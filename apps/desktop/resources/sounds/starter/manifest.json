@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "sounds": [
+    {
+      "slug": "airhorn",
+      "name": "Airhorn",
+      "hotkey": "1",
+      "file": "airhorn.ogg",
+      "sha256": "460f9f16c5efd5ff8ac5e450d8ee1e28f0d4d41a45acabbba2566a16824bae79",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/jacksonacademyashmore/sounds/414208/",
+      "previewUrl": "https://cdn.freesound.org/previews/414/414208_6938106-hq.mp3",
+      "author": "jacksonacademyashmore",
+      "originalTitle": "Airhorn",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "applause",
+      "name": "Applause",
+      "hotkey": "2",
+      "file": "applause.ogg",
+      "sha256": "13c440994039d5b78f9d51ac0c301bce1f167dd01a142b6180a1891b3f2a9d08",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/thaighaudio/sounds/478414/",
+      "previewUrl": "https://cdn.freesound.org/previews/478/478414_2205380-hq.mp3",
+      "author": "thaighaudio",
+      "originalTitle": "Concert audience applause 1",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "laugh",
+      "name": "Laugh",
+      "hotkey": "3",
+      "file": "laugh.ogg",
+      "sha256": "4191e5798c6c165c80feac03283f49d5f79a40b966db84dcf7bb8daafcef6751",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/Kinoton/sounds/371562/",
+      "previewUrl": "https://cdn.freesound.org/previews/371/371562_2247456-hq.mp3",
+      "author": "Kinoton",
+      "originalTitle": "Sitcom Laughter with Applause, Small Audience",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "rimshot",
+      "name": "Rimshot",
+      "hotkey": "4",
+      "file": "rimshot.ogg",
+      "sha256": "c6e8ee921b4604ecd6cf1d36c6c6f1f8baf46356bfea0d9e8820214c0b0b0679",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/Sajmund/sounds/132418/",
+      "previewUrl": "https://cdn.freesound.org/previews/132/132418_2412414-hq.mp3",
+      "author": "Sajmund",
+      "originalTitle": "Rimshot (sweet)",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "sad-trombone",
+      "name": "Sad trombone",
+      "hotkey": "5",
+      "file": "sad-trombone.ogg",
+      "sha256": "0f58d58e860a902215ae6c6dca9d4a9c6380276c9e693cafb3da679da28b5aff",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/kirbydx/sounds/175409/",
+      "previewUrl": "https://cdn.freesound.org/previews/175/175409_1326576-hq.mp3",
+      "author": "kirbydx",
+      "originalTitle": "wah wah sad trombone.wav",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "drumroll",
+      "name": "Drumroll",
+      "hotkey": "6",
+      "file": "drumroll.ogg",
+      "sha256": "51fde20f33b8812b7967bddedb429a3bb9d1cc2bc0a3d0c3b16c906a751974d5",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/bigjoedrummer/sounds/77305/",
+      "previewUrl": "https://cdn.freesound.org/previews/77/77305_1105584-hq.mp3",
+      "author": "bigjoedrummer",
+      "originalTitle": "buzz roll.wav",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "tada",
+      "name": "Tada",
+      "hotkey": "7",
+      "file": "tada.ogg",
+      "sha256": "219d004c6a5ae85cffcec4f142dd8201e5e22014d3737b3471f175949e027981",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/plasterbrain/sounds/397355/",
+      "previewUrl": "https://cdn.freesound.org/previews/397/397355_4284968-hq.mp3",
+      "author": "plasterbrain",
+      "originalTitle": "Tada Fanfare A",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "buzzer",
+      "name": "Buzzer",
+      "hotkey": "8",
+      "file": "buzzer.ogg",
+      "sha256": "87f155e50e1bba3f11453b57b2e6f7edbd1f030cde99892bb9947ff5888c6ad9",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/-Andreas/sounds/648462/",
+      "previewUrl": "https://cdn.freesound.org/previews/648/648462_11771918-hq.mp3",
+      "author": "-Andreas",
+      "originalTitle": "Wrong Answer",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "ding",
+      "name": "Ding",
+      "hotkey": "9",
+      "file": "ding.ogg",
+      "sha256": "0af8d3195905c0d22793a51f15aa72118dbfde7d06bf2f774bc6cf1d31f75ffc",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/LittleRainySeasons/sounds/335908/",
+      "previewUrl": "https://cdn.freesound.org/previews/335/335908_5865517-hq.mp3",
+      "author": "LittleRainySeasons",
+      "originalTitle": "Correct.mp3",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "crickets",
+      "name": "Crickets",
+      "file": "crickets.ogg",
+      "sha256": "a877a17110feda5347607367c90debbcb90541b53d4bace9a506f968f92d4cf2",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/lezaarth/sounds/242046/",
+      "previewUrl": "https://cdn.freesound.org/previews/242/242046_2023214-hq.mp3",
+      "author": "lezaarth",
+      "originalTitle": "cricket2.wav",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "boom",
+      "name": "Boom",
+      "file": "boom.ogg",
+      "sha256": "632280a1dd32b40b7007d8fb98870634e543e87c878f1ca24554cb9750620ac6",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/BennettFilmTeacher/sounds/523783/",
+      "previewUrl": "https://cdn.freesound.org/previews/523/523783_7254895-hq.mp3",
+      "author": "BennettFilmTeacher",
+      "originalTitle": "Boom Explosion",
+      "processing": {
+        "maxSeconds": 5
+      }
+    },
+    {
+      "slug": "woah",
+      "name": "Woah",
+      "file": "woah.ogg",
+      "sha256": "3db4b8d90bf4e5dba2f30d7b41b7e46cd3b325d1c31690dc2add3e1ec61e3370",
+      "licence": "CC0-1.0",
+      "sourceUrl": "https://freesound.org/people/DesignDean/sounds/397317/",
+      "previewUrl": "https://cdn.freesound.org/previews/397/397317_3366726-hq.mp3",
+      "author": "DesignDean",
+      "originalTitle": "kids_WOAH.wav",
+      "processing": {
+        "maxSeconds": 5
+      }
+    }
+  ]
+}

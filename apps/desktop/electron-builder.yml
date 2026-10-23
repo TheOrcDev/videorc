@@ -44,6 +44,14 @@ extraResources:
       - '**/*'
       - '!.gitkeep'
       - '!README.md'
+  # Plan 189: the CC0 starter sounds the backend imports once per profile
+  # (`sounds:starter-files` reads the manifest from here).
+  - from: resources/sounds/starter
+    to: sounds/starter
+    filter:
+      - '*.ogg'
+      - manifest.json
+      - LICENSES.md
 
 mac:
   category: public.app-category.video
