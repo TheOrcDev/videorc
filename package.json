@@ -162,6 +162,7 @@
     "smoke:separate-source-runtime": "node scripts/smoke-separate-source-runtime.mjs",
     "smoke:separate-source-take": "node scripts/smoke-separate-source-take.mjs",
     "smoke:system-audio": "node scripts/smoke-system-audio-app.mjs",
+    "smoke:soundboard": "node scripts/smoke-soundboard-app.mjs",
     "smoke:output-stall": "node scripts/smoke-output-stall-app.mjs",
     "smoke:backend-single-instance": "node scripts/smoke-backend-single-instance.mjs",
     "smoke:backend-resilience": "node scripts/smoke-backend-resilience.mjs",
