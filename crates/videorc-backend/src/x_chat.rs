@@ -556,7 +556,7 @@ impl RelayClient {
                 .to_string(),
             session_token,
             http: reqwest::Client::builder()
-                .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+                .user_agent(crate::performance_check::desktop_user_agent())
                 .build()
                 .context("Could not build the X chat relay HTTP client.")?,
         })

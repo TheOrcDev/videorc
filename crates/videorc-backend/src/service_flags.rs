@@ -442,7 +442,7 @@ pub async fn fetch_service_flags(
 fn http_client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(SERVICE_FLAGS_REQUEST_TIMEOUT)
-        .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::performance_check::desktop_user_agent())
         .build()
         .ok()
 }

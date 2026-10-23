@@ -1995,6 +1995,67 @@ describe('real StudioProvider lifecycle', () => {
     }
   )
 
+  it('moves the Library total when a loaded recording finishes its MP4', async () => {
+    // Release test 146, plan 0007: the row got its size from the finalization
+    // event, but "N recordings · X MB" kept the old total until a page change.
+    class TotalsBackend extends StudioBackend {
+      storage = { count: 1, totalBytes: 10_000_000 }
+      override response(command: BackendCommand): unknown {
+        if (command.method === 'sessions.storage') return { ...this.storage }
+        return super.response(command)
+      }
+    }
+    const backend = new TotalsBackend()
+    backend.sessionSummaries = [
+      sessionSummary({ id: 'older', fileSizeBytes: 10_000_000 }),
+      sessionSummary({ id: 'take-2', status: 'completed', finalizationState: 'finalizing' })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    await waitForObservation(
+      () => observation?.core.sessionStorageTotals?.totalBytes === 10_000_000
+    )
+    await waitForObservation(
+      () => observation?.core.sessions.some((row) => row.id === 'take-2') === true
+    )
+
+    backend.storage = { count: 2, totalBytes: 58_000_000 }
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.finalization',
+            payload: {
+              sessionId: 'take-2',
+              state: 'finalized',
+              mp4Path: '/recordings/take-2.mp4',
+              fileSizeBytes: 48_000_000,
+              updatedAt: now
+            }
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => observation?.core.sessionStorageTotals?.totalBytes === 58_000_000
+    )
+    expect(observation?.core.sessionStorageTotals?.count).toBe(2)
+  }, 15_000)
+
   it("never saves the shipped overlay defaults over the backend's layout at launch", async () => {
     // ogre 2026-10-13: with captions burned on the stream (the default), every
     // launch seeded the caption switches into the DEFAULT layout before

@@ -1482,7 +1482,7 @@ impl VideorcApiClient {
         Ok(Self {
             base_url: api_base_url(),
             http: reqwest::Client::builder()
-                .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+                .user_agent(crate::performance_check::desktop_user_agent())
                 .build()
                 .context("Could not build the Videorc API HTTP client.")?,
         })
