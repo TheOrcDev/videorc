@@ -25,12 +25,25 @@
 //!    `CoFreeUnusedLibraries` sweep can never unmap it under a live
 //!    capture-internal thread.
 //!
-//! Both are deliberately leaked: they must outlive every capture thread, and
-//! the process exiting is the only correct release.
+//! 3. One `MFStartup` reference is held for the whole process. Media
+//!    Foundation's platform is reference-counted the same way: every encoder,
+//!    probe, and device enumeration calls `MFStartup` and later `MFShutdown`.
+//!    When a hardware-encoder probe (`probe_hardware_encoder`, run on every
+//!    recording start) drops its test encoder and happens to hold the LAST
+//!    reference, its `MFShutdown` tears down the RTWorkQ work queues while the
+//!    NVIDIA async MFT still has an internal work item running on one of them:
+//!    `EXCEPTION_ACCESS_VIOLATION_WRITE` at a null+0x24 in `ntdll` on an
+//!    `RTWorkQ.dll`/`mfplat.dll` thread, with the probe's
+//!    `MediaFoundationH264Encoder::drop` concurrently inside RTWorkQ
+//!    (minidump 2026-10-23, 0.9.147 + this module's first two anchors).
+//!
+//! All are deliberately leaked: they must outlive every capture/encoder
+//! thread, and the process exiting is the only correct release.
 
 use std::sync::OnceLock;
 
 use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFStartup};
 use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
@@ -42,6 +55,7 @@ use windows::core::w;
 pub struct ComLifetimeStatus {
     pub mta_held: Result<(), String>,
     pub graphics_capture_pinned: Result<(), String>,
+    pub media_foundation_held: Result<(), String>,
 }
 
 static STATUS: OnceLock<ComLifetimeStatus> = OnceLock::new();
@@ -54,14 +68,20 @@ pub fn install() -> &'static ComLifetimeStatus {
         let status = ComLifetimeStatus {
             mta_held: hold_mta_for_process_lifetime(),
             graphics_capture_pinned: pin_graphics_capture_module(),
+            media_foundation_held: hold_media_foundation_for_process_lifetime(),
         };
-        match (&status.mta_held, &status.graphics_capture_pinned) {
-            (Ok(()), Ok(())) => tracing::info!(
-                "[com-lifetime] process MTA held and GraphicsCapture.dll pinned for process lifetime"
+        match (
+            &status.mta_held,
+            &status.graphics_capture_pinned,
+            &status.media_foundation_held,
+        ) {
+            (Ok(()), Ok(()), Ok(())) => tracing::info!(
+                "[com-lifetime] process MTA held, GraphicsCapture.dll pinned, and Media Foundation held for process lifetime"
             ),
-            (mta, pin) => tracing::warn!(
+            (mta, pin, mf) => tracing::warn!(
                 mta = ?mta,
                 graphics_capture_pin = ?pin,
+                media_foundation = ?mf,
                 "[com-lifetime] could not fully anchor COM/WinRT lifetime; capture restarts may unload in-use system DLLs"
             ),
         }
@@ -76,6 +96,15 @@ fn hold_mta_for_process_lifetime() -> Result<(), String> {
     unsafe { CoIncrementMTAUsage() }
         .map(|_cookie| ())
         .map_err(|error| format!("CoIncrementMTAUsage failed: {error}"))
+}
+
+fn hold_media_foundation_for_process_lifetime() -> Result<(), String> {
+    // SAFETY: MFStartup is reference-counted and thread-agnostic. The matching
+    // MFShutdown is intentionally never called: this reference keeps the MF
+    // platform (and its RTWorkQ work queues) alive under every encoder/probe
+    // teardown until process exit.
+    unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
+        .map_err(|error| format!("MFStartup failed: {error}"))
 }
 
 fn pin_graphics_capture_module() -> Result<(), String> {
@@ -121,6 +150,7 @@ mod tests {
         assert!(std::ptr::eq(first, second));
         assert_eq!(first.mta_held, Ok(()), "{first:?}");
         assert_eq!(first.graphics_capture_pinned, Ok(()), "{first:?}");
+        assert_eq!(first.media_foundation_held, Ok(()), "{first:?}");
     }
 
     #[test]
@@ -160,5 +190,25 @@ mod tests {
         }
         let still_loaded = unsafe { GetModuleHandleW(w!("GraphicsCapture.dll")) };
         assert_eq!(still_loaded.ok(), Some(module));
+    }
+
+    #[test]
+    fn com_lifetime_media_foundation_survives_a_worker_shutdown() {
+        use windows::Win32::Media::MediaFoundation::{
+            MFAllocateWorkQueue, MFShutdown, MFUnlockWorkQueue,
+        };
+        install();
+        // A probe/encoder takes and releases its own MF reference, exactly
+        // like MediaFoundationH264Encoder::{new, drop}.
+        std::thread::spawn(|| unsafe {
+            MFStartup(MF_VERSION, MFSTARTUP_FULL).expect("worker MFStartup");
+            MFShutdown().expect("worker MFShutdown");
+        })
+        .join()
+        .unwrap();
+        // Work queues are only available while the platform is started; with
+        // the process-lifetime reference they must still be.
+        let queue = unsafe { MFAllocateWorkQueue() }.expect("MF platform still running");
+        unsafe { MFUnlockWorkQueue(queue) }.expect("unlock work queue");
     }
 }
