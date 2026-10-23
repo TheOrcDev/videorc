@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   SOUND_IMPORT_EXTENSIONS,
+  SOUND_PICK_LEFT_OUT_REASON,
+  soundPickResult,
   isStarterSoundFileName,
   starterSoundRows,
   starterSoundRowsFor,
@@ -118,5 +120,38 @@ describe('starter sound files (plan 189)', () => {
       'flac',
       'webm'
     ])
+  })
+})
+
+describe('Import sounds… picks (release test 147, plan 0006)', () => {
+  const issue = async (path: string) => {
+    if (path.includes('gone'))
+      throw new Error('Resource path does not exist or could not be resolved.')
+    return { capabilityId: `cap:${path}`, kind: 'input-file' as const, displayName: path }
+  }
+
+  it('names a file it could not hand over instead of dropping it', async () => {
+    const logged: string[] = []
+    const result = await soundPickResult(
+      ['/home/me/ok.wav', '/home/me/gone missing.wav'],
+      issue,
+      (path) => logged.push(path)
+    )
+    expect(result.selections.map((selection) => selection.capabilityId)).toEqual([
+      'cap:/home/me/ok.wav'
+    ])
+    expect(result.leftOut).toEqual([
+      { displayName: 'gone missing.wav', reason: SOUND_PICK_LEFT_OUT_REASON }
+    ])
+    expect(logged).toEqual(['/home/me/gone missing.wav'])
+    // Never a path or the backend's own wording in what the renderer gets.
+    expect(JSON.stringify(result.leftOut)).not.toContain('/home/me')
+  })
+
+  it('takes at most a full board of files', async () => {
+    const paths = Array.from({ length: 30 }, (_, index) => `/s/${index}.wav`)
+    const result = await soundPickResult(paths, issue)
+    expect(result.selections).toHaveLength(24)
+    expect(result.leftOut).toEqual([])
   })
 })

@@ -205,13 +205,18 @@ import {
 } from './preview-surface-banners'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
 import { SOUND_ASSET_HOST, SOUNDS_FOLDER, isSoundFileName } from '../shared/sound-assets'
-import type { SoundboardSummary, StarterSound, StarterSoundFile } from '../shared/sound-commands'
+import type {
+  SoundboardSummary,
+  SoundPickResult,
+  StarterSound,
+  StarterSoundFile
+} from '../shared/sound-commands'
 import {
   SOUND_IMPORT_EXTENSIONS,
-  SOUND_PICK_MAX_FILES,
   STARTER_SOUNDS_MANIFEST,
   starterSoundRows,
   starterSoundRowsFor,
+  soundPickResult,
   starterSoundsDirectory,
   type StarterSoundRow
 } from './sound-files'
@@ -13826,7 +13831,7 @@ async function pickBannerImage(): Promise<ResourceSelection | null> {
 // Assets → Sounds → Import sounds… (plan 189): several files at once, each
 // its own single-use input-file capability; the backend decodes, trims and
 // levels each one. A file whose capability can't be issued is left out.
-async function pickSoundFiles(): Promise<ResourceSelection[]> {
+async function pickSoundFiles(): Promise<SoundPickResult> {
   const options: Electron.OpenDialogOptions = {
     title: 'Choose sounds',
     properties: ['openFile', 'multiSelections'],
@@ -13836,17 +13841,15 @@ async function pickSoundFiles(): Promise<ResourceSelection[]> {
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options)
   if (result.canceled) {
-    return []
+    return { selections: [], leftOut: [] }
   }
-  const selections: ResourceSelection[] = []
-  for (const path of result.filePaths.slice(0, SOUND_PICK_MAX_FILES)) {
-    try {
-      selections.push(await issueResourceCapability(path, 'input-file'))
-    } catch (error) {
-      logBackend('warn', `A picked sound was left out: ${errorMessageText(error)}`)
-    }
-  }
-  return selections
+  // A file whose capability can't be issued is named back to the renderer,
+  // which says so (release test 147, plan 0006); the reason stays in the log.
+  return soundPickResult(
+    result.filePaths,
+    (path) => issueResourceCapability(path, 'input-file'),
+    (_path, error) => logBackend('warn', `A picked sound was left out: ${errorMessageText(error)}`)
+  )
 }
 
 // The starter sounds (plan 189 S1): the manifest beside the bundled .ogg
