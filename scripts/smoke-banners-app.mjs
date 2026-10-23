@@ -108,6 +108,23 @@ try {
     assert.equal(logo.hasAlpha, true, 'the half-transparent logo keeps its alpha')
     assert.deepEqual([strip.width, strip.height], [2400, 400])
     assert.deepEqual([logo.width, logo.height], [512, 512])
+    // Release test 146, plan 0005: main serves videorc-asset://banner from the
+    // backend's own Banners folder. This smoke's profile keeps the backend's
+    // data and Electron's userData apart (as Linux always does), so a resolver
+    // that assumes userData answers 404 here.
+    for (const banner of [strip, logo]) {
+      const url = `videorc-asset://banner/${banner.imageFile}`
+      const loaded = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: `const response = await fetch(${JSON.stringify(url)}); return { status: response.status, bytes: (await response.arrayBuffer()).byteLength }`
+        },
+        { timeoutMs }
+      )
+      assert.equal(loaded.result?.status, 200, `${url} must load in the renderer`)
+      assert(loaded.result?.bytes > 0, `${url} must not be empty`)
+    }
     const stripHome = strip.horizontal
     const stripMoved = { ...stripHome, x: 0.0225, y: 0.04 }
 
