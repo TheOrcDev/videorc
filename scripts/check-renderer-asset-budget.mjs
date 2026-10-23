@@ -35,9 +35,14 @@ const htmlPath = resolve(
 // 385,123 against the 385,000 ceiling. Prefer keeping the proof-path honesty in
 // the eager Studio chunk over a split for ~123 bytes; raise gzip with the same
 // ~2.5% challenge margin. Prefer re-splitting if this trips again on net-new UI.
+// Recalibrated 2026-10-23: main measured 389,804 gzip (196 bytes of headroom)
+// and the Screen None intent (release test 146, plan 0002: reconcile, scene
+// visuals, live confirmations) is Studio correctness logic of ~300 gzip bytes,
+// tipping it to 390,086. Raise gzip to 395,000 (~1.3%); keep re-splitting the
+// answer for net-new UI.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 390_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 395_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

@@ -211,6 +211,22 @@ describe('scene presets', () => {
     expect(checkpoint.visual.sources.cameraId).toBeUndefined()
     expect(sameSceneVisual(entry.visual, checkpoint.visual)).toBe(true)
   })
+  it('retains a screen set to None through persisted scenes (plan 0002)', () => {
+    const none = normalizeSceneVisual({ ...visual(), sources: { captureOff: true } })
+    expect(none.sources.captureOff).toBe(true)
+    const entry = { ...saved(), visual: none }
+    const library = hydrateSceneLibrary(JSON.parse(JSON.stringify({ version: 1, scenes: [entry] })))
+    expect(library.library.scenes[0].visual.sources.captureOff).toBe(true)
+    expect(() => normalizeSceneVisual({ ...visual(), sources: { captureOff: 'yes' } })).toThrow(
+      'Invalid screen None intent'
+    )
+    // A chosen screen wins over a stale None, and a legacy scene is never None.
+    expect(
+      normalizeSceneVisual({ ...visual(), sources: { screenId: 'screen:1', captureOff: true } })
+        .sources.captureOff
+    ).toBe(false)
+    expect(normalizeSceneVisual({ ...visual(), sources: {} }).sources.captureOff).toBe(false)
+  })
   it('normalizes On and legacy absent flags equally without treating a missing ID as Off', () => {
     const on = visual()
     expect(on.sources.cameraOff).toBe(false)
