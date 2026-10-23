@@ -606,8 +606,12 @@ here before the slice it touches.
   Part of `smoke:recording-studio`.
 - `pnpm smoke:soundboard` (`scripts/smoke-soundboard-app.mjs`): the dev
   app, Record through remote intents, `soundPlay` at 3 s, and System audio
-  on when the grant exists: the tone once in the file (never doubled), at
-  3 s ± 60 ms. Missing grant: the System audio case SKIPS with the reason.
+  on when the grant exists: the tone once in the file (never doubled, the
+  same length and level as without System audio), starting within
+  −300..+300 ms of the press. That window is the wall-clock mapping's
+  (plan 069's anchor at `recording.status(recording)`); the exact placement
+  gate is the fixture smoke's. Missing grant: the System audio case SKIPS
+  with the reason.
 - Docs: `docs/soundboard.md`, `CONTEXT.md` (Sound, Soundboard),
   `docs/remote-control.md`, `docs/audiocn.md`, AGENTS.md (when to run the
   two smokes).
