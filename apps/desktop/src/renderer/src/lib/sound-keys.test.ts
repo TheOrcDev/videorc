@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest'
 
-import { soundForKey, soundKeyBlocked } from './sound-keys'
+import { soundForKey, soundKeyBlocked, soundKeyDigit } from './sound-keys'
 
 // Plan 189 S6: the digits yield like Space does, except that a focused
 // button (a pad) doesn't own a digit.
@@ -53,5 +53,24 @@ describe('soundForKey', () => {
     expect(soundForKey('2', sounds)).toBeUndefined()
     expect(soundForKey('0', sounds)).toBeUndefined()
     expect(soundForKey('Digit1', sounds)).toBeUndefined()
+  })
+})
+
+describe('soundKeyDigit (release test 147, plan 0005)', () => {
+  it('reads the physical number row and numpad on any layout', () => {
+    expect(soundKeyDigit({ key: '9', code: 'Digit9' })).toBe('9')
+    // AZERTY unshifted: Digit9 types "ç", Digit1 types "&".
+    expect(soundKeyDigit({ key: 'ç', code: 'Digit9' })).toBe('9')
+    expect(soundKeyDigit({ key: '&', code: 'Digit1' })).toBe('1')
+    expect(soundKeyDigit({ key: '9', code: 'Numpad9' })).toBe('9')
+    expect(soundKeyDigit({ key: '0', code: 'Digit0' })).toBeUndefined()
+    expect(soundKeyDigit({ key: 'a', code: 'KeyA' })).toBeUndefined()
+    // A letter key that types a digit is not the number row.
+    expect(soundKeyDigit({ key: '1', code: 'KeyA' })).toBeUndefined()
+  })
+
+  it('falls back to the typed key when the event has no code', () => {
+    expect(soundKeyDigit({ key: '4', code: '' })).toBe('4')
+    expect(soundKeyDigit({ key: 'x', code: '' })).toBeUndefined()
   })
 })
