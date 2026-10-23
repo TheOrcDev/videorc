@@ -12,11 +12,8 @@ import { useStudioShell } from '@/hooks/use-studio'
 import type { Sound } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
 import { soundForKey, soundKeyBlocked } from '@/lib/sound-keys'
-import { soundboardDescription } from '@/lib/sounds'
+import { STOP_ALL_IDLE_REASON, soundboardDescription } from '@/lib/sounds'
 import { connectionBlockedReason } from '@/lib/state-labels'
-
-/** Why Stop all is off. */
-export const STOP_ALL_IDLE_REASON = 'No sound is playing.'
 
 /**
  * Studio → Soundboard (plan 189 S6): the pads, under Scenes. Studio plays,

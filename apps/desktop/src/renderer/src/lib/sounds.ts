@@ -112,6 +112,9 @@ export async function runSoundAction(
   }
 }
 
+/** Why Stop all is off, in Studio and in the Stream Manager. */
+export const STOP_ALL_IDLE_REASON = 'No sound is playing.'
+
 /** Studio's line under Soundboard: where a press goes right now (plan 189 Copy). */
 export function soundboardDescription(sessionActive: boolean, monitor: boolean): string {
   if (!sessionActive) return 'Only you hear sounds until you record or go live.'

@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WorkspaceNavContext } from '@/components/workspace-nav'
 import type { Sound, SoundVoice } from '@/lib/backend'
+import { STOP_ALL_IDLE_REASON } from '@/lib/sounds'
 
-import { STOP_ALL_IDLE_REASON, SoundboardSection } from './soundboard-section'
+import { SoundboardSection } from './soundboard-section'
 
 // Plan 189 S6: Studio → Soundboard. Pads play on their own mode, keys 1 to 9
 // press them while Studio is up, and the line says where a press goes.
