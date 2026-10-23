@@ -154,6 +154,18 @@ const TRANSIENT_FIFO_GATES = Object.freeze({
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
 
+/** The renderer's default ring, on and buffer-only, or off by its switch. */
+async function waitForStableRing(ws, label) {
+  const deadline = Date.now() + 45_000
+  let last = null
+  while (Date.now() < deadline) {
+    last = await request(ws, timeoutMs, 'replay.status')
+    if (last?.state === 'off' || (last?.state === 'on' && last?.replayOnly === true)) return last
+    await sleep(250)
+  }
+  throw new Error(`${label}: the ring never settled before the combo: ${JSON.stringify(last)}`)
+}
+
 async function recordCombo({
   ws,
   smoke,
@@ -409,6 +421,14 @@ async function runPass({
     for (const combo of combos) {
       const label = `${combo.label}${passLabel ? `:${passLabel}` : ''}`
       try {
+        // Plan 181 (redesign R2): the renderer keeps a buffer-only ring on
+        // by default and re-arms it right after every Stop. This harness
+        // starts sessions on the backend socket, behind the renderer's
+        // back, so it waits for that re-arm to settle before the next combo
+        // (a user's Record goes through the renderer, which never re-arms
+        // while its own start is in flight); each combo then hands over
+        // from a running ring, the way a real Record does.
+        await waitForStableRing(ws, label)
         const result = await recordCombo({
           ws,
           smoke,

@@ -13,6 +13,11 @@ import type {
   CleanCutUpdateEdlParams,
   ClipMark,
   ClipMarkedEvent,
+  ReplayParams,
+  ReplaySaveAccepted,
+  ReplaySaveFailedEvent,
+  ReplaySavedEvent,
+  ReplayStateEvent,
   CohostAuthorParams,
   CohostCommandChooseParams,
   CohostCommandParams,
@@ -232,6 +237,18 @@ interface HighRiskContractFixtures {
     markedUnsaved: ClipMarkedEvent
     listParams: BackendRpcParams<'clip.marks.list'>
     marks: ClipMark[]
+  }
+  replay: {
+    params: ReplayParams
+    paramsAuto: ReplayParams
+    replayOnlyStatus: RecordingStatus
+    stateOn: ReplayStateEvent
+    stateOff: ReplayStateEvent
+    stateError: ReplayStateEvent
+    saveAccepted: ReplaySaveAccepted
+    saveAcceptedMinimal: ReplaySaveAccepted
+    savedEvent: ReplaySavedEvent
+    saveFailedEvent: ReplaySaveFailedEvent
   }
   cleanCut: {
     startParams: CleanCutStartParams
@@ -1071,6 +1088,37 @@ describe('shared high-risk protocol fixture', () => {
       fixtures.clip.marks
     )
     expect(fixtures.clip.marks[1]).not.toHaveProperty('phrase')
+  })
+
+  it('keeps the replay buffer request, status mark, state and save envelopes identical across languages (plan 181)', () => {
+    const replay = fixtures.replay
+    // The ring request rides session.start; the status mark rides recording.status.
+    expect(
+      jsonShape(validateBackendRpcResult('recording.status', replay.replayOnlyStatus))
+    ).toEqual(replay.replayOnlyStatus)
+    expect(replay.replayOnlyStatus.replayOnly).toBe(true)
+    expect(fixtures.recordingStatus.wire).not.toHaveProperty('replayOnly')
+    for (const event of [replay.stateOn, replay.stateOff, replay.stateError]) {
+      expect(validateBackendEventPayload('replay.state', event)).toStrictEqual(event)
+      expect(validateBackendRpcResult('replay.status', event)).toStrictEqual(event)
+    }
+    expect(replay.stateOff).not.toHaveProperty('sessionId')
+    expect(replay.stateError.reason).toMatch(/clips are off/)
+    // The request: `auto` rides the wire only on a default start (redesign R2).
+    expect(fixtures.replay.paramsAuto).toEqual({ seconds: 30, auto: true })
+    for (const accepted of [replay.saveAccepted, replay.saveAcceptedMinimal]) {
+      expect(validateBackendRpcResult('replay.save', accepted)).toStrictEqual(accepted)
+    }
+    expect(validateBackendEventPayload('replay.saved', replay.savedEvent)).toStrictEqual(
+      replay.savedEvent
+    )
+    expect(replay.savedEvent.source).toBe('manual')
+    expect(validateBackendEventPayload('replay.saveFailed', replay.saveFailedEvent)).toStrictEqual(
+      replay.saveFailedEvent
+    )
+    expect(() =>
+      validateBackendEventPayload('replay.state', { ...replay.stateOn, state: 'paused' })
+    ).toThrow()
   })
 
   it('keeps Clean cut jobs, the cut list and its params identical across languages (plan 119)', () => {

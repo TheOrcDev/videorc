@@ -5,8 +5,20 @@ import {
   recordingPresetOptions,
   type OutputNumberField
 } from '@/lib/output-quality'
-import { FolderIcon, VideoFileIcon, WarningIcon } from '@/components/icons'
-import { useEffect, useId, useState, type ReactElement } from 'react'
+import { ClipIcon, FolderIcon, VideoFileIcon, WarningIcon } from '@/components/icons'
+import { useEffect, useId, useState, useSyncExternalStore, type ReactElement } from 'react'
+
+import { findAcceleratorOwner } from '../../../../shared/accelerator'
+import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
+import { ShortcutRecorderField } from '@/components/shortcut-recorder'
+import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
+import {
+  CLIPS_LABEL,
+  KEEP_LAST_SECONDS_LABEL,
+  estimatedReplayDiskBytes,
+  formatBytes,
+  replayLengthLabel
+} from '@/lib/replay-buffer'
 
 import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
@@ -23,13 +35,20 @@ import {
 } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { SegmentedControl } from '@/components/ui/segmented-control'
-import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore, useStudioReplay } from '@/hooks/use-studio'
 import type { DirectoryFacts, VideoPreset, VideoSettings } from '@/lib/backend'
 import {
+  REPLAY_BUFFER_LENGTH_OPTIONS,
   layoutPresetOrientation,
   resolutionOptionsForOrientation,
   separateSourceRecordingsIneligibility,
@@ -39,6 +58,7 @@ import {
   type LayoutOrientation
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
+import { formatVideoQuality } from '@/lib/format-video'
 import { performanceCheckLine } from '@/lib/performance-check-line'
 import { unlockActionForGate } from '@/lib/lock-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
@@ -60,8 +80,128 @@ export function RecordingTab(): ReactElement {
   return (
     <div className="flex flex-col">
       <LocalRecordingSection />
+      <ClipsSection />
       <RecordingsFolderSection />
     </div>
+  )
+}
+
+/**
+ * Clips (plan 181, the owner's redesign): the one switch that keeps the last
+ * seconds whenever Videorc is open (R2, on by default), the length (R1), what
+ * it takes on disk at the current quality, the Save clip key, and where
+ * clips go (R4). On a software encoder path the backend keeps the default
+ * off and this section says why; the switch still turns it on.
+ */
+function ClipsSection(): ReactElement {
+  const {
+    captureConfig,
+    setCaptureConfig,
+    settings,
+    setSettings,
+    runtimeInfo,
+    recordBlockedReason
+  } = useStudioCore()
+  const clips = useStudioReplay()
+  const { seconds, enabled } = captureConfig.replayBuffer
+  const blocked = clips.blockedReason
+  const on = enabled && !blocked
+  const running = clips.state.state === 'on' || clips.state.state === 'starting'
+  const estimate = formatBytes(estimatedReplayDiskBytes(seconds, captureConfig.video.bitrateKbps))
+  const shortcutRegistration = useSyncExternalStore(
+    globalShortcutRegistration.subscribe,
+    globalShortcutRegistration.getSnapshot
+  )
+  return (
+    <PanelSection
+      description={`Videorc keeps the last ${replayLengthLabel(seconds)} of your screen and microphone while it is open, so one key saves them as a clip. While you record, the moment is also marked in the recording.`}
+      icon={ClipIcon}
+      title={CLIPS_LABEL}
+    >
+      <FieldGroup variant="grouped">
+        <SettingsRow
+          data-testid="output-clips-switch"
+          description={
+            blocked
+              ? `Off on this computer. ${blocked}`
+              : !on
+                ? 'Off. A clip can only be marked while you record.'
+                : running
+                  ? 'The newest seconds are on disk, ready to save, and deleted as they age. Nothing is kept for longer.'
+                  : recordBlockedReason
+                    ? `Starts once a source is ready. ${recordBlockedReason}`
+                    : 'Not running right now. It tries again after the next recording or source change.'
+          }
+          label={KEEP_LAST_SECONDS_LABEL}
+        >
+          <Switch
+            checked={on}
+            data-testid="output-clips-enabled"
+            onCheckedChange={(checked) => clips.setEnabled(checked)}
+          />
+        </SettingsRow>
+        <SettingsRow
+          data-testid="output-clips-length"
+          description="How much is kept. A clip runs this long, plus up to two seconds."
+          label="Length"
+        >
+          <Select
+            value={String(seconds)}
+            onValueChange={(value) =>
+              setCaptureConfig((current) => ({
+                ...current,
+                replayBuffer: { ...current.replayBuffer, seconds: Number(value) }
+              }))
+            }
+          >
+            <SelectTrigger className="w-32 shrink-0" id="clips-length">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {REPLAY_BUFFER_LENGTH_OPTIONS.map((option) => (
+                <SelectItem key={option} value={String(option)}>
+                  {replayLengthLabel(option)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        <SettingsRow
+          data-testid="output-clips-disk"
+          description={`At ${formatVideoQuality(captureConfig.video)}, however long it runs.`}
+          label="Disk use"
+        >
+          <span className="text-sm tabular-nums text-muted-foreground">about {estimate}</span>
+        </SettingsRow>
+        <ShortcutRecorderField
+          id="global-shortcut-clip-mark"
+          label={globalShortcutLabel('clip-mark')}
+          platform={runtimeInfo?.platform}
+          registrationFailed={shortcutRegistration['clip-mark'] === false}
+          validate={(accelerator) => {
+            const owner = findAcceleratorOwner(
+              settings.globalShortcuts ?? {},
+              accelerator,
+              'clip-mark',
+              runtimeInfo?.platform
+            )
+            return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
+          }}
+          value={settings.globalShortcuts?.clipMark}
+          onChange={(accelerator) =>
+            setSettings((current) => ({
+              ...current,
+              globalShortcuts: withGlobalShortcut(current.globalShortcuts, 'clip-mark', accelerator)
+            }))
+          }
+        />
+        <SettingsRow
+          data-testid="output-clips-folder"
+          description="A Clips folder inside your recordings folder. Every clip is listed in Library."
+          label="Where clips go"
+        />
+      </FieldGroup>
+    </PanelSection>
   )
 }
 

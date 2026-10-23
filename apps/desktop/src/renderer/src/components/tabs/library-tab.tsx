@@ -82,13 +82,7 @@ import {
   isFinalizingSession
 } from '@/lib/session-finalization'
 import { recordingRoleLabel, recordingRoleRowNote } from '@/lib/separate-source-recordings-view'
-import {
-  dayLabel,
-  durationMsLabel,
-  formatBytes,
-  isActiveRecordingState,
-  plural
-} from '@/lib/format'
+import { dayLabel, durationMsLabel, formatBytes, plural } from '@/lib/format'
 import { openCleanCut } from '@/lib/clean-cut-events'
 import {
   cleanCutModeLabel,
@@ -145,7 +139,7 @@ import {
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { sessionIsLive } from '../../../../shared/capture-state'
+import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
 
 const SessionMarkersDialog = lazy(async () => ({
   default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
@@ -201,7 +195,8 @@ export function LibraryTab({
     wsStatus
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
-  const captureProtected = isActiveRecordingState(recording.state)
+  // Plan 181: the default ring writes no file, so it protects nothing here.
+  const captureProtected = sessionOwnsTransport(recording)
   const online = wsStatus === 'connected'
   const [filter, setFilter] = useState<LibraryFilter>('all')
   const [sort, setSort] = useState<LibrarySort>('newest')
@@ -967,7 +962,7 @@ function LibraryRow({
                     Clean cut:{' '}
                     {
                       cleanCutStatusView(cleanCutJob, {
-                        captureActive: isActiveRecordingState(recording.state),
+                        captureActive: sessionOwnsTransport(recording),
                         streaming: sessionIsLive(recording)
                       }).label
                     }
@@ -1197,7 +1192,7 @@ function useSessionMenu({
 
   const busy = phase === 'checking' || phase === 'repairing'
   const disconnected = wsStatus !== 'connected'
-  const captureProtected = isActiveRecordingState(recording.state)
+  const captureProtected = sessionOwnsTransport(recording)
   // The live row's file is still being written: playing or duplicating a
   // partial container yields garbage, so those wait for finalize.
   const live = isLiveSession(session, recording)

@@ -77,6 +77,16 @@ describe('live dashboard state', () => {
     expect(recording.session).toEqual({ state: 'recording', startedAt: at(0) })
   })
 
+  it('keeps a buffer-only session off air (plan 181)', () => {
+    const ring = reduceDashboardRecording(
+      emptyLiveDashboardState(at(0)),
+      { state: 'recording', sessionId: 'ring', startedAt: at(0), replayOnly: true },
+      at(0)
+    )
+    expect(ring.session.state).toBe('off-air')
+    expect(ring.sessionId).toBeNull()
+  })
+
   it('keeps a peak and a bounded 60-minute viewer history', () => {
     let state = live()
     for (let index = 0; index < VIEWER_HISTORY_POINTS + 20; index += 1) {

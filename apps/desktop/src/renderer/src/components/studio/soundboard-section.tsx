@@ -8,12 +8,12 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Empty, EmptyContent, EmptyTitle } from '@/components/ui/empty'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSoundboard } from '@/hooks/use-soundboard'
-import { useStudioShell } from '@/hooks/use-studio'
+import { useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
 import type { Sound } from '@/lib/backend'
-import { isActiveRecordingState } from '@/lib/format'
 import { soundForKey, soundKeyBlocked } from '@/lib/sound-keys'
 import { STOP_ALL_IDLE_REASON, soundboardDescription } from '@/lib/sounds'
 import { connectionBlockedReason } from '@/lib/state-labels'
+import { sessionOwnsTransport } from '../../../../shared/capture-state'
 
 /**
  * Studio → Soundboard (plan 189 S6): the pads, under Scenes. Studio plays,
@@ -23,11 +23,14 @@ import { connectionBlockedReason } from '@/lib/state-labels'
  * are the confirmation.
  */
 export function SoundboardSection(): ReactElement {
-  const { wsStatus, recordingState } = useStudioShell()
+  const { wsStatus } = useStudioShell()
+  const { recording } = useStudioRecordingState()
   const { setActive } = useWorkspaceNav()
   const board = useSoundboard()
   const disconnectedReason = connectionBlockedReason(wsStatus)
-  const sessionActive = isActiveRecordingState(recordingState)
+  // A buffer-only Clips session (plan 181) is not a recording: its ring keeps
+  // the sounds for a clip, but only the streamer hears them now.
+  const sessionActive = sessionOwnsTransport(recording)
   useSoundKeys(board.sounds, board.press, board.stop, disconnectedReason === null)
   const playing = board.voices.length > 0
   const stopReason = disconnectedReason ?? (playing ? null : STOP_ALL_IDLE_REASON)

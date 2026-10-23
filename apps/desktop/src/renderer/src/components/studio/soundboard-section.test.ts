@@ -14,10 +14,14 @@ import { SoundboardSection } from './soundboard-section'
 
 const mocked = vi.hoisted(() => ({
   board: {} as Record<string, unknown>,
-  shell: { wsStatus: 'connected', recordingState: 'idle' } as Record<string, unknown>
+  shell: { wsStatus: 'connected' } as Record<string, unknown>,
+  recording: { state: 'idle' } as Record<string, unknown>
 }))
 vi.mock('@/hooks/use-soundboard', () => ({ useSoundboard: () => mocked.board }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioShell: () => mocked.shell }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioShell: () => mocked.shell,
+  useStudioRecordingState: () => ({ recording: mocked.recording })
+}))
 
 const sound = (id: string, overrides: Partial<Sound> = {}): Sound => ({
   id,
@@ -99,7 +103,8 @@ beforeEach(() => {
   document.body.append(container)
   root = createRoot(container)
   nav.setActive.mockClear()
-  mocked.shell = { wsStatus: 'connected', recordingState: 'idle' }
+  mocked.shell = { wsStatus: 'connected' }
+  mocked.recording = { state: 'idle' }
   setBoard()
 })
 
@@ -149,7 +154,11 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
   })
 
   it('says sounds reach the recording while one runs, and when the streamer hears them', async () => {
-    mocked.shell = { wsStatus: 'connected', recordingState: 'recording' }
+    // A buffer-only Clips session (plan 181) is not a recording.
+    mocked.recording = { state: 'recording', replayOnly: true }
+    await render()
+    expect(container.textContent).toContain('Only you hear sounds until you record or go live.')
+    mocked.recording = { state: 'recording' }
     await render()
     expect(container.textContent).toContain('Sounds play in your recording and stream.')
     setBoard({ monitor: false })
@@ -186,7 +195,7 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
   })
 
   it('plays nothing while Videorc reconnects, and says so', async () => {
-    mocked.shell = { wsStatus: 'closed', recordingState: 'idle' }
+    mocked.shell = { wsStatus: 'closed' }
     await render()
     expect(pad('airhorn').disabled).toBe(true)
     expect(container.textContent).toContain('Sounds play once Videorc is connected.')

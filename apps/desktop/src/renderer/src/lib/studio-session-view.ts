@@ -12,7 +12,12 @@ export { sessionIsLive }
 export type SessionTarget = { enabled: boolean; label: string; platform: string }
 export type SessionStatusTone = 'good' | 'warn' | 'error' | 'live' | 'neutral'
 /** The slice of `recording.status` the session chrome reads. */
-export type SessionStatusView = { state: string; streamUrl?: string | null }
+export type SessionStatusView = {
+  state: string
+  streamUrl?: string | null
+  /** Plan 181: a buffer-only session reads idle here and keeps the transport. */
+  replayOnly?: boolean
+}
 
 /** "Local recording" / "Streaming only" / "Recording + streaming" / "No output". */
 export function sessionMode(recordEnabled: boolean, streamEnabled: boolean): string {
@@ -50,7 +55,10 @@ export function streamingSummary(targets: readonly SessionTarget[]): string {
  * stay reachable through EVERY in-flight state (F-020: excluding starting/
  * stopping flipped the transport back to idle Record/Go Live mid-session).
  */
-export function isSessionTransportActive(state: string): boolean {
+export function isSessionTransportActive(state: string, replayOnly = false): boolean {
+  // Plan 181: a buffer-only session leaves Record and Go Live in place; the
+  // backend hands over to the real session on the next start.
+  if (replayOnly) return false
   return (
     state === 'recording' || state === 'streaming' || state === 'starting' || state === 'stopping'
   )
@@ -180,6 +188,9 @@ function sessionStatusKind(
   // waiting/connecting reads as "Connecting…", real drops as reconnecting.
   if (wsStatus === 'waiting' || wsStatus === 'connecting') return 'connecting'
   if (wsStatus && wsStatus !== 'connected') return 'reconnecting'
+  // Plan 181: the replay buffer is never "Recording"; its own chip says what
+  // it holds, and the session words stay at Ready.
+  if (status.replayOnly) return options.startBlocked ? 'not-ready' : 'ready'
   // An on-air session reads "On air" whether or not it also records: the
   // backend calls record+stream `recording` (plan 095 S5).
   if (sessionIsLive(status)) return 'on-air'

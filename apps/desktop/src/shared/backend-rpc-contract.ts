@@ -564,6 +564,10 @@ export interface BackendRpcMethodMap {
   'session.marker.delete': BackendRpcDefinition<MarkerParams, MarkerChanged>
   'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
+  // --- Replay buffer (plan 181) ---
+  'replay.status': BackendRpcDefinition<undefined, import('./backend').ReplayStateEvent>
+  'replay.save': BackendRpcDefinition<undefined, import('./backend').ReplaySaveAccepted>
+  // --- end replay buffer (plan 181) ---
 }
 
 export type BackendRpcMethod = keyof BackendRpcMethodMap
@@ -625,6 +629,11 @@ export interface BackendEventMap {
   'session.marker.created': SessionMarker
   'session.marker.changed': MarkerChanged
   'clip.marked': ClipMarkedEvent
+  // --- Replay buffer (plan 181) ---
+  'replay.state': import('./backend').ReplayStateEvent
+  'replay.saved': import('./backend').ReplaySavedEvent
+  'replay.saveFailed': import('./backend').ReplaySaveFailedEvent
+  // --- end replay buffer (plan 181) ---
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
   'liveChat.emotes': ChatEmotesSettings
@@ -795,10 +804,63 @@ const recordingStatusSchema = objectSchema(
     audioTracks: optionalSchema(arraySchema(boundedBackendPayloadSchema, { maxLength: 32 })),
     pipeline: optionalSchema(boundedBackendPayloadSchema),
     durationMs: optionalSchema(numberSchema({ min: 0 })),
-    message: optionalText
+    message: optionalText,
+    replayOnly: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<RecordingStatus>
+
+// --- Replay buffer (plan 181) ---
+const replayParamsSchema = objectSchema(
+  {
+    seconds: numberSchema({ integer: true, min: 1, max: 3600 }),
+    auto: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+const replayStateEventSchema = objectSchema(
+  {
+    state: enumSchema(['off', 'starting', 'on', 'error']),
+    sessionId: optionalText,
+    seconds: numberSchema({ integer: true, min: 0, max: 3600 }),
+    bufferedSeconds: numberSchema({ min: 0 }),
+    replayOnly: optionalSchema(booleanSchema),
+    reason: optionalSchema(stringSchema({ maxLength: 2000 })),
+    segmentFiles: optionalSchema(nonNegativeInteger)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<import('./backend').ReplayStateEvent>
+const replaySaveAcceptedSchema = objectSchema(
+  {
+    saveId: boundedString,
+    sessionId: boundedString,
+    queued: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<import('./backend').ReplaySaveAccepted>
+const replaySavedEventSchema = objectSchema(
+  {
+    saveId: boundedString,
+    sessionId: boundedString,
+    replaySessionId: boundedString,
+    path: boundedPath,
+    seconds: numberSchema({ integer: true, min: 0, max: 3600 }),
+    coveredSeconds: numberSchema({ min: 0 }),
+    complete: booleanSchema,
+    source: optionalSchema(enumSchema(['voice', 'manual']))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<import('./backend').ReplaySavedEvent>
+const replaySaveFailedEventSchema = objectSchema(
+  {
+    saveId: boundedString,
+    sessionId: optionalText,
+    reason: stringSchema({ minLength: 1, maxLength: 64 }),
+    message: stringSchema({ minLength: 1, maxLength: 2000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<import('./backend').ReplaySaveFailedEvent>
+// --- end replay buffer (plan 181) ---
 
 const videoSettingsSchema = objectSchema(
   {
@@ -2494,7 +2556,9 @@ const sessionStartParamsSchema = objectSchema(
         { allowUnknown: false }
       )
     ),
-    requestedAtMs: optionalSchema(nonNegativeInteger)
+    requestedAtMs: optionalSchema(nonNegativeInteger),
+    // The replay buffer (plan 181).
+    replay: optionalSchema(replayParamsSchema)
   },
   { allowUnknown: false }
 )
@@ -4888,6 +4952,10 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(clipMarkSchema, { maxLength: 10_000 })
   },
+  // --- Replay buffer (plan 181) ---
+  'replay.status': { params: undefinedSchema, result: replayStateEventSchema },
+  'replay.save': { params: undefinedSchema, result: replaySaveAcceptedSchema },
+  // --- end replay buffer (plan 181) ---
   'cohost.report.get': { params: cohostReportGetParamsSchema, result: cohostReportPayloadSchema },
   'cohost.report.latest': {
     params: undefinedSchema,
@@ -4971,6 +5039,11 @@ const runtimeEventSchemas = {
   'session.marker.created': sessionMarkerSchema,
   'session.marker.changed': markerChangedSchema,
   'clip.marked': clipMarkedEventSchema,
+  // --- Replay buffer (plan 181) ---
+  'replay.state': replayStateEventSchema,
+  'replay.saved': replaySavedEventSchema,
+  'replay.saveFailed': replaySaveFailedEventSchema,
+  // --- end replay buffer (plan 181) ---
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,
   'liveChat.emotes': chatEmotesSettingsSchema,

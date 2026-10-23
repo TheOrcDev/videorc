@@ -119,8 +119,10 @@ pub enum RemoteIntent {
         message_id: String,
     },
     CommentHighlightClear,
-    /// Mark the current moment for a clip (plan 068 D6). Idempotent by time:
-    /// the backend stamps the capture clock, never a toggle.
+    /// Save a clip (plan 068 D6; plan 181, the owner's redesign R4): the
+    /// last N seconds whenever the ring holds frames, and a mark in the
+    /// recording while one runs. Idempotent by time: the backend stamps the
+    /// capture clock, never a toggle.
     ClipMark,
 }
 
@@ -388,6 +390,9 @@ mod tests {
             serde_json::to_value(&intent).unwrap(),
             serde_json::json!({ "kind": "clipMark" })
         );
+        // Plan 181 (owner redesign R4): one action saves the clip, so the
+        // separate replaySave intent is gone from the wire.
+        assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"replaySave"}"#).is_err());
     }
 
     #[test]

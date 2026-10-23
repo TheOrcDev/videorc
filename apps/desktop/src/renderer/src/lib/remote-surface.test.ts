@@ -36,6 +36,7 @@ function remoteIntentContext(overrides: Partial<RemoteIntentContext> = {}) {
     showCommentHighlight: vi.fn(async () => ({ ok: true })),
     clearCommentHighlight: vi.fn(async () => ({ ok: true })),
     markClip: vi.fn(async () => ({ ok: true })),
+    replayOn: false,
     banners: [],
     ...overrides
   }
@@ -82,6 +83,21 @@ describe('executeRemoteIntent', () => {
     }
   })
 
+  it('lets a clip through on the ring alone, and names no replaySave intent (plan 181 R4)', async () => {
+    // The ring holding frames is enough: no recording, the mark saves a clip.
+    const on = remoteIntentContext({ replayOn: true })
+    await executeRemoteIntent({ intentId: 'clip-ring', intent: { kind: 'clipMark' } }, on.context)
+    expect(on.context.markClip).toHaveBeenCalledOnce()
+    expect(on.requests).toEqual([
+      { method: 'remote.intent.ack', params: { intentId: 'clip-ring', ok: true } }
+    ])
+    // The separate save intent is gone from the wire: unsupported, not a clip.
+    const off = remoteIntentContext()
+    await executeRemoteIntent({ intentId: 'rs-off', intent: { kind: 'replaySave' } }, off.context)
+    expect(off.context.markClip).not.toHaveBeenCalled()
+    expect(off.requests[0]?.params).toMatchObject({ intentId: 'rs-off', ok: false })
+  })
+
   it('marks a clip only while a session runs and relays the refusal reason (plan 068 D6)', async () => {
     const idle = remoteIntentContext()
     await executeRemoteIntent({ intentId: 'clip-idle', intent: { kind: 'clipMark' } }, idle.context)
@@ -89,7 +105,11 @@ describe('executeRemoteIntent', () => {
     expect(idle.requests).toEqual([
       {
         method: 'remote.intent.ack',
-        params: { intentId: 'clip-idle', ok: false, message: "You're not recording or live." }
+        params: {
+          intentId: 'clip-idle',
+          ok: false,
+          message: "Clips are off, and you're not recording or live."
+        }
       }
     ])
 

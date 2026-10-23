@@ -1650,32 +1650,43 @@
       }
     },
     "statusNone": { "creation": null },
-    "identityParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "reference": { "kind": "persona-idle" } },
+    "identityParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "reference": { "kind": "persona-idle" }
+    },
     "identityUploadParams": {
       "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
       "reference": { "kind": "upload", "imageBase64": "iVBORw0KGgo=" }
     },
-    "sheetParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "kind": "gaze", "row": "level", "redo": true },
+    "sheetParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "kind": "gaze",
+      "row": "level",
+      "redo": true
+    },
     "pilotParams": {
       "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
       "kind": "pilot",
       "redo": false,
       "notes": {
-          "palette": ["stone grey", "moss green"],
-          "materials": ["granite"],
-          "proportions": "Short legs, a heavy round body and a small head.",
-          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
-        }
+        "palette": ["stone grey", "moss green"],
+        "materials": ["granite"],
+        "proportions": "Short legs, a heavy round body and a small head.",
+        "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+      }
     },
     "buildParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90" },
     "saveParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "name": "Pebble" },
     "accepted": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "sheet": "gaze-level" },
-    "identityRead": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "notes": {
-          "palette": ["stone grey", "moss green"],
-          "materials": ["granite"],
-          "proportions": "Short legs, a heavy round body and a small head.",
-          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
-        } },
+    "identityRead": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "notes": {
+        "palette": ["stone grey", "moss green"],
+        "materials": ["granite"],
+        "proportions": "Short legs, a heavy round body and a small head.",
+        "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+      }
+    },
     "sheetGenerated": {
       "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
       "sheet": "gaze-level",
@@ -1716,9 +1727,21 @@
       "cellSize": 640,
       "gazeCount": 25,
       "reactions": [
-        "laugh", "surprised", "wink", "kiss", "blink", "sleep",
-        "worried", "annoyed", "proud", "confused", "excited", "calm",
-        "talk-a", "talk-b", "wave"
+        "laugh",
+        "surprised",
+        "wink",
+        "kiss",
+        "blink",
+        "sleep",
+        "worried",
+        "annoyed",
+        "proud",
+        "confused",
+        "excited",
+        "calm",
+        "talk-a",
+        "talk-b",
+        "wave"
       ],
       "source": "videorc-creator",
       "hasTalk": true
@@ -1739,7 +1762,11 @@
     "redoParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "laugh" },
     "requestIdParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
     "accepted": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
-    "progressWorking": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "idle", "phase": "working" },
+    "progressWorking": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "state": "idle",
+      "phase": "working"
+    },
     "progressDone": {
       "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
       "state": "talk",
@@ -1774,7 +1801,11 @@
         },
         "failed": {}
       },
-      "running": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "kind": "redo", "state": "think" }
+      "running": {
+        "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+        "kind": "redo",
+        "state": "think"
+      }
     },
     "statusNone": {},
     "libraryDraft": {
@@ -1891,7 +1922,10 @@
       "serverActiveAvatarId": "official:pirate",
       "limit": 30,
       "busy": { "kind": "use", "avatarId": "official:pirate" },
-      "error": { "code": "network", "message": "Could not reach Videorc. Check your connection and try again." }
+      "error": {
+        "code": "network",
+        "message": "Could not reach Videorc. Check your connection and try again."
+      }
     },
     "localOnly": {
       "signedIn": true,
@@ -1958,6 +1992,58 @@
     },
     "deleteParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
     "accepted": { "accepted": true }
+  },
+  "replay": {
+    "params": { "seconds": 30 },
+    "paramsAuto": { "seconds": 30, "auto": true },
+    "replayOnlyStatus": {
+      "state": "recording",
+      "sessionId": "replay-session-fixture",
+      "startedAt": "2026-10-12T18:30:00Z",
+      "pipeline": {
+        "container": "mkv",
+        "finalization": "none",
+        "stages": [{ "stage": "capture", "state": "running" }]
+      },
+      "replayOnly": true
+    },
+    "stateOn": {
+      "state": "on",
+      "sessionId": "replay-session-fixture",
+      "seconds": 30,
+      "bufferedSeconds": 12.5,
+      "replayOnly": true,
+      "segmentFiles": 8
+    },
+    "stateOff": { "state": "off", "seconds": 30, "bufferedSeconds": 0.0 },
+    "stateError": {
+      "state": "error",
+      "seconds": 30,
+      "bufferedSeconds": 0.0,
+      "reason": "The session ended before you stopped it, so clips are off."
+    },
+    "saveAccepted": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "queued": true
+    },
+    "saveAcceptedMinimal": { "saveId": "save-fixture", "sessionId": "replay-session-fixture" },
+    "savedEvent": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "replaySessionId": "replay-row-fixture",
+      "path": "Clips/Clip 2026-10-12 18-30-05.mp4",
+      "seconds": 30,
+      "coveredSeconds": 30.03,
+      "complete": true,
+      "source": "manual"
+    },
+    "saveFailedEvent": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "reason": "probe",
+      "message": "The replay could not be checked after it was written."
+    }
   },
   "banner": {
     "minimal": {

@@ -285,6 +285,8 @@ export interface StreamManagerProps {
   onMarker?: (label?: string) => Promise<import('@/lib/backend').SessionMarker>
   onUndoMarker?: (marker: import('@/lib/backend').SessionMarker) => Promise<void>
   onMarkClip?: () => void
+  /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */
+  onClip?: () => Promise<string>
   /**
    * Banners (plan 186 S7): the list Studio pushed (null until it loads) and
    * one show or hide, relayed to Studio. The status bar's Banners menu and
@@ -408,6 +410,7 @@ export function StreamManager({
   onHighlight,
   onClear,
   onMarkClip,
+  onClip,
   banners,
   onBanner,
   sounds,
@@ -479,6 +482,9 @@ export function StreamManager({
   const [nowMs, setNowMs] = useState(() => Date.now())
   const onAir =
     !inHistory && dashboard?.session.state !== undefined && dashboard.session.state !== 'off-air'
+  // The Clip button (plan 181 R4): on air, or whenever the ring holds frames
+  // (the main window says so through the marker context).
+  const clipAvailable = !inHistory && (onAir || markerContext?.clip?.available === true)
   // Chat removals (plan 140, S6): each row's newest removal, and Buddy's
   // cards and their result lines. History never has any.
   const removalOperations = live ? moderationOperations : NO_MODERATION_OPERATIONS
@@ -1223,6 +1229,7 @@ export function StreamManager({
             onRemoveFromChat={live ? onRemoveFromChat : undefined}
             markerContext={inHistory ? null : markerContext}
             onMarker={inHistory ? undefined : onMarker}
+            onClip={inHistory ? undefined : onClip}
             onUndoMarker={inHistory ? undefined : onUndoMarker}
             banners={banners}
             onBanner={inHistory ? undefined : onBanner}
@@ -1274,7 +1281,8 @@ export function StreamManager({
         onFocusBuddy={cohostVisible ? showBuddy : undefined}
         onFocusComposer={composerAvailable ? writeInChat : undefined}
         onHighlightAnchorChange={inHistory ? undefined : onHighlightAnchorChange}
-        onMarkClip={onAir ? onMarkClip : undefined}
+        clip={markerContext?.clip}
+        onMarkClip={clipAvailable ? onMarkClip : undefined}
         banners={banners}
         onBanner={onBanner}
         sounds={sounds}

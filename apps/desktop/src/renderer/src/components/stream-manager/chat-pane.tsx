@@ -27,7 +27,27 @@ import {
   type SoundRelayAction,
   type SoundboardSummary
 } from '../../../../shared/sound-commands'
-import type { MarkerContext, SessionMarker } from '@/lib/backend'
+import type { ClipContext, MarkerContext, SessionMarker } from '@/lib/backend'
+import { clipLengthWords } from '../../../../shared/clip-marks'
+
+/** "30 seconds" for the composer's clip words. */
+function clipSeconds(clip: ClipContext | undefined): string {
+  return clipLengthWords(clip?.seconds)
+}
+
+/** Why `/clip` keeps nothing right now, in the window's own words. */
+function clipOffNotice(clip: ClipContext | undefined): string {
+  switch (clip?.off) {
+    case 'blocked':
+      return 'Clips are off on this computer. Turn them on on the Output page.'
+    case 'starting':
+      return 'Clips are still starting. Try again in a moment.'
+    case 'idle':
+      return 'Nothing to clip yet. Start a recording, or go live.'
+    default:
+      return 'Clips are off. Turn on Keep the last seconds on the Output page.'
+  }
+}
 import { Command, CommandItem, CommandList } from '@/components/ui/command'
 import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
 import { CohostNudge } from '@/components/cohost-nudge'
@@ -132,6 +152,7 @@ export function ChatPane({
   onSend,
   markerContext,
   onMarker,
+  onClip,
   onUndoMarker,
   banners,
   onBanner,
@@ -180,6 +201,8 @@ export function ChatPane({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  /** `/clip` (plan 181 R4): the Clip button's action, answered with its words. */
+  onClip?: () => Promise<string>
   /** Plan 186 S7: the banners `/banner` reads, and its show or hide. */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => Promise<boolean>
@@ -638,6 +661,7 @@ export function ChatPane({
           markerContext={markerContext}
           onMarker={onMarker}
           onUndoMarker={onUndoMarker}
+          onClip={onClip}
           banners={banners}
           onBanner={onBanner}
           sounds={sounds}
@@ -661,6 +685,7 @@ export function ChatPane({
 /** The composer's own commands, in the order the completion list offers them. */
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
   { value: '/marker', hint: ' [title] · Save a timeline point' },
+  { value: '/clip', hint: ' · Save the last seconds as a clip' },
   { value: '/banner', hint: ' [name] · Show or hide a banner' },
   { value: '/sound', hint: ' [name] · Play a sound' },
   { value: '/help', hint: ' · Command help' }
@@ -687,6 +712,7 @@ export function Composer({
   markerContext,
   onMarker,
   onUndoMarker,
+  onClip,
   banners,
   onBanner,
   sounds,
@@ -695,6 +721,7 @@ export function Composer({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
+  onClip?: () => Promise<string>
   /**
    * Plan 186 S7: `/banner <name>` shows or hides one of these, `/banner off`
    * hides them all. Resolves false when it didn't happen; the window has
@@ -761,10 +788,12 @@ export function Composer({
   const soundBoard = onSound ? (sounds ?? NO_SOUNDBOARD) : null
   const command = classifyComposerDraft(draft, bannerList ?? [], soundBoard?.sounds ?? [])
   const local = command.kind !== 'chat'
+  const clipContext = markerContext?.clip
   const canSend = local
     ? !localPending &&
       (command.kind !== 'marker' ||
-        Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker))
+        Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker)) &&
+      (command.kind !== 'clip' || Boolean(clipContext?.available && onClip))
     : targets.length > 0 && !pending
   // Under `/banner` and `/sound`, the names (plans 186, 189); otherwise the commands.
   const completions: readonly ComposerCompletion[] =
@@ -833,8 +862,33 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/marker [title] saves a point on this recording or livestream.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
+      return
+    }
+    if (command.kind === 'clip') {
+      // Plan 181 R4: the Clip button's action from the keyboard. The
+      // streamer's own composer only; chat never triggers it.
+      if (!clipContext?.available || !onClip) {
+        setNotice(clipOffNotice(clipContext))
+        return
+      }
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(`Saving the last ${clipSeconds(clipContext)} as a clip…`)
+      void onClip()
+        .then((outcome) => {
+          setNotice(outcome)
+          if (draftRef.current === submitted) setDraft('')
+        })
+        .catch((error) =>
+          setNotice(error instanceof Error ? error.message : "Couldn't save the clip.")
+        )
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
       return
     }
     if (command.kind === 'banner') {
@@ -985,8 +1039,8 @@ export function Composer({
             aria-label="Message or local command"
             placeholder={
               writable.length > 0
-                ? 'Message or /marker [title]…'
-                : '/marker [title] · Local commands'
+                ? 'Message, /marker [title] or /clip…'
+                : '/marker [title], /clip · Local commands'
             }
             value={draft}
             onChange={(event) => {
@@ -1081,7 +1135,9 @@ export function Composer({
               {completions.map(({ value, hint }) => (
                 <CommandItem key={value} value={value} onSelect={() => complete(value)}>
                   {value}
-                  {hint}
+                  {value === '/clip'
+                    ? ` · Save the last ${clipSeconds(clipContext)} as a clip`
+                    : hint}
                 </CommandItem>
               ))}
             </CommandList>

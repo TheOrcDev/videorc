@@ -1202,6 +1202,8 @@ pub struct AppState {
     /// Clip-that phrase matcher state (plan 068 D6). Std mutex: the caption
     /// task matches and returns.
     pub clip_marks: crate::clip_marks::ClipMarkDetectorSlot,
+    /// The replay buffer (plan 181): the ring of the session that owns it.
+    pub replay: crate::replay_buffer::ReplaySlot,
     /// Buddy voice-command detector and the engine session it serves (plan
     /// 140 S2). Std mutex: the caption task observes a final and returns.
     pub cohost_commands: crate::cohost_command::CommandDetectorSlot,
@@ -1428,6 +1430,7 @@ impl AppState {
             cohost_recent_speech: crate::cohost::new_cohost_recent_speech_slot(),
             cohost_voice: crate::cohost::new_cohost_voice_slot(),
             clip_marks: crate::clip_marks::new_clip_mark_detector_slot(),
+            replay: crate::replay_buffer::new_replay_slot(),
             cohost_commands: crate::cohost_command::new_command_detector_slot(),
             buddy_library: Arc::new(crate::cohost_library::LibraryShared::new()),
         }

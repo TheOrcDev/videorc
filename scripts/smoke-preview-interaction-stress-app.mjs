@@ -157,6 +157,12 @@ try {
   })
   await waitForNativeSurface(smoke)
   await waitForCgHost(oracle, smoke)
+  // Plan 181 (redesign R2): the clip ring runs by default and arms the live
+  // preview compositor in place at the Output profile's fps, so the preview
+  // presents at that cadence (30 on the default profile) rather than the
+  // idle 60. The floor follows the compositor's own target, as it already
+  // does for the device recording phase.
+  const compositorTargetFps = (await request(ws, timeoutMs, 'compositor.status'))?.targetFps
   const floatingPhase = await runMovementPhase({
     label: 'floating movement/resize + focus/click',
     smoke,
@@ -164,13 +170,15 @@ try {
     movement: profile.floating,
     command: 'preview-window-set-bounds',
     boundsForIndex: floatingBounds,
-    interleaveClickFocus: true
+    interleaveClickFocus: true,
+    targetPresentFps: compositorTargetFps
   })
   report.phases.floating = floatingPhase
   report.failures.push(...floatingPhase.failures)
 
   const resizePhase = await runMovementPhase({
     label: 'floating continuous resize',
+    targetPresentFps: compositorTargetFps,
     smoke,
     oracle,
     movement: resizeMovementProfile(),
@@ -202,6 +210,7 @@ try {
   await waitForCgHost(oracle, smoke)
   const dockedPhase = await runMovementPhase({
     label: 'docked main-window movement',
+    targetPresentFps: compositorTargetFps,
     smoke,
     oracle,
     movement: profile.docked,

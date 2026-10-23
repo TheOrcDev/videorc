@@ -53,7 +53,12 @@ import {
   MarkerRemovedError
 } from '@/lib/marker-command'
 import type { CreateMarkerParams, MarkerContext } from '../../shared/session-markers'
-import { clipMarkedToast } from '../../shared/clip-marks'
+import {
+  clipMarkSavedClip,
+  clipMarkedToast,
+  clipSavingToast,
+  type ClipMarkedToast
+} from '../../shared/clip-marks'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
@@ -118,6 +123,18 @@ function CommentsWindowApp(): ReactElement {
     snapshot: emptyLiveChatSnapshot(new Date().toISOString())
   }))
   const [markerContext, setMarkerContext] = useState<MarkerContext | null>(null)
+  // The one Clip action (plan 181 R4): the status bar's button and /clip
+  // both relay through the main window, which owns the backend socket. The
+  // reply's words are the toast (button) or the composer's notice (/clip).
+  const saveClip = (): Promise<ClipMarkedToast> => {
+    const seconds = markerContext?.clip?.seconds
+    return (
+      window.videorc?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() }) ??
+      Promise.reject(new Error("The Stream Manager can't reach Videorc right now."))
+    ).then((event) =>
+      clipMarkSavedClip(event) ? clipSavingToast(event, seconds) : clipMarkedToast(event)
+    )
+  }
   const markerRetry = useRef<CreateMarkerParams | null>(null)
   const [markerRetrySessionId, setMarkerRetrySessionId] = useState<string | null>(null)
   useEffect(() => {
@@ -806,28 +823,19 @@ function CommentsWindowApp(): ReactElement {
               : undefined
           }
           onHighlight={live ? requestHighlight : undefined}
-          onMarkClip={
-            live
-              ? () => {
-                  void window.videorc
-                    ?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() })
-                    .then((event) => {
-                      const copy = clipMarkedToast(event)
-                      ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
-                        id: 'clip-marked',
-                        description: copy.description
-                      })
-                    })
-                    .catch((error) =>
-                      toastUserError(
-                        error,
-                        { action: 'mark', object: 'the clip' },
-                        { id: 'clip-marked' }
-                      )
-                    )
-                }
-              : undefined
-          }
+          onMarkClip={() => {
+            void saveClip()
+              .then((copy) => {
+                ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
+                  id: 'clip-marked',
+                  description: copy.description
+                })
+              })
+              .catch((error) =>
+                toastUserError(error, { action: 'save', object: 'the clip' }, { id: 'clip-marked' })
+              )
+          }}
+          onClip={() => saveClip().then((copy) => copy.title)}
           banners={banners}
           onBanner={runBanner}
           sounds={sounds}

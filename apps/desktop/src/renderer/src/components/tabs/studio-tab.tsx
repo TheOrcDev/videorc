@@ -76,7 +76,7 @@ export function StudioTab(): ReactElement {
     retrySessionStart
   } = studio
 
-  const active = isSessionTransportActive(recording.state)
+  const active = isSessionTransportActive(recording.state, recording.replayOnly)
   const banner = studioBlocker(studio)
   // A Go Live in flight owns the transport (plan 174 S3.1, the Phase 0
   // review): while its preflight runs or a start is in flight, Record,
@@ -274,7 +274,7 @@ function StudioPreviewPanel(): ReactElement {
   const { recording } = useStudioRecordingState()
   const { previewLiveStatus } = useStudioPreview()
   const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
-  const active = isSessionTransportActive(recording.state)
+  const active = isSessionTransportActive(recording.state, recording.replayOnly)
   const previewHealth = studioHealth(
     diagnosticStats,
     active,

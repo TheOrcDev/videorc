@@ -187,6 +187,7 @@ class BackendEventRecorder {
       if (message.event === 'diagnostics.stats') {
         this.systemAudioActiveSamples.push({
           at: record.at,
+          sessionId: message.payload?.sessionId,
           active: message.payload?.systemAudioActive === true
         })
         return
@@ -690,8 +691,16 @@ function sessionWindow(recorder, session) {
           inSession(record)
       )
       .map((record) => record.payload.code),
+    // Plan 181 (redesign R2): the clip ring runs by default and Record hands
+    // over from it, so the ring's own diagnostics (a system-audio source the
+    // previous case left on) still arrive just after the click; only this
+    // session's samples count.
     systemAudioActiveSamples: recorder.systemAudioActiveSamples.filter(
-      (sample) => sample.at >= session.clickAt && sample.at <= session.endAt && sample.active
+      (sample) =>
+        sample.at >= session.clickAt &&
+        sample.at <= session.endAt &&
+        sample.active &&
+        (sample.sessionId === undefined || sample.sessionId === session.sessionId)
     ).length
   }
 }

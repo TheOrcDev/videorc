@@ -118,6 +118,8 @@ function forSession(
  * with a `streamUrl`: it is on air all the same (plan 095 S5).
  */
 function sessionStateOf(status: RecordingStatus): LiveDashboardSessionState | null {
+  // A buffer-only session (plan 181) is nothing to manage: off air.
+  if (status.replayOnly) return 'off-air'
   if (sessionIsLive(status)) return 'live'
   if (status.state === 'recording') return 'recording'
   if (status.state === 'idle' || status.state === 'failed') return 'off-air'

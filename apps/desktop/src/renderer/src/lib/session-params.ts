@@ -19,6 +19,8 @@ export function buildStartSessionParams(input: {
   sceneEditMode?: boolean
   settings: SettingsState
   suppressCaptionsForSession?: boolean
+  /** The replay buffer's switch is on (plan 181): the session carries the ring. */
+  replayArmed?: boolean
   /** `process.platform` from runtime info: Separate source recordings are macOS-only. */
   platform?: string
 }): StartSessionParams {
@@ -27,7 +29,8 @@ export function buildStartSessionParams(input: {
     scene,
     sceneEditMode = false,
     settings,
-    suppressCaptionsForSession = false
+    suppressCaptionsForSession = false,
+    replayArmed = false
   } = input
 
   // Send the scene whenever edit mode is on OR it carries a background, so the
@@ -85,6 +88,16 @@ export function buildStartSessionParams(input: {
     },
     // Present only when a vertical destination is armed on a horizontal
     // session — the backend refuses vertical targets without this leg.
-    simulcast: buildSimulcastParams(captureConfig)
+    simulcast: buildSimulcastParams(captureConfig),
+    // `auto` (redesign R2): a ring the user never asked for, which the
+    // backend keeps off a software encoder path; a chosen one runs anywhere.
+    ...(replayArmed
+      ? {
+          replay: {
+            seconds: captureConfig.replayBuffer.seconds,
+            ...(captureConfig.replayBuffer.explicit ? {} : { auto: true })
+          }
+        }
+      : {})
   }
 }

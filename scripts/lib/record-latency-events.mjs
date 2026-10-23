@@ -148,9 +148,16 @@ export function createRecordLatencyWaitScope(recorder) {
   }
 }
 
+/** A buffer-only session (plan 181) is never the recording a cycle measures:
+ * it stops and restarts around every Record, and its statuses carry
+ * `replayOnly`. */
+function isSessionStatus(record) {
+  return record.event === 'recording.status' && record.payload?.replayOnly !== true
+}
+
 export function statusEvent(state, sessionId) {
   return (record) =>
-    record.event === 'recording.status' &&
+    isSessionStatus(record) &&
     record.payload?.state === state &&
     (sessionId === undefined || record.payload?.sessionId === sessionId)
 }
@@ -172,7 +179,7 @@ export async function startRecordLatencyCycle({
     const recordingPromise = waits.waitFor(
       'recording.status(recording)',
       (record) =>
-        record.event === 'recording.status' &&
+        isSessionStatus(record) &&
         (record.payload?.state === 'recording' || record.payload?.state === 'streaming') &&
         typeof record.payload?.sessionId === 'string',
       timeoutMs
@@ -180,7 +187,7 @@ export async function startRecordLatencyCycle({
     const startFailurePromise = waits
       .waitFor(
         'recording.status(failed)',
-        (record) => record.event === 'recording.status' && record.payload?.state === 'failed',
+        (record) => isSessionStatus(record) && record.payload?.state === 'failed',
         timeoutMs
       )
       .catch(() => null)
@@ -292,7 +299,7 @@ export async function stopRecordLatencyCycle({
 
 function terminalStatusEvent(sessionId) {
   return (record) =>
-    record.event === 'recording.status' &&
+    isSessionStatus(record) &&
     (record.payload?.state === 'idle' || record.payload?.state === 'failed') &&
     record.payload?.sessionId === sessionId
 }

@@ -49,7 +49,13 @@ import {
   type WorkspaceTabGroup
 } from '@/components/workspace-nav'
 import { useSoundboard } from '@/hooks/use-soundboard'
-import { useStudioBanners, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
+import {
+  useStudioBanners,
+  useStudioCore,
+  useStudioRecordingState,
+  useStudioReplay
+} from '@/hooks/use-studio'
+import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // ⌘K (plan 174 S3.21, A-9, A-13): Session first (the transport's own
@@ -131,6 +137,7 @@ export function CommandPalette({
     toggleCaptionsWindow
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
+  const replayBuffer = useStudioReplay()
   const { banners, showBanner, hideBanner } = useStudioBanners()
   const soundboard = useSoundboard()
   const platform = runtimeInfo?.platform
@@ -145,8 +152,11 @@ export function CommandPalette({
 
   // Running, not starting: while a start is in flight the two starts stay,
   // disabled, so the row the streamer reached for does not change under
-  // the cursor.
-  const live = recording.state === 'recording' || recording.state === 'streaming'
+  // the cursor. A buffer-only session (plan 181) owns no transport: the two
+  // starts stay, and "Stop recording" never names the ring.
+  const live =
+    (recording.state === 'recording' || recording.state === 'streaming') &&
+    !sessionIsReplayOnly(recording)
   const busy = recording.state === 'starting' || recording.state === 'stopping'
   // The transport's own stop words (plan 174 D3): "End livestream" on air,
   // "Stop recording" for a recording.
@@ -235,14 +245,16 @@ export function CommandPalette({
             {muteLabel}
             {shortcut(settings.globalShortcuts?.micToggle)}
           </CommandItem>
-          {live ? (
+          {/* The one clip action (plan 181 R4): the last seconds whenever the
+              ring holds frames, and a mark in the recording while one runs. */}
+          {live || replayBuffer.state.state === 'on' ? (
             <CommandItem
-              value="Mark clip"
-              keywords={['clip', 'highlight', 'marker', 'moment']}
+              value="Save clip"
+              keywords={['clip', 'replay', 'marker', 'moment']}
               onSelect={() => run(() => void markClip())}
             >
               <ClipIcon className="size-4" />
-              Mark clip
+              Save clip
               {shortcut(settings.globalShortcuts?.clipMark)}
             </CommandItem>
           ) : null}

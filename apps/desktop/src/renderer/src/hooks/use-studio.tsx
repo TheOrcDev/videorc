@@ -9,8 +9,18 @@ import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
-import { clipMarkedToast } from '../../../shared/clip-marks'
-import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
+import { acceleratorLabel } from '../../../shared/accelerator-format'
+import {
+  clipMarkKeptSomething,
+  clipMarkSavedClip,
+  clipMarkedToast
+} from '../../../shared/clip-marks'
+import {
+  sessionActivity,
+  sessionIsLive,
+  sessionIsReplayOnly,
+  sessionOwnsTransport
+} from '../../../shared/capture-state'
 import {
   END_LIVESTREAM_ARMED_TOAST,
   END_LIVESTREAM_ARMED_TOAST_ID,
@@ -330,6 +340,9 @@ import type {
   DiagnosticStats,
   ClipMarkCommand,
   ClipMarkedEvent,
+  ReplaySaveFailedEvent,
+  ReplaySavedEvent,
+  ReplayStateEvent,
   Device,
   DeviceList,
   EntitlementsSnapshot,
@@ -1567,6 +1580,39 @@ export type StudioContextValue = {
   canSampleAudio: boolean
 }
 
+/** What the Output page and the status bar show and do for the clip ring
+ * (plan 181, the owner's redesign). */
+export interface ReplayBufferControls {
+  state: ReplayStateEvent
+  /** The ring is wanted right now. The backend's `state` says what is. */
+  armed: boolean
+  /**
+   * The backend refused the default start on this computer (a software
+   * encoder path): the switch stays off and the Output page says why, until
+   * the user turns it on themselves.
+   */
+  blockedReason: string | null
+  /** The one switch (Output → Clips → Keep the last seconds). */
+  setEnabled: (enabled: boolean) => void
+}
+
+const REPLAY_STATE_OFF: ReplayStateEvent = { state: 'off', seconds: 30, bufferedSeconds: 0 }
+
+/** The backend's idle after a buffer-only stop, bounded (the stop's own reply
+ * may still say stopping). */
+async function waitForRecordingIdle(
+  recordingRef: { current: { state: string } },
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (recordingRef.current.state !== 'idle' && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+  }
+}
+/** `session.start`'s code for a default ring start the backend keeps off a
+ * software encoder path (mirrors `replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE`). */
+const REPLAY_SOFTWARE_ENCODER_REFUSAL = 'replay-software-encoder'
+
 export type StudioCoreContextValue = Omit<
   StudioContextValue,
   | 'captureRecoveryRetryPending'
@@ -1592,7 +1638,7 @@ export type StudioRecordingStateContextValue = {
    * the backend reports both as `recording` (plan 095 S5). `startedAt` feeds
    * the shell's clocks (the status bar, the sidebar's Studio row; plan 174
    * S1.3, D8) and changes only when a session starts. */
-  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'streamUrl' | 'startedAt'>
+  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'streamUrl' | 'startedAt' | 'replayOnly'>
 }
 
 export type StudioRecordingContextValue = Pick<StudioContextValue, 'recording'>
@@ -1670,6 +1716,10 @@ const NO_BANNERS: Banner[] = []
 
 const StudioContext = createContext<StudioCoreContextValue | null>(null)
 const StudioRecordingStateContext = createContext<StudioRecordingStateContextValue | null>(null)
+// Plan 181: the ring reports once a second while it is on. Its own context
+// keeps that tick away from the core value and the shell; only the Studio
+// row, the status bar chip and the palette item subscribe.
+const StudioReplayContext = createContext<ReplayBufferControls | null>(null)
 const StudioRecordingContext = createContext<StudioRecordingContextValue | null>(null)
 const StudioPreviewContext = createContext<StudioPreviewContextValue | null>(null)
 const StudioDiagnosticsContext = createContext<StudioDiagnosticsContextValue | null>(null)
@@ -2132,6 +2182,15 @@ export function useStudioRecordingState(): StudioRecordingStateContextValue {
   return value
 }
 
+/** The clip ring (plan 181): the backend's state, the Output switch, the guard's reason. */
+export function useStudioReplay(): ReplayBufferControls {
+  const value = useContext(StudioReplayContext)
+  if (!value) {
+    throw new Error('useStudioReplay must be used within a StudioProvider')
+  }
+  return value
+}
+
 export function useStudioPreview(): StudioPreviewContextValue {
   const value = useContext(StudioPreviewContext)
   if (!value) {
@@ -2202,8 +2261,17 @@ type StudioContextProvidersProps = {
   diagnostics: StudioDiagnosticsContextValue
   chat: StudioChatContextValue
   audio: StudioAudioContextValue
+  /** Plan 181. Optional so a test that mounts the providers alone keeps a ring that is off. */
+  replay?: ReplayBufferControls
   children?: ReactNode
 }
+
+const REPLAY_BUFFER_OFF_CONTROLS: ReplayBufferControls = Object.freeze({
+  state: REPLAY_STATE_OFF,
+  armed: false,
+  blockedReason: null,
+  setEnabled: () => {}
+})
 
 /**
  * Keep volatile Studio domains behind their own providers. Besides making the
@@ -2219,6 +2287,7 @@ export function StudioContextProviders({
   diagnostics,
   chat,
   audio,
+  replay = REPLAY_BUFFER_OFF_CONTROLS,
   children
 }: StudioContextProvidersProps): ReactElement {
   return (
@@ -2228,7 +2297,11 @@ export function StudioContextProviders({
           <StudioPreviewContext.Provider value={preview}>
             <StudioDiagnosticsContext.Provider value={diagnostics}>
               <StudioChatContext.Provider value={chat}>
-                <StudioAudioContext.Provider value={audio}>{children}</StudioAudioContext.Provider>
+                <StudioAudioContext.Provider value={audio}>
+                  <StudioReplayContext.Provider value={replay}>
+                    {children}
+                  </StudioReplayContext.Provider>
+                </StudioAudioContext.Provider>
               </StudioChatContext.Provider>
             </StudioDiagnosticsContext.Provider>
           </StudioPreviewContext.Provider>
@@ -2305,6 +2378,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     deviceListRef.current = deviceList
   }, [deviceList])
   const [recording, setRecording] = useState<RecordingStatus>({ state: 'idle', message: 'Ready.' })
+  // Plan 181: the backend's replay ring, and the switch (the user's intent).
+  const [replayState, setReplayState] = useState<ReplayStateEvent>(REPLAY_STATE_OFF)
+  const replayStateRef = useRef<ReplayStateEvent>(REPLAY_STATE_OFF)
+  const [replayArmed, setReplayArmedState] = useState(false)
+  const replayArmedRef = useRef(false)
+  // The backend refused the default start here (a software encoder path).
+  const [replayBlockedReason, setReplayBlockedReasonState] = useState<string | null>(null)
+  const replayBlockedReasonRef = useRef<string | null>(null)
+  const replayStartInFlightRef = useRef(false)
+  const replayFailedStartsRef = useRef(0)
+  const replayReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const replayGaveUpToastedRef = useRef(false)
+  const replayLaunchArmedRef = useRef(false)
+  const setReplayArmedRef = useRef<(armed: boolean) => void>(() => {})
+  const stopReplayBufferRef = useRef<() => Promise<void>>(async () => {})
+  const scheduleReplayReconcileRef = useRef<(delayMs?: number) => void>(() => {})
+  // Held while a layout transaction stops the default ring to change the
+  // canvas orientation, so the reconcile does not re-arm it in the old
+  // orientation before the new layout lands.
+  const replayReconcileHoldRef = useRef(false)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
   // Plan 069: the newest system-audio health issue, kept apart from the
@@ -3070,26 +3163,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     listening: import('@/lib/backend').CohostListening
   } | null>(null)
   useEffect(() => client?.on('session.marker.voice.status', setMarkerVoice), [client])
-  useEffect(() => {
-    const available = Boolean(
-      client &&
-      recording.sessionId &&
-      (recording.state === 'recording' || recording.state === 'streaming')
-    )
-    void window.videorc?.pushMarkerContext?.({
-      sessionId: recording.sessionId,
-      available,
-      reason: available ? undefined : 'Start a recording or livestream to make a marker.',
-      lastMarker: lastVoiceMarker ?? undefined,
-      voice:
-        markerVoice && markerVoice.sessionId === recording.sessionId
-          ? markerVoice.listening
-          : undefined
-    })
-    return () => {
-      void window.videorc?.pushMarkerContext?.(null)
-    }
-  }, [client, recording.sessionId, recording.state, markerVoice, lastVoiceMarker])
   // Backend-authoritative comment highlight. The renderer owns only the
   // temporary rasterization phase; `On stream` comes from the backend state.
   const [commentHighlightState, setCommentHighlightState] = useState<CommentHighlightState>({
@@ -3913,6 +3986,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sourceId?: string
       ) => { id: string; kind: 'screen' | 'window' } | null
     }
+    // Plan 181: the record-latency and replay smokes arm the ring the way
+    // the Studio switch does.
+    ;(
+      smokeWindow as Window & {
+        __videorcSmokeSetReplayBuffer?: (armed: boolean, seconds?: number) => boolean
+      }
+    ).__videorcSmokeSetReplayBuffer = (armed, seconds) => {
+      // The Output switch's own path (explicit, so the software encoder
+      // guard never applies to a smoke), with the length when given.
+      const patch = {
+        enabled: armed,
+        explicit: true,
+        ...(typeof seconds === 'number' ? { seconds } : {})
+      }
+      setCaptureConfig((current) => ({
+        ...current,
+        replayBuffer: { ...current.replayBuffer, ...patch }
+      }))
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        replayBuffer: { ...captureConfigRef.current.replayBuffer, ...patch }
+      }
+      setReplayArmedRef.current(armed)
+      return true
+    }
     smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
       const camera = deviceList.devices.find(
         (device) => device.kind === 'camera' && device.status === 'available'
@@ -3960,6 +4058,65 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [lastError, setLastError] = useState<string | null>(null)
   const lastErrorRef = useRef(lastError)
   lastErrorRef.current = lastError
+  // The Stream Manager's marker and clip facts (plan 068, plan 181 R4): sits
+  // after the settings and runtime state it reads.
+  useEffect(() => {
+    // A buffer-only session (plan 181) has no Library row to hold a marker,
+    // so the voice marker waits for a recording or a livestream.
+    const available = Boolean(
+      client &&
+      recording.sessionId &&
+      (recording.state === 'recording' || recording.state === 'streaming') &&
+      recording.replayOnly !== true
+    )
+    // The Clip action (R4): the last seconds whenever the ring holds frames,
+    // a mark while a session runs; the window shows the button on either.
+    const clipAvailable = replayState.state === 'on' || isActiveRecordingState(recording.state)
+    const clipShortcut = settings.globalShortcuts?.clipMark
+    const clipOff = clipAvailable
+      ? undefined
+      : replayBlockedReason
+        ? ('blocked' as const)
+        : !captureConfig.replayBuffer.enabled
+          ? ('switch' as const)
+          : replayState.state === 'starting'
+            ? ('starting' as const)
+            : ('idle' as const)
+    void window.videorc?.pushMarkerContext?.({
+      sessionId: recording.sessionId,
+      available,
+      reason: available ? undefined : 'Start a recording or livestream to make a marker.',
+      lastMarker: lastVoiceMarker ?? undefined,
+      voice:
+        markerVoice && markerVoice.sessionId === recording.sessionId
+          ? markerVoice.listening
+          : undefined,
+      clip: {
+        available: clipAvailable,
+        seconds: replayState.seconds,
+        ...(clipShortcut
+          ? { shortcutLabel: acceleratorLabel(clipShortcut, runtimeInfo?.platform) }
+          : {}),
+        ...(clipOff ? { off: clipOff } : {})
+      }
+    })
+    return () => {
+      void window.videorc?.pushMarkerContext?.(null)
+    }
+  }, [
+    captureConfig.replayBuffer.enabled,
+    client,
+    recording.sessionId,
+    recording.state,
+    recording.replayOnly,
+    replayBlockedReason,
+    replayState.seconds,
+    replayState.state,
+    runtimeInfo?.platform,
+    settings.globalShortcuts?.clipMark,
+    markerVoice,
+    lastVoiceMarker
+  ])
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewSurfaceStatusRef = useRef<PreviewSurfaceStatus>(idlePreviewSurfaceStatus())
@@ -5345,8 +5502,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const applyRecordingStatus = useCallback(
     (status: RecordingStatus) => {
-      if (status.state === 'recording' || status.state === 'streaming') {
-        // Go Live reports `recording` with a stream URL (plan 174 B-6).
+      if (
+        (status.state === 'recording' || status.state === 'streaming') &&
+        !sessionIsReplayOnly(status)
+      ) {
+        // Go Live reports `recording` with a stream URL (plan 174 B-6). A
+        // buffer-only session (plan 181) saves nothing, so it never becomes
+        // the activity a finished session is announced as.
         lastSessionActivityRef.current = sessionActivity(status)
       }
       recordingRef.current = status
@@ -7007,6 +7169,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const incomingStatus = payload as RecordingStatus
         const previousState = recordingRef.current.state ?? lastRecordingStateRef.current
         const previouslyLive = sessionIsLive(recordingRef.current)
+        const previouslyReplayOnly = sessionIsReplayOnly(recordingRef.current)
         const previousSessionId =
           recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current
         const exactTerminalSessionId =
@@ -7089,9 +7252,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // A terminal session moves a persistent degradation notice to past
         // tense. A saved recording also gets its two natural next steps: watch
         // it, or find it in the Library. Stream-only sessions have no local
-        // artifact, so they must not claim that a recording was saved.
+        // artifact, so they must not claim that a recording was saved; nor
+        // does a buffer-only session (plan 181) ending for the switch or the
+        // handover into a real session.
         if (
           status.state === 'idle' &&
+          !previouslyReplayOnly &&
           ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
         ) {
           const finishedActivity = lastSessionActivityRef.current
@@ -7127,6 +7293,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (status.state === 'failed') {
           void publishRecordingFailure(status)
         }
+        // Plan 181: a session ended or began; the switch decides what the
+        // ring does next (re-arm after a recording, stop after the switch).
+        // A session that ended cleanly is proof a start can work: the
+        // failed-start count begins again.
+        if (status.state === 'idle') replayFailedStartsRef.current = 0
+        scheduleReplayReconcile()
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the
       // Comments window (main-process cache + push, same shape as highlight).
@@ -7527,10 +7699,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Clip that (plan 068 D6): one toast per mark, whether it came from a
       // spoken phrase, a shortcut, a deck key, or the Stream Manager.
       nextClient.on('clip.marked', (payload) => {
+        const event = payload as ClipMarkedEvent
+        // The ring's save says "Clip saved" itself (replay.saved below); a
+        // press that also marked the recording needs no second toast.
+        if (clipMarkSavedClip(event)) return
         // A recording that never went live has no stream report to point at.
-        const copy = clipMarkedToast(payload as ClipMarkedEvent, {
-          streaming: sessionIsLive(recordingRef.current)
-        })
+        const copy = clipMarkedToast(event, { streaming: sessionIsLive(recordingRef.current) })
         ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
           id: 'clip-marked',
           description: copy.description,
@@ -7538,6 +7712,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ? { action: { label: 'Open Output', onClick: () => openWorkspaceTab('recording') } }
             : {})
         })
+      }),
+      // Plan 181: the clip ring's state, and every save's outcome.
+      nextClient.on('replay.state', (payload) => {
+        const next = payload as ReplayStateEvent
+        applyReplayState(next)
+        if (next.state === 'error') {
+          // The ring died with its session: it stays off and says why; the
+          // next session's end re-arms it (the switch is still on).
+          replayArmedRef.current = false
+          setReplayArmedState(false)
+          void import('@/lib/replay-buffer').then((replay) => replay.showClipsStopped(next.reason))
+        }
+        scheduleReplayReconcile()
+      }),
+      nextClient.on('replay.saved', (payload) => {
+        const event = payload as ReplaySavedEvent
+        void refreshSessions(nextClient)
+        void import('@/lib/replay-buffer').then((replay) => replay.showClipSaved(event))
+      }),
+      nextClient.on('replay.saveFailed', (payload) => {
+        void import('@/lib/replay-buffer').then((replay) =>
+          replay.showClipSaveFailed(payload as ReplaySaveFailedEvent)
+        )
       }),
       nextClient.on('comments.highlight.status', (payload) => {
         commentHighlightRevision += 1
@@ -7748,6 +7945,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return read
         }
         const recordingStatusBootstrap = readRecordingStatus(1)
+        // Plan 181 (redesign R2): the ring's state, then the switch once per
+        // launch: on by default, the ring runs whenever Videorc is open.
+        void bootstrapRequest<ReplayStateEvent>('replay.status').then(
+          (state) => {
+            if (!generationIsCurrent()) return
+            applyReplayState(state)
+            if (!replayLaunchArmedRef.current) {
+              replayLaunchArmedRef.current = true
+              setReplayArmed(captureConfigRef.current.replayBuffer.enabled)
+            } else {
+              scheduleReplayReconcile()
+            }
+          },
+          () => undefined
+        )
         const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
         void activeScreenBootstrap.then(
           (nextActiveScreen) => {
@@ -9152,12 +9364,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         origin?: 'builtin' | 'saved'
       }
     ): Promise<boolean> => {
-      const sessionActive = isActiveRecordingState(recordingRef.current.state)
-      if (
-        sessionActive &&
+      const crossesOrientation =
         layoutPresetOrientation(layout.layoutPreset) !==
-          layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
-      ) {
+        layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
+      if (crossesOrientation && sessionIsReplayOnly(recordingRef.current)) {
+        // Plan 181: the default ring is no reason to keep the canvas. It
+        // stops here, the transaction runs as idle, and the reconcile re-arms
+        // it in the new orientation once the layout has landed.
+        replayReconcileHoldRef.current = true
+        return stopReplayBufferRef
+          .current()
+          .then(() => waitForRecordingIdle(recordingRef, 5_000))
+          .then(() => requestLayoutTransactionRef.current(layout, options))
+          .finally(() => {
+            replayReconcileHoldRef.current = false
+            scheduleReplayReconcileRef.current()
+          })
+      }
+      const sessionActive = isActiveRecordingState(recordingRef.current.state)
+      if (sessionActive && crossesOrientation) {
         toast.warning('Stop the recording or stream before switching orientation', {
           id: 'scene-orientation-lock'
         })
@@ -9460,6 +9685,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       wsStatus
     ]
   )
+  const requestLayoutTransactionRef = useRef(requestLayoutTransaction)
+  requestLayoutTransactionRef.current = requestLayoutTransaction
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
@@ -9492,10 +9719,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const entry = takeLayoutUndo()
     if (!entry) return false
     const current = captureConfigRef.current
-    const sessionActive = isActiveRecordingState(recordingRef.current.state)
     const crossesOrientation =
       layoutPresetOrientation(entry.layout.layoutPreset) !==
       layoutPresetOrientation(current.layout.layoutPreset)
+    if (crossesOrientation && sessionIsReplayOnly(recordingRef.current)) {
+      // Plan 181: the default ring steps aside for the undo, as for a preset.
+      replayReconcileHoldRef.current = true
+      try {
+        await stopReplayBufferRef.current()
+        await waitForRecordingIdle(recordingRef, 5_000)
+      } finally {
+        replayReconcileHoldRef.current = false
+        scheduleReplayReconcileRef.current()
+      }
+    }
+    const sessionActive = isActiveRecordingState(recordingRef.current.state)
     if (sessionActive && crossesOrientation) {
       // The canvas is fixed mid-session; the transaction's own refusal would
       // say so, but the entry must stay for after the session.
@@ -11050,8 +11288,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const streamReady =
     !captureConfig.streamEnabled || areEnabledStreamTargetsStartReady(captureConfig.streaming)
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
+  // Plan 181 (redesign R2): the ring runs by default, so a buffer-only
+  // session is never "a session" to the pages that lock while one runs
+  // (Scene positions, Output quality, orientation, Library, Clean cut, the
+  // updater): those lock for a recording or a livestream only, and a
+  // setting that shapes the ring restarts it instead (below).
   const isSessionActive =
-    isActiveRecordingState(recording.state) || startRequestPending || stopRequestPending
+    sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
+  const transportSessionActive = isSessionActive
   const mixingSessionActive =
     ['recording', 'streaming'].includes(recording.state) && Boolean(recording.sessionId)
   const systemAudioConfirmed = mixingSessionActive
@@ -12608,7 +12852,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (disconnected) {
         return disconnected
       }
-      if (isSessionActive) {
+      if (transportSessionActive) {
         return START_BLOCKED_COPY.sessionRunning
       }
       if (!intent.record && !intent.stream) {
@@ -12674,7 +12918,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       currentStreamOutputTopologyRequestKey,
       entitlements,
       health,
-      isSessionActive,
+      transportSessionActive,
       livestreamingEntitlementReason,
       streamOutputTopologyPreflight,
       wsStatus
@@ -13685,6 +13929,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneEditMode,
             settings,
             suppressCaptionsForSession,
+            // Plan 181 S7: the ring rides every session while the switch is on.
+            replayArmed: replayArmedRef.current,
             platform: runtimeInfo?.platform
           })
           const authorizedOutput = {
@@ -15072,25 +15318,225 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   remuxSessionRef.current = remuxSession
 
+  // The one clip action (plan 181, the owner's redesign R4): the Stream
+  // Manager's Clip, its key, ⌘K, a deck key, /clip and the spoken "clip
+  // that" all land here. The backend saves the last seconds whenever the
+  // ring holds frames and keeps a mark while a recording runs; with neither,
+  // the toast says which switch to turn on.
   const markClip = useCallback(async (): Promise<ClipMarkedEvent | null> => {
     if (!client) {
-      toastOffline({ action: 'mark', object: 'the clip' })
+      toastOffline({ action: 'save', object: 'the clip' })
       return null
     }
-    if (!isActiveRecordingState(recordingRef.current.state)) {
-      toast.info('Nothing to mark yet', {
-        id: 'clip-marked',
-        description: 'Start recording or go live, then mark the moments you want clipped.'
-      })
+    const ring = replayStateRef.current
+    if (ring.state !== 'on' && !isActiveRecordingState(recordingRef.current.state)) {
+      void import('@/lib/replay-buffer').then((replay) =>
+        replay.showNothingToClip({
+          state: ring.state,
+          enabled: captureConfigRef.current.replayBuffer.enabled,
+          blockedReason: replayBlockedReasonRef.current
+        })
+      )
       return null
     }
     try {
       return await client.request<ClipMarkedEvent>('clip.mark')
     } catch (error) {
-      reportError(error, { action: 'mark', object: 'the clip' })
+      reportError(error, { action: 'save', object: 'the clip' })
       return null
     }
   }, [client, reportError])
+
+  // ── Replay buffer (plan 181) ────────────────────────────────────────
+  // The backend owns the ring and hands over on Record/Go Live; the renderer
+  // owns the switch and keeps the two in step with one pure decision
+  // (lib/replay-buffer-reconcile) after every status event.
+  const applyReplayState = useCallback((next: ReplayStateEvent) => {
+    replayStateRef.current = next
+    setReplayState(next)
+  }, [])
+
+  const scheduleReplayReconcile = useCallback((delayMs = 150): void => {
+    if (replayReconcileTimerRef.current) clearTimeout(replayReconcileTimerRef.current)
+    replayReconcileTimerRef.current = setTimeout(() => {
+      replayReconcileTimerRef.current = null
+      reconcileReplayBufferRef.current()
+    }, delayMs)
+  }, [])
+  scheduleReplayReconcileRef.current = scheduleReplayReconcile
+
+  const startReplayBuffer = useCallback(async (): Promise<void> => {
+    if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
+    if (recordBlockedReason) {
+      // Not yet: a source or a permission is missing. The switch stays on
+      // and the ring starts once the reason clears (the effect below), so a
+      // launch before Sources settle never turns clips off.
+      return
+    }
+    replayStartInFlightRef.current = true
+    try {
+      const replay = await import('@/lib/replay-buffer')
+      const status = await replay.startBufferOnlySession({
+        client,
+        captureConfig: captureConfigRef.current,
+        scene: sceneWithBackground,
+        sceneEditMode,
+        settings: settingsRef.current
+      })
+      replayFailedStartsRef.current = 0
+      replayBlockedReasonRef.current = null
+      setReplayBlockedReasonState(null)
+      applyRecordingStatus(status)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if ((error as { code?: unknown } | null)?.code === REPLAY_SOFTWARE_ENCODER_REFUSAL) {
+        // The default start on a software encoder path (the guard): no
+        // retry, no toast; the Output page shows the switch off and why.
+        replayArmedRef.current = false
+        setReplayArmedState(false)
+        replayBlockedReasonRef.current = message
+        setReplayBlockedReasonState(message)
+        return
+      }
+      replayFailedStartsRef.current += 1
+      console.warn('[replay-buffer] start failed', error)
+      const { REPLAY_START_RETRY_LIMIT, replayStartRetryDelayMs } =
+        await import('@/lib/replay-buffer-reconcile')
+      if (replayFailedStartsRef.current >= REPLAY_START_RETRY_LIMIT) {
+        // Three failures in a row: stop trying for now (the switch stays
+        // on; a source change or the next session's end tries again) and
+        // say so once per launch.
+        if (!replayGaveUpToastedRef.current) {
+          replayGaveUpToastedRef.current = true
+          void import('@/lib/replay-buffer').then((replay) =>
+            replay.showClipsCouldNotStart(message)
+          )
+        }
+      } else {
+        scheduleReplayReconcile(replayStartRetryDelayMs(replayFailedStartsRef.current))
+      }
+    } finally {
+      replayStartInFlightRef.current = false
+    }
+  }, [
+    applyRecordingStatus,
+    client,
+    recordBlockedReason,
+    sceneEditMode,
+    sceneWithBackground,
+    scheduleReplayReconcile
+  ])
+
+  const stopReplayBuffer = useCallback(async (): Promise<void> => {
+    if (!client || !sessionIsReplayOnly(recordingRef.current)) return
+    replayStartInFlightRef.current = true
+    try {
+      const status = await client.requestTyped('session.stop', {})
+      applyRecordingStatus(status)
+    } catch (error) {
+      reportError(error, { action: 'turn off', object: 'clips' })
+    } finally {
+      replayStartInFlightRef.current = false
+    }
+  }, [applyRecordingStatus, client, reportError])
+  stopReplayBufferRef.current = stopReplayBuffer
+
+  // The decision is a lazy chunk (the eager provider keeps the refs and the
+  // events); every input is a ref, read after the import resolves.
+  const reconcileReplayBuffer = useCallback(() => {
+    void import('@/lib/replay-buffer-reconcile').then(({ replayBufferReconcileAction }) => {
+      const action = replayBufferReconcileAction({
+        armed: replayArmedRef.current,
+        replayState: replayStateRef.current.state,
+        replayOnlyBuffer: replayStateRef.current.replayOnly === true,
+        recordingState: recordingRef.current.state,
+        recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
+        startPending:
+          sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
+        stopPending: stopSessionInFlightPromiseRef.current !== null,
+        replayStartInFlight: replayStartInFlightRef.current || replayReconcileHoldRef.current,
+        failedStarts: replayFailedStartsRef.current
+      })
+      if (action === 'start') void startReplayBuffer()
+      else if (action === 'stop') void stopReplayBuffer()
+      // 'give-up': three failed starts in a row; nothing until a source
+      // change or a session's end resets the count (below).
+    })
+  }, [startReplayBuffer, stopReplayBuffer])
+  const reconcileReplayBufferRef = useRef(reconcileReplayBuffer)
+  reconcileReplayBufferRef.current = reconcileReplayBuffer
+  // The ring waits for Sources (a blocked start keeps the switch on): once
+  // the record block clears, or a source changes, it tries again from a
+  // clean count.
+  useEffect(() => {
+    replayFailedStartsRef.current = 0
+    scheduleReplayReconcile()
+  }, [
+    recordBlockedReason,
+    captureConfig.sources.screenId,
+    captureConfig.sources.windowId,
+    captureConfig.sources.cameraId,
+    scheduleReplayReconcile
+  ])
+  // Settings that shape the session restart a buffer-only ring: the Output
+  // quality, the canvas orientation and the ring's length. A recording or
+  // livestream keeps its shape (those pages lock meanwhile); the re-armed
+  // ring picks the new one up.
+  const replayShape = [
+    captureConfig.video.width,
+    captureConfig.video.height,
+    captureConfig.video.fps,
+    captureConfig.video.bitrateKbps,
+    layoutPresetOrientation(captureConfig.layout.layoutPreset),
+    captureConfig.replayBuffer.seconds
+  ].join('|')
+  const replayShapeRef = useRef(replayShape)
+  useEffect(() => {
+    if (replayShapeRef.current === replayShape) return
+    replayShapeRef.current = replayShape
+    if (sessionIsReplayOnly(recordingRef.current)) void stopReplayBuffer()
+  }, [replayShape, stopReplayBuffer])
+
+  const setReplayArmed = useCallback(
+    (armed: boolean): void => {
+      replayArmedRef.current = armed
+      replayFailedStartsRef.current = 0
+      setReplayArmedState(armed)
+      scheduleReplayReconcile(0)
+    },
+    [scheduleReplayReconcile]
+  )
+  setReplayArmedRef.current = setReplayArmed
+
+  // The one switch (Output → Clips → Keep the last seconds): persisted as
+  // the user's explicit choice, so a default the backend refused (the
+  // software encoder guard) is overridden on purpose and never silently.
+  const setReplayEnabled = useCallback(
+    (enabled: boolean): void => {
+      setCaptureConfig((current) => ({
+        ...current,
+        replayBuffer: { ...current.replayBuffer, enabled, explicit: true }
+      }))
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        replayBuffer: { ...captureConfigRef.current.replayBuffer, enabled, explicit: true }
+      }
+      replayBlockedReasonRef.current = null
+      setReplayBlockedReasonState(null)
+      setReplayArmed(enabled)
+    },
+    [setCaptureConfig, setReplayArmed]
+  )
+
+  const replayBufferControls = useMemo<ReplayBufferControls>(
+    () => ({
+      state: replayState,
+      armed: replayArmed,
+      blockedReason: replayBlockedReason,
+      setEnabled: setReplayEnabled
+    }),
+    [replayArmed, replayBlockedReason, replayState, setReplayEnabled]
+  )
 
   const assessRecording = useCallback(
     async (sessionId: string): Promise<FileAssessment> => {
@@ -15778,7 +16224,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const knownLayoutPresets = [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS]
     const context: RemoteIntentContext = {
       client,
-      sessionActive: isActiveRecordingState(recordingRef.current.state),
+      sessionActive: sessionOwnsTransport(recordingRef.current),
+      replayOn: replayStateRef.current.state === 'on',
       recordBlockedReason,
       liveStreamBlockedReason,
       startRecording,
@@ -15842,7 +16289,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       markClip: async () => {
         try {
           const event = await client.request<ClipMarkedEvent>('clip.mark')
-          return event.saved ? { ok: true } : { ok: false, message: clipMarkedToast(event).title }
+          // Plan 181 R4: a saved clip is a success for a deck key, mark or not.
+          return clipMarkKeptSomething(event)
+            ? { ok: true }
+            : { ok: false, message: clipMarkedToast(event).title }
         } catch (error) {
           return {
             ok: false,
@@ -16055,7 +16505,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         }, 70)
       },
-      sessionActive: isActiveRecordingState(recordingRef.current.state),
+      sessionActive: sessionOwnsTransport(recordingRef.current),
       startRecording,
       startLivestream,
       // A global hotkey may fire with Videorc in the background: while live it
@@ -16204,10 +16654,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         state: recording.state,
         sessionId: recording.sessionId,
         streamUrl: recording.streamUrl,
-        startedAt: recording.startedAt
+        startedAt: recording.startedAt,
+        // Plan 181: the shell keeps Record and Go Live on a buffer-only session.
+        ...(recording.replayOnly ? { replayOnly: true } : {})
       }
     }),
-    [recording.sessionId, recording.startedAt, recording.state, recording.streamUrl]
+    [
+      recording.replayOnly,
+      recording.sessionId,
+      recording.startedAt,
+      recording.state,
+      recording.streamUrl
+    ]
   )
   const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
   const previewValue = useMemo<StudioPreviewContextValue>(
@@ -16782,6 +17240,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           preview={previewValue}
           recording={recordingValue}
           recordingState={recordingStateValue}
+          replay={replayBufferControls}
         >
           {children}
         </StudioContextProviders>

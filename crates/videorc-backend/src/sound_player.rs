@@ -32,6 +32,11 @@ pub(crate) const SOUNDS_PLAYBACK_EVENT: &str = "sounds.playback";
 struct SessionBus {
     session_id: String,
     handle: SoundboardHandle,
+    /// A recording or a stream. A buffer-only Clips session (plan 181) mixes
+    /// sounds into its ring, so a saved clip has them, but it is not on air:
+    /// its voices stay `onAir: false`, and the monitor plays them as between
+    /// sessions.
+    on_air: bool,
 }
 
 struct PlayerVoice {
@@ -98,11 +103,13 @@ impl SoundPlayer {
         session_id: &str,
         handle: SoundboardHandle,
         volume_db: i32,
+        on_air: bool,
     ) {
         handle.set_volume_db(volume_db as f32);
         self.lock().bus = Some(SessionBus {
             session_id: session_id.to_string(),
             handle,
+            on_air,
         });
     }
 
@@ -254,7 +261,8 @@ impl SoundPlayer {
             }
             None => SoundPlacement::MonitorOnly,
         };
-        let on_air = matches!(placement, SoundPlacement::OnAir { .. });
+        let on_air = matches!(placement, SoundPlacement::OnAir { .. })
+            && bus.as_ref().is_some_and(|bus| bus.on_air);
         {
             let mut inner = self.lock();
             match inner.voices.iter_mut().find(|voice| voice.key == key) {

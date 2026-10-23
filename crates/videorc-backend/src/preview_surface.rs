@@ -4036,6 +4036,7 @@ mod tests {
                 width: 640,
                 height: 360,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                replay_only: false,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,

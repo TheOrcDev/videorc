@@ -14,7 +14,8 @@ import { Spinner } from '@/components/ui/spinner'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { useUpdater } from '@/hooks/use-updater'
 import { updateRowView, type UpdateRowControl } from '@/lib/about-update-view'
-import { isActiveRecordingState, NO_VALUE } from '@/lib/format'
+import { NO_VALUE } from '@/lib/format'
+import { sessionOwnsTransport } from '../../../../shared/capture-state'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import { releaseTrackLabel } from '@/lib/release-track'
 import {
@@ -74,7 +75,8 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
   const { runtimeInfo } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const { status, check, install } = useUpdater()
-  const view = updateRowView(status, isActiveRecordingState(recording.state))
+  // Plan 181: the default ring never holds an update back (main treats it as idle too).
+  const view = updateRowView(status, sessionOwnsTransport(recording))
 
   return (
     <PanelSection description="Your version of Videorc and its updates." title="About & updates">

@@ -8,6 +8,7 @@ import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
+import { StatusBarReplayState } from '@/components/status-bar-replay'
 import { StatusBarSessionState } from '@/components/status-bar-session'
 import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
@@ -51,7 +52,7 @@ import {
 } from '@/lib/livestream-tabs'
 import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
 import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
-import { isActiveRecordingState } from '@/lib/format'
+import { sessionOwnsTransport } from '../../../shared/capture-state'
 // Straight from the session view, not `state-labels`, so the other state
 // tables stay out of the eager bundle (plan 174 S2.3a).
 import {
@@ -205,7 +206,6 @@ export function AppShell(): ReactElement {
 function AppShellContent(): ReactElement {
   const {
     wsStatus,
-    recordingState,
     runtimeInfo,
     entitlementTier,
     previewWindowOpen,
@@ -465,7 +465,8 @@ function AppShellContent(): ReactElement {
     return () => window.removeEventListener(OPEN_CLEAN_CUT_EVENT, onOpenCleanCut)
   }, [openCleanCut])
 
-  const live = isActiveRecordingState(recordingState)
+  // Plan 181: the default ring is not a session to the shell's live chrome.
+  const live = sessionOwnsTransport(recording)
   // The session's own words and tone, never the socket's enum (plan 174
   // S1.3, A-4); Go Live is record+stream, and its stream URL makes it on air.
   const statusLabel = sessionStatusLabel(recording, wsStatus)
@@ -565,7 +566,14 @@ function AppShellContent(): ReactElement {
           </Pane>
           {/* State on the left, the shell's real shortcuts on the right:
                 keyboard-first, only quieter than the old footer bar. */}
-          <StatusBar leading={<StatusBarSessionState recording={recording} wsStatus={wsStatus} />}>
+          <StatusBar
+            leading={
+              <>
+                <StatusBarSessionState recording={recording} wsStatus={wsStatus} />
+                <StatusBarReplayState />
+              </>
+            }
+          >
             <StatusBarHint
               accelerator={shortcutAccelerator('search')}
               label="Search"

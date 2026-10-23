@@ -222,13 +222,15 @@ impl JournalCollector {
     }
 
     fn observe_status(&mut self, status: &RecordingStatus) {
-        let active = matches!(
-            status.state,
-            RecordingState::Starting
-                | RecordingState::Recording
-                | RecordingState::Streaming
-                | RecordingState::Stopping
-        );
+        // Plan 181: a buffer-only session is not a recording or a stream.
+        let active = !status.replay_only
+            && matches!(
+                status.state,
+                RecordingState::Starting
+                    | RecordingState::Recording
+                    | RecordingState::Streaming
+                    | RecordingState::Stopping
+            );
         let Some(session_id) = status.session_id.as_ref().filter(|_| active) else {
             self.session_id = None;
             self.recording = false;
