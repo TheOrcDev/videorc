@@ -5562,11 +5562,52 @@ export interface CohostCooldownBehaviour {
   cooldownSeconds: number
 }
 
+/**
+ * The two welcome kinds (plan 192 D2): a chatter's first message ever in the
+ * channel, and their first this stream after an earlier one. They live in
+ * `greetings.welcomes`, never in `templates[]`, so an older app never meets
+ * an unknown template kind (S1.1).
+ */
+export type CohostWelcomeKind = 'first-time' | 'returning'
+export const COHOST_WELCOME_KINDS: readonly CohostWelcomeKind[] = ['first-time', 'returning']
+
+/**
+ * One welcome's line (plan 192 S1.1). `text` absent (never null, never
+ * empty) posts the built-in line; at most 200 UTF-16 units. `state` absent
+ * reads as `talk`; `reaction` is a reaction id of the pack, or `none`.
+ */
+export interface CohostWelcomeLine {
+  enabled: boolean
+  text?: string
+  state?: CohostUtteranceState
+  reaction?: string
+}
+
+/** First-time and returning chatters, each with its own line (plan 192 D2). */
+export interface CohostGreetingWelcomes {
+  firstTime: CohostWelcomeLine
+  returning: CohostWelcomeLine
+}
+
+/**
+ * Greetings (plan 164 D5, plan 192). An empty `templates` list posts the
+ * built-in lines (D1). `ai` and `welcomes` are absent only from an older
+ * backend; the renderer then reads both as on, Rust's defaults.
+ */
+export interface CohostGreetings {
+  enabled: boolean
+  templates: CohostGreetingTemplate[]
+  /** Plan 192 D3: Buddy writes each greeting itself (Premium, cloud AI). */
+  ai?: boolean
+  /** Plan 192 D2: welcome first-time and returning chatters. */
+  welcomes?: CohostGreetingWelcomes
+}
+
 /** Automatic chat (plan 164 D5): one mode, three behaviours. */
 export interface CohostAutoChat {
   mode: CohostAutoChatMode
-  greetings: { enabled: boolean; templates: CohostGreetingTemplate[] }
-  /** Default cooldown 20 s. */
+  greetings: CohostGreetings
+  /** Default on (plan 192 D5), cooldown 20 s. */
   answers: CohostCooldownBehaviour
   /** Default cooldown 240 s. */
   banter: CohostCooldownBehaviour
@@ -6569,6 +6610,27 @@ export interface CohostReportPromises {
   open?: CohostReportOpenPromise[]
 }
 
+/**
+ * Why Buddy didn't post a greeting (plan 192 D7), counted per reason. Each
+ * key is omitted while zero, and the whole block while every count is zero.
+ */
+export interface CohostReportGreetingSkips {
+  /** Nothing to say: every line for the kind was switched off. */
+  noLine?: number
+  /** Chat posting was Off. */
+  modeOff?: number
+  /** Too old to greet by the time it arrived. */
+  stale?: number
+  /** Already greeted this stream. */
+  deduped?: number
+  /** Held by the posting limit. */
+  held?: number
+  /** The destination refused or failed the send. */
+  destinationFailed?: number
+  /** YouTube chat was paused (the quota breaker). */
+  youtubePaused?: number
+}
+
 /** Greeting totals over every chatter of the session. */
 export interface CohostReportGreetings {
   /** Viewers whose first message in the channel landed this session. */
@@ -6580,6 +6642,8 @@ export interface CohostReportGreetings {
   onStream: number
   /** The streamer pressed Greeted. */
   manual: number
+  /** Plan 192 D7: greetings Buddy didn't post; absent while none. */
+  skipped?: CohostReportGreetingSkips
 }
 
 /** One alert kind viewers raised: the most distinct viewers who said it at
@@ -6652,6 +6716,9 @@ export interface CohostSessionReport {
 
 export type CohostReportPostResult = 'sent' | 'partial' | 'failed'
 
+/** Who wrote a greeting (plan 192 S2.2): Buddy's AI, or a line (yours or built in). */
+export type CohostReportPostSource = 'ai' | 'line'
+
 /** One automatic send in the report (plan 164 D10). */
 export interface CohostReportPost {
   /** The utterance id. */
@@ -6662,6 +6729,9 @@ export interface CohostReportPost {
   /** The platforms the send reached, or was meant to. */
   destinations: StreamPlatform[]
   result: CohostReportPostResult
+  /** Plan 192 S2.2: greetings only; absent on manual, answer and banter
+   * posts and on older reports. */
+  source?: CohostReportPostSource
 }
 
 export interface CohostReportChatPlatformCount {
