@@ -10088,12 +10088,13 @@ async function primeScreenCapturePermission(): Promise<void> {
   }
 
   try {
-    const info = await runtimeInfo()
+    // Plan 191: the granted path no longer waits for GPU info before the backend starts.
     const status = systemPreferences.getMediaAccessStatus('screen')
     if (status === 'granted') {
       return
     }
 
+    const info = await runtimeInfo()
     if (status === 'not-determined') {
       await desktopCapturer.getSources({
         types: ['screen'],

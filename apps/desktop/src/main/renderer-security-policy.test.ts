@@ -561,3 +561,25 @@ describe('renderer security policy', () => {
     expect(destinationCard).not.toContain('target="_blank"')
   })
 })
+
+describe('startup Screen Recording prime (plan 191)', () => {
+  it('skips runtime info when granted and still primes before the backend starts', () => {
+    const mainSource = source('./index.ts')
+    const primeStart = mainSource.indexOf('async function primeScreenCapturePermission()')
+    expect(primeStart).toBeGreaterThanOrEqual(0)
+    const prime = mainSource.slice(primeStart, mainSource.indexOf('\n}\n', primeStart))
+    const grantedReturn = prime.indexOf("if (status === 'granted') {")
+    expect(grantedReturn).toBeGreaterThan(0)
+
+    // Most launches are granted. They must not wait on app.getGPUInfo: runtime info
+    // only feeds the log lines of the other statuses.
+    const beforeGranted = prime.slice(0, grantedReturn)
+    expect(beforeGranted).toContain("systemPreferences.getMediaAccessStatus('screen')")
+    expect(beforeGranted).not.toContain('runtimeInfo(')
+    expect(prime.slice(grantedReturn)).toContain('await runtimeInfo()')
+
+    // First launch keeps its order: the permission request settles before the spawn.
+    const readySource = mainSource.slice(mainSource.indexOf('app.whenReady().then'))
+    expect(readySource).toContain('await primeScreenCapturePermission()\n  startBackend()')
+  })
+})
