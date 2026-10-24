@@ -54,15 +54,21 @@ import {
   type PendingBackgroundReplace
 } from '@/components/background-replace-dialog'
 import { BannersSection } from '@/components/banners-section'
+import {
+  LiveBackgroundStyleControl,
+  LiveBackgroundsGroup
+} from '@/components/live-backgrounds-group'
+import { SectionLabel } from '@/components/section-label'
 import { SoundsSection } from '@/components/sounds-section'
 import {
   IN_USE_RING,
   InUseChip,
   TakeoverScreensSection
 } from '@/components/takeover-screens-section'
-import { plural } from '@/lib/format'
+import { liveBackgroundLabel } from '@/lib/live-backgrounds'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+import { isLiveBackgroundId } from '../../../../shared/live-background-ids'
 
 type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>
 
@@ -182,10 +188,17 @@ export function AssetsTab(): ReactElement {
   }
 
   // The scene's own background, which may come from a saved scene rather
-  // than a slot: its row sits inside Backgrounds (C-26).
+  // than a slot: its row sits inside Backgrounds (C-26). A live background
+  // reads as itself and its look ("Silk · Satin", plan 190).
   const sceneBackground = scene?.background ?? null
+  const sceneLive =
+    sceneBackground?.live && isLiveBackgroundId(sceneBackground.live.id)
+      ? sceneBackground.live
+      : null
   const sceneBackgroundName = sceneBackground
-    ? (registry.assets[sceneBackground.assetId]?.name ?? 'A background from a saved scene')
+    ? sceneLive
+      ? liveBackgroundLabel(sceneLive.id, sceneLive.look)
+      : (registry.assets[sceneBackground.assetId]?.name ?? 'A background from a saved scene')
     : null
 
   return (
@@ -198,7 +211,7 @@ export function AssetsTab(): ReactElement {
       <PanelSection
         title="Backgrounds"
         icon={ImageIcon}
-        description={`${plural(registry.slots.length, 'background')} · PNG, JPEG or WebP.`}
+        description="Live backgrounds move behind your screen and camera. Images can be PNG, JPEG or WebP."
         action={
           <Button disabled={importing} variant="outline" onClick={() => importInto(null)}>
             <ImageIcon data-icon="inline-start" />
@@ -211,75 +224,85 @@ export function AssetsTab(): ReactElement {
             <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
               In this scene: <span className="text-foreground">{sceneBackgroundName}</span>
             </span>
-            <BackgroundStylePopover
-              name={sceneBackgroundName}
-              asset={{
-                id: sceneBackground.assetId,
-                name: sceneBackgroundName,
-                kind: 'imported',
-                status: 'ready',
-                createdAt: '',
-                updatedAt: '',
-                styleDefaults: sceneBackground
-              }}
-              onStyle={(_id, patch) => applyWorkingBackgroundStyle(patch)}
-            />
+            {sceneLive ? (
+              <LiveBackgroundStyleControl id={sceneLive.id} name={sceneBackgroundName} />
+            ) : (
+              <BackgroundStylePopover
+                name={sceneBackgroundName}
+                asset={{
+                  id: sceneBackground.assetId,
+                  name: sceneBackgroundName,
+                  kind: 'imported',
+                  status: 'ready',
+                  createdAt: '',
+                  updatedAt: '',
+                  styleDefaults: sceneBackground
+                }}
+                onStyle={(_id, patch) => applyWorkingBackgroundStyle(patch)}
+              />
+            )}
             <Button variant="ghost" onClick={() => applyBackgroundSlot(null)}>
               Use no background
             </Button>
           </div>
         ) : null}
-        <Gallery className="gap-3">
-          {registry.slots.map((slot) => (
-            <PresetTile
-              key={slot.id}
-              slot={slot}
-              registry={registry}
-              importing={importing}
-              platform={runtimeInfo?.platform}
-              renaming={renamingSlotId === slot.id}
-              onActivate={() => {
-                const status = slotDisplayStatus(slot, registry)
-                if (status === 'empty') {
-                  void importInto(slot.id)
-                  return
+        <LiveBackgroundsGroup />
+        <div className="flex flex-col gap-2" data-videorc-image-backgrounds="">
+          <SectionLabel as="h3">Images</SectionLabel>
+          <Gallery className="gap-3">
+            {registry.slots.map((slot) => (
+              <PresetTile
+                key={slot.id}
+                slot={slot}
+                registry={registry}
+                importing={importing}
+                platform={runtimeInfo?.platform}
+                renaming={renamingSlotId === slot.id}
+                onActivate={() => {
+                  const status = slotDisplayStatus(slot, registry)
+                  if (status === 'empty') {
+                    void importInto(slot.id)
+                    return
+                  }
+                  // Clicking the ACTIVE background removes it — the tile is a
+                  // toggle, matching its aria-pressed semantics (owner request,
+                  // 2026-08-19).
+                  if (status === 'active') {
+                    applyBackgroundSlot(null)
+                    return
+                  }
+                  applyBackgroundSlot(slot.id)
+                }}
+                onMissing={() => markMissing(slot.id)}
+                onStartRename={() => setRenamingSlotId(slot.id)}
+                onRename={(assetId, name) => {
+                  setRegistry((current) => renameAsset(current, assetId, name))
+                  setRenamingSlotId(null)
+                }}
+                onCancelRename={() => setRenamingSlotId(null)}
+                onReplace={() => void importInto(slot.id)}
+                onResetStyle={(assetId) =>
+                  setRegistry((current) =>
+                    setAssetStyle(current, assetId, defaultBackgroundStyle())
+                  )
                 }
-                // Clicking the ACTIVE background removes it — the tile is a
-                // toggle, matching its aria-pressed semantics (owner request,
-                // 2026-08-19).
-                if (status === 'active') {
-                  applyBackgroundSlot(null)
-                  return
+                onRemove={() => {
+                  // An applied background leaves the scene, and an imported one
+                  // loses its file (plan 174 C-12): both ask first. Emptying a
+                  // built-in slot is reversible (Restore default), so it just
+                  // happens.
+                  if (removeSlotNeedsConfirm(registry, slot.id, scene?.background?.assetId))
+                    setRemovingSlotId(slot.id)
+                  else setRegistry((current) => removeSlotAsset(current, slot.id))
+                }}
+                onRestore={() => setRegistry((current) => restoreSlotDefault(current, slot.id))}
+                onStyle={(assetId, patch) =>
+                  setRegistry((current) => setAssetStyle(current, assetId, patch))
                 }
-                applyBackgroundSlot(slot.id)
-              }}
-              onMissing={() => markMissing(slot.id)}
-              onStartRename={() => setRenamingSlotId(slot.id)}
-              onRename={(assetId, name) => {
-                setRegistry((current) => renameAsset(current, assetId, name))
-                setRenamingSlotId(null)
-              }}
-              onCancelRename={() => setRenamingSlotId(null)}
-              onReplace={() => void importInto(slot.id)}
-              onResetStyle={(assetId) =>
-                setRegistry((current) => setAssetStyle(current, assetId, defaultBackgroundStyle()))
-              }
-              onRemove={() => {
-                // An applied background leaves the scene, and an imported one
-                // loses its file (plan 174 C-12): both ask first. Emptying a
-                // built-in slot is reversible (Restore default), so it just
-                // happens.
-                if (removeSlotNeedsConfirm(registry, slot.id, scene?.background?.assetId))
-                  setRemovingSlotId(slot.id)
-                else setRegistry((current) => removeSlotAsset(current, slot.id))
-              }}
-              onRestore={() => setRegistry((current) => restoreSlotDefault(current, slot.id))}
-              onStyle={(assetId, patch) =>
-                setRegistry((current) => setAssetStyle(current, assetId, patch))
-              }
-            />
-          ))}
-        </Gallery>
+              />
+            ))}
+          </Gallery>
+        </div>
       </PanelSection>
 
       <ConfirmDialog

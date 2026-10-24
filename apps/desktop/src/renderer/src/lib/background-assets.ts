@@ -30,7 +30,7 @@ import {
   type LiveBackgroundId,
   type LiveBackgroundMotion
 } from '../../../shared/live-background-ids'
-import type { EffectiveSceneBackground } from './backend'
+import type { EffectiveSceneBackground, LiveBackgroundStatus } from './backend'
 
 export type BackgroundAssetSlotStatus =
   | 'empty'
@@ -870,6 +870,24 @@ export function registryForCommittedLiveBackground(
     activeSlotId: null,
     live: { activeId: live.id, settings: { ...registry.live.settings, [live.id]: settings } }
   }
+}
+
+/** How the applied live background is drawn, as Assets shows it. */
+export type LiveBackgroundStatusView = Pick<LiveBackgroundStatus, 'id' | 'rendering' | 'reason'>
+
+/**
+ * The view of a compositor status's live background. It keeps `current` while
+ * nothing Assets shows changed, so a status that only moves the timings or
+ * the look publishes nothing.
+ */
+export function nextLiveBackgroundStatusView(
+  current: LiveBackgroundStatusView | null,
+  incoming: LiveBackgroundStatus | null | undefined
+): LiveBackgroundStatusView | null {
+  const next = incoming
+    ? { id: incoming.id, rendering: incoming.rendering, reason: incoming.reason }
+    : null
+  return JSON.stringify(next) === JSON.stringify(current) ? current : next
 }
 
 // The resolved background for the active scene, or null when nothing usable is

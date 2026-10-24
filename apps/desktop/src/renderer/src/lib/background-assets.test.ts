@@ -19,6 +19,7 @@ import {
   liveSceneBackground,
   markSlotStatus,
   markSlotMissingIfAssetMatches,
+  nextLiveBackgroundStatusView,
   reconcileRegistry,
   registryForCommittedLiveBackground,
   removeSlotAsset,
@@ -739,5 +740,33 @@ describe('live backgrounds in the registry (plan 190)', () => {
       visibilityPercent: 25
     })
     expect(registryForCommittedLiveBackground(next, committed)).toBe(next)
+  })
+
+  it("keeps the status view while only the live background's timings move", () => {
+    const shader = nextLiveBackgroundStatusView(null, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'shader',
+      p95Ms: 0.4
+    })
+    expect(shader).toStrictEqual({ id: 'silk', rendering: 'shader', reason: undefined })
+    const sameShader = nextLiveBackgroundStatusView(shader, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'shader',
+      p95Ms: 0.9
+    })
+    expect(sameShader).toBe(shader)
+
+    const still = nextLiveBackgroundStatusView(sameShader, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'still',
+      reason: 'gpu-budget',
+      p95Ms: 6.1
+    })
+    expect(still).toStrictEqual({ id: 'silk', rendering: 'still', reason: 'gpu-budget' })
+    expect(nextLiveBackgroundStatusView(still, undefined)).toBeNull()
+    expect(nextLiveBackgroundStatusView(null, null)).toBeNull()
   })
 })
