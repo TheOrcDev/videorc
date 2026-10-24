@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WorkspaceNavContext } from '@/components/workspace-nav'
 import type { Sound, SoundVoice } from '@/lib/backend'
-import { STOP_ALL_IDLE_REASON } from '@/lib/sounds'
 
 import { SoundboardSection } from './soundboard-section'
 
@@ -94,6 +93,10 @@ async function render(): Promise<void> {
 const pad = (id: string): HTMLButtonElement =>
   container.querySelector<HTMLButtonElement>(`[data-videorc-sound-pad="${id}"]`)!
 const board = () => mocked.board as ReturnType<typeof actions>
+const stopAll = (): HTMLElement =>
+  container.querySelector<HTMLElement>('[data-videorc-stop-all-sounds]')!
+const stopAllButton = (): HTMLButtonElement => stopAll().querySelector('button')!
+const stopAllShown = (): boolean => stopAll().hasAttribute('data-playing')
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
@@ -134,23 +137,74 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
     expect(pad('applause').hasAttribute('data-playing')).toBe(true)
     expect(pad('applause').getAttribute('aria-label')).toBe('Stop Applause')
     expect(pad('applause').querySelector('[data-slot="sound-pad-progress"]')).not.toBeNull()
-    const stopAll = [...container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Stop all'
-    )!
-    expect(stopAll.disabled).toBe(false)
-    await act(async () => stopAll.click())
+    expect(stopAllShown()).toBe(true)
+    expect(stopAllButton().disabled).toBe(false)
+    await act(async () => stopAllButton().click())
     expect(board().stopAll).toHaveBeenCalled()
   })
 
-  it('keeps Stop all off while nothing plays, with its reason', async () => {
+  it('hides Stop all while nothing plays, keeping its place out of reach', async () => {
     await render()
-    const stopAll = [...container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Stop all'
-    )!
-    expect(stopAll.disabled).toBe(true)
-    const wrapper = stopAll.closest('[data-slot="disabled-reason"]')!
+    expect(stopAllShown()).toBe(false)
+    const slot = stopAll()
+    expect(slot.className).toContain('invisible')
+    expect(slot.getAttribute('aria-hidden')).toBe('true')
+    expect(slot.inert).toBe(true)
+    expect(stopAllButton().disabled).toBe(true)
+    // No reason tooltip on a control nobody can see.
+    expect(slot.querySelector('[data-slot="disabled-reason"]')).toBeNull()
+  })
+
+  it('shows Stop all for a sound in any mode, and hides it when the last one ends', async () => {
+    for (const mode of ['oneShot', 'toggle', 'loop', 'hold'] as const) {
+      setBoard({
+        sounds: [sound('applause', { mode })],
+        voices: [{ ...playingApplause, loop: mode === 'loop' }]
+      })
+      await render()
+      expect(stopAllShown()).toBe(true)
+    }
+    // Two play; one ends and Stop all stays; the last ends and it goes.
+    setBoard({
+      voices: [playingApplause, { ...playingApplause, voiceId: 'v-2', soundId: 'airhorn' }]
+    })
+    await render()
+    expect(stopAllShown()).toBe(true)
+    setBoard({ voices: [playingApplause] })
+    await render()
+    expect(stopAllShown()).toBe(true)
+    setBoard({ voices: [] })
+    await render()
+    expect(stopAllShown()).toBe(false)
+  })
+
+  it('hides Stop all again once pressing it has stopped the sounds', async () => {
+    setBoard({ voices: [playingApplause] })
+    await render()
+    await act(async () => stopAllButton().click())
+    expect(board().stopAll).toHaveBeenCalledTimes(1)
+    // The board comes back with no voices.
+    setBoard({ voices: [] })
+    await render()
+    expect(stopAllShown()).toBe(false)
+  })
+
+  it('keeps Stop all shown but off while Videorc reconnects, with its reason', async () => {
+    mocked.shell = { wsStatus: 'closed' }
+    setBoard({ voices: [playingApplause] })
+    await render()
+    expect(stopAllShown()).toBe(true)
+    expect(stopAllButton().disabled).toBe(true)
+    const wrapper = stopAllButton().closest('[data-slot="disabled-reason"]')!
     const description = document.getElementById(wrapper.getAttribute('aria-describedby')!)
-    expect(description?.textContent).toBe(STOP_ALL_IDLE_REASON)
+    expect(description?.textContent).toBeTruthy()
+  })
+
+  it('keeps the keys working whether Stop all shows or not', async () => {
+    await render()
+    expect(stopAllShown()).toBe(false)
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: '1' })))
+    expect(board().press).toHaveBeenCalledWith('airhorn')
   })
 
   it('says sounds reach the recording while one runs, and when the streamer hears them', async () => {
@@ -166,6 +220,13 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
     expect(container.textContent).toContain(
       "Sounds play in your recording and stream. You don't hear them yourself."
     )
+    // Release test 147, plan 0001: a session sounds can't reach says so.
+    setBoard({ monitor: true, sessionWithoutSounds: true })
+    await render()
+    expect(container.textContent).toContain(
+      "Sounds can't reach this recording or stream. Only you hear them."
+    )
+    expect(container.textContent).not.toContain('Sounds play in your recording and stream.')
   })
 
   it('presses a sound by its key, stops a While held one on release, and yields to fields', async () => {
@@ -192,6 +253,29 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: '9' }))
     })
     expect(board().press).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the number row by its physical key, so AZERTY presses and releases (release test 147)', async () => {
+    await render()
+    // French AZERTY: the unshifted number row types "&" and "'" on Digit1 and Digit3.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '&', code: 'Digit1' }))
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: '&', code: 'Digit1' }))
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: "'", code: 'Digit3' }))
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: "'", code: 'Digit3' }))
+    })
+    expect(board().press).toHaveBeenCalledWith('airhorn')
+    expect(board().press).toHaveBeenCalledWith('drumroll')
+    expect(board().stop).toHaveBeenCalledWith('drumroll')
+    // The numpad presses too; Shift on the number row still yields.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', code: 'Numpad2' }))
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: '1', code: 'Digit1', shiftKey: true })
+      )
+    })
+    expect(board().press).toHaveBeenCalledWith('applause')
+    expect(board().press).toHaveBeenCalledTimes(3)
   })
 
   it('plays nothing while Videorc reconnects, and says so', async () => {

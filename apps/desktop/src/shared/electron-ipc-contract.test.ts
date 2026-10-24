@@ -950,6 +950,23 @@ describe('comments delivery IPC metadata', () => {
     expect(validateElectronInvokeResult('comments-window:get-snapshot', view)).toEqual(view)
     expect(validateElectronEventPayload('comments-window:snapshot', view)).toEqual(view)
   })
+  // Plan 191: the main renderer discards both push results, so main resolves
+  // them to nothing; a view cost a full validation walk and clone per message.
+  it('resolves both chat push channels to nothing (plan 191)', () => {
+    expectTypeOf<ElectronInvokeResult<'comments-window:push-snapshot'>>().toEqualTypeOf<void>()
+    expectTypeOf<ElectronInvokeResult<'comments-window:push-delta'>>().toEqualTypeOf<void>()
+    const mainSource = readFileSync(new URL('../main/index.ts', import.meta.url), 'utf8')
+    const pushChannels = ['comments-window:push-snapshot', 'comments-window:push-delta'] as const
+    for (const channel of pushChannels) {
+      expect(validateElectronInvokeResult(channel, undefined)).toBeUndefined()
+      expect(() => validateElectronInvokeResult(channel, view)).toThrow('result must be undefined')
+      const handler =
+        mainSource.split(`secureIpcHandle('${channel}',`)[1]?.split('secureIpcHandle(')[0] ?? ''
+      expect(handler).toContain('event.sender.id !== mainWindow.webContents.id')
+      // `return undefined` only: no path hands a value back.
+      expect(handler).not.toMatch(/\breturn[ \t]+(?!undefined\b)[^\s;]/)
+    }
+  })
   it.each([
     null,
     { ...delivery, ownerId: '' },
@@ -1226,16 +1243,26 @@ describe('soundboard file IPC (plan 189)', () => {
     >()
     expect(validateElectronInvokeArgs('sounds:pick-files', [])).toEqual([])
     expect(() => validateElectronInvokeArgs('sounds:pick-files', ['/tmp/a.wav'])).toThrow()
-    expect(validateElectronInvokeResult('sounds:pick-files', [])).toEqual([])
-    expect(validateElectronInvokeResult('sounds:pick-files', [selection, selection])).toEqual([
-      selection,
-      selection
-    ])
+    const none = { selections: [], leftOut: [] }
+    expect(validateElectronInvokeResult('sounds:pick-files', none)).toEqual(none)
+    const two = { selections: [selection, selection], leftOut: [] }
+    expect(validateElectronInvokeResult('sounds:pick-files', two)).toEqual(two)
+    // Release test 147, plan 0006: a file main couldn't open comes back by name.
+    const gone = {
+      selections: [selection],
+      leftOut: [{ displayName: 'gone.wav', reason: "Videorc couldn't open this file." }]
+    }
+    expect(validateElectronInvokeResult('sounds:pick-files', gone)).toEqual(gone)
     for (const forged of [
       null,
-      [{ ...selection, path: '/tmp/a.wav' }],
-      [{ ...selection, kind: 'output-directory' }],
-      Array.from({ length: 25 }, () => selection)
+      [],
+      [selection],
+      { selections: [{ ...selection, path: '/tmp/a.wav' }], leftOut: [] },
+      { selections: [{ ...selection, kind: 'output-directory' }], leftOut: [] },
+      { selections: Array.from({ length: 25 }, () => selection), leftOut: [] },
+      { selections: [], leftOut: [{ displayName: 'a.wav', reason: 'x', path: '/tmp/a.wav' }] },
+      { selections: [], leftOut: [{ displayName: 'a.wav', reason: '' }] },
+      { selections: [], leftOut: [], extra: true }
     ]) {
       expect(() => validateElectronInvokeResult('sounds:pick-files', forged)).toThrow()
     }

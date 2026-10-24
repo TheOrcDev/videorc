@@ -282,6 +282,103 @@ fn dshow_anchor(line: &str, clock: &ClockPair) -> Result<CaptureAnchor> {
     })
 }
 
+/// Linux (release test 147, plan 0001): the stock FFmpeg pulse demuxer
+/// stamps every packet with the wall clock at its first sample (`-wallclock
+/// 1`, the default: `av_gettime()` less the latency PulseAudio reports), and
+/// `-copyts` keeps that through `aresample` into `ashowinfo`'s `pts` in
+/// 1/48000 s. So each PCM record carries its own capture clock and becomes
+/// its own anchor: there is no separate clock record as the patched
+/// AVFoundation and DirectShow workers print.
+const PULSE_CLOCK_UNCERTAINTY: Duration = Duration::from_millis(20);
+/// A pulse stamp this far past the expected capture instant is a real
+/// dropout (an overrun lost audio): the count and the clock jump together.
+const PULSE_DROPOUT_FRAMES: i64 = 960;
+/// How far the capture instant may move toward a packet's stamp per packet:
+/// 1 ms per 10 ms packet, far faster than any device drift and well inside
+/// `CaptureClock`'s 10 ms continuity check.
+const PULSE_SLEW_FRAMES: i64 = 48;
+
+/// Places pulse packets on a sample count and a capture clock (release test
+/// 147, plan 0001). The demuxer's stamps are smoothed wall-clock readings:
+/// on ogre they jittered by a couple of milliseconds from packet to packet
+/// (one started 85 samples before the previous one ended) and, under encode
+/// load, jumped by more than 10 ms. Taken raw, the first is a "regressed"
+/// sequence and the second a "discontinuous" clock. So samples are counted
+/// contiguously, and each packet's capture instant is its position plus an
+/// offset that slews toward the packet's own stamp by at most
+/// `PULSE_SLEW_FRAMES`: jitter averages out, drift between the sound card and
+/// the wall clock is followed, and only a stamp more than
+/// `PULSE_DROPOUT_FRAMES` past the expected instant (lost audio) moves the
+/// count and the clock forward together.
+#[derive(Debug, Default)]
+struct PulseTimeline {
+    next: Option<i64>,
+    offset: Option<i64>,
+}
+
+impl PulseTimeline {
+    /// The packet's sample position and the stamp (1/48000 s, wall clock) of
+    /// its capture instant.
+    fn place(&mut self, stamp: i64, frames: usize) -> (i64, i64) {
+        let (position, offset) = match (self.next, self.offset) {
+            (Some(next), Some(offset)) => {
+                let late = stamp - (next + offset);
+                if late > PULSE_DROPOUT_FRAMES {
+                    // Audio was lost: the gap goes into the count, and the
+                    // clock moves with it, so both stay continuous.
+                    (next + late, offset)
+                } else {
+                    let target = stamp - next;
+                    (
+                        next,
+                        offset + (target - offset).clamp(-PULSE_SLEW_FRAMES, PULSE_SLEW_FRAMES),
+                    )
+                }
+            }
+            _ => (stamp, 0),
+        };
+        self.offset = Some(offset);
+        self.next = Some(position + frames as i64);
+        (position, position + offset)
+    }
+}
+
+/// A pulse packet's anchor: its counted sample position, captured at the
+/// wall-clock stamp `PulseTimeline::place` gave it. Both in 1/48000 s.
+fn pulse_anchor(
+    position: i64,
+    stamp: i64,
+    frames: usize,
+    clock: &ClockPair,
+) -> Result<CaptureAnchor> {
+    let micros = |pts: i64| -> Result<i64> {
+        Ok(i64::try_from(
+            i128::from(pts)
+                .checked_mul(1_000_000)
+                .context("Pulse capture timestamp overflow")?
+                / 48_000,
+        )?)
+    };
+    let captured_start = clock.instant_from_wall(i128::from(micros(stamp)?) * 1_000)?;
+    Ok(CaptureAnchor {
+        pts_us: micros(position)?,
+        captured_start,
+        input_duration: Some(Duration::from_secs_f64(frames as f64 / 48_000.0)),
+        uncertainty: clock.uncertainty + PULSE_CLOCK_UNCERTAINTY,
+    })
+}
+
+/// Which capture protocol a worker speaks: how its PCM gets a capture time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureProtocol {
+    /// Patched macOS FFmpeg: `VIDEORC_AVF_CLOCK` records.
+    AvFoundation,
+    /// The Windows capture worker: `VIDEORC_DSHOW_CLOCK` records.
+    DirectShow,
+    /// Stock Linux FFmpeg `-f pulse`: wall-clock PCM timestamps.
+    Pulse,
+}
+
 struct CaptureClock {
     anchors: VecDeque<CaptureAnchor>,
     last_sequence: Option<u64>,
@@ -320,11 +417,10 @@ impl CaptureClock {
         {
             bail!("Capture PCM metadata sequence regressed or skipped an interval");
         }
-        let pts_us = packet
-            .pts
-            .checked_mul(1_000_000)
-            .context("PCM timestamp overflow")?
-            / 48000;
+        // i128: a Linux pulse PTS is the wall clock in 1/48000 s (about 9e13),
+        // so the microsecond product overflows i64 (release test 147).
+        let pts_us = i64::try_from(i128::from(packet.pts) * 1_000_000 / 48000)
+            .context("PCM timestamp overflow")?;
         let anchor = self
             .anchors
             .iter()
@@ -407,7 +503,7 @@ impl Drop for Worker {
     }
 }
 
-fn capture_command(ffmpeg: &str, device: &str, dshow: bool) -> Command {
+fn capture_command(ffmpeg: &str, device: &str, protocol: CaptureProtocol) -> Command {
     let mut command = Command::new(ffmpeg);
     #[cfg(windows)]
     {
@@ -428,7 +524,25 @@ fn capture_command(ffmpeg: &str, device: &str, dshow: bool) -> Command {
         "-analyzeduration",
         "0",
     ]);
-    if dshow {
+    if protocol == CaptureProtocol::Pulse {
+        // 10 ms fragments (480 stereo s16 frames): one bounded PCM record per
+        // fragment. `-wallclock` is FFmpeg's default and spelled out because
+        // the capture clock depends on it.
+        command.args([
+            "-f",
+            "pulse",
+            "-wallclock",
+            "1",
+            "-sample_rate",
+            "48000",
+            "-channels",
+            "2",
+            "-fragment_size",
+            "1920",
+            "-i",
+            device,
+        ]);
+    } else if protocol == CaptureProtocol::DirectShow {
         command.args([
             "-f",
             "dshow",
@@ -535,6 +649,15 @@ fn resolve_target(ffmpeg: &str, id: &str) -> Result<(String, String)> {
             || fetch_dshow_inventory(ffmpeg),
         )?;
         return Ok((target, name));
+    }
+    if let Some(source) = crate::linux_pulse_audio::parse_linux_pulse_microphone_id(id) {
+        if !cfg!(target_os = "linux") {
+            bail!("PulseAudio microphones require Linux");
+        }
+        if source.starts_with('-') || source.contains(['\0', '\r', '\n']) {
+            bail!("Invalid PulseAudio source identity");
+        }
+        return Ok((source.clone(), source));
     }
     bail!("This microphone capture adapter does not recognize the device identity")
 }
@@ -876,8 +999,14 @@ fn fail(failure: &Failure, message: impl Into<String>) {
 }
 
 pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
-    let dshow = crate::audio::parse_windows_dshow_microphone_id(device_id).is_some();
-    let worker = if dshow {
+    let protocol = if crate::audio::parse_windows_dshow_microphone_id(device_id).is_some() {
+        CaptureProtocol::DirectShow
+    } else if crate::linux_pulse_audio::parse_linux_pulse_microphone_id(device_id).is_some() {
+        CaptureProtocol::Pulse
+    } else {
+        CaptureProtocol::AvFoundation
+    };
+    let worker = if protocol == CaptureProtocol::DirectShow {
         windows_worker_path(ffmpeg).to_string_lossy().into_owned()
     } else {
         ffmpeg.into()
@@ -888,7 +1017,7 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
         uncertainty_us = clock_pair.uncertainty.as_micros(),
         "Mapped capture worker clock"
     );
-    let child = spawn_owned_std(&mut capture_command(&worker, &device, dshow))?;
+    let child = spawn_owned_std(&mut capture_command(&worker, &device, protocol))?;
     let stop = Arc::new(AtomicBool::new(false));
     let failure: Failure = Arc::new(Mutex::new(None));
     let stats = Arc::new(AudioCaptureStats::default());
@@ -992,6 +1121,7 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
             .name("capture-clock-pcm".into())
             .spawn(move || {
                 let result = assemble_pcm(
+                    protocol,
                     clock_pair,
                     metadata_rx,
                     raw_rx,
@@ -1063,6 +1193,7 @@ impl CaptureDiagnostics {
 }
 
 fn assemble_pcm(
+    protocol: CaptureProtocol,
     clock_pair: ClockPair,
     metadata: mpsc::Receiver<String>,
     raw: mpsc::Receiver<Vec<u8>>,
@@ -1078,6 +1209,8 @@ fn assemble_pcm(
     };
     let mut queued = VecDeque::<u8>::new();
     let mut diagnostics = CaptureDiagnostics::default();
+    // Pulse only: the sample count and capture clock (see `PulseTimeline`).
+    let mut pulse = PulseTimeline::default();
     let mut last_diagnostic = Instant::now();
     while !stop.load(Ordering::Acquire) {
         let line = match metadata.recv_timeout(Duration::from_millis(10)) {
@@ -1104,7 +1237,18 @@ fn assemble_pcm(
             clock.push(anchor)?;
             continue;
         }
-        let packet = parse_pcm_description(&line)?;
+        let mut packet = parse_pcm_description(&line)?;
+        if protocol == CaptureProtocol::Pulse {
+            clock_pair.validate_wall(Instant::now(), SystemTime::now())?;
+            let (position, captured) = pulse.place(packet.pts, packet.frames);
+            packet.pts = position;
+            clock.push(pulse_anchor(
+                position,
+                captured,
+                packet.frames,
+                &clock_pair,
+            )?)?;
+        }
         let wanted = packet.frames * 8;
         let deadline = Instant::now() + Duration::from_millis(100);
         while queued.len() < wanted {
@@ -1389,6 +1533,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::sync_channel(4);
         let stats = Arc::new(AudioCaptureStats::default());
         let result = assemble_pcm(
+            CaptureProtocol::AvFoundation,
             pair(start),
             meta_rx,
             raw_rx,
@@ -1446,7 +1591,7 @@ mod tests {
 
     #[test]
     fn worker_command_is_capture_only_and_preserves_source_clock() {
-        let command = capture_command("ffmpeg", "6465736b", false);
+        let command = capture_command("ffmpeg", "6465736b", CaptureProtocol::AvFoundation);
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1473,6 +1618,214 @@ mod tests {
                 .iter()
                 .any(|arg| arg.contains("volume") || arg.contains("rtmp") || arg.contains("amix"))
         );
+    }
+
+    #[test]
+    fn pulse_command_opens_the_source_with_wall_clock_timestamps() {
+        // Release test 147, plan 0001: a Linux microphone joins the session
+        // bus through this worker instead of FFmpeg's direct output input.
+        let command = capture_command(
+            "ffmpeg",
+            "alsa_input.pci-0000_02_00.3.HiFi__Mic__source",
+            CaptureProtocol::Pulse,
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["-f", "pulse"]));
+        assert!(args.windows(2).any(|pair| pair == ["-wallclock", "1"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-fragment_size", "1920"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "alsa_input.pci-0000_02_00.3.HiFi__Mic__source"])
+        );
+        assert!(args.contains(&"-copyts".into()));
+        assert!(!args.iter().any(|arg| arg.contains("videorc_audio")));
+        assert_eq!(args.last().unwrap(), "pipe:1");
+    }
+
+    #[test]
+    fn a_pulse_record_anchors_its_counted_position_at_its_own_stamp() {
+        let now = Instant::now();
+        // The pair maps wall 1.000 s to `now`; a packet stamped 20 ms earlier
+        // (1/48000 s) started 20 ms before `now`, whatever position it got.
+        let anchor = pulse_anchor(47_000, 47_040, 480, &pair(now)).unwrap();
+        assert_eq!(anchor.pts_us, 979_166);
+        assert_eq!(anchor.captured_start, now - Duration::from_millis(20));
+        assert_eq!(anchor.input_duration, Some(Duration::from_millis(10)));
+        assert_eq!(anchor.uncertainty, PULSE_CLOCK_UNCERTAINTY);
+    }
+
+    #[test]
+    fn pulse_samples_count_through_stamp_jitter_and_jump_only_on_a_dropout() {
+        // Release test 147: on ogre the second packet was stamped 85 samples
+        // before the first one ended and the worker stopped as "regressed".
+        let mut timeline = PulseTimeline::default();
+        assert_eq!(timeline.place(1_000, 480), (1_000, 1_000));
+        let (position, captured) = timeline.place(1_395, 480);
+        assert_eq!(position, 1_480);
+        assert_eq!(
+            captured,
+            1_480 - 48,
+            "the clock slews toward the early stamp"
+        );
+        let (position, captured) = timeline.place(1_987, 480);
+        assert_eq!(position, 1_960);
+        assert!(captured > 1_480 - 48 + 480 - 48 && captured <= 1_987);
+        // Over 20 ms past the count: audio was lost, both jump.
+        let mut timeline = PulseTimeline::default();
+        timeline.place(0, 480);
+        assert_eq!(timeline.place(480 + 961, 480), (1_441, 1_441));
+    }
+
+    #[test]
+    fn pulse_capture_clock_stays_continuous_through_stalls_and_follows_drift() {
+        // Under encode load the stamps jumped by more than 10 ms and the
+        // worker stopped as "discontinuous". Adjacent capture instants must
+        // stay within 1 ms of the 10 ms the samples say, and increasing.
+        let mut timeline = PulseTimeline::default();
+        let mut previous: Option<i64> = None;
+        let mut stamp = 0_i64;
+        for packet in 0..2_000_i64 {
+            // A sound card 200 ppm slow against the wall clock, plus a
+            // 15 ms stall every 100 packets that the next ones catch up.
+            stamp += 480 + 480 * 200 / 1_000_000 + 1;
+            let late = if packet % 100 == 50 { 720 } else { 0 };
+            let (_, captured) = timeline.place(stamp + late, 480);
+            if let Some(previous) = previous {
+                let delta = captured - previous;
+                assert!(delta > 0, "packet {packet}: the clock regressed");
+                assert!(
+                    (delta - 480).abs() <= PULSE_SLEW_FRAMES,
+                    "packet {packet}: {delta}"
+                );
+            }
+            previous = Some(captured);
+        }
+        // Drift is followed: the clock ends within a millisecond of the stamps.
+        assert!((stamp - previous.unwrap()).abs() <= PULSE_SLEW_FRAMES);
+    }
+
+    #[test]
+    fn pulse_pcm_assembles_from_its_own_timestamps_and_avf_refuses_it() {
+        let clock = ClockPair::sample().unwrap();
+        let wall_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        // Three 10 ms packets from 50 ms ago, stamped with the jitter seen on
+        // ogre: the second 85 samples early, the third 27 samples late.
+        let first_pts = i64::try_from(i128::from(wall_us - 50_000) * 48_000 / 1_000_000).unwrap();
+        let records = vec![
+            pcm(0, first_pts, 480),
+            pcm(1, first_pts + 480 - 85, 480),
+            pcm(2, first_pts + 960 + 27, 480),
+        ];
+        let bytes: Vec<u8> = (0..2880).flat_map(|_| 0.25f32.to_le_bytes()).collect();
+        let run = |protocol: CaptureProtocol, pair: ClockPair| {
+            let (meta_tx, meta_rx) = mpsc::channel();
+            for record in &records {
+                meta_tx.send(record.clone()).unwrap();
+            }
+            drop(meta_tx);
+            let (raw_tx, raw_rx) = mpsc::channel();
+            raw_tx.send(bytes.clone()).unwrap();
+            drop(raw_tx);
+            let (out_tx, out_rx) = mpsc::sync_channel(4);
+            let stats = Arc::new(AudioCaptureStats::default());
+            let result = assemble_pcm(
+                protocol,
+                pair,
+                meta_rx,
+                raw_rx,
+                out_tx,
+                &AtomicBool::new(false),
+                &stats,
+            );
+            (result, out_rx.try_iter().collect::<Vec<_>>())
+        };
+        let (result, frames) = run(CaptureProtocol::Pulse, clock);
+        assert!(
+            result.as_ref().map_or_else(
+                |error| error.to_string().contains("stopped producing"),
+                |_| true
+            ),
+            "{result:?}"
+        );
+        assert_eq!(frames.len(), 3);
+        // Counted contiguously through the jitter.
+        assert_eq!(frames[0].timestamp_micros, 0);
+        assert_eq!(frames[1].timestamp_micros, 10_000);
+        assert_eq!(frames[2].timestamp_micros, 20_000);
+        // Each packet keeps its own measured capture instant.
+        assert!(frames[1].captured_at < frames[2].captured_at);
+        assert_eq!(frames[0].samples, vec![0.25; 960]);
+        // A protocol that expects separate clock records has no anchor here.
+        let (result, frames) = run(CaptureProtocol::AvFoundation, ClockPair::sample().unwrap());
+        assert!(result.unwrap_err().to_string().contains("anchor"));
+        assert!(frames.is_empty());
+    }
+
+    /// On-device check (release test 147, plan 0001): opens the real Pulse
+    /// worker on `VIDEORC_PULSE_TEST_SOURCE` with `VIDEORC_PULSE_TEST_FFMPEG`
+    /// and requires ~8 s of continuous, finite PCM without the worker
+    /// stopping. `cargo test … pulse_worker_keeps_delivering -- --ignored`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs a PulseAudio/PipeWire source and the bundled FFmpeg"]
+    fn pulse_worker_keeps_delivering_from_a_real_source() {
+        let source = std::env::var("VIDEORC_PULSE_TEST_SOURCE").expect("VIDEORC_PULSE_TEST_SOURCE");
+        let ffmpeg = std::env::var("VIDEORC_PULSE_TEST_FFMPEG").expect("VIDEORC_PULSE_TEST_FFMPEG");
+        let id = crate::linux_pulse_audio::linux_pulse_microphone_id(&source);
+        let input = open(&ffmpeg, &id).unwrap();
+        let started = Instant::now();
+        let mut frames = 0_usize;
+        let mut last_micros = None;
+        while started.elapsed() < Duration::from_secs(8) {
+            match input.receiver.recv_timeout(Duration::from_millis(500)) {
+                Ok(frame) => {
+                    assert!(frame.samples.iter().all(|sample| sample.is_finite()));
+                    if let Some(last) = last_micros {
+                        assert!(frame.timestamp_micros > last, "timestamps regressed");
+                    }
+                    last_micros = Some(frame.timestamp_micros);
+                    frames += frame.samples.len() / 2;
+                }
+                Err(error) => panic!(
+                    "the worker stopped delivering ({error}): {:?}",
+                    input.failure.lock().unwrap()
+                ),
+            }
+        }
+        let failure = input.failure.lock().unwrap().clone();
+        assert!(failure.is_none(), "{failure:?}");
+        assert!(frames >= 48_000 * 7, "only {frames} frames in 8 s");
+        eprintln!(
+            "pulse worker: {frames} frames in {:?}, last timestamp {:?} us",
+            started.elapsed(),
+            last_micros
+        );
+    }
+
+    #[test]
+    fn a_pulse_microphone_id_resolves_to_its_source_name_on_linux_only() {
+        let id = crate::linux_pulse_audio::linux_pulse_microphone_id("videorc_test_tone");
+        let resolved = resolve_target("ffmpeg", &id);
+        if cfg!(target_os = "linux") {
+            let (device, name) = resolved.unwrap();
+            assert_eq!(device, "videorc_test_tone");
+            assert_eq!(name, "videorc_test_tone");
+        } else {
+            assert!(resolved.unwrap_err().to_string().contains("require Linux"));
+        }
+        let hostile = crate::linux_pulse_audio::linux_pulse_microphone_id("-filter_complex");
+        if cfg!(target_os = "linux") {
+            assert!(resolve_target("ffmpeg", &hostile).is_err());
+        }
     }
 
     #[test]

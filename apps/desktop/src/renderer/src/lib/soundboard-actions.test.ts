@@ -129,11 +129,10 @@ describe('soundboard actions (plan 189)', () => {
     })
     vi.stubGlobal('window', {
       videorc: {
-        pickSoundFiles: vi.fn(async () => [
-          selection('one.wav'),
-          selection('two.mp3'),
-          selection('three.ogg')
-        ])
+        pickSoundFiles: vi.fn(async () => ({
+          selections: [selection('one.wav'), selection('two.mp3'), selection('three.ogg')],
+          leftOut: []
+        }))
       }
     })
     request.mockImplementation(async (method: string, params?: unknown) => {
@@ -153,5 +152,48 @@ describe('soundboard actions (plan 189)', () => {
       id: 'sound-import',
       description: SOUND_COUNT_LIMIT_REASON
     })
+  })
+
+  it('says which picked files main could not open, and imports the rest (release test 147)', async () => {
+    const { store, request } = setup()
+    const reason = "Videorc couldn't open this file. It may have been moved or deleted."
+    vi.stubGlobal('window', {
+      videorc: {
+        pickSoundFiles: vi.fn(async () => ({
+          selections: [
+            { capabilityId: 'cap-ok', kind: 'input-file' as const, displayName: 'ok.wav' }
+          ],
+          leftOut: [{ displayName: 'gone.wav', reason }]
+        }))
+      }
+    })
+    request.mockImplementation(async () => sound('new'))
+    await importSounds(store, () => undefined)
+    expect(toasts.warning).toHaveBeenCalledWith("Couldn't import “gone.wav”", {
+      id: 'sound-import:gone.wav',
+      description: reason
+    })
+    expect(request).toHaveBeenCalledWith('sounds.import', { sourceCapability: 'cap-ok' })
+  })
+
+  it('never ends in silence when every picked file was left out', async () => {
+    const { store, request } = setup()
+    const reason = "Videorc couldn't open this file. It may have been moved or deleted."
+    vi.stubGlobal('window', {
+      videorc: {
+        pickSoundFiles: vi.fn(async () => ({
+          selections: [],
+          leftOut: [{ displayName: 'gone.wav', reason }]
+        }))
+      }
+    })
+    const phases: string[] = []
+    await importSounds(store, (phase) => phases.push(phase))
+    expect(phases).toEqual(['choosing', 'idle'])
+    expect(toasts.warning).toHaveBeenCalledWith("Couldn't import “gone.wav”", {
+      id: 'sound-import:gone.wav',
+      description: reason
+    })
+    expect(request).not.toHaveBeenCalledWith('sounds.import', expect.anything())
   })
 })

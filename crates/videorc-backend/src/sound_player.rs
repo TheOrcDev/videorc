@@ -68,6 +68,9 @@ struct PlayerState {
     voices: Vec<PlayerVoice>,
     next_key: u64,
     bus: Option<SessionBus>,
+    /// A recording or stream published without a session bus: sounds can't
+    /// reach it (release test 147, plan 0001). Its session id.
+    unmixed_session: Option<String>,
 }
 
 /// The voice id on the wire: `v-<key>`.
@@ -91,9 +94,20 @@ impl SoundPlayer {
 
     /// Every playing voice, oldest first.
     pub(crate) fn playback(&self) -> SoundsPlayback {
+        let inner = self.lock();
         SoundsPlayback {
-            voices: self.lock().voices.iter().map(PlayerVoice::wire).collect(),
+            voices: inner.voices.iter().map(PlayerVoice::wire).collect(),
+            session_without_sounds: inner.unmixed_session.is_some(),
         }
+    }
+
+    /// A recording or stream published without a session bus (a Linux
+    /// microphone FFmpeg had to open directly): every surface says sounds
+    /// can't reach it instead of claiming they play on stream (release test
+    /// 147, plan 0001). Emits `sounds.playback`.
+    pub(crate) fn session_without_bus(&self, state: &AppState, session_id: &str) {
+        self.lock().unmixed_session = Some(session_id.to_string());
+        self.emit(state);
     }
 
     /// A session with native audio published: its bus takes every voice
@@ -119,6 +133,12 @@ impl SoundPlayer {
     pub(crate) fn session_ended(&self, state: &AppState, session_id: &str) {
         let changed = {
             let mut inner = self.lock();
+            if inner.unmixed_session.as_deref() == Some(session_id) {
+                inner.unmixed_session = None;
+                drop(inner);
+                self.emit(state);
+                return;
+            }
             if inner
                 .bus
                 .as_ref()
@@ -433,6 +453,33 @@ mod tests {
             }
         }
         events
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_bus_is_announced_and_cleared_at_its_end() {
+        // Release test 147, plan 0001: a session whose audio skips the bus
+        // can't carry sounds, and the board says so until it ends.
+        let (state, mut receiver, dir) = player_state();
+        let player = SoundPlayer::default();
+        assert!(!player.playback().session_without_sounds);
+        player.session_without_bus(&state, "s-1");
+        assert!(player.playback().session_without_sounds);
+        // Another session ending changes nothing.
+        player.session_ended(&state, "s-2");
+        assert!(player.playback().session_without_sounds);
+        player.session_ended(&state, "s-1");
+        assert!(!player.playback().session_without_sounds);
+        let flags: Vec<bool> = playback_events(&mut receiver)
+            .into_iter()
+            .map(|playback| playback.session_without_sounds)
+            .collect();
+        assert_eq!(flags, vec![true, false]);
+        // The wire omits the flag when false (never `false` or null).
+        assert_eq!(
+            serde_json::to_value(player.playback()).unwrap(),
+            serde_json::json!({ "voices": [] })
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

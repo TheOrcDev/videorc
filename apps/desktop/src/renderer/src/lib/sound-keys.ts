@@ -48,6 +48,19 @@ export function soundKeyBlocked(
   return root.querySelector(SPACE_SHORTCUT_MODAL_SELECTOR) !== null
 }
 
+/**
+ * The digit 1 to 9 a press means, from the physical key first (release test
+ * 147, plan 0005): on AZERTY the unshifted number row types `& é " ' ( - è _
+ * ç`, so `key` never reads a digit there, while `code` is `Digit1`–`Digit9`
+ * on every layout. The numpad counts too. Only an event without a `code`
+ * (a synthetic one) falls back to the typed `key`: a letter key that types
+ * a digit is not the number row.
+ */
+export function soundKeyDigit(event: Pick<KeyboardEvent, 'key' | 'code'>): string | undefined {
+  if (event.code) return /^(?:Digit|Numpad)([1-9])$/.exec(event.code)?.[1]
+  return /^[1-9]$/.test(event.key) ? event.key : undefined
+}
+
 /** The sound a key plays, if any: its own key, 1 to 9. */
 export function soundForKey<T extends Pick<Sound, 'hotkey'>>(
   key: string,

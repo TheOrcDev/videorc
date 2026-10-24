@@ -177,13 +177,24 @@ export async function importSounds(
     return
   }
   setPhase('choosing')
-  let selections: Awaited<ReturnType<NonNullable<typeof window.videorc>['pickSoundFiles']>>
+  let picked: Awaited<ReturnType<NonNullable<typeof window.videorc>['pickSoundFiles']>>
   try {
-    selections = (await window.videorc?.pickSoundFiles?.()) ?? []
+    picked = (await window.videorc?.pickSoundFiles?.()) ?? { selections: [], leftOut: [] }
   } catch (error) {
     setPhase('idle')
     toastUserError(error, { action: 'choose', object: 'the sounds' }, { id: IMPORT_TOAST })
     return
+  }
+  const { selections, leftOut } = picked
+  // A picked file main couldn't open is said, never dropped in silence
+  // (release test 147, plan 0006).
+  const picks = selections.length + leftOut.length
+  for (const file of leftOut) {
+    toastUserError(
+      new UserFacingError(file.reason, 'warning'),
+      { action: 'import', object: `“${file.displayName}”` },
+      { id: `${IMPORT_TOAST}:${file.displayName}` }
+    )
   }
   if (!selections.length) {
     setPhase('idle')
@@ -205,7 +216,7 @@ export async function importSounds(
           refusal ? new UserFacingError(refusal, 'warning') : error,
           {
             action: 'import',
-            object: selections.length > 1 ? `“${selection.displayName}”` : 'the sound'
+            object: picks > 1 ? `“${selection.displayName}”` : 'the sound'
           },
           { id: IMPORT_TOAST }
         )

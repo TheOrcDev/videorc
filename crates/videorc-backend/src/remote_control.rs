@@ -162,6 +162,22 @@ impl RemoteIntent {
         }
     }
 
+    /// The key `admit_intent` debounces on: the bucket, except that sounds
+    /// debounce per sound (release test 147, plan 0004). A bounce is the same
+    /// key repeating, so a second press of one sound inside the window is
+    /// refused, while two different sound keys hit together both play. A
+    /// `soundStop` for one sound shares that sound's key; stop-all has its own.
+    pub fn debounce_key(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::SoundPlay { sound_id }
+            | Self::SoundStop {
+                sound_id: Some(sound_id),
+            } => std::borrow::Cow::Owned(format!("sound:{sound_id}")),
+            Self::SoundStop { sound_id: None } => std::borrow::Cow::Borrowed("sound:*"),
+            _ => std::borrow::Cow::Borrowed(self.debounce_kind()),
+        }
+    }
+
     /// How long after an accepted intent the same bucket refuses another.
     pub fn debounce_window(&self) -> Duration {
         match self {
@@ -243,8 +259,9 @@ impl RemoteControlRuntime {
     /// are relayed to the renderer.
     pub fn admit_intent(&mut self, intent: &RemoteIntent, now: Instant) -> RemoteIntentTicket {
         let kind = intent.debounce_kind();
+        let key = intent.debounce_key();
         let window = intent.debounce_window();
-        if let Some(last) = self.last_intent_at.get(kind)
+        if let Some(last) = self.last_intent_at.get(key.as_ref())
             && now.duration_since(*last) < window
         {
             return RemoteIntentTicket {
@@ -256,7 +273,13 @@ impl RemoteControlRuntime {
                 )),
             };
         }
-        self.last_intent_at.insert(kind.to_string(), now);
+        // Per-sound keys (`sound:<id>`) come from client-supplied ids: drop
+        // every key whose window has passed, so the map holds only the keys
+        // still debouncing however many ids a client sends (release test 147).
+        let longest = REMOTE_INTENT_DEBOUNCE.max(REMOTE_SOUND_INTENT_DEBOUNCE);
+        self.last_intent_at
+            .retain(|_, at| now.saturating_duration_since(*at) < longest);
+        self.last_intent_at.insert(key.into_owned(), now);
         self.next_intent_sequence += 1;
         RemoteIntentTicket {
             intent_id: format!("ri-{}", self.next_intent_sequence),
@@ -699,9 +722,11 @@ mod tests {
             sound_id: "s-1".to_string(),
         };
         assert!(runtime.admit_intent(&play, start).accepted);
-        // A bounce 50 ms later is refused, whichever sound form it is.
+        // A bounce 50 ms later is refused, whichever form names that sound.
         let bounce = runtime.admit_intent(
-            &RemoteIntent::SoundStop { sound_id: None },
+            &RemoteIntent::SoundStop {
+                sound_id: Some("s-1".to_string()),
+            },
             start + Duration::from_millis(50),
         );
         assert!(!bounce.accepted);
@@ -733,6 +758,83 @@ mod tests {
                         + Duration::from_millis(50)
                         + REMOTE_SOUND_INTENT_DEBOUNCE
                         + Duration::from_millis(1)
+                )
+                .accepted
+        );
+    }
+
+    #[test]
+    fn different_sounds_pressed_together_both_pass_and_each_still_debounces() {
+        // Release test 147, plan 0004: Airhorn 44 ms after Buzzer was refused
+        // because every sound shared one bucket.
+        let mut runtime = RemoteControlRuntime::default();
+        let start = Instant::now();
+        let press = |id: &str| RemoteIntent::SoundPlay {
+            sound_id: id.to_string(),
+        };
+        assert!(runtime.admit_intent(&press("buzzer"), start).accepted);
+        assert!(
+            runtime
+                .admit_intent(&press("airhorn"), start + Duration::from_millis(10))
+                .accepted,
+            "a different sound key at the same moment plays"
+        );
+        assert!(
+            !runtime
+                .admit_intent(&press("buzzer"), start + Duration::from_millis(50))
+                .accepted,
+            "the same key bouncing is still refused"
+        );
+        // Stop all right after a press is its own key, not a bounce.
+        assert!(
+            runtime
+                .admit_intent(
+                    &RemoteIntent::SoundStop { sound_id: None },
+                    start + Duration::from_millis(20)
+                )
+                .accepted
+        );
+        assert!(
+            !runtime
+                .admit_intent(
+                    &RemoteIntent::SoundStop { sound_id: None },
+                    start + Duration::from_millis(40)
+                )
+                .accepted,
+            "a bouncing stop-all key is refused"
+        );
+        assert_eq!(press("buzzer").debounce_kind(), "sound");
+        assert_eq!(press("buzzer").debounce_key(), "sound:buzzer");
+    }
+
+    #[test]
+    fn per_sound_debounce_keys_expire_instead_of_piling_up() {
+        let mut runtime = RemoteControlRuntime::default();
+        let start = Instant::now();
+        for index in 0..1_000_u64 {
+            let at = start + Duration::from_millis(index * 200);
+            assert!(
+                runtime
+                    .admit_intent(
+                        &RemoteIntent::SoundPlay {
+                            sound_id: format!("id-{index}"),
+                        },
+                        at
+                    )
+                    .accepted
+            );
+        }
+        // Each id's window passed long ago: only the newest key is kept.
+        assert_eq!(runtime.last_intent_at.len(), 1);
+        // A key still inside its window survives the pruning and debounces.
+        let now = start + Duration::from_millis(999 * 200 + 40);
+        assert!(
+            !runtime
+                .admit_intent(
+                    &RemoteIntent::SoundPlay {
+                        sound_id: "id-999".to_string(),
+                    },
+                    now
                 )
                 .accepted
         );

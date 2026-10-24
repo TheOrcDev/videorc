@@ -53,10 +53,17 @@ Phone remote and every Stream Deck with it.
   any other failure "Couldn't show the banner.", "Couldn't hide the banner."
   or "Couldn't hide the banners.".
 - The two sound intents (plan 189) are a family of their own too, debounced
-  at 80 ms instead of 150 ms so a fast drummer still gets every press. One
+  at 80 ms instead of 150 ms so a fast drummer still gets every press, and
+  per sound: two different sound keys pressed together both play, while one
+  key bouncing is refused (`soundStop` with a `soundId` shares that sound's
+  window; stop-all has its own). One
   whose sound is gone acks "That sound isn't available anymore."; a refusal
   acks the desktop's sentence; any other failure "Couldn't play the sound.",
-  "Couldn't stop the sound." or "Couldn't stop the sounds.".
+  "Couldn't stop the sound." or "Couldn't stop the sounds.". The renderer
+  runs sound intents in order among themselves but never behind another kind
+  of intent (a slow scene switch can't hold an airhorn back); a sound intent
+  that still waited over a second acks "That sound was pressed too long ago,
+  so it didn't play." instead of playing late.
 
 ## Requests
 

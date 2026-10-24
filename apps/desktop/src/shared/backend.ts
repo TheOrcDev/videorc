@@ -2,6 +2,7 @@ import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
+import type { LiveBackgroundId, LiveBackgroundMotion } from './live-background-ids'
 import type { TwitchGifMode } from './chat-gif'
 import type {
   BuddyAvatar,
@@ -716,6 +717,43 @@ export interface EffectiveSceneBackground {
   // per side = visibilityPercent / 200. 0 keeps the recording full-canvas;
   // 20 is the classic 80% stage. Backend serde-defaults absent values to 20.
   visibilityPercent: number
+  /**
+   * Plan 190: the shader a live background runs. `assetId` is then the look's
+   * bundled poster (`live-<id>-<look>`), which every path that can't animate
+   * draws. Absent for a picture.
+   */
+  live?: LiveBackgroundSpec
+}
+
+export interface LiveBackgroundSpec {
+  id: LiveBackgroundId
+  look: string
+  motion: LiveBackgroundMotion
+}
+
+/** How a live background is drawn: the shader, at half size, or its poster. */
+export type LiveBackgroundRendering = 'shader' | 'half' | 'still'
+
+/** Why a live background shows its poster (`LiveBackgroundStillReason`). */
+export type LiveBackgroundStillReason =
+  | 'forced'
+  | 'legacy-graph'
+  | 'cpu-fallback'
+  | 'no-gpu'
+  | 'software-gpu'
+  | 'quarantined-node'
+  | 'shader-compile-failed'
+  | 'gpu-budget'
+
+export interface LiveBackgroundStatus {
+  id: LiveBackgroundId
+  look: string
+  rendering: LiveBackgroundRendering
+  reason?: LiveBackgroundStillReason
+  /** The live background's own render time p95 over the guard's last window. */
+  p95Ms?: number
+  /** A look this build doesn't know; the first look renders instead. */
+  requestedLook?: string
 }
 
 export interface Scene {
@@ -2312,6 +2350,9 @@ export interface CompositorFramePipelineStatus {
   yuvFramesConverted: number
   immutableTextureUploads: number
   immutableTextureReuses: number
+  /** Plan 190: live background programs built and scratch bytes held (0 while off). */
+  liveBackgroundPrograms?: number
+  liveBackgroundScratchBytes?: number
 }
 
 export interface CompositorStatus {
@@ -2345,6 +2386,8 @@ export interface CompositorStatus {
    * while no drag is live; never present during a session.
    */
   editorDraft?: SceneEditorDraftStatus | null
+  /** Plan 190: the applied live background and how it is drawn. */
+  liveBackground?: LiveBackgroundStatus
   updatedAt: string
   message?: string
 }
@@ -2385,6 +2428,42 @@ export interface PreviewSurfaceSceneLayer {
   shape?: CameraShape
   /** 0..1; absent is fully opaque. Banners only (plan 186). */
   opacity?: number
+  /**
+   * Plan 190: the shader behind this background's poster. The `imageUrl` is
+   * the poster, which stays as the fallback and the first frame. Absent for
+   * a picture, so the proof surface creates no canvas.
+   */
+  live?: PreviewSurfaceLiveBackground
+}
+
+/** What the Electron proof surface needs to animate a live background. */
+export interface PreviewSurfaceLiveBackground {
+  id: LiveBackgroundId
+  /** The look that renders: an unknown look resolves to the first one. */
+  look: string
+  motion: LiveBackgroundMotion
+  /** Dim as the shader takes it: dimPercent / 100, clamped to 0..0.8. */
+  dim: number
+  /** The look's phase per second at Normal motion (Calm halves it). */
+  rate: number
+  /** The phase the poster was rendered at; the animation starts there. */
+  posterPhase: number
+}
+
+/**
+ * How the proof surface draws the scene's live background (plan 190 S6):
+ * `starting` until its first frame, `shader` while it moves, `still` with a
+ * reason when the poster shows instead.
+ */
+export interface PreviewSurfaceLiveBackgroundStatus {
+  id: LiveBackgroundId
+  look: string
+  rendering: 'starting' | 'shader' | 'still'
+  reason?: LiveBackgroundStillReason
+  /** What the surface saw, verbatim and bounded, for diagnostics. */
+  detail?: string
+  /** The WebGL renderer, when a context exists. */
+  renderer?: string
 }
 
 export interface PreviewSurfaceSceneState {
@@ -2526,6 +2605,9 @@ export interface PreviewSurfaceStatus {
   /** Sanitized readback from the backend-owned Windows DirectComposition
    * presenter. This intentionally contains no HWND or process ID. */
   windowsD3d11Presenter?: WindowsD3d11PresenterDiagnostics
+  /** Plan 190: the live background on the Electron proof surface, while the
+   * scene has one. Absent on native transports and for a picture. */
+  liveBackground?: PreviewSurfaceLiveBackgroundStatus
   startedAt?: string
   updatedAt: string
   message?: string
@@ -5862,6 +5944,9 @@ export interface SoundVoice {
 /** `sounds.playback` and `sounds.stop`: every playing sound, oldest first. */
 export interface SoundsPlayback {
   voices: SoundVoice[]
+  /** A recording or stream runs that sounds can't reach (release test 147,
+   * plan 0001). Omitted when false. */
+  sessionWithoutSounds?: true
 }
 // --- end soundboard (plan 189) -----------------------------------------------
 

@@ -548,9 +548,18 @@ import {
 } from '@/lib/session-start-failure'
 import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
-import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
+import {
+  applyLiveBackground as applyLiveBackgroundToRegistry,
+  effectiveSceneBackground,
+  nextLiveBackgroundStatusView,
+  registryForCommittedLiveBackground,
+  removeSlotAsset,
+  type LiveBackgroundStatusView
+} from '@/lib/background-assets'
+import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
+import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
 import {
   confirmedSystemAudioMix,
   systemAudioIssueFromHealthEvent,
@@ -1225,9 +1234,9 @@ export type StudioContextValue = {
   /** Read-only live-chat snapshot for the studio comments panel, driven by liveChat.* events. */
   liveChatSnapshot: LiveChatSnapshot
   /** Clear the local chat view (calls liveChat.clearLocal; not platform messages). */
-  /** Live captions (premium cloud AI): status + transcript lines from captions.* events. */
+  /** Live captions (premium cloud AI): status from captions.* events. The
+   * transcript lines are on their own context (`useStudioCaptions`). */
   captionsStatus: CaptionsStatus
-  captionLines: CaptionsUpdate[]
   captionsCommandPending: boolean
   startCaptions: (language?: string) => Promise<void>
   stopCaptions: () => Promise<void>
@@ -1257,9 +1266,6 @@ export type StudioContextValue = {
    * (or the Premium prompt) and the diagnostics record. For promises a page
    * starts itself, so no failure is swallowed (plan 174, C-6). */
   reportError: (error: unknown, context?: UserErrorContext) => void
-  /** The Buddy on stream (plan 164 Phase C): which state shows and the bubble
-   * that is up (`cohost.buddy.state`); null until the backend reported. */
-  buddyOverlay: BuddyOverlaySnapshot | null
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
@@ -1382,6 +1388,13 @@ export type StudioContextValue = {
   applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
   applyBackgroundSlot: (slotId: string | null) => void
   applyWorkingBackgroundStyle: (patch: Partial<Scene['background']>) => void
+  /** Plan 190: put a live background on the scene; null takes it off. */
+  applyLiveBackground: (id: LiveBackgroundId | null) => void
+  /**
+   * Plan 190: how the applied live background is drawn (null with none), for
+   * Assets' still-frame reason. It changes only when that summary does.
+   */
+  liveBackgroundStatus: LiveBackgroundStatusView | null
   /**
    * Change the vertical simulcast leg (scene, screen framing, follow). Saved
    * for the next session and, in a running dual-orientation session, applied
@@ -1709,6 +1722,11 @@ export type StudioBannersContextValue = {
   toggleBanner: (id: string) => Promise<boolean>
 }
 
+/** The live caption lines from `captions.update` (plan 191). */
+export type StudioCaptionsContextValue = {
+  captionLines: CaptionsUpdate[]
+}
+
 /** The takeover list before it loads: one stable empty array. */
 const NO_SCREENS: StreamScreen[] = []
 /** The banner list before it loads: one stable empty array. */
@@ -1726,6 +1744,10 @@ const StudioDiagnosticsContext = createContext<StudioDiagnosticsContextValue | n
 const StudioChatContext = createContext<StudioChatContextValue | null>(null)
 const StudioAudioContext = createContext<StudioAudioContextValue | null>(null)
 const StudioBannersContext = createContext<StudioBannersContextValue | null>(null)
+// Plan 191: a streaming caption partial lands several times a second while
+// anyone speaks. Its own context keeps it out of core and the shell; only the
+// Captions page and its preview subscribe.
+const StudioCaptionsContext = createContext<StudioCaptionsContextValue | null>(null)
 
 interface StudioShellContextValue {
   wsStatus: WsStatus
@@ -2231,6 +2253,14 @@ export function useStudioBanners(): StudioBannersContextValue {
   return value
 }
 
+export function useStudioCaptions(): StudioCaptionsContextValue {
+  const value = useContext(StudioCaptionsContext)
+  if (!value) {
+    throw new Error('useStudioCaptions must be used within a StudioProvider')
+  }
+  return value
+}
+
 /** Compatibility hook for consumers that genuinely span every state domain. */
 export function useStudio(): StudioContextValue {
   const core = useStudioCore()
@@ -2263,6 +2293,8 @@ type StudioContextProvidersProps = {
   audio: StudioAudioContextValue
   /** Plan 181. Optional so a test that mounts the providers alone keeps a ring that is off. */
   replay?: ReplayBufferControls
+  /** Plan 191. Optional so a test that mounts the providers alone has no caption lines. */
+  captions?: StudioCaptionsContextValue
   children?: ReactNode
 }
 
@@ -2272,6 +2304,8 @@ const REPLAY_BUFFER_OFF_CONTROLS: ReplayBufferControls = Object.freeze({
   blockedReason: null,
   setEnabled: () => {}
 })
+
+const NO_CAPTION_LINES: StudioCaptionsContextValue = Object.freeze({ captionLines: [] })
 
 /**
  * Keep volatile Studio domains behind their own providers. Besides making the
@@ -2288,6 +2322,7 @@ export function StudioContextProviders({
   chat,
   audio,
   replay = REPLAY_BUFFER_OFF_CONTROLS,
+  captions = NO_CAPTION_LINES,
   children
 }: StudioContextProvidersProps): ReactElement {
   return (
@@ -2299,7 +2334,9 @@ export function StudioContextProviders({
               <StudioChatContext.Provider value={chat}>
                 <StudioAudioContext.Provider value={audio}>
                   <StudioReplayContext.Provider value={replay}>
-                    {children}
+                    <StudioCaptionsContext.Provider value={captions}>
+                      {children}
+                    </StudioCaptionsContext.Provider>
                   </StudioReplayContext.Provider>
                 </StudioAudioContext.Provider>
               </StudioChatContext.Provider>
@@ -2324,7 +2361,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
-  const remoteIntentTailRef = useRef<Promise<void>>(Promise.resolve())
   const globalShortcutsRegistrarRef = useRef<GlobalShortcutsRegistrar | null>(null)
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -2890,7 +2926,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const openCaptionsWindow = useCallback(async () => {
     await window.videorc
       ?.pushCaptionSnapshot?.({
-        lines: captionLines,
+        // Plan 191: the latest lines through the ref, so a caption partial
+        // does not re-create this (and toggleCaptionsWindow, core and the
+        // shell with it). The effect above pushes every change anyway.
+        lines: captionLinesRef.current,
         status: captionsStatus,
         styleId: captureConfig.captions.styleId,
         position: captureConfig.captions.position,
@@ -2898,7 +2937,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       })
       .catch(() => {})
     await window.videorc?.openCaptionsWindow?.()
-  }, [captionLines, captionsStatus, captureConfig.captions])
+  }, [captionsStatus, captureConfig.captions])
   const closeCaptionsWindow = useCallback(async () => {
     await window.videorc?.closeCaptionsWindow?.()
   }, [])
@@ -4278,6 +4317,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       : effectiveSceneBackground(backgroundRegistry)
   })
   const workingBackgroundRef = useRef(workingBackground)
+  // Plan 190: how the applied live background is drawn, from compositor status.
+  const [liveBackgroundStatus, setLiveBackgroundStatus] = useState<LiveBackgroundStatusView | null>(
+    null
+  )
   const confirmedVisualRef = useRef<SceneVisual>(
     normalizeSceneVisual({
       layout: captureConfig.layout,
@@ -4628,6 +4671,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // talks to the web.
   const [cohostState, setCohostState] = useState<CohostState | null>(null)
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
+  // The Buddy on stream (`cohost.buddy.state`, plan 164 Phase C): the state
+  // and the bubble that is up; null until the backend reported. Plan 191: only
+  // the overlay push and the Comments-window relay below read it, so it stays
+  // out of core and a bubble's show or expiry re-renders no Studio view.
   const [buddyOverlay, setBuddyOverlay] = useState<BuddyOverlaySnapshot | null>(null)
   const cohostSettingsRef = useRef(cohostSettings)
   cohostSettingsRef.current = cohostSettings
@@ -7030,6 +7077,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch((error: unknown) => {
         if (!disposed) reportError(error)
       })
+    const remoteIntents = createRemoteIntentQueue({
+      run: async (payload) => {
+        if (!disposed) await handleRemoteIntent(payload)
+      },
+      refuseStale: async (payload) => {
+        const intentId = (payload as { intentId?: unknown } | null)?.intentId
+        if (disposed || typeof intentId !== 'string') return
+        await nextClient
+          .request('remote.intent.ack', {
+            intentId,
+            ok: false,
+            message: REMOTE_SOUND_STALE_MESSAGE
+          })
+          .catch(() => undefined)
+      }
+    })
     const unsubscribers = [
       nextClient.on('session.sources.changed', () => {
         // Read the complete current authority; event delivery can race RPC completion.
@@ -7052,17 +7115,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .catch(reportError)
       }),
       // Remote-control intents (Stream Deck et al) arrive as events relayed
-      // by the backend. Preserve arrival order across asynchronous handlers:
-      // each executor samples authoritative session truth only when its turn
-      // begins, and a failed predecessor cannot poison the tail.
+      // by the backend and run in arrival order (lib/remote-intent-queue.ts);
+      // sound presses on a lane of their own, so a slow scene switch never
+      // holds an airhorn back (release test 147, plan 0003).
       nextClient.on('remote.intent', (payload) => {
-        const result = remoteIntentTailRef.current
-          .catch(() => undefined)
-          .then(() => (disposed ? undefined : handleRemoteIntent(payload)))
-        remoteIntentTailRef.current = result.then(
-          () => undefined,
-          () => undefined
-        )
+        remoteIntents.enqueue(payload).catch((error: unknown) => {
+          if (!disposed) reportError(error)
+        })
       }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
@@ -7338,13 +7397,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             appendBoundedSessionDetailEntry(liveEntries.healthEvents, event)
             sessionDetailLiveEntriesRef.current.set(event.sessionId, liveEntries)
           }
-          setSessions((current) =>
-            current.map((session) =>
+          setSessions((current) => {
+            // Plan 191: a session the Library has not loaded keeps the same
+            // array, so core and the Library rows don't re-render for it
+            // (setSessionDetails below guards the same way).
+            if (!current.some((session) => session.id === event.sessionId)) return current
+            return current.map((session) =>
               session.id === event.sessionId
                 ? { ...session, healthEventCount: session.healthEventCount + 1 }
                 : session
             )
-          )
+          })
           setSessionDetails((current) => {
             const details = current[event.sessionId!]
             return details
@@ -7412,13 +7475,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           appendBoundedSessionDetailEntry(liveEntries.sessionLogs, entry)
           sessionDetailLiveEntriesRef.current.set(entry.sessionId, liveEntries)
         }
-        setSessions((current) =>
-          current.map((session) =>
+        setSessions((current) => {
+          // Plan 191: same as health.event above, an unloaded session keeps the array.
+          if (!current.some((session) => session.id === entry.sessionId)) return current
+          return current.map((session) =>
             session.id === entry.sessionId
               ? { ...session, sessionLogCount: session.sessionLogCount + 1 }
               : session
           )
-        )
+        })
         setSessionDetails((current) => {
           const details = current[entry.sessionId]
           return details
@@ -7493,6 +7558,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
         const status = payload as CompositorStatus
+        setLiveBackgroundStatus((current) =>
+          nextLiveBackgroundStatusView(current, status.liveBackground)
+        )
         // Backend-authored commits (live source switches) arrive only as this
         // event; advance committed truth so a later resync never re-presents
         // an older revision. Layout transactions record their own proven commit.
@@ -9157,18 +9225,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       workingBackgroundRef.current = background
       setWorkingBackground(background)
       const registry = backgroundRegistryRef.current
-      const activeSlotId = background
-        ? (registry.slots.find(
-            (slot) =>
-              slot.assetId === background.assetId &&
-              slot.status === 'ready' &&
-              JSON.stringify(
-                snapshotBackground(effectiveSceneBackground({ ...registry, activeSlotId: slot.id }))
-              ) === JSON.stringify(snapshotBackground(background))
-          )?.id ?? null)
-        : null
-      if (registry.activeSlotId !== activeSlotId) {
-        const nextRegistry = { ...registry, activeSlotId }
+      const activeSlotId =
+        background && !background.live
+          ? (registry.slots.find(
+              (slot) =>
+                slot.assetId === background.assetId &&
+                slot.status === 'ready' &&
+                JSON.stringify(
+                  snapshotBackground(
+                    effectiveSceneBackground({ ...registry, activeSlotId: slot.id })
+                  )
+                ) === JSON.stringify(snapshotBackground(background))
+            )?.id ?? null)
+          : null
+      // Plan 190: a committed live background is the registry's truth; a
+      // picture or none takes the live one off.
+      const nextRegistry = background?.live
+        ? registryForCommittedLiveBackground(registry, background)
+        : registry.activeSlotId === activeSlotId && !registry.live.activeId
+          ? registry
+          : { ...registry, activeSlotId, live: { ...registry.live, activeId: null } }
+      if (nextRegistry !== registry) {
         libraryBackgroundFingerprintRef.current = JSON.stringify(
           snapshotBackground(effectiveSceneBackground(nextRegistry))
         )
@@ -9860,6 +9937,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const registry = backgroundRegistryRef.current
       const background = slotId
         ? effectiveSceneBackground({ ...registry, activeSlotId: slotId })
+        : null
+      void requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        backgroundOverride: background
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
+  // Plan 190: put a live background on the scene (null takes it off). Its
+  // look, motion and style come from the registry; changing them edits the
+  // registry, and the library sync below applies the edit.
+  const applyLiveBackground = useCallback(
+    (id: LiveBackgroundId | null): void => {
+      const registry = backgroundRegistryRef.current
+      const background = id
+        ? effectiveSceneBackground(applyLiveBackgroundToRegistry(registry, id))
         : null
       void requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false,
@@ -16615,6 +16709,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () => ({ audioMeter, audioMeterLoading, meterLevel }),
     [audioMeter, audioMeterLoading, meterLevel]
   )
+  const captionsValue = useMemo<StudioCaptionsContextValue>(
+    () => ({ captionLines }),
+    [captionLines]
+  )
   const bannersValue = useMemo<StudioBannersContextValue>(() => {
     const banners = bannerList ?? NO_BANNERS
     return {
@@ -16796,7 +16894,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapabilityLoading,
       youtubeQuota,
       captionsStatus,
-      captionLines,
       captionsCommandPending,
       startCaptions,
       stopCaptions,
@@ -16819,7 +16916,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       overlayLayout,
       setOverlayLayout,
       reportError,
-      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
@@ -16936,6 +17032,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
+      liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
@@ -17032,7 +17130,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       xNativeCapabilityLoading,
       youtubeQuota,
       captionsStatus,
-      captionLines,
       captionsCommandPending,
       startCaptions,
       stopCaptions,
@@ -17055,7 +17152,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       overlayLayout,
       setOverlayLayout,
       reportError,
-      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
@@ -17171,6 +17267,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
+      liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
@@ -17234,6 +17332,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       <StudioBannersContext.Provider value={bannersValue}>
         <StudioContextProviders
           audio={audioValue}
+          captions={captionsValue}
           chat={chatValue}
           core={value}
           diagnostics={diagnosticsValue}

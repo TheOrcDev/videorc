@@ -2294,6 +2294,22 @@ pub fn start_runtime_resource_sampler() {
 }
 
 fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
+    let backend_pid = std::process::id();
+    // Plan 191: one `ps -axo` sample reads every process on the machine and costs
+    // ~40 ms of CPU, ~32 ms of it system time (measured), so forking it every second
+    // burned ~4% of a core for as long as the app was open. On macOS libproc reads
+    // the same rows for the backend's own process tree in ~35 µs, with `ps` kept as
+    // the fallback for any sample libproc cannot take. Every other platform keeps `ps`.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(rows) = collect_native_process_rows() {
+            return runtime_resource_snapshot_from_rows(&rows, backend_pid);
+        }
+    }
+    collect_ps_runtime_resource_snapshot(backend_pid)
+}
+
+fn collect_ps_runtime_resource_snapshot(backend_pid: u32) -> RuntimeResourceSnapshot {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,rss=,comm="])
         .output();
@@ -2301,7 +2317,7 @@ fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
         Ok(output) if output.status.success() => output,
         _ => return RuntimeResourceSnapshot::default(),
     };
-    parse_runtime_resource_snapshot(&String::from_utf8_lossy(&output.stdout), std::process::id())
+    parse_runtime_resource_snapshot(&String::from_utf8_lossy(&output.stdout), backend_pid)
 }
 
 #[derive(Debug)]
@@ -2317,10 +2333,19 @@ fn parse_runtime_resource_snapshot(output: &str, backend_pid: u32) -> RuntimeRes
         .lines()
         .filter_map(parse_process_sample_row)
         .collect::<Vec<_>>();
+    runtime_resource_snapshot_from_rows(&rows, backend_pid)
+}
+
+/// The one aggregation both collectors feed: the backend's own RSS, plus the FFmpeg
+/// and FFprobe processes anywhere in its descendant tree.
+fn runtime_resource_snapshot_from_rows(
+    rows: &[ProcessSampleRow],
+    backend_pid: u32,
+) -> RuntimeResourceSnapshot {
     let mut owned_pids = std::collections::HashSet::from([backend_pid]);
     loop {
         let previous_len = owned_pids.len();
-        for row in &rows {
+        for row in rows {
             if owned_pids.contains(&row.parent_pid) {
                 owned_pids.insert(row.pid);
             }
@@ -2366,6 +2391,129 @@ fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
         rss_kib,
         command,
     })
+}
+
+/// This process and its live descendants, read from libproc as the rows the `ps`
+/// collector parses: `rss_kib` is the resident size in KiB and `command` names the
+/// executable. `None` when libproc cannot read this process itself, so the sample
+/// falls back to `ps`.
+#[cfg(target_os = "macos")]
+fn collect_native_process_rows() -> Option<Vec<ProcessSampleRow>> {
+    let backend_pid = std::process::id();
+    let root = libc::pid_t::try_from(backend_pid).ok()?;
+    let mut rows = vec![ProcessSampleRow {
+        pid: backend_pid,
+        // SAFETY: getppid has no preconditions and cannot fail.
+        parent_pid: unsafe { libc::getppid() } as u32,
+        rss_kib: native_resident_size_bytes(root)? / 1024,
+        command: native_process_name(root)?,
+    }];
+    let mut visited = std::collections::HashSet::from([root]);
+    let mut parents = std::collections::VecDeque::from([root]);
+    while let Some(parent) = parents.pop_front() {
+        let children = match native_child_pids(parent) {
+            Some(children) => children,
+            // Without our own children every count would read zero: use `ps`.
+            None if parent == root => return None,
+            None => continue,
+        };
+        for child in children {
+            if !visited.insert(child) {
+                continue;
+            }
+            // A pid that exits mid-walk has no name left: skip it, like a row missing
+            // from `ps` output. Zombies land here too (`ps` shows them as `<defunct>`).
+            let Some(command) = native_process_name(child) else {
+                continue;
+            };
+            rows.push(ProcessSampleRow {
+                pid: child as u32,
+                parent_pid: parent as u32,
+                rss_kib: native_resident_size_bytes(child).map_or(0, |bytes| bytes / 1024),
+                command,
+            });
+            parents.push_back(child);
+        }
+    }
+    Some(rows)
+}
+
+/// Resident size in bytes. `ps` prints the same field, in KiB.
+#[cfg(target_os = "macos")]
+fn native_resident_size_bytes(pid: libc::pid_t) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: `info` is writable for `size` bytes, the exact size of proc_taskinfo.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if filled != size {
+        return None;
+    }
+    // SAFETY: an all-zero proc_taskinfo is valid, and libproc filled every byte.
+    Some(unsafe { info.assume_init() }.pti_resident_size)
+}
+
+/// The name the kernel keeps from the executable's file name at exec: `ffmpeg` for
+/// the bundled `…/ffmpeg`, the same file name `ps` shows in its `comm` column. Unlike
+/// `proc_pidpath`, it still reads after the binary is replaced on disk.
+#[cfg(target_os = "macos")]
+fn native_process_name(pid: libc::pid_t) -> Option<String> {
+    // proc_name copies a 32-byte field; the byte held back stays NUL either way.
+    let mut buffer = [0u8; 64];
+    // SAFETY: `buffer` is writable for the length passed.
+    let len =
+        unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), (buffer.len() - 1) as u32) };
+    if len <= 0 {
+        return None;
+    }
+    let name = std::ffi::CStr::from_bytes_until_nul(&buffer)
+        .ok()?
+        .to_string_lossy();
+    (!name.is_empty()).then(|| name.into_owned())
+}
+
+/// The most direct children one sample reads for a single parent.
+#[cfg(target_os = "macos")]
+const NATIVE_CHILD_PID_LIMIT: usize = 1 << 16;
+
+/// Direct children of `parent`, or `None` when libproc reports an error.
+#[cfg(target_os = "macos")]
+fn native_child_pids(parent: libc::pid_t) -> Option<Vec<libc::pid_t>> {
+    let mut capacity = 64;
+    loop {
+        let mut buffer: Vec<libc::pid_t> = vec![0; capacity];
+        let size = libc::c_int::try_from(capacity * std::mem::size_of::<libc::pid_t>()).ok()?;
+        // SAFETY: errno is this thread's own slot. libproc reports an empty list and a
+        // failure both as 0, so errno is what tells them apart.
+        unsafe { *libc::__error() = 0 };
+        // SAFETY: `buffer` is writable for `size` bytes.
+        let listed = unsafe { libc::proc_listchildpids(parent, buffer.as_mut_ptr().cast(), size) };
+        if listed < 0 || (listed == 0 && std::io::Error::last_os_error().raw_os_error() != Some(0))
+        {
+            return None;
+        }
+        // Current macOS returns a count of pids; older releases returned bytes. The
+        // buffer starts zeroed and no child is pid 0, so reading up to the larger
+        // figure and dropping zeros is right under either convention.
+        let filled = (listed as usize).min(capacity);
+        let children = buffer[..filled]
+            .iter()
+            .copied()
+            .filter(|pid| *pid > 0)
+            .collect::<Vec<_>>();
+        // A full buffer may have cut the list short: read again with more room.
+        if children.len() < capacity || capacity >= NATIVE_CHILD_PID_LIMIT {
+            return Some(children);
+        }
+        capacity *= 2;
+    }
 }
 
 #[cfg(test)]
@@ -2429,6 +2577,119 @@ mod tests {
         assert_eq!(stats.backend_rss_bytes, Some(42));
         assert_eq!(stats.active_ffmpeg_processes, 2);
         assert_eq!(stats.active_ffprobe_processes, 3);
+    }
+
+    /// Kills and reaps a test's child (and removes its scratch directory) even when an
+    /// assertion fails first.
+    #[cfg(target_os = "macos")]
+    struct OwnedTestChild {
+        child: std::process::Child,
+        scratch_dir: Option<std::path::PathBuf>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for OwnedTestChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(dir) = self.scratch_dir.take() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn executable_file_name(command: &str) -> Option<&str> {
+        std::path::Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_process_rows_read_own_rss_and_a_spawned_child() {
+        // spawn() returns once the child has exec'd, so it is listed by name at once.
+        let sleeper = OwnedTestChild {
+            child: Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn /bin/sleep"),
+            scratch_dir: None,
+        };
+        let own_pid = std::process::id();
+
+        let rows = collect_native_process_rows().expect("libproc samples this process");
+
+        let own = rows.iter().find(|row| row.pid == own_pid).expect("own row");
+        assert!(own.rss_kib > 0, "own resident size is sampled");
+        let child = rows
+            .iter()
+            .find(|row| row.pid == sleeper.child.id())
+            .expect("the spawned child is sampled");
+        assert_eq!(child.parent_pid, own_pid);
+        assert_eq!(executable_file_name(&child.command), Some("sleep"));
+    }
+
+    /// Stands in for a bundled `ffmpeg` child: blocks until its parent test kills it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "ffmpeg-named child fixture launched explicitly by the native sampler test"]
+    fn ffmpeg_named_child_fixture() {
+        if std::env::var_os("VIDEORC_FFMPEG_NAMED_CHILD_FIXTURE").is_none() {
+            return;
+        }
+        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_process_rows_count_an_ffmpeg_named_child() {
+        // A copied /bin/sleep is killed at launch (platform binaries carry launch
+        // constraints), so this ad-hoc signed test binary runs its fixture under the
+        // bundled binary's file name instead.
+        let scratch_dir =
+            std::env::temp_dir().join(format!("videorc-native-sampler-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch_dir).unwrap();
+        let ffmpeg = scratch_dir.join("ffmpeg");
+        std::fs::copy(std::env::current_exe().unwrap(), &ffmpeg).unwrap();
+        let fixture = OwnedTestChild {
+            child: Command::new(&ffmpeg)
+                .args([
+                    "--exact",
+                    "diagnostics::tests::ffmpeg_named_child_fixture",
+                    "--ignored",
+                ])
+                .env("VIDEORC_FFMPEG_NAMED_CHILD_FIXTURE", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn the ffmpeg-named fixture"),
+            scratch_dir: Some(scratch_dir),
+        };
+        let own_pid = std::process::id();
+        let fixture_pid = fixture.child.id();
+
+        let rows = collect_native_process_rows().expect("libproc samples this process");
+
+        let row = rows
+            .iter()
+            .find(|row| row.pid == fixture_pid)
+            .expect("the fixture is sampled");
+        assert_eq!(row.parent_pid, own_pid);
+        assert_eq!(executable_file_name(&row.command), Some("ffmpeg"));
+        // Other tests in this binary may run real FFmpeg children at the same time, so
+        // the exact count aggregates only this test's own row and its fixture.
+        let ours = rows
+            .into_iter()
+            .filter(|row| row.pid == own_pid || row.pid == fixture_pid)
+            .collect::<Vec<_>>();
+        let snapshot = runtime_resource_snapshot_from_rows(&ours, own_pid);
+        assert_eq!(snapshot.active_ffmpeg_processes, 1);
+        assert_eq!(snapshot.active_ffprobe_processes, 0);
+        assert!(snapshot.backend_rss_bytes.is_some_and(|bytes| bytes > 0));
+        // The sampler's own collection counts it too, beside any concurrent ones.
+        assert!(collect_runtime_resource_snapshot().active_ffmpeg_processes >= 1);
     }
 
     #[test]

@@ -1,17 +1,16 @@
 import { useEffect, useEffectEvent, type ReactElement } from 'react'
 
-import { StopIcon } from '@/components/icons'
 import { PanelSection } from '@/components/panel-section'
 import { SoundPadBoard } from '@/components/sound-pad-board'
+import { StopAllSoundsButton } from '@/components/stop-all-sounds-button'
 import { Button } from '@/components/ui/button'
-import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Empty, EmptyContent, EmptyTitle } from '@/components/ui/empty'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
 import type { Sound } from '@/lib/backend'
-import { soundForKey, soundKeyBlocked } from '@/lib/sound-keys'
-import { STOP_ALL_IDLE_REASON, soundboardDescription } from '@/lib/sounds'
+import { soundForKey, soundKeyBlocked, soundKeyDigit } from '@/lib/sound-keys'
+import { soundboardDescription } from '@/lib/sounds'
 import { connectionBlockedReason } from '@/lib/state-labels'
 import { sessionOwnsTransport } from '../../../../shared/capture-state'
 
@@ -32,26 +31,18 @@ export function SoundboardSection(): ReactElement {
   // the sounds for a clip, but only the streamer hears them now.
   const sessionActive = sessionOwnsTransport(recording)
   useSoundKeys(board.sounds, board.press, board.stop, disconnectedReason === null)
-  const playing = board.voices.length > 0
-  const stopReason = disconnectedReason ?? (playing ? null : STOP_ALL_IDLE_REASON)
 
   return (
     <PanelSection
       action={
-        <DisabledReason reason={stopReason}>
-          <Button
-            disabled={stopReason !== null}
-            variant="ghost"
-            onClick={() => void board.stopAll()}
-          >
-            {/* Filled, like Stop recording: the outline square read as a checkbox. */}
-            <StopIcon data-icon="inline-start" weight="fill" />
-            Stop all
-          </Button>
-        </DisabledReason>
+        <StopAllSoundsButton
+          disabledReason={disconnectedReason}
+          playing={board.voices.length > 0}
+          onStopAll={() => void board.stopAll()}
+        />
       }
       data-videorc-soundboard=""
-      description={soundboardDescription(sessionActive, board.monitor)}
+      description={soundboardDescription(sessionActive, board.monitor, board.sessionWithoutSounds)}
       title="Soundboard"
     >
       {board.sounds.length > 0 ? (
@@ -103,10 +94,11 @@ function useSoundKeys(
 ): void {
   const onKeyDown = useEffectEvent((event: KeyboardEvent, held: Map<string, Sound>): void => {
     if (!enabled || soundKeyBlocked(event, document)) return
-    const sound = soundForKey(event.key, sounds)
+    const digit = soundKeyDigit(event)
+    const sound = digit ? soundForKey(digit, sounds) : undefined
     if (!sound) return
     event.preventDefault()
-    held.set(event.key, sound)
+    held.set(heldKey(event), sound)
     void press(sound.id)
   })
   const release = useEffectEvent((sound: Sound): void => {
@@ -116,9 +108,9 @@ function useSoundKeys(
     const held = new Map<string, Sound>()
     const down = (event: KeyboardEvent): void => onKeyDown(event, held)
     const up = (event: KeyboardEvent): void => {
-      const sound = held.get(event.key)
+      const sound = held.get(heldKey(event))
       if (!sound) return
-      held.delete(event.key)
+      held.delete(heldKey(event))
       release(sound)
     }
     const releaseAll = (): void => {
@@ -135,4 +127,9 @@ function useSoundKeys(
       releaseAll()
     }
   }, [])
+}
+
+/** A held key's identity: the physical key, so its release matches on any layout. */
+function heldKey(event: KeyboardEvent): string {
+  return event.code || event.key
 }

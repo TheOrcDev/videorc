@@ -152,6 +152,7 @@ interface HighRiskContractFixtures {
     state: Omit<SoundboardState, 'sounds'>
     playback: SoundsPlayback
     pressStopped: { onAir: boolean }
+    playbackWithoutSounds: SoundsPlayback
   }
   buddyPets: {
     summary: BuddyPetSummary
@@ -793,6 +794,16 @@ describe('shared high-risk protocol fixture', () => {
     expect(validateBackendEventPayload('sounds.playback', playback)).toStrictEqual(playback)
     expect(validateBackendRpcResult('sounds.stop', playback)).toStrictEqual(playback)
     expect(validateBackendRpcResult('sounds.press', pressStopped)).toStrictEqual(pressStopped)
+    // Release test 147, plan 0001: a session sounds can't reach says so; the
+    // flag is omitted when false, never false or null.
+    const without = fixtures.sound.playbackWithoutSounds
+    expect(validateBackendEventPayload('sounds.playback', without)).toStrictEqual(without)
+    expect('sessionWithoutSounds' in playback).toBe(false)
+    for (const value of [false, null]) {
+      expect(() =>
+        validateBackendEventPayload('sounds.playback', { voices: [], sessionWithoutSounds: value })
+      ).toThrow()
+    }
     // Optional fields are omitted when absent (skip_serializing_if), never null.
     expect('hotkey' in minimal).toBe(false)
     expect('starter' in minimal).toBe(false)

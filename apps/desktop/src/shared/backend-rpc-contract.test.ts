@@ -1151,6 +1151,61 @@ describe('backend RPC contract', () => {
     ).toThrow()
   })
 
+  it('accepts the live background on compositor status (plan 190) and nothing forged', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      framePipeline: {
+        gpuReadbacks: 0,
+        bgraBytesCopied: 0,
+        yuvFramesConverted: 0,
+        immutableTextureUploads: 0,
+        immutableTextureReuses: 0,
+        liveBackgroundPrograms: 2,
+        liveBackgroundScratchBytes: 8_294_400
+      },
+      updatedAt: '2026-10-24T00:00:00Z'
+    } satisfies CompositorStatus
+    const shader = { id: 'silk', look: 'satin', rendering: 'shader', p95Ms: 0.4 } as const
+    const still = {
+      id: 'plasma-wave',
+      look: 'plasma',
+      rendering: 'still',
+      reason: 'gpu-budget',
+      p95Ms: 5.1,
+      requestedLook: 'lava'
+    } as const
+    for (const liveBackground of [shader, still]) {
+      // The event a running compositor publishes, and the status a read returns.
+      expect(
+        validateBackendEventPayload('compositor.status', { ...status, liveBackground })
+      ).toEqual({ ...status, liveBackground })
+      expect(validateBackendRpcResult('compositor.status', { ...status, liveBackground })).toEqual({
+        ...status,
+        liveBackground
+      })
+    }
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        liveBackground: { ...shader, id: 'lava-lamp' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        liveBackground: { ...shader, shader: 'void main() {}' }
+      })
+    ).toThrow('shader must be a known field')
+  })
+
   it('semantically rejects malformed preview state responses and events', () => {
     const surfaceStatus = {
       state: 'live',

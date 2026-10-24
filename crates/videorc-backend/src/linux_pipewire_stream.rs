@@ -18,10 +18,15 @@ use pw::spa::pod::Pod;
 use crate::linux_portal_capture::{PortalPixelLayout, copy_to_bgra};
 
 /// One negotiated frame, already converted to packed BGRA.
+///
+/// `bgra` is the stream's own conversion buffer, lent for the call. Plan 191:
+/// the consumer publishes it as is and leaves a frame-store buffer in its
+/// place, instead of copying the frame a second time; the next conversion
+/// resizes and overwrites whatever buffer it finds there.
 pub struct PipewireFrame<'a> {
     pub width: u32,
     pub height: u32,
-    pub bgra: &'a [u8],
+    pub bgra: &'a mut Vec<u8>,
 }
 
 #[derive(Default)]
@@ -144,7 +149,7 @@ pub fn run_pipewire_capture(
                 on_frame(PipewireFrame {
                     width,
                     height,
-                    bgra: &scratch,
+                    bgra: &mut scratch,
                 });
             }
             user_data.scratch = scratch;

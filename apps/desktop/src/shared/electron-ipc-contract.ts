@@ -1484,8 +1484,13 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
   'comments-window:dashboard-get': invokeContract(noArgs, dashboardSchema),
-  'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
-  'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema])),
+  // Plan 191: void. The main renderer discards both results; a view here would
+  // be a full validation walk and clone of up to 2,000 messages per message.
+  'comments-window:push-snapshot': invokeContract(
+    tupleSchema([commentsViewSchema]),
+    undefinedSchema
+  ),
+  'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema]), undefinedSchema),
   'comments-window:get-snapshot': invokeContract(noArgs, commentsViewSchema),
   'account:begin-sign-in': invokeContract(tupleSchema([accountAuthorizeUrl])),
   'account:refresh': invokeContract(noArgs, videorcAccountRefreshResultSchema),
@@ -1686,9 +1691,26 @@ const specificRuntimeInvokeContracts = {
   'banners:pick-image': invokeContract(noArgs, nullableSchema(inputFileSelectionSchema)),
   // Plan 189: Import sounds… (several files at once, none on cancel), and the
   // starter sounds the main window seeds and restores.
+  // Release test 147, plan 0006: the files main couldn't open come back by
+  // name with a fixed sentence, so the renderer can say so.
   'sounds:pick-files': invokeContract(
     noArgs,
-    arraySchema(inputFileSelectionSchema, { maxLength: SOUND_MAX_COUNT })
+    objectSchema(
+      {
+        selections: arraySchema(inputFileSelectionSchema, { maxLength: SOUND_MAX_COUNT }),
+        leftOut: arraySchema(
+          objectSchema(
+            {
+              displayName: stringSchema({ maxLength: 32_768 }),
+              reason: stringSchema({ minLength: 1, maxLength: 512 })
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: SOUND_MAX_COUNT }
+        )
+      },
+      { allowUnknown: false }
+    )
   ),
   'sounds:starter-list': invokeContract(noArgs, starterSoundsSchema),
   'sounds:starter-files': invokeContract(

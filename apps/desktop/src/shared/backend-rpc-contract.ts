@@ -1525,6 +1525,30 @@ const sceneEditorDraftAckSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<SceneEditorDraftAck>
 
+// Plan 190: how the live background draws (Rust `LiveBackgroundStatus`).
+const liveBackgroundStatusSchema = objectSchema(
+  {
+    id: enumSchema(['silk', 'side-rays', 'plasma-wave', 'liquid-chrome', 'line-waves']),
+    look: boundedString,
+    rendering: enumSchema(['shader', 'half', 'still']),
+    reason: optionalSchema(
+      enumSchema([
+        'forced',
+        'legacy-graph',
+        'cpu-fallback',
+        'no-gpu',
+        'software-gpu',
+        'quarantined-node',
+        'shader-compile-failed',
+        'gpu-budget'
+      ])
+    ),
+    p95Ms: optionalSchema(numberSchema({ min: 0 })),
+    requestedLook: optionalText
+  },
+  { allowUnknown: false }
+)
+
 const compositorStatusSchema = objectSchema(
   {
     state: enumSchema(['stopped', 'starting', 'live', 'failed']),
@@ -1551,6 +1575,7 @@ const compositorStatusSchema = objectSchema(
     imageCache: optionalSchema(boundedBackendPayloadSchema),
     framePipeline: optionalSchema(boundedBackendPayloadSchema),
     editorDraft: optionalSchema(nullableSchema(sceneEditorDraftStatusSchema)),
+    liveBackground: optionalSchema(liveBackgroundStatusSchema),
     updatedAt: timestamp,
     message: optionalText
   },
@@ -3279,7 +3304,8 @@ const soundsPlaybackSchema = objectSchema(
         { allowUnknown: false }
       ),
       { maxLength: SOUND_MAX_VOICES }
-    )
+    ),
+    sessionWithoutSounds: optionalSchema(literalSchema(true))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<SoundsPlayback>

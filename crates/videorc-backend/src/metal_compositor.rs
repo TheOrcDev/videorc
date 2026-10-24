@@ -47,8 +47,8 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 
-type MetalDevice = ProtocolObject<dyn MTLDevice>;
-type MetalTexture = ProtocolObject<dyn MTLTexture>;
+pub type MetalDevice = ProtocolObject<dyn MTLDevice>;
+pub type MetalTexture = ProtocolObject<dyn MTLTexture>;
 
 const SHADER_SOURCE: &str = r#"
 #include <metal_stdlib>
@@ -275,6 +275,10 @@ pub struct GpuSource<'a> {
     /// Multiplies the quad's alpha (needs `blend`); 1 for everything but
     /// the Buddy sprite.
     pub opacity: f32,
+    /// A texture this compositor's device already rendered (plan 190: the
+    /// live background frame). Drawn as it is: no import, no upload and no
+    /// cache slot; `bgra` is ignored.
+    pub texture: Option<&'a MetalTexture>,
 }
 
 /// The sampler a quad reads with (plan 168 D7).
@@ -1238,6 +1242,19 @@ impl MetalSceneCompositor {
         })
     }
 
+    /// The device this compositor renders on, for a renderer that shares it
+    /// (plan 190: the live background renders its frame on the leg's device
+    /// and queue, in its own command buffer, so the compose draws a texture
+    /// of this device with no import).
+    pub fn device(&self) -> &Retained<MetalDevice> {
+        &self.device
+    }
+
+    /// The queue this compositor commits on (see `device`).
+    pub fn queue(&self) -> &Retained<ProtocolObject<dyn MTLCommandQueue>> {
+        &self.queue
+    }
+
     /// Swaps the scene sampler in place (instant-record P4): an armed preview
     /// compositor switches to the recording's nearest sampler and back without
     /// rebuilding the device, pipelines or texture caches. Returns false when
@@ -1394,34 +1411,45 @@ impl MetalSceneCompositor {
                 layer: [source.opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
-            let source_texture_started_at = Instant::now();
-            let source_texture = self.ensure_source_texture(source_index, source);
-            let source_texture_elapsed_ms =
-                source_texture_started_at.elapsed().as_secs_f64() * 1000.0;
-            source_texture_ms += source_texture_elapsed_ms;
-            match source_texture {
-                Ok(ready) => {
-                    source_import_stats.record_ready(source.kind, ready, source_texture_elapsed_ms);
+            let texture = if let Some(external) = source.texture {
+                // Plan 190: a texture this device already rendered (the live
+                // background frame): no import, no upload, no cache slot.
+                external
+            } else {
+                let source_texture_started_at = Instant::now();
+                let source_texture = self.ensure_source_texture(source_index, source);
+                let source_texture_elapsed_ms =
+                    source_texture_started_at.elapsed().as_secs_f64() * 1000.0;
+                source_texture_ms += source_texture_elapsed_ms;
+                match source_texture {
+                    Ok(ready) => {
+                        source_import_stats.record_ready(
+                            source.kind,
+                            ready,
+                            source_texture_elapsed_ms,
+                        );
+                    }
+                    Err(failures) => {
+                        source_import_stats.record_failed_source(
+                            source.kind,
+                            failures,
+                            source_texture_elapsed_ms,
+                        );
+                        encode_result = Err(());
+                        break;
+                    }
                 }
-                Err(failures) => {
-                    source_import_stats.record_failed_source(
-                        source.kind,
-                        failures,
-                        source_texture_elapsed_ms,
-                    );
+                let texture = match keyed_slot_id(source) {
+                    Some(id) => self.keyed_texture(id),
+                    None => self.source_textures[source_index]
+                        .as_ref()
+                        .map(|cached| &*cached.texture),
+                };
+                let Some(texture) = texture else {
                     encode_result = Err(());
                     break;
-                }
-            }
-            let texture = match keyed_slot_id(source) {
-                Some(id) => self.keyed_texture(id),
-                None => self.source_textures[source_index]
-                    .as_ref()
-                    .map(|cached| &*cached.texture),
-            };
-            let Some(texture) = texture else {
-                encode_result = Err(());
-                break;
+                };
+                texture
             };
             let Some(params_ptr) = NonNull::new(std::ptr::addr_of!(params) as *mut c_void) else {
                 encode_result = Err(());
@@ -2854,6 +2882,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 2,
             height: 2,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3418,6 +3447,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3601,6 +3631,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 1920,
                 height: 1080,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -3619,6 +3650,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 320,
                 height: 180,
                 dest: [0.7, 0.7, 0.28, 0.28],
@@ -3650,6 +3682,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 2,
                 height: 2,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -3668,6 +3701,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 2,
                 height: 2,
                 dest: [0.0, 0.0, 0.5, 0.5],
@@ -3770,6 +3804,7 @@ mod tests {
             content_key: Some(key),
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3818,6 +3853,7 @@ mod tests {
             }),
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -3910,6 +3946,7 @@ mod tests {
                     .source_pixel_buffer
                     .as_ref()
                     .map(|retained| retained.pixel_buffer()),
+                texture: None,
                 width: w,
                 height: h,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -4069,6 +4106,7 @@ mod tests {
             }),
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -4175,6 +4213,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -4225,6 +4264,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width: w,
             height: h,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -4413,6 +4453,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 2,
             height: 2,
             dest: [0.5, 0.0, 0.5, 1.0],

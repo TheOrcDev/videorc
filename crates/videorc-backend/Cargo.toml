@@ -6,6 +6,10 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 anyhow = "1.0"
+# Plan 190: optional here only for the `live-background-gl-check` feature; the
+# Linux target table below always enables them.
+glow = { version = "0.16", optional = true }
+khronos-egl = { version = "6", features = ["dynamic"], optional = true }
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
@@ -51,7 +55,9 @@ objc2-core-media = { version = "0.3.2", default-features = false, features = ["C
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal", "objc2-io-surface"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSValue"] }
 objc2-io-surface = { version = "0.3.2", default-features = false, features = ["IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
-objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLBlitCommandEncoder", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "MTLBuffer", "MTLVertexDescriptor", "MTLArgument", "MTLDepthStencil", "MTLSampler", "MTLDrawable", "objc2-io-surface"] }
+# `objc2-core-foundation` exposes MTLCommandBuffer GPUStartTime/GPUEndTime: the
+# live background guard times its own command buffer with them (plan 190).
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLBlitCommandEncoder", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "MTLBuffer", "MTLVertexDescriptor", "MTLArgument", "MTLDepthStencil", "MTLSampler", "MTLDrawable", "objc2-io-surface", "objc2-core-foundation"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-metal", "CALayer", "CAMetalLayer", "CATransaction"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["SCShareableContent", "SCStream", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "block2", "objc2", "objc2-core-media", "objc2-core-video"] }
@@ -61,6 +67,11 @@ objc2-video-toolbox = { version = "0.3.2", default-features = false, features = 
 # zbus, and the PipeWire stream the portal grants.
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
 pipewire = "0.10"
+# Plan 190: the GLES live background renderer. EGL and GLES are loaded with
+# dlopen the first time a live background composes, so no system library is
+# linked and a machine without them shows the poster.
+khronos-egl = { version = "6", features = ["dynamic"] }
+glow = "0.16"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
@@ -72,6 +83,9 @@ tokio = { version = "1.48", features = ["test-util"] }
 [features]
 # Builds the dev-only pack example (plan 172); `cargo test` skips it otherwise.
 buddy-pack-example = []
+# Plan 190: type-check the Linux GLES live background renderer on any OS
+# (`cargo check --features live-background-gl-check`). Linux always builds it.
+live-background-gl-check = ["dep:khronos-egl", "dep:glow"]
 
 [[example]]
 name = "buddy_pack"

@@ -68,6 +68,10 @@ pub struct BackendBootstrap {
 pub struct ManagedAssetRoots {
     pub screens: String,
     pub banners: String,
+    /// The soundboard's `Sounds` folder (plan 189), served as
+    /// `videorc-asset://sound/<file>` to the monitor (release test 147,
+    /// plan 0002: it 404'd on Linux, so "Hear sounds yourself" was silent).
+    pub sounds: String,
 }
 
 pub fn authenticate_backend_token(

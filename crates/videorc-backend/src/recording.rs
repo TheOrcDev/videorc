@@ -405,9 +405,36 @@ enum WorkerMicrophoneFallback {
     /// Keep the resolved Windows DirectShow input; FFmpeg opens it directly
     /// as it did before the worker existed. Live replacement is unavailable.
     DirectDshow,
+    /// Keep the resolved Linux Pulse input, FFmpeg opening it directly as it
+    /// did before Linux microphones joined the session audio bus (release
+    /// test 147, plan 0001). The soundboard can't reach such a session.
+    DirectPulse,
     /// Record silence: no Windows input to fall back to, or the device is
     /// not in the DirectShow inventory, so a direct input would fail too.
     Silence,
+}
+
+/// Opts a Linux session back into FFmpeg's direct Pulse microphone input,
+/// the path before release test 147 plan 0001 (sounds can't reach it).
+const LINUX_MICROPHONE_DIRECT_ENV: &str = "VIDEORC_LINUX_MICROPHONE_DIRECT";
+
+/// The capture-worker device for a Linux Pulse microphone: the session audio
+/// bus takes it, like every other platform's microphone, so the soundboard,
+/// the mic gain/mute and the level meters run on the one PCM timeline
+/// (release test 147, plan 0001). `None` keeps every other input as it was,
+/// and keeps the direct input when `direct` is asked for.
+fn linux_pulse_worker_device(
+    microphone: Option<&MicrophoneInput>,
+    microphone_id: Option<&String>,
+    linux: bool,
+    direct: bool,
+) -> Option<String> {
+    match microphone {
+        Some(MicrophoneInput::LinuxPulse { .. }) if linux && !direct => microphone_id
+            .filter(|id| crate::linux_pulse_audio::parse_linux_pulse_microphone_id(id).is_some())
+            .cloned(),
+        _ => None,
+    }
 }
 
 fn worker_microphone_fallback(
@@ -420,6 +447,7 @@ fn worker_microphone_fallback(
         Some(MicrophoneInput::WindowsDshow { .. }) if !device_missing => {
             WorkerMicrophoneFallback::DirectDshow
         }
+        Some(MicrophoneInput::LinuxPulse { .. }) => WorkerMicrophoneFallback::DirectPulse,
         _ => WorkerMicrophoneFallback::Silence,
     }
 }
@@ -427,6 +455,14 @@ fn worker_microphone_fallback(
 fn worker_microphone_fallback_message(reason: &str) -> String {
     format!(
         "The microphone is live, but it can't be changed until this session ends. The capture worker could not open it ({reason}), so Videorc is recording it directly."
+    )
+}
+
+/// Release test 147, plan 0001: the direct Pulse input bypasses the session
+/// audio bus, so the soundboard can't reach this session; say so.
+fn linux_direct_microphone_message(reason: &str) -> String {
+    format!(
+        "The microphone is live, but soundboard sounds can't reach this recording or stream: Videorc couldn't put the microphone on its audio mix ({reason}), so it is recording it directly."
     )
 }
 
@@ -3922,6 +3958,12 @@ async fn start_session_with_timeline(
         {
             params.sources.microphone_id.clone()
         }
+        microphone @ Some(MicrophoneInput::LinuxPulse { .. }) => linux_pulse_worker_device(
+            microphone,
+            params.sources.microphone_id.as_ref(),
+            cfg!(target_os = "linux"),
+            std::env::var(LINUX_MICROPHONE_DIRECT_ENV).as_deref() == Ok("1"),
+        ),
         _ => None,
     };
     if let Some(id) = worker_device {
@@ -3957,6 +3999,24 @@ async fn start_session_with_timeline(
                             HealthLevel::Warn,
                             WORKER_MICROPHONE_FALLBACK_CODE,
                             &worker_microphone_fallback_message(&reason),
+                        );
+                        worker_fallback_reason = Some(reason);
+                    }
+                    WorkerMicrophoneFallback::DirectPulse => {
+                        capture.microphone = resolved_microphone.clone();
+                        let reason = format!("{error:#}");
+                        state.emit_log(
+                            "warn",
+                            format!(
+                                "Linux microphone capture fell back to FFmpeg's direct Pulse input: {reason}"
+                            ),
+                        );
+                        let _ = emit_health_event(
+                            &state,
+                            Some(&session_id),
+                            HealthLevel::Warn,
+                            WORKER_MICROPHONE_FALLBACK_CODE,
+                            &linux_direct_microphone_message(&reason),
                         );
                         worker_fallback_reason = Some(reason);
                     }
@@ -4817,6 +4877,23 @@ async fn start_session_with_timeline(
                 &notice.notice,
             );
         }
+    }
+    // Plan 190 D7: the legacy graph (4K60, bridge off) is static, so a live
+    // background records as its poster. Say so once, at start.
+    if !use_encoder_bridge
+        && params
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.background.as_ref())
+            .is_some_and(|background| background.live.is_some())
+    {
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "live-background-still",
+            crate::live_background::runtime::LEGACY_GRAPH_NOTICE,
+        );
     }
     #[cfg(target_os = "windows")]
     let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
@@ -6429,9 +6506,12 @@ async fn start_session_with_timeline(
         } else if cfg!(target_os = "linux")
             && matches!(
                 capture.microphone.as_ref(),
-                Some(MicrophoneInput::LinuxPulse { .. })
+                Some(MicrophoneInput::LinuxPulse { .. } | MicrophoneInput::SessionPcm { .. })
             )
+            && params.sources.microphone_id.is_some()
         {
+            // Release test 147, plan 0001: a Linux microphone on the session
+            // bus still can't be swapped mid-session; nothing has proved it.
             sources.microphone_unavailable("Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input.");
         }
         // Linux plan 0024: no Linux adapter swaps a screen or camera mid-
@@ -6574,6 +6654,12 @@ async fn start_session_with_timeline(
                 );
             }
         });
+    }
+    // Release test 147, plan 0001: a recording or stream whose audio skips
+    // the session bus (a Linux microphone FFmpeg had to open directly) can't
+    // carry sounds; every surface says so instead of claiming it does.
+    if session_soundboard.is_none() && !replay_only {
+        state.soundboard.session_without_bus(&state, &session_id);
     }
     if has_session_audio {
         tokio::spawn(sample_native_audio_during_recording(
@@ -18500,6 +18586,49 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
     }
 }
 
+/// Plan 181: a buffer-only session writes nothing permanent, so it blocks no
+/// update install or permission restart (main already reads it as idle). The
+/// interruption hands over from it the way Record and Go Live do, then takes
+/// the lease at once, before the renderer re-arms the ring. A re-arm that
+/// still lands first is handed over again, a bounded number of times.
+pub(crate) async fn admit_interruption_over_replay_buffer(
+    state: &AppState,
+    owner_id: &str,
+    action: &str,
+) -> std::result::Result<crate::capture_interruption::InterruptionLeaseGrant, String> {
+    let mut attempt = 1;
+    loop {
+        hand_over_replay_only_session(state)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        match state
+            .capture_interruption
+            .try_acquire_interruption(owner_id, action)
+        {
+            Ok(grant) => return Ok(grant),
+            Err(_)
+                if attempt < INTERRUPTION_HANDOVER_ATTEMPTS
+                    && replay_only_session_pending(state).await =>
+            {
+                attempt += 1;
+            }
+            Err(blocker) => return Err(blocker.to_string()),
+        }
+    }
+}
+
+async fn replay_only_session_pending(state: &AppState) -> bool {
+    crate::replay_buffer::start_in_flight(state)
+        || state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|active| active.replay_only)
+}
+
+const INTERRUPTION_HANDOVER_ATTEMPTS: u32 = 3;
+
 /// How long the handover waits for the buffer session's microphone and slot
 /// to release before the real session is admitted.
 const REPLAY_HANDOVER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29158,6 +29287,67 @@ mod tests {
         )
     }
 
+    /// Plan 181: only the Clips buffer yields to an update install; a real
+    /// session still refuses it and keeps running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interruption_admission_still_refuses_a_real_session() {
+        let state = test_state();
+        state
+            .capture_interruption
+            .try_begin_session_start()
+            .unwrap()
+            .commit();
+        *state.recording.lock().await = Some(test_active_recording_stub("real-session"));
+
+        let admission =
+            admit_interruption_over_replay_buffer(&state, "main/update", "update-install").await;
+
+        assert!(admission.is_err());
+        assert!(
+            state.recording.lock().await.is_some(),
+            "an update never stops a recording or a stream"
+        );
+        state.recording.lock().await.take();
+    }
+
+    /// The ring re-arms right after every Stop, so an update click can land
+    /// while a buffer-only start is still between admission and its running
+    /// session: admission waits it out instead of refusing the install.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interruption_admission_waits_out_a_clips_start_in_flight() {
+        let state = test_state();
+        let start_admission = state
+            .capture_interruption
+            .try_begin_session_start()
+            .unwrap();
+        let start_in_flight = crate::replay_buffer::begin_start_in_flight(&state);
+        let admit_state = state.clone();
+        let admit = tokio::spawn(async move {
+            admit_interruption_over_replay_buffer(&admit_state, "main/update", "update-install")
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!admit.is_finished(), "admission waits for the Clips start");
+
+        // The start ends without a running session (a refused start).
+        drop(start_in_flight);
+        drop(start_admission);
+
+        let grant = timeout(Duration::from_secs(2), admit)
+            .await
+            .expect("admission resolves once the Clips start ends")
+            .unwrap()
+            .expect("the update install is admitted");
+        assert!(!grant.consumed);
+        assert!(
+            state
+                .capture_interruption
+                .try_begin_session_start()
+                .is_err(),
+            "the lease now holds off the next Clips start"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn stop_waits_for_start_which_is_waiting_on_standby_microphone() {
         let state = test_state();
@@ -32474,6 +32664,64 @@ mod tests {
         );
         let message = worker_microphone_fallback_message("probe timed out");
         assert!(message.contains("microphone is live") && message.contains("probe timed out"));
+        // Release test 147, plan 0001: a Linux worker failure keeps the direct
+        // Pulse input, whatever the reason, and says the soundboard is out.
+        let pulse = MicrophoneInput::LinuxPulse {
+            source_name: "videorc_test_tone".to_string(),
+        };
+        for error in [&probe_timeout, &open_budget, &missing] {
+            assert_eq!(
+                worker_microphone_fallback(Some(&pulse), error),
+                WorkerMicrophoneFallback::DirectPulse,
+                "{error}"
+            );
+        }
+        let linux = linux_direct_microphone_message("pulse refused");
+        assert!(linux.contains("soundboard") && linux.contains("pulse refused"));
+    }
+
+    #[test]
+    fn a_linux_pulse_microphone_goes_through_the_session_bus_worker() {
+        // Release test 147, plan 0001: FFmpeg's direct Pulse input bypassed
+        // the session audio bus, so no soundboard press reached the output.
+        let pulse = MicrophoneInput::LinuxPulse {
+            source_name: "videorc_test_tone".to_string(),
+        };
+        let id = crate::linux_pulse_audio::linux_pulse_microphone_id("videorc_test_tone");
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), Some(&id), true, false),
+            Some(id.clone())
+        );
+        // The opt-out keeps the old direct input; other platforms never take
+        // this arm; a foreign or missing id is not guessed at.
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), Some(&id), true, true),
+            None
+        );
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), Some(&id), false, false),
+            None
+        );
+        assert_eq!(
+            linux_pulse_worker_device(
+                Some(&pulse),
+                Some(&"microphone:coreaudio:42".to_string()),
+                true,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), None, true, false),
+            None
+        );
+        let dshow = MicrophoneInput::WindowsDshow {
+            device_name: "Microphone Array".to_string(),
+        };
+        assert_eq!(
+            linux_pulse_worker_device(Some(&dshow), Some(&id), true, false),
+            None
+        );
     }
 
     #[tokio::test]
@@ -38167,6 +38415,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         params.scene = Some(scene);
 
@@ -38278,6 +38527,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: visibility,
+            live: None,
         };
         let filter_at = |visibility: f64| {
             let mut scene = base_scene.clone();

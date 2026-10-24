@@ -64,8 +64,9 @@ mod linux_portal_capture;
 mod linux_portal_session;
 mod linux_pulse_audio;
 mod linux_v4l2_camera;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", feature = "live-background-gl-check"))]
 mod linux_vaapi;
+mod live_background;
 mod live_chat;
 mod live_chat_moderation;
 mod live_chat_persistence;
@@ -191,7 +192,7 @@ use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Html;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -620,7 +621,8 @@ async fn run_backend() -> Result<()> {
         )
         .route("/oauth/callback", get(oauth_callback_handler))
         .route("/ws", get(ws_handler))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .layer(axum::middleware::map_response(default_no_store));
 
     // READY is a private bootstrap message consumed by Electron main. Main
     // must strip `adminToken` before any log, smoke marker, preload response,
@@ -692,7 +694,8 @@ async fn run_backend() -> Result<()> {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
                 .route("/oauth/callback", get(oauth_callback_handler))
-                .with_state(state.clone());
+                .with_state(state.clone())
+                .layer(axum::middleware::map_response(default_no_store));
             state.emit_log(
                 "info",
                 format!("OAuth callback listener bound on 127.0.0.1:{oauth_port}."),
@@ -1006,11 +1009,13 @@ fn backend_bootstrap(state: &AppState) -> BackendBootstrap {
     }
 }
 
-/// The folders behind `videorc-asset://screen|banner/<file>` (plan 0005).
+/// The folders behind `videorc-asset://screen|banner|sound/<file>` (release
+/// test 146 plan 0005, release test 147 plan 0002).
 fn managed_asset_roots(database: &Database) -> backend_authority::ManagedAssetRoots {
     backend_authority::ManagedAssetRoots {
         screens: database.screen_assets_dir().to_string_lossy().into_owned(),
         banners: database.banner_assets_dir().to_string_lossy().into_owned(),
+        sounds: database.sound_assets_dir().to_string_lossy().into_owned(),
     }
 }
 
@@ -1233,20 +1238,28 @@ async fn acquire_interruption_lease_handler(
         )
             .into_response();
     }
-    match state
-        .capture_interruption
-        .try_acquire_interruption(&query.owner_id, &query.action)
-    {
+    // Plan 181: the Clips buffer-only session yields to the interruption. The
+    // handover stops a session, so it runs detached: a dropped request never
+    // cancels that stop halfway.
+    let admission_state = state.clone();
+    let owner_id = query.owner_id.clone();
+    let action = query.action.clone();
+    let admission = tokio::spawn(async move {
+        recording::admit_interruption_over_replay_buffer(&admission_state, &owner_id, &action).await
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Interruption admission stopped: {error}")));
+    match admission {
         Ok(grant) => (
             StatusCode::CREATED,
             Json(interruption_lease_response(grant)),
         )
             .into_response(),
-        Err(blocker) => (
+        Err(message) => (
             StatusCode::CONFLICT,
             Json(InterruptionLeaseErrorResponse {
                 code: "capture-not-idle",
-                message: blocker.to_string(),
+                message,
             }),
         )
             .into_response(),
@@ -1312,6 +1325,21 @@ async fn release_interruption_lease_handler(
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
+}
+
+/// Plan 191: Chromium's HTTP cache stores any response without a
+/// Cache-Control header. The handlers mark their successes `no-store`, but
+/// their bare 401/400/403/404/500s carried no header, and builds from
+/// June–July 2026 that polled `/preview/{camera,screen}/live.png` with a fresh
+/// `t=` left ~472K cached 404s (~2 GB) that Chromium never evicts. So every
+/// response from the backend's routers is `no-store` unless its handler
+/// already chose a Cache-Control, which is kept exactly as it is.
+async fn default_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn preview_handler(
@@ -13867,7 +13895,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ready_names_the_screens_and_banners_folders_beside_the_database() {
+    fn ready_names_the_screens_banners_and_sounds_folders_beside_the_database() {
         // Release test 146, plan 0005: main serves videorc-asset://screen and
         // ://banner from these roots, so they must be the backend's own.
         let directory =
@@ -13882,9 +13910,18 @@ mod tests {
             std::path::PathBuf::from(&roots.banners),
             directory.join("Banners")
         );
+        // Release test 147, plan 0002: the monitor's sounds too.
+        assert_eq!(
+            std::path::PathBuf::from(&roots.sounds),
+            directory.join("Sounds")
+        );
+        assert_eq!(
+            std::path::PathBuf::from(&roots.sounds),
+            database.sound_assets_dir()
+        );
         assert_eq!(
             serde_json::to_value(&roots).unwrap(),
-            json!({ "screens": roots.screens, "banners": roots.banners })
+            json!({ "screens": roots.screens, "banners": roots.banners, "sounds": roots.sounds })
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -20045,6 +20082,77 @@ mod tests {
             .await
             .expect("graceful Axum server completion")
             .expect("graceful Axum server task");
+    }
+
+    #[tokio::test]
+    async fn default_no_store_marks_a_bare_error_response_no_store() {
+        // Plan 191: a bare error carried no Cache-Control, so Chromium cached it.
+        let response = default_no_store(StatusCode::NOT_FOUND.into_response()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+    }
+
+    #[tokio::test]
+    async fn default_no_store_keeps_an_explicit_cache_control() {
+        // The poster's stronger header is its handler's choice: kept, never doubled.
+        let response = default_no_store(
+            (
+                [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")],
+                "poster",
+            )
+                .into_response(),
+        )
+        .await;
+        let values: Vec<_> = response
+            .headers()
+            .get_all(header::CACHE_CONTROL)
+            .iter()
+            .collect();
+        assert_eq!(
+            values,
+            [&HeaderValue::from_static(
+                "no-store, no-cache, must-revalidate"
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_no_store_layer_marks_a_routed_404_no_store() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
+            .layer(axum::middleware::map_response(default_no_store));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // The handler's own 404, then the router's fallback 404 for a path
+        // that has no route: both leave the server marked no-store.
+        for path in ["/missing", "/no-such-route"] {
+            let response = timeout(
+                Duration::from_secs(2),
+                reqwest::Client::new()
+                    .get(format!("http://{address}{path}"))
+                    .send(),
+            )
+            .await
+            .expect("no-store HTTP response")
+            .expect("no-store HTTP request");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(reqwest::header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{path}"
+            );
+        }
+        server.abort();
     }
 
     #[tokio::test]
