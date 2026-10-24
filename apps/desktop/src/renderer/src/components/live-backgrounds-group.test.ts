@@ -6,15 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
 import {
   applyLiveBackground,
-  applySlot,
   createDefaultRegistry,
   liveSceneBackground,
-  defaultLiveBackgroundSettings,
   reconcileRegistry,
-  setLiveBackgroundSettings,
   type BackgroundAssetRegistry,
   type LiveBackgroundStatusView
 } from '@/lib/background-assets'
+import {
+  applySlot,
+  defaultLiveBackgroundSettings,
+  setLiveBackgroundSettings
+} from '@/lib/background-library'
 import { STORAGE_KEYS } from '@/lib/capture'
 import { AssetsTab } from '@/components/tabs/assets-tab'
 

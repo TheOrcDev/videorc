@@ -9191,36 +9191,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       workingBackgroundRef.current = background
       setWorkingBackground(background)
       const registry = backgroundRegistryRef.current
-      if (background?.live) {
-        // Plan 190: a committed live background is the registry's truth.
-        const nextRegistry = registryForCommittedLiveBackground(registry, background)
-        if (nextRegistry !== registry) {
-          libraryBackgroundFingerprintRef.current = JSON.stringify(
-            snapshotBackground(effectiveSceneBackground(nextRegistry))
-          )
-          setBackgroundRegistry(nextRegistry)
-        }
-      } else {
-        const pictureRegistry = { ...registry, live: { ...registry.live, activeId: null } }
-        const activeSlotId = background
+      const activeSlotId =
+        background && !background.live
           ? (registry.slots.find(
               (slot) =>
                 slot.assetId === background.assetId &&
                 slot.status === 'ready' &&
                 JSON.stringify(
                   snapshotBackground(
-                    effectiveSceneBackground({ ...pictureRegistry, activeSlotId: slot.id })
+                    effectiveSceneBackground({ ...registry, activeSlotId: slot.id })
                   )
                 ) === JSON.stringify(snapshotBackground(background))
             )?.id ?? null)
           : null
-        if (registry.activeSlotId !== activeSlotId || registry.live.activeId !== null) {
-          const nextRegistry = { ...pictureRegistry, activeSlotId }
-          libraryBackgroundFingerprintRef.current = JSON.stringify(
-            snapshotBackground(effectiveSceneBackground(nextRegistry))
-          )
-          setBackgroundRegistry(nextRegistry)
-        }
+      // Plan 190: a committed live background is the registry's truth; a
+      // picture or none takes the live one off.
+      const nextRegistry = background?.live
+        ? registryForCommittedLiveBackground(registry, background)
+        : registry.activeSlotId === activeSlotId && !registry.live.activeId
+          ? registry
+          : { ...registry, activeSlotId, live: { ...registry.live, activeId: null } }
+      if (nextRegistry !== registry) {
+        libraryBackgroundFingerprintRef.current = JSON.stringify(
+          snapshotBackground(effectiveSceneBackground(nextRegistry))
+        )
+        setBackgroundRegistry(nextRegistry)
       }
       workingOriginRef.current = snapshot.origin ?? 'builtin'
       const savedId = snapshot.savedSceneId ?? null
@@ -9907,11 +9902,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (slotId: string | null): void => {
       const registry = backgroundRegistryRef.current
       const background = slotId
-        ? effectiveSceneBackground({
-            ...registry,
-            activeSlotId: slotId,
-            live: { ...registry.live, activeId: null }
-          })
+        ? effectiveSceneBackground({ ...registry, activeSlotId: slotId })
         : null
       void requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false,

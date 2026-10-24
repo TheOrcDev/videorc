@@ -16,10 +16,10 @@ import {
 } from './scene-presets'
 import {
   createDefaultRegistry,
-  applySlot,
   effectiveSceneBackground,
   liveSceneBackground
 } from './background-assets'
+import { applySlot } from './background-library'
 
 const visual = () =>
   normalizeSceneVisual({

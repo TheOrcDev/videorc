@@ -21,13 +21,12 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { useStudioCore } from '@/hooks/use-studio'
+import { liveBackgroundSettings, type LiveBackgroundSettings } from '@/lib/background-assets'
 import {
   BACKGROUND_STYLE_FIELDS,
   defaultLiveBackgroundSettings,
-  liveBackgroundSettings,
-  setLiveBackgroundSettings,
-  type LiveBackgroundSettings
-} from '@/lib/background-assets'
+  setLiveBackgroundSettings
+} from '@/lib/background-library'
 import {
   LIVE_BACKGROUND_CATALOG,
   LIVE_BACKGROUND_CREDIT,

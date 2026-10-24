@@ -27,28 +27,30 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import {
-  BACKGROUND_STYLE_FIELDS,
-  createImportedAsset,
   defaultBackgroundStyle,
-  importIntoSlot,
-  backgroundAssetDisplayUrl,
-  markSlotMissingIfAssetMatches,
-  markSlotStatus,
   removeSlotAsset,
-  removeSlotNeedsConfirm,
-  restoreSlotDefault,
-  renameAsset,
-  setAssetStyle,
   slotAsset,
-  slotDisplayStatus,
-  slotName,
   type BackgroundAsset,
   type BackgroundAssetRegistry,
   type BackgroundAssetSlot,
   type BackgroundAssetSlotStatus,
-  type BackgroundFit,
-  backgroundImportTarget
+  type BackgroundFit
 } from '@/lib/background-assets'
+import {
+  BACKGROUND_STYLE_FIELDS,
+  createImportedAsset,
+  importIntoSlot,
+  backgroundAssetDisplayUrl,
+  markSlotMissingIfAssetMatches,
+  markSlotStatus,
+  removeSlotNeedsConfirm,
+  restoreSlotDefault,
+  renameAsset,
+  setAssetStyle,
+  slotDisplayStatus,
+  slotName,
+  backgroundImportTarget
+} from '@/lib/background-library'
 import {
   BackgroundReplaceDialog,
   type PendingBackgroundReplace

@@ -1,9 +1,5 @@
-import {
-  applySlot,
-  createImportedAsset,
-  importIntoSlot,
-  type BackgroundAssetRegistry
-} from '@/lib/background-assets'
+import { type BackgroundAssetRegistry } from '@/lib/background-assets'
+import { applySlot, createImportedAsset, importIntoSlot } from '@/lib/background-library'
 import type { CaptureConfig } from '@/lib/capture'
 import type { ObsImportPlanResult } from '@/lib/obs-import-map'
 

@@ -4,25 +4,30 @@ import {
   BACKGROUND_SLOT_COUNT,
   applyBundledBackgroundAssets,
   applyLiveBackground,
+  createDefaultRegistry,
+  defaultBackgroundStyle,
+  effectiveSceneBackground,
+  liveBackgroundSettings,
+  liveSceneBackground,
+  nextLiveBackgroundStatusView,
+  reconcileRegistry,
+  registryForCommittedLiveBackground,
+  removeSlotAsset,
+  type BackgroundAsset,
+  type BackgroundAssetRegistry,
+  type BackgroundAssetSlot
+} from './background-assets'
+import {
   applySlot,
   backgroundAssetDisplayUrl,
   backgroundImportTarget,
   canApplySlot,
   checkableBackgroundAssetPath,
   clearActiveSlot,
-  createDefaultRegistry,
   createImportedAsset,
-  defaultBackgroundStyle,
-  effectiveSceneBackground,
   importIntoSlot,
-  liveBackgroundSettings,
-  liveSceneBackground,
   markSlotStatus,
   markSlotMissingIfAssetMatches,
-  nextLiveBackgroundStatusView,
-  reconcileRegistry,
-  registryForCommittedLiveBackground,
-  removeSlotAsset,
   removeSlotNeedsConfirm,
   restoreSlotDefault,
   renameAsset,
@@ -30,11 +35,8 @@ import {
   setLiveBackgroundSettings,
   slotDisplayStatus,
   slotName,
-  unattendedImportSlot,
-  type BackgroundAsset,
-  type BackgroundAssetRegistry,
-  type BackgroundAssetSlot
-} from './background-assets'
+  unattendedImportSlot
+} from './background-library'
 
 function importedAsset(id: string, name: string): BackgroundAsset {
   return createImportedAsset({

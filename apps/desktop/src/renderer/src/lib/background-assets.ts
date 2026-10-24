@@ -1,4 +1,8 @@
-// Background assets domain model (Assets Tab plan, slice A2).
+// Background assets domain model (Assets Tab plan, slice A2): the core the
+// eager bundle needs (load, reconcile, the scene's effective background and
+// the commit sync). The Assets page's editing helpers live in
+// `background-library.ts`, which only lazy chunks import (plan 190: every
+// export of a module in the eager chunk ships eagerly).
 //
 // Assets owns reusable background material; Scene owns which one is active. This
 // registry ships ten bundled preset backgrounds, then lets users replace slots
@@ -24,9 +28,8 @@ import {
   LIVE_BACKGROUND_DEFAULT_LOOKS,
   LIVE_BACKGROUND_IDS,
   isLiveBackgroundId,
-  isLiveBackgroundLook,
   livePosterAssetId,
-  livePosterFileName,
+  parseLivePosterAssetId,
   type LiveBackgroundId,
   type LiveBackgroundMotion
 } from '../../../shared/live-background-ids'
@@ -131,28 +134,6 @@ export const BACKGROUND_SLOT_COUNT = SLOT_DEFS.length
 
 export type NumericStyleField = Exclude<keyof BackgroundStyle, 'fit'>
 
-// The numeric background-style controls in display order, with their ranges and
-// units. Shared by the Assets inspector (edits asset defaults) and the Scene tab
-// (edits per-scene overrides) so both render the same controls. `fit` is a
-// separate segmented control, not a slider.
-export const BACKGROUND_STYLE_FIELDS: readonly {
-  key: NumericStyleField
-  label: string
-  min: number
-  max: number
-  suffix?: string
-  bipolar?: boolean
-}[] = [
-  { key: 'visibilityPercent', label: 'Visibility', min: 0, max: 40, suffix: '%' },
-  { key: 'scale', label: 'Scale', min: 50, max: 200, suffix: '%' },
-  { key: 'offsetX', label: 'Pan X', min: -100, max: 100, bipolar: true },
-  { key: 'offsetY', label: 'Pan Y', min: -100, max: 100, bipolar: true },
-  { key: 'blurPx', label: 'Blur', min: 0, max: 40, suffix: 'px' },
-  { key: 'dimPercent', label: 'Dim', min: 0, max: 80, suffix: '%' },
-  { key: 'saturationPercent', label: 'Saturation', min: 0, max: 150, suffix: '%' },
-  { key: 'vignettePercent', label: 'Vignette', min: 0, max: 100, suffix: '%' }
-]
-
 export function defaultBackgroundStyle(): BackgroundStyle {
   return {
     fit: 'fill',
@@ -193,21 +174,12 @@ export function createDefaultRegistry(): BackgroundAssetRegistry {
   }
 }
 
-export function defaultLiveBackgroundSettings(id: LiveBackgroundId): LiveBackgroundSettings {
-  return {
-    look: LIVE_BACKGROUND_DEFAULT_LOOKS[id],
-    motion: 'calm',
-    dimPercent: 0,
-    visibilityPercent: defaultBackgroundStyle().visibilityPercent
-  }
-}
-
 /** A live background's stored choices, or its defaults. */
 export function liveBackgroundSettings(
   registry: BackgroundAssetRegistry,
   id: LiveBackgroundId
 ): LiveBackgroundSettings {
-  return registry.live.settings[id] ?? defaultLiveBackgroundSettings(id)
+  return normalizeLiveSettings(id, registry.live.settings[id])
 }
 
 /** Put a live background on the scene; the picture slot leaves it. */
@@ -216,23 +188,6 @@ export function applyLiveBackground(
   id: LiveBackgroundId
 ): BackgroundAssetRegistry {
   return { ...registry, activeSlotId: null, live: { ...registry.live, activeId: id } }
-}
-
-export function setLiveBackgroundSettings(
-  registry: BackgroundAssetRegistry,
-  id: LiveBackgroundId,
-  patch: Partial<LiveBackgroundSettings>
-): BackgroundAssetRegistry {
-  return {
-    ...registry,
-    live: {
-      ...registry.live,
-      settings: {
-        ...registry.live.settings,
-        [id]: normalizeLiveSettings(id, { ...liveBackgroundSettings(registry, id), ...patch })
-      }
-    }
-  }
 }
 
 function builtinAssetId(slotId: string): string {
@@ -253,7 +208,7 @@ function createBuiltinAsset(def: (typeof SLOT_DEFS)[number]): BackgroundAsset {
   }
 }
 
-function builtinAssetForSlot(slotId: string): BackgroundAsset | null {
+export function builtinAssetForSlot(slotId: string): BackgroundAsset | null {
   const def = SLOT_DEFS.find((entry) => entry.id === slotId)
   return def ? createBuiltinAsset(def) : null
 }
@@ -263,63 +218,6 @@ export function slotAsset(
   registry: BackgroundAssetRegistry
 ): BackgroundAsset | null {
   return slot.assetId ? (registry.assets[slot.assetId] ?? null) : null
-}
-
-// An imported asset's name wins; a placeholder slot shows its curated label.
-export function slotName(slot: BackgroundAssetSlot, registry: BackgroundAssetRegistry): string {
-  return slotAsset(slot, registry)?.name ?? slot.defaultLabel
-}
-
-// 'active' is derived, never stored: a slot reads as active only when it is the
-// registry's active slot AND actually holds a usable image.
-export function slotDisplayStatus(
-  slot: BackgroundAssetSlot,
-  registry: BackgroundAssetRegistry
-): BackgroundAssetSlotStatus {
-  if (registry.activeSlotId === slot.id && slot.status === 'ready') {
-    return 'active'
-  }
-  return slot.status
-}
-
-export function canApplySlot(slot: BackgroundAssetSlot): boolean {
-  return slot.status === 'ready'
-}
-
-// Explicit Apply — selecting a tile must NOT call this. Applying a non-ready
-// slot is a no-op so the active background can never point at an empty slot.
-export function applySlot(
-  registry: BackgroundAssetRegistry,
-  slotId: string
-): BackgroundAssetRegistry {
-  const slot = registry.slots.find((entry) => entry.id === slotId)
-  if (!slot) {
-    return registry
-  }
-  const asset = slotAsset(slot, registry)
-  const canRecoverBundledSlot = slot.status === 'missing-file' && asset?.kind === 'builtin'
-  if (!canApplySlot(slot) && !canRecoverBundledSlot) {
-    return registry
-  }
-  return {
-    ...registry,
-    activeSlotId: slotId,
-    live: { ...registry.live, activeId: null },
-    slots: canRecoverBundledSlot
-      ? registry.slots.map(
-          (entry): BackgroundAssetSlot =>
-            entry.id === slotId ? { ...entry, status: 'ready' } : entry
-        )
-      : registry.slots
-  }
-}
-
-// Recording without a digital background is always valid, so clearing is always
-// allowed.
-export function clearActiveSlot(registry: BackgroundAssetRegistry): BackgroundAssetRegistry {
-  return registry.activeSlotId === null && registry.live.activeId === null
-    ? registry
-    : { ...registry, activeSlotId: null, live: { ...registry.live, activeId: null } }
 }
 
 export function applyBundledBackgroundAssets(
@@ -377,151 +275,6 @@ export function applyBundledBackgroundAssets(
   return changed ? { ...registry, assets, slots } : registry
 }
 
-// Build an imported asset record from the main process's copy result plus the
-// caller's timestamps (kept out of this pure module so it stays deterministic).
-export function createImportedAsset(input: {
-  id: string
-  name: string
-  assetPath: string
-  thumbnailPath?: string
-  createdAt: string
-  updatedAt: string
-  styleDefaults?: BackgroundStyle
-}): BackgroundAsset {
-  return {
-    id: input.id,
-    name: input.name,
-    kind: 'imported',
-    assetPath: input.assetPath,
-    thumbnailPath: input.thumbnailPath ?? input.assetPath,
-    status: 'ready',
-    styleDefaults: input.styleDefaults ?? defaultBackgroundStyle(),
-    createdAt: input.createdAt,
-    updatedAt: input.updatedAt
-  }
-}
-
-export function firstEmptySlotId(registry: BackgroundAssetRegistry): string | null {
-  return registry.slots.find((slot) => slot.status === 'empty')?.id ?? null
-}
-
-/**
- * Where Assets' Import puts a new image (plan 174, C-2 and D14): the first
- * empty slot, or, with all ten in use (every fresh profile), the slot the
- * streamer picks under "Replace which background?", starting from the
- * active background, else the last slot.
- */
-export type BackgroundImportTarget =
-  | { kind: 'slot'; slotId: string }
-  | { kind: 'replace'; preselectedSlotId: string }
-
-export function backgroundImportTarget(
-  registry: BackgroundAssetRegistry
-): BackgroundImportTarget | null {
-  const empty = firstEmptySlotId(registry)
-  if (empty) return { kind: 'slot', slotId: empty }
-  const active = registry.slots.find((slot) => slot.id === registry.activeSlotId)
-  const preselected = active ?? registry.slots.at(-1)
-  return preselected ? { kind: 'replace', preselectedSlotId: preselected.id } : null
-}
-
-/**
- * Where an import nobody is asked about goes (the OBS import, C-7): the first
- * empty slot, else the last slot holding a built-in preset (Remove, then
- * Restore default, brings it back), else the last slot. `replaces` names the
- * background it takes the place of, so the report can say so before apply.
- */
-export function unattendedImportSlot(
-  registry: BackgroundAssetRegistry
-): { slotId: string; replaces: string | null } | null {
-  const empty = firstEmptySlotId(registry)
-  if (empty) return { slotId: empty, replaces: null }
-  const slot =
-    [...registry.slots].reverse().find((entry) => slotAsset(entry, registry)?.kind === 'builtin') ??
-    registry.slots.at(-1)
-  return slot ? { slotId: slot.id, replaces: slotName(slot, registry) } : null
-}
-
-// Link an imported asset into a slot, marking it ready. Replacing a slot's asset
-// drops the previous record so the registry can't leak orphaned assets.
-export function importIntoSlot(
-  registry: BackgroundAssetRegistry,
-  slotId: string,
-  asset: BackgroundAsset
-): BackgroundAssetRegistry {
-  const slot = registry.slots.find((entry) => entry.id === slotId)
-  if (!slot) {
-    return registry
-  }
-  const assets: Record<string, BackgroundAsset> = { ...registry.assets }
-  const previousAsset = slot.assetId ? assets[slot.assetId] : null
-  if (slot.assetId && slot.assetId !== asset.id && previousAsset?.kind !== 'builtin') {
-    delete assets[slot.assetId]
-  }
-  assets[asset.id] = asset
-  return {
-    ...registry,
-    assets,
-    slots: registry.slots.map(
-      (entry): BackgroundAssetSlot =>
-        entry.id === slotId ? { ...entry, assetId: asset.id, status: 'ready' } : entry
-    )
-  }
-}
-
-export function renameAsset(
-  registry: BackgroundAssetRegistry,
-  assetId: string,
-  name: string
-): BackgroundAssetRegistry {
-  const asset = registry.assets[assetId]
-  const trimmed = name.trim()
-  if (!asset || trimmed === '' || trimmed === asset.name) {
-    return registry
-  }
-  return {
-    ...registry,
-    assets: { ...registry.assets, [assetId]: { ...asset, name: trimmed } }
-  }
-}
-
-// Edit asset-level style defaults (Assets owns defaults; Scene overrides come in A5).
-export function setAssetStyle(
-  registry: BackgroundAssetRegistry,
-  assetId: string,
-  patch: Partial<BackgroundStyle>
-): BackgroundAssetRegistry {
-  const asset = registry.assets[assetId]
-  if (!asset) {
-    return registry
-  }
-  return {
-    ...registry,
-    assets: {
-      ...registry.assets,
-      [assetId]: { ...asset, styleDefaults: { ...asset.styleDefaults, ...patch } }
-    }
-  }
-}
-
-/**
- * Whether removing a slot's background asks first (plan 174 S0.3, C-12): when
- * it leaves the scene (the slot is active, or its asset is the scene's
- * background), or when it is an imported file (pruned on the next load, so
- * gone for good). Emptying a built-in slot is reversible (Restore default).
- */
-export function removeSlotNeedsConfirm(
-  registry: BackgroundAssetRegistry,
-  slotId: string,
-  sceneBackgroundAssetId: string | null | undefined
-): boolean {
-  const slot = registry.slots.find((entry) => entry.id === slotId)
-  if (!slot) return false
-  if (registry.activeSlotId === slotId) return true
-  if (slot.assetId !== null && slot.assetId === sceneBackgroundAssetId) return true
-  return slotAsset(slot, registry)?.kind === 'imported'
-}
-
 // Removing a library entry never deletes its managed file or saved-scene references.
 export function removeSlotAsset(
   registry: BackgroundAssetRegistry,
@@ -535,100 +288,6 @@ export function removeSlotAsset(
       slot.id === slotId ? { ...slot, assetId: null, status: 'empty' } : slot
     )
   }
-}
-
-export function restoreSlotDefault(
-  registry: BackgroundAssetRegistry,
-  slotId: string
-): BackgroundAssetRegistry {
-  const slot = registry.slots.find((entry) => entry.id === slotId)
-  const builtin = builtinAssetForSlot(slotId)
-  if (!slot || slot.assetId !== null || !builtin) return registry
-  return {
-    ...registry,
-    assets: { ...registry.assets, [builtin.id]: registry.assets[builtin.id] ?? builtin },
-    slots: registry.slots.map((entry) =>
-      entry.id === slotId ? { ...entry, assetId: builtin.id, status: 'ready' } : entry
-    )
-  }
-}
-
-/**
- * Display URL for a background asset path. Bundler URLs, data/blob/http and
- * relative paths pass through untouched; ABSOLUTE filesystem paths (imported
- * assets in app storage) are served through the scoped `videorc-asset://`
- * protocol — raw file:// subresources are blocked from the dev server's http
- * origin, which made fresh imports fail onError and get branded "Missing"
- * while the file sat safely on disk (post-0.9.4 fix batch F4).
- */
-export function backgroundAssetDisplayUrl(path: string): string {
-  if (
-    /^(blob|data|file|https?|videorc-asset):/i.test(path) ||
-    path.startsWith('/assets/') ||
-    path.startsWith('/src/') ||
-    path.startsWith('./') ||
-    path.startsWith('../') ||
-    !isAbsoluteBackgroundAssetPath(path)
-  ) {
-    return path
-  }
-  const normalized = path.replace(/\\/g, '/')
-  const baseName = normalized.slice(normalized.lastIndexOf('/') + 1)
-  return `videorc-asset://background/${encodeURIComponent(baseName)}`
-}
-
-/** Browser-safe absolute-path detection for paths returned by Electron. */
-export function isAbsoluteBackgroundAssetPath(path: string): boolean {
-  return (
-    path.startsWith('/') ||
-    /^[A-Za-z]:[\\/]/.test(path) ||
-    /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(path)
-  )
-}
-
-/** Only imported absolute files are safe and useful for the main-process existence oracle. */
-export function checkableBackgroundAssetPath(asset: BackgroundAsset | null): string | null {
-  const path = asset?.assetPath
-  return asset?.kind === 'imported' && path && isAbsoluteBackgroundAssetPath(path) ? path : null
-}
-
-// Set a slot's intrinsic status — used when an <img> fails to load to surface
-// 'missing-file' without dropping the active selection (A6 records without a
-// background and warns; A4 just shows the state).
-export function markSlotStatus(
-  registry: BackgroundAssetRegistry,
-  slotId: string,
-  status: IntrinsicSlotStatus
-): BackgroundAssetRegistry {
-  const slot = registry.slots.find((entry) => entry.id === slotId)
-  if (!slot || slot.status === status) {
-    return registry
-  }
-  return {
-    ...registry,
-    slots: registry.slots.map(
-      (entry): BackgroundAssetSlot => (entry.id === slotId ? { ...entry, status } : entry)
-    )
-  }
-}
-
-/** Apply an async missing-file result only while the checked asset still owns the slot. */
-export function markSlotMissingIfAssetMatches(
-  registry: BackgroundAssetRegistry,
-  slotId: string,
-  expectedAssetId: string,
-  expectedAssetPath: string
-): BackgroundAssetRegistry {
-  const slot = registry.slots.find((entry) => entry.id === slotId)
-  const currentAsset = slot ? slotAsset(slot, registry) : null
-  if (
-    currentAsset?.id !== expectedAssetId ||
-    currentAsset.assetPath !== expectedAssetPath ||
-    currentAsset.kind !== 'imported'
-  ) {
-    return registry
-  }
-  return markSlotStatus(registry, slotId, 'missing-file')
 }
 
 function numberOr(value: unknown, fallback: number): number {
@@ -781,58 +440,43 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   }
 }
 
-function normalizeLiveSettings(id: LiveBackgroundId, raw: unknown): LiveBackgroundSettings {
-  const base = defaultLiveBackgroundSettings(id)
-  if (!raw || typeof raw !== 'object') return base
-  const data = raw as Partial<LiveBackgroundSettings>
-  const clamp = (value: unknown, fallback: number, max: number): number =>
-    typeof value === 'number' && Number.isFinite(value)
-      ? Math.max(0, Math.min(max, value))
-      : fallback
+export function normalizeLiveSettings(id: LiveBackgroundId, raw: unknown): LiveBackgroundSettings {
+  const data = (raw ?? {}) as Partial<LiveBackgroundSettings>
+  const clamp = (value: unknown, max: number, fallback: number): number =>
+    Math.min(max, Math.max(0, numberOr(value, fallback)))
   return {
-    look: isLiveBackgroundLook(data.look) ? data.look : base.look,
+    // A look is any well-formed id; the backend draws the first look for one
+    // this build doesn't know.
+    look:
+      typeof data.look === 'string' && parseLivePosterAssetId(livePosterAssetId(id, data.look))
+        ? data.look
+        : LIVE_BACKGROUND_DEFAULT_LOOKS[id],
     motion: data.motion === 'normal' ? 'normal' : 'calm',
-    dimPercent: clamp(data.dimPercent, base.dimPercent, 80),
-    visibilityPercent: clamp(data.visibilityPercent, base.visibilityPercent, 40)
+    dimPercent: clamp(data.dimPercent, 80, 0),
+    visibilityPercent: clamp(data.visibilityPercent, 40, 20)
   }
 }
 
 function normalizeLiveState(raw: unknown): LiveBackgroundState {
-  const state: LiveBackgroundState = { activeId: null, settings: {} }
-  if (!raw || typeof raw !== 'object') return state
-  const data = raw as { activeId?: unknown; settings?: unknown }
-  state.activeId = isLiveBackgroundId(data.activeId) ? data.activeId : null
-  if (data.settings && typeof data.settings === 'object') {
-    for (const id of LIVE_BACKGROUND_IDS) {
-      const stored = (data.settings as Record<string, unknown>)[id]
-      if (stored !== undefined) state.settings[id] = normalizeLiveSettings(id, stored)
-    }
+  const data = (raw ?? {}) as Partial<LiveBackgroundState>
+  const settings: LiveBackgroundState['settings'] = {}
+  for (const id of LIVE_BACKGROUND_IDS) {
+    if (data.settings?.[id]) settings[id] = normalizeLiveSettings(id, data.settings[id])
   }
-  return state
+  return { activeId: isLiveBackgroundId(data.activeId) ? data.activeId : null, settings }
 }
 
-/** The bundled poster URL a live background's managed path names. */
-export function livePosterManagedPath(id: LiveBackgroundId, look: string): string {
-  return `videorc-asset://background/${encodeURIComponent(livePosterFileName(id, look))}`
-}
-
-/** The scene background for a live background with its stored choices. */
+/** The scene background for a live background with its choices: its poster plus the shader. */
 export function liveSceneBackground(
   id: LiveBackgroundId,
   settings: LiveBackgroundSettings
 ): EffectiveSceneBackground {
-  const style = defaultBackgroundStyle()
+  const assetId = livePosterAssetId(id, settings.look)
   return {
-    assetId: livePosterAssetId(id, settings.look),
-    managedAssetPath: livePosterManagedPath(id, settings.look),
-    fit: style.fit,
-    scale: style.scale,
-    offsetX: style.offsetX,
-    offsetY: style.offsetY,
-    blurPx: style.blurPx,
+    ...defaultBackgroundStyle(),
+    assetId,
+    managedAssetPath: `videorc-asset://background/${assetId}.webp`,
     dimPercent: settings.dimPercent,
-    saturationPercent: style.saturationPercent,
-    vignettePercent: style.vignettePercent,
     visibilityPercent: settings.visibilityPercent,
     live: { id, look: settings.look, motion: settings.motion }
   }
@@ -841,35 +485,25 @@ export function liveSceneBackground(
 /**
  * The registry after the backend committed a live `background` (the
  * transaction's truth): that live background becomes active, the picture slot
- * leaves, and its committed choices are remembered. Returns the same registry
- * when nothing changes.
+ * leaves, and its committed choices are remembered. The same registry when
+ * nothing changes.
  */
 export function registryForCommittedLiveBackground(
   registry: BackgroundAssetRegistry,
   background: EffectiveSceneBackground
 ): BackgroundAssetRegistry {
-  const live = background.live
+  const { live } = background
   if (!live || !isLiveBackgroundId(live.id)) return registry
-  const settings = normalizeLiveSettings(live.id, {
-    look: live.look,
-    motion: live.motion,
-    dimPercent: background.dimPercent,
-    visibilityPercent: background.visibilityPercent
-  })
-  const current = registry.live.settings[live.id]
-  if (
-    registry.activeSlotId === null &&
-    registry.live.activeId === live.id &&
-    current &&
-    JSON.stringify(current) === JSON.stringify(settings)
-  ) {
-    return registry
-  }
-  return {
+  const settings = normalizeLiveSettings(live.id, { ...live, ...background })
+  const next = {
     ...registry,
     activeSlotId: null,
     live: { activeId: live.id, settings: { ...registry.live.settings, [live.id]: settings } }
   }
+  return registry.activeSlotId === null &&
+    JSON.stringify(next.live) === JSON.stringify(registry.live)
+    ? registry
+    : next
 }
 
 /** How the applied live background is drawn, as Assets shows it. */
@@ -896,14 +530,9 @@ export function nextLiveBackgroundStatusView(
 export function effectiveSceneBackground(
   registry: BackgroundAssetRegistry
 ): EffectiveSceneBackground | null {
-  if (registry.live.activeId) {
-    return liveSceneBackground(
-      registry.live.activeId,
-      liveBackgroundSettings(registry, registry.live.activeId)
-    )
-  }
   if (!registry.activeSlotId) {
-    return null
+    const id = registry.live.activeId
+    return id ? liveSceneBackground(id, liveBackgroundSettings(registry, id)) : null
   }
   const slot = registry.slots.find((entry) => entry.id === registry.activeSlotId)
   if (!slot || slot.status !== 'ready') {

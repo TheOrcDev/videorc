@@ -4,36 +4,26 @@
 // catalogue (crates/videorc-backend/src/live_background/), and the generated
 // `live-backgrounds.catalog.generated.json` pins both to it.
 
-export const LIVE_BACKGROUND_IDS = [
-  'silk',
-  'side-rays',
-  'plasma-wave',
-  'liquid-chrome',
-  'line-waves'
-] as const
-
-export type LiveBackgroundId = (typeof LIVE_BACKGROUND_IDS)[number]
-
-/** Calm runs at half the React Bits speed (plan 190 D5). */
-export type LiveBackgroundMotion = 'calm' | 'normal'
-
-/** Each background's first look, applied by a click on its tile. */
-export const LIVE_BACKGROUND_DEFAULT_LOOKS: Readonly<Record<LiveBackgroundId, string>> = {
+/** Each live background with its first look, which a click on its tile applies. */
+export const LIVE_BACKGROUND_DEFAULT_LOOKS = {
   silk: 'satin',
   'side-rays': 'sunbeam',
   'plasma-wave': 'plasma',
   'liquid-chrome': 'polished',
   'line-waves': 'silk'
-}
+} as const
 
-const LOOK_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
+export type LiveBackgroundId = keyof typeof LIVE_BACKGROUND_DEFAULT_LOOKS
+
+export const LIVE_BACKGROUND_IDS = Object.keys(LIVE_BACKGROUND_DEFAULT_LOOKS) as LiveBackgroundId[]
+
+/** Calm runs at half the React Bits speed (plan 190 D5). */
+export type LiveBackgroundMotion = 'calm' | 'normal'
+
+const POSTER_ID = new RegExp(`^live-(${LIVE_BACKGROUND_IDS.join('|')})-([a-z][a-z0-9-]{0,31})$`)
 
 export function isLiveBackgroundId(value: unknown): value is LiveBackgroundId {
-  return typeof value === 'string' && (LIVE_BACKGROUND_IDS as readonly string[]).includes(value)
-}
-
-export function isLiveBackgroundLook(value: unknown): value is string {
-  return typeof value === 'string' && LOOK_PATTERN.test(value)
+  return LIVE_BACKGROUND_IDS.includes(value as LiveBackgroundId)
 }
 
 /** The bundled poster's managed asset id (`live-<id>-<look>`). */
@@ -50,10 +40,6 @@ export function livePosterFileName(id: LiveBackgroundId, look: string): string {
 export function parseLivePosterAssetId(
   assetId: string
 ): { id: LiveBackgroundId; look: string } | null {
-  if (!assetId.startsWith('live-')) return null
-  const rest = assetId.slice('live-'.length)
-  const id = LIVE_BACKGROUND_IDS.find((candidate) => rest.startsWith(`${candidate}-`))
-  if (!id) return null
-  const look = rest.slice(id.length + 1)
-  return isLiveBackgroundLook(look) ? { id, look } : null
+  const match = POSTER_ID.exec(assetId)
+  return match ? { id: match[1] as LiveBackgroundId, look: match[2] } : null
 }

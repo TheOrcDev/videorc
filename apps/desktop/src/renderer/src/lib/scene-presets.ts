@@ -14,11 +14,7 @@ import {
 } from './capture'
 import { BUILTIN_LAYOUTS } from './layout-framing-memory'
 import { BUNDLED_BACKGROUND_MANIFEST } from '../../../shared/background-import'
-import {
-  livePosterFileName,
-  parseLivePosterAssetId,
-  type LiveBackgroundId
-} from '../../../shared/live-background-ids'
+import { parseLivePosterAssetId } from '../../../shared/live-background-ids'
 
 export const SCENE_LIBRARY_KEY = 'videorc.scene-presets.v1'
 export const WORKING_SCENE_KEY = 'videorc.working-scene.v1'
@@ -121,20 +117,10 @@ export function normalizeSavedBackground(raw: unknown): SavedSceneBackground | n
     saturationPercent: clamp(data.saturationPercent, 100, 0, 150),
     vignettePercent: clamp(data.vignettePercent, 0, 0, 100),
     visibilityPercent: clamp(data.visibilityPercent, 20, 0, 40),
-    ...(livePoster ? { live: savedLiveSpec(livePoster, data.live) } : {})
-  }
-}
-
-/** The poster names the background and look; a stored spec only adds motion. */
-function savedLiveSpec(
-  poster: { id: LiveBackgroundId; look: string },
-  raw: unknown
-): NonNullable<EffectiveSceneBackground['live']> {
-  const stored = raw && typeof raw === 'object' ? (raw as { motion?: unknown }) : {}
-  return {
-    id: poster.id,
-    look: poster.look,
-    motion: stored.motion === 'normal' ? 'normal' : 'calm'
+    // The poster names the background and look; a stored spec adds the motion.
+    ...(livePoster && {
+      live: { ...livePoster, motion: data.live?.motion === 'normal' ? 'normal' : 'calm' }
+    })
   }
 }
 export function resolveSavedBackground(
@@ -145,7 +131,7 @@ export function resolveSavedBackground(
   const livePoster = parseLivePosterAssetId(style.assetId)
   const name =
     BUNDLED_BACKGROUND_MANIFEST.find((entry) => entry.id === style.assetId)?.fileName ??
-    (livePoster ? livePosterFileName(livePoster.id, livePoster.look) : fileName!)
+    (livePoster ? `${style.assetId}.webp` : fileName!)
   // The existing managed-asset protocol and backend capability registry resolve
   // this filename inside app-owned roots. Persisted arbitrary paths never survive.
   return { ...style, managedAssetPath: `videorc-asset://background/${encodeURIComponent(name)}` }
