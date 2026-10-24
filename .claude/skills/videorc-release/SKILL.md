@@ -1,21 +1,24 @@
 ---
 name: videorc-release
-description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta and the signed Windows 11 x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, release storage publication (Neon target origin), updater verification, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target both macOS and Windows by default unless the user explicitly narrows the platform.
+description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta, the signed Windows 11 x64 Alpha, and the Linux x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, Linux candidate listing, release storage publication (Neon target origin), updater verification, Discord announcements for each publicly live platform, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target all three platforms by default unless the user explicitly narrows the platform.
 ---
 
 # Videorc release
 
-Ship one new numeric desktop version on both supported tracks:
+Ship one new numeric desktop version on the supported tracks:
 
 - macOS arm64 Beta: `<version>-beta.<N>`;
-- Windows 11 x64 Alpha: `<version>-alpha.1`.
+- Windows 11 x64 Alpha: `<version>-alpha.1`;
+- Linux x64 Alpha: the same `<version>-alpha.1` (shared Alpha changelog).
 
-Target both platforms unless the user explicitly requests a platform-only
-release. Do not silently skip Windows because macOS can be released locally.
+Target all three unless the user explicitly requests a platform-only
+release. Do not silently skip Windows or Linux because macOS can be
+released locally.
 
-Before acting, read both sources of truth in full:
+Before acting, read the sources of truth in full:
 
-- `docs/releases/release-runbook.md` for macOS, shared versioning, and rollback;
+- `docs/releases/release-runbook.md` for macOS, shared versioning, rollback,
+  and the Linux Alpha candidate-track notes;
 - `docs/releases/windows-alpha-runbook.md` for Windows signing, candidate,
   physical acceptance, pilot, public promotion, and rollback.
 
@@ -155,7 +158,8 @@ versioned object.
 After the macOS upload and verification succeed:
 
 1. Add `changelog/<version>-alpha.1.md` with `channel: alpha` and
-   `platforms: [windows]` on top of current `main`.
+   `platforms: [windows, linux]` on top of current `main` when both Alphas
+   are in scope (`[windows]` or `[linux]` for a platform-only Alpha).
 2. State only Windows capabilities that the acceptance plan can prove. Keep
    internal gate details out of the public entry.
 3. Run `pnpm changelog:check`, push through a reviewed PR, and merge to protected
@@ -241,7 +245,37 @@ Never rebuild between acceptance and either promotion. Never substitute CI,
 VM-only, file-size, branch URL, or mutable-tag evidence for the exact physical
 record.
 
-## 5. Verify the coordinated production release
+## 5. Store and list the Linux Alpha
+
+Linux is a third default track on the same numeric version. Reuse the shared
+`<version>-alpha.1` changelog entry from section 3; do not bump again.
+
+There is no `promote-linux-alpha.yml` yet. Follow the candidate-track notes in
+`docs/releases/release-runbook.md`. Do not invent a promotion workflow or
+write macOS/Windows keys.
+
+1. From current protected `main`, dispatch the exact release ID:
+
+   ```sh
+   gh workflow run release-linux-alpha.yml --ref main \
+     -f release_id=<version>-alpha.1
+   ```
+
+2. Record the workflow URL, source commit, AppImage filename, SHA-256, and
+   `candidates/linux-alpha/<releaseId>/<sourceCommit>/` prefix.
+3. Physical acceptance on Ubuntu 24.04, or the owner's committed
+   `docs/acceptance/linux-alpha/<releaseId>.json` waiver. The AI must not
+   author the waiver.
+4. Public listing stays separate from the private candidate prefix. Recent
+   cuts write create-only
+   `releases/linux-alpha/<releaseId>/release.json` and point videorc-web
+   `VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` at it. Signed-out
+   `/api/downloads/linux/latest` stays 401.
+
+Do not announce Linux until the signed-in download actually serves this
+AppImage. A stored private candidate is not a public Linux release.
+
+## 6. Verify the coordinated production release
 
 - Verify the signed-in Windows download returns the accepted installer and
   visible SHA-256.
@@ -255,11 +289,14 @@ record.
   and rerun the two-platform smoke matrix.
 - Update `docs/releases/<version>.md` with both platform outcomes, workflow and
   evidence links, rollback status, and any explicitly incomplete external gate.
-- Render/send announcements from the exact platform changelog entry only after
-  that platform is live. Preview with
-  `pnpm release:notify:discord <releaseId> --dry-run`, then send with
-  `pnpm release:notify:discord <releaseId>`. Hold all Windows announcements
-  until public promotion.
+- Discord announcement is a standing finish step for each publicly live
+  platform, not macOS only. Preview first with
+  `pnpm release:notify:discord <releaseId> -- --dry-run`, then send
+  `pnpm release:notify:discord <releaseId>`. For a shared Windows+Linux Alpha
+  changelog entry, add `-- --platform windows` or `-- --platform linux` so
+  each post names that OS and links its download page. Hold the Windows post
+  until public promotion. Hold the Linux post until the signed-in Linux
+  download is public. Never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
 
 ## Hard-won rules
 

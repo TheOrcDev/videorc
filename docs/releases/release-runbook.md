@@ -24,8 +24,12 @@ lane is `.github/workflows/release-linux-alpha.yml`. It writes only:
 
 It must never write `releases/macos/`, `releases/windows/`, `updates/macos/`,
 `updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Public
-download remains disabled. See [../distribution.md](../distribution.md) and
-[../linux-port-plan.md](../linux-port-plan.md).
+download remains disabled until the signed-in Linux download actually serves
+this AppImage. Discord announcement is then a standing step: preview with
+`pnpm release:notify:discord <releaseId> -- --dry-run --platform linux`, then
+send. Hold the Linux post until that download is public. Never print
+`VIDEORC_DISCORD_RELEASE_WEBHOOK`. See [../distribution.md](../distribution.md)
+and [../linux-port-plan.md](../linux-port-plan.md).
 
 ## Windows Alpha Is A Separate Gated Track
 
@@ -215,14 +219,19 @@ Newsletter: `pnpm changelog:email <releaseId>` renders the entry to
 email-ready HTML + plaintext under `dist/changelog/email/` (sending is manual —
 no ESP is wired yet).
 
-Discord announcement: after the feed is verified, `pnpm release:notify:discord`
-posts a short "what's new" (release title + up to 4 changelog highlights) to the
-Videorc Discord channel. `-- --dry-run` previews without posting; a releaseId
-argument re-announces an older release. The webhook is a post-anywhere
-credential and this repo is PUBLIC, so it is **never committed** — it lives in
-`~/.videorc-release.env` as `VIDEORC_DISCORD_RELEASE_WEBHOOK` (gitignored,
-already sourced by the build); the script refuses to run without it and never
-echoes the URL.
+Discord announcement is a standing finish step for each publicly live
+platform, not macOS only. After that platform's feed or download is verified,
+`pnpm release:notify:discord <releaseId>` posts a short "what's new" (release
+title + up to 4 changelog highlights) to the Videorc Discord channel.
+`-- --dry-run` previews without posting and is required before the send; a
+releaseId argument re-announces an older release. For a shared Windows+Linux
+Alpha changelog entry, pass `-- --platform windows` or `-- --platform linux`
+so the post names that OS and links its download page. Hold the Windows post
+until public promotion. Hold the Linux post until the signed-in Linux download
+is public. The webhook is a post-anywhere credential and this repo is PUBLIC,
+so it is **never committed** — it lives in `~/.videorc-release.env` as
+`VIDEORC_DISCORD_RELEASE_WEBHOOK` (gitignored, already sourced by the build);
+the script refuses to run without it and never echoes the URL.
 
 ## Verify (always follow the redirect to storage)
 

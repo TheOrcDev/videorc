@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 // Post a short release announcement to the Videorc Discord channel.
 //
-// Runs at the END of the release process (after the feed is verified) so
-// followers see what the update brings. The message is intentionally SHORT:
-// the release title + up to a few highlights from the changelog entry — the
-// full notes live on the website.
+// Runs at the END of the release process (after that platform is publicly
+// live) so followers see what the update brings. The message is intentionally
+// SHORT: the release title + up to a few highlights from the changelog
+// entry — the full notes live on the website.
 //
 //   node scripts/notify-discord-release.mjs [releaseId] [--dry-run]
+//       [--platform macos|windows|linux]
 //
 // - releaseId defaults to the newest changelog entry (the one just shipped).
 // - --dry-run prints the exact payload without posting.
+// - --platform announces one OS from a shared changelog entry (typical for
+//   a Windows+Linux Alpha file) and links that platform's download page.
 //
 // SECURITY: the webhook URL is a post-anywhere credential and this repo is
 // public — it is NEVER hardcoded here. It is read from the env var
@@ -24,8 +27,17 @@ import { loadChangelogEntries } from './lib/changelog.mjs'
 
 const WEBHOOK_ENV = 'VIDEORC_DISCORD_RELEASE_WEBHOOK'
 const MAX_HIGHLIGHTS = 4
-const WINDOWS_ALPHA_DOWNLOAD_URL = 'https://www.videorc.com/download/windows'
 const DOWNLOAD_CHOOSER_URL = 'https://www.videorc.com/download'
+const PLATFORM_LABELS = {
+  macos: 'macOS',
+  windows: 'Windows',
+  linux: 'Linux'
+}
+const ALPHA_DOWNLOAD_URLS = {
+  windows: 'https://www.videorc.com/download/windows',
+  linux: 'https://www.videorc.com/download/linux'
+}
+const ANNOUNCEABLE_PLATFORMS = Object.keys(PLATFORM_LABELS)
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /** Strip inline markdown emphasis/links so a highlight reads clean in Discord. */
@@ -36,15 +48,55 @@ function stripInline(text) {
     .trim()
 }
 
+export function parseNotifyArgs(argv) {
+  let dryRun = false
+  let platform
+  const positionals = []
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    if (arg === '--dry-run') {
+      dryRun = true
+      continue
+    }
+    if (arg === '--platform') {
+      const value = argv[i + 1]
+      if (!value || value.startsWith('--')) {
+        throw new Error('Use --platform macos, --platform windows, or --platform linux.')
+      }
+      platform = value
+      i += 1
+      continue
+    }
+    if (arg.startsWith('--platform=')) {
+      platform = arg.slice('--platform='.length).trim()
+      continue
+    }
+    if (arg.startsWith('--')) {
+      throw new Error(`Unknown option ${arg}.`)
+    }
+    positionals.push(arg)
+  }
+
+  if (platform !== undefined && !ANNOUNCEABLE_PLATFORMS.includes(platform)) {
+    throw new Error(`Unknown platform "${platform}". Use macos, windows, or linux.`)
+  }
+  if (positionals.length > 1) {
+    throw new Error('Pass at most one releaseId.')
+  }
+
+  return { dryRun, platform, releaseId: positionals[0] }
+}
+
 /** Build the short Discord message from a changelog entry. */
-export function buildDiscordReleaseMessage(entry) {
-  const platforms = entry.platforms ?? ['macos']
-  const isWindowsAlpha = entry.channel === 'alpha' && platforms.includes('windows')
-  const isWindowsOnly = platforms.length === 1 && platforms[0] === 'windows'
-  const version = isWindowsAlpha
+export function buildDiscordReleaseMessage(entry, options = {}) {
+  const listed = entry.platforms ?? ['macos']
+  const platforms = resolveAnnouncementPlatforms(listed, options.platform, entry.version)
+  const isAlpha = entry.channel === 'alpha'
+  const version = isAlpha
     ? formatReleaseVersion(entry.version)
     : entry.version.replace(/-beta\.\d+$/, '')
-  const audience = isWindowsAlpha ? ` for ${formatPlatforms(platforms)}` : ''
+  const audience = isAlpha ? ` for ${formatPlatforms(platforms)}` : ''
   const highlights = entry.highlights
     .slice(0, MAX_HIGHLIGHTS)
     .map((item) => `• ${stripInline(item)}`)
@@ -52,19 +104,30 @@ export function buildDiscordReleaseMessage(entry) {
   if (entry.highlights.length > MAX_HIGHLIGHTS) {
     lines.push('', '…and more.')
   }
-  lines.push(
-    '',
-    isWindowsAlpha
-      ? isWindowsOnly
-        ? `Download the Windows Alpha: ${WINDOWS_ALPHA_DOWNLOAD_URL}`
-        : `Choose your Alpha download: ${DOWNLOAD_CHOOSER_URL}`
-      : 'Update from Settings → About, or it applies on next launch.'
-  )
+  lines.push('', announcementFooter({ isAlpha, platforms }))
   return lines.join('\n')
 }
 
+function resolveAnnouncementPlatforms(listed, requested, version) {
+  if (!requested) return listed
+  if (!listed.includes(requested)) {
+    throw new Error(`Changelog entry ${version} does not include platform ${requested}.`)
+  }
+  return [requested]
+}
+
+function announcementFooter({ isAlpha, platforms }) {
+  if (!isAlpha) {
+    return 'Update from Settings → About, or it applies on next launch.'
+  }
+  if (platforms.length === 1 && ALPHA_DOWNLOAD_URLS[platforms[0]]) {
+    return `Download the ${PLATFORM_LABELS[platforms[0]]} Alpha: ${ALPHA_DOWNLOAD_URLS[platforms[0]]}`
+  }
+  return `Choose your Alpha download: ${DOWNLOAD_CHOOSER_URL}`
+}
+
 function formatPlatforms(platforms) {
-  return platforms.map((platform) => (platform === 'macos' ? 'macOS' : 'Windows')).join(' and ')
+  return platforms.map((platform) => PLATFORM_LABELS[platform] ?? platform).join(' and ')
 }
 
 function formatReleaseVersion(version) {
@@ -82,9 +145,7 @@ async function main() {
       'Controller enabled: use release:announce with the exact --request and --platform for durable notification identity.'
     )
 
-  const argv = process.argv.slice(2)
-  const dryRun = argv.includes('--dry-run')
-  const releaseId = argv.find((arg) => !arg.startsWith('--'))
+  const { dryRun, platform, releaseId } = parseNotifyArgs(process.argv.slice(2))
 
   const entries = await loadChangelogEntries(join(repoRoot, 'changelog'))
   const entry = releaseId
@@ -95,7 +156,7 @@ async function main() {
     process.exit(1)
   }
 
-  const content = buildDiscordReleaseMessage(entry)
+  const content = buildDiscordReleaseMessage(entry, { platform })
 
   if (dryRun) {
     console.log('--- Discord release message (dry run, not posted) ---')

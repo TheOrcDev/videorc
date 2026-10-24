@@ -111,7 +111,10 @@ The development smoke test opens the Electron app through `electron-vite`, waits
 - Updater feed filename: `latest-linux.yml` only
 - Public download, videorc-web button, and `updates/linux-alpha/` pointers
   stay disabled until `promote-linux-alpha.yml` and Ubuntu 24.04 named-box
-  packaged/updater proof exist
+  packaged/updater proof exist. Discord announcement is a standing step only
+  after the signed-in Linux download is public; preview with
+  `pnpm release:notify:discord <releaseId> -- --dry-run --platform linux`.
+  Never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
 
 Build a local AppImage with:
 

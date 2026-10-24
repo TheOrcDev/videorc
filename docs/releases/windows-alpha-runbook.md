@@ -342,7 +342,13 @@ Before changing the web state, verify:
 - macOS DMG and `latest-mac.yml` are unchanged.
 
 Authorize the web `public` state only after the public promotion and production
-smoke pass. Publish held GitHub, Discord, email, and social drafts afterward.
+smoke pass. Discord announcement is then a standing step, not a macOS-only
+leftover: preview with
+`pnpm release:notify:discord <releaseId> -- --dry-run --platform windows`,
+then send `pnpm release:notify:discord <releaseId> -- --platform windows`.
+Do not post while the Windows state is still `disabled` or `pilot`. Never
+print `VIDEORC_DISCORD_RELEASE_WEBHOOK`. Publish held GitHub, email, and
+social drafts afterward.
 
 The protected promotion workflow reads the further origins from the
 `windows-alpha-release` environment:
