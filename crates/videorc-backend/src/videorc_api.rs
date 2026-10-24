@@ -1470,6 +1470,35 @@ pub(crate) fn classify_cohost_failure(
     }
 }
 
+/// Plan 191: one HTTP client for every `VideorcApiClient` in the process. A
+/// `reqwest::Client` owns its connection pool and TLS config, so building one
+/// per `new()` paid a fresh TCP + TLS handshake on every Buddy tick, voice
+/// command, captions start and account refresh. A clone is an `Arc` bump that
+/// shares the pool. Its one option, the user agent, is fixed for the process:
+/// Electron sets `VIDEORC_APP_VERSION` once, when it spawns the backend.
+static SHARED_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+/// How many times `shared_http()` built a client (tests only).
+#[cfg(test)]
+static SHARED_HTTP_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The process-wide client, built on first use. A failed build returns its
+/// error and is not cached, so a later call tries again. Two first callers may
+/// both build; the one that loses the race drops its client and shares the
+/// stored one.
+fn shared_http() -> Result<reqwest::Client> {
+    if let Some(http) = SHARED_HTTP.get() {
+        return Ok(http.clone());
+    }
+    let http = reqwest::Client::builder()
+        .user_agent(crate::performance_check::desktop_user_agent())
+        .build()
+        .context("Could not build the Videorc API HTTP client.")?;
+    #[cfg(test)]
+    SHARED_HTTP_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(SHARED_HTTP.get_or_init(|| http).clone())
+}
+
 /// A thin client over the Videorc web API.
 #[derive(Clone)]
 pub struct VideorcApiClient {
@@ -1481,10 +1510,7 @@ impl VideorcApiClient {
     pub fn new() -> Result<Self> {
         Ok(Self {
             base_url: api_base_url(),
-            http: reqwest::Client::builder()
-                .user_agent(crate::performance_check::desktop_user_agent())
-                .build()
-                .context("Could not build the Videorc API HTTP client.")?,
+            http: shared_http()?,
         })
     }
 
@@ -4082,5 +4108,75 @@ mod tests {
         let error = quota.post_cohost_command("token", &bad).await.unwrap_err();
         assert_eq!(error.kind, CohostApiErrorKind::InvalidRequest);
         assert_eq!(seen.lock().unwrap().len(), before, "nothing was sent");
+    }
+
+    /// Plan 191: every `new()` shares one `reqwest::Client`, so a Buddy tick
+    /// rides the connection the previous request opened instead of paying a
+    /// fresh TCP + TLS handshake. It is the only test in this module that
+    /// calls `new()`, so no sibling test races it to the first build.
+    #[tokio::test]
+    async fn new_clients_share_one_http_client_and_its_connections() {
+        use std::sync::atomic::Ordering;
+
+        // Other tests in this binary may have built the shared client first,
+        // so this counts builds across these calls rather than expecting 1.
+        let mut first = VideorcApiClient::new().expect("first client");
+        let builds = SHARED_HTTP_BUILDS.load(Ordering::SeqCst);
+        assert!(builds >= 1, "new() built or reused the shared client");
+        let mut second = VideorcApiClient::new().expect("second client");
+        for _ in 0..32 {
+            VideorcApiClient::new().expect("another client");
+        }
+        assert_eq!(
+            SHARED_HTTP_BUILDS.load(Ordering::SeqCst),
+            builds,
+            "new() must reuse the shared HTTP client, not build another"
+        );
+
+        // One pool: the second client's request reuses the first's connection.
+        let peers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = peers.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/ping",
+            axum::routing::get(
+                move |axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+                    std::net::SocketAddr,
+                >| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(peer);
+                        "ok"
+                    }
+                },
+            ),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+        });
+        first.base_url = format!("http://{address}");
+        second.base_url = first.base_url.clone();
+        for client in [&first, &second] {
+            let body = client
+                .http
+                .get(client.endpoint("/ping"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert_eq!(body, "ok");
+            // Give the finished connection a moment to return to the pool.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let peers = peers.lock().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0], peers[1], "both requests used one TCP connection");
     }
 }
