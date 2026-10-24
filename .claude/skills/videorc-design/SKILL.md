@@ -869,7 +869,7 @@ Words, numbers and navigation
 | Scroll regions               | `PaneBody` or `ScrollArea type="scroll"`                   |
 | Menus / popovers             | `DropdownMenu` / `Popover` on `glass-float`                |
 | Toasts                       | `toast` from `lib/toast.ts`; type colours the icon         |
-| Audio levels                 | audiocn meters (`docs/audiocn.md`)                         |
+| Audio levels                 | audiocn LCD meter in `--primary` ink (`MicLevelMeter`)     |
 | Audio controls               | audiocn controls in Sources rows (`SourceItem`)            |
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);

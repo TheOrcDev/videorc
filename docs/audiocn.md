@@ -6,7 +6,8 @@ Videorc vendors part of it with the shadcn CLI: `@audiocn` is a registry in
 `apps/desktop/components.json`. The decision records, with what Videorc does
 not use and why, are `plans/092-audiocn-audio-components.md` (meters) and
 `plans/093-sources-audio-mixer-on-audiocn-controls.md` (the Sources controls).
-Plan 173 (`plans/173-sources-tab-rewrite.md`) rebuilt the Sources page: the
+Plan 196 (`plans/196-lcd-level-meter.md`) moved every level onto the LCD
+meter. Plan 173 (`plans/173-sources-tab-rewrite.md`) rebuilt the Sources page: the
 controls stayed, the channel strips gave way to Sources rows.
 
 ## What is installed
@@ -15,7 +16,8 @@ controls stayed, the channel strips gave way to Sources rows.
 | ----------------------------------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------- |
 | `core`                                                                                          | `lib/audio/*.ts` (11 files) | Used by every item below                                                      |
 | `use-frame-source`, `use-clip-hold`, `use-audio-config`, `use-visibility`, `use-reduced-motion` | `hooks/`                    | Dependencies of the components (`use-reduced-motion` also serves the sidebar) |
-| `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Studio Microphone section and the Sources rows (`MicLevelMeter`)              |
+| `lcd-meter` with `lcd-display`                                                                  | `components/ui/`            | Studio Microphone section and the Sources rows (`MicLevelMeter`, plan 196)    |
+| `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Under `lcd-meter`, which is built on it                                       |
 | `bar-visualizer`                                                                                | `components/ui/`            | Session mic sliver                                                            |
 | `mixer`                                                                                         | `components/ui/`            | Sources Audio column: meter range, Cmd+Up/Down between rows (plans 093, 173)  |
 | `fader`                                                                                         | `components/ui/`            | Sources: Microphone Gain, System audio and Sounds Level, Assets → Sounds      |
@@ -43,24 +45,38 @@ Installed from:
   and added `lib/audio/history.ts` and `history-playback.ts`; Videorc kept
   its own copies and dropped the two new files, which the pad never imports.
 
+- Plan 196 items (`lcd-meter`, `lcd-display`, and the `level-meter` they
+  need): the shadcn CLI on 2026-10-25, `@audiocn/lcd-meter` from audiocn.dev
+  (origin/main `bcc737f`), then `lcd-display.json` from a local registry
+  build of audiocn PR #32 (`5ffbf9f`, the select trigger without
+  `cursor-pointer`). After Prettier, `lcd-meter.tsx` and `level-meter.tsx`
+  are byte-identical to `bcc737f` and `lcd-display.tsx` to `5ffbf9f`. Only
+  those three files were taken: the CLI also rewrote every shared file
+  (`hooks/`, `lib/audio/*`, `db-scale`, `db-readout`, `clip-indicator`) and
+  added `use-audio-context.tsx`, `lib/audio/click.ts`, `history.ts` and
+  `history-playback.ts`; Videorc kept its copies and dropped the new files,
+  which the LCD never imports.
+
 PR #2 merged as audiocn `d3736de` (2026-10-02). Checked against audiocn.dev
 at that commit, after Prettier: every plan 093 file and every shared file is
-byte-identical. Upstream is ahead of the plan 092 copies in two ways, not
-adopted yet:
+byte-identical. Upstream is ahead of Videorc's shared copies, not adopted
+yet:
 
-- `level-meter` carries audiocn #4 (`42f863e`): `[overflow-anchor:none]` on
-  the root so animated meters never anchor a scrolling page, plus room for a
-  horizontal `LevelMeterScale` (Videorc renders no scale).
 - `lib/audio/types.ts` and `lib/audio/decibels.ts` each gained one leading
-  doc comment.
+  doc comment; `types.ts` also gained three optional history fields.
+- `lib/audio/frame-loop.ts` runs listeners in an update phase, then a paint
+  phase.
 
-Adopting them is an ordinary update (see Updating).
+Adopting them is an ordinary update (see Updating). Plan 196 adopted
+audiocn #4 (`level-meter`'s `[overflow-anchor:none]` and room for a
+horizontal scale) with the LCD.
 
 ## Rules
 
 - **Never use audiocn's Web Audio hooks or blocks** (`useMicrophone`, `useAudioAnalyser`, `useAudioDevices`, `useSystemAudio`, `useWebAudioMixer`, `useSound`, the blocks, the soundboard block among them). The backend is the capture authority. The renderer's only microphone stream is the visual one owned by `StudioMicVisualProvider`, which opens only after an exact `granted` status.
 - **Base UI stays inside audiocn files.** `@base-ui/react` may only be imported by the files in `AUDIOCN_BASE_UI_FILES` (`eslint.config.mjs`). Videorc's own UI uses Radix.
-- **Do not edit vendored files.** Fix the problem in audiocn, then re-install. Local patches: none.
+- **Do not edit vendored files.** Fix the problem in audiocn, then re-install. Local patches: none, except `hooks/use-reduced-motion.ts`, which carries Videorc's `smoothScrollBehavior()` (plan 174 S1.8): restore it after any `--overwrite`.
+- **The LCD draws in Videorc's ink.** `LcdDisplay` keeps `variant="primary"` (`--primary`) and `appearance="auto"`; no hardware ink. Its bezel and glass are the instrument's own materials, so `lcd-display.tsx` is on the style guard's colour-literal allowlist; `audiocn-adoption.test.ts` keeps `LcdDisplay` inside `MicLevelMeter`, with no `variant` or `appearance`.
 - **Tokens are Videorc tokens.** The `audiocn` block in `styles.css` points the three meter tokens (and their foregrounds) at `--foreground`, `--warning` and `--destructive`, and the channel tokens at `--warning` (mute, the muted-speaker amber), `--foreground` (solo) and `--info` (monitor); solo and monitor have no Videorc use. Never keep the CSS the CLI writes (raw colours, and self-referencing lines in `@theme inline`); `audiocn-adoption.test.ts` fails if it comes back.
 
 - **Videorc's skin comes from outside.** Vendored files stay pristine; Videorc styles the parts it renders through `className`:
@@ -88,8 +104,8 @@ adapters that live outside the eager bundle:
 
 ## Updating
 
-1. From `apps/desktop`, look first: `pnpm dlx shadcn@4.21.1 add @audiocn/level-meter @audiocn/bar-visualizer @audiocn/mixer @audiocn/fader @audiocn/parameter-slider @audiocn/channel-toggle @audiocn/sound-pad --dry-run --diff`.
-2. Then install. The CLI asks per colliding file and ignores piped answers, so install with `--overwrite` (`use-reduced-motion.ts` and `bar-visualizer.tsx` are audiocn's own) and restore what Videorc owns: `badge.tsx` (if an item pulls it in, the CLI's shadcn badge would replace the glass-chip badge), `kbd.tsx` (`sound-pad` pulls in shadcn's, which would replace the glass keycap) and `styles.css` (next step). Any file outside the installed list: stop and look with `--dry-run --diff`.
+1. From `apps/desktop`, look first: `pnpm dlx shadcn@4.21.1 add @audiocn/lcd-meter @audiocn/level-meter @audiocn/bar-visualizer @audiocn/mixer @audiocn/fader @audiocn/parameter-slider @audiocn/channel-toggle @audiocn/sound-pad --dry-run --diff`.
+2. Then install. The CLI asks per colliding file and ignores piped answers, so install with `--overwrite` (`bar-visualizer.tsx` is audiocn's own; `use-reduced-motion.ts` is too, apart from Videorc's `smoothScrollBehavior`, which must survive) and restore what Videorc owns: `badge.tsx` (if an item pulls it in, the CLI's shadcn badge would replace the glass-chip badge), `kbd.tsx` (`sound-pad` pulls in shadcn's, which would replace the glass keycap) and `styles.css` (next step). Any file outside the installed list: stop and look with `--dry-run --diff`.
 3. Back at the repo root (the remaining steps run there): undo the CLI's CSS (`git checkout -- apps/desktop/src/renderer/src/styles.css`), remove any `cn` package it adds to `apps/desktop/package.json`, then `pnpm install`.
 4. Run `pnpm exec prettier --write` on the changed files and review the diff.
 5. Run `pnpm typecheck`, `pnpm lint` (stage first: the em-dash gate reads `git ls-files`), `pnpm format:check`, `pnpm --filter @videorc/desktop test`, `pnpm build && pnpm check:renderer-assets`.

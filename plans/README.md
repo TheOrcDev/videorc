@@ -1,5 +1,17 @@
 # Implementation Plans
 
+- 2026-10-25: [Plan 196](196-lcd-level-meter.md), The LCD meter for every
+  audio level. Owner request: the Studio microphone meter and the meters on
+  Sources become audiocn's LCD meter. `MicLevelMeter` stays the one meter
+  component and draws `LcdDisplay` + `LcdMeter` in Videorc's `--primary`
+  ink. A spike installed it on `4891fc53`: it builds, the eager bundle moves
+  9 gzip bytes, and it trips only gates on the audiocn files (Base UI fence,
+  colour literals, radii, one `cursor-pointer`, dock-slot coverage), fixed by
+  one upstream line (U1) and allowlists (S1). S2 swaps the meter and
+  measures the glow's CPU cost. The meter grows from 8 px to about 95 px.
+  Owner calls D1 to D5 (ink, readout, size, clip colour, which Sources rows)
+  have recommended defaults. **PLANNED**, nothing built.
+
 - 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
   background moves on the stream. Owner report: live backgrounds animate in
   Studio but sit still on the live stream. On macOS every record-and-stream
