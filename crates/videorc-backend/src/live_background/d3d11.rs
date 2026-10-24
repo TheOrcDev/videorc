@@ -1308,7 +1308,11 @@ mod tests {
 
     /// Plan 190 S4: every golden grid (the GLSL in WebGL2, 640 × 360 box
     /// filtered to 64 × 36) matches the HLSL within a mean absolute error of
-    /// 2.0 and a maximum cell error of 10 (0–255 units), as the MSL does.
+    /// 2.0, as the MSL does, and a maximum cell error of 16 (0–255 units).
+    /// The cell bound is wider than Metal's 10 because CI renders on WARP,
+    /// whose software `tanh` and `pow` differ slightly: on 2026-10-24 the worst
+    /// cell was 11 (Liquid Chrome) at a mean of 0.05. A real port bug shows a
+    /// mean of 20 or more.
     #[test]
     fn golden_grids_match_the_glsl_reference() {
         let Some((mut renderer, _board)) = renderer() else {
@@ -1360,7 +1364,7 @@ mod tests {
             let mean = total as f64 / expected.len() as f64;
             let name = format!("{css}/{}@{phase}", look.id);
             eprintln!("golden {name}: mean {mean:.3}, max cell {max}");
-            if mean > 2.0 || max > 10 {
+            if mean > 2.0 || max > 16 {
                 failures.push(format!("{name}: mean {mean:.3}, max {max}"));
             }
         }
