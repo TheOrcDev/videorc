@@ -15,14 +15,14 @@
 
 ## Status
 
-| Phase | What                                                             | PR  | State       |
-| ----- | ---------------------------------------------------------------- | --- | ----------- |
-| 0     | Greetings work with no setup: built-in lines, honest diagnostics | —   | IN PROGRESS |
-| 1     | Welcome first-time and returning chatters                        | —   | IN PROGRESS |
-| 2     | AI writes every greeting in Buddy's voice (Premium)              | —   | IN PROGRESS |
-| 3     | Answers as planned: unanswered questions too, clear defaults     | —   | IN PROGRESS |
-| 4     | Tick reliability: the 502s                                       | —   | IN PROGRESS |
-| 5     | Smokes and live acceptance                                       | —   | IN PROGRESS |
+| Phase | What                                                             | PR                              | State                               |
+| ----- | ---------------------------------------------------------------- | ------------------------------- | ----------------------------------- |
+| 0     | Greetings work with no setup: built-in lines, honest diagnostics | desktop PR                      | BUILT                               |
+| 1     | Welcome first-time and returning chatters                        | desktop PR                      | BUILT                               |
+| 2     | AI writes every greeting in Buddy's voice (Premium)              | web #93 `0cdf2bf5` + desktop PR | BUILT                               |
+| 3     | Answers as planned: unanswered questions too, clear defaults     | desktop PR                      | BUILT                               |
+| 4     | Tick reliability: the 502s                                       | web #92 `67e6d87f`              | MERGED, next-stream check owed      |
+| 5     | Smokes and live acceptance                                       | desktop PR                      | Smoke written; live acceptance owed |
 
 **Owner answers (2026-10-24)**: every recommendation taken (D2 both
 welcomes on, D3 AI writes all greetings, D5 notes-only Answers with Answers
@@ -31,6 +31,16 @@ answers before someone actually puts it, something simple like 'hi'. I had
 no clue that I have to put my answers there." So the built-in lines below
 are short and plain, and an empty list never means silence. Execute the whole
 plan; one desktop PR and one web PR.
+
+**As built (2026-10-24)**: web #93 (greet route) and #92 (Phase 4: the
+tick's backup model starts at 3 s instead of 6 s) merged. Production logs
+for the 10-24 stream showed the primary timing out on 57 of 219 ticks and
+the backup, started too late behind the judge, failing 21 of them. The
+desktop work is one PR. Deviations: an AI-greeting smoke cannot run end to
+end (Premium is a signed entitlement a smoke cannot fake), so the AI path
+is covered by engine tests with a fake greet client and a wire test;
+`held` greetings are reported apart from the ones never posted, because
+they go out later.
 
 - **Priority**: P1. The owner streamed on 0.9.150 on 2026-10-24 with Buddy
   in Auto, and Buddy posted nothing on its own.

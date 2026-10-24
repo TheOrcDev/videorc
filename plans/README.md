@@ -21,7 +21,9 @@
   - a tick 502 diagnosis;
   - smokes and a live acceptance.
 
-  **PLANNED**, with 4 owner questions open.
+  **BUILT** 2026-10-24 (owner took every recommendation): web #93 and #92
+  merged; the desktop PR carries Phases 0–3 and the smoke. Owed: a live
+  acceptance stream and the next stream's tick failure rate.
 
 - 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
   owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
