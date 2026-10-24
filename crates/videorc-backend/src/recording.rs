@@ -10463,6 +10463,7 @@ async fn monitor_session(
             if should_finalize_recording_session(
                 exit_status.success(),
                 monitored_recording.stop_intent_preceded_exit,
+                monitored_recording.stop_escalated,
                 recording_bridge_terminal_failure.as_deref(),
                 stream_bridge_terminal_failure.as_deref(),
             ) =>
@@ -12532,6 +12533,7 @@ struct MonitoredRecording {
 fn should_finalize_recording_session(
     ffmpeg_exit_success: bool,
     stop_intent_preceded_exit: bool,
+    stop_escalated: bool,
     recording_bridge_terminal_failure: Option<&str>,
     stream_bridge_terminal_failure: Option<&str>,
 ) -> bool {
@@ -12542,11 +12544,13 @@ fn should_finalize_recording_session(
     // Stop intent must win the monitor's exit-ready race. Windows FFmpeg can
     // report a non-zero status while closing a stopped graph even though the
     // local MKV is still exportable; let the MP4 exporter validate that output
-    // instead of unconditionally marooning it as recovery media. A recording
-    // bridge failure remains terminal because it means the video producer did
-    // not finish its contract.
+    // instead of unconditionally marooning it as recovery media. That only
+    // holds when FFmpeg exited on its own: once Videorc escalated to TERM/KILL
+    // the muxer never flushed, so the MKV stays recovery media and the exit is
+    // reported as `recording-stop-forced`. A recording bridge failure remains
+    // terminal because it means the video producer did not finish its contract.
     if recording_bridge_terminal_failure.is_some()
-        || (!ffmpeg_exit_success && !stop_intent_preceded_exit)
+        || (!ffmpeg_exit_success && (!stop_intent_preceded_exit || stop_escalated))
     {
         return false;
     }
@@ -38634,6 +38638,7 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            false,
             None,
             None
         ));
@@ -38662,6 +38667,7 @@ mod tests {
         assert!(should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            false,
             None,
             None
         ));
@@ -38703,15 +38709,31 @@ mod tests {
 
     #[test]
     fn only_an_explicit_graceful_stop_can_finalize_an_unbounded_capture() {
-        assert!(!should_finalize_recording_session(true, false, None, None));
+        assert!(!should_finalize_recording_session(
+            true, false, false, None, None
+        ));
         assert!(
-            should_finalize_recording_session(false, true, None, None),
+            should_finalize_recording_session(false, true, false, None, None),
             "a stopped Windows graph may have a non-zero exit while its MKV remains exportable"
         );
-        assert!(should_finalize_recording_session(true, true, None, None));
+        assert!(should_finalize_recording_session(
+            true, true, false, None, None
+        ));
+        assert!(
+            !should_finalize_recording_session(false, true, true, None, None),
+            "a forced TERM/KILL after Stop keeps the MKV as recovery media"
+        );
+        assert!(
+            should_finalize_recording_session(true, true, true, None, None),
+            "FFmpeg that still exited cleanly after escalation flushed its muxer"
+        );
+        let (_, health_code, _) =
+            classify_failed_ffmpeg_exit(true, true, None, "exit code: 1", true);
+        assert_eq!(health_code, "recording-stop-forced");
 
         assert!(!should_finalize_recording_session(
             true,
+            false,
             false,
             Some("recording raw-video encoder output stopped: FIFO timed out"),
             None
@@ -38719,6 +38741,7 @@ mod tests {
         assert!(!should_finalize_recording_session(
             false,
             true,
+            false,
             Some("recording raw-video encoder output stopped: FIFO timed out"),
             None
         ));
@@ -38732,6 +38755,7 @@ mod tests {
         assert!(should_finalize_recording_session(
             true,
             false,
+            false,
             None,
             Some("stream encoder output stopped: exceeded its bounded latency contract")
         ));
@@ -38739,10 +38763,12 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true,
             false,
+            false,
             Some("recording raw-video encoder output stopped"),
             Some("stream encoder output stopped")
         ));
         assert!(!should_finalize_recording_session(
+            false,
             false,
             false,
             None,
