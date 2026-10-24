@@ -161,6 +161,19 @@ pub fn entered_gpu_budget_still(
     budget(next) && !budget(previous)
 }
 
+/// A finished live frame for the CPU compositor (plan 190 S5): top-down BGRA
+/// at the background's internal size, drawn up like a picture. The Linux GLES
+/// renderer produces it; the compositor wraps it as an image source.
+#[derive(Debug, Clone)]
+pub struct CpuLiveFrame {
+    pub bgra: Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+    /// Increments per frame; the CPU path's content revision.
+    pub sequence: u64,
+    pub rendering: crate::protocol::LiveBackgroundRendering,
+}
+
 #[derive(Debug, Default, Clone)]
 struct BoardState {
     status: Option<LiveBackgroundStatus>,
@@ -177,6 +190,15 @@ pub struct LiveBackgroundBoard {
 impl LiveBackgroundBoard {
     pub fn report(&self, status: LiveBackgroundStatus) {
         self.lock().status = Some(status);
+    }
+
+    /// Report only when the status differs from the one on the board (the
+    /// CPU fallbacks call this every frame).
+    pub fn report_if_changed(&self, status: LiveBackgroundStatus) {
+        let mut state = self.lock();
+        if state.status.as_ref() != Some(&status) {
+            state.status = Some(status);
+        }
     }
 
     /// The programs built and scratch bytes held by the live background

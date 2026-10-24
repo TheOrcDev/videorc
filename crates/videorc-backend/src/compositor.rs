@@ -6289,8 +6289,12 @@ enum GpuCompositor {}
 /// and holding nothing while none does.
 #[cfg(target_os = "macos")]
 type LiveBackgroundGpuRenderer = crate::live_background::metal::LiveBackgroundMetalRenderer;
-/// Uninhabited stand-in off macOS (the slot is always `None`).
-#[cfg(not(target_os = "macos"))]
+/// Linux (plan 190 S5): the GLES renderer behind the CPU compositor.
+#[cfg(target_os = "linux")]
+type LiveBackgroundGpuRenderer = crate::live_background::gl::LiveBackgroundGlRenderer;
+/// Uninhabited stand-in elsewhere (the slot is always `None`): Windows draws
+/// live backgrounds in its D3D11 media session.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 enum LiveBackgroundGpuRenderer {}
 
 /// Plan 190: what a tick hands the primary leg for its live background: the
@@ -6335,6 +6339,80 @@ fn render_live_background(
         output,
         crate::live_background::preflight_still_reason(),
     )
+}
+
+/// Plan 190 S5: the CPU path's live background. On Linux, the GLES
+/// renderer's newest finished frame, wrapped as the image source the
+/// background resample draws (the poster until the first frame lands); on the
+/// macOS and Windows CPU fallbacks, the poster, with `cpu-fallback` said once.
+fn cpu_live_background_source(
+    slot: &mut Option<Box<LiveBackgroundGpuRenderer>>,
+    input: Option<&crate::live_background::LiveBackgroundFrameInput>,
+    output: (u32, u32),
+) -> Option<CompositorImageSource> {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(input) = input else {
+            release_cpu_live_background(slot);
+            return None;
+        };
+        let renderer = slot.get_or_insert_with(|| {
+            Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(&input.board)))
+        });
+        let frame = renderer.render(
+            input,
+            output,
+            crate::live_background::preflight_still_reason(),
+        )?;
+        Some(live_frame_image_source(&frame))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = output;
+        let input = input?;
+        // The GPU renderer (macOS) reports again when its compose recovers.
+        #[cfg(target_os = "macos")]
+        if let Some(renderer) = slot.as_mut() {
+            renderer.forget_reported_status();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = slot;
+        input.board.report_if_changed(input.status(
+            crate::protocol::LiveBackgroundRendering::Still,
+            Some(crate::protocol::LiveBackgroundStillReason::CpuFallback),
+            None,
+        ));
+        None
+    }
+}
+
+/// Plan 190 S5: stop the Linux live background thread when composition stops
+/// (the idle preview composes no pixels) or the live background leaves.
+fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
+    #[cfg(target_os = "linux")]
+    if let Some(renderer) = slot.as_mut()
+        && renderer.holds_resources()
+    {
+        renderer.release();
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = slot;
+}
+
+/// A CPU live frame as the background image source the resample reads.
+#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+fn live_frame_image_source(frame: &crate::live_background::CpuLiveFrame) -> CompositorImageSource {
+    CompositorImageSource {
+        image_path: "live-background".to_string(),
+        file_revision: None,
+        width: Some(frame.width),
+        height: Some(frame.height),
+        rgba: None,
+        bgra: Some(Arc::clone(&frame.bgra)),
+        content_revision: frame.sequence,
+        state: "ready".to_string(),
+        message: None,
+    }
 }
 
 struct GpuCompositorFrame {
@@ -8528,7 +8606,7 @@ async fn publish_compositor_frame(
             &inputs,
             frame_consumer.publishes_cpu_yuv(),
             &editor_chrome,
-            live.renderer,
+            &mut *live.renderer,
         );
         #[cfg(test)]
         test_trace_source_iso_composition(0, sequence, compose_began, &composed);
@@ -8573,8 +8651,27 @@ async fn publish_compositor_frame(
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         store.checkout_buffer(raw_yuv420p_len(width, height))
                     };
+                    // Plan 190 S5: the live frame (Linux) in place of the
+                    // poster; one `Option` check while none shows.
+                    let live_source = if inputs.live_background.is_some() || live.renderer.is_some()
+                    {
+                        cpu_live_background_source(
+                            &mut *live.renderer,
+                            inputs.live_background,
+                            (width, height),
+                        )
+                    } else {
+                        None
+                    };
+                    let inputs = CompositorRenderInputs {
+                        background_image_source: live_source
+                            .as_ref()
+                            .or(inputs.background_image_source),
+                        ..inputs
+                    };
                     render_compositor_yuv420p_frame_with_chrome(inputs, &editor_chrome, &mut bytes);
                 } else {
+                    release_cpu_live_background(&mut *live.renderer);
                     bytes = Vec::new();
                 }
             }
@@ -20783,5 +20880,118 @@ mod live_background_metal_tests {
         assert!(slot.is_none(), "no renderer is even made");
         assert_eq!(resources(&slot), (0, 0));
         assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+}
+
+/// Plan 190 S5: the CPU path's live background on every OS (the Linux GLES
+/// renderer itself is tested in `live_background::gl`).
+#[cfg(test)]
+mod live_background_cpu_tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::live_background::runtime::sync as sync_live_background;
+    use crate::live_background::{CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundTick};
+    use crate::protocol::{
+        LiveBackgroundId, LiveBackgroundMotion, LiveBackgroundRendering, LiveBackgroundSpec,
+    };
+
+    fn spec() -> LiveBackgroundSpec {
+        LiveBackgroundSpec {
+            id: LiveBackgroundId::Silk,
+            look: "satin".to_string(),
+            motion: LiveBackgroundMotion::Calm,
+        }
+    }
+
+    fn background() -> EffectiveSceneBackground {
+        EffectiveSceneBackground {
+            asset_id: "live-silk-satin".to_string(),
+            managed_asset_path: "live-silk-satin.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: Some(spec()),
+        }
+    }
+
+    fn solid_frame(bgra: [u8; 4]) -> CpuLiveFrame {
+        CpuLiveFrame {
+            bgra: Arc::new(bgra.repeat(32 * 18)),
+            width: 32,
+            height: 18,
+            sequence: 1,
+            rendering: LiveBackgroundRendering::Shader,
+        }
+    }
+
+    fn draw(source: &CompositorImageSource) -> Vec<u8> {
+        let (width, height) = (64, 36);
+        let mut bytes = vec![0u8; raw_yuv420p_len(width, height)];
+        assert!(render_scene_background(
+            Some(&background()),
+            Some(source),
+            width,
+            height,
+            &mut bytes
+        ));
+        bytes
+    }
+
+    #[test]
+    fn a_cpu_live_frame_draws_through_the_picture_resample() {
+        let blue = solid_frame([255, 0, 0, 255]);
+        let live = draw(&live_frame_image_source(&blue));
+        // Exactly what a picture with the same pixels draws.
+        let picture = CompositorImageSource {
+            image_path: "poster".to_string(),
+            ..live_frame_image_source(&blue)
+        };
+        assert_eq!(live, draw(&picture));
+        assert_ne!(
+            live,
+            draw(&live_frame_image_source(&solid_frame([0, 0, 255, 255])))
+        );
+    }
+
+    #[test]
+    fn no_live_background_builds_and_reports_nothing() {
+        let mut slot = None;
+        assert!(cpu_live_background_source(&mut slot, None, (640, 360)).is_none());
+        assert!(slot.is_none());
+        release_cpu_live_background(&mut slot);
+        assert!(slot.is_none());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_cpu_fallback_draws_the_poster_and_says_why() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input = runtime.unwrap().frame_input(
+            &background(),
+            &board,
+            LiveBackgroundTick::unmeasured(now),
+        );
+        let mut slot = None;
+        assert!(cpu_live_background_source(&mut slot, Some(&input), (640, 360)).is_none());
+        assert!(slot.is_none(), "the CPU fallback builds no renderer");
+        let (status, programs, scratch) = board.snapshot();
+        let status = status.expect("the fallback says why it shows the poster");
+        assert_eq!(status.rendering, LiveBackgroundRendering::Still);
+        assert_eq!(
+            status.reason,
+            Some(crate::protocol::LiveBackgroundStillReason::CpuFallback)
+        );
+        assert_eq!((programs, scratch), (0, 0));
     }
 }

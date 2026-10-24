@@ -64,7 +64,7 @@ mod linux_portal_capture;
 mod linux_portal_session;
 mod linux_pulse_audio;
 mod linux_v4l2_camera;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", feature = "live-background-gl-check"))]
 mod linux_vaapi;
 mod live_background;
 mod live_chat;

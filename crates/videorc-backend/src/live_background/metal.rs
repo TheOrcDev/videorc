@@ -1006,6 +1006,12 @@ impl LiveBackgroundMetalRenderer {
         )
     }
 
+    /// Forget the last status so the next frame reports again (the CPU
+    /// fallback overwrote the board for a tick).
+    pub fn forget_reported_status(&mut self) {
+        self.reported_status = None;
+    }
+
     pub fn holds_resources(&self) -> bool {
         self.library.is_some() || !self.pipelines.is_empty() || self.targets.is_some()
     }

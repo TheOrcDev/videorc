@@ -1065,3 +1065,58 @@ to exactness for about 15 MB more at 1080p.
 **Deferred**: Line Waves' half-frame-rate guard step (it halves its size like
 the others); the 12-hour phase-offset by-eye check and the side-by-side
 against React Bits (the dev app is not launched from this slice).
+
+### S5: Linux GLES and the CPU path (2026-10-24)
+
+The Fable lane hit its weekly limit before writing anything, so this slice
+was built on Opus.
+
+**The CPU path (every OS).** When the primary leg has a live background:
+- On Linux, the GLES renderer's newest frame is wrapped as an image source
+  and drawn by `render_scene_background`, exactly like a picture (a test
+  proves it is pixel-identical to a picture of the same pixels). The poster
+  draws until the first frame lands, and a switch never shows the previous
+  background's frame.
+- On the macOS and Windows CPU fallbacks, the poster draws and the board
+  says `cpu-fallback` once. On macOS the Metal renderer re-reports when its
+  compose recovers.
+- With no live background, the CPU path does one check and builds nothing.
+
+**The Linux renderer** (`live_background/gl.rs`):
+- The run loop's renderer slot holds it on Linux, as it holds the Metal
+  renderer on macOS.
+- One worker thread owns the EGL context, renders the newest request
+  (latest-wins) and publishes BGRA frames. The compositor never waits on
+  it; stopping detaches the thread, so a hung driver can't stall a tick.
+- **Device selection:** `choose_live_node` (pure, tested) takes the pin, or
+  the first node in neither quarantine list, and never wanders. The EGL
+  device is matched by `EGL_DRM_RENDER_NODE_FILE_EXT` through
+  `eglQueryDevicesEXT`, never the default display. A separate sentinel and
+  quarantine (`linux-live-background/`) keeps a GL hang from being blamed
+  on an FFmpeg probe.
+- **Formats:** RGBA8 for the live frame, the pack target and Silk's
+  mipmapped field. RGBA16F for Plasma Wave, which needs a color-buffer-float
+  extension; without it, only Plasma Wave shows its poster.
+- **Guard:** the worker's per-frame time (render plus readback) feeds the
+  guard; GL timer queries were not used.
+- **Readback:** a fenced pixel-buffer readback, with the frame packed
+  flipped and BGRA-swizzled by one shader pass, so there is no CPU-side
+  conversion. Buffers are recycled when the compositor no longer holds them.
+- **Failures:** a background-scoped failure (shader, float targets) lifts
+  when the background changes; a whole-GPU failure (no EGL, no node,
+  software GL) stops the thread for the run.
+
+**Verified here:** `cargo check --tests --features live-background-gl-check`
+type-checks the GL module and its tests on macOS, and the CPU-path tests
+pass (`live_background` filter).
+
+**Owed on Linux:**
+- CI's Linux job compiles the real target.
+- On ogre (AGENTS.md's named box): the direct matrix command with a live
+  background applied (`VIDEORC_LINUX_H264_ENCODER=openh264
+  VIDEORC_MATRIX_ONLY=1080p30 VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS=1
+  VIDEORC_SMOKE_FFMPEG_PATH=$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg node
+  scripts/smoke-recording-matrix-app.mjs`), `pnpm
+  probe:preview-lifecycle:linux`, `pnpm probe:live-background-cost`, and the
+  GLES golden test (`cargo test -p videorc-backend live_background::gl`).
+

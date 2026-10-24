@@ -30,6 +30,8 @@
 //! catalogue is built lazily on first use (the zero-cost-when-off contract).
 
 pub mod clock;
+#[cfg(any(target_os = "linux", feature = "live-background-gl-check"))]
+pub mod gl;
 pub mod glsl;
 pub mod guard;
 pub mod looks;
@@ -54,7 +56,8 @@ pub use looks::{
     is_soft, look_or_first, looks, motion_factor, poster_asset_id, uniforms,
 };
 pub use runtime::{
-    LiveBackgroundBoard, LiveBackgroundFrameInput, LiveBackgroundRuntime, LiveBackgroundTick,
+    CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundFrameInput, LiveBackgroundRuntime,
+    LiveBackgroundTick,
 };
 #[allow(unused_imports)]
 pub use sizes::{PlasmaSizes, internal_size, plasma_sizes, silk_field_size};

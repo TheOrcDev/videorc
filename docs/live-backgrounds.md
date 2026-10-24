@@ -116,6 +116,39 @@ The backend owns everything in `crates/videorc-backend/src/live_background/`:
 4. `cargo test -p videorc-backend live_background` on macOS (and the D3D11
    golden test on Windows).
 
+### Linux (GLES)
+
+`live_background/gl.rs` runs the GLSL as it is, OpenGL ES 3.0 through EGL:
+
+- **Loading.** `libEGL.so.1` and `libGLESv2` are loaded with dlopen (the
+  `khronos-egl` crate's `dynamic` feature, plus `glow`) the first time a
+  live background composes pixels. No system library is linked.
+- **One render node.** It opens the pin (`VIDEORC_LINUX_VAAPI_DEVICE`),
+  else the first render node that neither the VAAPI quarantine nor its own
+  (`linux-live-background/quarantined.json`, beside the database) names. It
+  never tries another. A sentinel is armed before the first context and
+  draw; a hang quarantines the node for live backgrounds on the next start.
+- **No software GL.** If `GL_RENDERER` is llvmpipe, softpipe or swrast, it
+  shows the poster (`software-gpu`).
+- **One thread.** `videorc-live-background-gl` renders the newest request
+  and packs the frame flipped and swizzled to BGRA in one more pass. It
+  reads that back through a pixel buffer and publishes it latest-wins. The
+  CPU compositor never waits: it draws the newest frame like a picture, and
+  the poster until the first frame lands.
+- **Lifecycle.** The thread starts with the first composed frame (the idle
+  Linux preview composes none; the proof surface draws it in WebGL2) and
+  stops when composition stops or the live background leaves.
+- **Plasma Wave** needs `EXT_color_buffer_float` or
+  `EXT_color_buffer_half_float`. Without them only Plasma Wave shows its
+  poster.
+
+macOS can't compile the Linux target (PipeWire needs Linux headers), so
+`cargo check -p videorc-backend --tests --features live-background-gl-check`
+type-checks the GL module on any OS. CI's Linux job is the real compile gate.
+A GLES golden-grid test runs on Linux when EGL is present; it skips without
+EGL and accepts Mesa's llvmpipe only with
+`VIDEORC_LIVE_BACKGROUND_GL_ALLOW_SOFTWARE=1`.
+
 ### Measuring a machine
 
 `pnpm probe:live-background-cost` runs the GLSL in the app's Electron
