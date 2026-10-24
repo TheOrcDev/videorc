@@ -18,6 +18,7 @@ import {
   commentRowTint,
   emptyLiveChatSnapshot,
   filterMessagesByPlatform,
+  isSortedChronologically,
   liveChatSendOperationQueryDecision,
   LiveChatRecoveryOverflowError,
   LiveChatMessageBatcher,
@@ -142,6 +143,35 @@ describe('live-chat-view', () => {
       message('twitch:c', 'twitch', '2026-06-06T10:00:03Z')
     ])
     expect(sorted.map((m) => m.id)).toEqual(['youtube:a', 'twitch:b', 'twitch:c'])
+  })
+
+  it('knows a buffer is already in chronological order (plan 191)', () => {
+    const rows = [
+      message('youtube:a', 'youtube', '2026-06-06T10:00:01Z'),
+      message('twitch:b', 'twitch', '2026-06-06T10:00:02Z'),
+      message('twitch:c', 'twitch', '2026-06-06T10:00:02Z'),
+      message('x:d', 'x', '2026-06-06T10:00:03Z')
+    ]
+
+    expect(isSortedChronologically([])).toBe(true)
+    expect(isSortedChronologically(rows.slice(0, 1))).toBe(true)
+    expect(isSortedChronologically(rows)).toBe(true)
+    // Sorting a sorted buffer changes nothing, so the Stream Manager may skip it.
+    expect(sortMessagesChronological(rows)).toEqual(rows)
+    // Out of order by time, then by the id tie-break at one instant.
+    expect(isSortedChronologically([rows[1], rows[0], rows[2], rows[3]])).toBe(false)
+    expect(isSortedChronologically([rows[0], rows[2], rows[1], rows[3]])).toBe(false)
+  })
+
+  it('falls back to the sort where the delta reducer ordered a tie differently', () => {
+    // The relay orders a same-instant tie with localeCompare (a before B);
+    // this order compares UTF-16 code units (B before a).
+    const lower = message('twitch:a', 'twitch', '2026-06-06T10:00:01Z')
+    const upper = message('twitch:B', 'twitch', '2026-06-06T10:00:01Z')
+
+    expect(isSortedChronologically([lower, upper])).toBe(false)
+    expect(sortMessagesChronological([lower, upper])).toEqual([upper, lower])
+    expect(isSortedChronologically([upper, lower])).toBe(true)
   })
 
   it('merges an out-of-order message into chronological position', () => {
