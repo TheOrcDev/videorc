@@ -1484,8 +1484,13 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
   'comments-window:dashboard-get': invokeContract(noArgs, dashboardSchema),
-  'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
-  'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema])),
+  // Plan 191: void. The main renderer discards both results; a view here would
+  // be a full validation walk and clone of up to 2,000 messages per message.
+  'comments-window:push-snapshot': invokeContract(
+    tupleSchema([commentsViewSchema]),
+    undefinedSchema
+  ),
+  'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema]), undefinedSchema),
   'comments-window:get-snapshot': invokeContract(noArgs, commentsViewSchema),
   'account:begin-sign-in': invokeContract(tupleSchema([accountAuthorizeUrl])),
   'account:refresh': invokeContract(noArgs, videorcAccountRefreshResultSchema),

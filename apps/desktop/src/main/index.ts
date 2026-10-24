@@ -15249,12 +15249,14 @@ app.whenReady().then(async () => {
   // Relay (C3): the main renderer owns the single WS client and pushes each
   // live-chat snapshot through here to the window; the window's Clear routes
   // back to the main renderer. Last snapshot is cached for the window's first paint.
+  // Plan 191: the renderer discards the result; returning the 2,000-message
+  // view cost a full validation walk and clone per chat message.
   secureIpcHandle('comments-window:push-snapshot', (event, view: CommentsViewSnapshot) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined
     }
     if (commentsSmokeSnapshotOverride) {
-      return currentCommentsView()
+      return undefined
     }
     cacheCommentsView(view)
     // A history view pushed from Library carries its transcript; its saved
@@ -15271,7 +15273,7 @@ app.whenReady().then(async () => {
         emitCommentsView()
       }
     }
-    return view
+    return undefined
   })
   secureIpcHandle('comments-window:get-snapshot', () => currentCommentsView())
   secureIpcHandle('comments-window:set-view-mode', async (event, value: unknown) => {
@@ -15294,15 +15296,19 @@ app.whenReady().then(async () => {
     }
     return currentCommentsView()
   })
+  // Plan 191: the renderer discards the result; returning the 2,000-message
+  // view cost a full validation walk and clone per chat message.
+  // (applyLiveCommentsDelta still returns the view for its smoke command.)
   secureIpcHandle('comments-window:push-delta', (event, delta: CommentsSnapshotDelta) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
-      return currentCommentsView()
+      return undefined
     }
     if (commentsSmokeSnapshotOverride) {
-      return currentCommentsView()
+      return undefined
     }
 
-    return applyLiveCommentsDelta(delta)
+    applyLiveCommentsDelta(delta)
+    return undefined
   })
   // Click-to-highlight relay (Comments upgrade S3): the window clicks, the
   // MAIN renderer owns the lifecycle + rasterization (it has the backend
