@@ -25,11 +25,14 @@
 //! - [`glsl`]: the GLSL ES 3.00 sources (the source of truth; the Linux
 //!   renderer and the Electron previews run them as they are, Metal and D3D11
 //!   run hand ports checked against golden frames rendered from them).
+//! - `metal`, `d3d11`, `gl`: the renderers (macOS, Windows, Linux).
 //!
 //! Nothing here allocates or runs until a live background is applied: the
 //! catalogue is built lazily on first use (the zero-cost-when-off contract).
 
 pub mod clock;
+#[cfg(target_os = "windows")]
+pub mod d3d11;
 #[cfg(any(target_os = "linux", feature = "live-background-gl-check"))]
 pub mod gl;
 pub mod glsl;
@@ -43,9 +46,9 @@ pub mod sizes;
 #[cfg(test)]
 mod export;
 
-// The module's surface for every renderer (Metal now, D3D11 and GLES in
-// S4/S5) and the catalogue's users; a binary crate warns about the
-// re-exports nothing reaches yet.
+// The module's surface for every renderer (Metal, D3D11, GLES) and the
+// catalogue's users; a binary crate warns about the re-exports a platform's
+// build doesn't reach.
 #[allow(unused_imports)]
 pub use clock::LiveBackgroundClock;
 #[allow(unused_imports)]

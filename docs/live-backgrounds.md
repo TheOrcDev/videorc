@@ -22,13 +22,13 @@ looks. They are free for everyone, on macOS, Windows and Linux.
 - The animation starts on the frame the tile shows, so the first frame is
   the picture you clicked.
 
-| Background | Looks |
-| --- | --- |
-| Silk | Satin, Champagne, Midnight |
-| Side Rays | Sunbeam, Moonlight, Spotlight |
-| Plasma Wave | Plasma, Ember, Glacier |
-| Liquid Chrome | Polished, Gold, Mercury |
-| Line Waves | Silk, Gold, Aurora |
+| Background    | Looks                         |
+| ------------- | ----------------------------- |
+| Silk          | Satin, Champagne, Midnight    |
+| Side Rays     | Sunbeam, Moonlight, Spotlight |
+| Plasma Wave   | Plasma, Ember, Glacier        |
+| Liquid Chrome | Polished, Gold, Mercury       |
+| Line Waves    | Silk, Gold, Aurora            |
 
 ## Where it moves, and where it shows a still
 
@@ -38,21 +38,23 @@ the bundled backgrounds folder) and a `live` spec names the shader. Every
 path that can't animate draws the poster through the picture code that
 already exists, and says why in `CompositorStatus.liveBackground.reason`.
 
-| Path | Moves? | How |
-| --- | --- | --- |
-| macOS preview, recording, stream (Metal) | Yes | MSL ports render a live frame; the compositor draws it like a picture |
-| Windows recording and stream (D3D11 media session) | Yes | HLSL ports, the same way |
-| Windows idle preview, Linux preview (Electron proof surface) | Yes | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`) |
-| Linux recording and stream (CPU compositor) | Yes | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame |
-| 4K60 and the bridge-off override (legacy FFmpeg graph) | No, the poster | `legacy-graph`, with a start notice |
-| Windows and macOS CPU fallbacks | No, the poster | `cpu-fallback` |
-| A software GPU (llvmpipe, SwiftShader, WARP) | No, the poster | `software-gpu` |
-| Linux without EGL/GLES or a usable render node | No, the poster | `no-gpu`, `quarantined-node` |
-| Vertical simulcast leg, ISO legs, Clean cut | No background, as for pictures | |
+| Path                                                         | Moves?              | How                                                                                |
+| ------------------------------------------------------------ | ------------------- | ---------------------------------------------------------------------------------- |
+| macOS preview, recording, stream (Metal)                     | Yes                 | MSL ports render a live frame; the compositor draws it like a picture              |
+| Windows recording and stream (D3D11 media session)           | Yes                 | HLSL ports, the same way                                                           |
+| Windows idle preview, Linux preview (Electron proof surface) | Yes                 | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`)   |
+| Linux recording and stream (CPU compositor)                  | Yes                 | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame |
+| 4K60 and the bridge-off override (legacy FFmpeg graph)       | No, the poster      | `legacy-graph`, with a start notice                                                |
+| Windows and macOS CPU fallbacks                              | No, the poster      | `cpu-fallback`                                                                     |
+| A software GPU (llvmpipe, SwiftShader)                       | No, the poster      | `software-gpu`                                                                     |
+| Windows on WARP (no D3D11 session)                           | No, the poster      | `cpu-fallback`                                                                     |
+| Linux without EGL/GLES or a usable render node               | No, the poster      | `no-gpu`, `quarantined-node`                                                       |
+| Vertical simulcast leg, ISO legs, Clean cut                  | No, as for pictures | Windows' vertical leg draws the poster; the others draw no background              |
 
 ## Cost, and none when off
 
 With no live background chosen, nothing runs and nothing is allocated:
+
 - no shader compiles and no GPU driver loads;
 - no scratch texture, readback buffer or WebGL canvas exists;
 - each frame does one `Option` check.
@@ -62,6 +64,7 @@ pictures (a path check each, no decode). `pnpm smoke:live-background-off-ab`
 compares startup, frame time and memory with `origin/main`.
 
 With one on, measured on an Apple M4 (plan 190 "Measured cost"):
+
 - **GPU time per 1080p frame**: 0.3–0.9 ms for most looks, up to 1.7 ms
   on a loaded machine. A still picture takes 0.05–0.08 ms.
 - **Memory**: 0–1 MB of scratch for four of the five, about 13 MB for
@@ -71,11 +74,14 @@ With one on, measured on an Apple M4 (plan 190 "Measured cost"):
 
 Each 2 s the guard compares the background's own render time with the frame
 interval and checks the compositor's missed deadlines:
+
 - Over 20 % of the frame, or missed deadlines while it costs over 10 %: it
   drops to half its internal size.
 - Over again: it shows the poster (reason `gpu-budget`, plus one Info health
   event).
-- It never climbs back during a session (`live_background/guard.rs`).
+- It never climbs back for the same background (a new look or motion
+  included). A different background starts again at full size, since the five
+  cost very different amounts (`live_background/guard.rs`).
 
 ## For developers
 
@@ -104,6 +110,9 @@ The backend owns everything in `crates/videorc-backend/src/live_background/`:
 - GLSL `mod` is not `fmod`.
 - `pow(negative, 2.0)` is NaN outside WebGL: write `x * x`.
 - Rename MSL and HLSL keywords (`thread`, `sampler`, `line`, …).
+- HLSL: write vector arguments out (`float3(1, 1, 1)`, `gray.xxx`) where GLSL
+  mixes a scalar and a vector, and keep `fwidth`/`ddx` out of branches that
+  differ per pixel (compute, then select).
 - Draw opaque over the look's base colour (`#050506`).
 - No `_sRGB` views: React Bits writes sRGB values straight into the canvas.
 
@@ -115,6 +124,31 @@ The backend owns everything in `crates/videorc-backend/src/live_background/`:
 3. `pnpm probe:live-background-cost -- --mode golden` and `-- --mode posters`.
 4. `cargo test -p videorc-backend live_background` on macOS (and the D3D11
    golden test on Windows).
+
+### Windows (D3D11)
+
+`live_background/d3d11.rs` runs `d3d11.hlsl`, the hand port, on the D3D11
+media thread:
+
+- **Where.** The session pump sends the primary leg's live background as a
+  `LiveBackground` composition source. The media thread renders the live
+  frame just before the scene compose, which draws it as the background
+  layer like a picture.
+- **One size.** The pump declares the layer before the media thread knows
+  how the guard stands, so the live frame is always the Full internal size:
+  - the guard's Half level renders smaller and is drawn up into it;
+  - a still draws the poster into it, or the base colour while the poster
+    isn't prepared.
+- **Lazily compiled.** Each entry point compiles with `D3DCompile` the first
+  time a background needs it.
+- **Timing.** The guard reads D3D11 timestamp queries without waiting.
+- **Status.** The preview compositor is suspended during a D3D11 session, so
+  the session's pump follows the scene and publishes the status itself.
+- **WARP.** The D3D11 session never runs on a software adapter.
+
+No HLSL compiler runs on macOS; `cargo xwin check --target
+x86_64-pc-windows-msvc -p videorc-backend --tests` type-checks the Rust.
+Windows CI compiles every entry point and runs the golden grids on WARP.
 
 ### Linux (GLES)
 

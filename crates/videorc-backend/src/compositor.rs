@@ -741,6 +741,64 @@ impl CompositorRuntime {
         }
     }
 
+    /// Publish how the live background draws and what it holds (0 while
+    /// off) from the board into the status. True when the guard has just
+    /// fallen back to the poster (say it once).
+    fn publish_live_background_status(&mut self) -> bool {
+        let (live_status, live_programs, live_scratch) = self.live_background_board.snapshot();
+        let live_status = self.live_background.as_ref().and(live_status);
+        let budget_notice = crate::live_background::runtime::entered_gpu_budget_still(
+            self.status.live_background.as_ref(),
+            live_status.as_ref(),
+        );
+        self.status.live_background = live_status;
+        self.status.frame_pipeline.live_background_programs = live_programs;
+        self.status.frame_pipeline.live_background_scratch_bytes = live_scratch;
+        budget_notice
+    }
+
+    /// Plan 190 S4: the D3D11 media session's live background. The preview
+    /// compositor is suspended while the session runs, so its pump follows
+    /// the scene and publishes the renderer's board itself, once per tick it
+    /// gets the lock. Returns this tick's frame input (the session stamps the
+    /// tick) and whether to say the guard fell back to the poster.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_live_background(
+        &mut self,
+        now: Instant,
+    ) -> (
+        Option<crate::live_background::LiveBackgroundFrameInput>,
+        bool,
+    ) {
+        self.sync_live_background(now);
+        let Some(runtime) = self.live_background.as_ref() else {
+            // Off: publish until the media thread's release has reached the
+            // status; after that this is three compares per tick.
+            let pipeline = &self.status.frame_pipeline;
+            if self.status.live_background.is_some()
+                || pipeline.live_background_programs != 0
+                || pipeline.live_background_scratch_bytes != 0
+            {
+                self.publish_live_background_status();
+            }
+            return (None, false);
+        };
+        let input = self
+            .scene
+            .as_ref()
+            .and_then(|snapshot| snapshot.scene.as_ref())
+            .and_then(|scene| scene.background.as_ref())
+            .map(|background| {
+                runtime.frame_input(
+                    background,
+                    &self.live_background_board,
+                    crate::live_background::LiveBackgroundTick::unmeasured(now),
+                )
+            });
+        let budget_notice = self.publish_live_background_status();
+        (input, budget_notice)
+    }
+
     /// Drop the layers whose fade-out ended (D10). Runs every render tick
     /// that gets the lock; swaps the `Arc` only when something leaves.
     fn reap_faded_banners(&mut self, now: Instant) -> bool {
@@ -2633,6 +2691,17 @@ pub(crate) struct WindowsSceneImage {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) revision: u64,
+}
+#[cfg(target_os = "windows")]
+impl std::fmt::Debug for WindowsSceneImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindowsSceneImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
 }
 #[cfg(target_os = "windows")]
 impl CompositorImageSource {
@@ -9788,18 +9857,8 @@ fn try_update_compositor_status(
     compositor.status.sources = metrics.sources;
     compositor.status.frame_pipeline = metrics.frame_pipeline;
     // Plan 190: how the live background draws, and what it holds (0 while off).
-    let (live_status, live_programs, live_scratch) = compositor.live_background_board.snapshot();
-    let live_status = compositor.live_background.as_ref().and(live_status);
-    let budget_notice = crate::live_background::runtime::entered_gpu_budget_still(
-        compositor.status.live_background.as_ref(),
-        live_status.as_ref(),
-    );
-    compositor.status.live_background = live_status;
-    compositor.status.frame_pipeline.live_background_programs = live_programs;
-    compositor
-        .status
-        .frame_pipeline
-        .live_background_scratch_bytes = live_scratch;
+    let budget_notice = compositor.publish_live_background_status();
+
     compositor.status.image_cache = compositor.image_sources.status();
     compositor.status.updated_at = Utc::now().to_rfc3339();
     let status = compositor.status.clone();

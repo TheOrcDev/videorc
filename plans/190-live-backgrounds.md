@@ -1037,7 +1037,7 @@ sessions; the plan's budget is p95 ≤ 1.5 ms at 1080p and ≤ 3.0 ms at 4K):
 | Side Rays     |           0.36 / 0.38 ms |           0.36 / 0.39 ms |                              8.5 MB |
 | Plasma Wave   |           0.56 / 1.06 ms |           0.57 / 0.75 ms |                             23.2 MB |
 | Liquid Chrome |           0.85 / 0.92 ms |           0.86 / 0.98 ms |                              8.5 MB |
-| Line Waves    |           0.30 / 0.32 ms |           1.24 / 1.35 ms |  8.5 MB at 1080p, 33.9 MB at 4K     |
+| Line Waves    |           0.30 / 0.32 ms |           1.24 / 1.35 ms |      8.5 MB at 1080p, 33.9 MB at 4K |
 
 The four soft backgrounds render at 1920 × 1080 internally at 4K (the
 compose scales the frame up), so their 4K time equals 1080p. Plasma Wave's
@@ -1066,12 +1066,91 @@ to exactness for about 15 MB more at 1080p.
 the others); the 12-hour phase-offset by-eye check and the side-by-side
 against React Bits (the dev app is not launched from this slice).
 
+### S4: Windows D3D11 (2026-10-24)
+
+The Fable lane hit its weekly limit (it resets 2026-10-28), so this slice
+was built on Opus. **It has never run on Windows.** This Mac type-checks and
+lints the Windows target (`cargo xwin check --tests`, and `cargo xwin
+clippy` with Windows CI's flags), but no HLSL compiler runs here: Windows CI
+is the first compile of the shaders.
+
+**Changed from the design:**
+
+- The HLSL lives in its own file, `live_background/d3d11.hlsl`.
+  `windows_d3d11_shaders.hlsl`, `ScenePs` and the scene compositor are
+  untouched.
+- There is no new layer kind. The live frame is the `BackgroundImage` layer
+  (source 30, z −1) with a texture source, as the capture's is.
+- Time is the shared phase clock at the pump's tick start, as on every other
+  platform (not `output_sequence / fps`). A look or motion change re-bases
+  without a jump.
+
+**How it runs:**
+
+- The preview compositor is suspended during a D3D11 session, so the session
+  pump's snapshot follows the scene's live spec itself
+  (`windows_live_background`). It also publishes the renderer's board into
+  `CompositorStatus` each tick it gets the lock, and emits the gpu-budget
+  health event once.
+- The pump declares the layer at the Full internal size of the primary
+  output. It sends a `LiveBackground` composition source with:
+  - the frame input, stamped with the tick, its interval, and whether the
+    previous tick ran over 1.5 intervals;
+  - the prepared poster.
+- The media thread renders the live frame on the immediate context before
+  the compose (`LiveBackgroundD3d11Renderer`). The frame is always the
+  declared size:
+  - Full: the passes end in the live frame.
+  - Half: a half-size frame, drawn up by one present pass.
+  - Still (forced, a failed compile, gpu-budget): the poster, drawn to
+    cover the frame by the same pass and uploaded once per revision. While
+    the poster isn't prepared, the frame is the base colour.
+  - If D3D11 refuses the live frame itself, the background is left out of
+    that one composition (the plan is trimmed). The composition never fails.
+- Each entry point compiles with `D3DCompile` the first time a background
+  needs it. A failed entry shows only its background's poster.
+- **Formats:** BGRA8 for the live frame, R8 with generated mips for Silk's
+  field, RGBA16F for Plasma's coarse trace, R11G11B10F for Plasma's light
+  chain.
+- **Guard:** GPU time comes from timestamp queries. Up to four sets are in
+  flight, read without flushing. `GetData` goes through the vtable because
+  the windows crate maps "not ready" (`S_FALSE`) to `Ok`.
+- **Lifecycle:** the first composition with a live background creates the
+  renderer. The first one without frees its shaders, textures and queries.
+  The renderer ends with the media generation.
+- **WARP:** the D3D11 media device already refuses software adapters. A
+  WARP-only machine never reaches this renderer: its CPU fallback shows the
+  poster with `cpu-fallback`.
+- **The vertical leg** draws the poster, as it draws a picture (the D3D11
+  session draws each leg's background).
+
+**Tests (they run on Windows CI only):**
+
+- every entry point compiles (no device needed);
+- golden grids on the hardware adapter, else WARP, at the Metal port's
+  tolerance (mean ≤ 2.0, max cell ≤ 10);
+- on injected slow timings, the guard steps Full → Half → poster at one
+  frame size, and the still is the poster's pixels;
+- a forced still compiles nothing and draws the base colour;
+- Plasma Wave's scratch at 1080p, and release frees it all.
+
+**Owed on Windows:**
+
+- CI's Windows job: the first HLSL compile, the WARP goldens and the tests
+  above.
+- On the owner's Windows machine:
+  - AGENTS.md's Windows rules: the affected filters 25 times and the full
+    suite three times from PowerShell 7;
+  - a D3D11 recording with Silk, through S9's analyzer;
+  - S1's cost numbers.
+
 ### S5: Linux GLES and the CPU path (2026-10-24)
 
 The Fable lane hit its weekly limit before writing anything, so this slice
 was built on Opus.
 
 **The CPU path (every OS).** When the primary leg has a live background:
+
 - On Linux, the GLES renderer's newest frame is wrapped as an image source
   and drawn by `render_scene_background`, exactly like a picture (a test
   proves it is pixel-identical to a picture of the same pixels). The poster
@@ -1083,6 +1162,7 @@ was built on Opus.
 - With no live background, the CPU path does one check and builds nothing.
 
 **The Linux renderer** (`live_background/gl.rs`):
+
 - The run loop's renderer slot holds it on Linux, as it holds the Metal
   renderer on macOS.
 - One worker thread owns the EGL context, renders the newest request
@@ -1111,12 +1191,70 @@ type-checks the GL module and its tests on macOS, and the CPU-path tests
 pass (`live_background` filter).
 
 **Owed on Linux:**
+
 - CI's Linux job compiles the real target.
 - On ogre (AGENTS.md's named box): the direct matrix command with a live
   background applied (`VIDEORC_LINUX_H264_ENCODER=openh264
-  VIDEORC_MATRIX_ONLY=1080p30 VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS=1
-  VIDEORC_SMOKE_FFMPEG_PATH=$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg node
-  scripts/smoke-recording-matrix-app.mjs`), `pnpm
-  probe:preview-lifecycle:linux`, `pnpm probe:live-background-cost`, and the
+VIDEORC_MATRIX_ONLY=1080p30 VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS=1
+VIDEORC_SMOKE_FFMPEG_PATH=$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg node
+scripts/smoke-recording-matrix-app.mjs`), `pnpm
+probe:preview-lifecycle:linux`, `pnpm probe:live-background-cost`, and the
   GLES golden test (`cargo test -p videorc-backend live_background::gl`).
 
+### S11: Gates (2026-10-24, on Opus)
+
+This Mac was shared and busy the whole time: a Unity editor kept the GPU and
+about 120 % CPU, and other sessions pushed the load average to 15–49. GPU
+times below are host-contaminated; quiet-host numbers are owed.
+
+**Found and fixed by the gates:**
+
+- **The strict backend contract rejected `compositor.status.liveBackground`.**
+  Whenever a live background showed, main logged "invalid backend event" and
+  retired its present pump, and the UI's own `compositor.status` reads would
+  have thrown. `backend-rpc-contract.ts` now has a strict
+  `liveBackgroundStatusSchema`, with a test.
+- **S6's `inspect-native-preview-live-background` smoke command was not on
+  the smoke-server allowlist** (`test:scripts` caught it).
+- **`framePipeline` always sent the two new counters, even at 0.** The shared
+  high-risk contract fixture for a stopped compositor caught it. They are now
+  left off the wire at 0, so a run without a live background sends what it
+  sent before plan 190.
+- **The guard carried a fall to the poster across a background change.** A
+  user whose machine dropped Plasma Wave to its poster, then picked a cheaper
+  background, got a still for the rest of the run. Now
+  `LiveBackgroundGuard::follow` starts a different background again at
+  Full. A new look or motion never climbs back. Tested.
+- **The smoke applied its scene straight to the backend.** Main's first-frame
+  watchdog (`resync-scene`) put the app's own scene back over it. The smoke
+  now re-applies when the compositor loses the live background, and names
+  the last status on a timeout.
+
+**Results:**
+
+- Rust (macOS): `cargo fmt --check`, `cargo clippy -p videorc-backend -- -D
+warnings` (the foundation's dead-code warnings fixed) and `cargo test
+live_background` pass.
+- Rust (Windows, `cargo xwin`): `check --tests`, and `clippy` with Windows
+  CI's flags, pass.
+- TypeScript: `typecheck`, `lint` and `format:check` pass. Desktop vitest:
+  516 files, 5281 tests. `test:scripts`: 2541 pass (one RTMP readiness timing
+  test failed under load and passed on rerun).
+- `check:renderer-assets`: eager JS 393,921 gzip bytes (ceiling 395,000).
+- `smoke:live-background`:
+  - **Forced still** (`VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1`): full pass. Every case
+    shows the poster with reason `forced`, a static ring (motion
+    0.02–0.06) and no programs.
+  - **Shader:** every case passed at least once here.
+    - Silk 1080p30: p95 1.65–4.5 ms, ring motion ≈ 5 per 0.5 s.
+    - Plasma Wave 4K30 (renders at 1080p): p95 5.1–6.4 ms, motion ≈ 5.5.
+    - Liquid Chrome 1080p60: p95 1.48 ms, motion 24.
+    - Under this load the guard drew at half size for most samples. That is
+      the designed response, so the smoke now allows `half` and fails only on
+      a fall to the poster.
+  - **The last full shader run failed:** Plasma Wave's ring froze at the
+    tail of its 4 s take (load 15–20), most likely the guard's fall to the
+    poster after the last status sample. The smoke now prints the
+    end-of-take status. A quiet-host run is owed.
+  - Off: no programs and no scratch before the first live background, and
+    both back to 0 after it comes off.
