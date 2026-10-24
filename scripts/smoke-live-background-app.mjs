@@ -3,7 +3,11 @@
 // For each case (Silk at 1080p30, Plasma Wave at 4K30, Liquid Chrome at
 // 1080p60) the smoke puts the live background on the preview, checks the
 // compositor draws the shader, records a few seconds through the encoder
-// bridge and samples the artifact with ffmpeg:
+// bridge and samples the artifact with ffmpeg. Plan 193 adds record-and-
+// stream cases (`<id>:<record>+stream<stream>`): the stream goes to a local
+// RTMP listener and the received stream is checked like the recording. On
+// macOS the stream is its own compositor leg, which drew the poster before
+// plan 193; its ring must move as much as the recording's. Each artifact:
 // - the background ring (the stage margin around the screen) moves;
 // - it never freezes for more than half a second;
 // - the stage (the synthetic screen) is not the background;
@@ -15,7 +19,7 @@
 // builds) every case must draw the still poster instead: status `still` with
 // reason `forced` and a static ring.
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -42,26 +46,54 @@ const forced = process.env.VIDEORC_LIVE_BACKGROUND_FORCE_STILL === '1'
 const BUDGET_MS = { 1080: 1.5, 2160: 3.0 }
 const CASES = (
   process.env.VIDEORC_LIVE_BACKGROUND_SMOKE_CASES ??
-  'silk:1080p30,plasma-wave:2160p30,liquid-chrome:1080p60'
+  [
+    'silk:1080p30',
+    'plasma-wave:2160p30',
+    'liquid-chrome:1080p60',
+    // Plan 193: one profile for both (the same-profile stream leg), the
+    // owner's 4K30 recording with a 1080p30 stream, and Line Waves' thin
+    // lines drawn from a 4K frame into the 1080p stream.
+    'silk:1080p30+stream1080p30',
+    'liquid-chrome:2160p30+stream1080p30',
+    'line-waves:2160p30+stream1080p30'
+  ].join(',')
 )
   .split(',')
   .map((entry) => {
-    const [id, profile] = entry.split(':')
-    const match = /^(\d+)p(\d+)$/.exec(profile)
+    const [id, profiles] = entry.split(':')
+    const match = /^(\d+)p(\d+)(?:\+stream(\d+)p(\d+))?$/.exec(profiles ?? '')
     assert(match, `bad case ${entry}`)
     const height = Number(match[1])
+    const streamHeight = match[3] ? Number(match[3]) : null
     return {
       id,
-      look: { silk: 'satin', 'plasma-wave': 'plasma', 'liquid-chrome': 'polished' }[id] ?? null,
-      width: Math.round((height * 16) / 9),
+      look:
+        {
+          silk: 'satin',
+          'plasma-wave': 'plasma',
+          'liquid-chrome': 'polished',
+          'line-waves': 'silk'
+        }[id] ?? null,
+      width: widthFor(height),
       height,
       fps: Number(match[2]),
+      stream: streamHeight
+        ? { width: widthFor(streamHeight), height: streamHeight, fps: Number(match[4]) }
+        : null,
       seconds: height > 1080 ? 4 : 6
     }
   })
 /** The stage margin per side at Visibility 20 is 10 %; the ring is sampled inside it. */
 const RING = { x: 0.01, y: 0.15, w: 0.07, h: 0.7 }
 const STAGE = { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }
+/**
+ * Plan 193: a square of the ring, sampled finer (64 × 64, five a second), to
+ * compare the recording with the stream at one scale. Line Waves' thin lines
+ * average away in the 16 × 16 ring thumbnail; here they still show.
+ */
+const RING_SQUARE = { x: 0.015, y: 0.4, w: 0.06, h: 0.1067 }
+const RTMP_BASE_PORT = Number(process.env.VIDEORC_LIVE_BACKGROUND_RTMP_PORT ?? 19841)
+const RTMP_BIND_MS = 1500
 
 const LAYOUT = {
   layoutPreset: 'screen-only',
@@ -112,8 +144,8 @@ try {
     assert.equal(before.framePipeline?.liveBackgroundScratchBytes ?? 0, 0, 'no scratch while off')
     assert.equal(before.liveBackground, undefined, 'no live status while off')
 
-    for (const testCase of CASES) {
-      await runCase(testCase)
+    for (const [index, testCase] of CASES.entries()) {
+      await runCase(testCase, index)
     }
 
     // Off again: the programs and scratch are released.
@@ -132,7 +164,8 @@ try {
     ws.close()
   }
 
-  async function runCase(testCase) {
+  async function runCase(testCase, index) {
+    const label = caseLabel(testCase)
     const background = liveBackground(testCase)
     await applyPreview(background, testCase)
     let appliedAt = Date.now()
@@ -177,31 +210,53 @@ try {
       { path: outputDirectory, kind: 'output-directory' },
       { timeoutMs }
     )
-    const started = await request(ws, timeoutMs, 'session.start', {
-      ...sessionParams(capability.capabilityId, testCase),
-      scene: {
-        ...scene,
-        background,
-        outputs: scene.outputs.map((output) => ({
-          ...output,
-          width: testCase.width,
-          height: testCase.height,
-          fps: testCase.fps
-        }))
-      }
-    })
-    assert.equal(started.state, 'recording', `${testCase.id}: the session must record`)
-    await sleep(1500) // Deliberate: past the start transient before sampling uploads.
-    const early = await status()
+    // Plan 193: a stream case sends its stream to a local RTMP listener.
+    const target = testCase.stream ? rtmpTarget(testCase, index) : null
+    const listener = target ? spawnRtmpListener(target) : null
+    let started
+    let stopped
+    let early
+    let late
     const samples = []
-    const until = Date.now() + testCase.seconds * 1000
-    while (Date.now() < until) {
-      samples.push(await status())
-      await sleep(500)
+    try {
+      if (listener) {
+        await sleep(RTMP_BIND_MS) // Deliberate: ffmpeg must be listening before the session dials.
+        assert.equal(
+          listener.process.exitCode,
+          null,
+          `${label}: the local RTMP listener exited: ${listener.stderr.join('').trim()}`
+        )
+      }
+      started = await request(ws, timeoutMs, 'session.start', {
+        ...sessionParams(capability.capabilityId, testCase, target),
+        scene: {
+          ...scene,
+          background,
+          outputs: scene.outputs.map((output) => ({
+            ...output,
+            ...(output.kind === 'stream' && testCase.stream
+              ? testCase.stream
+              : { width: testCase.width, height: testCase.height, fps: testCase.fps })
+          }))
+        }
+      })
+      assert(
+        started.state === 'recording' || (target && started.state === 'streaming'),
+        `${label}: the session must record, got ${started.state}`
+      )
+      await sleep(1500) // Deliberate: past the start transient before sampling uploads.
+      early = await status()
+      const until = Date.now() + testCase.seconds * 1000
+      while (Date.now() < until) {
+        samples.push(await status())
+        await sleep(500)
+      }
+      late = await status()
+      console.log(`${label}: at the end of the take ${JSON.stringify(late.liveBackground)}`)
+      stopped = await request(ws, timeoutMs, 'session.stop')
+    } finally {
+      await stopRtmpListener(listener)
     }
-    const late = await status()
-    console.log(`${testCase.id}: at the end of the take ${JSON.stringify(late.liveBackground)}`)
-    const stopped = await request(ws, timeoutMs, 'session.stop')
     const path = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120000 })
 
     // The guard may halve the internal size on a busy host (it still moves);
@@ -210,35 +265,33 @@ try {
     for (const sample of samples) {
       assert(
         allowed.includes(sample.liveBackground?.rendering),
-        `${testCase.id}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)}`
+        `${label}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)}`
       )
     }
     const halved = samples.filter((sample) => sample.liveBackground?.rendering === 'half').length
     if (halved > 0) {
-      console.log(
-        `${testCase.id}: the guard drew at half size for ${halved}/${samples.length} samples`
-      )
+      console.log(`${label}: the guard drew at half size for ${halved}/${samples.length} samples`)
     }
     assert.equal(
       late.framePipeline.immutableTextureUploads,
       early.framePipeline.immutableTextureUploads,
-      `${testCase.id}: immutable texture uploads grew while the live background showed`
+      `${label}: immutable texture uploads grew while the live background showed`
     )
     if (!forced) {
       assert(late.framePipeline.liveBackgroundPrograms > 0, 'the live programs are counted')
       const p95 = late.liveBackground?.p95Ms
       const budget = BUDGET_MS[testCase.height]
       console.log(
-        `${testCase.id} ${testCase.width}x${testCase.height}@${testCase.fps}: p95 ${p95?.toFixed?.(2) ?? 'n/a'} ms (budget ${budget}), load ${loadavg()[0].toFixed(1)}`
+        `${label}: p95 ${p95?.toFixed?.(2) ?? 'n/a'} ms (budget ${budget}), load ${loadavg()[0].toFixed(1)}`
       )
       if (process.env.VIDEORC_LIVE_BACKGROUND_SMOKE_SKIP_BUDGET !== '1') {
         assert(
           typeof p95 === 'number' && p95 <= budget,
-          `${testCase.id}: the live background's p95 ${p95} ms exceeds ${budget} ms (load ${loadavg()[0].toFixed(1)})`
+          `${label}: the live background's p95 ${p95} ms exceeds ${budget} ms (load ${loadavg()[0].toFixed(1)})`
         )
       }
     }
-    verifyArtifact(path, testCase)
+    verifyArtifact(path, testCase, `${label} recording`)
     const quality = await analyzeRecording(path, {
       ffmpegPath,
       ffprobePath,
@@ -247,16 +300,49 @@ try {
       gates: { requireMotion: false }
     })
     assert(quality.verdict.pass, `${path}: ${quality.verdict.failures.join('; ')}`)
-    console.log(`Live background case OK: ${testCase.id} ${testCase.height}p${testCase.fps}`)
+    if (target) verifyStream(path, target.receivedPath, testCase, label)
+    console.log(`Live background case OK: ${label}`)
   }
 
-  function verifyArtifact(path, testCase) {
+  /**
+   * Plan 193: the received stream moves like the recording. Before plan 193 the
+   * stream leg drew the poster, so its ring was still while the recording's
+   * moved; the cross-check fails a stream that shows a still on either leg.
+   */
+  function verifyStream(recordingPath, streamPath, testCase, label) {
+    verifyArtifact(streamPath, testCase, `${label} stream`)
+    const size = probeVideoSize(streamPath)
+    assert.deepEqual(
+      size,
+      { width: testCase.stream.width, height: testCase.stream.height },
+      `${label}: the received stream is ${JSON.stringify(size)}`
+    )
+    const recordingMotion = squareMotion(recordingPath)
+    const streamMotion = squareMotion(streamPath)
+    console.log(
+      `${label}: ring square motion recording ${recordingMotion.toFixed(2)}, stream ${streamMotion.toFixed(2)} per 0.2 s`
+    )
+    if (forced) {
+      assert(
+        streamMotion < 0.75,
+        `${streamPath}: a forced still must not move on the stream (${streamMotion})`
+      )
+      return
+    }
+    const ratio = streamMotion / Math.max(recordingMotion, 0.01)
+    assert(
+      ratio >= 0.5 && ratio <= 2,
+      `${label}: the stream's ring moves ${streamMotion.toFixed(2)} against the recording's ${recordingMotion.toFixed(2)} (ratio ${ratio.toFixed(2)}, want 0.5–2)`
+    )
+  }
+
+  function verifyArtifact(path, testCase, label) {
     assert(path && existsSync(path) && statSync(path).size > 0, `missing artifact ${path}`)
     const ring = grayTimeline(path, RING)
     const stage = grayTimeline(path, STAGE)
     const steps = ring.slice(1).map((frame, index) => meanAbsDiff(frame, ring[index]))
     const motion = steps.reduce((sum, value) => sum + value, 0) / steps.length
-    console.log(`${testCase.id}: ring motion ${motion.toFixed(2)} per 0.5 s`)
+    console.log(`${label}: ring motion ${motion.toFixed(2)} per 0.5 s`)
     if (forced) {
       assert(motion < 0.75, `${path}: a forced still must not move (ring motion ${motion})`)
     } else {
@@ -318,13 +404,13 @@ function liveBackground({ id, look }) {
   }
 }
 
-function sessionParams(outputDirectoryCapability, testCase) {
-  return {
+function sessionParams(outputDirectoryCapability, testCase, target) {
+  const params = {
     sources: { testPattern: true, microphoneId: 'microphone:coreaudio:4294967295' },
     layout: LAYOUT,
     output: {
       recordEnabled: true,
-      streamEnabled: false,
+      streamEnabled: Boolean(target),
       outputDirectoryCapability,
       video: {
         preset: 'custom',
@@ -333,13 +419,147 @@ function sessionParams(outputDirectoryCapability, testCase) {
         fps: testCase.fps,
         bitrateKbps: testCase.height > 1080 ? 20000 : 8000
       },
-      rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
+      rtmp: target
+        ? { preset: 'custom', serverUrl: target.serverUrl, streamKey: target.streamKey }
+        : { preset: 'custom', serverUrl: '', streamKey: '' }
     }
+  }
+  if (!target) return params
+  // Plan 193: one custom RTMP destination at a stream-safe preset, the shape
+  // the comment-highlight stream smoke uses.
+  const timestamp = '2026-01-01T00:00:00.000Z'
+  const preset = `stream-safe-${testCase.stream.height}p${testCase.stream.fps}`
+  return {
+    ...params,
+    streaming: {
+      enabled: true,
+      mode: 'single',
+      targets: [
+        {
+          id: target.id,
+          platform: 'custom',
+          label: target.label,
+          enabled: true,
+          serverUrl: target.serverUrl,
+          urlMode: 'server-and-key',
+          streamKey: target.streamKey,
+          streamKeyPresent: true,
+          authMode: 'manual-rtmp',
+          outputPreset: preset,
+          outputBitrateKbps: 6000,
+          createdAt: timestamp,
+          updatedAt: timestamp
+        }
+      ],
+      selectedTargetId: target.id,
+      defaultOutputPreset: preset,
+      defaultBitrateKbps: 6000,
+      enabledTargetIds: [target.id]
+    },
+    captions: { burnTarget: 'off', position: 'bottom', textSize: 'm' }
   }
 }
 
-/** A 16×16 grey thumbnail of a rect every 0.5 s. */
-function grayTimeline(path, rect) {
+function widthFor(height) {
+  return Math.round((height * 16) / 9)
+}
+
+function caseLabel({ id, height, fps, stream }) {
+  return `${id} ${height}p${fps}${stream ? ` + stream ${stream.height}p${stream.fps}` : ''}`
+}
+
+function rtmpTarget(testCase, index) {
+  const port = RTMP_BASE_PORT + index
+  const streamKey = `live-background-${index}`
+  return {
+    id: `live-background-${index}`,
+    label: `Local ${caseLabel(testCase)}`,
+    serverUrl: `rtmp://127.0.0.1:${port}/live`,
+    streamKey,
+    listenUrl: `rtmp://127.0.0.1:${port}/live/${streamKey}`,
+    receivedPath: join(outputDirectory, `stream-received-${index}-${testCase.id}.flv`)
+  }
+}
+
+function spawnRtmpListener(target) {
+  const stderr = []
+  const child = spawn(
+    ffmpegPath,
+    [
+      '-y',
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-listen',
+      '1',
+      '-i',
+      target.listenUrl,
+      '-c',
+      'copy',
+      '-f',
+      'flv',
+      target.receivedPath
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'] }
+  )
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (text) => stderr.push(text))
+  return { process: child, stderr }
+}
+
+async function stopRtmpListener(listener) {
+  const child = listener?.process
+  if (!child?.pid || child.exitCode !== null) return
+  // The listener ends by itself when the session closes its RTMP connection.
+  await waitForExit(child, 3000)
+  if (child.exitCode !== null) return
+  child.kill('SIGTERM')
+  await waitForExit(child, 1000)
+  if (child.exitCode === null) child.kill('SIGKILL')
+  await waitForExit(child, 1000)
+}
+
+function waitForExit(child, timeout) {
+  if (child.exitCode !== null) return Promise.resolve()
+  return new Promise((resolveWait) => {
+    const timer = setTimeout(resolveWait, timeout)
+    child.once('exit', () => {
+      clearTimeout(timer)
+      resolveWait()
+    })
+  })
+}
+
+function probeVideoSize(path) {
+  const probe = spawnSync(
+    ffprobePath,
+    [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'stream=width,height',
+      '-of',
+      'csv=p=0:s=x',
+      path
+    ],
+    { encoding: 'utf8' }
+  )
+  const match = /^(\d+)x(\d+)/.exec(String(probe.stdout).trim())
+  return match ? { width: Number(match[1]), height: Number(match[2]) } : null
+}
+
+/** Plan 193: mean frame-to-frame change of the ring square, 64 × 64 at 5 per second. */
+function squareMotion(path) {
+  const frames = grayTimeline(path, RING_SQUARE, { size: 64, fps: 5 })
+  const steps = frames.slice(1).map((frame, index) => meanAbsDiff(frame, frames[index]))
+  return steps.reduce((sum, value) => sum + value, 0) / steps.length
+}
+
+/** A grey thumbnail of a rect (16×16, every 0.5 s unless told otherwise). */
+function grayTimeline(path, rect, { size = 16, fps = 2 } = {}) {
   const result = spawnSync(
     ffmpegPath,
     [
@@ -349,7 +569,7 @@ function grayTimeline(path, rect) {
       '-i',
       path,
       '-vf',
-      `fps=2,crop=iw*${rect.w}:ih*${rect.h}:iw*${rect.x}:ih*${rect.y},scale=16:16,format=gray`,
+      `fps=${fps},crop=iw*${rect.w}:ih*${rect.h}:iw*${rect.x}:ih*${rect.y},scale=${size}:${size},format=gray`,
       '-f',
       'rawvideo',
       'pipe:1'
@@ -357,13 +577,14 @@ function grayTimeline(path, rect) {
     { encoding: null, maxBuffer: 64 * 1024 * 1024 }
   )
   assert(result.status === 0, `${path}: ffmpeg failed: ${result.stderr?.toString() ?? ''}`)
+  const frameBytes = size * size
   const frames = []
-  for (let offset = 0; offset + 256 <= result.stdout.length; offset += 256) {
-    frames.push(result.stdout.subarray(offset, offset + 256))
+  for (let offset = 0; offset + frameBytes <= result.stdout.length; offset += frameBytes) {
+    frames.push(result.stdout.subarray(offset, offset + frameBytes))
   }
-  assert(frames.length >= 4, `${path}: too few frames sampled (${frames.length})`)
+  assert(frames.length >= fps + 2, `${path}: too few frames sampled (${frames.length})`)
   // Skip the first second (start transient).
-  return frames.slice(2)
+  return frames.slice(fps)
 }
 
 function meanAbsDiff(a, b) {
