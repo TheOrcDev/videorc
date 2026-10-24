@@ -47,21 +47,22 @@ use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonRealTime,
     CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMF2DBuffer2,
     IMFActivate, IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFAttributes,
-    IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFTrackedSample,
-    IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-    MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY,
-    MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING,
-    MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION,
-    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MF2DBuffer_LockFlags_Write,
-    MFCreate2DMediaBuffer, MFCreateAttributes, MFCreateDXGIDeviceManager,
-    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFCreateTrackedSample, MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown,
-    MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG,
-    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
-    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFShutdown,
+    IMFTrackedSample, IMFTransform, METransformDrainComplete, METransformHaveOutput,
+    METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE,
+    MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE,
+    MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+    MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE,
+    MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES,
+    MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MF2DBuffer_LockFlags_Write, MFCreate2DMediaBuffer, MFCreateAttributes,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFCreateTrackedSample, MFMediaType_Video, MFNominalRange_16_235,
+    MFSTARTUP_FULL, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID,
+    MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
     MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
@@ -3114,21 +3115,123 @@ fn variant_u32(value: u32) -> VARIANT {
     }
 }
 
+/// Microsoft's teardown contract for asynchronous MFTs ("Asynchronous MFTs" →
+/// shutting down): stop streaming, then `IMFShutdown::Shutdown` on the MFT
+/// itself so it shuts down its event queue and stops its internal work-queue
+/// items BEFORE the last reference is released.
+///
+/// Without the explicit Shutdown, the NVIDIA H.264 MFT keeps an internal
+/// RTWorkQ work item in flight after release: minidump 2026-10-23 (0.9.147)
+/// shows `nvEncMFTH264x.dll` → `RTWorkQ.dll` → `mfplat.dll` writing through a
+/// null pointer ~0.8 s after a cancelled recording's encoder was dropped.
+/// A session cancelled before draining also gets a flush, so no queued input
+/// survives into Shutdown. Every call is best-effort; errors are ignored
+/// because the encoder is going away regardless.
+unsafe fn shutdown_async_transform(transform: &IMFTransform, drained: bool) {
+    unsafe {
+        stop_async_transform_streaming(transform, drained);
+        if let Ok(shutdown) = transform.cast::<IMFShutdown>() {
+            let _ = shutdown.Shutdown();
+        }
+    }
+}
+
+unsafe fn stop_async_transform_streaming(transform: &IMFTransform, drained: bool) {
+    unsafe {
+        if !drained {
+            let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        }
+        let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+        let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+    }
+}
+
+/// How long a stopped hardware MFT stays fully alive before its final
+/// Shutdown/ShutdownObject/Release. Session-stop teardown of the NVIDIA async
+/// H.264 MFT crashed 0.7-3.5 s later on the MFT's own RTWorkQ work item
+/// (`nvEncMFTH264x.dll` -> `RTWorkQ.dll` -> `mfplat.dll`, null+0x24 write;
+/// minidumps 2026-10-23, 0.9.147), even with the documented IMFShutdown
+/// sequence. Streaming is stopped immediately; only the destruction waits,
+/// so a straggling driver work item runs against a live object.
+const RETIRED_TRANSFORM_GRACE: Duration = Duration::from_secs(15);
+
+struct RetiredTransform {
+    release_at: Instant,
+    activation: IMFActivate,
+    events: IMFMediaEventGenerator,
+    transform: IMFTransform,
+    d3d11_input: Option<D3D11SurfaceInput>,
+    d3d11_cpu_upload: Option<D3D11CpuUploadInput>,
+}
+
+// SAFETY: async MFTs, their activation and event generator are free-threaded
+// MTA objects (the process holds the MTA for its lifetime, see
+// windows_com_lifetime.rs), and D3D11 objects are free-threaded for
+// AddRef/Release. The reaper only shuts down and releases them.
+unsafe impl Send for RetiredTransform {}
+
+impl RetiredTransform {
+    fn destroy(self) {
+        unsafe {
+            if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
+                let _ = shutdown.Shutdown();
+            }
+            let _ = self.activation.ShutdownObject();
+        }
+        drop(self.events);
+        drop(self.transform);
+        drop(self.activation);
+        drop(self.d3d11_input);
+        drop(self.d3d11_cpu_upload);
+    }
+}
+
+fn retire_transform(retired: RetiredTransform) {
+    static REAPER: std::sync::OnceLock<
+        Option<std::sync::Mutex<std::sync::mpsc::Sender<RetiredTransform>>>,
+    > = std::sync::OnceLock::new();
+    let sender = REAPER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<RetiredTransform>();
+        std::thread::Builder::new()
+            .name("videorc-mft-reaper".to_string())
+            .spawn(move || {
+                // Items arrive in release order (same grace for every item).
+                while let Ok(retired) = receiver.recv() {
+                    let now = Instant::now();
+                    if retired.release_at > now {
+                        std::thread::sleep(retired.release_at - now);
+                    }
+                    retired.destroy();
+                }
+            })
+            .ok()
+            .map(|_| std::sync::Mutex::new(sender))
+    });
+    let unsent = match sender {
+        Some(sender) => match sender.lock() {
+            Ok(sender) => sender.send(retired).err().map(|error| error.0),
+            Err(_) => Some(retired),
+        },
+        None => Some(retired),
+    };
+    // No reaper thread: fall back to immediate destruction.
+    if let Some(retired) = unsent {
+        retired.destroy();
+    }
+}
+
 impl Drop for MediaFoundationH264Encoder {
     fn drop(&mut self) {
         unsafe {
-            let _ = self
-                .transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-            let activation = ManuallyDrop::take(&mut self.activation);
-            let events = ManuallyDrop::take(&mut self.events);
-            let transform = ManuallyDrop::take(&mut self.transform);
-            let _ = activation.ShutdownObject();
-            drop(events);
-            drop(transform);
-            drop(activation);
-            drop(self.d3d11_input.take());
-            drop(self.d3d11_cpu_upload.take());
+            stop_async_transform_streaming(&self.transform, self.drained);
+            retire_transform(RetiredTransform {
+                release_at: Instant::now() + RETIRED_TRANSFORM_GRACE,
+                activation: ManuallyDrop::take(&mut self.activation),
+                events: ManuallyDrop::take(&mut self.events),
+                transform: ManuallyDrop::take(&mut self.transform),
+                d3d11_input: self.d3d11_input.take(),
+                d3d11_cpu_upload: self.d3d11_cpu_upload.take(),
+            });
             if self.mf_started {
                 let _ = MFShutdown();
                 self.mf_started = false;
@@ -3144,12 +3247,7 @@ impl Drop for MediaFoundationH264Encoder {
 impl Drop for MediaFoundationD3d11H264Encoder {
     fn drop(&mut self) {
         unsafe {
-            if !self.drained {
-                let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-                let _ = self
-                    .transform
-                    .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-            }
+            shutdown_async_transform(&self.transform, self.drained);
             let activation = ManuallyDrop::take(&mut self.activation);
             let events = ManuallyDrop::take(&mut self.events);
             let transform = ManuallyDrop::take(&mut self.transform);

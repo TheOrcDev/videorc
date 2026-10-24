@@ -152,6 +152,10 @@ mod viewer_stats;
 mod warm_microphone;
 #[allow(dead_code)]
 mod windows_capture_owner;
+#[cfg(target_os = "windows")]
+mod windows_com_lifetime;
+#[cfg(target_os = "windows")]
+mod windows_crash_dump;
 #[allow(dead_code)]
 mod windows_d3d11_capture;
 #[allow(dead_code)]
@@ -448,6 +452,16 @@ async fn run_backend() -> Result<()> {
         // mid-recording. Logging must never be load-bearing.
         .with_writer(|| FailSilentStderr)
         .init();
+    // Must run before any capture/encoder/audio thread joins the MTA: keeps
+    // COM from unloading GraphicsCapture.dll (and the rest of the WinRT
+    // stack) under a live capture-internal thread when the last worker
+    // leaves the MTA. See windows_com_lifetime.rs.
+    #[cfg(target_os = "windows")]
+    windows_com_lifetime::install();
+    // Native faults never reach the panic hook; write our own minidump so a
+    // crash record always has a stack. See windows_crash_dump.rs.
+    #[cfg(target_os = "windows")]
+    windows_crash_dump::install();
     // F-021 root cause: SkyLight ASSERTS (SIGABRT, "CGS_REQUIRE_INIT
     // did_initialize") if a window-server call runs before this process's
     // CoreGraphics connection initializes — SCContentFilter's window init
