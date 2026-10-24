@@ -370,6 +370,8 @@ try {
 
     // This smoke is intentionally off-stream. The backend must reject a highlight instead of
     // claiming that viewer-facing output changed; the artifact smoke proves the live path.
+    // Since Clips (plan 181) the dev app may hold a buffer-only capture session, so the refusal
+    // can name that session instead of the missing livestream; either is an explicit refusal.
     const onePixelPng =
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
     let highlightError
@@ -385,7 +387,10 @@ try {
     }
     if (
       !(highlightError instanceof Error) ||
-      highlightError.message !== 'Comment highlighting requires an active livestream.'
+      ![
+        'Comment highlighting requires an active livestream.',
+        'The comment belongs to a stale or different livestream session.'
+      ].includes(highlightError.message)
     ) {
       throw new Error(
         `Off-stream comment highlight was not rejected explicitly: ${String(highlightError)}`
