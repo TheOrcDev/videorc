@@ -172,7 +172,8 @@ describe('session runtime recovery', () => {
     expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account", {
       id: 'oauth-callback:provider',
       description: 'Authorization was declined.',
-      duration: 8_000
+      duration: 8_000,
+      action: expect.objectContaining({ label: 'Copy' })
     })
   })
 
