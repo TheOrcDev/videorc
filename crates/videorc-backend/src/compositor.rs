@@ -9338,10 +9338,13 @@ struct CompositorRenderInputs<'a> {
     live_background: Option<&'a crate::live_background::LiveBackgroundFrameInput>,
     /// Plan 193: the live frame another leg rendered this tick, drawn in
     /// place of the poster by a leg that renders none of its own (the stream
-    /// leg of a record-and-stream session; D1).
+    /// leg of a record-and-stream session; D1). Only Metal reads it: Linux's
+    /// legs share one composed frame and Windows composes in its session.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     shared_live_frame: Option<&'a SharedLiveFrame>,
     /// Plan 193: the canvas of the leg that draws this leg's live frame too,
-    /// so the frame renders at the larger of the two (`live_output`).
+    /// so the frame renders at the larger of the two (`live_output`, Metal).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     shared_live_output: Option<(u32, u32)>,
 }
 
