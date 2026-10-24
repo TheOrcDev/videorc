@@ -14224,7 +14224,9 @@ mod tests {
     fn settings_persona_and_auto_chat_round_trip_and_default_for_older_rows() {
         let database = Database::open_in_memory_for_tests();
         // A row from before plan 164 loads with the default persona and
-        // everything automatic off.
+        // posting Off; since plan 192 Greetings (with AI and both welcomes)
+        // and Answers are on underneath it, so the first Suggest or Auto has
+        // something to say. Banter stays off.
         database
             .save_setting(
                 COHOST_SETTINGS_KEY,
@@ -14241,9 +14243,12 @@ mod tests {
         assert_eq!(loaded.persona.id, COHOST_DEFAULT_PERSONA_ID);
         assert_eq!(loaded.persona.name, COHOST_DEFAULT_PERSONA_NAME);
         assert_eq!(loaded.auto_chat.mode, CohostAutoChatMode::Off);
-        assert!(!loaded.auto_chat.greetings.enabled);
+        assert!(loaded.auto_chat.greetings.enabled);
         assert!(loaded.auto_chat.greetings.templates.is_empty());
-        assert!(!loaded.auto_chat.answers.enabled);
+        assert!(loaded.auto_chat.greetings.ai);
+        assert!(loaded.auto_chat.greetings.welcomes.first_time.enabled);
+        assert!(loaded.auto_chat.greetings.welcomes.returning.enabled);
+        assert!(loaded.auto_chat.answers.enabled);
         assert_eq!(loaded.auto_chat.answers.cooldown_seconds, 20);
         assert!(!loaded.auto_chat.banter.enabled);
         assert_eq!(loaded.auto_chat.banter.cooldown_seconds, 240);
