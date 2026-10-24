@@ -26,6 +26,11 @@ export function isLiveBackgroundId(value: unknown): value is LiveBackgroundId {
   return LIVE_BACKGROUND_IDS.includes(value as LiveBackgroundId)
 }
 
+/** A well-formed look id (the backend draws the first look for an unknown one). */
+export function isLiveBackgroundLook(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value)
+}
+
 /** The bundled poster's managed asset id (`live-<id>-<look>`). */
 export function livePosterAssetId(id: LiveBackgroundId, look: string): string {
   return `live-${id}-${look}`
