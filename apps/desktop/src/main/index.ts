@@ -10,6 +10,7 @@ import {
   removeBuddyPersona,
   type BuddyPetRoots
 } from './buddy-assets'
+import { clearStaleHttpCacheOnce } from './http-cache-cleanup'
 import {
   BUDDY_REACTION_NONE,
   isBuddyReactionId,
@@ -14077,6 +14078,27 @@ function moveLegacyBuddyAssetsOnce(): void {
   }
 }
 
+// Plan 191: builds from June–July 2026 left ~472K cached backend 404s (~2 GB)
+// in the default session's HTTP cache. Clear it once per profile, 15 s after
+// start so it never competes with startup; a failed clear is retried next start.
+function scheduleStaleHttpCacheCleanup(): void {
+  setTimeout(() => {
+    void (async () => {
+      const outcome = await clearStaleHttpCacheOnce({
+        userData: app.getPath('userData'),
+        clearCache: () => session.defaultSession.clearCache()
+      })
+      if (outcome.kind === 'cleared') {
+        logBackend('info', 'Cleared the stale HTTP cache once (plan 191).')
+      } else if (outcome.kind === 'failed') {
+        logBackend('warn', `The stale HTTP cache could not be cleared: ${outcome.message}`)
+      }
+    })().catch((error) => {
+      logBackend('warn', `The stale HTTP cache cleanup failed: ${errorMessage(error)}`)
+    })
+  }, 15_000).unref()
+}
+
 // Plan 168 D3: shipped pet packs (`bundled:<name>`) live in a read-only second
 // buddy root, `buddy-assets/bundled` in the packaged app (electron-builder.yml)
 // and the source tree in dev, the backgrounds precedent.
@@ -15002,6 +15024,7 @@ app.whenReady().then(async () => {
 
   installRendererSessionPermissions(session.defaultSession)
   moveLegacyBuddyAssetsOnce()
+  scheduleStaleHttpCacheCleanup()
 
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
