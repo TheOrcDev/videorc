@@ -267,6 +267,17 @@ export function sortMessagesChronological(messages: LiveChatMessage[]): LiveChat
   return [...messages].sort(compareMessagesChronological)
 }
 
+/**
+ * Whether the rows are already in `sortMessagesChronological` order (plan 191):
+ * one O(n) scan, so a buffer that arrives sorted is not copied and re-sorted.
+ */
+export function isSortedChronologically(messages: readonly LiveChatMessage[]): boolean {
+  for (let index = 1; index < messages.length; index++) {
+    if (compareMessagesChronological(messages[index - 1], messages[index]) > 0) return false
+  }
+  return true
+}
+
 function boundMessages(messages: LiveChatMessage[]): LiveChatMessage[] {
   return messages.length > MAX_LIVE_CHAT_VIEW_MESSAGES
     ? messages.slice(messages.length - MAX_LIVE_CHAT_VIEW_MESSAGES)
