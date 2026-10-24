@@ -3926,6 +3926,23 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
     }
 
+    // Plan 191: both window resets share this list; deadline lag was the one sample never reset.
+    macro_rules! clear_window_samples {
+        () => {{
+            compositor_wait_times_ms.clear();
+            video_toolbox_submit_times_ms.clear();
+            video_toolbox_fifo_write_times_ms.clear();
+            raw_video_fifo_write_times_ms.clear();
+            video_toolbox_fifo_enqueue_times_ms.clear();
+            writer_loop_times_ms.clear();
+            writer_sleep_times_ms.clear();
+            writer_active_times_ms.clear();
+            deadline_lag_times_ms.clear();
+            source_to_encode_age_times_ms.clear();
+            repeated_frame_age_times_ms.clear();
+        }};
+    }
+
     if matches!(video_output, EncoderBridgeVideoOutput::RawYuv420p) {
         // FFmpeg can take hundreds of milliseconds to initialise its input
         // graph and hardware encoder after opening the raw FIFO. Advancing the
@@ -4331,16 +4348,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     window_started_at = Instant::now();
                     frames_in_window = 0;
                     raw_frames_delivered_in_window = 0;
-                    compositor_wait_times_ms.clear();
-                    video_toolbox_submit_times_ms.clear();
-                    video_toolbox_fifo_write_times_ms.clear();
-                    raw_video_fifo_write_times_ms.clear();
-                    video_toolbox_fifo_enqueue_times_ms.clear();
-                    writer_loop_times_ms.clear();
-                    writer_sleep_times_ms.clear();
-                    writer_active_times_ms.clear();
-                    source_to_encode_age_times_ms.clear();
-                    repeated_frame_age_times_ms.clear();
+                    clear_window_samples!();
                 }
                 // `last_fed_sequence` intentionally does not advance. The next
                 // admitted tick asks the latest-wins compositor store for the
@@ -5305,16 +5313,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             window_started_at = Instant::now();
             frames_in_window = 0;
             raw_frames_delivered_in_window = 0;
-            compositor_wait_times_ms.clear();
-            video_toolbox_submit_times_ms.clear();
-            video_toolbox_fifo_write_times_ms.clear();
-            raw_video_fifo_write_times_ms.clear();
-            video_toolbox_fifo_enqueue_times_ms.clear();
-            writer_loop_times_ms.clear();
-            writer_sleep_times_ms.clear();
-            writer_active_times_ms.clear();
-            source_to_encode_age_times_ms.clear();
-            repeated_frame_age_times_ms.clear();
+            clear_window_samples!();
         }
     }
 
