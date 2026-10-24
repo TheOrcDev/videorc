@@ -2428,6 +2428,42 @@ export interface PreviewSurfaceSceneLayer {
   shape?: CameraShape
   /** 0..1; absent is fully opaque. Banners only (plan 186). */
   opacity?: number
+  /**
+   * Plan 190: the shader behind this background's poster. The `imageUrl` is
+   * the poster, which stays as the fallback and the first frame. Absent for
+   * a picture, so the proof surface creates no canvas.
+   */
+  live?: PreviewSurfaceLiveBackground
+}
+
+/** What the Electron proof surface needs to animate a live background. */
+export interface PreviewSurfaceLiveBackground {
+  id: LiveBackgroundId
+  /** The look that renders: an unknown look resolves to the first one. */
+  look: string
+  motion: LiveBackgroundMotion
+  /** Dim as the shader takes it: dimPercent / 100, clamped to 0..0.8. */
+  dim: number
+  /** The look's phase per second at Normal motion (Calm halves it). */
+  rate: number
+  /** The phase the poster was rendered at; the animation starts there. */
+  posterPhase: number
+}
+
+/**
+ * How the proof surface draws the scene's live background (plan 190 S6):
+ * `starting` until its first frame, `shader` while it moves, `still` with a
+ * reason when the poster shows instead.
+ */
+export interface PreviewSurfaceLiveBackgroundStatus {
+  id: LiveBackgroundId
+  look: string
+  rendering: 'starting' | 'shader' | 'still'
+  reason?: LiveBackgroundStillReason
+  /** What the surface saw, verbatim and bounded, for diagnostics. */
+  detail?: string
+  /** The WebGL renderer, when a context exists. */
+  renderer?: string
 }
 
 export interface PreviewSurfaceSceneState {
@@ -2569,6 +2605,9 @@ export interface PreviewSurfaceStatus {
   /** Sanitized readback from the backend-owned Windows DirectComposition
    * presenter. This intentionally contains no HWND or process ID. */
   windowsD3d11Presenter?: WindowsD3d11PresenterDiagnostics
+  /** Plan 190: the live background on the Electron proof surface, while the
+   * scene has one. Absent on native transports and for a picture. */
+  liveBackground?: PreviewSurfaceLiveBackgroundStatus
   startedAt?: string
   updatedAt: string
   message?: string
