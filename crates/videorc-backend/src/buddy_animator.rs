@@ -1066,12 +1066,18 @@ pub fn live_chat_events(
         {
             continue;
         }
-        match crate::cohost_greetings::activity_facts(message) {
-            Some(facts) => events.push(BuddyAnimatorEvent::Trigger {
-                trigger: trigger_for_activity(facts.kind),
-                reaction: greeting_reaction(auto_chat, facts.kind, facts.platform),
-            }),
-            None => chat = true,
+        match crate::cohost_greetings::activity_facts(message)
+            .map(|facts| (facts.kind, facts.platform))
+        {
+            Some((crate::cohost_greetings::GreetingKind::Activity(kind), platform)) => {
+                events.push(BuddyAnimatorEvent::Trigger {
+                    trigger: trigger_for_activity(kind),
+                    reaction: greeting_reaction(auto_chat, kind, platform),
+                })
+            }
+            // Activity facts are always an Activity kind; a welcome (plan
+            // 192) is plain chat to the animator.
+            _ => chat = true,
         }
     }
     if chat {

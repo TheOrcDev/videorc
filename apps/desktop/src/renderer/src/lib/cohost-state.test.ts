@@ -4,7 +4,8 @@ import type { CohostAutoChat } from './backend'
 import {
   buddyLiveSettingsPatch,
   cohostEnableRelayPatch,
-  DEFAULT_COHOST_AUTO_CHAT
+  DEFAULT_COHOST_AUTO_CHAT,
+  mergeAutoChatRelayPatch
 } from './cohost-state'
 
 const on = { enabled: true }
@@ -85,6 +86,49 @@ describe('cohostEnableRelayPatch (plan 174 S0.2, S3.14a)', () => {
     expect(cohostEnableRelayPatch(null, { enabled: true, listen: true }, null)).toEqual({
       enabled: true,
       listen: true
+    })
+  })
+})
+
+describe('the automatic chat defaults (plan 192)', () => {
+  it("matches Rust's defaults: posting Off, Greetings with AI and both welcomes, Answers on", () => {
+    expect(DEFAULT_COHOST_AUTO_CHAT).toStrictEqual({
+      mode: 'off',
+      greetings: {
+        enabled: true,
+        templates: [],
+        ai: true,
+        welcomes: { firstTime: { enabled: true }, returning: { enabled: true } }
+      },
+      answers: { enabled: true, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    })
+  })
+
+  it("keeps the AI switch, the welcomes and the lines when the Stream Manager's patch lands", () => {
+    const stored: CohostAutoChat = {
+      mode: 'suggest',
+      greetings: {
+        enabled: true,
+        templates: [{ id: 't', kind: 'follow', text: 'Hi {name}', state: 'talk', enabled: true }],
+        ai: false,
+        welcomes: {
+          firstTime: { enabled: true, text: 'Yo {name}!', state: 'laugh' },
+          returning: { enabled: false }
+        }
+      },
+      answers: { enabled: false, cooldownSeconds: 45 },
+      banter: { enabled: true, cooldownSeconds: 300 }
+    }
+    expect(mergeAutoChatRelayPatch(stored, { mode: 'auto', greetings: false })).toStrictEqual({
+      ...stored,
+      mode: 'auto',
+      greetings: { ...stored.greetings, enabled: false }
+    })
+    // Nothing stored yet: the patch lands on the defaults.
+    expect(mergeAutoChatRelayPatch(null, { mode: 'suggest' })).toStrictEqual({
+      ...DEFAULT_COHOST_AUTO_CHAT,
+      mode: 'suggest'
     })
   })
 })

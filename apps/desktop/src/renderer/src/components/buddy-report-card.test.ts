@@ -380,6 +380,80 @@ describe('BuddyReportCard: the Commands row (plan 140, S6)', () => {
   })
 })
 
+describe('BuddyReportCard: greetings Buddy wrote and skipped (plan 192)', () => {
+  it('tags a greeting AI or Line, only when the report says', async () => {
+    await render({
+      report: {
+        payload: payload({
+          report: {
+            ...REPORT,
+            posts: [
+              {
+                id: 'u1',
+                at: REPORT.startedAt,
+                trigger: 'greeting',
+                text: 'Hi Ana, welcome to the stream!',
+                destinations: ['twitch'],
+                result: 'sent',
+                source: 'ai'
+              },
+              {
+                id: 'u2',
+                at: REPORT.startedAt,
+                trigger: 'greeting',
+                text: 'Welcome back, Bo!',
+                destinations: ['twitch'],
+                result: 'sent',
+                source: 'line'
+              },
+              {
+                id: 'u3',
+                at: REPORT.startedAt,
+                trigger: 'manual',
+                text: 'hello',
+                destinations: ['twitch'],
+                result: 'sent'
+              }
+            ]
+          }
+        }),
+        loading: false,
+        error: null
+      }
+    })
+    const tags = rows('posts').map(
+      (row) => row.querySelector('[data-testid="buddy-report-post-source"]')?.textContent ?? null
+    )
+    expect(tags).toEqual(['AI', 'Line', null])
+    // A small neutral tag: the outline badge, never a status tone.
+    expect(
+      rows('posts')[0]!
+        .querySelector('[data-testid="buddy-report-post-source"]')
+        ?.getAttribute('data-variant')
+    ).toBe('outline')
+  })
+
+  it('says why greetings were not posted, and nothing when every one went out', async () => {
+    await render({
+      report: {
+        payload: payload({
+          report: {
+            ...REPORT,
+            greetings: { ...REPORT.greetings, skipped: { noLine: 3, held: 2 } }
+          }
+        }),
+        loading: false,
+        error: null
+      }
+    })
+    expect(document.querySelector('[data-slot="buddy-report-greeting-skips"]')?.textContent).toBe(
+      'Greetings not posted: 3 had no line. 2 greetings waited for the posting limit.'
+    )
+    await render()
+    expect(document.querySelector('[data-slot="buddy-report-greeting-skips"]')).toBeNull()
+  })
+})
+
 describe('Reports tab layout (plan 150 S6)', () => {
   it('repeats no auto session name the picker already says', async () => {
     await render({

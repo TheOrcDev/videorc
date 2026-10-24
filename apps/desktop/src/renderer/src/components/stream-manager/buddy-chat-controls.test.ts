@@ -48,7 +48,12 @@ afterEach(async () => {
 
 async function render(
   current: CohostAutoChat,
-  { name, picture, link = true }: { name?: string; picture?: string; link?: boolean } = {}
+  {
+    name,
+    picture,
+    link = true,
+    aiGreetings
+  }: { name?: string; picture?: string; link?: boolean; aiGreetings?: boolean } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
@@ -57,6 +62,7 @@ async function render(
         null,
         createElement(BuddyChatControls, {
           autoChat: current,
+          aiGreetings,
           name,
           picture,
           onModeChange,
@@ -207,12 +213,26 @@ describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
     expect(onModeChange).not.toHaveBeenCalled()
   })
 
-  it('warns when Greetings is on with nothing to post (plan 174 F-11)', async () => {
+  it('never warns about an empty list: it posts the built-in lines (plan 192 D1)', async () => {
     await render(autoChat({ greetings: { enabled: true, templates: [] } }))
     const [greetings] = chips()
-    expect(greetings!.textContent).toBe('Greetings on, no lines')
-    expect(greetings!.getAttribute('data-variant')).toBe('warning')
-    expect(greetings!.getAttribute('aria-label')).toContain('Nothing is posted until you add some')
+    expect(greetings!.textContent).toBe('Greetings on')
+    expect(greetings!.getAttribute('data-variant')).toBe('success')
+    expect(greetings!.getAttribute('aria-label')).toBe('Greetings on. Change it in Buddy → Chat.')
+  })
+
+  it('says AI on the Greetings chip only when Buddy may write them (plan 192 D7)', async () => {
+    const greetings = { enabled: true, templates: [], ai: true }
+    await render(autoChat({ greetings }), { aiGreetings: true })
+    expect(chips()[0]!.textContent).toBe('Greetings on · AI')
+    expect(chips()[0]!.getAttribute('aria-label')).toBe(
+      'Greetings on · AI. Change it in Buddy → Chat.'
+    )
+    // Without Premium and cloud AI, or with the switch off, the lines go out.
+    await render(autoChat({ greetings }))
+    expect(chips()[0]!.textContent).toBe('Greetings on')
+    await render(autoChat({ greetings: { ...greetings, ai: false } }), { aiGreetings: true })
+    expect(chips()[0]!.textContent).toBe('Greetings on')
   })
 
   it('keeps the chips inert without a way to Buddy → Chat', async () => {

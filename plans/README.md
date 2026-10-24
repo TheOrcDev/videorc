@@ -1,5 +1,30 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 192](192-buddy-greets-and-talks-on-its-own.md), Buddy
+  greets and talks on its own. On the owner's 10-24 stream (0.9.150), Buddy
+  was in Auto and posted nothing by itself, only the owner's two Say lines.
+  There were five causes:
+  - Greetings had no lines, so they posted nothing.
+  - First-time chatters were never greeted automatically (only the "Say hi"
+    nudge to the streamer).
+  - Greetings never use AI (plan 164 D5).
+  - Answers and Banter were off. Answers reply only when a viewer types
+    Buddy's name; the "unanswered question" half of 164 D5 was never built.
+  - About 10% of ticks failed with 502.
+
+  The fix, in six phases:
+  - built-in lines for every kind;
+  - welcomes for first-time and returning chatters;
+  - a Premium `/api/ai/cohost/greet` route that writes each greeting in the
+    persona's voice, with the line as the fallback;
+  - Answers from the streamer notes after 60 s;
+  - a tick 502 diagnosis;
+  - smokes and a live acceptance.
+
+  **BUILT** 2026-10-24 (owner took every recommendation): web #93 and #92
+  merged; the desktop PR carries Phases 0–3 and the smoke. Owed: a live
+  acceptance stream and the next stream's tick failure rate.
+
 - 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
   owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
   Wave, Liquid Chrome, Line Waves) behind the screen and camera, free, on

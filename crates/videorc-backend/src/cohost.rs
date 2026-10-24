@@ -29,7 +29,10 @@ use crate::cohost_ack::{
     AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dead_air_text, match_candidates,
     name_forms_match, name_match_forms, name_tokens,
 };
-use crate::cohost_auto_chat::{AnswerCandidate, AutoChatLane, AutoChatPass};
+use crate::cohost_auto_chat::{
+    AnswerCandidate, AutoChatLane, AutoChatPass, GreetAiContext, GreetingSkipReason, PendingGreet,
+    SendSkip,
+};
 use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
@@ -47,9 +50,10 @@ use crate::protocol::{
     CohostCommandParams, CohostFlagParams, CohostPromiseParams, CohostQuestionParams,
     CohostRecapParams, CohostReportAlert, CohostReportChat, CohostReportCommands,
     CohostReportFlagKindCount, CohostReportFlagSeverityCount, CohostReportFlags,
-    CohostReportGreetings, CohostReportOpenPromise, CohostReportPayload, CohostReportPromises,
-    CohostReportQuestion, CohostReportQuestionOutcome, CohostReportQuestions, CohostReportRecap,
-    CohostReportSavedEvent, CohostSessionReport, CohostSettingsPatch, CohostStartParams, FeatureId,
+    CohostReportGreetings, CohostReportGreetingsSkipped, CohostReportOpenPromise,
+    CohostReportPayload, CohostReportPromises, CohostReportQuestion, CohostReportQuestionOutcome,
+    CohostReportQuestions, CohostReportRecap, CohostReportSavedEvent, CohostSessionReport,
+    CohostSettingsPatch, CohostStartParams, FeatureId,
 };
 use crate::state::AppState;
 use crate::storage::Database;
@@ -58,10 +62,10 @@ use crate::twitch_chat::gif_title;
 use crate::videorc_api::{
     COHOST_COMMAND_MAX_CANDIDATES, COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError,
     CohostApiErrorKind, CohostCommandCandidate, CohostCommandRequest, CohostCommandResponse,
-    CohostSpotlightCandidate, CohostSpotlightRequest, CohostSpotlightResponse, CohostTickIntent,
-    CohostTickMessage, CohostTickMood, CohostTickOpenPromise, CohostTickOpenQuestion,
-    CohostTickPersona, CohostTickPromise, CohostTickQuestion, CohostTickRequest,
-    CohostTickResponse, VideorcApiClient,
+    CohostGreetRequest, CohostGreetResponse, CohostSpotlightCandidate, CohostSpotlightRequest,
+    CohostSpotlightResponse, CohostTickIntent, CohostTickMessage, CohostTickMood,
+    CohostTickOpenPromise, CohostTickOpenQuestion, CohostTickPersona, CohostTickPromise,
+    CohostTickQuestion, CohostTickRequest, CohostTickResponse, VideorcApiClient,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
@@ -754,13 +758,83 @@ pub struct CohostGreetingTemplate {
     pub reaction: Option<String>,
 }
 
+/// One welcome line (plan 192 S1.1): what the Buddy says to a first-time or
+/// a returning chatter. `text` absent (never null) means the built-in line.
+/// The welcomes never live in `templates[]`: an app from before plan 192
+/// would meet an unknown kind there, fail to parse its settings and fall
+/// back to defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WelcomeLine {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The user's own line, at most `COHOST_GREETING_TEXT_MAX_CHARS`,
+    /// trimmed; empty reads as absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub state: CohostUtteranceState,
+    /// The reaction this welcome plays (plan 168 D14), absent for the
+    /// trigger's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reaction: Option<String>,
+}
+
+impl Default for WelcomeLine {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            text: None,
+            state: CohostUtteranceState::Talk,
+            reaction: None,
+        }
+    }
+}
+
+/// The two welcomes (plan 192 D2), both on by default.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct CohostGreetingsSettings {
+pub struct CohostWelcomes {
     #[serde(default)]
+    pub first_time: WelcomeLine,
+    #[serde(default)]
+    pub returning: WelcomeLine,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostGreetingsSettings {
+    /// On by default since plan 192 (the mode, off by default, still gates
+    /// every post).
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    /// The user's lines for the Activity kinds; an empty list means the
+    /// built-in lines (plan 192 D1).
     #[serde(default)]
     pub templates: Vec<CohostGreetingTemplate>,
+    /// Plan 192 D3: the AI writes the greetings in the persona's voice.
+    /// Honoured only with Premium, consent and the web's `greet` capability;
+    /// the line goes out otherwise.
+    #[serde(default = "default_true")]
+    pub ai: bool,
+    /// Plan 192 S1.1: the first-time and returning welcomes.
+    #[serde(default)]
+    pub welcomes: CohostWelcomes,
+}
+
+impl Default for CohostGreetingsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            templates: Vec::new(),
+            ai: true,
+            welcomes: CohostWelcomes::default(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -786,9 +860,11 @@ pub struct CohostAutoChat {
     pub banter: CohostCooldownBehaviour,
 }
 
+/// Plan 192 D5: Answers on for a new install (a stored block keeps its own
+/// value; saved settings are never flipped).
 fn default_answers() -> CohostCooldownBehaviour {
     CohostCooldownBehaviour {
-        enabled: false,
+        enabled: true,
         cooldown_seconds: 20,
     }
 }
@@ -924,12 +1000,43 @@ pub(crate) fn validate_auto_chat(auto_chat: &CohostAutoChat) -> Result<CohostAut
             );
         }
     }
+    normalize_welcome_line(&mut valid.greetings.welcomes.first_time)?;
+    normalize_welcome_line(&mut valid.greetings.welcomes.returning)?;
     for (label, behaviour) in [("answers", &valid.answers), ("banter", &valid.banter)] {
         if behaviour.cooldown_seconds == 0 || behaviour.cooldown_seconds > 3600 {
             return Err(format!("The {label} cooldown is 1 to 3600 seconds."));
         }
     }
     Ok(valid)
+}
+
+/// A welcome line as stored (plan 192 S1.1): the text trimmed, empty read as
+/// absent, cut to `COHOST_GREETING_TEXT_MAX_CHARS`; the reaction trimmed,
+/// empty read as absent, else a plain reaction id (the renderer's schema
+/// refuses `""` for either, so neither is ever serialized).
+fn normalize_welcome_line(line: &mut WelcomeLine) -> Result<(), String> {
+    line.text = line
+        .text
+        .as_deref()
+        .map(|text| truncate_utf16(text.trim(), COHOST_GREETING_TEXT_MAX_CHARS))
+        .map(|text| text.trim_end().to_string())
+        .filter(|text| !text.is_empty());
+    line.reaction = line
+        .reaction
+        .as_deref()
+        .map(str::trim)
+        .filter(|reaction| !reaction.is_empty())
+        .map(str::to_string);
+    if line
+        .reaction
+        .as_deref()
+        .is_some_and(|reaction| !crate::buddy_pet::reaction_id_ok(reaction))
+    {
+        return Err(
+            "A welcome's reaction is 1 to 40 lowercase letters, digits or dashes.".to_string(),
+        );
+    }
+    Ok(())
 }
 
 // --- Settings ----------------------------------------------------------------
@@ -998,6 +1105,16 @@ impl CohostSettings {
     fn normalized(mut self) -> Self {
         self.notes = truncate_utf16(&self.notes, COHOST_NOTES_MAX_CHARS);
         self.rules = normalize_rules(self.rules);
+        // A stored welcome is bounded like every other text here; a reaction
+        // that is not a reaction id is dropped (only a patch is refused).
+        for line in [
+            &mut self.auto_chat.greetings.welcomes.first_time,
+            &mut self.auto_chat.greetings.welcomes.returning,
+        ] {
+            if normalize_welcome_line(line).is_err() {
+                line.reaction = None;
+            }
+        }
         self
     }
 
@@ -2049,6 +2166,9 @@ struct CohostSession {
     /// Plan 164 S-D3: tick replies the viewer asked the Buddy for by name,
     /// new this tick, waiting for the auto-chat lane to route them.
     answer_candidates: Vec<AnswerCandidate>,
+    /// Plan 192 D5: question ids that were an answer candidate once
+    /// (addressed, or unanswered and answered by the notes); never twice.
+    offered_answers: HashSet<String>,
     /// Plan 164 S-D4: a banter request is outstanding (it shares the tick's
     /// `in_flight`, so the two never overlap).
     banter_in_flight: bool,
@@ -2925,6 +3045,7 @@ impl CohostSession {
             command: None,
             command_operations: HashMap::new(),
             answer_candidates: Vec::new(),
+            offered_answers: HashSet::new(),
             banter_in_flight: false,
         }
     }
@@ -2981,6 +3102,10 @@ impl CohostSession {
                 by_chat: greetings.by_chat,
                 on_stream: greetings.on_stream,
                 manual: greetings.manual,
+                // Plan 192 D7: the lane writes the skips as they happen
+                // (`append_cohost_report_greeting_skips`); the merge keeps
+                // them.
+                skipped: None,
             },
             alerts: self.report.alerts.clone(),
             recap: CohostReportRecap {
@@ -3676,9 +3801,18 @@ impl CohostSession {
             }
             // Plan 164 S-D3: a NEW question the viewer addressed to the Buddy
             // by name, with a drafted reply, is an answer candidate once.
-            if existing.is_none()
-                && incoming.addressed
+            // Plan 192 D5: so is a question nobody answered within 60 s when
+            // the streamer's notes answer it. A question the streamer
+            // answered (in chat, on air, or marked) is closed and never
+            // comes back here (`dismissed_questions`).
+            let addressed_now = existing.is_none() && incoming.addressed;
+            let from_notes_now = existing.is_some_and(|question| {
+                incoming.from_notes
+                    && open_for_at_least(&question.first_seen_at, now_iso, NOTES_ANSWER_AFTER)
+            });
+            if (addressed_now || from_notes_now)
                 && !incoming.suggested_reply.trim().is_empty()
+                && self.offered_answers.insert(incoming.id.clone())
             {
                 let message_id = message_ids.first().cloned();
                 let destination_id = message_id
@@ -6061,6 +6195,24 @@ fn unit_interval(value: f64) -> Option<f64> {
     value.is_finite().then(|| value.clamp(0.0, 1.0))
 }
 
+/// Plan 192 D5: an unaddressed question becomes an answer candidate only
+/// after this long open, when nobody answered it and the notes do.
+const NOTES_ANSWER_AFTER: Duration = Duration::from_secs(60);
+
+/// Whether `first_seen_at` is at least `at_least` before `now_iso` (both
+/// RFC 3339; a stamp that does not parse is never due).
+fn open_for_at_least(first_seen_at: &str, now_iso: &str, at_least: Duration) -> bool {
+    let (Ok(first), Ok(now)) = (
+        chrono::DateTime::parse_from_rfc3339(first_seen_at),
+        chrono::DateTime::parse_from_rfc3339(now_iso),
+    ) else {
+        return false;
+    };
+    now.signed_duration_since(first)
+        .to_std()
+        .is_ok_and(|open| open >= at_least)
+}
+
 fn normalize_role(role: &str) -> Option<String> {
     let normalized = match role.trim().to_ascii_lowercase().as_str() {
         "moderator" | "mod" => "mod",
@@ -6098,6 +6250,9 @@ pub struct CohostEngine {
     /// `cohost.tick` from the last capability read (plan 164 S-D3): a new
     /// session speaks v4 (persona, moods, banter) only when the web said 4.
     web_tick_version: Option<u32>,
+    /// `cohost.greet` from the last capability read (plan 192 D4): the AI
+    /// writes greetings only when the web said 1 or more. Absent reads as 0.
+    web_greet_version: Option<u32>,
 }
 
 impl CohostEngine {
@@ -6115,12 +6270,18 @@ impl CohostEngine {
             command_parser: CommandParserLane::default(),
             auto_chat: AutoChatLane::default(),
             web_tick_version: None,
+            web_greet_version: None,
         }
     }
 
     /// `cohost.tick` from the capability read (plan 164 S-D3).
     pub(crate) fn set_web_tick_version(&mut self, version: Option<u32>) {
         self.web_tick_version = version;
+    }
+
+    /// `cohost.greet` from the capability read (plan 192 D4).
+    pub(crate) fn set_web_greet_version(&mut self, version: Option<u32>) {
+        self.web_greet_version = version;
     }
 
     /// The tick contract a new session starts on: v4 only when the web
@@ -6822,21 +6983,98 @@ impl CohostEngine {
 
     // --- Automatic chat (plan 164 Phase D) ----------------------------------
 
-    /// Activity rows just delivered: greetings, by the mode (D4) and the
-    /// throttle (D9). Runs with or without a tick session.
+    /// Chat rows just delivered: greetings and welcomes, by the mode (D4)
+    /// and the throttle (D9). Runs with or without a tick session; `premium`
+    /// only decides whether the AI may write the lines (plan 192 S2.2).
     pub(crate) fn note_activity(
         &mut self,
         messages: &[LiveChatMessage],
+        premium: bool,
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        let ai = self.greet_ai_context(premium);
+        self.auto_chat.note_activity(
+            &self.settings.auto_chat,
+            ai.as_ref(),
+            messages,
+            now,
+            now_iso,
+        )
+    }
+
+    /// The pump's pass over the held greeting buckets.
+    pub(crate) fn drain_auto_chat(
+        &mut self,
+        premium: bool,
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        let ai = self.greet_ai_context(premium);
+        self.auto_chat
+            .drain(&self.settings.auto_chat, ai.as_ref(), now, now_iso)
+    }
+
+    /// Plan 192 S2.2: what the AI needs to write greetings, or `None` when
+    /// it may not: the same gate as the tick and the spotlight (Premium and
+    /// the running session's consent to process chat), plus the web's
+    /// `greet` capability and the `greetings.ai` switch. The persona is cut
+    /// to what the route takes.
+    fn greet_ai_context(&self, premium: bool) -> Option<GreetAiContext> {
+        if !premium
+            || !self.settings.enabled
+            || !self.settings.auto_chat.greetings.ai
+            || self.web_greet_version.unwrap_or(0) < 1
+        {
+            return None;
+        }
+        let session = self.session.as_ref().filter(|session| session.consent)?;
+        let name = truncate_utf16(
+            self.settings.persona.name.trim(),
+            COHOST_PERSONA_NAME_MAX_CHARS,
+        );
+        Some(GreetAiContext {
+            client_version: DESKTOP_CLIENT_VERSION.to_string(),
+            session_id: session.session_id.clone(),
+            tone: self.settings.tone,
+            persona: (!name.is_empty()).then(|| CohostTickPersona {
+                name,
+                personality: truncate_utf16(
+                    &self.settings.persona.personality,
+                    COHOST_PERSONA_PERSONALITY_MAX_CHARS,
+                ),
+            }),
+        })
+    }
+
+    /// The greet route answered (plan 192 S2.2): route the waiting
+    /// greetings with the AI's lines, or their own.
+    pub(crate) fn apply_greet_result(
+        &mut self,
+        pending: PendingGreet,
+        result: Result<CohostGreetResponse, CohostApiError>,
         now: Instant,
         now_iso: &str,
     ) -> AutoChatPass {
         self.auto_chat
-            .note_activity(&self.settings.auto_chat, messages, now, now_iso)
+            .apply_greet_result(&self.settings.auto_chat, pending, result, now, now_iso)
     }
 
-    /// The pump's pass over the held greeting buckets.
-    pub(crate) fn drain_auto_chat(&mut self, now: Instant, now_iso: &str) -> AutoChatPass {
-        self.auto_chat.drain(&self.settings.auto_chat, now, now_iso)
+    /// A greeting the send path could not deliver (plan 192 D7).
+    pub(crate) fn note_greeting_send_skip(
+        &mut self,
+        utterance_id: &str,
+        reason: GreetingSkipReason,
+    ) -> SendSkip {
+        self.auto_chat.note_send_skip(utterance_id, reason)
+    }
+
+    /// Who wrote a greeting (plan 192 S2.2), for the report.
+    pub(crate) fn utterance_source(
+        &self,
+        utterance_id: &str,
+    ) -> Option<crate::protocol::CohostReportPostSource> {
+        self.auto_chat.utterance_source(utterance_id)
     }
 
     pub(crate) fn auto_chat_next_due(&self) -> Option<Instant> {
@@ -7087,6 +7325,11 @@ pub(crate) async fn set_tick_capability(state: &AppState, tick: Option<u32>) {
     state.cohost.lock().await.set_web_tick_version(tick);
 }
 
+/// `cohost.greet` from the capability read (plan 192 D4).
+pub(crate) async fn set_greet_capability(state: &AppState, greet: Option<u32>) {
+    state.cohost.lock().await.set_web_greet_version(greet);
+}
+
 /// Whether a `liveChat.send` operation is the Buddy's own (D10): its
 /// delivery never reads as "the streamer replied".
 pub(crate) async fn is_buddy_operation(state: &AppState, operation_id: &str) -> bool {
@@ -7107,8 +7350,8 @@ async fn apply_auto_chat_pass(
     publish_auto_chat_pass(state, pass, lifecycle_delivery).await;
 }
 
-/// The pass minus the pump: logs, proposals, sends. The pump itself calls
-/// this (it owns its own schedule).
+/// The pass minus the pump: logs, proposals, sends, the skip counts and the
+/// AI greet request. The pump itself calls this (it owns its own schedule).
 async fn publish_auto_chat_pass(
     state: &AppState,
     pass: AutoChatPass,
@@ -7116,6 +7359,15 @@ async fn publish_auto_chat_pass(
 ) {
     for line in &pass.log {
         state.emit_log("info", line.clone());
+    }
+    for line in &pass.warn {
+        state.emit_log("warn", line.clone());
+    }
+    if !pass.skipped.is_empty() {
+        persist_greeting_skips(state, pass.skipped).await;
+    }
+    if let Some(pending) = pass.greet.clone() {
+        spawn_greet(state.clone(), pending);
     }
     if pass.changed() {
         for utterance in &pass.propose {
@@ -7154,6 +7406,82 @@ fn utterance_trigger_label(kind: CohostUtteranceTriggerKind) -> &'static str {
     }
 }
 
+/// Plan 192 D7: fold skip counts into the live-chat session's report as
+/// they happen (like posts). Nothing without a session to file them under.
+async fn persist_greeting_skips(state: &AppState, skipped: CohostReportGreetingsSkipped) {
+    let Some(session_id) = state.cohost.lock().await.auto_chat_session_id() else {
+        return;
+    };
+    match state.database.append_cohost_report_greeting_skips(
+        &session_id,
+        skipped,
+        &chrono::Utc::now().to_rfc3339(),
+    ) {
+        Ok(_) => {}
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Buddy report greeting skips could not be saved: {error}"),
+        ),
+    }
+}
+
+/// Plan 192 S2.2: run one greet request with NO engine lock held, then let
+/// the engine route the lines (the AI's, or the fallback) and publish the
+/// pass like any other. `call` is the route (a fake in tests).
+pub(crate) async fn run_greet<F, Fut>(state: &AppState, pending: PendingGreet, call: F)
+where
+    F: FnOnce(CohostGreetRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<CohostGreetResponse, CohostApiError>>,
+{
+    let items = pending.request.items.len();
+    let result = call(pending.request.clone()).await;
+    if let Ok(response) = &result {
+        state.emit_log(
+            "info",
+            format!(
+                "Buddy AI wrote {} of {items} greeting(s){}.",
+                response.lines.len(),
+                if response.model.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", response.model)
+                }
+            ),
+        );
+    }
+    let pass = {
+        let mut engine = state.cohost.lock().await;
+        engine.apply_greet_result(
+            pending,
+            result,
+            Instant::now(),
+            &chrono::Utc::now().to_rfc3339(),
+        )
+    };
+    publish_auto_chat_pass(state, pass, None).await;
+}
+
+/// Spawn the live greet call (plan 192 S2.2) on its own task. Type-erased
+/// on purpose: `publish_auto_chat_pass` calls this, and `run_greet` calls
+/// `publish_auto_chat_pass`, so the two futures must never name each
+/// other's type.
+fn spawn_greet(state: AppState, pending: PendingGreet) {
+    let task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move {
+            run_greet(&state, pending, |request| async move {
+                let Some(token) = crate::account::stored_session_token() else {
+                    return Err(CohostApiError::network("Not signed in."));
+                };
+                match VideorcApiClient::new() {
+                    Ok(client) => client.post_cohost_greet(&token, &request).await,
+                    Err(error) => Err(CohostApiError::network(error.to_string())),
+                }
+            })
+            .await;
+        });
+    tokio::spawn(task);
+}
+
 /// Arm the pump that releases held greetings at `due` (one task at a time).
 async fn arm_auto_chat_pump(state: &AppState, due: Instant) {
     {
@@ -7168,9 +7496,10 @@ async fn arm_auto_chat_pump(state: &AppState, due: Instant) {
         let mut next = Some(due);
         while let Some(due) = next {
             tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+            let premium = premium_entitled();
             let pass = {
                 let mut engine = state.cohost.lock().await;
-                engine.drain_auto_chat(Instant::now(), &chrono::Utc::now().to_rfc3339())
+                engine.drain_auto_chat(premium, Instant::now(), &chrono::Utc::now().to_rfc3339())
             };
             next = pass.schedule;
             publish_auto_chat_pass(&state, pass, None).await;
@@ -7185,6 +7514,14 @@ async fn arm_auto_chat_pump(state: &AppState, due: Instant) {
     });
 }
 
+/// Why a destination was dropped from an automatic send, for the log and
+/// (plan 192 D7) the greeting skip counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DestinationSkip {
+    reason: GreetingSkipReason,
+    message: String,
+}
+
 /// The destinations an automatic send may reach right now (D9): the
 /// utterance's own, or every write-ready one when it names none; minus
 /// YouTube while the plan 094 breaker is open or the budget sheds sends, and
@@ -7194,11 +7531,17 @@ async fn automatic_send_destinations(
     state: &AppState,
     session_id: &str,
     wanted: &[String],
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<DestinationSkip>) {
     let providers: Vec<crate::live_chat::LiveChatProviderState> = {
         let coordinator = state.live_chat.lock().await;
         if coordinator.session_id() != Some(session_id) {
-            return (Vec::new(), vec!["the chat session ended".to_string()]);
+            return (
+                Vec::new(),
+                vec![DestinationSkip {
+                    reason: GreetingSkipReason::DestinationFailed,
+                    message: "the chat session ended".to_string(),
+                }],
+            );
         }
         coordinator.providers().to_vec()
     };
@@ -7222,26 +7565,56 @@ async fn automatic_send_destinations(
             continue;
         }
         if provider.write != crate::live_chat::CommentsWriteState::Ready {
-            skipped.push(format!("{} is not writable", provider.id));
+            skipped.push(DestinationSkip {
+                reason: GreetingSkipReason::DestinationFailed,
+                message: format!("{} is not writable", provider.id),
+            });
             continue;
         }
         if provider.platform == StreamPlatform::Youtube && youtube_blocked {
-            skipped.push(format!(
-                "{} skipped: YouTube calls are paused by the quota breaker",
-                provider.id
-            ));
+            skipped.push(DestinationSkip {
+                reason: GreetingSkipReason::YoutubePaused,
+                message: format!(
+                    "{} skipped: YouTube calls are paused by the quota breaker",
+                    provider.id
+                ),
+            });
             continue;
         }
         if failed_platforms.contains(&provider.platform) {
-            skipped.push(format!(
-                "{} skipped: its stream destination failed",
-                provider.id
-            ));
+            skipped.push(DestinationSkip {
+                reason: GreetingSkipReason::DestinationFailed,
+                message: format!("{} skipped: its stream destination failed", provider.id),
+            });
             continue;
         }
         ids.push(provider.id);
     }
     (ids, skipped)
+}
+
+/// Plan 192 D7: a greeting that reached no destination (or whose send
+/// failed) is counted once under the reason that stopped it, and logged
+/// once per kind per session. Nothing for other utterances.
+async fn note_greeting_not_sent(
+    state: &AppState,
+    utterance: &CohostUtterance,
+    reason: GreetingSkipReason,
+) {
+    if utterance.trigger.kind != CohostUtteranceTriggerKind::Greeting {
+        return;
+    }
+    let skip = state
+        .cohost
+        .lock()
+        .await
+        .note_greeting_send_skip(&utterance.id, reason);
+    if let Some(line) = skip.log {
+        state.emit_log("info", line);
+    }
+    if !skip.skipped.is_empty() {
+        persist_greeting_skips(state, skip.skipped).await;
+    }
 }
 
 /// The text as the strictest reached platform takes it (D8): X 140, Kick
@@ -7309,10 +7682,21 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
     };
     let (destination_ids, skipped) =
         automatic_send_destinations(state, &session_id, &utterance.destination_ids).await;
-    for reason in &skipped {
-        state.emit_log("info", format!("Buddy send: {reason}."));
+    for skip in &skipped {
+        state.emit_log("info", format!("Buddy send: {}.", skip.message));
     }
     if destination_ids.is_empty() {
+        // Plan 192 D7: the breaker is the reason when it stopped any
+        // destination; otherwise the destination itself.
+        let reason = if skipped
+            .iter()
+            .any(|skip| skip.reason == GreetingSkipReason::YoutubePaused)
+        {
+            GreetingSkipReason::YoutubePaused
+        } else {
+            GreetingSkipReason::DestinationFailed
+        };
+        note_greeting_not_sent(state, &utterance, reason).await;
         fail_utterance(
             state,
             &utterance,
@@ -7342,11 +7726,11 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
         );
     }
     let operation_id = uuid::Uuid::new_v4().to_string();
-    state
-        .cohost
-        .lock()
-        .await
-        .register_buddy_operation(&operation_id);
+    let source = {
+        let mut engine = state.cohost.lock().await;
+        engine.register_buddy_operation(&operation_id);
+        engine.utterance_source(&utterance.id)
+    };
     let result = crate::live_chat::send_live_chat_message(
         state,
         crate::live_chat::CommentsSendParams {
@@ -7426,6 +7810,9 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
         engine.mark_utterance(&utterance.id, status);
         engine.snapshot()
     };
+    if status == CohostUtteranceStatus::Failed {
+        note_greeting_not_sent(state, &utterance, GreetingSkipReason::DestinationFailed).await;
+    }
     // D7: the words that reached chat reach the bubble as they land. A manual
     // line bubbled when it was typed (`say_utterance`), so it is not shown
     // twice; an answer that went nowhere stops thinking.
@@ -7448,6 +7835,7 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
         text,
         destinations: platforms,
         result: outcome,
+        source,
     };
     match state.database.append_cohost_report_post(&session_id, post) {
         Ok(true) => {}
@@ -7478,15 +7866,19 @@ async fn fail_utterance(
             utterance.text
         ),
     );
-    let snapshot = {
+    let (snapshot, session_id, source) = {
         let mut engine = state.cohost.lock().await;
         engine.mark_utterance(&utterance.id, CohostUtteranceStatus::Failed);
-        engine.snapshot()
+        (
+            engine.snapshot(),
+            engine.auto_chat_session_id(),
+            engine.utterance_source(&utterance.id),
+        )
     };
     if utterance.trigger.kind == CohostUtteranceTriggerKind::Answer {
         crate::buddy_overlay::settle(state).await;
     }
-    if let Some(session_id) = state.cohost.lock().await.auto_chat_session_id() {
+    if let Some(session_id) = session_id {
         let _ = state.database.append_cohost_report_post(
             &session_id,
             crate::protocol::CohostReportPost {
@@ -7496,6 +7888,7 @@ async fn fail_utterance(
                 text: utterance.text.clone(),
                 destinations: Vec::new(),
                 result: crate::protocol::CohostReportPostResult::Failed,
+                source,
             },
         );
     }
@@ -9478,7 +9871,9 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
         return;
     }
     // Plan 164 Phase D: greetings run with or without the tick session. The
-    // sends are spawned, never awaited under the delivery fence.
+    // sends (and the AI greet call, plan 192) are spawned, never awaited
+    // under the delivery fence.
+    let premium = premium_entitled();
     let (auto_chat, buddy_events) = {
         let mut engine = state.cohost.lock().await;
         // Plan 168 S-C3: Activity rows make the Buddy react on stream (the
@@ -9488,8 +9883,12 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
             &engine.settings.auto_chat,
             chrono::Utc::now(),
         );
-        let auto_chat =
-            engine.note_activity(messages, Instant::now(), &chrono::Utc::now().to_rfc3339());
+        let auto_chat = engine.note_activity(
+            messages,
+            premium,
+            Instant::now(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
         (auto_chat, buddy_events)
     };
     for event in buddy_events {
@@ -10193,6 +10592,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
             author_affiliation: None,
             author_verified: None,
         }
@@ -13824,7 +14224,9 @@ mod tests {
     fn settings_persona_and_auto_chat_round_trip_and_default_for_older_rows() {
         let database = Database::open_in_memory_for_tests();
         // A row from before plan 164 loads with the default persona and
-        // everything automatic off.
+        // posting Off; since plan 192 Greetings (with AI and both welcomes)
+        // and Answers are on underneath it, so the first Suggest or Auto has
+        // something to say. Banter stays off.
         database
             .save_setting(
                 COHOST_SETTINGS_KEY,
@@ -13841,9 +14243,12 @@ mod tests {
         assert_eq!(loaded.persona.id, COHOST_DEFAULT_PERSONA_ID);
         assert_eq!(loaded.persona.name, COHOST_DEFAULT_PERSONA_NAME);
         assert_eq!(loaded.auto_chat.mode, CohostAutoChatMode::Off);
-        assert!(!loaded.auto_chat.greetings.enabled);
+        assert!(loaded.auto_chat.greetings.enabled);
         assert!(loaded.auto_chat.greetings.templates.is_empty());
-        assert!(!loaded.auto_chat.answers.enabled);
+        assert!(loaded.auto_chat.greetings.ai);
+        assert!(loaded.auto_chat.greetings.welcomes.first_time.enabled);
+        assert!(loaded.auto_chat.greetings.welcomes.returning.enabled);
+        assert!(loaded.auto_chat.answers.enabled);
         assert_eq!(loaded.auto_chat.answers.cooldown_seconds, 20);
         assert!(!loaded.auto_chat.banter.enabled);
         assert_eq!(loaded.auto_chat.banter.cooldown_seconds, 240);
@@ -13889,6 +14294,7 @@ mod tests {
                         enabled: true,
                         reaction: Some("proud".to_string()),
                     }],
+                    ..CohostGreetingsSettings::default()
                 },
                 answers: CohostCooldownBehaviour {
                     enabled: true,
@@ -14061,6 +14467,7 @@ mod tests {
             greetings: CohostGreetingsSettings {
                 enabled: true,
                 templates,
+                ..CohostGreetingsSettings::default()
             },
             ..CohostAutoChat::default()
         };
@@ -16879,6 +17286,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
             author_affiliation: None,
             author_verified: None,
         }
@@ -20179,6 +20587,7 @@ mod tests {
                     enabled: true,
                     reaction: None,
                 }],
+                ..CohostGreetingsSettings::default()
             },
             answers: CohostCooldownBehaviour {
                 enabled: true,
@@ -20476,7 +20885,7 @@ mod tests {
                 .find(|row| row.raw_provider_type.as_deref() == Some("follow"))
                 .unwrap();
         follow.published_at = chrono::Utc::now().to_rfc3339();
-        let pass = engine.note_activity(&[follow], start, &chrono::Utc::now().to_rfc3339());
+        let pass = engine.note_activity(&[follow], false, start, &chrono::Utc::now().to_rfc3339());
         assert_eq!(pass.propose.len(), 1);
         let id = pass.propose[0].id.clone();
         assert_eq!(engine.auto_chat_session_id().as_deref(), Some("session-1"));
@@ -20506,6 +20915,542 @@ mod tests {
         engine.register_buddy_operation("op-buddy");
         assert!(engine.is_buddy_operation("op-buddy"));
         assert!(!engine.is_buddy_operation("op-streamer"));
+    }
+
+    // --- Plan 192: settings, the AI greet gate, answers from the notes --------------
+
+    fn fresh_follow() -> LiveChatMessage {
+        let mut follow =
+            crate::live_chat::fake_events_for_tests("session-1", StreamPlatform::Twitch, None)
+                .into_iter()
+                .find(|row| row.raw_provider_type.as_deref() == Some("follow"))
+                .unwrap();
+        follow.published_at = chrono::Utc::now().to_rfc3339();
+        follow
+    }
+
+    /// Plan 192 defaults: greetings on, AI on, both welcomes on, answers on
+    /// for a new install; a stored block keeps its own values and gains the
+    /// new fields' defaults; the welcomes round-trip with absent optionals.
+    #[test]
+    fn greetings_default_on_with_ai_and_welcomes_and_answers_on_for_new_installs() {
+        let auto_chat = CohostAutoChat::default();
+        assert_eq!(auto_chat.mode, CohostAutoChatMode::Off);
+        assert!(auto_chat.greetings.enabled);
+        assert!(auto_chat.greetings.ai);
+        assert!(auto_chat.greetings.templates.is_empty());
+        assert_eq!(
+            auto_chat.greetings.welcomes,
+            CohostWelcomes {
+                first_time: WelcomeLine::default(),
+                returning: WelcomeLine::default(),
+            }
+        );
+        assert!(auto_chat.greetings.welcomes.first_time.enabled);
+        assert_eq!(auto_chat.greetings.welcomes.first_time.text, None);
+        assert_eq!(
+            auto_chat.greetings.welcomes.first_time.state,
+            CohostUtteranceState::Talk
+        );
+        assert!(auto_chat.answers.enabled);
+        assert_eq!(auto_chat.answers.cooldown_seconds, 20);
+        assert!(!auto_chat.banter.enabled);
+        // The owner's stored block (2026-10-16) keeps every value it has.
+        let stored: CohostAutoChat = serde_json::from_value(serde_json::json!({
+            "mode": "auto",
+            "greetings": { "enabled": true, "templates": [] },
+            "answers": { "enabled": false, "cooldownSeconds": 20 },
+            "banter": { "enabled": false, "cooldownSeconds": 240 }
+        }))
+        .unwrap();
+        assert_eq!(stored.mode, CohostAutoChatMode::Auto);
+        assert!(!stored.answers.enabled, "saved settings are never flipped");
+        assert!(stored.greetings.ai);
+        assert_eq!(stored.greetings.welcomes, CohostWelcomes::default());
+        // A block that never stored `answers` gets the new default.
+        let bare: CohostAutoChat =
+            serde_json::from_value(serde_json::json!({ "mode": "auto" })).unwrap();
+        assert!(bare.answers.enabled);
+        assert!(bare.greetings.enabled);
+        // Round trip, with absent optionals (never null) on the wire.
+        let mut settings = CohostAutoChat::default();
+        settings.greetings.welcomes.returning.text = Some("Yo {name}".to_string());
+        settings.greetings.welcomes.returning.state = CohostUtteranceState::Laugh;
+        settings.greetings.welcomes.returning.reaction = Some("wave".to_string());
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["greetings"]["ai"], true);
+        assert_eq!(
+            json["greetings"]["welcomes"]["firstTime"],
+            serde_json::json!({ "enabled": true, "state": "talk" })
+        );
+        assert_eq!(
+            json["greetings"]["welcomes"]["returning"],
+            serde_json::json!({
+                "enabled": true,
+                "text": "Yo {name}",
+                "state": "laugh",
+                "reaction": "wave"
+            })
+        );
+        let back: CohostAutoChat = serde_json::from_value(json).unwrap();
+        assert_eq!(back, settings);
+        let database = Database::open_in_memory_for_tests();
+        let full = CohostSettings {
+            auto_chat: settings,
+            ..CohostSettings::default()
+        };
+        database.save_setting(COHOST_SETTINGS_KEY, &full).unwrap();
+        assert_eq!(load_cohost_settings(&database), full);
+        // Nothing stored: the defaults.
+        let database = Database::open_in_memory_for_tests();
+        assert!(load_cohost_settings(&database).auto_chat.answers.enabled);
+    }
+
+    /// Plan 192 S1.1 trap: `load_cohost_settings` falls back to defaults
+    /// when the stored JSON does not parse. The 0.9.150 structs (copied here
+    /// without the new fields) must read a block saved by this build, which
+    /// is why the welcomes never live inside `templates[]`.
+    #[test]
+    #[allow(dead_code)] // The 0.9.150 shapes, parsed only.
+    fn settings_with_welcomes_still_parse_with_the_0_9_150_shape() {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldTemplate {
+            id: String,
+            kind: CohostActivityTemplateKind,
+            #[serde(default)]
+            platform: Option<CohostGreetingPlatform>,
+            text: String,
+            #[serde(default)]
+            state: CohostUtteranceState,
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            reaction: Option<String>,
+        }
+        #[derive(Debug, Default, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldGreetings {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            templates: Vec<OldTemplate>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldAutoChat {
+            #[serde(default)]
+            mode: CohostAutoChatMode,
+            #[serde(default)]
+            greetings: OldGreetings,
+            answers: CohostCooldownBehaviour,
+            banter: CohostCooldownBehaviour,
+        }
+        let mut settings = CohostAutoChat {
+            mode: CohostAutoChatMode::Auto,
+            ..CohostAutoChat::default()
+        };
+        settings.greetings.templates = vec![CohostGreetingTemplate {
+            id: "t-1".to_string(),
+            kind: CohostActivityTemplateKind::Follow,
+            platform: None,
+            text: "Welcome {name}".to_string(),
+            state: CohostUtteranceState::Talk,
+            enabled: true,
+            reaction: None,
+        }];
+        settings.greetings.welcomes.first_time.text = Some("Hi {name}!".to_string());
+        settings.greetings.welcomes.returning.enabled = false;
+        let new_json = serde_json::to_value(&settings).unwrap();
+        assert!(new_json["greetings"].get("welcomes").is_some());
+        let old: OldAutoChat = serde_json::from_value(new_json.clone())
+            .expect("an older app ignores the fields it does not know");
+        assert_eq!(old.mode, CohostAutoChatMode::Auto);
+        assert_eq!(old.greetings.templates.len(), 1);
+        assert_eq!(old.greetings.templates[0].id, "t-1");
+        assert_eq!(
+            old.greetings.templates[0].kind,
+            CohostActivityTemplateKind::Follow
+        );
+        assert!(old.answers.enabled);
+        // The trap itself: a welcome kind inside `templates[]` would not
+        // parse for the old shape (nor for this one: the kind is closed).
+        let mut bad = new_json;
+        bad["greetings"]["templates"][0]["kind"] = serde_json::json!("first-time");
+        assert!(serde_json::from_value::<OldAutoChat>(bad.clone()).is_err());
+        assert!(serde_json::from_value::<CohostAutoChat>(bad).is_err());
+    }
+
+    /// Plan 192 S1.1: a welcome's text is trimmed, empty reads as absent,
+    /// long is cut to the greeting cap, and its reaction is a plain id.
+    #[test]
+    fn welcome_lines_are_trimmed_bounded_and_their_reaction_checked() {
+        let mut auto_chat = CohostAutoChat::default();
+        auto_chat.greetings.welcomes.first_time.text = Some("   ".to_string());
+        auto_chat.greetings.welcomes.returning.text = Some(format!("  {}  ", "x".repeat(250)));
+        let valid = validate_auto_chat(&auto_chat).unwrap();
+        assert_eq!(valid.greetings.welcomes.first_time.text, None);
+        assert_eq!(
+            valid
+                .greetings
+                .welcomes
+                .returning
+                .text
+                .as_deref()
+                .map(str::len),
+            Some(COHOST_GREETING_TEXT_MAX_CHARS)
+        );
+        auto_chat.greetings.welcomes.returning.reaction = Some("Laugh".to_string());
+        assert_eq!(
+            validate_auto_chat(&auto_chat).unwrap_err(),
+            "A welcome's reaction is 1 to 40 lowercase letters, digits or dashes."
+        );
+        auto_chat.greetings.welcomes.returning.reaction = Some("wave".to_string());
+        assert!(validate_auto_chat(&auto_chat).is_ok());
+        // An empty or blank reaction reads as absent, never "" (the
+        // renderer's schema refuses an empty one).
+        auto_chat.greetings.welcomes.returning.reaction = Some("  ".to_string());
+        let valid = validate_auto_chat(&auto_chat).unwrap();
+        assert_eq!(valid.greetings.welcomes.returning.reaction, None);
+        assert!(
+            serde_json::to_value(&valid).unwrap()["greetings"]["welcomes"]["returning"]
+                .get("reaction")
+                .is_none()
+        );
+        // On load, the text is bounded the same way and a bad reaction is
+        // dropped rather than refused.
+        let database = Database::open_in_memory_for_tests();
+        let mut settings = CohostSettings::default();
+        settings.auto_chat.greetings.welcomes.first_time.text = Some(" hi {name} ".to_string());
+        settings.auto_chat.greetings.welcomes.first_time.reaction = Some("Bad One".to_string());
+        settings.auto_chat.greetings.welcomes.returning.text = Some(String::new());
+        settings.auto_chat.greetings.welcomes.returning.reaction = Some(String::new());
+        database
+            .save_setting(COHOST_SETTINGS_KEY, &settings)
+            .unwrap();
+        let loaded = load_cohost_settings(&database).auto_chat.greetings.welcomes;
+        assert_eq!(loaded.first_time.text.as_deref(), Some("hi {name}"));
+        assert_eq!(loaded.first_time.reaction, None);
+        assert_eq!(loaded.returning.text, None);
+        assert_eq!(loaded.returning.reaction, None);
+    }
+
+    /// Plan 192 S2.2: the AI writes a greeting only with Premium, the
+    /// running session's consent, the web's `greet` capability and the
+    /// `greetings.ai` switch; any one missing sends the line at once, and
+    /// the route is never called.
+    #[test]
+    fn ai_greetings_need_premium_consent_the_capability_and_the_switch() {
+        let start = Instant::now();
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        engine.set_web_greet_version(Some(1));
+        let pass = engine.note_activity(&[fresh_follow()], true, start, &now_iso);
+        assert!(pass.send.is_empty() && pass.propose.is_empty());
+        let pending = pass
+            .greet
+            .expect("all four hold: the batch waits for the AI");
+        assert_eq!(pending.request.session_client_id, "session-1");
+        assert_eq!(pending.request.tone, CohostTone::Short);
+        assert_eq!(
+            pending.request.persona,
+            Some(CohostTickPersona {
+                name: "Buddy".to_string(),
+                personality: String::new(),
+            })
+        );
+        assert!(
+            pending
+                .request
+                .client_version
+                .starts_with("videorc-desktop/")
+        );
+        assert!(pending.request.introduce);
+        assert_eq!(pending.request.items[0].kind, "follow");
+        let routed = engine.apply_greet_result(
+            pending,
+            Ok(CohostGreetResponse {
+                lines: vec![crate::videorc_api::CohostGreetLine {
+                    id: "g-1".to_string(),
+                    text: "Fresh blood! Welcome, new_friend.".to_string(),
+                    mood: Some(CohostTickMood::Amused),
+                }],
+                model: "jev".to_string(),
+            }),
+            start + Duration::from_secs(1),
+            &now_iso,
+        );
+        assert_eq!(routed.send.len(), 1);
+        assert_eq!(routed.send[0].text, "Fresh blood! Welcome, new_friend.");
+        assert_eq!(routed.send[0].state, CohostUtteranceState::Laugh);
+        assert_eq!(
+            engine.utterance_source(&routed.send[0].id),
+            Some(crate::protocol::CohostReportPostSource::Ai)
+        );
+        assert_eq!(engine.snapshot().utterances.len(), 1);
+
+        let line_at_once = |engine: &mut CohostEngine, premium: bool| {
+            let pass = engine.note_activity(&[fresh_follow()], premium, start, &now_iso);
+            assert!(pass.greet.is_none(), "{pass:?}");
+            assert_eq!(pass.send.len(), 1);
+            assert_eq!(pass.send[0].text, "Welcome new_friend!", "the user's line");
+            assert_eq!(
+                engine.utterance_source(&pass.send[0].id),
+                Some(crate::protocol::CohostReportPostSource::Line)
+            );
+        };
+        // No Premium.
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        engine.set_web_greet_version(Some(1));
+        line_at_once(&mut engine, false);
+        // No capability: absent, or 0.
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        line_at_once(&mut engine, true);
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        engine.set_web_greet_version(Some(0));
+        line_at_once(&mut engine, true);
+        // The switch off.
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        engine.set_web_greet_version(Some(1));
+        engine.settings.auto_chat.greetings.ai = false;
+        line_at_once(&mut engine, true);
+        // No consent on the session.
+        let mut settings = enabled_settings();
+        settings.auto_chat = auto_chat_settings(CohostAutoChatMode::Auto);
+        let mut engine = CohostEngine::new(settings.clone());
+        engine.set_web_greet_version(Some(1));
+        engine.start_session("session-1".to_string(), false, None, start);
+        line_at_once(&mut engine, true);
+        // No tick session at all (Buddy not started): greetings are free,
+        // the AI is not.
+        let mut engine = CohostEngine::new(settings);
+        engine.set_web_greet_version(Some(1));
+        line_at_once(&mut engine, true);
+        // The pump's drain reads the same gate.
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        engine.set_web_greet_version(Some(1));
+        let follows: Vec<LiveChatMessage> = (0..2)
+            .map(|n| {
+                let mut row = fresh_follow();
+                row.author_id = Some(format!("fan-{n}"));
+                row.author_name = format!("Fan{n}");
+                row.id = format!("session-1:twitch:default:f{n}");
+                row
+            })
+            .collect();
+        let first = engine.note_activity(&follows, true, start, &now_iso);
+        assert!(first.greet.is_some());
+        let drained = engine.drain_auto_chat(true, start + Duration::from_secs(10), &now_iso);
+        assert!(drained.greet.is_some(), "{drained:?}");
+        assert!(!drained.greet.unwrap().request.introduce);
+    }
+
+    /// Plan 192 S2.2: the greet call runs with the engine lock free, and
+    /// its answer is routed and published like any pass.
+    #[tokio::test]
+    async fn run_greet_holds_no_engine_lock_across_the_call() {
+        let state = test_state();
+        let mut rx = state.events.subscribe();
+        let pending = {
+            let mut engine = state.cohost.lock().await;
+            engine.settings.enabled = true;
+            engine.settings.auto_chat = auto_chat_settings(CohostAutoChatMode::Suggest);
+            engine.set_web_greet_version(Some(1));
+            engine.start_session("session-1".to_string(), true, None, Instant::now());
+            let pass = engine.note_activity(
+                &[fresh_follow()],
+                true,
+                Instant::now(),
+                &chrono::Utc::now().to_rfc3339(),
+            );
+            assert!(pass.propose.is_empty());
+            pass.greet.unwrap()
+        };
+        let probe = state.clone();
+        run_greet(&state, pending, |request| async move {
+            assert!(
+                probe.cohost.try_lock().is_ok(),
+                "the engine lock is held across the greet call"
+            );
+            assert_eq!(request.items.len(), 1);
+            Ok(CohostGreetResponse {
+                lines: vec![crate::videorc_api::CohostGreetLine {
+                    id: request.items[0].id.clone(),
+                    text: "The horde grows. Welcome, new_friend.".to_string(),
+                    mood: Some(CohostTickMood::Neutral),
+                }],
+                model: "jev".to_string(),
+            })
+        })
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.utterances.len(), 1);
+        assert_eq!(
+            snapshot.utterances[0].text,
+            "The horde grows. Welcome, new_friend."
+        );
+        assert_eq!(
+            snapshot.utterances[0].status,
+            CohostUtteranceStatus::Proposed,
+            "Suggest: a card with the AI text"
+        );
+        // The card was published (log events ride the same channel).
+        let mut published = false;
+        while let Ok(event) = rx.try_recv() {
+            published |= event.event == COHOST_STATE_EVENT;
+        }
+        assert!(published, "the AI card reached the renderer");
+        // A failed call still publishes the card, with the line.
+        let pending = {
+            let mut engine = state.cohost.lock().await;
+            let mut raid =
+                crate::live_chat::fake_events_for_tests("session-1", StreamPlatform::Twitch, None)
+                    .into_iter()
+                    .find(|row| row.raw_provider_type.as_deref() == Some("raid"))
+                    .unwrap();
+            raid.published_at = chrono::Utc::now().to_rfc3339();
+            engine
+                .note_activity(
+                    &[raid],
+                    true,
+                    Instant::now() + Duration::from_secs(10),
+                    &chrono::Utc::now().to_rfc3339(),
+                )
+                .greet
+                .unwrap()
+        };
+        run_greet(&state, pending, |_| async move {
+            Err(CohostApiError::timeout("Buddy did not answer within 3 s."))
+        })
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.utterances.len(), 2);
+        assert_eq!(
+            snapshot.utterances[1].text,
+            "raider42 is raiding! Welcome, everyone!"
+        );
+    }
+
+    /// Plan 192 D5: an unaddressed question the streamer's notes answer is
+    /// answered once it has been open for a minute, once; a question not
+    /// from the notes stays a card.
+    #[test]
+    fn an_unanswered_question_is_answered_from_the_notes_after_a_minute() {
+        let start = Instant::now();
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let rows = messages("session-1", 0..5);
+        let tick = |engine: &mut CohostEngine,
+                    n: u64,
+                    at_iso: &str,
+                    questions: Vec<CohostTickQuestion>| {
+            engine.note_messages(&messages("session-1", (n as u32 - 1) * 5..n as u32 * 5));
+            let at = start + Duration::from_secs(1 + (n - 1) * 30);
+            engine.prepare_tick(generation, true, true, at).unwrap();
+            assert!(engine.apply_tick_result(generation, 0, Ok(response(questions)), at, at_iso));
+            engine.route_answer_candidates(generation, at, at_iso)
+        };
+        let notes = question("q_notes", &[&rows[0].id]);
+        let mut card = question("q_card", &[&rows[1].id]);
+        card.from_notes = false;
+        let mut blank = question("q_blank", &[&rows[2].id]);
+        blank.suggested_reply = String::new();
+        let open = || vec![notes.clone(), card.clone(), blank.clone()];
+        // Seen at T: nothing yet.
+        let pass = tick(&mut engine, 1, "2026-08-22T10:00:02Z", open());
+        assert_eq!(pass, AutoChatPass::default());
+        // T+30 s: still waiting.
+        let pass = tick(&mut engine, 2, "2026-08-22T10:00:32Z", open());
+        assert_eq!(pass, AutoChatPass::default());
+        // T+60 s: the notes answer goes out; the card and the blank reply
+        // stay suggestions.
+        let pass = tick(&mut engine, 3, "2026-08-22T10:01:02Z", open());
+        assert_eq!(pass.send.len(), 1, "{pass:?}");
+        assert_eq!(pass.send[0].text, "Keychron Q1!");
+        assert_eq!(
+            pass.send[0].trigger.kind,
+            CohostUtteranceTriggerKind::Answer
+        );
+        assert_eq!(
+            pass.send[0].trigger.message_id.as_deref(),
+            Some(rows[0].id.as_str())
+        );
+        assert_eq!(pass.send[0].destination_ids, ["twitch"]);
+        // T+90 s: never twice.
+        let pass = tick(&mut engine, 4, "2026-08-22T10:01:32Z", open());
+        assert_eq!(pass, AutoChatPass::default());
+        assert_eq!(
+            engine.snapshot().questions.len(),
+            3,
+            "the questions stay open"
+        );
+    }
+
+    /// Plan 192 D5: a question the streamer answered (marked, replied in
+    /// chat, or answered on air) is closed and never answered by the Buddy.
+    #[test]
+    fn a_question_the_streamer_answered_is_never_answered_by_buddy() {
+        let start = Instant::now();
+        let rows = messages("session-1", 0..5);
+        let run = |close: &dyn Fn(&mut CohostEngine)| {
+            let (mut engine, generation) =
+                running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+            engine.note_messages(&rows);
+            engine
+                .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+                .unwrap();
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![question("q_notes", &[&rows[0].id])])),
+                start + Duration::from_secs(2),
+                "2026-08-22T10:00:02Z",
+            ));
+            close(&mut engine);
+            assert!(engine.snapshot().questions.is_empty());
+            engine.note_messages(&messages("session-1", 5..10));
+            let at = start + Duration::from_secs(70);
+            engine.prepare_tick(generation, true, true, at).unwrap();
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![question("q_notes", &[&rows[0].id])])),
+                at,
+                "2026-08-22T10:01:10Z",
+            ));
+            let pass = engine.route_answer_candidates(generation, at, "2026-08-22T10:01:10Z");
+            assert_eq!(pass, AutoChatPass::default());
+            assert!(
+                engine.snapshot().questions.is_empty(),
+                "a closed question never returns"
+            );
+        };
+        run(&|engine| {
+            assert!(engine.mark_answered("session-1", "q_notes").unwrap());
+        });
+        run(&|engine| {
+            assert!(engine.own_send_delivered(
+                "session-1",
+                "It is a Keychron Q1",
+                Some("q_notes"),
+                start + Duration::from_secs(3)
+            ));
+        });
+        assert!(open_for_at_least(
+            "2026-08-22T10:00:02Z",
+            "2026-08-22T10:01:02Z",
+            NOTES_ANSWER_AFTER
+        ));
+        assert!(!open_for_at_least(
+            "2026-08-22T10:00:02Z",
+            "2026-08-22T10:01:01Z",
+            NOTES_ANSWER_AFTER
+        ));
+        assert!(!open_for_at_least(
+            "nope",
+            "2026-08-22T10:01:02Z",
+            NOTES_ANSWER_AFTER
+        ));
     }
 
     /// Plan 164 D7: the Say box with the chat mode off and the Buddy on an

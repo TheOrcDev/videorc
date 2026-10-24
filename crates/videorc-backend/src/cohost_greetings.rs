@@ -1,15 +1,21 @@
-//! Greetings written by the user (plan 164 S-D1): no model, no network.
+//! Greetings (plan 164 S-D1, plan 192): the lines, no model here.
 //!
 //! An Activity event (a follow, a sub, a cheer, a raid, ...) becomes
-//! [`ActivityFacts`]: the template kind it answers, the destination it came
-//! from and the fields a template may name in braces. [`pick_template`] picks
-//! the user's enabled template for that kind and platform,
-//! [`resolve_template`] fills the braces, and [`collapse`] folds a burst of
-//! same-kind events into one `{names}` / `{others}` message (D9). Everything
-//! here is pure; the throttle (`cohost_throttle`) decides when, the engine
-//! (`cohost`) decides whether, and `live_chat` sends.
+//! [`ActivityFacts`]: the greeting kind it answers, the destination it came
+//! from and the fields a line may name in braces. A chatter's first message
+//! (ever, or this stream) becomes the same facts through [`welcome_facts`]
+//! (plan 192 S1.2). [`resolve_line`] picks the user's enabled template for
+//! that kind and platform, else the built-in line (D1; a kind the user
+//! switched off stays off), [`resolve_template`] fills the braces, and
+//! [`collapse`] folds a burst of same-kind events into one `{names}` /
+//! `{others}` message (D9). Everything here is pure; the throttle
+//! (`cohost_throttle`) decides when, the engine (`cohost`) decides whether,
+//! and `live_chat` sends.
 
-use crate::cohost::{CohostActivityTemplateKind, CohostGreetingPlatform, CohostGreetingTemplate};
+use crate::cohost::{
+    CohostActivityTemplateKind, CohostGreetingPlatform, CohostGreetingTemplate,
+    CohostGreetingsSettings, CohostUtteranceState, WelcomeLine, truncate_utf16,
+};
 use crate::live_chat::{
     LiveChatEventDetails, LiveChatEventType, LiveChatMessage, MembershipKind, SubscriptionKind,
     comments_destination_id,
@@ -19,10 +25,206 @@ use crate::streaming::{StreamPlatform, stream_platform_label};
 /// Names listed before "and N others" in a collapsed greeting.
 pub(crate) const COLLAPSE_NAMED_MAX: usize = 3;
 
-/// One Activity event as a greeting sees it.
+/// The longest first message a welcome carries to the AI (plan 192, the
+/// greet route's `firstMessageText` cap).
+pub(crate) const FIRST_MESSAGE_TEXT_MAX_UNITS: usize = 200;
+
+/// Chat bots that never get a welcome (plan 192 S1.2), matched on the
+/// lowercased name.
+pub(crate) const KNOWN_BOTS: [&str; 9] = [
+    "nightbot",
+    "streamelements",
+    "streamlabs",
+    "moobot",
+    "fossabot",
+    "sery_bot",
+    "wizebot",
+    "botrixoficial",
+    "kickbot",
+];
+
+/// Every kind a greeting answers (plan 192): the Activity kinds a template
+/// may be written for, plus the two welcomes, which live in
+/// `greetings.welcomes` and never in `templates[]` (S1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum GreetingKind {
+    Activity(CohostActivityTemplateKind),
+    /// The author's first message in the channel.
+    FirstTime,
+    /// The author's first message this stream, having chatted on an
+    /// earlier one.
+    Returning,
+}
+
+impl GreetingKind {
+    /// Every kind, in the order of the shared fixture
+    /// (`protocol-fixtures/buddy-builtin-greetings.json`); the fixture test
+    /// walks it.
+    #[cfg(test)]
+    pub(crate) const ALL: [GreetingKind; 16] = {
+        use CohostActivityTemplateKind as K;
+        [
+            GreetingKind::FirstTime,
+            GreetingKind::Returning,
+            GreetingKind::Activity(K::Follow),
+            GreetingKind::Activity(K::Sub),
+            GreetingKind::Activity(K::Resub),
+            GreetingKind::Activity(K::SubGift),
+            GreetingKind::Activity(K::CommunitySubGift),
+            GreetingKind::Activity(K::Membership),
+            GreetingKind::Activity(K::Cheer),
+            GreetingKind::Activity(K::Kicks),
+            GreetingKind::Activity(K::SuperChat),
+            GreetingKind::Activity(K::SuperSticker),
+            GreetingKind::Activity(K::Raid),
+            GreetingKind::Activity(K::WatchStreak),
+            GreetingKind::Activity(K::PowerUp),
+            GreetingKind::Activity(K::Redemption),
+        ]
+    };
+
+    /// The kind as the wire and the fixture spell it (the template kind's
+    /// own kebab-case name, `first-time`, `returning`).
+    pub(crate) fn wire(self) -> &'static str {
+        use CohostActivityTemplateKind as K;
+        match self {
+            Self::FirstTime => "first-time",
+            Self::Returning => "returning",
+            Self::Activity(kind) => match kind {
+                K::Follow => "follow",
+                K::Sub => "sub",
+                K::Resub => "resub",
+                K::SubGift => "sub-gift",
+                K::CommunitySubGift => "community-sub-gift",
+                K::Membership => "membership",
+                K::Cheer => "cheer",
+                K::Kicks => "kicks",
+                K::SuperChat => "super-chat",
+                K::SuperSticker => "super-sticker",
+                K::Raid => "raid",
+                K::WatchStreak => "watch-streak",
+                K::PowerUp => "power-up",
+                K::Redemption => "redemption",
+            },
+        }
+    }
+}
+
+/// One built-in line (plan 192 D1): what a kind says when the user wrote
+/// nothing for it. Short and plain, `{name}` only, so it reads right whatever
+/// optional fields a platform leaves empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BuiltinGreeting {
+    pub(crate) kind: GreetingKind,
+    pub(crate) text: &'static str,
+    pub(crate) state: CohostUtteranceState,
+}
+
+/// The runtime copy of `protocol-fixtures/buddy-builtin-greetings.json`; a
+/// test asserts they are equal, and the TS `BUDDY_BUILTIN_GREETINGS` asserts
+/// the same, so the two never drift.
+pub(crate) const BUILTIN_GREETINGS: [BuiltinGreeting; 16] = {
+    use CohostActivityTemplateKind as K;
+    use CohostUtteranceState::{Laugh, Talk};
+    const fn line(
+        kind: GreetingKind,
+        text: &'static str,
+        state: CohostUtteranceState,
+    ) -> BuiltinGreeting {
+        BuiltinGreeting { kind, text, state }
+    }
+    [
+        line(
+            GreetingKind::FirstTime,
+            "Hi {name}, welcome to the stream!",
+            Talk,
+        ),
+        line(GreetingKind::Returning, "Welcome back, {name}!", Talk),
+        line(
+            GreetingKind::Activity(K::Follow),
+            "Welcome, {name}! Thanks for the follow.",
+            Talk,
+        ),
+        line(
+            GreetingKind::Activity(K::Sub),
+            "{name} joined the ranks. Thank you!",
+            Laugh,
+        ),
+        line(
+            GreetingKind::Activity(K::Resub),
+            "{name} is back in the ranks. Thank you!",
+            Laugh,
+        ),
+        line(
+            GreetingKind::Activity(K::SubGift),
+            "Thanks for the gift sub, {name}!",
+            Laugh,
+        ),
+        line(
+            GreetingKind::Activity(K::CommunitySubGift),
+            "{name} gifted subs to the chat. Thank you!",
+            Laugh,
+        ),
+        line(
+            GreetingKind::Activity(K::Membership),
+            "Welcome to the members, {name}!",
+            Laugh,
+        ),
+        line(
+            GreetingKind::Activity(K::Cheer),
+            "Thanks for the bits, {name}!",
+            Talk,
+        ),
+        line(
+            GreetingKind::Activity(K::Kicks),
+            "Thanks for the Kicks, {name}!",
+            Talk,
+        ),
+        line(
+            GreetingKind::Activity(K::SuperChat),
+            "Thanks for the Super Chat, {name}!",
+            Talk,
+        ),
+        line(
+            GreetingKind::Activity(K::SuperSticker),
+            "Thanks for the Super Sticker, {name}!",
+            Talk,
+        ),
+        line(
+            GreetingKind::Activity(K::Raid),
+            "{name} is raiding! Welcome, everyone!",
+            Laugh,
+        ),
+        line(
+            GreetingKind::Activity(K::WatchStreak),
+            "{name}, thanks for the watch streak!",
+            Talk,
+        ),
+        line(
+            GreetingKind::Activity(K::PowerUp),
+            "Thanks for the power-up, {name}!",
+            Talk,
+        ),
+        line(
+            GreetingKind::Activity(K::Redemption),
+            "Thanks for redeeming, {name}!",
+            Talk,
+        ),
+    ]
+};
+
+/// The built-in line of a kind (every kind has one).
+pub(crate) fn builtin_greeting(kind: GreetingKind) -> &'static BuiltinGreeting {
+    BUILTIN_GREETINGS
+        .iter()
+        .find(|line| line.kind == kind)
+        .expect("every greeting kind has a built-in line")
+}
+
+/// One Activity event (or a chatter's first message) as a greeting sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActivityFacts {
-    pub(crate) kind: CohostActivityTemplateKind,
+    pub(crate) kind: GreetingKind,
     pub(crate) platform: StreamPlatform,
     /// The comments destination the event came from: the greeting goes there
     /// and nowhere else (D8).
@@ -39,6 +241,9 @@ pub(crate) struct ActivityFacts {
     pub(crate) count: Option<u64>,
     pub(crate) amount: Option<String>,
     pub(crate) reward: Option<String>,
+    /// A welcome's first message, trimmed to what the greet route takes
+    /// (plan 192 S2.2); never set on an Activity row.
+    pub(crate) first_message_text: Option<String>,
 }
 
 /// The greeting platform a chat platform maps to; `None` for platforms a
@@ -67,8 +272,108 @@ pub(crate) fn activity_facts(message: &LiveChatMessage) -> Option<ActivityFacts>
     if name.is_empty() {
         return None;
     }
-    let mut facts = ActivityFacts {
-        kind: CohostActivityTemplateKind::Follow,
+    let mut facts = base_facts(message, name);
+    use CohostActivityTemplateKind as K;
+    match details {
+        LiveChatEventDetails::Follow { handle } => {
+            facts.kind = GreetingKind::Activity(K::Follow);
+            if let Some(handle) = handle.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+                facts.handle = format!("@{}", handle.trim_start_matches('@'));
+            }
+        }
+        LiveChatEventDetails::Subscription {
+            subscription,
+            months,
+            gift_count,
+            community_gift_id,
+            ..
+        } => {
+            facts.kind = GreetingKind::Activity(match subscription {
+                SubscriptionKind::Sub => K::Sub,
+                SubscriptionKind::Resub => K::Resub,
+                SubscriptionKind::SubGift => {
+                    if community_gift_id.is_some() {
+                        return None;
+                    }
+                    K::SubGift
+                }
+                SubscriptionKind::CommunitySubGift => K::CommunitySubGift,
+                SubscriptionKind::GiftPaidUpgrade
+                | SubscriptionKind::PrimePaidUpgrade
+                | SubscriptionKind::PayItForward => return None,
+            });
+            facts.months = *months;
+            facts.count = gift_count.map(u64::from);
+        }
+        LiveChatEventDetails::Membership {
+            membership,
+            months,
+            gift_count,
+            ..
+        } => {
+            if *membership == MembershipKind::GiftReceived {
+                return None;
+            }
+            facts.kind = GreetingKind::Activity(K::Membership);
+            facts.months = *months;
+            facts.count = gift_count.map(u64::from);
+        }
+        LiveChatEventDetails::Cheer { bits } => {
+            facts.kind = GreetingKind::Activity(K::Cheer);
+            facts.count = Some(*bits);
+            facts.amount = Some(format!("{} bits", group_thousands(*bits)));
+        }
+        LiveChatEventDetails::Kicks { amount, .. } => {
+            facts.kind = GreetingKind::Activity(K::Kicks);
+            facts.count = Some(*amount);
+            facts.amount = Some(format!("{} KICKs", group_thousands(*amount)));
+        }
+        LiveChatEventDetails::SuperChat { amount_display, .. }
+        | LiveChatEventDetails::SuperSticker { amount_display, .. } => {
+            facts.kind = if matches!(details, LiveChatEventDetails::SuperChat { .. }) {
+                GreetingKind::Activity(K::SuperChat)
+            } else {
+                GreetingKind::Activity(K::SuperSticker)
+            };
+            facts.amount = Some(amount_display.clone());
+        }
+        LiveChatEventDetails::Raid { viewer_count } => {
+            facts.kind = GreetingKind::Activity(K::Raid);
+            facts.count = Some(*viewer_count);
+        }
+        LiveChatEventDetails::WatchStreak { streak_count, .. } => {
+            facts.kind = GreetingKind::Activity(K::WatchStreak);
+            facts.streak = Some(*streak_count);
+        }
+        LiveChatEventDetails::PowerUp { bits, title, .. } => {
+            facts.kind = GreetingKind::Activity(K::PowerUp);
+            facts.count = Some(*bits);
+            facts.amount = Some(format!("{} bits", group_thousands(*bits)));
+            facts.reward = title.clone();
+        }
+        LiveChatEventDetails::Redemption {
+            channel_points,
+            title,
+            points_name,
+            ..
+        } => {
+            facts.kind = GreetingKind::Activity(K::Redemption);
+            facts.count = Some(*channel_points);
+            // Plan 163: the channel's own name for its points.
+            let points = points_name.as_deref().unwrap_or("channel points");
+            facts.amount = Some(format!("{} {points}", group_thousands(*channel_points)));
+            facts.reward = title.clone();
+        }
+        LiveChatEventDetails::Announcement { .. } => return None,
+    }
+    Some(facts)
+}
+
+/// The facts every row shares: a follow kind placeholder, the destination,
+/// the viewer key (the author id, else the lowercased name) and the name.
+fn base_facts(message: &LiveChatMessage, name: String) -> ActivityFacts {
+    ActivityFacts {
+        kind: GreetingKind::Activity(CohostActivityTemplateKind::Follow),
         platform: message.platform,
         destination_id: comments_destination_id(message.platform, message.target_id.as_deref()),
         viewer_key: message
@@ -86,100 +391,81 @@ pub(crate) fn activity_facts(message: &LiveChatMessage) -> Option<ActivityFacts>
         count: None,
         amount: message.amount_text.clone(),
         reward: None,
-    };
-    match details {
-        LiveChatEventDetails::Follow { handle } => {
-            facts.kind = CohostActivityTemplateKind::Follow;
-            if let Some(handle) = handle.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
-                facts.handle = format!("@{}", handle.trim_start_matches('@'));
-            }
-        }
-        LiveChatEventDetails::Subscription {
-            subscription,
-            months,
-            gift_count,
-            community_gift_id,
-            ..
-        } => {
-            facts.kind = match subscription {
-                SubscriptionKind::Sub => CohostActivityTemplateKind::Sub,
-                SubscriptionKind::Resub => CohostActivityTemplateKind::Resub,
-                SubscriptionKind::SubGift => {
-                    if community_gift_id.is_some() {
-                        return None;
-                    }
-                    CohostActivityTemplateKind::SubGift
-                }
-                SubscriptionKind::CommunitySubGift => CohostActivityTemplateKind::CommunitySubGift,
-                SubscriptionKind::GiftPaidUpgrade
-                | SubscriptionKind::PrimePaidUpgrade
-                | SubscriptionKind::PayItForward => return None,
-            };
-            facts.months = *months;
-            facts.count = gift_count.map(u64::from);
-        }
-        LiveChatEventDetails::Membership {
-            membership,
-            months,
-            gift_count,
-            ..
-        } => {
-            if *membership == MembershipKind::GiftReceived {
-                return None;
-            }
-            facts.kind = CohostActivityTemplateKind::Membership;
-            facts.months = *months;
-            facts.count = gift_count.map(u64::from);
-        }
-        LiveChatEventDetails::Cheer { bits } => {
-            facts.kind = CohostActivityTemplateKind::Cheer;
-            facts.count = Some(*bits);
-            facts.amount = Some(format!("{} bits", group_thousands(*bits)));
-        }
-        LiveChatEventDetails::Kicks { amount, .. } => {
-            facts.kind = CohostActivityTemplateKind::Kicks;
-            facts.count = Some(*amount);
-            facts.amount = Some(format!("{} KICKs", group_thousands(*amount)));
-        }
-        LiveChatEventDetails::SuperChat { amount_display, .. }
-        | LiveChatEventDetails::SuperSticker { amount_display, .. } => {
-            facts.kind = if matches!(details, LiveChatEventDetails::SuperChat { .. }) {
-                CohostActivityTemplateKind::SuperChat
-            } else {
-                CohostActivityTemplateKind::SuperSticker
-            };
-            facts.amount = Some(amount_display.clone());
-        }
-        LiveChatEventDetails::Raid { viewer_count } => {
-            facts.kind = CohostActivityTemplateKind::Raid;
-            facts.count = Some(*viewer_count);
-        }
-        LiveChatEventDetails::WatchStreak { streak_count, .. } => {
-            facts.kind = CohostActivityTemplateKind::WatchStreak;
-            facts.streak = Some(*streak_count);
-        }
-        LiveChatEventDetails::PowerUp { bits, title, .. } => {
-            facts.kind = CohostActivityTemplateKind::PowerUp;
-            facts.count = Some(*bits);
-            facts.amount = Some(format!("{} bits", group_thousands(*bits)));
-            facts.reward = title.clone();
-        }
-        LiveChatEventDetails::Redemption {
-            channel_points,
-            title,
-            points_name,
-            ..
-        } => {
-            facts.kind = CohostActivityTemplateKind::Redemption;
-            facts.count = Some(*channel_points);
-            // Plan 163: the channel's own name for its points.
-            let points = points_name.as_deref().unwrap_or("channel points");
-            facts.amount = Some(format!("{} {points}", group_thousands(*channel_points)));
-            facts.reward = title.clone();
-        }
-        LiveChatEventDetails::Announcement { .. } => return None,
+        first_message_text: None,
     }
+}
+
+/// The facts of a chatter's first message (plan 192 S1.2): first-time when
+/// `first_message` (new to the channel, by local history), returning when it
+/// is their first row this stream and they chatted on an earlier one. `None`
+/// for everything else: later messages, tombstones, notices, the streamer's
+/// own rows, known bots and names that carry a URL.
+pub(crate) fn welcome_facts(message: &LiveChatMessage) -> Option<ActivityFacts> {
+    if message.is_deleted
+        || !matches!(
+            message.event_type,
+            LiveChatEventType::Message | LiveChatEventType::Paid
+        )
+        || message.details.is_some()
+    {
+        return None;
+    }
+    let kind = if message.first_message {
+        GreetingKind::FirstTime
+    } else if message.first_in_session {
+        GreetingKind::Returning
+    } else {
+        return None;
+    };
+    if is_owner_row(message) {
+        return None;
+    }
+    let name = message.author_name.trim().to_string();
+    if name.is_empty() || is_known_bot(&name) || name_has_url(&name) {
+        return None;
+    }
+    let mut facts = base_facts(message, name);
+    facts.kind = kind;
+    let text = truncate_utf16(message.message_text.trim(), FIRST_MESSAGE_TEXT_MAX_UNITS);
+    facts.first_message_text = (!text.trim().is_empty()).then(|| text.trim_end().to_string());
     Some(facts)
+}
+
+/// The streamer's own row: an owner or broadcaster role, as the connectors
+/// label it.
+fn is_owner_row(message: &LiveChatMessage) -> bool {
+    message.author_roles.iter().any(|role| {
+        matches!(
+            role.trim().to_ascii_lowercase().as_str(),
+            "owner" | "broadcaster"
+        )
+    })
+}
+
+/// A known chat bot, by name (case-insensitive, a leading `@` ignored).
+pub(crate) fn is_known_bot(name: &str) -> bool {
+    let name = name.trim().trim_start_matches('@').to_lowercase();
+    KNOWN_BOTS.contains(&name.as_str())
+}
+
+/// A display name that carries a link: a scheme, `www.`, or a domain-shaped
+/// token (letters or digits, a dot, then two or more letters).
+pub(crate) fn name_has_url(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    if lower.contains("://") || lower.contains("www.") {
+        return true;
+    }
+    let bytes = lower.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'.'
+            && index > 0
+            && bytes[index - 1].is_ascii_alphanumeric()
+            && bytes[index + 1..]
+                .iter()
+                .take_while(|b| b.is_ascii_alphabetic())
+                .count()
+                >= 2
+    })
 }
 
 fn group_thousands(value: u64) -> String {
@@ -213,6 +499,91 @@ pub(crate) fn pick_template(
         return None;
     }
     Some(matching[choice % matching.len()])
+}
+
+/// The line a greeting kind resolves to (plan 192 D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GreetingLine {
+    pub(crate) text: String,
+    pub(crate) state: CohostUtteranceState,
+    /// The reaction the user's line names (plan 168 D14); built-in lines
+    /// name none.
+    pub(crate) reaction: Option<String>,
+    /// The user wrote it (the AI's style example), else it is built in.
+    pub(crate) user_written: bool,
+}
+
+/// What `kind` says on `platform` (plan 192 D1), in this order: the user's
+/// enabled template for the kind and platform (`choice` picks among them);
+/// off (`None`) when the user has templates of that kind and switched every
+/// one of them off; else the built-in line. A welcome kind reads its own
+/// switch and text in `greetings.welcomes`. An empty list never means
+/// silence.
+pub(crate) fn resolve_line(
+    settings: &CohostGreetingsSettings,
+    kind: GreetingKind,
+    platform: StreamPlatform,
+    choice: usize,
+) -> Option<GreetingLine> {
+    let builtin = || {
+        let line = builtin_greeting(kind);
+        GreetingLine {
+            text: line.text.to_string(),
+            state: line.state,
+            reaction: None,
+            user_written: false,
+        }
+    };
+    let welcome = |line: &WelcomeLine| {
+        if !line.enabled {
+            return None;
+        }
+        Some(
+            match line
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                Some(text) => GreetingLine {
+                    text: text.to_string(),
+                    state: line.state,
+                    reaction: line.reaction.clone(),
+                    user_written: true,
+                },
+                None => GreetingLine {
+                    state: line.state,
+                    reaction: line.reaction.clone(),
+                    ..builtin()
+                },
+            },
+        )
+    };
+    match kind {
+        GreetingKind::FirstTime => welcome(&settings.welcomes.first_time),
+        GreetingKind::Returning => welcome(&settings.welcomes.returning),
+        GreetingKind::Activity(template_kind) => {
+            if let Some(template) =
+                pick_template(&settings.templates, template_kind, platform, choice)
+            {
+                return Some(GreetingLine {
+                    text: template.text.clone(),
+                    state: template.state,
+                    reaction: template.reaction.clone(),
+                    user_written: true,
+                });
+            }
+            let of_kind: Vec<&CohostGreetingTemplate> = settings
+                .templates
+                .iter()
+                .filter(|template| template.kind == template_kind)
+                .collect();
+            if !of_kind.is_empty() && of_kind.iter().all(|template| !template.enabled) {
+                return None;
+            }
+            Some(builtin())
+        }
+    }
 }
 
 /// The fields of one event, or of a collapsed burst (`{names}` /
@@ -268,15 +639,8 @@ impl TemplateFields {
     }
 }
 
-/// One event's fields, or a burst's: `{names}` lists the first three
-/// distinct names ("Ana, Bo and Cy"), `{others}` counts the rest, the
-/// singular fields come from the first event (D9). An empty slice gives the
-/// default fields.
-pub(crate) fn collapse(events: &[ActivityFacts]) -> TemplateFields {
-    let Some(first) = events.first() else {
-        return TemplateFields::default();
-    };
-    let mut fields = TemplateFields::from_facts(first);
+/// The distinct names of a burst, first seen first (case-insensitive).
+pub(crate) fn distinct_names(events: &[ActivityFacts]) -> Vec<&str> {
     let mut names: Vec<&str> = Vec::new();
     for event in events {
         if !names
@@ -286,6 +650,21 @@ pub(crate) fn collapse(events: &[ActivityFacts]) -> TemplateFields {
             names.push(&event.name);
         }
     }
+    names
+}
+
+/// One event's fields, or a burst's: `{names}` lists the first three
+/// distinct names ("Ana, Bo and Cy"), `{others}` counts the rest, the
+/// singular fields come from the first event (D9). With more than one
+/// distinct name, `{name}` and `{handle}` resolve to that list too (plan
+/// 192), so a line written with `{name}` never greets only the first viewer
+/// of a burst. An empty slice gives the default fields.
+pub(crate) fn collapse(events: &[ActivityFacts]) -> TemplateFields {
+    let Some(first) = events.first() else {
+        return TemplateFields::default();
+    };
+    let mut fields = TemplateFields::from_facts(first);
+    let names = distinct_names(events);
     let named: Vec<&str> = names.iter().copied().take(COLLAPSE_NAMED_MAX).collect();
     fields.others = names.len().saturating_sub(named.len());
     fields.names = match named.as_slice() {
@@ -300,6 +679,10 @@ pub(crate) fn collapse(events: &[ActivityFacts]) -> TemplateFields {
             fields.others,
             if fields.others == 1 { "" } else { "s" }
         );
+    }
+    if names.len() > 1 {
+        fields.name = fields.names.clone();
+        fields.handle = fields.names.clone();
     }
     fields
 }
@@ -472,7 +855,7 @@ mod tests {
             ),
             "Welcome member Newbie"
         );
-        let kinds: Vec<CohostActivityTemplateKind> = [
+        let kinds: Vec<GreetingKind> = [
             (StreamPlatform::Twitch, "follow"),
             (StreamPlatform::Twitch, "resub"),
             (StreamPlatform::Twitch, "community-sub-gift"),
@@ -497,7 +880,7 @@ mod tests {
         .collect();
         assert_eq!(
             kinds,
-            vec![
+            [
                 CohostActivityTemplateKind::Follow,
                 CohostActivityTemplateKind::Resub,
                 CohostActivityTemplateKind::CommunitySubGift,
@@ -511,6 +894,8 @@ mod tests {
                 CohostActivityTemplateKind::SuperSticker,
                 CohostActivityTemplateKind::Membership,
             ]
+            .map(GreetingKind::Activity)
+            .to_vec()
         );
     }
 
@@ -532,7 +917,10 @@ mod tests {
             community_gift_id: None,
         });
         let sub = activity_facts(resub).unwrap();
-        assert_eq!(sub.kind, CohostActivityTemplateKind::Sub);
+        assert_eq!(
+            sub.kind,
+            GreetingKind::Activity(CohostActivityTemplateKind::Sub)
+        );
         assert_eq!(
             resolve_template("{name} subscribed", &TemplateFields::from_facts(&sub)).0,
             "morgaesis subscribed"
@@ -548,7 +936,10 @@ mod tests {
             community_gift_id: None,
         });
         let gift = activity_facts(resub).unwrap();
-        assert_eq!(gift.kind, CohostActivityTemplateKind::SubGift);
+        assert_eq!(
+            gift.kind,
+            GreetingKind::Activity(CohostActivityTemplateKind::SubGift)
+        );
         assert_eq!(gift.count, Some(1));
         resub.details = Some(LiveChatEventDetails::Subscription {
             subscription: SubscriptionKind::SubGift,
@@ -682,5 +1073,249 @@ mod tests {
         let long = "x".repeat(300);
         let (line, _) = resolve_template(&long, &TemplateFields::from_facts(&facts));
         assert_eq!(line.len(), 300, "the caller clips to the platform cap");
+    }
+
+    // --- Plan 192: built-in lines, the resolver and welcomes ---------------------
+
+    /// The runtime table equals the shared fixture, row for row, in order.
+    #[test]
+    fn builtin_greetings_equal_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            version: u32,
+            lines: Vec<FixtureLine>,
+        }
+        #[derive(serde::Deserialize)]
+        struct FixtureLine {
+            kind: String,
+            text: String,
+            state: CohostUtteranceState,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/buddy-builtin-greetings.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.version, 1);
+        assert_eq!(fixture.lines.len(), BUILTIN_GREETINGS.len());
+        for (line, builtin) in fixture.lines.iter().zip(BUILTIN_GREETINGS.iter()) {
+            assert_eq!(line.kind, builtin.kind.wire());
+            assert_eq!(line.text, builtin.text, "{}", line.kind);
+            assert_eq!(line.state, builtin.state, "{}", line.kind);
+        }
+        // Every kind has exactly one line, and the table is in `ALL` order.
+        for (kind, builtin) in GreetingKind::ALL.iter().zip(BUILTIN_GREETINGS.iter()) {
+            assert_eq!(*kind, builtin.kind);
+            assert_eq!(builtin_greeting(*kind).kind, *kind);
+        }
+        // The wire name of an Activity kind is its serde name.
+        for kind in GreetingKind::ALL {
+            if let GreetingKind::Activity(template_kind) = kind {
+                assert_eq!(
+                    serde_json::to_value(template_kind).unwrap(),
+                    serde_json::Value::String(kind.wire().to_string())
+                );
+            }
+        }
+        // Built-in lines use `{name}` only.
+        for builtin in BUILTIN_GREETINGS {
+            let (_, unknown) = resolve_template(builtin.text, &TemplateFields::default());
+            assert!(unknown.is_empty(), "{}", builtin.text);
+            assert!(!builtin.text.contains("{names}") && !builtin.text.contains("{handle}"));
+        }
+    }
+
+    /// D1: the user's enabled line wins, an all-off kind is off, and an
+    /// empty list (or a kind without a template) gets the built-in line.
+    #[test]
+    fn resolve_line_prefers_the_user_line_then_off_then_the_builtin() {
+        let follow = GreetingKind::Activity(CohostActivityTemplateKind::Follow);
+        let cheer = GreetingKind::Activity(CohostActivityTemplateKind::Cheer);
+        let mut settings = CohostGreetingsSettings::default();
+        let built_in = resolve_line(&settings, follow, StreamPlatform::Twitch, 0).unwrap();
+        assert_eq!(built_in.text, "Welcome, {name}! Thanks for the follow.");
+        assert!(!built_in.user_written);
+        assert_eq!(built_in.state, CohostUtteranceState::Talk);
+
+        settings.templates = vec![template(CohostActivityTemplateKind::Follow, "Yo {name}")];
+        let user = resolve_line(&settings, follow, StreamPlatform::Twitch, 0).unwrap();
+        assert_eq!(user.text, "Yo {name}");
+        assert!(user.user_written);
+        // The cheer has no template: built in.
+        assert_eq!(
+            resolve_line(&settings, cheer, StreamPlatform::Twitch, 0)
+                .unwrap()
+                .text,
+            "Thanks for the bits, {name}!"
+        );
+        // Every follow template off: the kind is off.
+        settings.templates[0].enabled = false;
+        assert_eq!(
+            resolve_line(&settings, follow, StreamPlatform::Twitch, 0),
+            None
+        );
+        // One on but limited to Twitch: Kick gets the built-in line, Twitch
+        // the user's.
+        settings.templates[0].enabled = true;
+        settings.templates[0].platform = Some(CohostGreetingPlatform::Twitch);
+        assert_eq!(
+            resolve_line(&settings, follow, StreamPlatform::Kick, 0)
+                .unwrap()
+                .text,
+            "Welcome, {name}! Thanks for the follow."
+        );
+        assert_eq!(
+            resolve_line(&settings, follow, StreamPlatform::Twitch, 0)
+                .unwrap()
+                .text,
+            "Yo {name}"
+        );
+
+        // Welcomes: their own switch, their own text, else the built-in
+        // line with the state and reaction the user set.
+        let first = resolve_line(
+            &settings,
+            GreetingKind::FirstTime,
+            StreamPlatform::Youtube,
+            0,
+        )
+        .unwrap();
+        assert_eq!(first.text, "Hi {name}, welcome to the stream!");
+        assert!(!first.user_written);
+        settings.welcomes.returning.text = Some("  Yo {name}!  ".to_string());
+        settings.welcomes.returning.state = CohostUtteranceState::Laugh;
+        settings.welcomes.returning.reaction = Some("wave".to_string());
+        let returning =
+            resolve_line(&settings, GreetingKind::Returning, StreamPlatform::Kick, 0).unwrap();
+        assert_eq!(returning.text, "Yo {name}!");
+        assert_eq!(returning.state, CohostUtteranceState::Laugh);
+        assert_eq!(returning.reaction.as_deref(), Some("wave"));
+        assert!(returning.user_written);
+        settings.welcomes.returning.text = Some("   ".to_string());
+        let blank =
+            resolve_line(&settings, GreetingKind::Returning, StreamPlatform::Kick, 0).unwrap();
+        assert_eq!(blank.text, "Welcome back, {name}!");
+        assert_eq!(blank.state, CohostUtteranceState::Laugh);
+        settings.welcomes.returning.enabled = false;
+        assert_eq!(
+            resolve_line(&settings, GreetingKind::Returning, StreamPlatform::Kick, 0),
+            None
+        );
+    }
+
+    fn chat_row(name: &str, text: &str) -> LiveChatMessage {
+        let mut row = fake_events_for_tests("session-1", StreamPlatform::Twitch, Some("main"))
+            .into_iter()
+            .find(|message| message.raw_provider_type.as_deref() == Some("follow"))
+            .unwrap();
+        row.details = None;
+        row.event_type = LiveChatEventType::Message;
+        row.raw_provider_type = Some("twitch".to_string());
+        row.author_id = Some(format!("id-{}", name.to_lowercase()));
+        row.author_name = name.to_string();
+        row.message_text = text.to_string();
+        row.first_message = true;
+        row.first_in_session = true;
+        row
+    }
+
+    /// S1.2: a first message is a first-time or returning welcome; later
+    /// messages, the streamer, bots, links, tombstones and Activity rows
+    /// never are.
+    #[test]
+    fn welcome_facts_read_first_messages_and_skip_the_rest() {
+        let first = welcome_facts(&chat_row("Ana", "  hey everyone!  ")).unwrap();
+        assert_eq!(first.kind, GreetingKind::FirstTime);
+        assert_eq!(first.name, "Ana");
+        assert_eq!(first.handle, "Ana");
+        assert_eq!(first.viewer_key, "id-ana");
+        assert_eq!(first.destination_id, "main");
+        assert_eq!(first.first_message_text.as_deref(), Some("hey everyone!"));
+        let mut returning = chat_row("Bo", "");
+        returning.first_message = false;
+        let facts = welcome_facts(&returning).unwrap();
+        assert_eq!(facts.kind, GreetingKind::Returning);
+        assert_eq!(facts.first_message_text, None);
+        // A long first message is cut to the route's cap, in UTF-16 units.
+        let long = chat_row("Cy", &"é".repeat(250));
+        assert_eq!(
+            welcome_facts(&long)
+                .unwrap()
+                .first_message_text
+                .unwrap()
+                .chars()
+                .count(),
+            200
+        );
+        // Not a first message this session: nothing.
+        let mut later = chat_row("Di", "again");
+        later.first_message = false;
+        later.first_in_session = false;
+        assert_eq!(welcome_facts(&later), None);
+        // Twitch's own first-chat flag counts even without the session mark.
+        let mut intro = chat_row("Ed", "hi");
+        intro.first_in_session = false;
+        assert_eq!(welcome_facts(&intro).unwrap().kind, GreetingKind::FirstTime);
+        // The streamer, bots and links.
+        let mut owner = chat_row("Streamer", "hi");
+        owner.author_roles = vec!["Broadcaster".to_string()];
+        assert_eq!(welcome_facts(&owner), None);
+        assert_eq!(welcome_facts(&chat_row("NightBot", "hi")), None);
+        assert_eq!(welcome_facts(&chat_row("@StreamElements", "hi")), None);
+        assert_eq!(welcome_facts(&chat_row("buy.cheap.tld", "hi")), None);
+        assert_eq!(welcome_facts(&chat_row("http://x", "hi")), None);
+        assert_eq!(welcome_facts(&chat_row("www.site", "hi")), None);
+        assert!(welcome_facts(&chat_row("J. Doe", "hi")).is_some());
+        assert!(welcome_facts(&chat_row("Dr.", "hi")).is_some());
+        // Tombstones, notices and Activity rows.
+        let mut deleted = chat_row("Fay", "hi");
+        deleted.is_deleted = true;
+        assert_eq!(welcome_facts(&deleted), None);
+        let mut system = chat_row("Gus", "hi");
+        system.event_type = LiveChatEventType::System;
+        assert_eq!(welcome_facts(&system), None);
+        let follow = fake_events_for_tests("session-1", StreamPlatform::Twitch, Some("main"))
+            .into_iter()
+            .find(|message| message.raw_provider_type.as_deref() == Some("follow"))
+            .unwrap();
+        assert_eq!(welcome_facts(&follow), None);
+        assert!(activity_facts(&chat_row("Hal", "hi")).is_none());
+        for bot in KNOWN_BOTS {
+            assert!(is_known_bot(bot));
+            assert!(is_known_bot(&bot.to_uppercase()));
+        }
+        assert!(!is_known_bot("nightbot_fan"));
+    }
+
+    /// Plan 192: a burst resolves `{name}` to the names list, never to the
+    /// first viewer alone.
+    #[test]
+    fn collapse_resolves_name_and_handle_to_the_list_for_a_burst() {
+        let base = facts_of(StreamPlatform::Twitch, "follow");
+        let named = |name: &str| ActivityFacts {
+            name: name.to_string(),
+            handle: format!("@{}", name.to_lowercase()),
+            viewer_key: name.to_lowercase(),
+            ..base.clone()
+        };
+        let one = collapse(&[named("Ana")]);
+        assert_eq!(one.name, "Ana");
+        assert_eq!(one.handle, "@ana");
+        let burst = collapse(&[
+            named("Ana"),
+            named("Bo"),
+            named("Cy"),
+            named("Di"),
+            named("Ed"),
+        ]);
+        assert_eq!(burst.name, "Ana, Bo, Cy and 2 others");
+        assert_eq!(burst.handle, "Ana, Bo, Cy and 2 others");
+        assert_eq!(
+            resolve_template("Welcome, {name}! Thanks for the follow.", &burst).0,
+            "Welcome, Ana, Bo, Cy and 2 others! Thanks for the follow."
+        );
+        assert_eq!(
+            distinct_names(&[named("Ana"), named("ana"), named("Bo")]),
+            ["Ana", "Bo"]
+        );
     }
 }

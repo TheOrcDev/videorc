@@ -2783,13 +2783,33 @@ const cohostCooldownBehaviourSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 192 S1.1: one welcome's line. `text` absent (never null, never empty)
+// is the built-in line; `state` absent reads as talk.
+const cohostWelcomeLineSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    text: optionalSchema(stringSchema({ minLength: 1, maxLength: 200 })),
+    state: optionalSchema(enumSchema(['talk', 'laugh', 'think'])),
+    reaction: optionalSchema(buddyReactionIdSchema)
+  },
+  { allowUnknown: false }
+)
 const cohostAutoChatSchema = objectSchema(
   {
     mode: enumSchema(['off', 'suggest', 'auto']),
     greetings: objectSchema(
       {
         enabled: booleanSchema,
-        templates: arraySchema(cohostGreetingTemplateSchema, { maxLength: 60 })
+        templates: arraySchema(cohostGreetingTemplateSchema, { maxLength: 60 }),
+        // Plan 192 D3 and D2: Rust always sends both; an older backend sends
+        // neither, so both stay optional (absent, never null).
+        ai: optionalSchema(booleanSchema),
+        welcomes: optionalSchema(
+          objectSchema(
+            { firstTime: cohostWelcomeLineSchema, returning: cohostWelcomeLineSchema },
+            { allowUnknown: false }
+          )
+        )
       },
       { allowUnknown: false }
     ),
@@ -3893,7 +3913,23 @@ const cohostReportGreetingsSchema = objectSchema(
     byVoice: nonNegativeInteger,
     byChat: nonNegativeInteger,
     onStream: nonNegativeInteger,
-    manual: nonNegativeInteger
+    manual: nonNegativeInteger,
+    // Plan 192 D7: why greetings weren't posted; each key absent while zero,
+    // the block absent while all are.
+    skipped: optionalSchema(
+      objectSchema(
+        {
+          noLine: optionalSchema(nonNegativeInteger),
+          modeOff: optionalSchema(nonNegativeInteger),
+          stale: optionalSchema(nonNegativeInteger),
+          deduped: optionalSchema(nonNegativeInteger),
+          held: optionalSchema(nonNegativeInteger),
+          destinationFailed: optionalSchema(nonNegativeInteger),
+          youtubePaused: optionalSchema(nonNegativeInteger)
+        },
+        { allowUnknown: false }
+      )
+    )
   },
   { allowUnknown: false }
 )
@@ -3932,7 +3968,9 @@ const cohostReportPostSchema = objectSchema(
     trigger: enumSchema(['greeting', 'answer', 'banter', 'manual']),
     text: stringSchema({ maxLength: 2000 }),
     destinations: arraySchema(streamPlatformSchema, { maxLength: 7 }),
-    result: enumSchema(['sent', 'partial', 'failed'])
+    result: enumSchema(['sent', 'partial', 'failed']),
+    // Plan 192 S2.2: greetings only; absent on other posts and older rows.
+    source: optionalSchema(enumSchema(['ai', 'line']))
   },
   { allowUnknown: false }
 )

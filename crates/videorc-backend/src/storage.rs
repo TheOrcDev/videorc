@@ -6095,6 +6095,22 @@ impl Database {
         self.upsert_cohost_report(&CohostSessionReport::post_only(session_id, post))
     }
 
+    /// Plan 192 D7: add greeting skip counts to the session's report as they
+    /// happen, the same way posts land. Nothing is written for empty counts.
+    pub fn append_cohost_report_greeting_skips(
+        &self,
+        session_id: &str,
+        skipped: crate::protocol::CohostReportGreetingsSkipped,
+        at: &str,
+    ) -> Result<bool> {
+        if skipped.is_empty() {
+            return Ok(true);
+        }
+        self.upsert_cohost_report(&CohostSessionReport::greeting_skips_only(
+            session_id, skipped, at,
+        ))
+    }
+
     /// The saved Buddy report of a session; `None` when there is none or it
     /// was written in a format this build does not read.
     pub fn get_cohost_report(&self, session_id: &str) -> Result<Option<CohostSessionReport>> {
@@ -8979,6 +8995,7 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
             .get::<_, Option<String>>(19)?
             .and_then(|json| serde_json::from_str(&json).ok()),
         first_message: row.get::<_, Option<bool>>(20)?.unwrap_or(false),
+        first_in_session: false,
         author_affiliation: row
             .get::<_, Option<String>>(21)?
             .and_then(|json| serde_json::from_str(&json).ok()),
@@ -10802,6 +10819,72 @@ mod tests {
         assert_eq!(rows, 0);
     }
 
+    /// Plan 192 D7: skip counts fold into the session's report as they
+    /// happen, add up, and survive the stop-time report's merge.
+    #[test]
+    fn greeting_skips_fold_into_the_session_report_as_they_happen() {
+        use crate::protocol::CohostReportGreetingsSkipped;
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        let at = "2026-10-04T10:00:00Z";
+        assert!(
+            database
+                .append_cohost_report_greeting_skips(
+                    "s-1",
+                    CohostReportGreetingsSkipped {
+                        held: 2,
+                        ..CohostReportGreetingsSkipped::default()
+                    },
+                    at,
+                )
+                .unwrap()
+        );
+        assert!(
+            database
+                .append_cohost_report_greeting_skips(
+                    "s-1",
+                    CohostReportGreetingsSkipped {
+                        held: 1,
+                        no_line: 1,
+                        ..CohostReportGreetingsSkipped::default()
+                    },
+                    at,
+                )
+                .unwrap()
+        );
+        let report = database.get_cohost_report("s-1").unwrap().unwrap();
+        let expected = CohostReportGreetingsSkipped {
+            held: 3,
+            no_line: 1,
+            ..CohostReportGreetingsSkipped::default()
+        };
+        assert_eq!(report.greetings.skipped, Some(expected));
+        assert_eq!(report.segments, 0);
+        // The stop-time report folds in without clobbering them.
+        let stop = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&stop).unwrap());
+        let merged = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.greetings.skipped, Some(expected));
+        assert_eq!(merged.greetings.first_timers, 3);
+        assert_eq!(merged.segments, 1);
+        // Empty counts write nothing, and a missing session is skipped.
+        assert!(
+            database
+                .append_cohost_report_greeting_skips(
+                    "nope",
+                    CohostReportGreetingsSkipped::default(),
+                    at
+                )
+                .unwrap()
+        );
+        assert_eq!(database.get_cohost_report("nope").unwrap(), None);
+        assert!(
+            !database
+                .append_cohost_report_greeting_skips("nope", expected, at)
+                .unwrap()
+        );
+    }
+
     #[test]
     fn cohost_report_for_a_missing_session_is_skipped_not_an_error() {
         let database = test_database();
@@ -11454,6 +11537,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
             author_affiliation: None,
             author_verified: None,
         }

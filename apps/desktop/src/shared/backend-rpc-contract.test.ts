@@ -2004,6 +2004,207 @@ describe('backend RPC contract', () => {
     ).toThrow('cohost.report.saved')
   })
 
+  it('carries Greetings AI, the welcomes and why greetings were skipped (plan 192)', () => {
+    const oldAutoChat = {
+      mode: 'auto',
+      greetings: { enabled: true, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    }
+    const settings = {
+      enabled: true,
+      tone: 'friendly',
+      notes: '',
+      autoHighlight: false,
+      voiceHighlight: false,
+      rules: [],
+      listen: false,
+      wakeWordRequired: false,
+      removeConfirm: 'confirm',
+      persona: {
+        id: 'default',
+        name: 'Buddy',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default',
+        avatar: { kind: 'still' },
+        motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+        reactions: {}
+      },
+      autoChat: oldAutoChat
+    }
+    // An older backend sends neither field: its settings still load.
+    expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
+    expect(validateBackendRpcParams('cohost.settings.set', { autoChat: oldAutoChat })).toEqual({
+      autoChat: oldAutoChat
+    })
+
+    const welcomes = {
+      firstTime: { enabled: true },
+      returning: { enabled: false, text: 'Yo {name}!', state: 'laugh', reaction: 'wave' }
+    }
+    const greetings = { enabled: true, templates: [], ai: true, welcomes }
+    const autoChat = { ...oldAutoChat, greetings, answers: { enabled: true, cooldownSeconds: 20 } }
+    expect(validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat })).toEqual({
+      ...settings,
+      autoChat
+    })
+    expect(validateBackendRpcParams('cohost.settings.set', { autoChat })).toEqual({ autoChat })
+
+    // Absent, never null (the serde-null trap); closed shapes; an empty line
+    // is absent, not ''.
+    for (const broken of [
+      { ...greetings, ai: null },
+      { ...greetings, ai: 'yes' },
+      { ...greetings, welcomes: null },
+      { ...greetings, welcomes: { firstTime: welcomes.firstTime } },
+      { ...greetings, welcomes: { ...welcomes, everyone: { enabled: true } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: {} } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, text: null } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, text: '' } } },
+      {
+        ...greetings,
+        welcomes: { ...welcomes, firstTime: { enabled: true, text: 'x'.repeat(201) } }
+      },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, state: 'idle' } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, reaction: null } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, extra: 1 } } },
+      { ...greetings, extra: true }
+    ]) {
+      const broke = { ...autoChat, greetings: broken }
+      expect(() => validateBackendRpcParams('cohost.settings.set', { autoChat: broke })).toThrow(
+        'cohost.settings.set'
+      )
+      expect(() =>
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: broke })
+      ).toThrow('cohost.settings.get')
+    }
+    // The welcome kinds never ride templates[] (S1.1): an older app would
+    // load defaults and its next save would wipe the persona.
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        autoChat: {
+          ...autoChat,
+          greetings: {
+            ...greetings,
+            templates: [
+              { id: 't', kind: 'first-time', text: 'Hi {name}', state: 'talk', enabled: true }
+            ]
+          }
+        }
+      })
+    ).toThrow('cohost.settings.set')
+
+    const report = {
+      version: 1,
+      sessionId: 'session-1',
+      startedAt: '2026-10-24T16:20:00Z',
+      endedAt: '2026-10-24T17:43:00Z',
+      segments: 1,
+      messagesSeen: 300,
+      shownOnStream: 0,
+      questions: {
+        total: 0,
+        markedAnswered: 0,
+        dismissed: 0,
+        replied: 0,
+        answeredOnAir: 0,
+        restored: 0,
+        shownOnStream: 0
+      },
+      flags: { raised: 0, dismissed: 0 },
+      promises: { heard: 0, kept: 0, dismissed: 0, reminded: 0 },
+      greetings: {
+        firstTimers: 4,
+        firstTimersGreeted: 4,
+        byVoice: 0,
+        byChat: 4,
+        onStream: 0,
+        manual: 0,
+        skipped: { noLine: 3, held: 2 }
+      },
+      recap: { offered: 0, drafted: 0, dismissed: 0 },
+      posts: [
+        {
+          id: 'u-1',
+          at: '2026-10-24T16:21:00Z',
+          trigger: 'greeting',
+          text: 'Hi Ana, welcome to the stream!',
+          destinations: ['twitch'],
+          result: 'sent',
+          source: 'ai'
+        },
+        {
+          id: 'u-2',
+          at: '2026-10-24T16:22:00Z',
+          trigger: 'greeting',
+          text: 'Welcome back, Bo!',
+          destinations: ['youtube'],
+          result: 'sent',
+          source: 'line'
+        },
+        {
+          id: 'u-3',
+          at: '2026-10-24T16:23:00Z',
+          trigger: 'manual',
+          text: 'hello',
+          destinations: ['twitch'],
+          result: 'sent'
+        }
+      ]
+    }
+    const payload = {
+      sessionId: 'session-1',
+      report,
+      moments: [],
+      chat: { messages: 300, byPlatform: [{ platform: 'twitch', messages: 300 }] }
+    }
+    expect(validateBackendRpcResult('cohost.report.get', payload)).toEqual(payload)
+    expect(
+      validateBackendRpcResult('cohost.report.get', {
+        ...payload,
+        report: {
+          ...report,
+          greetings: {
+            ...report.greetings,
+            skipped: {
+              noLine: 1,
+              modeOff: 2,
+              stale: 3,
+              deduped: 4,
+              held: 5,
+              destinationFailed: 6,
+              youtubePaused: 7
+            }
+          }
+        }
+      })
+    ).toBeTruthy()
+    // An older report has neither field.
+    const { skipped: _skipped, ...oldGreetings } = report.greetings
+    const oldReport = {
+      ...report,
+      greetings: oldGreetings,
+      posts: report.posts.map(({ source: _source, ...post }) => post)
+    }
+    expect(
+      validateBackendRpcResult('cohost.report.get', { ...payload, report: oldReport })
+    ).toEqual({ ...payload, report: oldReport })
+    for (const broken of [
+      { ...report, greetings: { ...report.greetings, skipped: null } },
+      { ...report, greetings: { ...report.greetings, skipped: { noLine: null } } },
+      { ...report, greetings: { ...report.greetings, skipped: { noLine: -1 } } },
+      { ...report, greetings: { ...report.greetings, skipped: { muted: 1 } } },
+      { ...report, posts: [{ ...report.posts[0], source: null }] },
+      { ...report, posts: [{ ...report.posts[0], source: 'human' }] }
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('cohost.report.get', { ...payload, report: broken })
+      ).toThrow('cohost.report.get')
+    }
+  })
+
   it('validates the Live Co-host RPCs and state event against the wire contract', () => {
     const state = {
       sessionId: 'session-1',

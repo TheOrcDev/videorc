@@ -367,6 +367,30 @@ describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () =
     expect(markup).toContain('Each message is a card here; one click sends it.')
   })
 
+  it('says the greetings are written with AI only with Premium and cloud AI (plan 192 D7)', () => {
+    const greetingsChip = (patch: Partial<StreamManagerProps>): string | undefined =>
+      renderWith({ onCohostOpenChatSettings: () => undefined, ...patch }).match(
+        /data-behaviour="greetings"[^>]*>([^<]*)</
+      )?.[1]
+    expect(greetingsChip({})).toBe('Greetings on · AI')
+    expect(greetingsChip({ cohostConsented: false })).toBe('Greetings on')
+    expect(
+      greetingsChip({
+        cohostGate: {
+          allowed: false,
+          featureId: 'live-cohost',
+          reason: 'Buddy requires Videorc Premium.',
+          upgradeUrl: 'https://www.videorc.com/premium'
+        }
+      })
+    ).toBe('Greetings on')
+    expect(
+      greetingsChip({
+        cohostAutoChat: { ...autoChat, greetings: { ...autoChat.greetings, ai: false } }
+      })
+    ).toBe('Greetings on')
+  })
+
   it('locks the switch off, with the Premium reason, for a Basic account that has Buddy off', () => {
     const basic = {
       allowed: false as const,
