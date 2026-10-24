@@ -255,6 +255,7 @@ async fn publish(
         false,
         false,
         false,
+        super::LiveBackgroundLeg::unmeasured(&mut None),
     )
     .await
 }
@@ -611,6 +612,7 @@ async fn scene_switch_artifact_fixture() {
                 false,
                 false,
                 false,
+                super::LiveBackgroundLeg::unmeasured(&mut None),
             )
             .await;
             if metal {
@@ -759,6 +761,7 @@ async fn source_iso_artifact_fixture() {
                 false,
                 false,
                 false,
+                super::LiveBackgroundLeg::unmeasured(&mut None),
             )
             .await;
             if metal {
@@ -1278,6 +1281,7 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             false,
             false,
             false,
+            super::LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         let snapshot = state
@@ -1470,6 +1474,7 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
             false,
             false,
             false,
+            super::LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         let observed = state

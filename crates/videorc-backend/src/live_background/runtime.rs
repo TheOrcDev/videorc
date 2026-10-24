@@ -9,12 +9,41 @@
 //!   half, still and why) and what it holds (programs, scratch bytes); the
 //!   compositor status publishes it.
 
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::clock::LiveBackgroundClock;
 use super::looks::LiveLook;
 use crate::protocol::{EffectiveSceneBackground, LiveBackgroundSpec, LiveBackgroundStatus};
+
+/// The compositor tick a frame input is drawn on: the publish instant every
+/// leg of the tick shares (so every leg reads the same phase), the loop's
+/// frame interval and whether this tick missed its deadline (the loop's own
+/// late-tick signal: a tick gap that skipped an interval, or a previous
+/// publish that ran past the interval). The guard reads the last two.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveBackgroundTick {
+    pub at: Instant,
+    pub frame_interval: Duration,
+    pub missed_deadline: bool,
+}
+
+impl LiveBackgroundTick {
+    pub fn new(at: Instant, frame_interval: Duration, missed_deadline: bool) -> Self {
+        Self {
+            at,
+            frame_interval,
+            missed_deadline,
+        }
+    }
+
+    /// A tick whose deadline nobody measured (tests, the cache refresh before
+    /// the publish stamps the real one): 60 fps, on time.
+    pub fn unmeasured(at: Instant) -> Self {
+        Self::new(at, Duration::from_nanos(16_666_667), false)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LiveBackgroundRuntime {
@@ -46,8 +75,15 @@ pub fn sync(
 }
 
 impl LiveBackgroundRuntime {
-    /// This tick's input for the background the runtime follows.
-    pub fn frame_input(&self, background: &EffectiveSceneBackground) -> LiveBackgroundFrameInput {
+    /// This tick's input for the background the runtime follows. `board` is
+    /// where the leg's renderer reports; `tick` is re-stamped by the publish
+    /// with the tick's real instant and deadline.
+    pub fn frame_input(
+        &self,
+        background: &EffectiveSceneBackground,
+        board: &Arc<LiveBackgroundBoard>,
+        tick: LiveBackgroundTick,
+    ) -> LiveBackgroundFrameInput {
         let (look, requested_look) = super::resolve(&self.spec);
         LiveBackgroundFrameInput {
             spec: self.spec.clone(),
@@ -55,6 +91,8 @@ impl LiveBackgroundRuntime {
             requested_look,
             clock: self.clock.clone(),
             dim: (background.dim_percent / 100.0).clamp(0.0, 0.8) as f32,
+            board: Arc::clone(board),
+            tick,
         }
     }
 }
@@ -69,6 +107,10 @@ pub struct LiveBackgroundFrameInput {
     clock: LiveBackgroundClock,
     /// Dim as 0–0.8.
     pub dim: f32,
+    /// Where the leg's renderer reports how it draws and what it holds.
+    pub board: Arc<LiveBackgroundBoard>,
+    /// The tick this input is drawn on (`phase_at(tick.at)` is its phase).
+    pub tick: LiveBackgroundTick,
 }
 
 impl LiveBackgroundFrameInput {
@@ -214,7 +256,11 @@ mod tests {
             visibility_percent: 20.0,
             live: Some(spec("lava")),
         };
-        let input = slot.unwrap().frame_input(&background);
+        let input = slot.unwrap().frame_input(
+            &background,
+            &Arc::default(),
+            LiveBackgroundTick::unmeasured(now),
+        );
         assert_eq!(input.look.id, "satin");
         assert_eq!(input.requested_look.as_deref(), Some("lava"));
         assert_eq!(input.dim, 0.8);
@@ -248,7 +294,11 @@ mod tests {
             visibility_percent: 20.0,
             live: Some(spec("satin")),
         };
-        let input = input.frame_input(&background);
+        let input = input.frame_input(
+            &background,
+            &Arc::default(),
+            LiveBackgroundTick::unmeasured(Instant::now()),
+        );
         let half = input.status(LiveBackgroundRendering::Half, None, Some(4.0));
         let still = input.status(
             LiveBackgroundRendering::Still,

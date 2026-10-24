@@ -951,3 +951,117 @@ with `git show origin/main:<path>`; gates run once at the end".
 ## As built
 
 (Fill in after execution. S1's numbers go here first.)
+
+### S2: macOS Metal (2026-10-24)
+
+Built in `crates/videorc-backend/src/live_background/metal.rs`, with the
+compose integration in `compositor.rs` and two small additions to
+`metal_compositor.rs`.
+
+**Shape.**
+
+- `LiveBackgroundMetalRenderer` is owned by the compositor **run** beside its
+  GPU compositor (`run_synthetic_compositor_loop` holds the slot and hands it
+  to the primary leg through `LiveBackgroundLeg`), not by
+  `MetalSceneCompositor`: the native preview helper binary includes
+  `metal_compositor.rs` by path with a stub `protocol`, so the quad compositor
+  must stay free of live-background types. It gained only `device()`,
+  `queue()` and a `GpuSource.texture` field (a texture of the same device,
+  drawn with no import, upload or cache slot). The slot is `None` until a live
+  background shows; a picture background never creates it.
+- The MSL for all five is one runtime-compiled string (`LIVE_BACKGROUND_MSL`),
+  one fragment function per pass and a vertex-id full-screen triangle, built
+  lazily on first use and cached per pass for the run. A compile failure logs
+  once and reports `shader-compile-failed` without retrying per frame.
+- **Live frame**: a plain **private** `BGRA8Unorm` texture at
+  `sizes::internal_size`, not an IOSurface. Both command buffers run on the
+  leg's queue, so the compose samples the texture directly through the
+  picture quad (full canvas, fit Fill, `GpuSourceSampler::Linear`); an
+  IOSurface would only add a CoreVideo import. The poster stays decoded in
+  the CPU image cache and is never uploaded while the shader draws
+  (`immutable_texture_uploads` stays 0; the test proves it against the
+  picture path, which uploads it once).
+- **Formats**: Silk's field `R8Unorm` at ¼ size with a full mip chain
+  (`generateMipmaps` on a blit encoder); Plasma Wave's coarse trace
+  `RGBA16Float` (its alpha is the edge field); its fine trace and bloom chain
+  `RG11B10Float` (nothing reads their alpha; renderable and filterable on
+  every macOS GPU). Scratch is rebuilt when the background id or internal
+  size changes and dropped, with the pipelines, when the live background goes
+  away; `set_resources(programs, scratch_bytes)` reports both (the live
+  frame counts as scratch).
+- **Time**: every leg of a tick draws at `phase_at(published_at)`;
+  `publish_compositor_frame` stamps the instant into the frame input
+  (`LiveBackgroundTick`) exactly where the Buddy and banners read
+  `published_at`.
+- **Guard**: one `LiveBackgroundGuard` per renderer. The live command
+  buffer's `GPUEndTime - GPUStartTime` is read at the start of the next tick
+  (the compose on the same queue already waited, so it has long completed; no
+  extra wait). **Missed deadline** = the loop's own late-tick signal: the
+  ticker skipped an interval (what `dropped_frames` counts) or the previous
+  publish ran past the frame interval. `Half` re-renders at half the internal
+  size for all five (Line Waves' half-frame-rate alternative is deferred);
+  `Still` shows the poster with `gpu-budget`. The guard keeps its level for
+  the run even if the live background is removed and re-applied.
+- **Status**: reported to the board only on change (plus the window p95
+  every 2 s); the forced still (`VIDEORC_LIVE_BACKGROUND_FORCE_STILL`, with a
+  thread-local test override) holds nothing at all.
+- Shared plumbing touched: `LiveBackgroundFrameInput` now carries `board`
+  and `tick`; the primary leg's `CompositorRenderInputs.live_background` is
+  wired (it was still `None`); `publish_compositor_frame` takes a
+  `LiveBackgroundLeg`; the `objc2-metal` `objc2-core-foundation` feature is
+  on for the GPU timestamps.
+
+**Golden grids** (`golden_grids_match_the_glsl_reference`, 30 frames at
+640 × 360 → 64 × 36, tolerance mean ≤ 2.0 and max cell ≤ 10 in 0–255 units),
+on the owner's M4:
+
+| Background    | Worst mean | Worst max cell | Note                                                          |
+| ------------- | ---------: | -------------: | ------------------------------------------------------------- |
+| Silk          |      0.000 |              0 | bit-identical to the WebGL render after the box filter        |
+| Side Rays     |      0.000 |              0 | bit-identical                                                 |
+| Plasma Wave   |      1.025 |              9 | the only difference; `RG11B10Float` light targets (see below) |
+| Liquid Chrome |      0.000 |              0 | bit-identical                                                 |
+| Line Waves    |      0.000 |              0 | bit-identical                                                 |
+
+Per frame, Plasma Wave: plasma 0.84/8 and 0.89/8, ember 0.72/7 and 0.72/6,
+glacier 0.99/9 and 1.03/9 (mean/max). Chromium's WebGL runs on the same
+Metal compiler here, which is why the other four match exactly.
+
+**Live frame GPU time** (`live_frame_gpu_times`, median and p95 of 60
+frames from `GPUEndTime - GPUStartTime`, host load average 33 from other
+sessions; the plan's budget is p95 ≤ 1.5 ms at 1080p and ≤ 3.0 ms at 4K):
+
+| Background    | 1920 × 1080 median / p95 | 3840 × 2160 median / p95 | Scratch held (incl. the live frame) |
+| ------------- | -----------------------: | -----------------------: | ----------------------------------: |
+| Silk          |           0.34 / 0.41 ms |           0.34 / 0.51 ms |                 8.8 MB (1080p both) |
+| Side Rays     |           0.36 / 0.38 ms |           0.36 / 0.39 ms |                              8.5 MB |
+| Plasma Wave   |           0.56 / 1.06 ms |           0.57 / 0.75 ms |                             23.2 MB |
+| Liquid Chrome |           0.85 / 0.92 ms |           0.86 / 0.98 ms |                              8.5 MB |
+| Line Waves    |           0.30 / 0.32 ms |           1.24 / 1.35 ms |  8.5 MB at 1080p, 33.9 MB at 4K     |
+
+The four soft backgrounds render at 1920 × 1080 internally at 4K (the
+compose scales the frame up), so their 4K time equals 1080p. Plasma Wave's
+23.2 MB is 8.3 MB of live frame plus 14.9 MB of trace and bloom chain in
+`RG11B10Float` (the plan estimated 13 MB). A second run under the same
+load gave medians of 0.36–1.02 ms and p95s up to 1.95 ms (Plasma Wave at
+1080p): on this shared host the p95s are noise-bound, so the budget's p95
+needs the quiet-host run S9/S11 owe.
+
+**Plasma Wave's light format, measured**
+(`plasma_light_formats_both_match_the_goldens`, the six Plasma goldens at
+640 × 360):
+
+| Light targets (fine trace + bloom chain) | Worst mean | Worst max cell | Scratch at 640 × 360 |
+| ---------------------------------------- | ---------: | -------------: | -------------------: |
+| `RG11B10Float` (shipped)                 |      1.025 |              9 |               2.9 MB |
+| `RGBA16Float` (the WebGL reference's)    |      0.000 |              0 |               4.3 MB |
+
+So the whole Plasma difference is the packed format's 5–6-bit mantissas,
+not the port. It stays inside the tolerance the plan set and keeps the
+chain at half the bytes, as designed; if the owner's by-eye finds banding in
+a Plasma look, `PLASMA_LIGHT_FORMAT` in `metal.rs` is a one-constant switch
+to exactness for about 15 MB more at 1080p.
+
+**Deferred**: Line Waves' half-frame-rate guard step (it halves its size like
+the others); the 12-hour phase-offset by-eye check and the side-by-side
+against React Bits (the dev app is not launched from this slice).

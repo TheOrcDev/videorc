@@ -33,19 +33,30 @@ pub mod clock;
 pub mod glsl;
 pub mod guard;
 pub mod looks;
+#[cfg(target_os = "macos")]
+pub mod metal;
 pub mod runtime;
 pub mod sizes;
 
 #[cfg(test)]
 mod export;
 
+// The module's surface for every renderer (Metal now, D3D11 and GLES in
+// S4/S5) and the catalogue's users; a binary crate warns about the
+// re-exports nothing reaches yet.
+#[allow(unused_imports)]
 pub use clock::LiveBackgroundClock;
+#[allow(unused_imports)]
 pub use guard::{GuardLevel, LiveBackgroundGuard};
+#[allow(unused_imports)]
 pub use looks::{
     ALL_LIVE_BACKGROUNDS, BASE_COLOR, LiveLook, UNIFORM_VEC4_COUNT, Uniforms, css_id, display_name,
     is_soft, look_or_first, looks, motion_factor, poster_asset_id, uniforms,
 };
-pub use runtime::{LiveBackgroundBoard, LiveBackgroundFrameInput, LiveBackgroundRuntime};
+pub use runtime::{
+    LiveBackgroundBoard, LiveBackgroundFrameInput, LiveBackgroundRuntime, LiveBackgroundTick,
+};
+#[allow(unused_imports)]
 pub use sizes::{PlasmaSizes, internal_size, plasma_sizes, silk_field_size};
 
 use crate::protocol::{LiveBackgroundSpec, LiveBackgroundStillReason};
@@ -53,10 +64,36 @@ use crate::protocol::{LiveBackgroundSpec, LiveBackgroundStillReason};
 /// `VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1` forces the poster (debug builds
 /// only), for smokes and A/B checks.
 pub fn forced_still() -> bool {
+    if let Some(forced) = forced_still_test_override() {
+        return forced;
+    }
     cfg!(debug_assertions)
         && std::env::var("VIDEORC_LIVE_BACKGROUND_FORCE_STILL")
             .map(|value| value == "1")
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_STILL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests force (or un-force) the still on their own thread instead of the
+/// process-wide environment, which other tests in the same process read.
+#[cfg(test)]
+pub fn set_forced_still_for_test(forced: Option<bool>) {
+    FORCED_STILL_OVERRIDE.with(|cell| cell.set(forced));
+}
+
+fn forced_still_test_override() -> Option<bool> {
+    #[cfg(test)]
+    {
+        FORCED_STILL_OVERRIDE.with(|cell| cell.get())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
 }
 
 /// The still reason a renderer must report before it even tries the shader,
