@@ -4,7 +4,7 @@ import { useEffect, useState, type ReactElement } from 'react'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCaptions, useStudioCore } from '@/hooks/use-studio'
 import { renderCaptionCueFramePng } from '@/lib/caption-overlay'
 import { formatResolution } from '@/lib/format-video'
 import { cn } from '@/lib/utils'
@@ -15,7 +15,8 @@ const PREVIEW_WIDTH = 960
 const SAMPLE_CAPTION = 'Your words become clear, live captions.'
 
 export function CaptionPreview(): ReactElement {
-  const { captionLines, captureConfig } = useStudioCore()
+  const { captureConfig } = useStudioCore()
+  const { captionLines } = useStudioCaptions()
   const [backdrop, setBackdrop] = useState<PreviewBackdrop>('motion')
   const [overlayUrl, setOverlayUrl] = useState<string | null>(null)
   const latest = captionLines.at(-1)

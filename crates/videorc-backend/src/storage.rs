@@ -1506,6 +1506,29 @@ fn sync_directory(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Plan 191: journal in WAL mode. In SQLite's default rollback mode every
+/// autocommit write creates, fsyncs and deletes a `-journal` file on top of
+/// fsyncing the database, all while holding the one connection mutex every
+/// other database user waits on. WAL appends each commit to `-wal` instead.
+/// Durability is unchanged: `synchronous` stays at its default FULL, which
+/// fsyncs the WAL on every commit. A filesystem that refuses WAL keeps the
+/// rollback journal, which still works, so this never fails the open. Call it
+/// right after opening, before `migrate()` and outside any transaction.
+fn enable_write_ahead_log(conn: &Connection, path: &Path) {
+    match conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0)) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
+        Ok(mode) => tracing::warn!(
+            path = %path.display(),
+            journal_mode = %mode,
+            "SQLite refused WAL journaling; keeping the rollback journal"
+        ),
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            "Could not switch SQLite to WAL journaling; keeping the rollback journal: {error}"
+        ),
+    }
+}
+
 impl Database {
     pub fn open_default() -> Result<Self> {
         let path = default_database_path();
@@ -1516,6 +1539,7 @@ impl Database {
 
         let conn = Connection::open(&path)
             .with_context(|| format!("Could not open SQLite database {}", path.display()))?;
+        enable_write_ahead_log(&conn, &path);
         let database = Self {
             conn: Arc::new(Mutex::new(conn)),
             path,
@@ -1539,8 +1563,10 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        let conn = Connection::open(path).unwrap();
+        enable_write_ahead_log(&conn, path);
         let database = Self {
-            conn: Arc::new(Mutex::new(Connection::open(path).unwrap())),
+            conn: Arc::new(Mutex::new(conn)),
             path: path.to_path_buf(),
         };
         database.migrate().unwrap();
@@ -4711,25 +4737,13 @@ impl Database {
         Ok(sessions)
     }
 
-    /// Return one bounded Library page with a fixed SQL statement count.
-    /// Histories are represented only by counts/ready-kind summaries and are
-    /// loaded through their dedicated detail endpoints when a row is opened.
-    pub fn list_session_items_page(
-        &self,
-        cursor: Option<&str>,
-        requested_limit: usize,
-    ) -> Result<SessionListPage> {
-        let limit = requested_limit.clamp(1, 200);
-        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(201);
-        let (cursor_started_at, cursor_id) = cursor
-            .map(parse_session_list_cursor)
-            .transpose()?
-            .map(|(started_at, id)| (Some(started_at), Some(id)))
-            .unwrap_or((None, None));
-
-        let conn = self.lock()?;
-        let mut statement = conn.prepare(
-            "WITH
+    /// The one statement behind [`Self::list_session_items_page`]: `?1`/`?2`
+    /// are the cursor's `started_at`/`id` (NULL on the first page), `?3` the
+    /// page size plus one. Every history CTE makes `page_sessions` the left
+    /// table of a CROSS JOIN, which SQLite never reorders: the page stays the
+    /// outer loop, so each count is an index search for the page's own rows
+    /// instead of a scan of the user's whole history (plan 191).
+    const SESSION_LIST_PAGE_SQL: &str = "WITH
                 page_sessions AS (
                     SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
@@ -4748,14 +4762,14 @@ impl Database {
                 ),
                 health_counts AS (
                     SELECT health_events.session_id, COUNT(*) AS count
-                    FROM health_events
-                    JOIN page_sessions ON page_sessions.id = health_events.session_id
+                    FROM page_sessions
+                    CROSS JOIN health_events ON page_sessions.id = health_events.session_id
                     GROUP BY health_events.session_id
                 ),
                 log_counts AS (
                     SELECT session_logs.session_id, COUNT(*) AS count
-                    FROM session_logs
-                    JOIN page_sessions ON page_sessions.id = session_logs.session_id
+                    FROM page_sessions
+                    CROSS JOIN session_logs ON page_sessions.id = session_logs.session_id
                     GROUP BY session_logs.session_id
                 ),
                 artifact_summaries AS (
@@ -4767,14 +4781,14 @@ impl Database {
                                END
                            )
                                AS ready_kinds
-                    FROM ai_artifacts
-                    JOIN page_sessions ON page_sessions.id = ai_artifacts.session_id
+                    FROM page_sessions
+                    CROSS JOIN ai_artifacts ON page_sessions.id = ai_artifacts.session_id
                     GROUP BY ai_artifacts.session_id
                 ),
                 comment_counts AS (
                     SELECT live_chat_messages.session_id, COUNT(*) AS count
-                    FROM live_chat_messages
-                    JOIN page_sessions ON page_sessions.id = live_chat_messages.session_id
+                    FROM page_sessions
+                    CROSS JOIN live_chat_messages ON page_sessions.id = live_chat_messages.session_id
                     GROUP BY live_chat_messages.session_id
                 ),
                 quality_candidate_values AS (
@@ -4840,7 +4854,7 @@ impl Database {
                                ELSE 0
                            END AS gate_status_valid
                     FROM page_sessions
-                    JOIN repair_jobs
+                    CROSS JOIN repair_jobs
                       ON repair_jobs.file_path = page_sessions.output_path
                       OR repair_jobs.file_path = page_sessions.mp4_path
                     WHERE repair_jobs.status IN ('completed', 'running')
@@ -4870,8 +4884,8 @@ impl Database {
                                    ORDER BY clean_cut_jobs.updated_at DESC,
                                             clean_cut_jobs.id DESC
                                ) AS rank
-                        FROM clean_cut_jobs
-                        JOIN page_sessions
+                        FROM page_sessions
+                        CROSS JOIN clean_cut_jobs
                           ON page_sessions.id = clean_cut_jobs.output_session_id
                     ) WHERE rank = 1
                 )
@@ -4900,8 +4914,26 @@ impl Database {
                    AND quality_candidates.rank = 1
              LEFT JOIN clean_cut_outputs
                     ON clean_cut_outputs.output_session_id = page_sessions.id
-             ORDER BY page_sessions.started_at DESC, page_sessions.id DESC",
-        )?;
+             ORDER BY page_sessions.started_at DESC, page_sessions.id DESC";
+
+    /// Return one bounded Library page with a fixed SQL statement count.
+    /// Histories are represented only by counts/ready-kind summaries and are
+    /// loaded through their dedicated detail endpoints when a row is opened.
+    pub fn list_session_items_page(
+        &self,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionListPage> {
+        let limit = requested_limit.clamp(1, 200);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(201);
+        let (cursor_started_at, cursor_id) = cursor
+            .map(parse_session_list_cursor)
+            .transpose()?
+            .map(|(started_at, id)| (Some(started_at), Some(id)))
+            .unwrap_or((None, None));
+
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(Self::SESSION_LIST_PAGE_SQL)?;
 
         let rows =
             statement.query_map(params![cursor_started_at, cursor_id, query_limit], |row| {
@@ -8149,6 +8181,14 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_clean_cut_source_mode_created
                 ON clean_cut_jobs(source_session_id, mode, created_at DESC, id DESC);",
         )?;
+        // Library page (plan 191): its quality and Clean cut joins search these
+        // by the page's own paths and session ids instead of reading every job.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_repair_jobs_file_path
+                ON repair_jobs(file_path, status);
+             CREATE INDEX IF NOT EXISTS idx_clean_cut_jobs_output_session
+                ON clean_cut_jobs(output_session_id, updated_at DESC, id DESC);",
+        )?;
         // Plan 119 S13: the render's staging and final paths. A column on
         // Clean cut's own table, never a new `session_file_operations` kind:
         // older readers name their columns and never see it.
@@ -10459,12 +10499,8 @@ mod tests {
             std::env::temp_dir().join(format!("videorc-storage-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("videorc.sqlite3");
-        let database = Database {
-            conn: Arc::new(Mutex::new(Connection::open(&path).unwrap())),
-            path: path.clone(),
-        };
-        database.migrate().unwrap();
-        (database, path)
+        // The app's open path, WAL journaling included (plan 191).
+        (Database::open_file_for_tests(&path), path)
     }
 
     fn create_owned_mp4_staging_directory(
@@ -11467,6 +11503,77 @@ mod tests {
     }
 
     #[test]
+    fn database_file_journals_in_wal_and_keeps_full_sync() {
+        // Plan 191: faster commits, identical durability.
+        let directory =
+            std::env::temp_dir().join(format!("videorc-wal-mode-test-{}", uuid::Uuid::new_v4()));
+        let database = Database::open_file_for_tests(&directory.join("videorc.sqlite3"));
+        database
+            .add_health_event(None, HealthLevel::Info, "wal-probe", "An autocommit write.")
+            .unwrap();
+
+        {
+            let conn = database.lock().unwrap();
+            let journal_mode: String = conn
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal_mode, "wal");
+            let synchronous: i64 = conn
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .unwrap();
+            assert_eq!(synchronous, 2, "durability stays at synchronous=FULL");
+        }
+        assert!(
+            directory.join("videorc.sqlite3-wal").exists(),
+            "commits append to the -wal sidecar"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn wal_database_keeps_committed_rows_across_a_reopen() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-wal-reopen-test-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("videorc.sqlite3");
+        let database = Database::open_file_for_tests(&path);
+        database
+            .create_session(&sample_session("session-wal-reopen"))
+            .unwrap();
+        let event = database
+            .add_health_event(
+                Some("session-wal-reopen"),
+                HealthLevel::Warn,
+                "wal-reopen",
+                "Written before the reopen.",
+            )
+            .unwrap();
+        drop(database);
+
+        // WAL lives in the file header: a connection that never asks for it,
+        // like an older app build, still opens this database in WAL.
+        let raw = Connection::open(&path).unwrap();
+        let journal_mode: String = raw
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(raw);
+
+        let reopened = Database::open_file_for_tests(&path);
+        let sessions = reopened.list_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "session-wal-reopen");
+        let events = reopened.list_health_events("session-wal-reopen").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, event.id);
+        assert_eq!(events[0].message, "Written before the reopen.");
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn session_payload_round_trips_through_json() {
         let layout = LayoutSettings {
             layout_preset: LayoutPreset::ScreenOnly,
@@ -11668,6 +11775,119 @@ mod tests {
             .lock()
             .unwrap()
             .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+    }
+
+    #[test]
+    fn session_list_page_searches_each_history_from_the_page_instead_of_scanning_it() {
+        // Plan 191: every history the page counts is an index search driven
+        // by the page's own rows. A scan reads the user's whole history on
+        // every Library page.
+        use crate::protocol::CleanCutMode;
+        use crate::repair::{GateStatus, QualityExpectations};
+
+        let database = test_database();
+        let expectations = QualityExpectations {
+            intended_fps: Some(30.0),
+            expect_audio: true,
+            pipeline_reported_freezes: false,
+            pipeline_reported_audio_loss: false,
+        };
+        for index in 0..3 {
+            let session_id = format!("session-{index}");
+            let output_path = format!("/tmp/videorc-plan-191-{index}.mkv");
+            let mut session = sample_session(&session_id);
+            session.started_at = format!("2026-06-01T00:00:0{index}Z");
+            session.output_path = Some(output_path.clone());
+            database.create_session(&session).unwrap();
+            database
+                .add_health_event(
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "fixture-health",
+                    "Fixture health event.",
+                )
+                .unwrap();
+            database
+                .add_session_log(
+                    &session_id,
+                    HealthLevel::Info,
+                    "fixture-log",
+                    "Fixture session log.",
+                    None,
+                )
+                .unwrap();
+            let mut repair = RepairJob::pending(
+                format!("repair-{index}"),
+                output_path.clone(),
+                &expectations,
+                "t0".to_string(),
+            );
+            repair.complete_with_gate(&GateStatus::Ready { path: output_path }, "t1".to_string());
+            database.upsert_repair_job(&repair).unwrap();
+        }
+        assert!(matches!(
+            database
+                .create_clean_cut_job("session-0", CleanCutMode::Clean)
+                .unwrap(),
+            CleanCutJobCreation::Created(_)
+        ));
+
+        let page = database.list_session_items_page(None, 50).unwrap();
+        assert_eq!(page.items.len(), 3);
+        for item in &page.items {
+            assert_eq!(item.health_event_count, 1);
+            assert_eq!(item.session_log_count, 1);
+            assert!(matches!(
+                item.quality_status,
+                Some(GateStatus::Ready { .. })
+            ));
+        }
+
+        let conn = database.conn.lock().unwrap();
+        let mut statement = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                Database::SESSION_LIST_PAGE_SQL
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(params![None::<&str>, None::<&str>, 51_i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let plan_text = plan.join("\n");
+        for table in [
+            "health_events",
+            "session_logs",
+            "ai_artifacts",
+            "live_chat_messages",
+            "repair_jobs",
+            "clean_cut_jobs",
+        ] {
+            let scan = format!("SCAN {table}");
+            let search = format!("SEARCH {table} USING ");
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with(&scan)),
+                "a page must never scan all of {table}:\n{plan_text}"
+            );
+            // An automatic index is built by reading the whole table.
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.starts_with(&search) && !detail.contains("AUTOMATIC")),
+                "{table} must be searched through a stored index:\n{plan_text}"
+            );
+        }
+        for search in [
+            "SEARCH repair_jobs USING INDEX idx_repair_jobs_file_path",
+            "SEARCH clean_cut_jobs USING INDEX idx_clean_cut_jobs_output_session",
+        ] {
+            assert!(
+                plan.iter().any(|detail| detail.starts_with(search)),
+                "expected `{search}`:\n{plan_text}"
+            );
+        }
     }
 
     #[test]

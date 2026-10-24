@@ -24,7 +24,10 @@ use crate::capture_health::{
     CaptureHealthSample, CaptureHealthScreenEpoch, CaptureHealthScreenProducerSample,
     CaptureHealthTransition,
 };
-use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
+use crate::color::{
+    rgb_to_uv_video_range_bt709 as rgb_to_uv, rgb_to_y_video_range_bt709 as rgb_to_y,
+    rgb_to_yuv_video_range_bt709 as rgb_to_yuv,
+};
 use crate::overlay_layout::{OverlayOrientation, OverlayRect, OverlaySessionShape};
 
 #[path = "compositor_preview_frame_lease.rs"]
@@ -64,10 +67,10 @@ use crate::protocol::{
     SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin,
-    background_zoom_crop, camera_chroma_key, camera_mask, chroma_key_alpha, chroma_key_despill,
-    scene_crop_from_transform, scene_mask_allows, scene_source_fit, scene_source_rect_pixels,
-    scene_source_render_transform,
+    ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, SceneMaskTester,
+    background_stage_margin, background_zoom_crop, camera_chroma_key, camera_mask,
+    chroma_key_alpha, chroma_key_despill, scene_crop_from_transform, scene_source_fit,
+    scene_source_rect_pixels, scene_source_render_transform,
 };
 pub use crate::source_mask::SourceMask;
 use crate::source_registry::SourceKey;
@@ -8718,7 +8721,9 @@ async fn publish_compositor_frame(
                         let mut store = frame_store
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        store.checkout_buffer(raw_yuv420p_len(width, height))
+                        // No zero fill (plan 191): the scene render's first
+                        // step, `fill_yuv420p`, writes every byte of the frame.
+                        store.checkout_overwrite_buffer(raw_yuv420p_len(width, height))
                     };
                     // Plan 190 S5: the live frame (Linux) in place of the
                     // poster; one `Option` check while none shows.
@@ -9167,7 +9172,9 @@ fn publish_auxiliary_compositor_frame(
                 let mut store = frame_store
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                store.checkout_buffer(raw_yuv420p_len(width, height))
+                // No zero fill (plan 191): the scene render's first step,
+                // `fill_yuv420p`, writes every byte of the frame.
+                store.checkout_overwrite_buffer(raw_yuv420p_len(width, height))
             };
             render_compositor_yuv420p_frame(inputs, &mut bytes);
             (bytes, Some(take_failed_gpu_timings(gpu)))
@@ -10048,12 +10055,14 @@ pub(crate) fn render_camera_overlay_bgra(
     output.resize(byte_len, 0);
     output.fill(0);
     let row_len = overlay_width as usize * 4;
+    // Mask geometry, once per overlay instead of per pixel (plan 191).
+    let mask_tester = source_mask_tester(mask, &fit);
     output
         .par_chunks_mut(row_len)
         .enumerate()
         .for_each(|(dest_y, row)| {
             for dest_x in 0..overlay_width as usize {
-                if !source_mask_allows(mask, dest_x, dest_y, &fit) {
+                if !mask_tester.allows(dest_x, dest_y) {
                     continue;
                 }
                 let Some((source_x, source_y)) =
@@ -10158,6 +10167,10 @@ fn scene_content_rect_pixels(stage_margin: f64, width: u32, height: u32) -> Pixe
     })
 }
 
+/// Writes every byte of a `raw_yuv420p_len(width, height)` frame (odd sizes
+/// included: the same `max(1)` and `div_ceil` plane sizes). The CPU
+/// compositor's frame checkouts skip their zero fill because of this
+/// (plan 191).
 fn fill_yuv420p(bytes: &mut [u8], width: u32, height: u32, y_value: u8, u_value: u8, v_value: u8) {
     let width = width.max(1) as usize;
     let height = height.max(1) as usize;
@@ -10419,7 +10432,8 @@ fn composite_straight_alpha_at(
             if a == 0 {
                 continue;
             }
-            let (y_value, _, _) = rgb_to_yuv(r, g, b);
+            // Luma only: no chroma computed just to be dropped (plan 191).
+            let y_value = rgb_to_y(r, g, b);
             let index = dest_y * canvas_width + dest_x;
             dest[index] = blend(y_value, dest[index], u16::from(a));
         }
@@ -10440,7 +10454,7 @@ fn composite_straight_alpha_at(
             if a == 0 {
                 continue;
             }
-            let (_, u_value, v_value) = rgb_to_yuv(r, g, b);
+            let (u_value, v_value) = rgb_to_uv(r, g, b);
             let uv_index = uv_y * uv_width + uv_x;
             dest[u_start + uv_index] = blend(u_value, dest[u_start + uv_index], u16::from(a));
             dest[v_start + uv_index] = blend(v_value, dest[v_start + uv_index], u16::from(a));
@@ -10521,6 +10535,8 @@ fn blit_rgba_to_yuv420p(
     let uv_right = draw_right.div_ceil(2).min(uv_width);
     let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
     let masked = options.mask != SceneMask::None;
+    // Mask geometry, once per blit instead of per pixel (plan 191).
+    let mask_tester = source_mask_tester(options.mask, &fit);
     // Per-column source x, once per blit (identical to map_source_pixel).
     let luma_columns = (draw_left..draw_right.max(draw_left))
         .map(|dest_x| map_source_column(dest_x as u32, source, &fit, options.mirror_x))
@@ -10550,7 +10566,7 @@ fn blit_rgba_to_yuv420p(
                         .skip(draw_left)
                         .enumerate()
                     {
-                        if masked && !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                        if masked && !mask_tester.allows(dest_x, dest_y) {
                             continue;
                         }
                         let Some(source_x) = luma_columns[column] else {
@@ -10563,7 +10579,8 @@ fn blit_rgba_to_yuv420p(
                         let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
                             continue;
                         };
-                        let (y_value, _u_value, _v_value) = rgb_to_yuv(r, g, b);
+                        // This pass writes luma only (plan 191).
+                        let y_value = rgb_to_y(r, g, b);
                         *output = if key_alpha == 255 {
                             y_value
                         } else {
@@ -10585,7 +10602,7 @@ fn blit_rgba_to_yuv420p(
                     };
                     for (column, uv_x) in (uv_left..uv_right).enumerate() {
                         let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
-                        if masked && !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                        if masked && !mask_tester.allows(dest_x, dest_y) {
                             continue;
                         }
                         let Some(source_x) = chroma_columns[column] else {
@@ -10598,7 +10615,7 @@ fn blit_rgba_to_yuv420p(
                         let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
                             continue;
                         };
-                        let (_y_value, u_value, v_value) = rgb_to_yuv(r, g, b);
+                        let (u_value, v_value) = rgb_to_uv(r, g, b);
                         if key_alpha == 255 {
                             u_row[uv_x] = u_value;
                             v_row[uv_x] = v_value;
@@ -10649,7 +10666,8 @@ fn blit_untransformed_rgba_to_yuv420p(
                         let source_x = (dest_x - draw_left) as u32;
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
                         if a >= 16 {
-                            *output = rgb_to_yuv(r, g, b).0;
+                            // Luma only (plan 191).
+                            *output = rgb_to_y(r, g, b);
                         }
                     }
                 });
@@ -10666,7 +10684,7 @@ fn blit_untransformed_rgba_to_yuv420p(
                         let source_x = (uv_x * 2).saturating_sub(draw_left) as u32;
                         let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
                         if a >= 16 {
-                            let (_, u_value, v_value) = rgb_to_yuv(r, g, b);
+                            let (u_value, v_value) = rgb_to_uv(r, g, b);
                             u_row[uv_x] = u_value;
                             v_row[uv_x] = v_value;
                         }
@@ -10857,8 +10875,10 @@ fn map_source_row(dest_y: u32, source: &RgbaSource<'_>, fit: &SourceFit) -> Opti
     )
 }
 
-fn source_mask_allows(mask: SceneMask, dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
-    scene_mask_allows(
+/// A blit's mask resolved against its fitted rect, built once per blit and
+/// tested per pixel (plan 191).
+fn source_mask_tester(mask: SceneMask, fit: &SourceFit) -> SceneMaskTester {
+    SceneMaskTester::new(
         mask,
         PixelRect {
             x: fit.x,
@@ -10866,9 +10886,12 @@ fn source_mask_allows(mask: SceneMask, dest_x: usize, dest_y: usize, fit: &Sourc
             width: fit.width,
             height: fit.height,
         },
-        dest_x,
-        dest_y,
     )
+}
+
+#[cfg(test)]
+fn source_mask_allows(mask: SceneMask, dest_x: usize, dest_y: usize, fit: &SourceFit) -> bool {
+    source_mask_tester(mask, fit).allows(dest_x, dest_y)
 }
 
 fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
@@ -12218,6 +12241,72 @@ mod tests {
         let blue = rgb_to_yuv(0, 0, 255);
         let white = rgb_to_yuv(255, 255, 255);
         assert_eq!(bytes, [red.0, green.0, blue.0, white.0, red.1, red.2]);
+    }
+
+    /// Even and odd canvases, the degenerate 0x0 (sized as 1x1), and 1080p.
+    const DIRTY_CHECKOUT_SIZES: [(u32, u32); 11] = [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (4, 2),
+        (5, 7),
+        (8, 4),
+        (31, 17),
+        (33, 16),
+        (1920, 1080),
+        (1921, 1081),
+    ];
+
+    #[test]
+    fn fill_yuv420p_overwrites_every_byte_of_a_dirty_frame_buffer() {
+        // Plan 191: CPU frame checkouts skip the zero fill because the scene
+        // render opens with fill_yuv420p. Any byte it missed would keep 0xAA
+        // here and 0x00 in the zeroed buffer.
+        for (width, height) in DIRTY_CHECKOUT_SIZES {
+            let len = raw_yuv420p_len(width, height);
+            let mut zeroed = vec![0x00_u8; len];
+            let mut dirty = vec![0xAA_u8; len];
+            fill_yuv420p(&mut zeroed, width, height, 16, 128, 128);
+            fill_yuv420p(&mut dirty, width, height, 16, 128, 128);
+            assert_eq!(dirty, zeroed, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn cpu_frame_renders_the_same_into_a_dirty_or_a_zeroed_buffer() {
+        // Plan 191 end to end: a reused frame buffer arrives dirty, and a
+        // half-transparent caption bar blends onto whatever the canvas holds,
+        // so it must only ever see this frame's own fill.
+        let overlay = test_caption_overlay(
+            8,
+            4,
+            [250, 40, 90, 128],
+            crate::captions::CaptionOverlayPosition::Bottom,
+        );
+        for (width, height) in DIRTY_CHECKOUT_SIZES {
+            let inputs = CompositorRenderInputs {
+                sequence: 1,
+                width,
+                height,
+                snapshot: None,
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: Some(&overlay),
+                highlight_overlay: None,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
+            };
+            let len = raw_yuv420p_len(width, height);
+            let mut zeroed = vec![0x00_u8; len];
+            let mut dirty = vec![0xAA_u8; len];
+            render_compositor_yuv420p_frame(inputs, &mut zeroed);
+            render_compositor_yuv420p_frame(inputs, &mut dirty);
+            assert_eq!(dirty, zeroed, "{width}x{height}");
+        }
     }
 
     /// A 2×2 blue YUV canvas the chroma-key blit tests composite onto.

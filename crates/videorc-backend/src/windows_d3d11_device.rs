@@ -2401,6 +2401,41 @@ mod runtime {
         pub(crate) diagnostics: WindowsD3d11CaptureDiagnostics,
     }
 
+    /// The bytes of one CPU upload, shared with the owner that already holds
+    /// them instead of copied (plan 191). Overlays, banners and images hand
+    /// over their prepared `Arc<Vec<u8>>`; the session pump hands over the
+    /// published capture or camera frame itself. An owner's bytes must not
+    /// change while it is shared; the compositor only borrows them for the
+    /// one upload call.
+    #[derive(Clone)]
+    pub(crate) struct WindowsD3d11UploadPixels(Arc<dyn AsRef<[u8]> + Send + Sync>);
+
+    impl WindowsD3d11UploadPixels {
+        /// Share an owner whose bytes stay unchanged while it lives.
+        pub(crate) fn shared(owner: impl AsRef<[u8]> + Send + Sync + 'static) -> Self {
+            Self(Arc::new(owner))
+        }
+
+        pub(crate) fn as_slice(&self) -> &[u8] {
+            AsRef::<[u8]>::as_ref(&*self.0)
+        }
+    }
+
+    impl From<Arc<Vec<u8>>> for WindowsD3d11UploadPixels {
+        fn from(pixels: Arc<Vec<u8>>) -> Self {
+            Self(pixels)
+        }
+    }
+
+    impl fmt::Debug for WindowsD3d11UploadPixels {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("WindowsD3d11UploadPixels")
+                .field("len", &self.as_slice().len())
+                .finish_non_exhaustive()
+        }
+    }
+
     #[derive(Debug, Clone)]
     pub(crate) enum WindowsD3d11CompositionSource {
         TextureLease {
@@ -2409,7 +2444,7 @@ mod runtime {
         },
         BgraUpload {
             source_id: u64,
-            pixels: Arc<Vec<u8>>,
+            pixels: WindowsD3d11UploadPixels,
             dimensions: WindowsD3d11OutputDimensions,
             row_pitch: u32,
             pixel_order: WindowsD3d11UploadPixelOrder,
@@ -3258,7 +3293,8 @@ mod runtime {
                     }
                 }
                 WindowsD3d11CompositionSource::BgraUpload { pixels, .. } => {
-                    upload_bytes = upload_bytes.checked_add(pixels.len()).ok_or_else(|| {
+                    let pixel_bytes = pixels.as_slice().len();
+                    upload_bytes = upload_bytes.checked_add(pixel_bytes).ok_or_else(|| {
                         WindowsD3d11Error::new(
                             WindowsD3d11ErrorCode::UnsupportedCapability,
                             "composition upload byte count overflowed",
@@ -4907,7 +4943,7 @@ mod runtime {
                         gpu_sources.push(WindowsD3d11GpuSource {
                             source_id: *source_id,
                             content: WindowsD3d11GpuSourceContent::Upload(WindowsD3d11BgraUpload {
-                                pixels,
+                                pixels: pixels.as_slice(),
                                 dimensions: *dimensions,
                                 row_pitch: *row_pitch,
                                 pixel_order: *pixel_order,
@@ -5100,7 +5136,7 @@ pub(crate) use runtime::{
     WindowsD3d11CompositionSource, WindowsD3d11CompositionSubmission, WindowsD3d11Device,
     WindowsD3d11EncoderProgress, WindowsD3d11EncoderStatus, WindowsD3d11EncoderSubmissionFailure,
     WindowsD3d11MediaClient, WindowsD3d11MediaThread, WindowsD3d11PreviewOffer,
-    WindowsD3d11TestPatternSubmission, WindowsD3d11TicketedTexture,
+    WindowsD3d11TestPatternSubmission, WindowsD3d11TicketedTexture, WindowsD3d11UploadPixels,
 };
 
 #[cfg(test)]

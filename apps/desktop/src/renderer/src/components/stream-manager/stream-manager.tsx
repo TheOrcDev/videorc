@@ -86,7 +86,7 @@ import {
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { CHAT_HEADER_CONTAINER, CHAT_HEADER_TIGHT_HIDDEN } from '@/lib/chat-header-tiers'
-import { sortMessagesChronological } from '@/lib/live-chat-view'
+import { isSortedChronologically, sortMessagesChronological } from '@/lib/live-chat-view'
 import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
 import { formatHistoryDate, statItems } from '@/lib/stream-manager-stats'
 import {
@@ -468,7 +468,15 @@ export function StreamManager({
   onCohostEnableConsent,
   onCohostUpgrade
 }: StreamManagerProps): ReactElement {
-  const messages = useMemo(() => sortMessagesChronological(snapshot.messages), [snapshot.messages])
+  // The buffer almost always arrives sorted: one scan instead of a copy and a
+  // full sort per chat message (plan 191). Either way the rows are the same.
+  const messages = useMemo<readonly LiveChatMessage[]>(
+    () =>
+      isSortedChronologically(snapshot.messages)
+        ? snapshot.messages
+        : sortMessagesChronological(snapshot.messages),
+    [snapshot.messages]
+  )
   // The message on stream now (plan 095, S2): the backend's live state when
   // it has one. Chat, Activity and Buddy all read this one slot.
   const liveHighlightId =
@@ -648,21 +656,27 @@ export function StreamManager({
     chatVisible,
     (message) => !isActivityOnlyEvent(message.eventType)
   )
-  const communityGifts = new Set([
-    ...messages.flatMap((message) =>
-      message.details?.kind === 'subscription' &&
-      message.details.subscription === 'community-sub-gift' &&
-      !message.isDeleted &&
-      message.details.communityGiftId
-        ? [message.details.communityGiftId]
-        : []
-    ),
-    ...(snapshot.delivery?.entries.flatMap(({ message }) =>
-      message.gift === 'community' && message.communityGiftId && !message.isDeleted
-        ? [message.communityGiftId]
-        : []
-    ) ?? [])
-  ])
+  // Rebuilt only when the rows or the journal change, not on every render
+  // (plan 191).
+  const communityGifts = useMemo(
+    () =>
+      new Set([
+        ...messages.flatMap((message) =>
+          message.details?.kind === 'subscription' &&
+          message.details.subscription === 'community-sub-gift' &&
+          !message.isDeleted &&
+          message.details.communityGiftId
+            ? [message.details.communityGiftId]
+            : []
+        ),
+        ...(snapshot.delivery?.entries.flatMap(({ message }) =>
+          message.gift === 'community' && message.communityGiftId && !message.isDeleted
+            ? [message.communityGiftId]
+            : []
+        ) ?? [])
+      ]),
+    [messages, snapshot.delivery]
+  )
   const activityUnseen = useUnseen(
     inHistory ? undefined : snapshot.delivery,
     arrivalKey,

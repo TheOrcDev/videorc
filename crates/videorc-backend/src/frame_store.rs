@@ -602,6 +602,10 @@ impl<P, M> FrameStore<P, M> {
         self.latest.clone()
     }
 
+    /// Zero-filled checkout. Test-only since plan 191: its last production
+    /// callers, the CPU compositor's frame checkouts, overwrite every byte and
+    /// use `checkout_overwrite_buffer`.
+    #[cfg(test)]
     pub fn checkout_buffer(&mut self, byte_len: usize) -> Vec<u8> {
         self.buffer_pool
             .lock()

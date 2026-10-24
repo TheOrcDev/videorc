@@ -10,6 +10,7 @@ import {
   removeBuddyPersona,
   type BuddyPetRoots
 } from './buddy-assets'
+import { clearStaleHttpCacheOnce } from './http-cache-cleanup'
 import {
   BUDDY_REACTION_NONE,
   isBuddyReactionId,
@@ -14164,6 +14165,27 @@ function moveLegacyBuddyAssetsOnce(): void {
   }
 }
 
+// Plan 191: builds from June–July 2026 left ~472K cached backend 404s (~2 GB)
+// in the default session's HTTP cache. Clear it once per profile, 15 s after
+// start so it never competes with startup; a failed clear is retried next start.
+function scheduleStaleHttpCacheCleanup(): void {
+  setTimeout(() => {
+    void (async () => {
+      const outcome = await clearStaleHttpCacheOnce({
+        userData: app.getPath('userData'),
+        clearCache: () => session.defaultSession.clearCache()
+      })
+      if (outcome.kind === 'cleared') {
+        logBackend('info', 'Cleared the stale HTTP cache once (plan 191).')
+      } else if (outcome.kind === 'failed') {
+        logBackend('warn', `The stale HTTP cache could not be cleared: ${outcome.message}`)
+      }
+    })().catch((error) => {
+      logBackend('warn', `The stale HTTP cache cleanup failed: ${errorMessage(error)}`)
+    })
+  }, 15_000).unref()
+}
+
 // Plan 168 D3: shipped pet packs (`bundled:<name>`) live in a read-only second
 // buddy root, `buddy-assets/bundled` in the packaged app (electron-builder.yml)
 // and the source tree in dev, the backgrounds precedent.
@@ -15115,6 +15137,7 @@ app.whenReady().then(async () => {
 
   installRendererSessionPermissions(session.defaultSession)
   moveLegacyBuddyAssetsOnce()
+  scheduleStaleHttpCacheCleanup()
 
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
@@ -15362,12 +15385,14 @@ app.whenReady().then(async () => {
   // Relay (C3): the main renderer owns the single WS client and pushes each
   // live-chat snapshot through here to the window; the window's Clear routes
   // back to the main renderer. Last snapshot is cached for the window's first paint.
+  // Plan 191: the renderer discards the result; returning the 2,000-message
+  // view cost a full validation walk and clone per chat message.
   secureIpcHandle('comments-window:push-snapshot', (event, view: CommentsViewSnapshot) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined
     }
     if (commentsSmokeSnapshotOverride) {
-      return currentCommentsView()
+      return undefined
     }
     cacheCommentsView(view)
     // A history view pushed from Library carries its transcript; its saved
@@ -15384,7 +15409,7 @@ app.whenReady().then(async () => {
         emitCommentsView()
       }
     }
-    return view
+    return undefined
   })
   secureIpcHandle('comments-window:get-snapshot', () => currentCommentsView())
   secureIpcHandle('comments-window:set-view-mode', async (event, value: unknown) => {
@@ -15407,15 +15432,19 @@ app.whenReady().then(async () => {
     }
     return currentCommentsView()
   })
+  // Plan 191: the renderer discards the result; returning the 2,000-message
+  // view cost a full validation walk and clone per chat message.
+  // (applyLiveCommentsDelta still returns the view for its smoke command.)
   secureIpcHandle('comments-window:push-delta', (event, delta: CommentsSnapshotDelta) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
-      return currentCommentsView()
+      return undefined
     }
     if (commentsSmokeSnapshotOverride) {
-      return currentCommentsView()
+      return undefined
     }
 
-    return applyLiveCommentsDelta(delta)
+    applyLiveCommentsDelta(delta)
+    return undefined
   })
   // Click-to-highlight relay (Comments upgrade S3): the window clicks, the
   // MAIN renderer owns the lifecycle + rasterization (it has the backend
