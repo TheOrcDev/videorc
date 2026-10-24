@@ -4,6 +4,7 @@ import type {
   CohostAlertKind,
   CohostReportChat,
   CohostReportCommands,
+  CohostReportGreetingSkips,
   CohostReportPayload,
   CohostReportPost,
   CohostReportQuestion,
@@ -160,6 +161,18 @@ export interface BuddyReportPostRow {
   result: 'sent' | 'partial' | 'failed'
   resultLabel: string
   at: string | null
+  /** Plan 192 S2.2: who wrote a greeting, "AI" or "Line"; null when the
+   * report doesn't say (other posts, older reports). */
+  source: string | null
+}
+
+/** Plan 192 D7: the greetings Buddy didn't post, and why, in plain words. */
+export interface BuddyReportGreetingSkipsView {
+  /** How many, all reasons together ("5"). */
+  total: string
+  /** "Greetings not posted: 3 had no line, 2 were held by the limit." The
+   * reasons in a fixed order, each only when it happened. */
+  sentence: string
 }
 
 export type BuddyReportView =
@@ -184,6 +197,8 @@ export type BuddyReportView =
       commands: BuddyReportCommandsView | null
       /** Plan 164 D10: what the Buddy posted as you, oldest first. */
       posts: BuddyReportPostRow[]
+      /** Plan 192 D7: null when every greeting went out (or Buddy was off). */
+      greetingSkips: BuddyReportGreetingSkipsView | null
     }
 
 export interface BuddyReportViewInput {
@@ -412,6 +427,38 @@ export function reportCommands(
   }
 }
 
+// --- Greetings not posted (plan 192 D7) ------------------------------------------
+
+/** Each reason as a clause, in the wire's order. */
+const GREETING_SKIP_CLAUSES: ReadonlyArray<
+  [keyof CohostReportGreetingSkips, (count: string, one: boolean) => string]
+> = [
+  ['noLine', (count) => `${count} had no line`],
+  ['modeOff', (count) => `${count} came while posting was off`],
+  ['stale', (count, one) => `${count} ${one ? 'was' : 'were'} too old to greet`],
+  ['deduped', (count, one) => `${count} ${one ? 'was' : 'were'} already greeted`],
+  ['held', (count, one) => `${count} ${one ? 'was' : 'were'} held by the limit`],
+  ['destinationFailed', (count) => `${count} couldn't be sent`],
+  ['youtubePaused', (count) => `${count} came while YouTube chat was paused`]
+]
+
+/** The non-zero reasons as one plain line, null when there are none. */
+export function reportGreetingSkips(
+  skipped: CohostReportGreetingSkips | undefined
+): BuddyReportGreetingSkipsView | null {
+  if (!skipped) return null
+  const counts = GREETING_SKIP_CLAUSES.map(([key, clause]) => ({
+    count: Math.max(0, Math.round(skipped[key] ?? 0)),
+    clause
+  })).filter((entry) => entry.count > 0)
+  if (counts.length === 0) return null
+  const reasons = counts.map(({ count, clause }) => clause(formatReportCount(count), count === 1))
+  return {
+    total: formatReportCount(counts.reduce((sum, entry) => sum + entry.count, 0)),
+    sentence: `Greetings not posted: ${reasons.join(', ')}.`
+  }
+}
+
 // --- The card ------------------------------------------------------------------
 
 export function buddyReportView({
@@ -450,7 +497,8 @@ export function buddyReportView({
       promises: [],
       alerts: [],
       commands: null,
-      posts: []
+      posts: [],
+      greetingSkips: null
     }
   }
   return {
@@ -488,9 +536,17 @@ export function buddyReportView({
       platforms: uniquePlatforms(post.destinations),
       result: post.result,
       resultLabel: POST_RESULT_LABELS[post.result],
-      at: streamOffsetLabel(post.at, startedAt)
-    }))
+      at: streamOffsetLabel(post.at, startedAt),
+      source: post.source ? POST_SOURCE_LABELS[post.source] : null
+    })),
+    greetingSkips: reportGreetingSkips(report.greetings.skipped)
   }
+}
+
+/** Plan 192 S2.2: a small neutral tag on a greeting. */
+const POST_SOURCE_LABELS: Record<NonNullable<CohostReportPost['source']>, string> = {
+  ai: 'AI',
+  line: 'Line'
 }
 
 const POST_TRIGGER_LABELS: Record<CohostReportPost['trigger'], string> = {

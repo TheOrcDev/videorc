@@ -29,6 +29,7 @@ import {
   questionTally,
   reportAlertLabel,
   reportCommands,
+  reportGreetingSkips,
   reportMoments,
   reportPlatforms,
   reportSessionChoice,
@@ -523,6 +524,119 @@ describe('report view', () => {
     })
     if (off.kind !== 'buddy-off') throw new Error(off.kind)
     expect(off.commands).toBeNull()
+  })
+
+  it('tags each greeting with who wrote it, and nothing else (plan 192 S2.2)', () => {
+    const view = buddyReportView({
+      payload: payload({
+        report: report({
+          posts: [
+            {
+              id: 'u1',
+              at: '2026-08-22T10:01:30Z',
+              trigger: 'greeting',
+              text: 'Hi Ana, welcome to the stream!',
+              destinations: ['twitch'],
+              result: 'sent',
+              source: 'ai'
+            },
+            {
+              id: 'u2',
+              at: '2026-08-22T10:02:30Z',
+              trigger: 'greeting',
+              text: 'Welcome back, Bo!',
+              destinations: ['youtube', 'youtube'],
+              result: 'partial',
+              source: 'line'
+            },
+            {
+              id: 'u3',
+              at: '2026-08-22T10:03:30Z',
+              trigger: 'manual',
+              text: 'hello',
+              destinations: ['twitch'],
+              result: 'sent'
+            }
+          ]
+        })
+      }),
+      session: SESSION,
+      buddyOn: true
+    })
+    if (view.kind !== 'report') throw new Error(view.kind)
+    expect(view.posts).toEqual([
+      {
+        id: 'u1',
+        trigger: 'Greeting',
+        text: 'Hi Ana, welcome to the stream!',
+        platforms: ['twitch'],
+        result: 'sent',
+        resultLabel: 'Posted',
+        at: '1:30',
+        source: 'AI'
+      },
+      expect.objectContaining({
+        id: 'u2',
+        platforms: ['youtube'],
+        resultLabel: 'Posted in part',
+        source: 'Line'
+      }),
+      // A Say post (and any older row) carries no source: no tag.
+      expect.objectContaining({ id: 'u3', trigger: 'Say', source: null })
+    ])
+  })
+
+  it('says in plain words why greetings were not posted (plan 192 D7)', () => {
+    expect(reportGreetingSkips({ noLine: 3, held: 2 })).toEqual({
+      total: '5',
+      sentence: 'Greetings not posted: 3 had no line, 2 were held by the limit.'
+    })
+    expect(
+      reportGreetingSkips({
+        youtubePaused: 1,
+        destinationFailed: 1,
+        held: 1,
+        deduped: 1,
+        stale: 1,
+        modeOff: 1,
+        noLine: 1
+      })
+    ).toEqual({
+      total: '7',
+      sentence:
+        "Greetings not posted: 1 had no line, 1 came while posting was off, 1 was too old to greet, 1 was already greeted, 1 was held by the limit, 1 couldn't be sent, 1 came while YouTube chat was paused."
+    })
+    expect(reportGreetingSkips({ stale: 2, deduped: 1200 })?.sentence).toBe(
+      `Greetings not posted: 2 were too old to greet, ${(1200).toLocaleString()} were already greeted.`
+    )
+    // Absent (an older report, or every greeting went out) or all zero: no line.
+    expect(reportGreetingSkips(undefined)).toBeNull()
+    expect(reportGreetingSkips({})).toBeNull()
+    expect(reportGreetingSkips({ noLine: 0 })).toBeNull()
+    // The card's view carries it; a report without it and a missed stream have none.
+    const view = buddyReportView({
+      payload: payload({
+        report: report({
+          greetings: { ...report().greetings, skipped: { noLine: 3, held: 2 } }
+        })
+      }),
+      session: SESSION,
+      buddyOn: true
+    })
+    if (view.kind !== 'report') throw new Error(view.kind)
+    expect(view.greetingSkips?.sentence).toBe(
+      'Greetings not posted: 3 had no line, 2 were held by the limit.'
+    )
+    const plain = buddyReportView({ payload: payload(), session: SESSION, buddyOn: true })
+    if (plain.kind !== 'report') throw new Error(plain.kind)
+    expect(plain.greetingSkips).toBeNull()
+    const off = buddyReportView({
+      payload: payload({ report: null }),
+      session: SESSION,
+      buddyOn: true
+    })
+    if (off.kind !== 'buddy-off') throw new Error(off.kind)
+    expect(off.greetingSkips).toBeNull()
   })
 
   it('times events into the stream and gives up on unreadable times', () => {
