@@ -1506,6 +1506,29 @@ fn sync_directory(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Plan 191: journal in WAL mode. In SQLite's default rollback mode every
+/// autocommit write creates, fsyncs and deletes a `-journal` file on top of
+/// fsyncing the database, all while holding the one connection mutex every
+/// other database user waits on. WAL appends each commit to `-wal` instead.
+/// Durability is unchanged: `synchronous` stays at its default FULL, which
+/// fsyncs the WAL on every commit. A filesystem that refuses WAL keeps the
+/// rollback journal, which still works, so this never fails the open. Call it
+/// right after opening, before `migrate()` and outside any transaction.
+fn enable_write_ahead_log(conn: &Connection, path: &Path) {
+    match conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0)) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
+        Ok(mode) => tracing::warn!(
+            path = %path.display(),
+            journal_mode = %mode,
+            "SQLite refused WAL journaling; keeping the rollback journal"
+        ),
+        Err(error) => tracing::warn!(
+            path = %path.display(),
+            "Could not switch SQLite to WAL journaling; keeping the rollback journal: {error}"
+        ),
+    }
+}
+
 impl Database {
     pub fn open_default() -> Result<Self> {
         let path = default_database_path();
@@ -1516,6 +1539,7 @@ impl Database {
 
         let conn = Connection::open(&path)
             .with_context(|| format!("Could not open SQLite database {}", path.display()))?;
+        enable_write_ahead_log(&conn, &path);
         let database = Self {
             conn: Arc::new(Mutex::new(conn)),
             path,
@@ -1539,8 +1563,10 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        let conn = Connection::open(path).unwrap();
+        enable_write_ahead_log(&conn, path);
         let database = Self {
-            conn: Arc::new(Mutex::new(Connection::open(path).unwrap())),
+            conn: Arc::new(Mutex::new(conn)),
             path: path.to_path_buf(),
         };
         database.migrate().unwrap();
@@ -10459,12 +10485,8 @@ mod tests {
             std::env::temp_dir().join(format!("videorc-storage-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("videorc.sqlite3");
-        let database = Database {
-            conn: Arc::new(Mutex::new(Connection::open(&path).unwrap())),
-            path: path.clone(),
-        };
-        database.migrate().unwrap();
-        (database, path)
+        // The app's open path, WAL journaling included (plan 191).
+        (Database::open_file_for_tests(&path), path)
     }
 
     fn create_owned_mp4_staging_directory(
@@ -11464,6 +11486,77 @@ mod tests {
         assert!(rendered.contains("Videorc"));
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert!(rendered.contains(".videorc"));
+    }
+
+    #[test]
+    fn database_file_journals_in_wal_and_keeps_full_sync() {
+        // Plan 191: faster commits, identical durability.
+        let directory =
+            std::env::temp_dir().join(format!("videorc-wal-mode-test-{}", uuid::Uuid::new_v4()));
+        let database = Database::open_file_for_tests(&directory.join("videorc.sqlite3"));
+        database
+            .add_health_event(None, HealthLevel::Info, "wal-probe", "An autocommit write.")
+            .unwrap();
+
+        {
+            let conn = database.lock().unwrap();
+            let journal_mode: String = conn
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal_mode, "wal");
+            let synchronous: i64 = conn
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .unwrap();
+            assert_eq!(synchronous, 2, "durability stays at synchronous=FULL");
+        }
+        assert!(
+            directory.join("videorc.sqlite3-wal").exists(),
+            "commits append to the -wal sidecar"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn wal_database_keeps_committed_rows_across_a_reopen() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-wal-reopen-test-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("videorc.sqlite3");
+        let database = Database::open_file_for_tests(&path);
+        database
+            .create_session(&sample_session("session-wal-reopen"))
+            .unwrap();
+        let event = database
+            .add_health_event(
+                Some("session-wal-reopen"),
+                HealthLevel::Warn,
+                "wal-reopen",
+                "Written before the reopen.",
+            )
+            .unwrap();
+        drop(database);
+
+        // WAL lives in the file header: a connection that never asks for it,
+        // like an older app build, still opens this database in WAL.
+        let raw = Connection::open(&path).unwrap();
+        let journal_mode: String = raw
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(raw);
+
+        let reopened = Database::open_file_for_tests(&path);
+        let sessions = reopened.list_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "session-wal-reopen");
+        let events = reopened.list_health_events("session-wal-reopen").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, event.id);
+        assert_eq!(events[0].message, "Written before the reopen.");
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
