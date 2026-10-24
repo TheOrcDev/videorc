@@ -438,14 +438,83 @@ export function liveChatEmptyMessage(
 
 /**
  * Apply a batch of incoming messages in a single pass (event batching): dedupe against the
- * buffer and within the batch, sort + bound once. One state update for many messages.
+ * buffer and within the batch, keep the rows chronological, bound once. One state update for
+ * many messages. A burst that lands in order at the tail of a well-formed buffer is appended
+ * without re-sorting it; anything else takes the full merge-and-sort. Both yield the same rows.
  */
 export function applyLiveChatMessages(
   snapshot: LiveChatSnapshot,
   incoming: LiveChatMessage[]
 ): LiveChatSnapshot {
   if (incoming.length === 0) return snapshot
-  const byId = new Map(snapshot.messages.map((message) => [message.id, message]))
+  const merged =
+    appendLiveChatMessagesInOrder(snapshot.messages, incoming) ??
+    mergeAndSortLiveChatMessages(snapshot.messages, incoming)
+  if (merged === snapshot.messages) return snapshot
+  const messages = boundMessages(merged)
+  return {
+    ...snapshot,
+    messages,
+    delivery: admitChatDelivery(snapshot, incoming),
+    updatedAt: messages[messages.length - 1]?.receivedAt ?? snapshot.updatedAt
+  }
+}
+
+/**
+ * The batch merge without a sort, in O(buffer + batch). It needs a buffer that is strictly
+ * chronological with unique ids, which the reducers here keep except for a snapshot that
+ * carries one id twice or a single-message tombstone with a new receivedAt. It also needs a
+ * batch that only appends new ids at the tail, in order, or swaps a tombstone in with its
+ * original's receivedAt. The buffer plus the appended rows is then exactly what the full merge
+ * sorts into: with unique ids the comparator never ties, so there is one sorted order. Dedupe
+ * and replace follow the full merge's rules, in arrival order. Returns `buffer` itself when
+ * nothing changes, and `undefined` when the batch needs the full merge.
+ */
+function appendLiveChatMessagesInOrder(
+  buffer: LiveChatMessage[],
+  incoming: LiveChatMessage[]
+): LiveChatMessage[] | undefined {
+  const indexById = new Map<string, number>()
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (index > 0 && compareMessagesChronological(buffer[index - 1], buffer[index]) >= 0) {
+      return undefined
+    }
+    indexById.set(buffer[index].id, index)
+  }
+  if (indexById.size !== buffer.length) return undefined
+  let merged: LiveChatMessage[] | undefined
+  for (const message of incoming) {
+    const rows = merged ?? buffer
+    const index = indexById.get(message.id)
+    if (index !== undefined) {
+      const existing = rows[index]
+      if (!message.isDeleted || existing.isDeleted) continue
+      // A tombstone keeps its original's place only when it keeps its receivedAt.
+      if (message.receivedAt !== existing.receivedAt) return undefined
+      merged ??= buffer.slice()
+      merged[index] = message
+      continue
+    }
+    // A new id never ties the tail (their ids differ), so "not before" means after it.
+    const tail = rows.at(-1)
+    if (tail && compareMessagesChronological(message, tail) < 0) return undefined
+    merged ??= buffer.slice()
+    indexById.set(message.id, merged.length)
+    merged.push(message)
+  }
+  return merged ?? buffer
+}
+
+/**
+ * The full merge: dedupe through an id map (a tombstone replaces a row that is not deleted
+ * yet; any other repeated id is skipped), then sort. Returns `buffer` itself when nothing
+ * changes.
+ */
+function mergeAndSortLiveChatMessages(
+  buffer: LiveChatMessage[],
+  incoming: LiveChatMessage[]
+): LiveChatMessage[] {
+  const byId = new Map(buffer.map((message) => [message.id, message]))
   let changed = false
   for (const message of incoming) {
     const existing = byId.get(message.id)
@@ -454,14 +523,7 @@ export function applyLiveChatMessages(
       changed = true
     }
   }
-  if (!changed) return snapshot
-  const messages = boundMessages(sortMessagesChronological([...byId.values()]))
-  return {
-    ...snapshot,
-    messages,
-    delivery: admitChatDelivery(snapshot, incoming),
-    updatedAt: messages[messages.length - 1]?.receivedAt ?? snapshot.updatedAt
-  }
+  return changed ? sortMessagesChronological([...byId.values()]) : buffer
 }
 
 /** Replace missed incremental belief after reconnect/lag, then merge events queued during RPC. */
