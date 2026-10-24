@@ -748,7 +748,7 @@ mod runtime {
         WindowsD3d11ErrorCode, WindowsD3d11MediaClient, WindowsD3d11MediaRole,
         WindowsD3d11Nv12TextureDescriptor, WindowsD3d11TextureFormat,
         WindowsD3d11TextureLeaseTicket, WindowsD3d11TexturePoolConfig, WindowsD3d11TicketedTexture,
-        WindowsDxgiOutputSelection,
+        WindowsD3d11UploadPixels, WindowsDxgiOutputSelection,
     };
     use crate::windows_d3d11_preview::{WindowsD3d11PresenterStatus, WindowsD3d11PreviewPlacement};
     use crate::windows_media_foundation_encoder::MediaFoundationEncoderConfig;
@@ -1778,6 +1778,27 @@ mod runtime {
         })
     }
 
+    /// A published capture or camera frame, shared as the bytes of its BGRA
+    /// upload (plan 191). The pump used to clone each new frame into a fresh
+    /// `Vec` (8.3 MB at 1080p, 3.7 MB for a 720p camera) on the thread that
+    /// must hit its frame interval. `FrameHandle` bytes are immutable, and the
+    /// frame store returns a buffer to its pool only after the last handle
+    /// drops, so the upload reads the same pixels without the copy.
+    struct FrameUploadBytes<P>(FrameHandle<P>);
+
+    impl<P> AsRef<[u8]> for FrameUploadBytes<P> {
+        fn as_ref(&self) -> &[u8] {
+            &self.0.bytes
+        }
+    }
+
+    fn frame_upload_pixels<P: 'static>(frame: &FrameHandle<P>) -> WindowsD3d11UploadPixels
+    where
+        FrameHandle<P>: Send + Sync,
+    {
+        WindowsD3d11UploadPixels::shared(FrameUploadBytes(frame.clone()))
+    }
+
     /// The Buddy on each leg for this tick (plan 168 S-B4): the pet's draw
     /// and the bubble's anchor, from the sprite slot, with the gaze targets
     /// Phase C reads (the card's and the caption bar's blits on the leg).
@@ -2110,7 +2131,7 @@ mod runtime {
             .max(1);
         let frame_interval = Duration::from_secs_f64(1.0 / f64::from(render_fps));
         let mut last_camera_frame: Option<FrameHandle<PreviewCameraPixelFormat>> = None;
-        let mut last_camera_upload: Option<(u64, Arc<Vec<u8>>)> = None;
+        let mut last_camera_upload: Option<(u64, WindowsD3d11UploadPixels)> = None;
         let mut retained_capture_ticket: Option<WindowsD3d11TextureLeaseTicket> = None;
         let mut cfr = WindowsD3d11CfrSequencer::default();
         let mut pending_capture: Option<crate::windows_d3d11_device::WindowsD3d11CapturePoll> =
@@ -2134,7 +2155,7 @@ mod runtime {
             FrameHandle<crate::preview_screen::PreviewScreenPixelFormat>,
         > = None;
         let mut upload_revision = 0u64;
-        let mut last_capture_upload: Option<(u64, Arc<Vec<u8>>, u64)> = None;
+        let mut last_capture_upload: Option<(u64, WindowsD3d11UploadPixels, u64)> = None;
         let mut camera_upload_revision = 0u64;
         while !stop.load(Ordering::Relaxed) {
             let frame_started_at = Instant::now();
@@ -2460,7 +2481,7 @@ mod runtime {
                     }
                     _ => {
                         upload_revision += 1;
-                        let pixels = Arc::new(frame.bytes.clone());
+                        let pixels = frame_upload_pixels(frame);
                         last_capture_upload =
                             Some((frame.sequence, pixels.clone(), upload_revision));
                         update_snapshot(&snapshot, |current| current.capture_upload_frames += 1);
@@ -2480,11 +2501,11 @@ mod runtime {
             }
             if let Some(frame) = camera_frame.as_ref() {
                 let pixels = match last_camera_upload.as_ref() {
-                    Some((revision, pixels)) if *revision == frame.sequence => Arc::clone(pixels),
+                    Some((revision, pixels)) if *revision == frame.sequence => pixels.clone(),
                     _ => {
                         camera_upload_revision += 1;
-                        let pixels = Arc::new(frame.bytes.clone());
-                        last_camera_upload = Some((frame.sequence, Arc::clone(&pixels)));
+                        let pixels = frame_upload_pixels(frame);
+                        last_camera_upload = Some((frame.sequence, pixels.clone()));
                         pixels
                     }
                 };
@@ -2529,7 +2550,7 @@ mod runtime {
                     if let Some(image) = image {
                         sources.push(WindowsD3d11CompositionSource::BgraUpload {
                             source_id,
-                            pixels: image.pixels.clone(),
+                            pixels: image.pixels.clone().into(),
                             dimensions: WindowsD3d11OutputDimensions::new(
                                 image.width,
                                 image.height,
@@ -2739,7 +2760,7 @@ mod runtime {
                 .map_err(|error| error.to_string())?;
         Ok(WindowsD3d11CompositionSource::BgraUpload {
             source_id: frame.source_id,
-            pixels: Arc::clone(&frame.overlay.bgra),
+            pixels: Arc::clone(&frame.overlay.bgra).into(),
             dimensions,
             row_pitch,
             pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
@@ -2760,7 +2781,7 @@ mod runtime {
         })?;
         Ok(WindowsD3d11CompositionSource::BgraUpload {
             source_id: frame.source_id,
-            pixels: Arc::clone(&atlas.bgra),
+            pixels: Arc::clone(&atlas.bgra).into(),
             dimensions: WindowsD3d11OutputDimensions::new(atlas.width, atlas.height)
                 .map_err(|error| error.to_string())?,
             row_pitch,
@@ -2784,7 +2805,7 @@ mod runtime {
         })?;
         Ok(WindowsD3d11CompositionSource::BgraUpload {
             source_id: frame.source_id,
-            pixels: Arc::clone(&bitmap.bgra),
+            pixels: Arc::clone(&bitmap.bgra).into(),
             dimensions: WindowsD3d11OutputDimensions::new(bitmap.width, bitmap.height)
                 .map_err(|error| error.to_string())?,
             row_pitch,
