@@ -36,7 +36,7 @@ import {
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCaptions, useStudioCore } from '@/hooks/use-studio'
 import type { CaptionStyleId } from '@/lib/backend'
 import {
   CAPTION_STYLE_IDS,
@@ -117,7 +117,6 @@ function StyleSwatch({ styleId }: { styleId: CaptionStyleId }): ReactElement {
 
 export function CaptionsControls(): ReactElement {
   const {
-    captionLines,
     captionsCommandPending,
     captionsStatus,
     captionsWindow,
@@ -131,6 +130,7 @@ export function CaptionsControls(): ReactElement {
     startCaptions,
     toggleCaptionsWindow
   } = useStudioCore()
+  const { captionLines } = useStudioCaptions()
   const captions = captureConfig.captions
   const gate = cloudAiUploadGate(entitlements)
   // Locked means disabled, with one reason (S1.5): the lock leads and every

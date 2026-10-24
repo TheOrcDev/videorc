@@ -50,6 +50,8 @@ import type {
   AudioTrack,
   BackendConnection,
   Banner,
+  BuddyOverlaySnapshot,
+  CaptionsUpdate,
   CaptureRecoveryStatus,
   CohostSettings,
   CohostSettingsPatch,
@@ -107,6 +109,7 @@ import {
   streamOutputTopologyProbeRequestKey,
   useStudioAudio,
   useStudioBanners,
+  useStudioCaptions,
   useStudioChat,
   useStudioCore,
   useStudioDiagnostics,
@@ -1668,6 +1671,7 @@ class TestWebSocket {
 type StudioObservation = {
   audio: ReturnType<typeof useStudioAudio>
   banners: ReturnType<typeof useStudioBanners>
+  captions: ReturnType<typeof useStudioCaptions>
   chat: ReturnType<typeof useStudioChat>
   core: StudioCoreContextValue
   diagnostics: ReturnType<typeof useStudioDiagnostics>
@@ -1685,13 +1689,14 @@ function MicVisualProbe({ observe }: { observe: (active: boolean) => void }): nu
 function Probe({ observe }: { observe: (value: StudioObservation) => void }): null {
   const audio = useStudioAudio()
   const banners = useStudioBanners()
+  const captions = useStudioCaptions()
   const chat = useStudioChat()
   const core = useStudioCore()
   const diagnostics = useStudioDiagnostics()
   const recording = useStudioRecording()
   useEffect(
-    () => observe({ audio, banners, chat, core, diagnostics, recording }),
-    [audio, banners, chat, core, diagnostics, observe, recording]
+    () => observe({ audio, banners, captions, chat, core, diagnostics, recording }),
+    [audio, banners, captions, chat, core, diagnostics, observe, recording]
   )
   return null
 }
@@ -7993,6 +7998,176 @@ describe('real StudioProvider lifecycle', () => {
         ['sessions.healthEvents.list', 'sessions.logs.list'].includes(command.method)
       )
     ).toHaveLength(2)
+  })
+
+  // Plan 191: these events used to publish a new core value that no core
+  // consumer reads, so every mounted Studio view re-rendered for each one.
+  describe('events no core consumer reads keep the core value (plan 191)', () => {
+    async function mountQuietProvider(setup?: (backend: StudioBackend) => void): Promise<{
+      api: VideorcApi
+      latest: () => StudioObservation
+      shell: () => ReturnType<typeof useStudioShell> | undefined
+      emit: (event: string, payload: unknown) => Promise<void>
+    }> {
+      const backend = new StudioBackend()
+      setup?.(backend)
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioObservation => observations.at(-1)!
+      let shell: ReturnType<typeof useStudioShell> | undefined
+      function ShellProbe(): null {
+        const value = useStudioShell()
+        useEffect(() => {
+          shell = value
+        }, [value])
+        return null
+      }
+      root = await mountStudioProvider(
+        testDom.container,
+        (value) => {
+          observations.push(value)
+        },
+        createElement(ShellProbe)
+      )
+      await waitForObservation(
+        () =>
+          observations.at(-1)?.core.wsStatus === 'connected' &&
+          observations.at(-1)?.core.cohostSettings != null &&
+          observations.at(-1)?.core.sessions.length === backend.sessionSummaries.length
+      )
+      // Bootstrap is done publishing: core keeps its identity for 30 sequential
+      // 10 ms ticks, which outlasts the 250 ms debounce of the post-connect
+      // scene reload (it re-applies the same scene as a new object).
+      let quietTicks = 0
+      for (let attempt = 0; attempt < 400 && quietTicks < 30; attempt += 1) {
+        const before = latest().core
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        })
+        quietTicks = latest().core === before ? quietTicks + 1 : 0
+      }
+      expect(quietTicks, 'the core value never settled after bootstrap').toBe(30)
+      const emit = async (event: string, payload: unknown): Promise<void> => {
+        await act(async () => {
+          for (const socket of backend.sockets)
+            socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+          await Promise.resolve()
+        })
+      }
+      return { api, latest, shell: () => shell, emit }
+    }
+
+    it('streams caption partials to captions readers without a new core or shell value', async () => {
+      const { api, latest, shell, emit } = await mountQuietProvider()
+      const core = latest().core
+      const shellValue = shell()
+      expect(shellValue).toBeDefined()
+      expect(latest().captions.captionLines).toEqual([])
+      const line = (
+        seq: number,
+        text: string,
+        kind: CaptionsUpdate['kind'] = 'partial'
+      ): CaptionsUpdate => ({ sessionClientId: 'captions-1', seq, kind, text, chunkSeconds: 0 })
+
+      await emit('captions.update', line(1, 'Hello'))
+      expect(latest().captions.captionLines).toEqual([line(1, 'Hello')])
+      await emit('captions.update', line(1, 'Hello every'))
+      await emit('captions.update', line(1, 'Hello everyone', 'final'))
+      await emit('captions.update', line(2, 'Welcome'))
+      expect(latest().captions.captionLines).toEqual([
+        line(1, 'Hello everyone', 'final'),
+        line(2, 'Welcome')
+      ])
+      expect(latest().core === core, 'a caption partial published a new core value').toBe(true)
+      expect(shell()).toBe(shellValue)
+
+      // Opening the reader still hands it the latest lines.
+      const pushCaptionSnapshot = vi.fn<VideorcApi['pushCaptionSnapshot']>(async () => {})
+      api.pushCaptionSnapshot = pushCaptionSnapshot
+      await act(async () => {
+        await latest().core.openCaptionsWindow()
+      })
+      expect(pushCaptionSnapshot).toHaveBeenCalledTimes(1)
+      expect(pushCaptionSnapshot.mock.calls[0]?.[0].lines).toEqual(latest().captions.captionLines)
+    }, 15_000)
+
+    it('shows and expires a Buddy bubble without a new core value', async () => {
+      const { api, latest, emit } = await mountQuietProvider()
+      const core = latest().core
+      const pushCohostWindowState = vi.fn<VideorcApi['pushCohostWindowState']>(async () => {})
+      api.pushCohostWindowState = pushCohostWindowState
+      const talking: BuddyOverlaySnapshot = {
+        personaId: 'default',
+        state: 'talk',
+        bubble: { text: 'Hello chat', until: '2026-10-24T00:00:06.000Z' }
+      }
+
+      await emit('cohost.buddy.state', talking)
+      // The provider still reads it: the Comments window shows the bubble.
+      expect(pushCohostWindowState.mock.lastCall?.[0].buddy).toMatchObject({
+        state: 'talk',
+        bubble: 'Hello chat'
+      })
+      await emit('cohost.buddy.state', { ...talking, state: 'idle', bubble: null })
+      expect(pushCohostWindowState.mock.lastCall?.[0].buddy).toMatchObject({
+        state: 'idle',
+        bubble: null
+      })
+      expect(latest().core === core, 'a Buddy bubble published a new core value').toBe(true)
+    }, 15_000)
+
+    it("keeps the sessions array for a session the Library hasn't loaded, and still counts a loaded one", async () => {
+      const { latest, emit } = await mountQuietProvider((backend) => {
+        backend.sessionSummaries = [sessionSummary()]
+      })
+      const core = latest().core
+      const sessions = core.sessions
+      expect(sessions).toHaveLength(1)
+      const health = (sessionId: string): HealthEvent => ({
+        id: `health-${sessionId}`,
+        sessionId,
+        level: 'warn',
+        code: 'live-health',
+        message: 'A health event.',
+        permissionPane: null,
+        createdAt: '2026-10-24T00:00:01.000Z'
+      })
+      const log = (sessionId: string): SessionLogEntry => ({
+        id: `log-${sessionId}`,
+        sessionId,
+        level: 'info',
+        code: 'live-log',
+        message: 'A session log.',
+        sourceId: null,
+        permissionPane: null,
+        createdAt: '2026-10-24T00:00:01.000Z'
+      })
+
+      await emit('health.event', health('session-elsewhere'))
+      await emit('session.log', log('session-elsewhere'))
+      // Diagnostics heard it; the Library's array and core did not change.
+      expect(latest().diagnostics.healthEvents[0]?.id).toBe('health-session-elsewhere')
+      expect(latest().core.sessions).toBe(sessions)
+      expect(latest().core === core, 'another session published a new core value').toBe(true)
+
+      await emit('health.event', health('session-1'))
+      await emit('session.log', log('session-1'))
+      expect(latest().core.sessions).not.toBe(sessions)
+      expect(latest().core.sessions[0]).toMatchObject({
+        id: 'session-1',
+        healthEventCount: 1,
+        sessionLogCount: 1
+      })
+    }, 15_000)
   })
 
   it('keeps replacement detail buffers when an invalidated request settles late', async () => {
