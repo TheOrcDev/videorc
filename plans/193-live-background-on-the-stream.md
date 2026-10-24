@@ -322,4 +322,69 @@ the PR is ready for the owner, and is a candidate for a 0.9.151 hotfix.
 
 ## As built
 
-(Filled in by the executor.)
+Built 2026-10-24 on branch `fix/193-live-background-on-stream`. The owner took
+D1 and D2 as recommended. No STOP condition hit: both legs compose in turn on
+the loop task, each compose waits until the GPU finishes, and both
+compositors take the system default Metal device.
+
+- **S1** (`fix(live-backgrounds): the stream leg draws the recording leg's live frame`):
+  as designed. `LiveBackgroundMetalRenderer::frame_at`; `SharedLiveFrame`;
+  `CompositorRenderInputs.shared_live_frame` and `shared_live_output` (the
+  larger-leg rule); the device check warns once. Tests drive the real publish
+  path with two Metal compositors. Eight tests, the seven in S1 plus one for
+  the larger leg (a 1280×720 stream above a smaller recording renders the
+  frame at 1280×720). A test-only `LiveBackgroundLeg.at` pins two ticks a
+  second apart without waiting.
+- **Off macOS**: the two new fields are only read by Metal, so Windows and
+  Linux warned "never read" (a failure under `-D warnings`). Fixed with
+  `cfg_attr(not(target_os = "macos"), allow(dead_code))`, as the file does
+  for `live_frame_image_source`.
+- **S2**: three record-and-stream cases: Silk 1080p30 at one profile, and
+  Liquid Chrome and Line Waves at 4K30 with a 1080p30 stream.
+- **S3**: two Windows tests, CI only. The session test builds the real scene
+  plan and asserts the live layer is on `ALL` targets for a same-scene
+  record-and-stream session (and off the auxiliary target beside a vertical
+  leg). The WARP test composes it through `WindowsD3d11Compositor` and reads
+  the auxiliary NV12 luma: the ring moves and the stage does not. Reading the
+  code, Windows already draws it; no product change. `cargo xwin` type-checks
+  them; the PR's Windows job is their first run.
+- **S4, harness fixes the first smoke runs found** (none in the product):
+  - Clips is on by default, so the dev app arms a buffer-only session with
+    the app's own scene. With a camera the dev app can't read, every start
+    was refused. The smoke now turns Clips off first, as `smoke:record-latency`
+    does.
+  - A record-and-stream session starts a new compositor run. Its status has
+    no `liveBackground` until its first 2 s diagnostic window, which is
+    pre-existing and cosmetic. The smoke skips only those leading samples (at
+    most six) and takes the uploads baseline from the run's first status.
+  - Line Waves' thin lines average away in the 16×16 ring thumbnail (about 1
+    per 0.5 s), so a ring also passes when the finer square sees it move.
+
+### Gates (2026-10-24, a loaded host: load 10–45 from other apps)
+
+- `cargo fmt --check --all`: pass.
+- `cargo clippy -p videorc-backend -- -D warnings` (macOS): pass.
+- Windows (`cargo xwin clippy`) and `--all-targets` clippy fail on
+  `origin/main` itself (121 and about 90/234 errors in untouched files). This
+  branch adds none: its error sets equal main's, once the dead-field warning
+  above was fixed.
+- `cargo test -p videorc-backend live_background`: 50 passed.
+  `compositor::`: 267 passed.
+- `CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p videorc-backend`: pass.
+- `pnpm format:check`, `pnpm lint`, `pnpm typecheck`: pass.
+  `pnpm test:scripts`: 2540 passed, 1 skipped.
+- `pnpm smoke:live-background` (`VIDEORC_LIVE_BACKGROUND_SMOKE_SKIP_BUDGET=1`):
+  PASS, all six cases. The stream ring moves like the recording's (finer
+  square, recording against stream):
+  - Silk: 0.49 and 0.49;
+  - Liquid Chrome 4K → 1080p: 21.14 and 22.09;
+  - Line Waves 4K → 1080p: 3.70 and 3.64 (a rerun: 5.89 and 5.92).
+- The p95 budget was skipped under load. The guard drew at half size for
+  Liquid Chrome 1080p60 and Line Waves. Measured p95: Silk 1.7–3.2 ms
+  (budget 1.5), Plasma 4K 3.6–6.7 ms (3.0), Liquid Chrome 2.4–4.8 ms. A
+  quiet-host run is still owed, as for plan 190.
+- `VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1 pnpm smoke:live-background`: PASS.
+  Both outputs show the poster, with motion 0.02–0.42 (live: 0.49–29).
+
+Owed after this PR: the Windows CI run of the S3 tests, a quiet-host p95
+run, and the owner's by-eye check on a real stream.
