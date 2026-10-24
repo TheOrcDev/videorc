@@ -1,5 +1,26 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
+  owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
+  Wave, Liquid Chrome, Line Waves) behind the screen and camera, free, on
+  macOS, Windows and Linux in one plan, with no cost to anyone who doesn't
+  turn one on. A live background is a bundled poster picture with a shader
+  attached. The GLSL from React Bits is the source of truth. Metal and D3D11
+  run hand ports, checked against golden grids. Linux runs the GLSL through
+  EGL/GLES on a latest-wins readback thread, under `linux_vaapi.rs`'s
+  render-node rules, because a CPU renderer measured far too slow. The two
+  Electron previews run it in WebGL2. A budget guard drops to half size,
+  then to the poster. Measured on an M4: 0.3–1.7 ms GPU per 1080p frame (a
+  still is 0.05–0.08 ms), 0–1 MB extra for four of the five, about 13 MB for
+  Plasma Wave. S1 is a hard cost gate on all three machines before any
+  product code. S9 proves zero cost when off with an A/B against
+  `origin/main`. Licence: the creator gave permission. D2–D6 answered.
+  **DRAFT PR #779** 2026-10-24: every slice built (S4 Windows and S5 Linux
+  on Opus, never run on their platforms; CI is their first compile). The
+  gates found and fixed a contract bug that retired main's present pump
+  whenever a live background showed. Owed: a quiet-host smoke run, the
+  Windows and ogre checks, S1 cost on both, owner by-eye in both themes.
+
 - 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
   owner asked for an inspection of leaks and waste that changes no feature,
   and then for one PR per confirmed problem. Seven read-only subsystem audits,

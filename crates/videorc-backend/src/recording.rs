@@ -4878,6 +4878,23 @@ async fn start_session_with_timeline(
             );
         }
     }
+    // Plan 190 D7: the legacy graph (4K60, bridge off) is static, so a live
+    // background records as its poster. Say so once, at start.
+    if !use_encoder_bridge
+        && params
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.background.as_ref())
+            .is_some_and(|background| background.live.is_some())
+    {
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "live-background-still",
+            crate::live_background::runtime::LEGACY_GRAPH_NOTICE,
+        );
+    }
     #[cfg(target_os = "windows")]
     let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
         && use_encoder_bridge
@@ -38230,6 +38247,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         params.scene = Some(scene);
 
@@ -38341,6 +38359,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: visibility,
+            live: None,
         };
         let filter_at = |visibility: f64| {
             let mut scene = base_scene.clone();

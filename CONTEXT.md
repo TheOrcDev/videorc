@@ -121,6 +121,20 @@ stays over a takeover and under captions, Buddy and the highlight card.
 _Avoid_: overlay (in copy), image source, sticker, sponsor (as the feature's
 name)
 
+**Live background**:
+An animated background behind the screen and camera: Silk, Side Rays, Plasma
+Wave, Liquid Chrome or Line Waves, from React Bits (plan 190). Assets →
+Backgrounds → Live puts one on the scene, and a click on its tile takes it
+off. A scene has one background, live or an image. Where it can't move, it
+shows a still frame of its look, and its Adjust style says why.
+_Avoid_: animated background, shader, video background, motion background
+
+**Look**:
+One of a live background's three curated color sets ("Silk · Satin"), chosen
+in its Adjust style. Each live background remembers its own look, Motion
+(Calm or Normal), Visibility and Dim.
+_Avoid_: preset (a preset is quality only), theme, variant, style
+
 **Sound**:
 A short audio file (up to 30 seconds) the streamer plays into the recording
 and every stream from the Soundboard: an airhorn, applause, a laugh.

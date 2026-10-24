@@ -204,6 +204,14 @@ import {
   previewSurfaceCanvasFromOutputs,
   withPreviewSurfaceBanners
 } from './preview-surface-banners'
+import {
+  PREVIEW_SURFACE_LIVE_BACKGROUND_RUNTIME_SCRIPT,
+  previewSurfaceBackgroundLayer,
+  previewSurfaceLiveBackgroundLibraryScript,
+  previewSurfaceLiveBackgroundLogLine,
+  previewSurfaceLiveBackgroundStatusFromConsoleLine
+} from './preview-surface-live-background'
+import { livePosterManifest } from '../shared/live-background-catalog'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
 import { SOUND_ASSET_HOST, SOUNDS_FOLDER, isSoundFileName } from '../shared/sound-assets'
 import type {
@@ -4965,25 +4973,12 @@ function previewLayerUsesBackgroundStage(sourceKind: PreviewSurfaceSceneLayerKin
   return ['screen', 'window', 'screen-image', 'test-pattern'].includes(sourceKind)
 }
 
+// The poster <img> for every background; plus the live spec for a live one
+// (plan 190 S6), which the surface animates in a canvas it creates only then.
 function previewBackgroundLayer(
   scene: PreviewSurfaceSceneUpdateParams['scene']
 ): PreviewSurfaceSceneLayer | null {
-  const background = scene?.background
-  const managedAssetPath = background?.managedAssetPath?.trim()
-  if (!background || !managedAssetPath) {
-    return null
-  }
-
-  return {
-    id: `background:${background.assetId}`,
-    name: 'Scene background',
-    kind: 'background',
-    transform: fullFrameTransform(),
-    visible: true,
-    imageUrl: fileUrlFromPath(managedAssetPath),
-    fit: background.fit === 'fit' ? 'contain' : background.fit === 'stretch' ? 'fill' : 'cover',
-    mirror: false
-  }
+  return previewSurfaceBackgroundLayer(scene?.background, fileUrlFromPath)
 }
 
 function existingPreviewBackgroundLayer(): PreviewSurfaceSceneLayer | null {
@@ -5333,6 +5328,21 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         opacity: 1;
       }
 
+      /* A live background (plan 190) draws over its poster img, and shows
+         only once its first frame is on the canvas. */
+      .scene-layer > canvas.live-background {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        opacity: 0;
+      }
+
+      .scene-layer > canvas.live-background[data-drawn="1"] {
+        opacity: 1;
+      }
+
       #readout {
         position: fixed;
         right: 12px;
@@ -5355,6 +5365,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
   <body${nativePreviewProofReadoutVisible() ? ' class="proof-readout"' : ''}>
     <div id="scene-root"></div>
     <div id="readout">proof scene surface</div>
+    <script nonce="${scriptNonce}">${previewSurfaceLiveBackgroundLibraryScript()}</script>
     <script nonce="${scriptNonce}">
       (() => {
         const root = document.getElementById('scene-root');
@@ -5473,6 +5484,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
 
         ${NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT}
         ${NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT}
+        ${PREVIEW_SURFACE_LIVE_BACKGROUND_RUNTIME_SCRIPT}
 
         function updateProofReadout() {
           // Source polls and compositor presents advance independently. Derive
@@ -5736,6 +5748,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             return;
           }
 
+          if (layer.kind === 'background') {
+            syncLiveBackgroundLayer(id, entry, layer.live, liveBackgroundNow());
+          }
+
           if (layer.imageUrl) {
             stopLayerPoller(id);
             if (image.src !== layer.imageUrl) {
@@ -5771,6 +5787,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           stopMissingPollers(activeIds);
           for (const [id, entry] of layers) {
             if (!activeIds.has(id)) {
+              teardownLiveBackground(id);
               entry.element.remove();
               layers.delete(id);
             }
@@ -5852,6 +5869,9 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             return;
           }
           proofSurfaceSuspended = next;
+          // A live background's clock holds while suspended, so it resumes
+          // on the frame it stopped on.
+          setLiveBackgroundsSuspended(proofSurfaceSuspended, liveBackgroundNow());
           if (proofSurfaceSuspended) {
             if (animationFrameId !== null) {
               cancelAnimationFrame(animationFrameId);
@@ -5887,6 +5907,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           frames += 1;
           recordNativePreviewProofMeasurementFrame(proofMeasurementEpoch, now);
           presentLatestCompositorStatus(now);
+          // One Map size check per frame while no live background shows.
+          drawLiveBackgrounds(now, framePollingMaxWidth);
           if (!compositorStatus) {
             const x = (now * 0.045) % Math.max(1, window.innerWidth + 140);
             document.body.style.setProperty('--dot-x', String((x / Math.max(1, window.innerWidth)) * 100) + '%');
@@ -5979,6 +6001,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               proofSourceDimensions: transportTotals.sourceDimensions,
               proofSurfaceSuspended,
               sourcePixelsPresent: liveLayerCount > 0,
+              liveBackground: liveBackgroundMetrics(),
               blankFrames: measurement.blankFrames,
               width: window.innerWidth,
               height: window.innerHeight
@@ -6107,6 +6130,14 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
         nativePreviewProofAnimationSuspended = null
         nativePreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
       }
+    })
+    // Plan 190: the surface has no IPC; it reports its live background (moving,
+    // or the poster and why) as one prefixed console line per change.
+    surfaceWindow.webContents.on('console-message', (details) => {
+      if (nativePreviewSurfaceWindow !== surfaceWindow) {
+        return
+      }
+      observeProofSurfaceLiveBackgroundLine(details.message)
     })
 
     try {
@@ -6620,6 +6651,30 @@ async function updateNativePreviewSurfaceScene(
     () => applyNativePreviewSurfaceScene(params, generation),
     'update-scene'
   )
+}
+
+// Plan 190 S6: the proof surface prints `[live-background] {...}` whenever its
+// live background starts, moves, or falls back to the poster (and `null` when
+// the scene drops it). The status carries it; a fallback is logged, never
+// silent (AGENTS.md: explicit diagnostics over silent fallbacks).
+function observeProofSurfaceLiveBackgroundLine(line: string): void {
+  const parsed = previewSurfaceLiveBackgroundStatusFromConsoleLine(line)
+  if (!parsed) {
+    return
+  }
+  const next = parsed.status
+  const previous = nativePreviewSurfaceStatus.liveBackground
+  if (JSON.stringify(next ?? null) === JSON.stringify(previous ?? null)) {
+    return
+  }
+  nativePreviewSurfaceStatus = {
+    ...nativePreviewSurfaceStatus,
+    liveBackground: next
+  }
+  const log = previewSurfaceLiveBackgroundLogLine(next)
+  if (log) {
+    logBackend(log.level, log.message)
+  }
 }
 
 async function applyNativePreviewSurfaceScene(
@@ -10571,7 +10626,9 @@ async function runSmokePreviewMotionCommand(
           screenWidth: screen?.style.width ?? null,
           screenHeight: screen?.style.height ?? null,
           screenZIndex: screen?.style.zIndex ?? null,
-          layerCount: document.querySelectorAll('.scene-layer').length
+          layerCount: document.querySelectorAll('.scene-layer').length,
+          // Plan 190 zero cost: a picture background creates no canvas.
+          canvasCount: document.querySelectorAll('canvas').length
         };
       })()`,
       true
@@ -10579,6 +10636,35 @@ async function runSmokePreviewMotionCommand(
     return {
       ...result,
       status
+    }
+  }
+
+  if (command === 'inspect-native-preview-live-background') {
+    // Plan 190 S6: what the proof surface does about the scene's background.
+    // A picture must leave no canvas; a live background has one canvas while
+    // it moves and none while it shows its poster (with the reason).
+    const surface = nativePreviewSurfaceWindow
+    if (!surface || surface.isDestroyed() || surface.webContents.isDestroyed()) {
+      return {
+        surfaceExists: false,
+        canvasCount: null,
+        bodyLiveBackground: null,
+        surfaceLiveBackground: null,
+        liveBackground: nativePreviewSurfaceStatus.liveBackground ?? null
+      }
+    }
+    const inspected = await surface.webContents.executeJavaScript(
+      `(() => ({
+        canvasCount: document.querySelectorAll('canvas').length,
+        bodyLiveBackground: document.body.dataset.liveBackground ?? null,
+        surfaceLiveBackground: window.__videorcNativePreviewMetrics?.()?.liveBackground ?? null
+      }))()`,
+      true
+    )
+    return {
+      surfaceExists: true,
+      ...inspected,
+      liveBackground: nativePreviewSurfaceStatus.liveBackground ?? null
     }
   }
 
@@ -11018,7 +11104,8 @@ async function runSmokePreviewMotionCommand(
         nativePreviewDrawableWidth: nativePreviewSurfaceStatus.nativePreviewDrawableWidth,
         nativePreviewDrawableHeight: nativePreviewSurfaceStatus.nativePreviewDrawableHeight,
         nativePreviewContentsScale: nativePreviewSurfaceStatus.nativePreviewContentsScale,
-        windowsD3d11Presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter
+        windowsD3d11Presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter,
+        liveBackground: nativePreviewSurfaceStatus.liveBackground
       }
     }
   }
@@ -14753,6 +14840,28 @@ function bundledBackgroundAssetsInternal(): BackgroundImportResult[] {
   }).filter((asset) => existsSync(asset.assetPath))
 }
 
+/**
+ * Plan 190: every live background look's bundled poster. Registered with the
+ * backend like the bundled pictures, so a scene naming a live background
+ * resolves on every path, and a path that can't animate draws the poster.
+ * Registration is a path check; no poster is read or decoded until shown.
+ */
+function livePosterAssetsInternal(): BackgroundImportResult[] {
+  const directory = bundledBackgroundDirectory()
+  return livePosterManifest()
+    .map((asset) => {
+      const assetPath = join(directory, asset.fileName)
+      return {
+        id: asset.id,
+        name: asset.name,
+        assetPath,
+        thumbnailPath: assetPath,
+        fileName: asset.fileName
+      }
+    })
+    .filter((asset) => existsSync(asset.assetPath))
+}
+
 async function bundledBackgroundAssets(): Promise<BackgroundImportResult[]> {
   const assets = bundledBackgroundAssetsInternal()
   await Promise.all(
@@ -14795,7 +14904,9 @@ function importedBackgroundPathForAssetId(assetId: string): string | null {
 }
 
 async function ensureManagedBackgroundRegistered(assetId: string): Promise<boolean> {
-  const bundled = bundledBackgroundAssetsInternal().find((asset) => asset.id === assetId)
+  const bundled =
+    bundledBackgroundAssetsInternal().find((asset) => asset.id === assetId) ??
+    livePosterAssetsInternal().find((asset) => asset.id === assetId)
   const path = bundled?.assetPath ?? importedBackgroundPathForAssetId(assetId)
   if (!path) {
     return false
@@ -14805,7 +14916,9 @@ async function ensureManagedBackgroundRegistered(assetId: string): Promise<boole
 }
 
 async function rehydrateManagedBackgroundAssets(): Promise<void> {
-  const ids = new Set(bundledBackgroundAssetsInternal().map((asset) => asset.id))
+  const ids = new Set(
+    [...bundledBackgroundAssetsInternal(), ...livePosterAssetsInternal()].map((asset) => asset.id)
+  )
   const root = join(app.getPath('userData'), 'background-assets')
   try {
     for (const entry of readdirSync(root)) {

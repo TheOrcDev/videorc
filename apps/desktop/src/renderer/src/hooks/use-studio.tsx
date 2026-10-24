@@ -548,7 +548,15 @@ import {
 } from '@/lib/session-start-failure'
 import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
-import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
+import {
+  applyLiveBackground as applyLiveBackgroundToRegistry,
+  effectiveSceneBackground,
+  nextLiveBackgroundStatusView,
+  registryForCommittedLiveBackground,
+  removeSlotAsset,
+  type LiveBackgroundStatusView
+} from '@/lib/background-assets'
+import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
 import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
@@ -1380,6 +1388,13 @@ export type StudioContextValue = {
   applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
   applyBackgroundSlot: (slotId: string | null) => void
   applyWorkingBackgroundStyle: (patch: Partial<Scene['background']>) => void
+  /** Plan 190: put a live background on the scene; null takes it off. */
+  applyLiveBackground: (id: LiveBackgroundId | null) => void
+  /**
+   * Plan 190: how the applied live background is drawn (null with none), for
+   * Assets' still-frame reason. It changes only when that summary does.
+   */
+  liveBackgroundStatus: LiveBackgroundStatusView | null
   /**
    * Change the vertical simulcast leg (scene, screen framing, follow). Saved
    * for the next session and, in a running dual-orientation session, applied
@@ -4302,6 +4317,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       : effectiveSceneBackground(backgroundRegistry)
   })
   const workingBackgroundRef = useRef(workingBackground)
+  // Plan 190: how the applied live background is drawn, from compositor status.
+  const [liveBackgroundStatus, setLiveBackgroundStatus] = useState<LiveBackgroundStatusView | null>(
+    null
+  )
   const confirmedVisualRef = useRef<SceneVisual>(
     normalizeSceneVisual({
       layout: captureConfig.layout,
@@ -7539,6 +7558,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
         const status = payload as CompositorStatus
+        setLiveBackgroundStatus((current) =>
+          nextLiveBackgroundStatusView(current, status.liveBackground)
+        )
         // Backend-authored commits (live source switches) arrive only as this
         // event; advance committed truth so a later resync never re-presents
         // an older revision. Layout transactions record their own proven commit.
@@ -9203,18 +9225,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       workingBackgroundRef.current = background
       setWorkingBackground(background)
       const registry = backgroundRegistryRef.current
-      const activeSlotId = background
-        ? (registry.slots.find(
-            (slot) =>
-              slot.assetId === background.assetId &&
-              slot.status === 'ready' &&
-              JSON.stringify(
-                snapshotBackground(effectiveSceneBackground({ ...registry, activeSlotId: slot.id }))
-              ) === JSON.stringify(snapshotBackground(background))
-          )?.id ?? null)
-        : null
-      if (registry.activeSlotId !== activeSlotId) {
-        const nextRegistry = { ...registry, activeSlotId }
+      const activeSlotId =
+        background && !background.live
+          ? (registry.slots.find(
+              (slot) =>
+                slot.assetId === background.assetId &&
+                slot.status === 'ready' &&
+                JSON.stringify(
+                  snapshotBackground(
+                    effectiveSceneBackground({ ...registry, activeSlotId: slot.id })
+                  )
+                ) === JSON.stringify(snapshotBackground(background))
+            )?.id ?? null)
+          : null
+      // Plan 190: a committed live background is the registry's truth; a
+      // picture or none takes the live one off.
+      const nextRegistry = background?.live
+        ? registryForCommittedLiveBackground(registry, background)
+        : registry.activeSlotId === activeSlotId && !registry.live.activeId
+          ? registry
+          : { ...registry, activeSlotId, live: { ...registry.live, activeId: null } }
+      if (nextRegistry !== registry) {
         libraryBackgroundFingerprintRef.current = JSON.stringify(
           snapshotBackground(effectiveSceneBackground(nextRegistry))
         )
@@ -9906,6 +9937,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const registry = backgroundRegistryRef.current
       const background = slotId
         ? effectiveSceneBackground({ ...registry, activeSlotId: slotId })
+        : null
+      void requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        backgroundOverride: background
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
+  // Plan 190: put a live background on the scene (null takes it off). Its
+  // look, motion and style come from the registry; changing them edits the
+  // registry, and the library sync below applies the edit.
+  const applyLiveBackground = useCallback(
+    (id: LiveBackgroundId | null): void => {
+      const registry = backgroundRegistryRef.current
+      const background = id
+        ? effectiveSceneBackground(applyLiveBackgroundToRegistry(registry, id))
         : null
       void requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false,
@@ -16984,6 +17032,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
+      liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
@@ -17217,6 +17267,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
+      liveBackgroundStatus,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,

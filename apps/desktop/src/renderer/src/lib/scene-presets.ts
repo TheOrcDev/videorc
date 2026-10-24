@@ -14,6 +14,7 @@ import {
 } from './capture'
 import { BUILTIN_LAYOUTS } from './layout-framing-memory'
 import { BUNDLED_BACKGROUND_MANIFEST } from '../../../shared/background-import'
+import { parseLivePosterAssetId } from '../../../shared/live-background-ids'
 
 export const SCENE_LIBRARY_KEY = 'videorc.scene-presets.v1'
 export const WORKING_SCENE_KEY = 'videorc.working-scene.v1'
@@ -74,7 +75,9 @@ export function snapshotBackground(
 ): SavedSceneBackground | null {
   if (!background) return null
   const { managedAssetPath, ...style } = background
-  const bundled = BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === style.assetId)
+  const bundled =
+    BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === style.assetId) ||
+    parseLivePosterAssetId(style.assetId) !== null
   return {
     ...style,
     ...(!bundled
@@ -88,7 +91,10 @@ export function normalizeSavedBackground(raw: unknown): SavedSceneBackground | n
   const data = raw as SavedSceneBackground
   if (typeof data.assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(data.assetId))
     throw new Error('Invalid background identity')
-  const builtin = BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === data.assetId)
+  // Plan 190: a live background's poster is bundled; its shader rides along.
+  const livePoster = parseLivePosterAssetId(data.assetId)
+  const builtin =
+    BUNDLED_BACKGROUND_MANIFEST.some((entry) => entry.id === data.assetId) || livePoster !== null
   if (
     !builtin &&
     (typeof data.fileName !== 'string' ||
@@ -110,7 +116,11 @@ export function normalizeSavedBackground(raw: unknown): SavedSceneBackground | n
     dimPercent: clamp(data.dimPercent, 0, 0, 80),
     saturationPercent: clamp(data.saturationPercent, 100, 0, 150),
     vignettePercent: clamp(data.vignettePercent, 0, 0, 100),
-    visibilityPercent: clamp(data.visibilityPercent, 20, 0, 40)
+    visibilityPercent: clamp(data.visibilityPercent, 20, 0, 40),
+    // The poster names the background and look; a stored spec adds the motion.
+    ...(livePoster && {
+      live: { ...livePoster, motion: data.live?.motion === 'normal' ? 'normal' : 'calm' }
+    })
   }
 }
 export function resolveSavedBackground(
@@ -118,8 +128,10 @@ export function resolveSavedBackground(
 ): EffectiveSceneBackground | null {
   if (!background) return null
   const { fileName, ...style } = normalizeSavedBackground(background)!
+  const livePoster = parseLivePosterAssetId(style.assetId)
   const name =
-    BUNDLED_BACKGROUND_MANIFEST.find((entry) => entry.id === style.assetId)?.fileName ?? fileName!
+    BUNDLED_BACKGROUND_MANIFEST.find((entry) => entry.id === style.assetId)?.fileName ??
+    (livePoster ? `${style.assetId}.webp` : fileName!)
   // The existing managed-asset protocol and backend capability registry resolve
   // this filename inside app-owned roots. Persisted arbitrary paths never survive.
   return { ...style, managedAssetPath: `videorc-asset://background/${encodeURIComponent(name)}` }

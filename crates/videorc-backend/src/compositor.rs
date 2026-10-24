@@ -469,6 +469,12 @@ pub struct CompositorRuntime {
     /// The auxiliary output of the current run, so a banner set change can
     /// kick prepares for its canvas too.
     stream_output: Option<CompositorAuxiliaryOutput>,
+    /// Plan 190: the live background's phase clock, synced to the scene's
+    /// `background.live` once per tick. `None` while no live background
+    /// shows, and then nothing below runs.
+    live_background: Option<crate::live_background::LiveBackgroundRuntime>,
+    /// Plan 190: where the live background renderers report how they draw.
+    live_background_board: Arc<crate::live_background::LiveBackgroundBoard>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,6 +723,83 @@ impl CompositorRuntime {
             }
         }
         requests
+    }
+
+    /// Plan 190: follow the scene's live background (start, re-base, stop).
+    /// While none shows this is one `Option` check per tick, and the board is
+    /// left empty so status says nothing.
+    fn sync_live_background(&mut self, now: Instant) {
+        let spec = self
+            .scene
+            .as_ref()
+            .and_then(|snapshot| snapshot.scene.as_ref())
+            .and_then(|scene| scene.background.as_ref())
+            .and_then(|background| background.live.as_ref());
+        if spec.is_none() && self.live_background.is_none() {
+            return;
+        }
+        crate::live_background::runtime::sync(&mut self.live_background, spec, now);
+        if self.live_background.is_none() {
+            self.live_background_board.clear();
+        }
+    }
+
+    /// Publish how the live background draws and what it holds (0 while
+    /// off) from the board into the status. True when the guard has just
+    /// fallen back to the poster (say it once).
+    fn publish_live_background_status(&mut self) -> bool {
+        let (live_status, live_programs, live_scratch) = self.live_background_board.snapshot();
+        let live_status = self.live_background.as_ref().and(live_status);
+        let budget_notice = crate::live_background::runtime::entered_gpu_budget_still(
+            self.status.live_background.as_ref(),
+            live_status.as_ref(),
+        );
+        self.status.live_background = live_status;
+        self.status.frame_pipeline.live_background_programs = live_programs;
+        self.status.frame_pipeline.live_background_scratch_bytes = live_scratch;
+        budget_notice
+    }
+
+    /// Plan 190 S4: the D3D11 media session's live background. The preview
+    /// compositor is suspended while the session runs, so its pump follows
+    /// the scene and publishes the renderer's board itself, once per tick it
+    /// gets the lock. Returns this tick's frame input (the session stamps the
+    /// tick) and whether to say the guard fell back to the poster.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_live_background(
+        &mut self,
+        now: Instant,
+    ) -> (
+        Option<crate::live_background::LiveBackgroundFrameInput>,
+        bool,
+    ) {
+        self.sync_live_background(now);
+        let Some(runtime) = self.live_background.as_ref() else {
+            // Off: publish until the media thread's release has reached the
+            // status; after that this is three compares per tick.
+            let pipeline = &self.status.frame_pipeline;
+            if self.status.live_background.is_some()
+                || pipeline.live_background_programs != 0
+                || pipeline.live_background_scratch_bytes != 0
+            {
+                self.publish_live_background_status();
+            }
+            return (None, false);
+        };
+        let input = self
+            .scene
+            .as_ref()
+            .and_then(|snapshot| snapshot.scene.as_ref())
+            .and_then(|scene| scene.background.as_ref())
+            .map(|background| {
+                runtime.frame_input(
+                    background,
+                    &self.live_background_board,
+                    crate::live_background::LiveBackgroundTick::unmeasured(now),
+                )
+            });
+        let budget_notice = self.publish_live_background_status();
+        (input, budget_notice)
     }
 
     /// Drop the layers whose fade-out ended (D10). Runs every render tick
@@ -1023,6 +1106,9 @@ struct CompositorRenderCache {
     /// S3): one `Arc` clone per tick, read by both legs.
     banners: Arc<BannerSet>,
     banner_session_shape: Option<OverlaySessionShape>,
+    /// Plan 190: the live background the primary leg draws this tick, if any
+    /// (it carries the board the leg's renderer reports to).
+    live_background: Option<crate::live_background::LiveBackgroundFrameInput>,
 }
 
 impl CompositorRenderCache {
@@ -1048,7 +1134,8 @@ impl CompositorRenderCache {
     }
 
     async fn refresh_initial(state: &AppState) -> Self {
-        let compositor = state.compositor.lock().await;
+        let mut compositor = state.compositor.lock().await;
+        compositor.sync_live_background(Instant::now());
         Self::from_runtime(&compositor)
     }
 
@@ -1057,6 +1144,7 @@ impl CompositorRenderCache {
             let now = Instant::now();
             compositor.reap_editor_draft(now);
             compositor.reap_faded_banners(now);
+            compositor.sync_live_background(now);
             *self = Self::from_runtime(&compositor);
         }
     }
@@ -1100,6 +1188,20 @@ impl CompositorRenderCache {
             background_image_source,
             banners: Arc::clone(&compositor.banners),
             banner_session_shape: compositor.banner_session_shape,
+            live_background: compositor.live_background.as_ref().and_then(|runtime| {
+                compositor
+                    .scene
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.scene.as_ref())
+                    .and_then(|scene| scene.background.as_ref())
+                    .map(|background| {
+                        runtime.frame_input(
+                            background,
+                            &compositor.live_background_board,
+                            crate::live_background::LiveBackgroundTick::unmeasured(Instant::now()),
+                        )
+                    })
+            }),
         }
     }
 }
@@ -2483,6 +2585,7 @@ mod editor_draft_tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -2591,6 +2694,17 @@ pub(crate) struct WindowsSceneImage {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) revision: u64,
+}
+#[cfg(target_os = "windows")]
+impl std::fmt::Debug for WindowsSceneImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindowsSceneImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
 }
 #[cfg(target_os = "windows")]
 impl CompositorImageSource {
@@ -2862,6 +2976,8 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         banners: Arc::new(BannerSet::default()),
         banner_session_shape: None,
         stream_output: None,
+        live_background: None,
+        live_background_board: Arc::default(),
     }
 }
 
@@ -2940,6 +3056,7 @@ async fn start_synthetic_compositor_with_lifecycle(
             ..CompositorFramePipelineStatus::default()
         },
         editor_draft: None,
+        live_background: None,
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Synthetic compositor running.".to_string()),
     };
@@ -5369,6 +5486,9 @@ async fn run_synthetic_compositor_loop(
     // recording leg so a 1:1 screen stays pixel-exact.
     let mut iso_screen_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
     let mut iso_camera_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
+    // Plan 190: the primary leg's live background renderer, `None` until a
+    // live background shows (nothing is allocated before that).
+    let mut live_background_renderer: Option<Box<LiveBackgroundGpuRenderer>> = None;
     // Rate-collapse watchdog for the always-on pipeline: the 2026-08-27
     // incident (33 idle minutes of silent decay to ~6 fresh fps) is exactly
     // the state every liveness-only watchdog ignores.
@@ -5409,6 +5529,7 @@ async fn run_synthetic_compositor_loop(
     let mut dropped_frames = 0_u64;
     let mut window_started_at = Instant::now();
     let mut previous_tick_at: Option<Instant> = None;
+    let mut last_render_ms: Option<f64> = None;
     let mut previous_fingerprint: Option<SourceFrameFingerprint> = None;
     let mut frame_times_ms = Vec::with_capacity(128);
     let mut source_fetch_times_ms = Vec::with_capacity(128);
@@ -5554,6 +5675,13 @@ async fn run_synthetic_compositor_loop(
 
                 let render_started_at = Instant::now();
                 frames_rendered = frames_rendered.saturating_add(1);
+                // Plan 190: the tick missed its deadline when the ticker
+                // skipped an interval (a dropped frame above) or the previous
+                // publish ran past the interval. The live background guard
+                // reads this beside its own GPU time.
+                let missed_deadline = skipped_intervals > 0
+                    || last_render_ms
+                        .is_some_and(|ms| ms > frame_interval.as_secs_f64() * 1000.0);
                 // Preview bounds can change without restarting the compositor
                 // (including portrait <-> landscape). Re-read every tick so
                 // the next published frame and Metal target adopt the new
@@ -5582,6 +5710,14 @@ async fn run_synthetic_compositor_loop(
                         highlight_overlay_on_aux,
                         buddy_overlay_on_primary,
                         buddy_overlay_on_aux,
+                        LiveBackgroundLeg {
+                            tick: crate::live_background::LiveBackgroundTick::new(
+                                ticked_at,
+                                frame_interval,
+                                missed_deadline,
+                            ),
+                            renderer: &mut live_background_renderer,
+                        },
                     )
                         .await;
                 // Adoption at the publish boundary uses the same recovery/
@@ -5639,7 +5775,9 @@ async fn run_synthetic_compositor_loop(
                     repeated_frames = repeated_frames.saturating_add(1);
                 }
                 previous_fingerprint = Some(fingerprint);
-                frame_times_ms.push(render_started_at.elapsed().as_secs_f64() * 1000.0);
+                let render_ms = render_started_at.elapsed().as_secs_f64() * 1000.0;
+                last_render_ms = Some(render_ms);
+                frame_times_ms.push(render_ms);
                 source_fetch_times_ms.push(published.timings.source_fetch_ms);
                 scene_snapshot_times_ms.push(published.timings.scene_snapshot_ms);
                 camera_frame_fetch_times_ms.push(published.timings.camera_frame_fetch_ms);
@@ -6218,6 +6356,137 @@ use crate::metal_compositor::MetalSceneCompositor as GpuCompositor;
 #[cfg(not(target_os = "macos"))]
 enum GpuCompositor {}
 
+/// Plan 190: the primary leg's live background renderer. Owned by the run
+/// beside its GPU compositor, made the first tick a live background shows,
+/// and holding nothing while none does.
+#[cfg(target_os = "macos")]
+type LiveBackgroundGpuRenderer = crate::live_background::metal::LiveBackgroundMetalRenderer;
+/// Linux (plan 190 S5): the GLES renderer behind the CPU compositor.
+#[cfg(target_os = "linux")]
+type LiveBackgroundGpuRenderer = crate::live_background::gl::LiveBackgroundGlRenderer;
+/// Uninhabited stand-in elsewhere (the slot is always `None`): Windows draws
+/// live backgrounds in its D3D11 media session.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+enum LiveBackgroundGpuRenderer {}
+
+/// Plan 190: what a tick hands the primary leg for its live background: the
+/// loop's tick (instant, frame interval, deadline verdict for the guard) and
+/// the run's renderer slot.
+struct LiveBackgroundLeg<'a> {
+    tick: crate::live_background::LiveBackgroundTick,
+    renderer: &'a mut Option<Box<LiveBackgroundGpuRenderer>>,
+}
+
+impl<'a> LiveBackgroundLeg<'a> {
+    /// A tick nobody measured, for tests of the publish path.
+    #[cfg(test)]
+    fn unmeasured(renderer: &'a mut Option<Box<LiveBackgroundGpuRenderer>>) -> Self {
+        Self {
+            tick: crate::live_background::LiveBackgroundTick::unmeasured(Instant::now()),
+            renderer,
+        }
+    }
+}
+
+/// Plan 190: render this tick's live frame on the primary leg's device and
+/// queue, making the renderer on first use. `None` means the poster draws
+/// (the renderer reported why on the board).
+#[cfg(target_os = "macos")]
+fn render_live_background(
+    gpu: &GpuCompositor,
+    slot: &mut Option<Box<LiveBackgroundGpuRenderer>>,
+    input: &crate::live_background::LiveBackgroundFrameInput,
+    output: (u32, u32),
+) -> Option<crate::live_background::metal::LiveFrame> {
+    if slot.is_none() {
+        let renderer = LiveBackgroundGpuRenderer::new(
+            gpu.device().clone(),
+            gpu.queue().clone(),
+            Arc::clone(&input.board),
+        )?;
+        *slot = Some(Box::new(renderer));
+    }
+    slot.as_mut()?.render(
+        input,
+        output,
+        crate::live_background::preflight_still_reason(),
+    )
+}
+
+/// Plan 190 S5: the CPU path's live background. On Linux, the GLES
+/// renderer's newest finished frame, wrapped as the image source the
+/// background resample draws (the poster until the first frame lands); on the
+/// macOS and Windows CPU fallbacks, the poster, with `cpu-fallback` said once.
+fn cpu_live_background_source(
+    slot: &mut Option<Box<LiveBackgroundGpuRenderer>>,
+    input: Option<&crate::live_background::LiveBackgroundFrameInput>,
+    output: (u32, u32),
+) -> Option<CompositorImageSource> {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(input) = input else {
+            release_cpu_live_background(slot);
+            return None;
+        };
+        let renderer = slot.get_or_insert_with(|| {
+            Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(&input.board)))
+        });
+        let frame = renderer.render(
+            input,
+            output,
+            crate::live_background::preflight_still_reason(),
+        )?;
+        Some(live_frame_image_source(&frame))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = output;
+        let input = input?;
+        // The GPU renderer (macOS) reports again when its compose recovers.
+        #[cfg(target_os = "macos")]
+        if let Some(renderer) = slot.as_mut() {
+            renderer.forget_reported_status();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = slot;
+        input.board.report_if_changed(input.status(
+            crate::protocol::LiveBackgroundRendering::Still,
+            Some(crate::protocol::LiveBackgroundStillReason::CpuFallback),
+            None,
+        ));
+        None
+    }
+}
+
+/// Plan 190 S5: stop the Linux live background thread when composition stops
+/// (the idle preview composes no pixels) or the live background leaves.
+fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
+    #[cfg(target_os = "linux")]
+    if let Some(renderer) = slot.as_mut()
+        && renderer.holds_resources()
+    {
+        renderer.release();
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = slot;
+}
+
+/// A CPU live frame as the background image source the resample reads.
+#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+fn live_frame_image_source(frame: &crate::live_background::CpuLiveFrame) -> CompositorImageSource {
+    CompositorImageSource {
+        image_path: "live-background".to_string(),
+        file_revision: None,
+        width: Some(frame.width),
+        height: Some(frame.height),
+        rgba: None,
+        bgra: Some(Arc::clone(&frame.bgra)),
+        content_revision: frame.sequence,
+        state: "ready".to_string(),
+        message: None,
+    }
+}
+
 struct GpuCompositorFrame {
     yuv: Vec<u8>,
     pixel_format: CompositorPixelFormat,
@@ -6281,6 +6550,9 @@ impl CompositorPublishTimings {
 enum PreparedGpuSourcePixels<'a> {
     Borrowed(&'a [u8]),
     Owned(Vec<u8>),
+    /// Plan 190: a texture the leg's device already rendered (the live
+    /// background frame), drawn without an upload.
+    Texture(objc2::rc::Retained<crate::metal_compositor::MetalTexture>),
 }
 
 #[cfg(target_os = "macos")]
@@ -6294,6 +6566,7 @@ impl<'a> PreparedGpuSourcePixels<'a> {
         match self {
             Self::Borrowed(bytes) => bytes,
             Self::Owned(bytes) => bytes,
+            Self::Texture(_) => &[],
         }
     }
 }
@@ -6370,6 +6643,10 @@ impl<'a> PreparedGpuSource<'a> {
             corners: self.corners,
             sampler: self.sampler,
             opacity: self.opacity,
+            texture: match &self.pixels {
+                PreparedGpuSourcePixels::Texture(texture) => Some(&**texture),
+                _ => None,
+            },
         }
     }
 }
@@ -6857,7 +7134,7 @@ fn try_gpu_compose(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
 ) -> Result<GpuCompositorFrame, GpuComposeFailure> {
-    try_gpu_compose_with_chrome(gpu, inputs, publish_yuv_frame, &[])
+    try_gpu_compose_with_chrome(gpu, inputs, publish_yuv_frame, &[], &mut None)
 }
 
 /// Editor chrome content namespace (images use 1, captions 2, highlight 3,
@@ -6951,6 +7228,7 @@ fn try_gpu_compose_with_chrome(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
     editor_chrome: &[ChromeQuad],
+    live_renderer: &mut Option<Box<LiveBackgroundGpuRenderer>>,
 ) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     let gpu = gpu.ok_or_else(|| {
         if metal_compositor_enabled() {
@@ -6971,9 +7249,65 @@ fn try_gpu_compose_with_chrome(
     let scene = snapshot.scene.as_ref();
     let layout = &snapshot.layout;
     let mut prepared_sources = Vec::new();
+    // Plan 190: with no live background this tick, the renderer holds
+    // nothing (one `Option` check; it frees its textures when one goes away).
+    if inputs.live_background.is_none()
+        && let Some(renderer) = live_renderer.as_mut()
+        && renderer.holds_resources()
+    {
+        renderer.release();
+    }
     let background_active = if let Some(scene) = scene {
         if let Some(background) = scene.background.as_ref() {
-            if let Some((bgra, (image_width, image_height), content_revision)) =
+            // Plan 190: a live background renders its own frame first (its
+            // own command buffer on this leg's queue, at the tick's shared
+            // instant), and the compose draws that frame as the background:
+            // full canvas, fit Fill, linear sampling, so the half-size and
+            // soft-1080 internal sizes scale up smoothly. The poster stays
+            // decoded in the CPU image cache for the fallbacks and is never
+            // uploaded while the shader draws. When the renderer can't draw
+            // (forced still, a shader that failed to build, the budget
+            // guard) it reports why and the poster draws exactly as before.
+            let live_frame = inputs.live_background.and_then(|input| {
+                render_live_background(gpu, live_renderer, input, (inputs.width, inputs.height))
+            });
+            if let Some(frame) = live_frame {
+                let (dest, crop) = gpu_source_placement(
+                    frame.width,
+                    frame.height,
+                    PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: inputs.width,
+                        height: inputs.height,
+                    },
+                    false,
+                    SceneCrop::none(),
+                    (0.0, 0.0),
+                    inputs.width,
+                    inputs.height,
+                )
+                .ok_or("live background placement failed")?;
+                prepared_sources.push(PreparedGpuSource {
+                    pixels: PreparedGpuSourcePixels::Texture(frame.texture),
+                    kind: crate::metal_compositor::GpuSourceKind::Image,
+                    content_key: None,
+                    iosurface: None,
+                    pixel_buffer: None,
+                    width: frame.width as usize,
+                    height: frame.height as usize,
+                    dest,
+                    crop,
+                    mirror: false,
+                    mask: SceneMask::None,
+                    blend: false,
+                    chroma_key: None,
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Linear,
+                    opacity: 1.0,
+                });
+                true
+            } else if let Some((bgra, (image_width, image_height), content_revision)) =
                 inputs.background_image_source.and_then(|source| {
                     source
                         .bgra
@@ -8078,6 +8412,7 @@ fn try_gpu_compose_with_chrome(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
     _editor_chrome: &[ChromeQuad],
+    _live_renderer: &mut Option<Box<LiveBackgroundGpuRenderer>>,
 ) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     try_gpu_compose(gpu, inputs, publish_yuv_frame)
 }
@@ -8119,6 +8454,7 @@ async fn publish_compositor_frame(
     highlight_overlay_on_aux: bool,
     buddy_overlay_on_primary: bool,
     buddy_overlay_on_aux: bool,
+    live: LiveBackgroundLeg<'_>,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
@@ -8226,6 +8562,14 @@ async fn publish_compositor_frame(
         primary_screen_frame.map(|frame| (frame.sequence, frame.captured_at)),
     );
     let published_at = Instant::now();
+    // Plan 190: every leg of this tick reads the live background at
+    // `published_at`, with the loop's deadline verdict for the guard.
+    if let Some(input) = render_cache.live_background.as_mut() {
+        input.tick = crate::live_background::LiveBackgroundTick {
+            at: published_at,
+            ..live.tick
+        };
+    }
     let captured_at = compositor_frame_content_captured_at(
         primary_camera_frame,
         primary_screen_frame,
@@ -8324,6 +8668,7 @@ async fn publish_compositor_frame(
             ),
             buddy_leg: primary_buddy.as_ref(),
             banners: &primary_banners,
+            live_background: render_cache.live_background.as_ref(),
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         #[cfg(test)]
@@ -8333,6 +8678,7 @@ async fn publish_compositor_frame(
             &inputs,
             frame_consumer.publishes_cpu_yuv(),
             &editor_chrome,
+            &mut *live.renderer,
         );
         #[cfg(test)]
         test_trace_source_iso_composition(0, sequence, compose_began, &composed);
@@ -8379,8 +8725,27 @@ async fn publish_compositor_frame(
                         // step, `fill_yuv420p`, writes every byte of the frame.
                         store.checkout_overwrite_buffer(raw_yuv420p_len(width, height))
                     };
+                    // Plan 190 S5: the live frame (Linux) in place of the
+                    // poster; one `Option` check while none shows.
+                    let live_source = if inputs.live_background.is_some() || live.renderer.is_some()
+                    {
+                        cpu_live_background_source(
+                            &mut *live.renderer,
+                            inputs.live_background,
+                            (width, height),
+                        )
+                    } else {
+                        None
+                    };
+                    let inputs = CompositorRenderInputs {
+                        background_image_source: live_source
+                            .as_ref()
+                            .or(inputs.background_image_source),
+                        ..inputs
+                    };
                     render_compositor_yuv420p_frame_with_chrome(inputs, &editor_chrome, &mut bytes);
                 } else {
+                    release_cpu_live_background(&mut *live.renderer);
                     bytes = Vec::new();
                 }
             }
@@ -8499,6 +8864,7 @@ async fn publish_compositor_frame(
             ),
             buddy_leg: aux_buddy.as_ref(),
             banners: &aux_banners,
+            live_background: None,
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -8608,6 +8974,7 @@ async fn publish_compositor_frame(
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             };
             #[cfg(test)]
             let trace_role = leg_index + 1;
@@ -8857,6 +9224,10 @@ struct CompositorRenderInputs<'a> {
     /// The banners this leg carries this tick (plan 186 S3), bottom to top:
     /// drawn after the scene and the takeover, before captions (D5).
     banners: &'a [BannerDraw],
+    /// Plan 190: the live background this leg draws in place of the scene
+    /// background's poster, when its renderer can. Only the primary leg
+    /// carries one (the simulcast and ISO legs have no background).
+    live_background: Option<&'a crate::live_background::LiveBackgroundFrameInput>,
 }
 
 /// One banner as a leg draws it this tick (plan 186 S3): the prepared bitmap
@@ -9197,6 +9568,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         buddy_overlay: _,
         buddy_leg: _,
         banners: _,
+        live_background: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -9491,9 +9863,23 @@ fn try_update_compositor_status(
     );
     compositor.status.sources = metrics.sources;
     compositor.status.frame_pipeline = metrics.frame_pipeline;
+    // Plan 190: how the live background draws, and what it holds (0 while off).
+    let budget_notice = compositor.publish_live_background_status();
+
     compositor.status.image_cache = compositor.image_sources.status();
     compositor.status.updated_at = Utc::now().to_rfc3339();
-    Ok(Some(compositor.status.clone()))
+    let status = compositor.status.clone();
+    drop(compositor);
+    if budget_notice {
+        let _ = crate::recording::emit_health_event(
+            state,
+            None,
+            crate::protocol::HealthLevel::Info,
+            "live-background-gpu-budget",
+            crate::live_background::runtime::GPU_BUDGET_NOTICE,
+        );
+    }
+    Ok(Some(status))
 }
 
 fn apply_compositor_status_metal_target_handoff(
@@ -10580,6 +10966,7 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
         },
         frame_pipeline: CompositorFramePipelineStatus::default(),
         editor_draft: None,
+        live_background: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
     }
@@ -11166,6 +11553,7 @@ mod tests {
                 background_image_source: None,
                 banners: Arc::new(BannerSet::default()),
                 banner_session_shape: None,
+                live_background: None,
             };
             assert_eq!(
                 cache.capture_source_needs(),
@@ -11671,6 +12059,7 @@ mod tests {
             }),
             iosurface: None,
             pixel_buffer: Some(&pixel_buffer),
+            texture: None,
             width,
             height,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -11910,6 +12299,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             };
             let len = raw_yuv420p_len(width, height);
             let mut zeroed = vec![0x00_u8; len];
@@ -12049,6 +12439,7 @@ mod tests {
                     content_key: None,
                     iosurface: None,
                     pixel_buffer: None,
+                    texture: None,
                     width: 2,
                     height: 2,
                     dest: [0.0, 0.0, 1.0, 1.0],
@@ -12319,6 +12710,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12339,6 +12731,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12431,6 +12824,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12563,6 +12957,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12614,6 +13009,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         let snapshot = CompositorSceneSnapshot {
             selected_sources: None,
@@ -12665,6 +13061,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             false,
         )
@@ -12707,6 +13104,7 @@ mod tests {
                 false,
                 false,
                 false,
+                LiveBackgroundLeg::unmeasured(&mut None),
             )
             .await;
             let frame = store.lock().unwrap().latest().expect("metadata frame");
@@ -12756,6 +13154,7 @@ mod tests {
                 false,
                 false,
                 false,
+                LiveBackgroundLeg::unmeasured(&mut None),
             )
             .await;
             let frame = store.lock().unwrap().latest().expect("native frame");
@@ -12820,6 +13219,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         assert_eq!(resumed.compositor_backend, CompositorBackend::Metal);
@@ -12856,6 +13256,7 @@ mod tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         drop(held);
         publish_auxiliary_compositor_frame(
@@ -12980,6 +13381,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -13075,6 +13477,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -13125,6 +13528,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         let store = compositor_frame_store(&state).await;
@@ -13158,6 +13562,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         let jpeg_source = store
@@ -13248,6 +13653,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
 
@@ -13335,6 +13741,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         ) {
@@ -13389,6 +13796,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         ) {
@@ -14774,6 +15182,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -16229,6 +16638,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         let background = CompositorImageSource {
             image_path: "/missing/background.webp".to_string(),
@@ -16438,6 +16848,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -16519,6 +16930,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -16615,6 +17027,7 @@ mod tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -16626,6 +17039,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
                 ..base_inputs
             },
             &mut with_both,
@@ -16992,6 +17406,7 @@ mod tests {
                 buddy_overlay: buddy,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
@@ -17118,6 +17533,7 @@ mod tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -17146,6 +17562,7 @@ mod tests {
                     buddy_overlay: None,
                     buddy_leg: None,
                     banners: &[],
+                    live_background: None,
                     ..base_inputs
                 },
                 &mut frame,
@@ -17253,6 +17670,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17274,6 +17692,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut scene_only,
         );
@@ -17311,6 +17730,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17339,6 +17759,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut baseline,
         );
@@ -17381,6 +17802,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         let snapshot = CompositorSceneSnapshot {
             selected_sources: None,
@@ -17432,6 +17854,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17530,6 +17953,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17640,6 +18064,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17718,6 +18143,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: visibility,
+            live: None,
         };
 
         assert_close(background_stage_margin(None), 0.0);
@@ -17895,6 +18321,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -18103,6 +18530,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
 
@@ -18214,6 +18642,7 @@ mod tests {
             false,
             false,
             false,
+            LiveBackgroundLeg::unmeasured(&mut None),
         )
         .await;
         let compositor = state.compositor.lock().await;
@@ -18574,6 +19003,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    LiveBackgroundLeg::unmeasured(&mut None),
                 )
                 .await;
                 let store = compositor_frame_store(&state).await;
@@ -18801,6 +19231,7 @@ mod buddy_sprite_tests {
             buddy_overlay: bubble,
             buddy_leg,
             banners: &[],
+            live_background: None,
         }
     }
 
@@ -19285,6 +19716,7 @@ mod banner_tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners,
+            live_background: None,
         }
     }
 
@@ -20186,5 +20618,529 @@ mod banner_tests {
         );
         assert!(clipped[14 * canvas_w as usize + 28] > 0);
         assert!(clipped[15 * canvas_w as usize + 31] > 0);
+    }
+}
+
+/// Plan 190 S2: the Metal path with a live background. The live frame draws
+/// in place of the poster (which is never uploaded), moves between ticks
+/// while the stage stays put, a forced still falls back to the poster, and a
+/// picture background builds nothing live.
+#[cfg(all(test, target_os = "macos"))]
+mod live_background_metal_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::live_background::runtime::sync as sync_live_background;
+    use crate::live_background::{
+        LiveBackgroundBoard, LiveBackgroundFrameInput, LiveBackgroundTick,
+    };
+    use crate::protocol::{
+        LiveBackgroundId, LiveBackgroundMotion, LiveBackgroundRendering, LiveBackgroundSpec,
+        LiveBackgroundStillReason, SceneConfigParams, SourceSelection, VideoPreset, VideoSettings,
+    };
+
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 360;
+    const FRAME: Duration = Duration::from_nanos(16_666_667);
+
+    fn spec(id: LiveBackgroundId, look: &str, motion: LiveBackgroundMotion) -> LiveBackgroundSpec {
+        LiveBackgroundSpec {
+            id,
+            look: look.to_string(),
+            motion,
+        }
+    }
+
+    fn background(live: Option<LiveBackgroundSpec>) -> EffectiveSceneBackground {
+        EffectiveSceneBackground {
+            asset_id: match &live {
+                Some(spec) => crate::live_background::poster_asset_id(spec.id, &spec.look),
+                None => "builtin-bg-01".to_string(),
+            },
+            managed_asset_path: "/managed/poster.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live,
+        }
+    }
+
+    /// A screen-only scene on a 640 × 360 canvas with a background.
+    fn scene_snapshot(live: Option<LiveBackgroundSpec>) -> CompositorSceneSnapshot {
+        let layout = crate::protocol::default_layout_settings();
+        let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: SourceSelection {
+                screen_id: Some("screen-1".to_string()),
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: WIDTH,
+                height: HEIGHT,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        scene.background = Some(background(live));
+        CompositorSceneSnapshot {
+            selected_sources: None,
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        }
+    }
+
+    /// The poster as the image cache holds it: a 2 × 2 solid blue.
+    fn poster() -> CompositorImageSource {
+        CompositorImageSource {
+            image_path: "poster.webp".to_string(),
+            file_revision: None,
+            width: Some(2),
+            height: Some(2),
+            rgba: Some(Arc::new([0, 0, 255, 255].repeat(4))),
+            bgra: Some(Arc::new([255, 0, 0, 255].repeat(4))),
+            content_revision: 1,
+            state: "live".to_string(),
+            message: None,
+        }
+    }
+
+    /// A solid red screen frame the size of the stage (the canvas inset by
+    /// 10 % per side at 20 % visibility).
+    fn screen_frame() -> FrameHandle<PreviewScreenPixelFormat> {
+        crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+            storage: crate::frame_store::FrameStorage::untracked(),
+            sequence: 1,
+            width: 512,
+            height: 288,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: [0, 0, 255, 255].repeat(512 * 288),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            source_d3d11_texture: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        })
+    }
+
+    fn frame_input(
+        spec: &LiveBackgroundSpec,
+        board: &Arc<LiveBackgroundBoard>,
+        at: Instant,
+    ) -> LiveBackgroundFrameInput {
+        let mut slot = None;
+        sync_live_background(&mut slot, Some(spec), at);
+        slot.unwrap().frame_input(
+            &background(Some(spec.clone())),
+            board,
+            LiveBackgroundTick::unmeasured(at),
+        )
+    }
+
+    fn resources(slot: &Option<Box<LiveBackgroundGpuRenderer>>) -> (u32, u64) {
+        slot.as_ref()
+            .map_or((0, 0), |renderer| renderer.resources())
+    }
+
+    fn inputs<'a>(
+        sequence: u64,
+        snapshot: &'a CompositorSceneSnapshot,
+        poster: &'a CompositorImageSource,
+        screen: &'a FrameHandle<PreviewScreenPixelFormat>,
+        live: Option<&'a LiveBackgroundFrameInput>,
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence,
+            width: WIDTH,
+            height: HEIGHT,
+            snapshot: Some(snapshot),
+            active_image_source: None,
+            background_image_source: Some(poster),
+            camera_frame: None,
+            screen_frame: Some(screen),
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: live,
+        }
+    }
+
+    /// With a live background, `immutable_texture_uploads` stays at 0 over
+    /// 60 ticks: the live frame is drawn as a texture and the poster is
+    /// never uploaded. The same scene as a picture uploads the poster once.
+    #[test]
+    fn metal_draws_the_live_frame_and_never_uploads_the_poster() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let spec = spec(
+            LiveBackgroundId::SideRays,
+            "sunbeam",
+            LiveBackgroundMotion::Normal,
+        );
+        let snapshot = scene_snapshot(Some(spec.clone()));
+        let (poster, screen) = (poster(), screen_frame());
+        let start = Instant::now();
+        let mut input = frame_input(&spec, &board, start);
+        let mut slot = None;
+        let (mut uploads, mut reuses) = (0, 0);
+        for tick in 0..60_u32 {
+            input.tick = LiveBackgroundTick::new(start + FRAME * tick, FRAME, false);
+            let frame = try_gpu_compose_with_chrome(
+                Some(&mut gpu),
+                &inputs(
+                    u64::from(tick) + 1,
+                    &snapshot,
+                    &poster,
+                    &screen,
+                    Some(&input),
+                ),
+                false,
+                &[],
+                &mut slot,
+            )
+            .expect("metal frame with a live background");
+            uploads += frame.timings.immutable_texture_uploads;
+            reuses += frame.timings.immutable_texture_reuses;
+        }
+        assert_eq!(
+            uploads, 0,
+            "the poster is never uploaded while the shader draws"
+        );
+        assert_eq!(reuses, 0, "and never reused: it is not on the GPU at all");
+        let (status, programs, scratch) = board.snapshot();
+        let status = status.expect("the renderer reported");
+        assert_eq!(status.rendering, LiveBackgroundRendering::Shader);
+        assert_eq!(status.reason, None);
+        assert_eq!(status.id, LiveBackgroundId::SideRays);
+        assert_eq!(status.look, "sunbeam");
+        assert_eq!(programs, 1, "one pass, one pipeline");
+        assert!(scratch > 0, "the live frame");
+        assert_eq!(resources(&slot), (programs, scratch));
+
+        // The control: the picture path uploads the poster once and reuses it.
+        let picture = scene_snapshot(None);
+        let (mut uploads, mut reuses) = (0, 0);
+        for tick in 0..10_u64 {
+            let frame = try_gpu_compose_with_chrome(
+                Some(&mut gpu),
+                &inputs(100 + tick, &picture, &poster, &screen, None),
+                false,
+                &[],
+                &mut slot,
+            )
+            .expect("metal frame with a picture");
+            uploads += frame.timings.immutable_texture_uploads;
+            reuses += frame.timings.immutable_texture_reuses;
+        }
+        assert_eq!(uploads, 1);
+        assert_eq!(reuses, 9);
+        // And the leg freed the live background's textures and pipelines.
+        assert_eq!(resources(&slot), (0, 0));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|renderer| !renderer.holds_resources())
+        );
+        assert_eq!(board.snapshot().1, 0);
+        assert_eq!(board.snapshot().2, 0);
+    }
+
+    /// Two ticks one second apart differ in the background ring and are
+    /// identical (and the source's colour) inside the stage.
+    #[test]
+    fn the_ring_moves_between_ticks_and_the_stage_does_not() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let spec = spec(
+            LiveBackgroundId::SideRays,
+            "sunbeam",
+            LiveBackgroundMotion::Normal,
+        );
+        let snapshot = scene_snapshot(Some(spec.clone()));
+        let (poster, screen) = (poster(), screen_frame());
+        let start = Instant::now();
+        let mut input = frame_input(&spec, &board, start);
+        let mut slot = None;
+        let mut compose = |at: Instant, sequence: u64| {
+            input.tick = LiveBackgroundTick::new(at, FRAME, false);
+            try_gpu_compose_with_chrome(
+                Some(&mut gpu),
+                &inputs(sequence, &snapshot, &poster, &screen, Some(&input)),
+                true,
+                &[],
+                &mut slot,
+            )
+            .expect("metal frame")
+            .yuv
+        };
+        let first = compose(start, 1);
+        let later = compose(start + Duration::from_secs(1), 2);
+        let background = background(Some(spec));
+        let stage =
+            scene_content_rect_pixels(background_stage_margin(Some(&background)), WIDTH, HEIGHT);
+        assert_eq!(
+            (stage.x, stage.y, stage.width, stage.height),
+            (64, 36, 512, 288)
+        );
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        let luma = |frame: &[u8], x: u32, y: u32| frame[(y * WIDTH + x) as usize];
+        let mut stage_pixels = 0;
+        for y in stage.y + 2..stage.y + stage.height - 2 {
+            for x in stage.x + 2..stage.x + stage.width - 2 {
+                assert_eq!(luma(&first, x, y), luma(&later, x, y), "stage at {x},{y}");
+                assert!(
+                    luma(&first, x, y).abs_diff(red_y) <= 2,
+                    "stage at {x},{y} is the screen: {} vs {red_y}",
+                    luma(&first, x, y)
+                );
+                stage_pixels += 1;
+            }
+        }
+        assert!(stage_pixels > 100_000);
+        let (mut ring_pixels, mut changed, mut brightest, mut darkest) = (0, 0, 0_u8, 255_u8);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let in_stage = x >= stage.x
+                    && x < stage.x + stage.width
+                    && y >= stage.y
+                    && y < stage.y + stage.height;
+                if in_stage {
+                    continue;
+                }
+                ring_pixels += 1;
+                let (a, b) = (luma(&first, x, y), luma(&later, x, y));
+                brightest = brightest.max(a);
+                darkest = darkest.min(a);
+                if a.abs_diff(b) > 2 {
+                    changed += 1;
+                }
+            }
+        }
+        assert!(
+            brightest > darkest + 10,
+            "the ring shows the rays, not a flat colour ({darkest}..{brightest})"
+        );
+        assert!(
+            changed * 20 > ring_pixels,
+            "{changed} of {ring_pixels} ring pixels moved in a second"
+        );
+    }
+
+    /// `VIDEORC_LIVE_BACKGROUND_FORCE_STILL` draws the poster through the
+    /// picture path (uploaded once) and reports `forced`; nothing live is
+    /// built.
+    #[test]
+    fn a_forced_still_draws_the_poster_and_reports_forced() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        struct Unforce;
+        impl Drop for Unforce {
+            fn drop(&mut self) {
+                crate::live_background::set_forced_still_for_test(None);
+            }
+        }
+        crate::live_background::set_forced_still_for_test(Some(true));
+        let _unforce = Unforce;
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let snapshot = scene_snapshot(Some(spec.clone()));
+        let (poster, screen) = (poster(), screen_frame());
+        let start = Instant::now();
+        let mut input = frame_input(&spec, &board, start);
+        let mut slot = None;
+        let mut uploads = 0;
+        for tick in 0..5_u32 {
+            input.tick = LiveBackgroundTick::new(start + FRAME * tick, FRAME, false);
+            let frame = try_gpu_compose_with_chrome(
+                Some(&mut gpu),
+                &inputs(
+                    u64::from(tick) + 1,
+                    &snapshot,
+                    &poster,
+                    &screen,
+                    Some(&input),
+                ),
+                false,
+                &[],
+                &mut slot,
+            )
+            .expect("metal frame");
+            uploads += frame.timings.immutable_texture_uploads;
+        }
+        assert_eq!(uploads, 1, "the poster uploads once, as a picture does");
+        let (status, programs, scratch) = board.snapshot();
+        let status = status.expect("reported");
+        assert_eq!(status.rendering, LiveBackgroundRendering::Still);
+        assert_eq!(status.reason, Some(LiveBackgroundStillReason::Forced));
+        assert_eq!((programs, scratch), (0, 0));
+        assert_eq!(resources(&slot), (0, 0));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|renderer| !renderer.holds_resources())
+        );
+    }
+
+    /// Zero cost when off: a run with a picture background builds no live
+    /// pipeline and holds no scratch, and the board stays empty.
+    #[test]
+    fn a_picture_background_builds_nothing_live() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let picture = scene_snapshot(None);
+        let (poster, screen) = (poster(), screen_frame());
+        let mut slot = None;
+        for tick in 0..10_u64 {
+            try_gpu_compose_with_chrome(
+                Some(&mut gpu),
+                &inputs(tick + 1, &picture, &poster, &screen, None),
+                tick == 9,
+                &[],
+                &mut slot,
+            )
+            .expect("metal frame");
+        }
+        assert!(slot.is_none(), "no renderer is even made");
+        assert_eq!(resources(&slot), (0, 0));
+        assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+}
+
+/// Plan 190 S5: the CPU path's live background on every OS (the Linux GLES
+/// renderer itself is tested in `live_background::gl`).
+#[cfg(test)]
+mod live_background_cpu_tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::live_background::runtime::sync as sync_live_background;
+    use crate::live_background::{CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundTick};
+    use crate::protocol::{
+        LiveBackgroundId, LiveBackgroundMotion, LiveBackgroundRendering, LiveBackgroundSpec,
+    };
+
+    fn spec() -> LiveBackgroundSpec {
+        LiveBackgroundSpec {
+            id: LiveBackgroundId::Silk,
+            look: "satin".to_string(),
+            motion: LiveBackgroundMotion::Calm,
+        }
+    }
+
+    fn background() -> EffectiveSceneBackground {
+        EffectiveSceneBackground {
+            asset_id: "live-silk-satin".to_string(),
+            managed_asset_path: "live-silk-satin.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: Some(spec()),
+        }
+    }
+
+    fn solid_frame(bgra: [u8; 4]) -> CpuLiveFrame {
+        CpuLiveFrame {
+            bgra: Arc::new(bgra.repeat(32 * 18)),
+            width: 32,
+            height: 18,
+            sequence: 1,
+            rendering: LiveBackgroundRendering::Shader,
+        }
+    }
+
+    fn draw(source: &CompositorImageSource) -> Vec<u8> {
+        let (width, height) = (64, 36);
+        let mut bytes = vec![0u8; raw_yuv420p_len(width, height)];
+        assert!(render_scene_background(
+            Some(&background()),
+            Some(source),
+            width,
+            height,
+            &mut bytes
+        ));
+        bytes
+    }
+
+    #[test]
+    fn a_cpu_live_frame_draws_through_the_picture_resample() {
+        let blue = solid_frame([255, 0, 0, 255]);
+        let live = draw(&live_frame_image_source(&blue));
+        // Exactly what a picture with the same pixels draws.
+        let picture = CompositorImageSource {
+            image_path: "poster".to_string(),
+            ..live_frame_image_source(&blue)
+        };
+        assert_eq!(live, draw(&picture));
+        assert_ne!(
+            live,
+            draw(&live_frame_image_source(&solid_frame([0, 0, 255, 255])))
+        );
+    }
+
+    #[test]
+    fn no_live_background_builds_and_reports_nothing() {
+        let mut slot = None;
+        assert!(cpu_live_background_source(&mut slot, None, (640, 360)).is_none());
+        assert!(slot.is_none());
+        release_cpu_live_background(&mut slot);
+        assert!(slot.is_none());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_cpu_fallback_draws_the_poster_and_says_why() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input = runtime.unwrap().frame_input(
+            &background(),
+            &board,
+            LiveBackgroundTick::unmeasured(now),
+        );
+        let mut slot = None;
+        assert!(cpu_live_background_source(&mut slot, Some(&input), (640, 360)).is_none());
+        assert!(slot.is_none(), "the CPU fallback builds no renderer");
+        let (status, programs, scratch) = board.snapshot();
+        let status = status.expect("the fallback says why it shows the poster");
+        assert_eq!(status.rendering, LiveBackgroundRendering::Still);
+        assert_eq!(
+            status.reason,
+            Some(crate::protocol::LiveBackgroundStillReason::CpuFallback)
+        );
+        assert_eq!((programs, scratch), (0, 0));
     }
 }

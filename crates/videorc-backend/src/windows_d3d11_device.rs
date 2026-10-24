@@ -2364,6 +2364,9 @@ mod runtime {
         retiring_captures: Vec<ManagedCapture>,
         wake_event: Option<Arc<WindowsD3d11WakeEvent>>,
         compositor: Result<WindowsD3d11Compositor, WindowsD3d11CompositorError>,
+        /// Plan 190 S4: created by the first composition with a live
+        /// background, released by the first one without.
+        live_background: Option<crate::live_background::d3d11::LiveBackgroundD3d11Renderer>,
         encoders: BTreeMap<WindowsD3d11MediaRole, WindowsD3d11EncoderRuntime>,
         presenter: Option<WindowsD3d11Presenter>,
         presenter_last_error: Option<WindowsD3d11Error>,
@@ -2383,6 +2386,7 @@ mod runtime {
                 retiring_captures: Vec::new(),
                 wake_event: None,
                 compositor,
+                live_background: None,
                 encoders: BTreeMap::new(),
                 presenter: None,
                 presenter_last_error: None,
@@ -2447,14 +2451,25 @@ mod runtime {
             content_revision: u64,
             immutable: bool,
         },
+        /// Plan 190 S4: the live background, rendered on the media thread
+        /// just before the compose into a frame of the layer's declared size
+        /// (`sizes::internal_size` Full for `output`).
+        LiveBackground {
+            source_id: u64,
+            input: Box<crate::live_background::LiveBackgroundFrameInput>,
+            /// The primary leg's output size.
+            output: (u32, u32),
+            /// The prepared poster the still draws, when there is one.
+            poster: Option<crate::compositor::WindowsSceneImage>,
+        },
     }
 
     impl WindowsD3d11CompositionSource {
         fn source_id(&self) -> u64 {
             match self {
-                Self::TextureLease { source_id, .. } | Self::BgraUpload { source_id, .. } => {
-                    *source_id
-                }
+                Self::TextureLease { source_id, .. }
+                | Self::BgraUpload { source_id, .. }
+                | Self::LiveBackground { source_id, .. } => *source_id,
             }
         }
     }
@@ -3280,6 +3295,21 @@ mod runtime {
                 WindowsD3d11CompositionSource::BgraUpload { pixels, .. } => {
                     let pixel_bytes = pixels.as_slice().len();
                     upload_bytes = upload_bytes.checked_add(pixel_bytes).ok_or_else(|| {
+                        WindowsD3d11Error::new(
+                            WindowsD3d11ErrorCode::UnsupportedCapability,
+                            "composition upload byte count overflowed",
+                        )
+                    })?;
+                }
+                WindowsD3d11CompositionSource::LiveBackground { output, poster, .. } => {
+                    if output.0 == 0 || output.1 == 0 {
+                        return Err(WindowsD3d11Error::new(
+                            WindowsD3d11ErrorCode::UnsupportedCapability,
+                            "live background output has no size",
+                        ));
+                    }
+                    let poster_bytes = poster.as_ref().map_or(0, |poster| poster.pixels.len());
+                    upload_bytes = upload_bytes.checked_add(poster_bytes).ok_or_else(|| {
                         WindowsD3d11Error::new(
                             WindowsD3d11ErrorCode::UnsupportedCapability,
                             "composition upload byte count overflowed",
@@ -4826,6 +4856,69 @@ mod runtime {
             }
         }
 
+        // Plan 190 S4: the live frame renders on this context before the
+        // compose samples it. A frame D3D11 refused leaves the background out
+        // of this composition instead of failing it.
+        let live_source = sources.iter().find_map(|source| match source {
+            WindowsD3d11CompositionSource::LiveBackground {
+                source_id,
+                input,
+                output,
+                poster,
+            } => Some((*source_id, input, *output, poster)),
+            _ => None,
+        });
+        let live_frame = match live_source {
+            Some((source_id, input, output, poster)) => {
+                let renderer = media_runtime.live_background.get_or_insert_with(|| {
+                    crate::live_background::d3d11::LiveBackgroundD3d11Renderer::new(
+                        device.raw_device().clone(),
+                        device.immediate_context().clone(),
+                        Arc::clone(&input.board),
+                    )
+                });
+                let poster =
+                    poster
+                        .as_ref()
+                        .map(|poster| crate::live_background::d3d11::PosterPixels {
+                            bgra: &poster.pixels,
+                            width: poster.width,
+                            height: poster.height,
+                            revision: poster.revision,
+                        });
+                renderer
+                    .render(
+                        input,
+                        output,
+                        poster,
+                        crate::live_background::preflight_still_reason(),
+                    )
+                    .map(|texture| (source_id, texture))
+            }
+            None => {
+                if let Some(mut renderer) = media_runtime.live_background.take() {
+                    renderer.release();
+                }
+                None
+            }
+        };
+        let without_live;
+        let plan = match live_source {
+            Some((source_id, ..)) if live_frame.is_none() => {
+                without_live = WindowsD3d11ScenePlan {
+                    layers: plan
+                        .layers
+                        .iter()
+                        .filter(|layer| layer.source_id != source_id)
+                        .copied()
+                        .collect(),
+                    ..plan.clone()
+                };
+                &without_live
+            }
+            _ => plan,
+        };
+
         let composition = (|| {
             let mut gpu_sources = Vec::with_capacity(sources.len());
             for source in sources {
@@ -4858,6 +4951,14 @@ mod runtime {
                                 immutable: *immutable,
                             }),
                         });
+                    }
+                    WindowsD3d11CompositionSource::LiveBackground { .. } => {
+                        if let Some((source_id, texture)) = live_frame.as_ref() {
+                            gpu_sources.push(WindowsD3d11GpuSource {
+                                source_id: *source_id,
+                                content: WindowsD3d11GpuSourceContent::Texture(texture),
+                            });
+                        }
                     }
                 }
             }
