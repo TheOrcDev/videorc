@@ -18,7 +18,10 @@ const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
   gate: { allowed: true } as { allowed: boolean; reason?: string; upgradeUrl?: string }
 }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  useStudioCaptions: () => ({ captionLines: [] })
+}))
 vi.mock('@/lib/entitlement-ui', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/entitlement-ui')>()),
   cloudAiUploadGate: () => mocked.gate
@@ -41,7 +44,6 @@ function render({
     captions: { ...defaultCaptureConfig.captions, enabled }
   }
   mocked.core = {
-    captionLines: [],
     captionsCommandPending: false,
     captionsStatus: status,
     captionsWindow: { open: false, enabled: true },

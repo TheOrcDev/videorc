@@ -76,10 +76,8 @@ import {
 } from '@/lib/chat-removal-view'
 import { holdUndoableAction, type UndoableAction } from '@/lib/undoable-action'
 import { mergeModerationOperations } from '../../shared/chat-moderation'
-import {
-  reconcileBrokerCommentsSnapshot,
-  applyCommentsSnapshotDelta
-} from '../../shared/comments-snapshot-delta'
+import { reconcileBrokerCommentsSnapshot } from '../../shared/comments-snapshot-delta'
+import { CommentsDeltaBatcher, scheduleCommentsDeltaFlush } from '@/lib/comments-delta-batcher'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
 import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
@@ -318,9 +316,22 @@ function CommentsWindowApp(): ReactElement {
         setSendPending(false)
       }
     }
+    // Plan 191: main relays one delta per chat message. They queue and apply
+    // together at the next frame (or after 16 ms with no frame), so busy chat
+    // renders and reconciles this window once per frame, not once per message.
+    const deltas = new CommentsDeltaBatcher({
+      view: () => viewRef.current,
+      commit: applyView,
+      schedule: scheduleCommentsDeltaFlush
+    })
     void window.videorc
       ?.getCommentsSnapshot?.()
-      .then((initial) => initial && applyView(initial))
+      .then((initial) => {
+        if (!initial) return
+        // Deltas that arrived before the seed still apply before it.
+        deltas.flush()
+        applyView(initial)
+      })
       .catch(() => {})
     void window.videorc
       ?.getCommentsWindowState?.()
@@ -331,14 +342,13 @@ function CommentsWindowApp(): ReactElement {
         setAutoShowActivity(state.autoShowActivity === true)
       })
       .catch(() => {})
-    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
-    const offDelta = window.videorc?.onCommentsDelta?.((delta) => {
-      const current = viewRef.current
-      if (current.mode.kind !== 'live') return
-      const snapshot = applyCommentsSnapshotDelta(current.snapshot, delta)
-      if (snapshot === current.snapshot) return
-      applyView({ ...current, snapshot })
+    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => {
+      // Main applies each delta to its view before relaying it, so a pushed
+      // snapshot already holds every delta still queued here (plan 191).
+      deltas.supersede()
+      applyView(next)
     })
+    const offDelta = window.videorc?.onCommentsDelta?.((delta) => deltas.push(delta))
     void window.videorc
       ?.getViewerSample?.()
       .then((sample) => setViewerSample(sample ?? null))
@@ -375,6 +385,7 @@ function CommentsWindowApp(): ReactElement {
       .catch(() => {})
     const offCohost = window.videorc?.onCohostWindowState?.((state) => setCohost(state))
     return () => {
+      deltas.dispose()
       offSnapshot?.()
       offDelta?.()
       offViewers?.()

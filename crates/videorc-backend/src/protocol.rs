@@ -675,9 +675,98 @@ pub struct EffectiveSceneBackground {
     /// classic look.
     #[serde(default = "default_background_visibility_percent")]
     pub visibility_percent: f64,
+    /// Plan 190: the shader a live background runs. The background's
+    /// `asset_id` is then that look's poster (`live-<id>-<look>`), so every
+    /// path that can't animate draws the poster unchanged. Absent for a
+    /// picture, and kept off the wire (`skip_serializing_if`) because the
+    /// renderer's optional contract fields reject `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveBackgroundSpec>,
 }
 
 pub const DEFAULT_BACKGROUND_VISIBILITY_PERCENT: f64 = 20.0;
+
+/// The five live backgrounds (plan 190), from React Bits.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundId {
+    Silk,
+    SideRays,
+    PlasmaWave,
+    LiquidChrome,
+    LineWaves,
+}
+
+/// Calm runs at half the React Bits speed, Normal at the React Bits speed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundMotion {
+    #[default]
+    Calm,
+    Normal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveBackgroundSpec {
+    pub id: LiveBackgroundId,
+    pub look: String,
+    #[serde(default)]
+    pub motion: LiveBackgroundMotion,
+}
+
+/// How a live background is being drawn right now.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundRendering {
+    /// The shader at its full internal size.
+    Shader,
+    /// The shader at half its internal size (the budget guard's first step).
+    Half,
+    /// The poster, with a reason.
+    Still,
+}
+
+/// Why a live background shows its poster instead of the shader.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundStillReason {
+    /// `VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1` (debug builds only).
+    Forced,
+    /// The legacy FFmpeg graph (4K60, bridge off) is static.
+    LegacyGraph,
+    /// The CPU compositor fallback has no GPU renderer (Windows, macOS).
+    CpuFallback,
+    /// No usable GPU API (Linux: no EGL/GLES libraries or no render node).
+    NoGpu,
+    /// The only GPU is a software rasteriser (llvmpipe, SwiftShader, WARP).
+    SoftwareGpu,
+    /// Linux: the render node is quarantined (`linux_vaapi.rs`).
+    QuarantinedNode,
+    /// The shader failed to compile or link.
+    ShaderCompileFailed,
+    /// The budget guard stepped down to the poster.
+    GpuBudget,
+}
+
+/// Plan 190: the live background on this compositor run, when one is applied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveBackgroundStatus {
+    pub id: LiveBackgroundId,
+    /// The look being drawn (the first look when `requested_look` is unknown).
+    pub look: String,
+    pub rendering: LiveBackgroundRendering,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<LiveBackgroundStillReason>,
+    /// The live background's own render time p95 over the guard's last
+    /// window: GPU time where the API reports it, else the render thread's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_ms: Option<f64>,
+    /// A look this build doesn't know; the first look renders instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_look: Option<String>,
+}
 
 fn default_background_visibility_percent() -> f64 {
     DEFAULT_BACKGROUND_VISIBILITY_PERCENT
@@ -3640,6 +3729,22 @@ pub struct CompositorFramePipelineStatus {
     pub yuv_frames_converted: u64,
     pub immutable_texture_uploads: u64,
     pub immutable_texture_reuses: u64,
+    /// Plan 190: live background shader programs built on this run, and the
+    /// scratch bytes they hold. Both stay 0 while no live background shows
+    /// (the zero-cost-when-off contract), and 0 is left off the wire, so a
+    /// run without one sends exactly what it sent before plan 190.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub live_background_programs: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub live_background_scratch_bytes: u64,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Small latest-wins event used by native preview presentation. Full
@@ -3724,6 +3829,10 @@ pub struct CompositorStatus {
     /// renderer's optional contract fields reject `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_draft: Option<SceneEditorDraftStatus>,
+    /// Plan 190: the applied live background and how it is drawn. Absent
+    /// while the scene has no live background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_background: Option<LiveBackgroundStatus>,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -6618,6 +6727,7 @@ mod tests {
                 saturation_percent: 110.0,
                 vignette_percent: 30.0,
                 visibility_percent: 20.0,
+                live: None,
             }),
             ..plain
         };
@@ -6672,6 +6782,7 @@ mod tests {
                 saturation_percent: 100.0,
                 vignette_percent: 0.0,
                 visibility_percent: 20.0,
+                live: None,
             }),
             protected_overlay_window_ids: Vec::new(),
         };

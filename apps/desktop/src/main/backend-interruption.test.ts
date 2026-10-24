@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { BackendConnection } from '../shared/backend'
 import {
+  ACQUIRE_REQUEST_TIMEOUT_MS,
   acquireBackendInterruptionLease,
   type BackendInterruptionHttpResponse,
   type BackendInterruptionTransport
@@ -42,7 +43,8 @@ describe('backend interruption lease transport', () => {
     expect(transport).toHaveBeenCalledWith(
       connection,
       'POST',
-      '/interruption/lease?token=secret-token&ownerId=owner-123&action=permission-restart&reason=permission+granted'
+      '/interruption/lease?token=secret-token&ownerId=owner-123&action=permission-restart&reason=permission+granted',
+      ACQUIRE_REQUEST_TIMEOUT_MS
     )
   })
 

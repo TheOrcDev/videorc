@@ -4885,6 +4885,23 @@ async fn start_session_with_timeline(
             );
         }
     }
+    // Plan 190 D7: the legacy graph (4K60, bridge off) is static, so a live
+    // background records as its poster. Say so once, at start.
+    if !use_encoder_bridge
+        && params
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.background.as_ref())
+            .is_some_and(|background| background.live.is_some())
+    {
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "live-background-still",
+            crate::live_background::runtime::LEGACY_GRAPH_NOTICE,
+        );
+    }
     #[cfg(target_os = "windows")]
     let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
         && use_encoder_bridge
@@ -18563,6 +18580,49 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
     }
 }
 
+/// Plan 181: a buffer-only session writes nothing permanent, so it blocks no
+/// update install or permission restart (main already reads it as idle). The
+/// interruption hands over from it the way Record and Go Live do, then takes
+/// the lease at once, before the renderer re-arms the ring. A re-arm that
+/// still lands first is handed over again, a bounded number of times.
+pub(crate) async fn admit_interruption_over_replay_buffer(
+    state: &AppState,
+    owner_id: &str,
+    action: &str,
+) -> std::result::Result<crate::capture_interruption::InterruptionLeaseGrant, String> {
+    let mut attempt = 1;
+    loop {
+        hand_over_replay_only_session(state)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        match state
+            .capture_interruption
+            .try_acquire_interruption(owner_id, action)
+        {
+            Ok(grant) => return Ok(grant),
+            Err(_)
+                if attempt < INTERRUPTION_HANDOVER_ATTEMPTS
+                    && replay_only_session_pending(state).await =>
+            {
+                attempt += 1;
+            }
+            Err(blocker) => return Err(blocker.to_string()),
+        }
+    }
+}
+
+async fn replay_only_session_pending(state: &AppState) -> bool {
+    crate::replay_buffer::start_in_flight(state)
+        || state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|active| active.replay_only)
+}
+
+const INTERRUPTION_HANDOVER_ATTEMPTS: u32 = 3;
+
 /// How long the handover waits for the buffer session's microphone and slot
 /// to release before the real session is admitted.
 const REPLAY_HANDOVER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29221,6 +29281,67 @@ mod tests {
         )
     }
 
+    /// Plan 181: only the Clips buffer yields to an update install; a real
+    /// session still refuses it and keeps running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interruption_admission_still_refuses_a_real_session() {
+        let state = test_state();
+        state
+            .capture_interruption
+            .try_begin_session_start()
+            .unwrap()
+            .commit();
+        *state.recording.lock().await = Some(test_active_recording_stub("real-session"));
+
+        let admission =
+            admit_interruption_over_replay_buffer(&state, "main/update", "update-install").await;
+
+        assert!(admission.is_err());
+        assert!(
+            state.recording.lock().await.is_some(),
+            "an update never stops a recording or a stream"
+        );
+        state.recording.lock().await.take();
+    }
+
+    /// The ring re-arms right after every Stop, so an update click can land
+    /// while a buffer-only start is still between admission and its running
+    /// session: admission waits it out instead of refusing the install.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interruption_admission_waits_out_a_clips_start_in_flight() {
+        let state = test_state();
+        let start_admission = state
+            .capture_interruption
+            .try_begin_session_start()
+            .unwrap();
+        let start_in_flight = crate::replay_buffer::begin_start_in_flight(&state);
+        let admit_state = state.clone();
+        let admit = tokio::spawn(async move {
+            admit_interruption_over_replay_buffer(&admit_state, "main/update", "update-install")
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!admit.is_finished(), "admission waits for the Clips start");
+
+        // The start ends without a running session (a refused start).
+        drop(start_in_flight);
+        drop(start_admission);
+
+        let grant = timeout(Duration::from_secs(2), admit)
+            .await
+            .expect("admission resolves once the Clips start ends")
+            .unwrap()
+            .expect("the update install is admitted");
+        assert!(!grant.consumed);
+        assert!(
+            state
+                .capture_interruption
+                .try_begin_session_start()
+                .is_err(),
+            "the lease now holds off the next Clips start"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn stop_waits_for_start_which_is_waiting_on_standby_microphone() {
         let state = test_state();
@@ -38313,6 +38434,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         params.scene = Some(scene);
 
@@ -38424,6 +38546,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: visibility,
+            live: None,
         };
         let filter_at = |visibility: f64| {
             let mut scene = base_scene.clone();

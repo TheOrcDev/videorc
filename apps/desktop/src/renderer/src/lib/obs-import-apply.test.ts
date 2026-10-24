@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  createDefaultRegistry,
-  effectiveSceneBackground,
-  slotName,
-  unattendedImportSlot
-} from '@/lib/background-assets'
+import { createDefaultRegistry, effectiveSceneBackground } from '@/lib/background-assets'
+import { slotName, unattendedImportSlot } from '@/lib/background-library'
 import { defaultCaptureConfig, legacyStreamKeyMigrationCandidates } from '@/lib/capture'
 import { mergeObsImportIntoConfig, withObsBackground } from './obs-import-apply'
 import type { ObsImportPlanResult } from './obs-import-map'

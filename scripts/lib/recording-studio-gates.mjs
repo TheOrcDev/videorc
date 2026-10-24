@@ -146,6 +146,14 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:banners']
       },
       {
+        // Plan 190: a live background moves in the recording, never freezes,
+        // never draws over the stage, uploads nothing per frame, and releases
+        // everything when it comes off.
+        label: 'live background recording smoke',
+        command: 'pnpm',
+        args: ['smoke:live-background']
+      },
+      {
         // The reality gate: real capture config (no synthetic preview scene),
         // isolated backend state, and the first-frame contract at launch. This
         // is the scenario every other preview smoke bypasses via

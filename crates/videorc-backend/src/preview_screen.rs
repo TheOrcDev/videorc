@@ -4744,7 +4744,7 @@ mod linux {
         shared: &Arc<StdMutex<PreviewScreenShared>>,
         width: u32,
         height: u32,
-        bgra: &[u8],
+        bgra: &mut Vec<u8>,
     ) {
         let callback_started_at = Instant::now();
         let mut guard = shared
@@ -4765,9 +4765,12 @@ mod linux {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        let mut buffer = guard.frame_store.checkout_overwrite_buffer(bgra.len());
-        buffer.clear();
-        buffer.extend_from_slice(bgra);
+        let frame_len = bgra.len();
+        // Plan 191: publish the converted frame itself and hand the stream the
+        // store's checked-out buffer as its next conversion target, instead of
+        // copying every frame into that buffer under this lock.
+        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+        let buffer = std::mem::replace(bgra, next_buffer);
         let publish_started_at = Instant::now();
         guard.frame_store.publish_with_metadata(
             sequence,
@@ -4781,7 +4784,7 @@ mod linux {
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
-            .record_valid_frame(0.0, 0.0, publish_ms, bgra.len() as u64);
+            .record_valid_frame(0.0, 0.0, publish_ms, frame_len as u64);
     }
 }
 

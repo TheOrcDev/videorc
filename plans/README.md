@@ -1,5 +1,46 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
+  owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
+  Wave, Liquid Chrome, Line Waves) behind the screen and camera, free, on
+  macOS, Windows and Linux in one plan, with no cost to anyone who doesn't
+  turn one on. A live background is a bundled poster picture with a shader
+  attached. The GLSL from React Bits is the source of truth. Metal and D3D11
+  run hand ports, checked against golden grids. Linux runs the GLSL through
+  EGL/GLES on a latest-wins readback thread, under `linux_vaapi.rs`'s
+  render-node rules, because a CPU renderer measured far too slow. The two
+  Electron previews run it in WebGL2. A budget guard drops to half size,
+  then to the poster. Measured on an M4: 0.3–1.7 ms GPU per 1080p frame (a
+  still is 0.05–0.08 ms), 0–1 MB extra for four of the five, about 13 MB for
+  Plasma Wave. S1 is a hard cost gate on all three machines before any
+  product code. S9 proves zero cost when off with an A/B against
+  `origin/main`. Licence: the creator gave permission. D2–D6 answered.
+  **DRAFT PR #779** 2026-10-24: every slice built (S4 Windows and S5 Linux
+  on Opus, never run on their platforms; CI is their first compile). The
+  gates found and fixed a contract bug that retired main's present pump
+  whenever a live background showed. Owed: a quiet-host smoke run, the
+  Windows and ogre checks, S1 cost on both, owner by-eye in both themes.
+
+- 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
+  owner asked for an inspection of leaks and waste that changes no feature,
+  and then for one PR per confirmed problem. Seven read-only subsystem audits,
+  each finding re-checked at its line by the orchestrator, with measurements
+  on copies of the owner's real profile: a 2 GB Chromium cache of stale
+  backend 404s, a Library page that scanned its whole history (111–144 ms →
+  6 ms), rollback-journal writes (2.3 → ~0.3 ms in WAL), a `ps` fork every
+  second (~42 ms → ~35 µs per sample) and a 9.5–56 ms per-frame Windows preview
+  resize. **MERGED** 2026-10-24 (13 PRs plus #777, squashed; last
+  `b9ae4d8b`): one executor and one PR per problem, each reviewed, then
+  verified together on a merged tree (smoke:dev,
+  probe:comments-window, session-decay A/B against the base, clippy). Three
+  findings were closed after measurement showed no worthwhile win (#759,
+  #762, and the proof-surface decode, which moved to Part B). Part B holds the
+  owner decisions (Clips is on by default, so an idle Studio runs a full
+  encode; process-wide renderer un-throttling) and the follow-up slices, which
+  need a quiet host or a Windows box. Found on the way: CI's Rust job dies at
+  `cargo audit` (RUSTSEC-2026-0386, tokio) on main and every PR; #777 fixed
+  that, and the job now times out in its test build instead (N14).
+
 - 2026-10-23: [Plan 189](189-soundboard.md), Soundboard. The owner wants
   a soundboard in Studio on audiocn's sound pads, with the sounds streamers
   use most built in. Sounds join the session audio bus as a third mix

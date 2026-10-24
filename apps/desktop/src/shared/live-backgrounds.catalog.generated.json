@@ -1,0 +1,110 @@
+{
+  "_generated": "By crates/videorc-backend/src/live_background/export.rs. Do not edit.",
+  "backgrounds": [
+    {
+      "id": "silk",
+      "looks": [
+        {
+          "id": "satin",
+          "name": "Satin",
+          "posterAssetId": "live-silk-satin"
+        },
+        {
+          "id": "champagne",
+          "name": "Champagne",
+          "posterAssetId": "live-silk-champagne"
+        },
+        {
+          "id": "midnight",
+          "name": "Midnight",
+          "posterAssetId": "live-silk-midnight"
+        }
+      ],
+      "name": "Silk"
+    },
+    {
+      "id": "side-rays",
+      "looks": [
+        {
+          "id": "sunbeam",
+          "name": "Sunbeam",
+          "posterAssetId": "live-side-rays-sunbeam"
+        },
+        {
+          "id": "moonlight",
+          "name": "Moonlight",
+          "posterAssetId": "live-side-rays-moonlight"
+        },
+        {
+          "id": "spotlight",
+          "name": "Spotlight",
+          "posterAssetId": "live-side-rays-spotlight"
+        }
+      ],
+      "name": "Side Rays"
+    },
+    {
+      "id": "plasma-wave",
+      "looks": [
+        {
+          "id": "plasma",
+          "name": "Plasma",
+          "posterAssetId": "live-plasma-wave-plasma"
+        },
+        {
+          "id": "ember",
+          "name": "Ember",
+          "posterAssetId": "live-plasma-wave-ember"
+        },
+        {
+          "id": "glacier",
+          "name": "Glacier",
+          "posterAssetId": "live-plasma-wave-glacier"
+        }
+      ],
+      "name": "Plasma Wave"
+    },
+    {
+      "id": "liquid-chrome",
+      "looks": [
+        {
+          "id": "polished",
+          "name": "Polished",
+          "posterAssetId": "live-liquid-chrome-polished"
+        },
+        {
+          "id": "gold",
+          "name": "Gold",
+          "posterAssetId": "live-liquid-chrome-gold"
+        },
+        {
+          "id": "mercury",
+          "name": "Mercury",
+          "posterAssetId": "live-liquid-chrome-mercury"
+        }
+      ],
+      "name": "Liquid Chrome"
+    },
+    {
+      "id": "line-waves",
+      "looks": [
+        {
+          "id": "silk",
+          "name": "Silk",
+          "posterAssetId": "live-line-waves-silk"
+        },
+        {
+          "id": "gold",
+          "name": "Gold",
+          "posterAssetId": "live-line-waves-gold"
+        },
+        {
+          "id": "aurora",
+          "name": "Aurora",
+          "posterAssetId": "live-line-waves-aurora"
+        }
+      ],
+      "name": "Line Waves"
+    }
+  ]
+}

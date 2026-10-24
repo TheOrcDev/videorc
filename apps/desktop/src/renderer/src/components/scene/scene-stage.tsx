@@ -34,7 +34,7 @@ import type {
   SceneEditorDraftParams,
   SceneSource
 } from '@/lib/backend'
-import { backgroundAssetDisplayUrl } from '@/lib/background-assets'
+import { backgroundAssetDisplayUrl } from '@/lib/background-library'
 import {
   createEditorDraftChannel,
   type EditorDraftChannel,

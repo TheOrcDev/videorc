@@ -748,7 +748,7 @@ mod runtime {
         WindowsD3d11ErrorCode, WindowsD3d11MediaClient, WindowsD3d11MediaRole,
         WindowsD3d11Nv12TextureDescriptor, WindowsD3d11TextureFormat,
         WindowsD3d11TextureLeaseTicket, WindowsD3d11TexturePoolConfig, WindowsD3d11TicketedTexture,
-        WindowsDxgiOutputSelection,
+        WindowsD3d11UploadPixels, WindowsDxgiOutputSelection,
     };
     use crate::windows_d3d11_preview::{WindowsD3d11PresenterStatus, WindowsD3d11PreviewPlacement};
     use crate::windows_media_foundation_encoder::MediaFoundationEncoderConfig;
@@ -802,6 +802,8 @@ mod runtime {
         authority: Option<crate::compositor::NativeSourceOutputLease>,
         bootstrap: Option<WindowsLiveSnapshot>,
         events: tokio::sync::broadcast::Sender<crate::protocol::ServerEvent>,
+        /// For the live background's budget notice (plan 190 S4).
+        state: crate::state::AppState,
     }
     struct WindowsLiveSnapshot {
         edit: crate::compositor::CompositorSourceEdit,
@@ -816,6 +818,11 @@ mod runtime {
         /// The banner set (plan 186 S4), swapped as one `Arc` by the
         /// compositor; each leg's draws are derived per tick.
         banners: Arc<crate::banners::BannerSet>,
+        /// Plan 190 S4: the live background this tick, when one shows (the
+        /// pump stamps the tick; `primary_live_background` checks the leg).
+        live_background: Option<crate::live_background::LiveBackgroundFrameInput>,
+        /// The guard just fell back to the poster: the pump says so once.
+        live_background_budget_notice: bool,
     }
     impl WindowsLiveSources {
         pub(crate) fn new(state: &crate::state::AppState, session_id: &str) -> Self {
@@ -829,6 +836,7 @@ mod runtime {
                 authority: None,
                 bootstrap: None,
                 events: state.events.clone(),
+                state: state.clone(),
             }
         }
         pub(crate) async fn for_recovery(
@@ -862,7 +870,7 @@ mod runtime {
             // from the CFR thread. A busy transaction leaves the last route live.
             let camera = self.camera.try_lock().ok()?;
             let capture = self.capture.try_lock().ok()?;
-            let compositor = self.compositor.try_lock().ok()?;
+            let mut compositor = self.compositor.try_lock().ok()?;
             let coordinator = self.coordinator.try_lock().ok()?;
             let confirmed = coordinator.running_snapshot(&self.session_id).ok()?;
             // Same-ID retry candidates can be installed before commit. Their
@@ -891,6 +899,8 @@ mod runtime {
                 });
             let edit = compositor.source_edit_snapshot()?;
             let (takeover, backgrounds) = compositor.windows_scene_images(&edit);
+            let (live_background, live_background_budget_notice) =
+                compositor.windows_live_background(Instant::now());
             Some(WindowsLiveSnapshot {
                 render_edit: compositor.source_render_edit(Instant::now())?,
                 edit,
@@ -898,11 +908,23 @@ mod runtime {
                 takeover_active: compositor.windows_takeover_active(),
                 backgrounds,
                 banners: compositor.windows_banner_set(),
+                live_background,
+                live_background_budget_notice,
                 camera,
                 capture,
                 confirmed: confirmed.confirmed,
                 source_revision: confirmed.source_revision,
             })
+        }
+        /// Plan 190 S4: the guard fell back to the poster (once per fall).
+        fn notify_live_background_budget(&self) {
+            let _ = crate::recording::emit_health_event(
+                &self.state,
+                Some(&self.session_id),
+                crate::protocol::HealthLevel::Info,
+                "live-background-gpu-budget",
+                crate::live_background::runtime::GPU_BUDGET_NOTICE,
+            );
         }
         fn observe(
             &self,
@@ -1778,6 +1800,27 @@ mod runtime {
         })
     }
 
+    /// A published capture or camera frame, shared as the bytes of its BGRA
+    /// upload (plan 191). The pump used to clone each new frame into a fresh
+    /// `Vec` (8.3 MB at 1080p, 3.7 MB for a 720p camera) on the thread that
+    /// must hit its frame interval. `FrameHandle` bytes are immutable, and the
+    /// frame store returns a buffer to its pool only after the last handle
+    /// drops, so the upload reads the same pixels without the copy.
+    struct FrameUploadBytes<P>(FrameHandle<P>);
+
+    impl<P> AsRef<[u8]> for FrameUploadBytes<P> {
+        fn as_ref(&self) -> &[u8] {
+            &self.0.bytes
+        }
+    }
+
+    fn frame_upload_pixels<P: 'static>(frame: &FrameHandle<P>) -> WindowsD3d11UploadPixels
+    where
+        FrameHandle<P>: Send + Sync,
+    {
+        WindowsD3d11UploadPixels::shared(FrameUploadBytes(frame.clone()))
+    }
+
     /// The Buddy on each leg for this tick (plan 168 S-B4): the pet's draw
     /// and the bubble's anchor, from the sprite slot, with the gaze targets
     /// Phase C reads (the card's and the caption bar's blits on the leg).
@@ -2110,7 +2153,7 @@ mod runtime {
             .max(1);
         let frame_interval = Duration::from_secs_f64(1.0 / f64::from(render_fps));
         let mut last_camera_frame: Option<FrameHandle<PreviewCameraPixelFormat>> = None;
-        let mut last_camera_upload: Option<(u64, Arc<Vec<u8>>)> = None;
+        let mut last_camera_upload: Option<(u64, WindowsD3d11UploadPixels)> = None;
         let mut retained_capture_ticket: Option<WindowsD3d11TextureLeaseTicket> = None;
         let mut cfr = WindowsD3d11CfrSequencer::default();
         let mut pending_capture: Option<crate::windows_d3d11_device::WindowsD3d11CapturePoll> =
@@ -2134,11 +2177,26 @@ mod runtime {
             FrameHandle<crate::preview_screen::PreviewScreenPixelFormat>,
         > = None;
         let mut upload_revision = 0u64;
-        let mut last_capture_upload: Option<(u64, Arc<Vec<u8>>, u64)> = None;
+        let mut last_capture_upload: Option<(u64, WindowsD3d11UploadPixels, u64)> = None;
         let mut camera_upload_revision = 0u64;
+        let mut previous_tick_started: Option<Instant> = None;
         while !stop.load(Ordering::Relaxed) {
             let frame_started_at = Instant::now();
+            // Plan 190 S4: the live background's guard reads late ticks (a
+            // gap of more than one and a half intervals).
+            let live_missed_deadline =
+                previous_tick_started
+                    .replace(frame_started_at)
+                    .is_some_and(|previous| {
+                        frame_started_at.duration_since(previous) > frame_interval * 3 / 2
+                    });
             let fresh_committed = live_sources.snapshot();
+            if fresh_committed
+                .as_ref()
+                .is_some_and(|next| next.live_background_budget_notice)
+            {
+                live_sources.notify_live_background_budget();
+            }
             if resuming && startup_tx.is_some() && fresh_committed.is_none() {
                 // A recovery bootstrap is a source of dimensions/readiness, not
                 // permission to publish an older binding through contention.
@@ -2460,7 +2518,7 @@ mod runtime {
                     }
                     _ => {
                         upload_revision += 1;
-                        let pixels = Arc::new(frame.bytes.clone());
+                        let pixels = frame_upload_pixels(frame);
                         last_capture_upload =
                             Some((frame.sequence, pixels.clone(), upload_revision));
                         update_snapshot(&snapshot, |current| current.capture_upload_frames += 1);
@@ -2480,11 +2538,11 @@ mod runtime {
             }
             if let Some(frame) = camera_frame.as_ref() {
                 let pixels = match last_camera_upload.as_ref() {
-                    Some((revision, pixels)) if *revision == frame.sequence => Arc::clone(pixels),
+                    Some((revision, pixels)) if *revision == frame.sequence => pixels.clone(),
                     _ => {
                         camera_upload_revision += 1;
-                        let pixels = Arc::new(frame.bytes.clone());
-                        last_camera_upload = Some((frame.sequence, Arc::clone(&pixels)));
+                        let pixels = frame_upload_pixels(frame);
+                        last_camera_upload = Some((frame.sequence, pixels.clone()));
                         pixels
                     }
                 };
@@ -2526,10 +2584,29 @@ mod runtime {
                         .enumerate()
                         .map(|(index, image)| (30 + index as u64, image.as_ref())),
                 ) {
+                    // Plan 190 S4: the primary leg's live background renders
+                    // on the media thread; its poster rides along for a still.
+                    if source_id == 30
+                        && let Some(input) = primary_live_background(committed)
+                    {
+                        let mut input = input.clone();
+                        input.tick = crate::live_background::LiveBackgroundTick::new(
+                            frame_started_at,
+                            frame_interval,
+                            live_missed_deadline,
+                        );
+                        sources.push(WindowsD3d11CompositionSource::LiveBackground {
+                            source_id,
+                            input: Box::new(input),
+                            output: (plan.primary.width, plan.primary.height),
+                            poster: image.cloned(),
+                        });
+                        continue;
+                    }
                     if let Some(image) = image {
                         sources.push(WindowsD3d11CompositionSource::BgraUpload {
                             source_id,
-                            pixels: image.pixels.clone(),
+                            pixels: image.pixels.clone().into(),
                             dimensions: WindowsD3d11OutputDimensions::new(
                                 image.width,
                                 image.height,
@@ -2739,7 +2816,7 @@ mod runtime {
                 .map_err(|error| error.to_string())?;
         Ok(WindowsD3d11CompositionSource::BgraUpload {
             source_id: frame.source_id,
-            pixels: Arc::clone(&frame.overlay.bgra),
+            pixels: Arc::clone(&frame.overlay.bgra).into(),
             dimensions,
             row_pitch,
             pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
@@ -2760,7 +2837,7 @@ mod runtime {
         })?;
         Ok(WindowsD3d11CompositionSource::BgraUpload {
             source_id: frame.source_id,
-            pixels: Arc::clone(&atlas.bgra),
+            pixels: Arc::clone(&atlas.bgra).into(),
             dimensions: WindowsD3d11OutputDimensions::new(atlas.width, atlas.height)
                 .map_err(|error| error.to_string())?,
             row_pitch,
@@ -2784,7 +2861,7 @@ mod runtime {
         })?;
         Ok(WindowsD3d11CompositionSource::BgraUpload {
             source_id: frame.source_id,
-            pixels: Arc::clone(&bitmap.bgra),
+            pixels: Arc::clone(&bitmap.bgra).into(),
             dimensions: WindowsD3d11OutputDimensions::new(bitmap.width, bitmap.height)
                 .map_err(|error| error.to_string())?,
             row_pitch,
@@ -2871,6 +2948,17 @@ mod runtime {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
+    }
+
+    /// Plan 190 S4: the live background the primary leg draws this tick,
+    /// when its scene shows one.
+    fn primary_live_background(
+        committed: &WindowsLiveSnapshot,
+    ) -> Option<&crate::live_background::LiveBackgroundFrameInput> {
+        let input = committed.live_background.as_ref()?;
+        let (scene, _) = committed.render_edit.legs().next()?;
+        scene.background.as_ref()?.live.as_ref()?;
+        Some(input)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2974,17 +3062,35 @@ mod runtime {
                 } else {
                     WindowsD3d11SceneOutputTargets::AUXILIARY
                 };
-                let background = committed.backgrounds.get(index).and_then(Option::as_ref);
-                if let (Some(image), Some(background)) = (background, scene.background.as_ref()) {
+                // Plan 190 S4: the primary leg's live background is a frame
+                // at its Full internal size; every other background is its
+                // prepared picture.
+                let live_size = (index == 0)
+                    .then(|| primary_live_background(committed))
+                    .flatten()
+                    .map(|input| {
+                        crate::live_background::internal_size(
+                            input.spec.id,
+                            (dimensions.width, dimensions.height),
+                            crate::live_background::GuardLevel::Full,
+                        )
+                    });
+                let background_size = live_size.or_else(|| {
+                    committed
+                        .backgrounds
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .map(|image| (image.width, image.height))
+                });
+                if let (Some((width, height)), Some(background)) =
+                    (background_size, scene.background.as_ref())
+                {
                     let crop = crate::scene_geometry::background_zoom_crop(Some(background));
                     layers.push(WindowsD3d11SceneLayerInput {
                         source_id: 30 + index as u64,
                         source_kind: WindowsD3d11SceneSourceKind::BackgroundImage,
-                        source_dimensions: WindowsD3d11OutputDimensions::new(
-                            image.width,
-                            image.height,
-                        )
-                        .map_err(|error| error.to_string())?,
+                        source_dimensions: WindowsD3d11OutputDimensions::new(width, height)
+                            .map_err(|error| error.to_string())?,
                         transform: WindowsD3d11NormalizedTransform::full_canvas(),
                         crop: WindowsD3d11Crop {
                             left: crop.left as f32,
@@ -3004,7 +3110,7 @@ mod runtime {
                         output_targets: targets,
                     });
                 }
-                let stage_margin = if background.is_some() {
+                let stage_margin = if background_size.is_some() {
                     crate::scene_geometry::background_stage_margin(scene.background.as_ref())
                 } else {
                     0.0
@@ -3276,6 +3382,8 @@ mod runtime {
             takeover_active: false,
             backgrounds: vec![None, None],
             banners: Arc::new(crate::banners::BannerSet::default()),
+            live_background: None,
+            live_background_budget_notice: false,
         };
         let primary = super::WindowsD3d11VideoPlan {
             width: 1280,
