@@ -603,6 +603,30 @@ async function assertExpectedWindowsPreviewDiagnostics(label) {
           }
         : diagnostics?.windowsD3d11Media
   })
+  await assertProofSurfaceLiveBackgroundCost(label)
+}
+
+// Plan 190 S6, zero cost when off: the proof surface holds a canvas only while
+// a live background moves. A picture background (or no background) leaves
+// none, and a live background on its poster (a software GPU, a failed shader)
+// leaves none either and says why.
+async function assertProofSurfaceLiveBackgroundCost(label) {
+  const inspected = await smokeCommand('inspect-native-preview-live-background')
+  if (inspected?.surfaceExists !== true) return
+  const live = inspected.surfaceLiveBackground
+  const expectedCanvases = live && live.rendering !== 'still' ? 1 : 0
+  assertProbe(
+    inspected.canvasCount === expectedCanvases,
+    `${label}: proof surface has ${expectedCanvases} live background canvas(es)`,
+    inspected
+  )
+  if (live?.rendering === 'still') {
+    assertProbe(
+      typeof live.reason === 'string' && live.reason.length > 0,
+      `${label}: a live background on its poster names the reason`,
+      inspected
+    )
+  }
 }
 
 async function assertPermissionRequiredStopsSurface(label) {
