@@ -12,7 +12,10 @@
   added and the two can't disagree. Windows gets a WARP test that pins its
   stream target; Linux shares one frame already. The smoke gains
   record-and-stream cases (it only recorded). D2: 4K60 stays the poster.
-  **PLANNED**, uncommitted in `~/projects/videorc-wt-193`.
+  **DRAFT PR #794** 2026-10-24: built (owner took D1 and D2). The smoke
+  shows the stream ring moving like the recording's on every case. Owed: the
+  Windows CI run of the S3 tests, a quiet-host p95 run, owner by-eye on a
+  real stream.
 
 - 2026-10-24: [Plan 192](192-buddy-greets-and-talks-on-its-own.md), Buddy
   greets and talks on its own. On the owner's 10-24 stream (0.9.150), Buddy
