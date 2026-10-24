@@ -200,6 +200,7 @@ impl LiveBackgroundGlRenderer {
     ) -> Option<Arc<CpuLiveFrame>> {
         let tick = input.tick;
         let render_ms = self.poll_worker();
+        self.guard.follow(input.spec.id);
         self.guard.record(
             tick.at,
             render_ms,

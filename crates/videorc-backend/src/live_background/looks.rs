@@ -38,7 +38,9 @@ pub struct LiveLook {
     pub statics: [[f32; 4]; STATIC_VEC4_COUNT],
 }
 
-/// The wire and file id (`silk`, `side-rays`, …).
+/// The wire and file id (`silk`, `side-rays`, …). The desktop JSON export
+/// (a test) and the posters' asset ids use it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn css_id(id: LiveBackgroundId) -> &'static str {
     match id {
         LiveBackgroundId::Silk => "silk",
@@ -49,6 +51,7 @@ pub fn css_id(id: LiveBackgroundId) -> &'static str {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn display_name(id: LiveBackgroundId) -> &'static str {
     match id {
         LiveBackgroundId::Silk => "Silk",
@@ -74,6 +77,7 @@ pub fn motion_factor(motion: LiveBackgroundMotion) -> f64 {
 }
 
 /// The bundled poster's managed asset id for a look.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn poster_asset_id(id: LiveBackgroundId, look: &str) -> String {
     format!("live-{}-{look}", css_id(id))
 }

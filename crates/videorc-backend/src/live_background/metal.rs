@@ -791,6 +791,7 @@ impl LiveBackgroundMetalRenderer {
     ) -> Option<LiveFrame> {
         let tick = input.tick;
         let gpu_ms = self.take_last_gpu_ms();
+        self.guard.follow(input.spec.id);
         self.guard
             .record(tick.at, gpu_ms, tick.missed_deadline, tick.frame_interval);
         let p95 = self.guard.last_p95_ms();
@@ -989,7 +990,7 @@ impl LiveBackgroundMetalRenderer {
     }
 
     /// The live background went away: free every texture and pipeline and
-    /// report 0/0. The guard keeps its level for the rest of the run.
+    /// report 0/0. The guard keeps its level for that background.
     pub fn release(&mut self) {
         if self.holds_resources() {
             self.drop_resources();

@@ -78,6 +78,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'focused-window',
   'heal-main-window',
   'inspect-native-preview-bootstrap',
+  'inspect-native-preview-live-background',
   'inspect-backend-state-isolation',
   'inspect-packaged-bundled-background',
   'inspect-native-preview-runtime',

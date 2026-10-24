@@ -55,10 +55,6 @@ impl LiveBackgroundClock {
         self.look = look.id.to_string();
         true
     }
-
-    pub fn rate(&self) -> f64 {
-        self.rate
-    }
 }
 
 #[cfg(test)]

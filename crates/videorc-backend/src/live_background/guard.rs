@@ -1,9 +1,13 @@
 //! The budget guard (plan 190 "Budget guard"): a live background may never
 //! make the compositor miss frames. Each 2 s window it checks the background's
 //! own render time and the compositor's missed deadlines; over budget, it
-//! steps Full → Half → Still. It never climbs back within a run.
+//! steps Full → Half → Still. It never climbs back for the same background
+//! (a new look or motion included); a different background starts at Full,
+//! since the five cost very different amounts.
 
 use std::time::{Duration, Instant};
+
+use crate::protocol::LiveBackgroundId;
 
 pub const GUARD_WINDOW: Duration = Duration::from_secs(2);
 /// Over budget: the background's p95 above this share of the frame interval.
@@ -25,6 +29,8 @@ pub enum GuardLevel {
 
 #[derive(Debug, Clone, Default)]
 pub struct LiveBackgroundGuard {
+    /// The background this level was judged on.
+    background: Option<LiveBackgroundId>,
     level: GuardLevel,
     window_started: Option<Instant>,
     samples: Vec<f64>,
@@ -39,6 +45,17 @@ impl LiveBackgroundGuard {
 
     pub fn level(&self) -> GuardLevel {
         self.level
+    }
+
+    /// Judge `id` from now on: a different background than the last one
+    /// starts again at Full with an empty window.
+    pub fn follow(&mut self, id: LiveBackgroundId) {
+        if self.background != Some(id) {
+            *self = Self {
+                background: Some(id),
+                ..Self::default()
+            };
+        }
     }
 
     /// The p95 of the last finished window, for status.
@@ -97,11 +114,6 @@ impl LiveBackgroundGuard {
             || (self.missed >= GUARD_MISSES_PER_WINDOW
                 && p95 > interval_ms * GUARD_SHARE_WITH_MISSES)
     }
-
-    /// A new session starts at Full again.
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
 }
 
 #[cfg(test)]
@@ -151,8 +163,22 @@ mod tests {
         let later = start + Duration::from_secs(6);
         assert_eq!(run_window(&mut guard, later, 0.1, false), None);
         assert_eq!(guard.level(), GuardLevel::Still);
-        guard.reset();
+    }
+
+    #[test]
+    fn a_different_background_starts_again_at_full() {
+        let mut guard = LiveBackgroundGuard::new();
+        let start = Instant::now();
+        guard.follow(LiveBackgroundId::PlasmaWave);
+        run_window(&mut guard, start, 4.0, false);
+        run_window(&mut guard, start + Duration::from_secs(3), 4.0, false);
+        assert_eq!(guard.level(), GuardLevel::Still);
+        // The same background (any look or motion) stays on its poster.
+        guard.follow(LiveBackgroundId::PlasmaWave);
+        assert_eq!(guard.level(), GuardLevel::Still);
+        guard.follow(LiveBackgroundId::LiquidChrome);
         assert_eq!(guard.level(), GuardLevel::Full);
+        assert_eq!(guard.last_p95_ms(), None);
     }
 
     #[test]

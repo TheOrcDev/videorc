@@ -3731,11 +3731,20 @@ pub struct CompositorFramePipelineStatus {
     pub immutable_texture_reuses: u64,
     /// Plan 190: live background shader programs built on this run, and the
     /// scratch bytes they hold. Both stay 0 while no live background shows
-    /// (the zero-cost-when-off contract).
-    #[serde(default)]
+    /// (the zero-cost-when-off contract), and 0 is left off the wire, so a
+    /// run without one sends exactly what it sent before plan 190.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub live_background_programs: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub live_background_scratch_bytes: u64,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Small latest-wins event used by native preview presentation. Full

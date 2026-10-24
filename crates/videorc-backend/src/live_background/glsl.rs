@@ -3,6 +3,13 @@
 //! desktop JSON; Metal and D3D11 run hand ports checked against golden frames
 //! rendered from them.
 
+// Only the Linux renderer and the desktop JSON export (a test) read the
+// sources; macOS and Windows use the pass list.
+#![cfg_attr(
+    not(any(test, target_os = "linux", feature = "live-background-gl-check")),
+    allow(dead_code)
+)]
+
 use std::borrow::Cow;
 
 use crate::protocol::LiveBackgroundId;

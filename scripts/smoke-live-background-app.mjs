@@ -10,7 +10,8 @@
 // - the poster is never uploaded per frame (immutable uploads stay flat);
 // - the background's own p95 is within budget.
 // Then the background comes off and the live programs and scratch drop to 0
-// (zero cost when off). With VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1 (debug
+// (zero cost when off). The guard may draw at half size on a busy host; a
+// fall to the poster fails, so run it on a quiet host (it is load-sensitive). With VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1 (debug
 // builds) every case must draw the still poster instead: status `still` with
 // reason `forced` and a static ring.
 import assert from 'node:assert/strict'
@@ -134,10 +135,36 @@ try {
   async function runCase(testCase) {
     const background = liveBackground(testCase)
     await applyPreview(background, testCase)
+    let appliedAt = Date.now()
     const expected = forced ? 'still' : 'shader'
+    let seen
+    let reapplied = 0
     await waitFor(
-      async () => (await status()).liveBackground?.rendering === expected,
-      `${testCase.id} to render as ${expected}`
+      async () => {
+        seen = await status()
+        if (seen.liveBackground?.rendering === expected) return true
+        // Until the preview first shows the app's own committed scene, main's
+        // first-frame watchdog re-commits that scene over this smoke's
+        // (`resync-scene`), and the compositor loses the live background.
+        // Put it back (the recording below passes its scene explicitly).
+        if (!seen.liveBackground && Date.now() - appliedAt > 1500 && reapplied < 5) {
+          reapplied += 1
+          console.log(`${testCase.id}: the app displaced the preview scene; applying again`)
+          await applyPreview(background, testCase)
+          appliedAt = Date.now()
+        }
+        return false
+      },
+      () =>
+        `${testCase.id} to render as ${expected}; last ${JSON.stringify({
+          liveBackground: seen?.liveBackground,
+          programs: seen?.framePipeline?.liveBackgroundPrograms,
+          scratchBytes: seen?.framePipeline?.liveBackgroundScratchBytes,
+          backend: seen?.backend,
+          framesRendered: seen?.framesRendered,
+          sceneRevision: seen?.sceneRevision,
+          sceneSources: seen?.sceneSources?.map((source) => [source.kind, source.id, source.state])
+        })}`
     )
     const live = (await status()).liveBackground
     assert.equal(live.id, testCase.id)
@@ -173,14 +200,23 @@ try {
       await sleep(500)
     }
     const late = await status()
+    console.log(`${testCase.id}: at the end of the take ${JSON.stringify(late.liveBackground)}`)
     const stopped = await request(ws, timeoutMs, 'session.stop')
     const path = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120000 })
 
+    // The guard may halve the internal size on a busy host (it still moves);
+    // falling back to the poster mid-recording fails.
+    const allowed = forced ? ['still'] : ['shader', 'half']
     for (const sample of samples) {
-      assert.equal(
-        sample.liveBackground?.rendering,
-        expected,
-        `${testCase.id}: the live background left ${expected} mid-recording: ${JSON.stringify(sample.liveBackground)}`
+      assert(
+        allowed.includes(sample.liveBackground?.rendering),
+        `${testCase.id}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)}`
+      )
+    }
+    const halved = samples.filter((sample) => sample.liveBackground?.rendering === 'half').length
+    if (halved > 0) {
+      console.log(
+        `${testCase.id}: the guard drew at half size for ${halved}/${samples.length} samples`
       )
     }
     assert.equal(
@@ -255,7 +291,9 @@ try {
   async function waitFor(check, what) {
     const deadline = Date.now() + timeoutMs
     while (!(await check())) {
-      assert(Date.now() < deadline, `Timed out waiting for ${what}`)
+      if (Date.now() >= deadline) {
+        assert.fail(`Timed out waiting for ${typeof what === 'function' ? what() : what}`)
+      }
       await sleep(100)
     }
   }

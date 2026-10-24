@@ -171,6 +171,11 @@ pub struct CpuLiveFrame {
     pub height: u32,
     /// Increments per frame; the CPU path's content revision.
     pub sequence: u64,
+    /// How the renderer drew it (the Linux renderer reports it).
+    #[cfg_attr(
+        not(any(target_os = "linux", feature = "live-background-gl-check")),
+        allow(dead_code)
+    )]
     pub rendering: crate::protocol::LiveBackgroundRendering,
 }
 
