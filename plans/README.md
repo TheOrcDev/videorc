@@ -1,5 +1,19 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
+  background moves on the stream. Owner report: live backgrounds animate in
+  Studio but sit still on the live stream. On macOS every record-and-stream
+  session streams from an auxiliary compositor leg, and plan 190 wired the
+  live background to the primary leg only (`live_background: None` on the
+  auxiliary inputs), so the stream drew the poster. The owner's 10-24
+  session proves it: its recording's ring moves on every frame, and the
+  stream leg's code never sees the shader. Fix (D1): the stream leg draws the
+  texture the recording rendered in the same tick, so no shader cost is
+  added and the two can't disagree. Windows gets a WARP test that pins its
+  stream target; Linux shares one frame already. The smoke gains
+  record-and-stream cases (it only recorded). D2: 4K60 stays the poster.
+  **PLANNED**, uncommitted in `~/projects/videorc-wt-193`.
+
 - 2026-10-24: [Plan 192](192-buddy-greets-and-talks-on-its-own.md), Buddy
   greets and talks on its own. On the owner's 10-24 stream (0.9.150), Buddy
   was in Auto and posted nothing by itself, only the owner's two Say lines.
