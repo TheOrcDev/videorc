@@ -168,10 +168,11 @@ export interface BuddyReportPostRow {
 
 /** Plan 192 D7: the greetings Buddy didn't post, and why, in plain words. */
 export interface BuddyReportGreetingSkipsView {
-  /** How many, all reasons together ("5"). */
+  /** How many were not posted, all reasons together ("3"). Held greetings
+   * are not counted: they wait for the limit and go out later. */
   total: string
-  /** "Greetings not posted: 3 had no line, 2 were held by the limit." The
-   * reasons in a fixed order, each only when it happened. */
+  /** "Greetings not posted: 3 had no line. 2 waited for the posting limit."
+   * The reasons in a fixed order, each only when it happened. */
   sentence: string
 }
 
@@ -437,7 +438,6 @@ const GREETING_SKIP_CLAUSES: ReadonlyArray<
   ['modeOff', (count) => `${count} came while posting was off`],
   ['stale', (count, one) => `${count} ${one ? 'was' : 'were'} too old to greet`],
   ['deduped', (count, one) => `${count} ${one ? 'was' : 'were'} already greeted`],
-  ['held', (count, one) => `${count} ${one ? 'was' : 'were'} held by the limit`],
   ['destinationFailed', (count) => `${count} couldn't be sent`],
   ['youtubePaused', (count) => `${count} came while YouTube chat was paused`]
 ]
@@ -451,11 +451,23 @@ export function reportGreetingSkips(
     count: Math.max(0, Math.round(skipped[key] ?? 0)),
     clause
   })).filter((entry) => entry.count > 0)
-  if (counts.length === 0) return null
-  const reasons = counts.map(({ count, clause }) => clause(formatReportCount(count), count === 1))
+  // A held greeting waited for the posting limit and went out later (or in
+  // a collapsed burst), so it is said apart from the ones never posted.
+  const held = Math.max(0, Math.round(skipped.held ?? 0))
+  if (counts.length === 0 && held === 0) return null
+  const sentences: string[] = []
+  if (counts.length > 0) {
+    const reasons = counts.map(({ count, clause }) => clause(formatReportCount(count), count === 1))
+    sentences.push(`Greetings not posted: ${reasons.join(', ')}.`)
+  }
+  if (held > 0) {
+    sentences.push(
+      `${formatReportCount(held)} ${held === 1 ? 'greeting' : 'greetings'} waited for the posting limit.`
+    )
+  }
   return {
     total: formatReportCount(counts.reduce((sum, entry) => sum + entry.count, 0)),
-    sentence: `Greetings not posted: ${reasons.join(', ')}.`
+    sentence: sentences.join(' ')
   }
 }
 

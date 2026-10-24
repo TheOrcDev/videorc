@@ -587,9 +587,14 @@ describe('report view', () => {
   })
 
   it('says in plain words why greetings were not posted (plan 192 D7)', () => {
+    // Held greetings went out later: said apart, never counted as not posted.
     expect(reportGreetingSkips({ noLine: 3, held: 2 })).toEqual({
-      total: '5',
-      sentence: 'Greetings not posted: 3 had no line, 2 were held by the limit.'
+      total: '3',
+      sentence: 'Greetings not posted: 3 had no line. 2 greetings waited for the posting limit.'
+    })
+    expect(reportGreetingSkips({ held: 1 })).toEqual({
+      total: '0',
+      sentence: '1 greeting waited for the posting limit.'
     })
     expect(
       reportGreetingSkips({
@@ -602,9 +607,9 @@ describe('report view', () => {
         noLine: 1
       })
     ).toEqual({
-      total: '7',
+      total: '6',
       sentence:
-        "Greetings not posted: 1 had no line, 1 came while posting was off, 1 was too old to greet, 1 was already greeted, 1 was held by the limit, 1 couldn't be sent, 1 came while YouTube chat was paused."
+        "Greetings not posted: 1 had no line, 1 came while posting was off, 1 was too old to greet, 1 was already greeted, 1 couldn't be sent, 1 came while YouTube chat was paused. 1 greeting waited for the posting limit."
     })
     expect(reportGreetingSkips({ stale: 2, deduped: 1200 })?.sentence).toBe(
       `Greetings not posted: 2 were too old to greet, ${(1200).toLocaleString()} were already greeted.`
@@ -625,7 +630,7 @@ describe('report view', () => {
     })
     if (view.kind !== 'report') throw new Error(view.kind)
     expect(view.greetingSkips?.sentence).toBe(
-      'Greetings not posted: 3 had no line, 2 were held by the limit.'
+      'Greetings not posted: 3 had no line. 2 greetings waited for the posting limit.'
     )
     const plain = buddyReportView({ payload: payload(), session: SESSION, buddyOn: true })
     if (plain.kind !== 'report') throw new Error(plain.kind)

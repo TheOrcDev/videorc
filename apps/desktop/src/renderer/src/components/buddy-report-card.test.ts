@@ -447,7 +447,7 @@ describe('BuddyReportCard: greetings Buddy wrote and skipped (plan 192)', () => 
       }
     })
     expect(document.querySelector('[data-slot="buddy-report-greeting-skips"]')?.textContent).toBe(
-      'Greetings not posted: 3 had no line, 2 were held by the limit.'
+      'Greetings not posted: 3 had no line. 2 greetings waited for the posting limit.'
     )
     await render()
     expect(document.querySelector('[data-slot="buddy-report-greeting-skips"]')).toBeNull()
