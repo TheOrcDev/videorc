@@ -548,7 +548,13 @@ import {
 } from '@/lib/session-start-failure'
 import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
-import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
+import {
+  applyLiveBackground as applyLiveBackgroundToRegistry,
+  effectiveSceneBackground,
+  registryForCommittedLiveBackground,
+  removeSlotAsset
+} from '@/lib/background-assets'
+import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
 import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
@@ -1383,6 +1389,8 @@ export type StudioContextValue = {
   applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
   applyBackgroundSlot: (slotId: string | null) => void
   applyWorkingBackgroundStyle: (patch: Partial<Scene['background']>) => void
+  /** Plan 190: put a live background on the scene; null takes it off. */
+  applyLiveBackground: (id: LiveBackgroundId | null) => void
   /**
    * Change the vertical simulcast leg (scene, screen framing, follow). Saved
    * for the next session and, in a running dual-orientation session, applied
@@ -9169,22 +9177,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       workingBackgroundRef.current = background
       setWorkingBackground(background)
       const registry = backgroundRegistryRef.current
-      const activeSlotId = background
-        ? (registry.slots.find(
-            (slot) =>
-              slot.assetId === background.assetId &&
-              slot.status === 'ready' &&
-              JSON.stringify(
-                snapshotBackground(effectiveSceneBackground({ ...registry, activeSlotId: slot.id }))
-              ) === JSON.stringify(snapshotBackground(background))
-          )?.id ?? null)
-        : null
-      if (registry.activeSlotId !== activeSlotId) {
-        const nextRegistry = { ...registry, activeSlotId }
-        libraryBackgroundFingerprintRef.current = JSON.stringify(
-          snapshotBackground(effectiveSceneBackground(nextRegistry))
-        )
-        setBackgroundRegistry(nextRegistry)
+      if (background?.live) {
+        // Plan 190: a committed live background is the registry's truth.
+        const nextRegistry = registryForCommittedLiveBackground(registry, background)
+        if (nextRegistry !== registry) {
+          libraryBackgroundFingerprintRef.current = JSON.stringify(
+            snapshotBackground(effectiveSceneBackground(nextRegistry))
+          )
+          setBackgroundRegistry(nextRegistry)
+        }
+      } else {
+        const pictureRegistry = { ...registry, live: { ...registry.live, activeId: null } }
+        const activeSlotId = background
+          ? (registry.slots.find(
+              (slot) =>
+                slot.assetId === background.assetId &&
+                slot.status === 'ready' &&
+                JSON.stringify(
+                  snapshotBackground(
+                    effectiveSceneBackground({ ...pictureRegistry, activeSlotId: slot.id })
+                  )
+                ) === JSON.stringify(snapshotBackground(background))
+            )?.id ?? null)
+          : null
+        if (registry.activeSlotId !== activeSlotId || registry.live.activeId !== null) {
+          const nextRegistry = { ...pictureRegistry, activeSlotId }
+          libraryBackgroundFingerprintRef.current = JSON.stringify(
+            snapshotBackground(effectiveSceneBackground(nextRegistry))
+          )
+          setBackgroundRegistry(nextRegistry)
+        }
       }
       workingOriginRef.current = snapshot.origin ?? 'builtin'
       const savedId = snapshot.savedSceneId ?? null
@@ -9871,8 +9893,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (slotId: string | null): void => {
       const registry = backgroundRegistryRef.current
       const background = slotId
-        ? effectiveSceneBackground({ ...registry, activeSlotId: slotId })
+        ? effectiveSceneBackground({
+            ...registry,
+            activeSlotId: slotId,
+            live: { ...registry.live, activeId: null }
+          })
         : null
+      void requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        backgroundOverride: background
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
+  // Plan 190: put a live background on the scene (null takes it off). Its
+  // look, motion and style come from the registry; changing them edits the
+  // registry, and the library sync below applies the edit.
+  const applyLiveBackground = useCallback(
+    (id: LiveBackgroundId | null): void => {
+      const registry = backgroundRegistryRef.current
+      const background = id ? effectiveSceneBackground(applyLiveBackgroundToRegistry(registry, id)) : null
       void requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false,
         backgroundOverride: background
@@ -16948,6 +16989,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
@@ -17183,6 +17225,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
+      applyLiveBackground,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,

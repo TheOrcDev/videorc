@@ -66,6 +66,7 @@ mod linux_pulse_audio;
 mod linux_v4l2_camera;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_vaapi;
+mod live_background;
 mod live_chat;
 mod live_chat_moderation;
 mod live_chat_persistence;

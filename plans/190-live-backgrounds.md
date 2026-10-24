@@ -429,6 +429,22 @@ pub live: Option<LiveBackgroundSpec>,
 
 ### Rendering per platform
 
+**Amended 2026-10-24, during execution: every platform renders a "live
+frame" first.** The live background renders into its own texture at its
+internal size (`sizes::internal_size`). The compositor then draws that
+texture through the picture path that draws a background today. This has
+three effects:
+
+- The guard can time the background alone: on Metal its own command buffer,
+  on D3D11 timestamp queries around its passes, on Linux the GL thread.
+- The main draw path barely changes.
+- The half-size and 4K up-draw come free from the existing fit and linear
+  sampling.
+
+The cost is one frame-sized texture per leg while a live background shows:
+8 MB at 1080p and 4K (the soft four render at 1080p), 33 MB for Line Waves
+at 4K. "Measured cost" counts it.
+
 **macOS (Metal)**, in `metal_compositor.rs` and
 `try_gpu_compose_with_chrome`:
 
@@ -439,12 +455,13 @@ pub live: Option<LiveBackgroundSpec>,
   with mipmaps. Plasma Wave uses an `RGBA16Float` coarse target (its alpha
   carries the edge field), and `RG11B10Float` for the full-size target and
   the bloom chain.
-- Scratch passes are separate encoders in the leg's existing command buffer.
-  The live background is the main pass's first draw, opaque, in place of the
-  poster quad. There is still one `waitUntilCompleted` per tick.
-- Above 1080p output, the four soft backgrounds render at 1920 × 1080 (or
-  1080 × 1920) into one extra texture and are drawn up with linear
-  filtering. Line Waves always renders at full size.
+- The live frame is an IOSurface-backed `bgra8Unorm` texture. Its passes
+  run in their own command buffer, committed on the same queue just before
+  the compose command buffer. The compose then draws the IOSurface as the
+  background source, through the same quad, fit and sampler as a picture.
+  There is still one `waitUntilCompleted` per tick, and the live command
+  buffer's `gpuStartTime`/`gpuEndTime` feed the guard.
+- The poster is not uploaded to the GPU while the shader draws.
 - `background_active` stays true, so the stage margin applies.
 
 **Windows (D3D11)**, in the media session:

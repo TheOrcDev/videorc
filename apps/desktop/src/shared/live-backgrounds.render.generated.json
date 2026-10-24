@@ -1,0 +1,1231 @@
+{
+  "_generated": "By crates/videorc-backend/src/live_background/export.rs. Do not edit.",
+  "backgrounds": [
+    {
+      "id": "silk",
+      "looks": [
+        {
+          "id": "satin",
+          "posterPhase": 3.0,
+          "rate": 0.5,
+          "statics": [
+            [
+              1.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.5
+            ],
+            [
+              0.32156863808631897,
+              0.15294118225574493,
+              1.0,
+              0.5
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              0.5
+            ],
+            [
+              0.30000001192092896,
+              -0.550000011920929,
+              0.699999988079071,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "champagne",
+          "posterPhase": 3.0,
+          "rate": 0.5,
+          "statics": [
+            [
+              1.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.5
+            ],
+            [
+              0.6901960968971252,
+              0.5529412031173706,
+              0.34117648005485535,
+              0.550000011920929
+            ],
+            [
+              1.0,
+              0.9529411792755127,
+              0.8627451062202454,
+              0.6000000238418579
+            ],
+            [
+              0.3499999940395355,
+              -0.550000011920929,
+              0.699999988079071,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "midnight",
+          "posterPhase": 3.0,
+          "rate": 0.35000000000000003,
+          "statics": [
+            [
+              1.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              -0.2715044319629669,
+              -0.9887903928756714,
+              0.5
+            ],
+            [
+              0.16470588743686676,
+              0.29411765933036804,
+              0.843137264251709,
+              0.5
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              0.550000011920929
+            ],
+            [
+              0.4000000059604645,
+              -0.550000011920929,
+              0.699999988079071,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        }
+      ],
+      "shaders": {
+        "composite": "#version 300 es\n// Silk, from React Bits by David Haz (https://reactbits.dev, MIT + Commons\n// Clause), used in Videorc with the author's permission. Adapted for Videorc\n// (plan 190): pointer, click and intro inputs are constants, dark mode only,\n// and uniforms are packed into `u` (layout in live_background/mod.rs).\n//\n// Passes: VIDEORC_PASS_FIELD renders the bloom field at a quarter size; the\n// default pass composites the silk with the field's mip chain bound to t0.\nprecision highp float;\n\nuniform vec4 u[9];\nuniform sampler2D t0;\nout vec4 outColor;\n\nconst float e = 2.71828182845904523536;\n\nfloat noise(vec2 texCoord) {\n  float G = e;\n  vec2 r = (G * sin(G * texCoord));\n  return fract(r.x * r.y * (1.0 + texCoord.x));\n}\n\nvec2 rotateUvs(vec2 uv, float angle) {\n  float c = cos(angle);\n  float s = sin(angle);\n  mat2 rot = mat2(c, -s, s, c);\n  return rot * uv;\n}\n\nfloat silk(vec2 vUv) {\n  float scale = u[2].x;\n  vec2 uv = rotateUvs(vUv * scale, u[2].y);\n  vec2 tex = uv * scale + u[3].yz;\n  float tOffset = u[0].z;\n  tex.y += 0.03 * u[2].z * sin(8.0 * tex.x - tOffset);\n  return 0.6 + 0.4 * u[3].x * sin(5.0 * (tex.x + tex.y + cos(3.0 * tex.x + 5.0 * tex.y) + 0.02 * tOffset) + u[2].w * sin(20.0 * (tex.x + tex.y - 0.1 * tOffset)));\n}\n\n#ifdef VIDEORC_PASS_FIELD\nvoid main() {\n  vec2 vUv = gl_FragCoord.xy / u[0].xy;\n  float n = clamp((silk(vUv) - 0.2) / 0.8, 0.0, 1.0);\n  outColor = vec4(pow(n, 6.0), 0.0, 0.0, 1.0);\n}\n#else\nvec3 softClip(vec3 c) {\n  vec3 over = max(c - 0.75, 0.0);\n  return min(c, 0.75) + 0.25 * (1.0 - exp(-over * 4.0));\n}\n\nvoid main() {\n  vec2 vUv = gl_FragCoord.xy / u[0].xy;\n  float pattern = silk(vUv);\n  float rnd = noise(gl_FragCoord.xy);\n  float n = clamp((pattern - 0.2) / 0.8, 0.0, 1.0);\n\n  // React Bits steps one CSS pixel; one CSS pixel is min(view) / 1080 here.\n  vec2 stepUv = u[0].w / u[1].xy;\n  float gx = silk(vUv + vec2(stepUv.x, 0.0)) - pattern;\n  float gy = silk(vUv + vec2(0.0, stepUv.y)) - pattern;\n  vec3 normal = normalize(vec3(-gx * 26.0, -gy * 26.0, 1.0));\n  vec3 toLight = normalize(vec3(u[6].yz, 0.85));\n  float depth = u[4].w;\n  float relief = 1.0 + (dot(normal, toLight) - toLight.z) * 1.8 * depth;\n  vec3 halfway = normalize(toLight + vec3(0.0, 0.0, 1.0));\n  float gloss = pow(max(dot(normal, halfway), 0.0), 48.0) * smoothstep(0.25, 0.85, n);\n  float crest = pow(n, 5.0);\n  float sheen = u[5].w;\n  float shine = (gloss * 0.85 + crest * 0.4) * sheen * (1.0 + u[6].w * 0.6);\n\n  float glow = u[6].x;\n  float bloom = 0.0;\n  if (glow > 0.0) {\n    bloom += textureLod(t0, vUv, 1.0).r * 0.35;\n    bloom += textureLod(t0, vUv, 2.0).r * 0.3;\n    bloom += textureLod(t0, vUv, 3.0).r * 0.2;\n    bloom += textureLod(t0, vUv, 4.0).r * 0.15;\n  }\n\n  vec3 color = u[4].rgb;\n  float grain = rnd / 15.0 * u[3].w;\n  float floorValue = mix(0.2, 0.03, depth);\n  float curve = depth > 0.0 ? pow(n, 1.0 + 1.4 * depth) : n;\n  float shade = depth > 0.0 ? floorValue + (1.0 - floorValue) * curve : pattern;\n  vec3 tone = mix(color, pow(color, vec3(1.45)), (1.0 - n) * depth);\n  vec3 lit = tone * shade * relief - vec3(grain);\n  vec3 tint = mix(color, u[5].rgb, 0.8);\n  vec3 extra = tint * (shine + bloom * glow * 0.55);\n  float blend = clamp((sheen + glow) * 4.0, 0.0, 1.0);\n  vec3 result = mix(clamp(lit, 0.0, 1.0), clamp(softClip(lit + extra), 0.0, 1.0), blend);\n  outColor = vec4(result * (1.0 - u[1].z), 1.0);\n}\n#endif\n",
+        "field": "#version 300 es\n#define VIDEORC_PASS_FIELD\n// Silk, from React Bits by David Haz (https://reactbits.dev, MIT + Commons\n// Clause), used in Videorc with the author's permission. Adapted for Videorc\n// (plan 190): pointer, click and intro inputs are constants, dark mode only,\n// and uniforms are packed into `u` (layout in live_background/mod.rs).\n//\n// Passes: VIDEORC_PASS_FIELD renders the bloom field at a quarter size; the\n// default pass composites the silk with the field's mip chain bound to t0.\nprecision highp float;\n\nuniform vec4 u[9];\nuniform sampler2D t0;\nout vec4 outColor;\n\nconst float e = 2.71828182845904523536;\n\nfloat noise(vec2 texCoord) {\n  float G = e;\n  vec2 r = (G * sin(G * texCoord));\n  return fract(r.x * r.y * (1.0 + texCoord.x));\n}\n\nvec2 rotateUvs(vec2 uv, float angle) {\n  float c = cos(angle);\n  float s = sin(angle);\n  mat2 rot = mat2(c, -s, s, c);\n  return rot * uv;\n}\n\nfloat silk(vec2 vUv) {\n  float scale = u[2].x;\n  vec2 uv = rotateUvs(vUv * scale, u[2].y);\n  vec2 tex = uv * scale + u[3].yz;\n  float tOffset = u[0].z;\n  tex.y += 0.03 * u[2].z * sin(8.0 * tex.x - tOffset);\n  return 0.6 + 0.4 * u[3].x * sin(5.0 * (tex.x + tex.y + cos(3.0 * tex.x + 5.0 * tex.y) + 0.02 * tOffset) + u[2].w * sin(20.0 * (tex.x + tex.y - 0.1 * tOffset)));\n}\n\n#ifdef VIDEORC_PASS_FIELD\nvoid main() {\n  vec2 vUv = gl_FragCoord.xy / u[0].xy;\n  float n = clamp((silk(vUv) - 0.2) / 0.8, 0.0, 1.0);\n  outColor = vec4(pow(n, 6.0), 0.0, 0.0, 1.0);\n}\n#else\nvec3 softClip(vec3 c) {\n  vec3 over = max(c - 0.75, 0.0);\n  return min(c, 0.75) + 0.25 * (1.0 - exp(-over * 4.0));\n}\n\nvoid main() {\n  vec2 vUv = gl_FragCoord.xy / u[0].xy;\n  float pattern = silk(vUv);\n  float rnd = noise(gl_FragCoord.xy);\n  float n = clamp((pattern - 0.2) / 0.8, 0.0, 1.0);\n\n  // React Bits steps one CSS pixel; one CSS pixel is min(view) / 1080 here.\n  vec2 stepUv = u[0].w / u[1].xy;\n  float gx = silk(vUv + vec2(stepUv.x, 0.0)) - pattern;\n  float gy = silk(vUv + vec2(0.0, stepUv.y)) - pattern;\n  vec3 normal = normalize(vec3(-gx * 26.0, -gy * 26.0, 1.0));\n  vec3 toLight = normalize(vec3(u[6].yz, 0.85));\n  float depth = u[4].w;\n  float relief = 1.0 + (dot(normal, toLight) - toLight.z) * 1.8 * depth;\n  vec3 halfway = normalize(toLight + vec3(0.0, 0.0, 1.0));\n  float gloss = pow(max(dot(normal, halfway), 0.0), 48.0) * smoothstep(0.25, 0.85, n);\n  float crest = pow(n, 5.0);\n  float sheen = u[5].w;\n  float shine = (gloss * 0.85 + crest * 0.4) * sheen * (1.0 + u[6].w * 0.6);\n\n  float glow = u[6].x;\n  float bloom = 0.0;\n  if (glow > 0.0) {\n    bloom += textureLod(t0, vUv, 1.0).r * 0.35;\n    bloom += textureLod(t0, vUv, 2.0).r * 0.3;\n    bloom += textureLod(t0, vUv, 3.0).r * 0.2;\n    bloom += textureLod(t0, vUv, 4.0).r * 0.15;\n  }\n\n  vec3 color = u[4].rgb;\n  float grain = rnd / 15.0 * u[3].w;\n  float floorValue = mix(0.2, 0.03, depth);\n  float curve = depth > 0.0 ? pow(n, 1.0 + 1.4 * depth) : n;\n  float shade = depth > 0.0 ? floorValue + (1.0 - floorValue) * curve : pattern;\n  vec3 tone = mix(color, pow(color, vec3(1.45)), (1.0 - n) * depth);\n  vec3 lit = tone * shade * relief - vec3(grain);\n  vec3 tint = mix(color, u[5].rgb, 0.8);\n  vec3 extra = tint * (shine + bloom * glow * 0.55);\n  float blend = clamp((sheen + glow) * 4.0, 0.0, 1.0);\n  vec3 result = mix(clamp(lit, 0.0, 1.0), clamp(softClip(lit + extra), 0.0, 1.0), blend);\n  outColor = vec4(result * (1.0 - u[1].z), 1.0);\n}\n#endif\n"
+      },
+      "soft": true
+    },
+    {
+      "id": "side-rays",
+      "looks": [
+        {
+          "id": "sunbeam",
+          "posterPhase": 15.0,
+          "rate": 2.5,
+          "statics": [
+            [
+              1.0,
+              0.7686274647712708,
+              0.41960784792900085,
+              0.6000000238418579
+            ],
+            [
+              0.5882353186607361,
+              0.7843137383460999,
+              1.0,
+              2.0
+            ],
+            [
+              2.0,
+              5.0,
+              0.5,
+              1.600000023841858
+            ],
+            [
+              1.0,
+              1.0,
+              0.0,
+              1.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.5,
+              0.0,
+              1.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "moonlight",
+          "posterPhase": 15.0,
+          "rate": 1.5,
+          "statics": [
+            [
+              0.8588235378265381,
+              0.8941176533699036,
+              1.0,
+              0.699999988079071
+            ],
+            [
+              0.47843137383461,
+              0.6352941393852234,
+              1.0,
+              1.600000023841858
+            ],
+            [
+              2.0,
+              5.0,
+              0.5,
+              1.600000023841858
+            ],
+            [
+              1.0,
+              1.0,
+              0.0,
+              1.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.5,
+              0.0,
+              1.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "spotlight",
+          "posterPhase": 15.0,
+          "rate": 2.5,
+          "statics": [
+            [
+              1.0,
+              1.0,
+              1.0,
+              0.6000000238418579
+            ],
+            [
+              0.8784313797950745,
+              0.9058823585510254,
+              1.0,
+              2.0
+            ],
+            [
+              1.2000000476837158,
+              3.0,
+              0.75,
+              1.600000023841858
+            ],
+            [
+              1.399999976158142,
+              1.0,
+              0.0,
+              1.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.30000001192092896,
+              0.0,
+              1.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        }
+      ],
+      "shaders": {
+        "main": "#version 300 es\n// Side Rays, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): mouse follow and the intro reveal are constants, dark\n// mode only, drawn opaque over the look's base colour, and uniforms are packed\n// into `u` (layout in live_background/mod.rs).\nprecision highp float;\n\nuniform vec4 u[9];\nout vec4 outColor;\n\nfloat sq(float x) {\n  return x * x;\n}\n\nfloat hash(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\n\nfloat noise(vec2 p) {\n  vec2 i = floor(p);\n  vec2 f = p - i;\n  vec2 w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n  float a = hash(i);\n  float b = hash(i + vec2(1.0, 0.0));\n  float c = hash(i + vec2(0.0, 1.0));\n  float d = hash(i + vec2(1.0, 1.0));\n  return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);\n}\n\nfloat shafts(float x, float t, float seed, float aa) {\n  float sway = (0.4 * sin(t * 0.31 + seed) + 0.24 * sin(t * 0.17 + seed * 2.3)) * u[7].w;\n  float n = 0.7 * noise(vec2(x + sway + seed, t * 0.3)) + 0.3 * noise(vec2(x * 2.4 + sway * 1.5 + seed * 1.7, t * 0.45 + 3.0));\n  float width = mix(0.5, 0.1, u[4].z);\n  float s = mix(smoothstep(0.5 - width, 0.5 + width, n), 0.5, aa);\n  return mix(0.05, 1.0, s);\n}\n\nfloat motes(vec2 p, float cell, float t, float seed) {\n  p += vec2(t * 0.021, -t * 0.013) + seed * 7.31;\n  vec2 grid = p / cell;\n  vec2 id = floor(grid);\n  vec2 f = grid - id;\n  float h = hash(id + seed);\n  if (h > 0.5) return 0.0;\n  vec2 center = 0.25 + 0.5 * vec2(hash(id + 1.7 + seed), hash(id + 3.1 + seed));\n  center += 0.1 * vec2(sin(t * 0.7 + h * 31.0), cos(t * 0.6 + h * 23.0));\n  float size = mix(0.035, 0.09, hash(id + 5.3 + seed));\n  float edge = length(fwidth(grid)) * 0.7;\n  float twinkle = 0.55 + 0.45 * sin(t * 1.9 + h * 41.0);\n  return (1.0 - smoothstep(size - edge, size + edge, length(f - center))) * twinkle;\n}\n\nvoid main() {\n  vec2 res = u[0].xy;\n  float aspect = res.x / res.y;\n  vec2 q = (gl_FragCoord.xy - 0.5 * res) / res.y;\n  if (u[6].x > 0.5) q.x = -q.x;\n  if (u[6].y > 0.5) q.y = -q.y;\n  vec2 source = u[6].z > 0.5 ? vec2(aspect * 0.5 + 0.42, 0.3) : vec2(aspect * 0.5 + 0.1, 0.62);\n  float t = u[0].z;\n  float swayAmount = u[7].w;\n  float heading = (u[6].z > 0.5 ? 3.42 : -2.48) + u[6].w + 0.035 * sin(t * 0.21) * swayAmount;\n  vec2 v = q - source;\n  float r = length(v);\n  float angle = mod(atan(v.y, v.x) - heading + 3.14159265, 6.28318531) - 3.14159265;\n  float spread = u[4].x;\n  float x = angle * u[4].y;\n  float aa = smoothstep(0.12, 0.45, fwidth(x));\n  float offset = spread * 0.22;\n  float fanA = exp(-sq((angle + offset) / spread) * 1.4);\n  float fanB = exp(-sq((angle - offset) / (spread * 1.15)) * 1.4);\n  float focus = 1.0 + u[7].z * exp(-sq((angle - u[7].x) / u[7].y));\n  float lightA = fanA * shafts(x, t, 0.0, aa) * focus;\n  float lightB = fanB * shafts(x * 0.83, t * 0.6, 17.0, aa) * focus;\n  float reach = 1.0 / (1.0 + pow(r / 0.4, u[4].w));\n  float blend = u[2].w;\n  vec3 colorA = u[2].rgb;\n  vec3 colorB = u[3].rgb;\n  vec3 glowColor = mix(colorA, colorB, blend);\n  vec3 light = (colorA * lightA * (1.0 - blend) + colorB * lightB * blend) * 2.0 * reach;\n  light += glowColor * u[5].x * exp(-sq(r / 0.4));\n  float dust = u[5].z;\n  if (dust > 0.0) {\n    float sparkle = motes(q, 0.06, t, 0.0) + 0.7 * motes(q, 0.038, t * 0.8, 9.0);\n    light += mix(glowColor, vec3(1.0), 0.6) * sparkle * (lightA + lightB) * reach * dust * 2.5;\n  }\n  // The intro reveal is finished (React Bits' uReveal = 1).\n  light *= u[3].w * (1.0 - smoothstep(2.15, 2.6, r));\n  float gray = dot(light, vec3(0.2126, 0.7152, 0.0722));\n  light = max(mix(vec3(gray), light, u[5].y), 0.0);\n  float peak = max(light.r, max(light.g, light.b));\n  float grain = (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;\n  float mapped = 1.0 - exp(-peak);\n  vec3 tone = light * (mapped / max(peak, 1e-4));\n  tone = mix(tone, vec3(mapped), smoothstep(0.7, 1.0, mapped) * 0.55);\n  vec3 shown = clamp(tone * u[5].w, 0.0, 1.0);\n  float alpha = max(shown.r, max(shown.g, shown.b));\n  vec3 color = clamp(shown * alpha + grain, 0.0, 1.0);\n  vec3 premultiplied = min(color, vec3(alpha));\n  outColor = vec4((premultiplied + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n"
+      },
+      "soft": true
+    },
+    {
+      "id": "plasma-wave",
+      "looks": [
+        {
+          "id": "plasma",
+          "posterPhase": 6.0,
+          "rate": 1.0,
+          "statics": [
+            [
+              0.0,
+              1.25,
+              0.05000000074505806,
+              0.05000000074505806
+            ],
+            [
+              1.0,
+              1.0,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.6000000238418579,
+              2.4000000953674316,
+              1.0,
+              0.0
+            ],
+            [
+              0.39929333329200745,
+              0.08919350802898407,
+              0.9322768449783325,
+              1.0
+            ],
+            [
+              0.0002615437260828912,
+              0.47617727518081665,
+              0.6661169528961182,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.399999976158142,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "ember",
+          "posterPhase": 6.0,
+          "rate": 1.0,
+          "statics": [
+            [
+              0.0,
+              1.25,
+              0.05000000074505806,
+              0.05000000074505806
+            ],
+            [
+              1.0,
+              1.0,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.6000000238418579,
+              2.4000000953674316,
+              1.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.259027361869812,
+              0.04298700764775276,
+              1.0
+            ],
+            [
+              1.0,
+              0.022012993693351746,
+              0.160443514585495,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.399999976158142,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "glacier",
+          "posterPhase": 6.0,
+          "rate": 1.0,
+          "statics": [
+            [
+              0.0,
+              1.25,
+              0.05000000074505806,
+              0.05000000074505806
+            ],
+            [
+              1.0,
+              1.0,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.6000000238418579,
+              2.4000000953674316,
+              0.8999999761581421,
+              0.0
+            ],
+            [
+              0.2976526618003845,
+              0.5668097734451294,
+              0.9828262329101562,
+              1.0
+            ],
+            [
+              0.7518950700759888,
+              0.8912620544433594,
+              0.9913928508758545,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.399999976158142,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        }
+      ],
+      "shaders": {
+        "coarse": "#version 300 es\n#define VIDEORC_PASS_COARSE\n// Plasma Wave, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): the mouse heat and the intro are constants, dark mode\n// only, float targets only (React Bits' range = 1), drawn opaque over the\n// look's base colour, and uniforms are packed into `u` (layout in\n// live_background/mod.rs).\n//\n// Passes (define one): VIDEORC_PASS_COARSE traces at a third of the fine size;\n// VIDEORC_PASS_FINE re-traces only near edges, else samples the coarse trace\n// (t0); VIDEORC_PASS_DOWN and VIDEORC_PASS_UP build the bloom chain (t0 the\n// source, t1 the matching down level for UP); the default pass composites the\n// fine light (t0) and the bloom (t1).\nprecision highp float;\n\nuniform vec4 u[9];\nuniform sampler2D t0;\nuniform sampler2D t1;\nout vec4 outColor;\n\nconst float PI = 3.14159265;\nconst float TAU = 6.28318531;\nconst float HALF_PI = 1.5707963;\n\n#if defined(VIDEORC_PASS_COARSE) || defined(VIDEORC_PASS_FINE)\nvec4 traceLight(vec2 pixel) {\n  vec2 view = u[1].xy;\n  vec2 coord = pixel - 0.5 * view;\n  float c = cos(u[2].x);\n  float sn = sin(u[2].x);\n  coord = mat2(c, -sn, sn, c) * coord;\n  vec3 dir = normalize(vec3(coord / view.y, u[2].y));\n  vec3 o = vec3(0.0, 0.0, -7.0);\n  float t = u[0].z * PI;\n  float t1 = t * 0.7;\n  float t2 = t * 0.9;\n  float tSpeed1 = t * u[2].z;\n  float tSpeed2 = t * u[2].w * u[3].x;\n  float bend1 = u[3].y;\n  float bend2 = u[3].z;\n  float thickness = u[3].w;\n  vec3 heat = u[7].xyz;\n  float s = 1.0;\n  float d = 0.0;\n  vec2 k = vec2(0.0);\n  for (int i = 0; i < 14; ++i) {\n    vec3 p = o + dir * d;\n    p.x -= 15.0;\n    float px = p.x;\n    float heatOffset = (px - heat.x) / heat.z;\n    float swell = heat.y * exp(-heatOffset * heatOffset);\n    float wob1 = bend1 + swell * (0.16 + 0.2 * bend1) + sin(t1 + px * 0.8) * 0.1;\n    float wob2 = bend2 + swell * (0.16 + 0.2 * bend2) + cos(t2 + px * 1.1) * 0.1;\n    vec2 a = sin(vec2(px, px + HALF_PI) + tSpeed1) * wob1;\n    vec2 b = cos(vec2(px, px + HALF_PI) + tSpeed2) * wob2;\n    float cut = px + thickness;\n    k.x = max(cut, length(p.yz - a) - thickness);\n    k.y = max(cut, length(p.yz - b) - thickness);\n    s = min(s, min(k.x, k.y));\n    if (s < 0.001 || d > 300.0) break;\n    d += s * 0.7;\n  }\n  vec3 raw = max(cos(d * TAU) - s * sqrt(d) - vec3(k, 0.0), 0.0);\n  float field = max(raw.r, max(raw.g, raw.b));\n  raw.gb += 0.1;\n  raw = raw * 0.4 + raw.brg * 0.6 + raw * raw;\n  float lum = dot(raw, vec3(0.299, 0.587, 0.114));\n  float w1 = max(0.0, 1.0 - k.x * 2.0) + 0.0001;\n  float w2 = max(0.0, 1.0 - k.y * 2.0) + 0.0001;\n  vec3 base = (u[5].rgb * w1 + u[6].rgb * w2) / (w1 + w2);\n  float soft = smoothstep(0.03, 0.36, field);\n  float hot = smoothstep(0.32, 0.8, field);\n  vec3 light = base * lum * 2.6 * soft + mix(base, vec3(1.0), 0.55) * hot * u[4].x * 2.0;\n  return vec4(light, field);\n}\n#endif\n\n#if defined(VIDEORC_PASS_COARSE)\nvoid main() {\n  outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n}\n#elif defined(VIDEORC_PASS_FINE)\nvoid main() {\n  vec2 coarseSize = vec2(textureSize(t0, 0));\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 pos = uv * coarseSize - 0.5;\n  ivec2 cell = ivec2(floor(pos));\n  ivec2 last = ivec2(coarseSize) - 1;\n  float a = texelFetch(t0, clamp(cell, ivec2(0), last), 0).a;\n  float b = texelFetch(t0, clamp(cell + ivec2(1, 0), ivec2(0), last), 0).a;\n  float c = texelFetch(t0, clamp(cell + ivec2(0, 1), ivec2(0), last), 0).a;\n  float d = texelFetch(t0, clamp(cell + ivec2(1, 1), ivec2(0), last), 0).a;\n  float high = max(max(a, b), max(c, d));\n  float low = min(min(a, b), min(c, d));\n  if (high > 0.02 && low < 0.4) outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n  else outColor = texture(t0, uv);\n}\n#elif defined(VIDEORC_PASS_DOWN)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 texel = 1.0 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv) * 4.0;\n  sum += texture(t0, uv - texel);\n  sum += texture(t0, uv + texel);\n  sum += texture(t0, uv + vec2(texel.x, -texel.y));\n  sum += texture(t0, uv - vec2(texel.x, -texel.y));\n  outColor = sum / 8.0;\n}\n#elif defined(VIDEORC_PASS_UP)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 h = 0.5 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv + vec2(-h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(0.0, -h.y * 2.0));\n  sum += texture(t0, uv + vec2(0.0, h.y * 2.0));\n  sum += texture(t0, uv + vec2(-h.x, h.y)) * 2.0;\n  sum += texture(t0, uv + h) * 2.0;\n  sum += texture(t0, uv + vec2(h.x, -h.y)) * 2.0;\n  sum += texture(t0, uv - h) * 2.0;\n  outColor = sum / 12.0 + texture(t1, uv);\n}\n#else\nfloat hash(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  float exposure = u[4].y;\n  vec3 hdr = texture(t0, uv).rgb * exposure;\n  hdr += texture(t1, uv).rgb * exposure * u[4].z * 0.18;\n  float grain = (hash(gl_FragCoord.xy + fract(u[0].z * 7.31) * 113.0) - 0.5) * u[4].w;\n  vec3 mapped = 1.0 - exp(-hdr);\n  float level = max(mapped.r, max(mapped.g, mapped.b));\n  mapped = clamp(mapped + grain * level, 0.0, 1.0) * u[5].w;\n  float alpha = max(mapped.r, max(mapped.g, mapped.b));\n  outColor = vec4((mapped + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n#endif\n",
+        "composite": "#version 300 es\n// Plasma Wave, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): the mouse heat and the intro are constants, dark mode\n// only, float targets only (React Bits' range = 1), drawn opaque over the\n// look's base colour, and uniforms are packed into `u` (layout in\n// live_background/mod.rs).\n//\n// Passes (define one): VIDEORC_PASS_COARSE traces at a third of the fine size;\n// VIDEORC_PASS_FINE re-traces only near edges, else samples the coarse trace\n// (t0); VIDEORC_PASS_DOWN and VIDEORC_PASS_UP build the bloom chain (t0 the\n// source, t1 the matching down level for UP); the default pass composites the\n// fine light (t0) and the bloom (t1).\nprecision highp float;\n\nuniform vec4 u[9];\nuniform sampler2D t0;\nuniform sampler2D t1;\nout vec4 outColor;\n\nconst float PI = 3.14159265;\nconst float TAU = 6.28318531;\nconst float HALF_PI = 1.5707963;\n\n#if defined(VIDEORC_PASS_COARSE) || defined(VIDEORC_PASS_FINE)\nvec4 traceLight(vec2 pixel) {\n  vec2 view = u[1].xy;\n  vec2 coord = pixel - 0.5 * view;\n  float c = cos(u[2].x);\n  float sn = sin(u[2].x);\n  coord = mat2(c, -sn, sn, c) * coord;\n  vec3 dir = normalize(vec3(coord / view.y, u[2].y));\n  vec3 o = vec3(0.0, 0.0, -7.0);\n  float t = u[0].z * PI;\n  float t1 = t * 0.7;\n  float t2 = t * 0.9;\n  float tSpeed1 = t * u[2].z;\n  float tSpeed2 = t * u[2].w * u[3].x;\n  float bend1 = u[3].y;\n  float bend2 = u[3].z;\n  float thickness = u[3].w;\n  vec3 heat = u[7].xyz;\n  float s = 1.0;\n  float d = 0.0;\n  vec2 k = vec2(0.0);\n  for (int i = 0; i < 14; ++i) {\n    vec3 p = o + dir * d;\n    p.x -= 15.0;\n    float px = p.x;\n    float heatOffset = (px - heat.x) / heat.z;\n    float swell = heat.y * exp(-heatOffset * heatOffset);\n    float wob1 = bend1 + swell * (0.16 + 0.2 * bend1) + sin(t1 + px * 0.8) * 0.1;\n    float wob2 = bend2 + swell * (0.16 + 0.2 * bend2) + cos(t2 + px * 1.1) * 0.1;\n    vec2 a = sin(vec2(px, px + HALF_PI) + tSpeed1) * wob1;\n    vec2 b = cos(vec2(px, px + HALF_PI) + tSpeed2) * wob2;\n    float cut = px + thickness;\n    k.x = max(cut, length(p.yz - a) - thickness);\n    k.y = max(cut, length(p.yz - b) - thickness);\n    s = min(s, min(k.x, k.y));\n    if (s < 0.001 || d > 300.0) break;\n    d += s * 0.7;\n  }\n  vec3 raw = max(cos(d * TAU) - s * sqrt(d) - vec3(k, 0.0), 0.0);\n  float field = max(raw.r, max(raw.g, raw.b));\n  raw.gb += 0.1;\n  raw = raw * 0.4 + raw.brg * 0.6 + raw * raw;\n  float lum = dot(raw, vec3(0.299, 0.587, 0.114));\n  float w1 = max(0.0, 1.0 - k.x * 2.0) + 0.0001;\n  float w2 = max(0.0, 1.0 - k.y * 2.0) + 0.0001;\n  vec3 base = (u[5].rgb * w1 + u[6].rgb * w2) / (w1 + w2);\n  float soft = smoothstep(0.03, 0.36, field);\n  float hot = smoothstep(0.32, 0.8, field);\n  vec3 light = base * lum * 2.6 * soft + mix(base, vec3(1.0), 0.55) * hot * u[4].x * 2.0;\n  return vec4(light, field);\n}\n#endif\n\n#if defined(VIDEORC_PASS_COARSE)\nvoid main() {\n  outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n}\n#elif defined(VIDEORC_PASS_FINE)\nvoid main() {\n  vec2 coarseSize = vec2(textureSize(t0, 0));\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 pos = uv * coarseSize - 0.5;\n  ivec2 cell = ivec2(floor(pos));\n  ivec2 last = ivec2(coarseSize) - 1;\n  float a = texelFetch(t0, clamp(cell, ivec2(0), last), 0).a;\n  float b = texelFetch(t0, clamp(cell + ivec2(1, 0), ivec2(0), last), 0).a;\n  float c = texelFetch(t0, clamp(cell + ivec2(0, 1), ivec2(0), last), 0).a;\n  float d = texelFetch(t0, clamp(cell + ivec2(1, 1), ivec2(0), last), 0).a;\n  float high = max(max(a, b), max(c, d));\n  float low = min(min(a, b), min(c, d));\n  if (high > 0.02 && low < 0.4) outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n  else outColor = texture(t0, uv);\n}\n#elif defined(VIDEORC_PASS_DOWN)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 texel = 1.0 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv) * 4.0;\n  sum += texture(t0, uv - texel);\n  sum += texture(t0, uv + texel);\n  sum += texture(t0, uv + vec2(texel.x, -texel.y));\n  sum += texture(t0, uv - vec2(texel.x, -texel.y));\n  outColor = sum / 8.0;\n}\n#elif defined(VIDEORC_PASS_UP)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 h = 0.5 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv + vec2(-h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(0.0, -h.y * 2.0));\n  sum += texture(t0, uv + vec2(0.0, h.y * 2.0));\n  sum += texture(t0, uv + vec2(-h.x, h.y)) * 2.0;\n  sum += texture(t0, uv + h) * 2.0;\n  sum += texture(t0, uv + vec2(h.x, -h.y)) * 2.0;\n  sum += texture(t0, uv - h) * 2.0;\n  outColor = sum / 12.0 + texture(t1, uv);\n}\n#else\nfloat hash(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  float exposure = u[4].y;\n  vec3 hdr = texture(t0, uv).rgb * exposure;\n  hdr += texture(t1, uv).rgb * exposure * u[4].z * 0.18;\n  float grain = (hash(gl_FragCoord.xy + fract(u[0].z * 7.31) * 113.0) - 0.5) * u[4].w;\n  vec3 mapped = 1.0 - exp(-hdr);\n  float level = max(mapped.r, max(mapped.g, mapped.b));\n  mapped = clamp(mapped + grain * level, 0.0, 1.0) * u[5].w;\n  float alpha = max(mapped.r, max(mapped.g, mapped.b));\n  outColor = vec4((mapped + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n#endif\n",
+        "down": "#version 300 es\n#define VIDEORC_PASS_DOWN\n// Plasma Wave, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): the mouse heat and the intro are constants, dark mode\n// only, float targets only (React Bits' range = 1), drawn opaque over the\n// look's base colour, and uniforms are packed into `u` (layout in\n// live_background/mod.rs).\n//\n// Passes (define one): VIDEORC_PASS_COARSE traces at a third of the fine size;\n// VIDEORC_PASS_FINE re-traces only near edges, else samples the coarse trace\n// (t0); VIDEORC_PASS_DOWN and VIDEORC_PASS_UP build the bloom chain (t0 the\n// source, t1 the matching down level for UP); the default pass composites the\n// fine light (t0) and the bloom (t1).\nprecision highp float;\n\nuniform vec4 u[9];\nuniform sampler2D t0;\nuniform sampler2D t1;\nout vec4 outColor;\n\nconst float PI = 3.14159265;\nconst float TAU = 6.28318531;\nconst float HALF_PI = 1.5707963;\n\n#if defined(VIDEORC_PASS_COARSE) || defined(VIDEORC_PASS_FINE)\nvec4 traceLight(vec2 pixel) {\n  vec2 view = u[1].xy;\n  vec2 coord = pixel - 0.5 * view;\n  float c = cos(u[2].x);\n  float sn = sin(u[2].x);\n  coord = mat2(c, -sn, sn, c) * coord;\n  vec3 dir = normalize(vec3(coord / view.y, u[2].y));\n  vec3 o = vec3(0.0, 0.0, -7.0);\n  float t = u[0].z * PI;\n  float t1 = t * 0.7;\n  float t2 = t * 0.9;\n  float tSpeed1 = t * u[2].z;\n  float tSpeed2 = t * u[2].w * u[3].x;\n  float bend1 = u[3].y;\n  float bend2 = u[3].z;\n  float thickness = u[3].w;\n  vec3 heat = u[7].xyz;\n  float s = 1.0;\n  float d = 0.0;\n  vec2 k = vec2(0.0);\n  for (int i = 0; i < 14; ++i) {\n    vec3 p = o + dir * d;\n    p.x -= 15.0;\n    float px = p.x;\n    float heatOffset = (px - heat.x) / heat.z;\n    float swell = heat.y * exp(-heatOffset * heatOffset);\n    float wob1 = bend1 + swell * (0.16 + 0.2 * bend1) + sin(t1 + px * 0.8) * 0.1;\n    float wob2 = bend2 + swell * (0.16 + 0.2 * bend2) + cos(t2 + px * 1.1) * 0.1;\n    vec2 a = sin(vec2(px, px + HALF_PI) + tSpeed1) * wob1;\n    vec2 b = cos(vec2(px, px + HALF_PI) + tSpeed2) * wob2;\n    float cut = px + thickness;\n    k.x = max(cut, length(p.yz - a) - thickness);\n    k.y = max(cut, length(p.yz - b) - thickness);\n    s = min(s, min(k.x, k.y));\n    if (s < 0.001 || d > 300.0) break;\n    d += s * 0.7;\n  }\n  vec3 raw = max(cos(d * TAU) - s * sqrt(d) - vec3(k, 0.0), 0.0);\n  float field = max(raw.r, max(raw.g, raw.b));\n  raw.gb += 0.1;\n  raw = raw * 0.4 + raw.brg * 0.6 + raw * raw;\n  float lum = dot(raw, vec3(0.299, 0.587, 0.114));\n  float w1 = max(0.0, 1.0 - k.x * 2.0) + 0.0001;\n  float w2 = max(0.0, 1.0 - k.y * 2.0) + 0.0001;\n  vec3 base = (u[5].rgb * w1 + u[6].rgb * w2) / (w1 + w2);\n  float soft = smoothstep(0.03, 0.36, field);\n  float hot = smoothstep(0.32, 0.8, field);\n  vec3 light = base * lum * 2.6 * soft + mix(base, vec3(1.0), 0.55) * hot * u[4].x * 2.0;\n  return vec4(light, field);\n}\n#endif\n\n#if defined(VIDEORC_PASS_COARSE)\nvoid main() {\n  outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n}\n#elif defined(VIDEORC_PASS_FINE)\nvoid main() {\n  vec2 coarseSize = vec2(textureSize(t0, 0));\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 pos = uv * coarseSize - 0.5;\n  ivec2 cell = ivec2(floor(pos));\n  ivec2 last = ivec2(coarseSize) - 1;\n  float a = texelFetch(t0, clamp(cell, ivec2(0), last), 0).a;\n  float b = texelFetch(t0, clamp(cell + ivec2(1, 0), ivec2(0), last), 0).a;\n  float c = texelFetch(t0, clamp(cell + ivec2(0, 1), ivec2(0), last), 0).a;\n  float d = texelFetch(t0, clamp(cell + ivec2(1, 1), ivec2(0), last), 0).a;\n  float high = max(max(a, b), max(c, d));\n  float low = min(min(a, b), min(c, d));\n  if (high > 0.02 && low < 0.4) outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n  else outColor = texture(t0, uv);\n}\n#elif defined(VIDEORC_PASS_DOWN)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 texel = 1.0 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv) * 4.0;\n  sum += texture(t0, uv - texel);\n  sum += texture(t0, uv + texel);\n  sum += texture(t0, uv + vec2(texel.x, -texel.y));\n  sum += texture(t0, uv - vec2(texel.x, -texel.y));\n  outColor = sum / 8.0;\n}\n#elif defined(VIDEORC_PASS_UP)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 h = 0.5 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv + vec2(-h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(0.0, -h.y * 2.0));\n  sum += texture(t0, uv + vec2(0.0, h.y * 2.0));\n  sum += texture(t0, uv + vec2(-h.x, h.y)) * 2.0;\n  sum += texture(t0, uv + h) * 2.0;\n  sum += texture(t0, uv + vec2(h.x, -h.y)) * 2.0;\n  sum += texture(t0, uv - h) * 2.0;\n  outColor = sum / 12.0 + texture(t1, uv);\n}\n#else\nfloat hash(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  float exposure = u[4].y;\n  vec3 hdr = texture(t0, uv).rgb * exposure;\n  hdr += texture(t1, uv).rgb * exposure * u[4].z * 0.18;\n  float grain = (hash(gl_FragCoord.xy + fract(u[0].z * 7.31) * 113.0) - 0.5) * u[4].w;\n  vec3 mapped = 1.0 - exp(-hdr);\n  float level = max(mapped.r, max(mapped.g, mapped.b));\n  mapped = clamp(mapped + grain * level, 0.0, 1.0) * u[5].w;\n  float alpha = max(mapped.r, max(mapped.g, mapped.b));\n  outColor = vec4((mapped + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n#endif\n",
+        "fine": "#version 300 es\n#define VIDEORC_PASS_FINE\n// Plasma Wave, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): the mouse heat and the intro are constants, dark mode\n// only, float targets only (React Bits' range = 1), drawn opaque over the\n// look's base colour, and uniforms are packed into `u` (layout in\n// live_background/mod.rs).\n//\n// Passes (define one): VIDEORC_PASS_COARSE traces at a third of the fine size;\n// VIDEORC_PASS_FINE re-traces only near edges, else samples the coarse trace\n// (t0); VIDEORC_PASS_DOWN and VIDEORC_PASS_UP build the bloom chain (t0 the\n// source, t1 the matching down level for UP); the default pass composites the\n// fine light (t0) and the bloom (t1).\nprecision highp float;\n\nuniform vec4 u[9];\nuniform sampler2D t0;\nuniform sampler2D t1;\nout vec4 outColor;\n\nconst float PI = 3.14159265;\nconst float TAU = 6.28318531;\nconst float HALF_PI = 1.5707963;\n\n#if defined(VIDEORC_PASS_COARSE) || defined(VIDEORC_PASS_FINE)\nvec4 traceLight(vec2 pixel) {\n  vec2 view = u[1].xy;\n  vec2 coord = pixel - 0.5 * view;\n  float c = cos(u[2].x);\n  float sn = sin(u[2].x);\n  coord = mat2(c, -sn, sn, c) * coord;\n  vec3 dir = normalize(vec3(coord / view.y, u[2].y));\n  vec3 o = vec3(0.0, 0.0, -7.0);\n  float t = u[0].z * PI;\n  float t1 = t * 0.7;\n  float t2 = t * 0.9;\n  float tSpeed1 = t * u[2].z;\n  float tSpeed2 = t * u[2].w * u[3].x;\n  float bend1 = u[3].y;\n  float bend2 = u[3].z;\n  float thickness = u[3].w;\n  vec3 heat = u[7].xyz;\n  float s = 1.0;\n  float d = 0.0;\n  vec2 k = vec2(0.0);\n  for (int i = 0; i < 14; ++i) {\n    vec3 p = o + dir * d;\n    p.x -= 15.0;\n    float px = p.x;\n    float heatOffset = (px - heat.x) / heat.z;\n    float swell = heat.y * exp(-heatOffset * heatOffset);\n    float wob1 = bend1 + swell * (0.16 + 0.2 * bend1) + sin(t1 + px * 0.8) * 0.1;\n    float wob2 = bend2 + swell * (0.16 + 0.2 * bend2) + cos(t2 + px * 1.1) * 0.1;\n    vec2 a = sin(vec2(px, px + HALF_PI) + tSpeed1) * wob1;\n    vec2 b = cos(vec2(px, px + HALF_PI) + tSpeed2) * wob2;\n    float cut = px + thickness;\n    k.x = max(cut, length(p.yz - a) - thickness);\n    k.y = max(cut, length(p.yz - b) - thickness);\n    s = min(s, min(k.x, k.y));\n    if (s < 0.001 || d > 300.0) break;\n    d += s * 0.7;\n  }\n  vec3 raw = max(cos(d * TAU) - s * sqrt(d) - vec3(k, 0.0), 0.0);\n  float field = max(raw.r, max(raw.g, raw.b));\n  raw.gb += 0.1;\n  raw = raw * 0.4 + raw.brg * 0.6 + raw * raw;\n  float lum = dot(raw, vec3(0.299, 0.587, 0.114));\n  float w1 = max(0.0, 1.0 - k.x * 2.0) + 0.0001;\n  float w2 = max(0.0, 1.0 - k.y * 2.0) + 0.0001;\n  vec3 base = (u[5].rgb * w1 + u[6].rgb * w2) / (w1 + w2);\n  float soft = smoothstep(0.03, 0.36, field);\n  float hot = smoothstep(0.32, 0.8, field);\n  vec3 light = base * lum * 2.6 * soft + mix(base, vec3(1.0), 0.55) * hot * u[4].x * 2.0;\n  return vec4(light, field);\n}\n#endif\n\n#if defined(VIDEORC_PASS_COARSE)\nvoid main() {\n  outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n}\n#elif defined(VIDEORC_PASS_FINE)\nvoid main() {\n  vec2 coarseSize = vec2(textureSize(t0, 0));\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 pos = uv * coarseSize - 0.5;\n  ivec2 cell = ivec2(floor(pos));\n  ivec2 last = ivec2(coarseSize) - 1;\n  float a = texelFetch(t0, clamp(cell, ivec2(0), last), 0).a;\n  float b = texelFetch(t0, clamp(cell + ivec2(1, 0), ivec2(0), last), 0).a;\n  float c = texelFetch(t0, clamp(cell + ivec2(0, 1), ivec2(0), last), 0).a;\n  float d = texelFetch(t0, clamp(cell + ivec2(1, 1), ivec2(0), last), 0).a;\n  float high = max(max(a, b), max(c, d));\n  float low = min(min(a, b), min(c, d));\n  if (high > 0.02 && low < 0.4) outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n  else outColor = texture(t0, uv);\n}\n#elif defined(VIDEORC_PASS_DOWN)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 texel = 1.0 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv) * 4.0;\n  sum += texture(t0, uv - texel);\n  sum += texture(t0, uv + texel);\n  sum += texture(t0, uv + vec2(texel.x, -texel.y));\n  sum += texture(t0, uv - vec2(texel.x, -texel.y));\n  outColor = sum / 8.0;\n}\n#elif defined(VIDEORC_PASS_UP)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 h = 0.5 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv + vec2(-h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(0.0, -h.y * 2.0));\n  sum += texture(t0, uv + vec2(0.0, h.y * 2.0));\n  sum += texture(t0, uv + vec2(-h.x, h.y)) * 2.0;\n  sum += texture(t0, uv + h) * 2.0;\n  sum += texture(t0, uv + vec2(h.x, -h.y)) * 2.0;\n  sum += texture(t0, uv - h) * 2.0;\n  outColor = sum / 12.0 + texture(t1, uv);\n}\n#else\nfloat hash(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  float exposure = u[4].y;\n  vec3 hdr = texture(t0, uv).rgb * exposure;\n  hdr += texture(t1, uv).rgb * exposure * u[4].z * 0.18;\n  float grain = (hash(gl_FragCoord.xy + fract(u[0].z * 7.31) * 113.0) - 0.5) * u[4].w;\n  vec3 mapped = 1.0 - exp(-hdr);\n  float level = max(mapped.r, max(mapped.g, mapped.b));\n  mapped = clamp(mapped + grain * level, 0.0, 1.0) * u[5].w;\n  float alpha = max(mapped.r, max(mapped.g, mapped.b));\n  outColor = vec4((mapped + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n#endif\n",
+        "up": "#version 300 es\n#define VIDEORC_PASS_UP\n// Plasma Wave, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): the mouse heat and the intro are constants, dark mode\n// only, float targets only (React Bits' range = 1), drawn opaque over the\n// look's base colour, and uniforms are packed into `u` (layout in\n// live_background/mod.rs).\n//\n// Passes (define one): VIDEORC_PASS_COARSE traces at a third of the fine size;\n// VIDEORC_PASS_FINE re-traces only near edges, else samples the coarse trace\n// (t0); VIDEORC_PASS_DOWN and VIDEORC_PASS_UP build the bloom chain (t0 the\n// source, t1 the matching down level for UP); the default pass composites the\n// fine light (t0) and the bloom (t1).\nprecision highp float;\n\nuniform vec4 u[9];\nuniform sampler2D t0;\nuniform sampler2D t1;\nout vec4 outColor;\n\nconst float PI = 3.14159265;\nconst float TAU = 6.28318531;\nconst float HALF_PI = 1.5707963;\n\n#if defined(VIDEORC_PASS_COARSE) || defined(VIDEORC_PASS_FINE)\nvec4 traceLight(vec2 pixel) {\n  vec2 view = u[1].xy;\n  vec2 coord = pixel - 0.5 * view;\n  float c = cos(u[2].x);\n  float sn = sin(u[2].x);\n  coord = mat2(c, -sn, sn, c) * coord;\n  vec3 dir = normalize(vec3(coord / view.y, u[2].y));\n  vec3 o = vec3(0.0, 0.0, -7.0);\n  float t = u[0].z * PI;\n  float t1 = t * 0.7;\n  float t2 = t * 0.9;\n  float tSpeed1 = t * u[2].z;\n  float tSpeed2 = t * u[2].w * u[3].x;\n  float bend1 = u[3].y;\n  float bend2 = u[3].z;\n  float thickness = u[3].w;\n  vec3 heat = u[7].xyz;\n  float s = 1.0;\n  float d = 0.0;\n  vec2 k = vec2(0.0);\n  for (int i = 0; i < 14; ++i) {\n    vec3 p = o + dir * d;\n    p.x -= 15.0;\n    float px = p.x;\n    float heatOffset = (px - heat.x) / heat.z;\n    float swell = heat.y * exp(-heatOffset * heatOffset);\n    float wob1 = bend1 + swell * (0.16 + 0.2 * bend1) + sin(t1 + px * 0.8) * 0.1;\n    float wob2 = bend2 + swell * (0.16 + 0.2 * bend2) + cos(t2 + px * 1.1) * 0.1;\n    vec2 a = sin(vec2(px, px + HALF_PI) + tSpeed1) * wob1;\n    vec2 b = cos(vec2(px, px + HALF_PI) + tSpeed2) * wob2;\n    float cut = px + thickness;\n    k.x = max(cut, length(p.yz - a) - thickness);\n    k.y = max(cut, length(p.yz - b) - thickness);\n    s = min(s, min(k.x, k.y));\n    if (s < 0.001 || d > 300.0) break;\n    d += s * 0.7;\n  }\n  vec3 raw = max(cos(d * TAU) - s * sqrt(d) - vec3(k, 0.0), 0.0);\n  float field = max(raw.r, max(raw.g, raw.b));\n  raw.gb += 0.1;\n  raw = raw * 0.4 + raw.brg * 0.6 + raw * raw;\n  float lum = dot(raw, vec3(0.299, 0.587, 0.114));\n  float w1 = max(0.0, 1.0 - k.x * 2.0) + 0.0001;\n  float w2 = max(0.0, 1.0 - k.y * 2.0) + 0.0001;\n  vec3 base = (u[5].rgb * w1 + u[6].rgb * w2) / (w1 + w2);\n  float soft = smoothstep(0.03, 0.36, field);\n  float hot = smoothstep(0.32, 0.8, field);\n  vec3 light = base * lum * 2.6 * soft + mix(base, vec3(1.0), 0.55) * hot * u[4].x * 2.0;\n  return vec4(light, field);\n}\n#endif\n\n#if defined(VIDEORC_PASS_COARSE)\nvoid main() {\n  outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n}\n#elif defined(VIDEORC_PASS_FINE)\nvoid main() {\n  vec2 coarseSize = vec2(textureSize(t0, 0));\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 pos = uv * coarseSize - 0.5;\n  ivec2 cell = ivec2(floor(pos));\n  ivec2 last = ivec2(coarseSize) - 1;\n  float a = texelFetch(t0, clamp(cell, ivec2(0), last), 0).a;\n  float b = texelFetch(t0, clamp(cell + ivec2(1, 0), ivec2(0), last), 0).a;\n  float c = texelFetch(t0, clamp(cell + ivec2(0, 1), ivec2(0), last), 0).a;\n  float d = texelFetch(t0, clamp(cell + ivec2(1, 1), ivec2(0), last), 0).a;\n  float high = max(max(a, b), max(c, d));\n  float low = min(min(a, b), min(c, d));\n  if (high > 0.02 && low < 0.4) outColor = traceLight(gl_FragCoord.xy * (u[1].xy / u[0].xy));\n  else outColor = texture(t0, uv);\n}\n#elif defined(VIDEORC_PASS_DOWN)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 texel = 1.0 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv) * 4.0;\n  sum += texture(t0, uv - texel);\n  sum += texture(t0, uv + texel);\n  sum += texture(t0, uv + vec2(texel.x, -texel.y));\n  sum += texture(t0, uv - vec2(texel.x, -texel.y));\n  outColor = sum / 8.0;\n}\n#elif defined(VIDEORC_PASS_UP)\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  vec2 h = 0.5 / vec2(textureSize(t0, 0));\n  vec4 sum = texture(t0, uv + vec2(-h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(h.x * 2.0, 0.0));\n  sum += texture(t0, uv + vec2(0.0, -h.y * 2.0));\n  sum += texture(t0, uv + vec2(0.0, h.y * 2.0));\n  sum += texture(t0, uv + vec2(-h.x, h.y)) * 2.0;\n  sum += texture(t0, uv + h) * 2.0;\n  sum += texture(t0, uv + vec2(h.x, -h.y)) * 2.0;\n  sum += texture(t0, uv - h) * 2.0;\n  outColor = sum / 12.0 + texture(t1, uv);\n}\n#else\nfloat hash(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / u[0].xy;\n  float exposure = u[4].y;\n  vec3 hdr = texture(t0, uv).rgb * exposure;\n  hdr += texture(t1, uv).rgb * exposure * u[4].z * 0.18;\n  float grain = (hash(gl_FragCoord.xy + fract(u[0].z * 7.31) * 113.0) - 0.5) * u[4].w;\n  vec3 mapped = 1.0 - exp(-hdr);\n  float level = max(mapped.r, max(mapped.g, mapped.b));\n  mapped = clamp(mapped + grain * level, 0.0, 1.0) * u[5].w;\n  float alpha = max(mapped.r, max(mapped.g, mapped.b));\n  outColor = vec4((mapped + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n#endif\n"
+      },
+      "soft": true
+    },
+    {
+      "id": "liquid-chrome",
+      "looks": [
+        {
+          "id": "polished",
+          "posterPhase": 1.2,
+          "rate": 0.2,
+          "statics": [
+            [
+              0.30000001192092896,
+              3.0,
+              3.0,
+              4.0
+            ],
+            [
+              1.6666666269302368,
+              1.0,
+              0.17000000178813934,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "gold",
+          "posterPhase": 1.2,
+          "rate": 0.2,
+          "statics": [
+            [
+              0.30000001192092896,
+              3.0,
+              3.0,
+              4.0
+            ],
+            [
+              1.6666666269302368,
+              1.0,
+              0.30000001192092896,
+              1.0
+            ],
+            [
+              0.8912620544433594,
+              0.5604991912841797,
+              0.1541522592306137,
+              1.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "mercury",
+          "posterPhase": 1.2,
+          "rate": 0.14,
+          "statics": [
+            [
+              0.2199999988079071,
+              2.5,
+              2.5,
+              3.0
+            ],
+            [
+              1.4492754936218262,
+              1.0,
+              0.20000000298023224,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        }
+      ],
+      "shaders": {
+        "main": "#version 300 es\n// Liquid Chrome, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): the pointer ripple simulation, its slope pass, the tilt\n// and the intro are gone (a recording has no pointer), dark mode only, drawn\n// opaque over the look's base colour, and uniforms are packed into `u`\n// (layout in live_background/mod.rs).\nprecision highp float;\n\nuniform vec4 u[9];\nout vec4 outColor;\n\nfloat lamp(vec2 p, vec2 center, vec2 size, float soft) {\n  vec2 grown = size + soft;\n  vec2 q = (p - center) / grown;\n  q *= q;\n  float d = sqrt(sqrt(dot(q, q)));\n  float edge = soft / min(grown.x, grown.y);\n  float shape = (1.0 - smoothstep(1.0 - edge, 1.0 + edge, d)) * (1.0 - 0.45 * d * d);\n  return shape * size.x * size.y / (grown.x * grown.y);\n}\n\nvec3 studio(vec3 r, float blur) {\n  vec2 p = r.xy / max(r.z + 1.0, 0.05);\n  p += u[5].xy * smoothstep(0.3, 1.0, length(p));\n  float radius = length(p);\n  float soft = 0.008 + blur;\n  vec2 dir = p / max(radius, 1e-3);\n  float key = lamp(p, vec2(-0.25, 0.42), vec2(0.3, 0.12), soft);\n  float side = lamp(p, vec2(0.48, 0.12), vec2(0.06, 0.3), soft);\n  float ground = lamp(p, vec2(-0.1, -0.55), vec2(0.45, 0.06), soft);\n  float rise = smoothstep(-1.0, 1.0, dir.y);\n  float width = 0.015 + soft * 2.0;\n  float rim = exp(-abs(radius - 1.0) / width) * 0.031 / width * (0.8 + smoothstep(-0.5, 0.8, p.y));\n  float band = 1.0 - 0.95 * smoothstep(1.04 - soft, 1.12 + soft, radius);\n  float wall = smoothstep(1.25, 1.55, radius) * (0.6 + 0.4 * rise);\n  float streak = smoothstep(0.2, 0.8, 0.5 + 0.5 * sin(atan(dir.y, dir.x) * 3.0 + 0.6));\n  vec3 color = vec3(0.004, 0.004, 0.005) + 0.02 * smoothstep(-0.4, 0.6, p.y);\n  color += vec3(1.0, 0.97, 0.94) * key * 4.0 + vec3(0.9, 0.95, 1.0) * side * 3.0 + ground * 1.2;\n  color += vec3(1.0, 0.98, 0.95) * rim;\n  color *= band;\n  return color + vec3(mix(0.45, 1.8, streak)) * wall;\n}\n\nvec3 shade(vec2 slope, vec3 v, float blur, vec3 f0) {\n  float steep = length(slope);\n  slope *= 3.0 * tanh(steep / 3.0) / max(steep, 1e-6);\n  vec3 n = normalize(vec3(-slope, 1.0));\n  vec3 r = reflect(v, n);\n  float facing = clamp(dot(n, -v), 0.0, 1.0);\n  return studio(r, blur) * (f0 + (1.0 - f0) * pow(1.0 - facing, 5.0));\n}\n\nvec3 aces(vec3 x) {\n  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);\n}\n\nvoid main() {\n  vec2 res = u[0].xy;\n  float unit = min(res.x, res.y);\n  float time = u[0].z;\n  vec2 frag = gl_FragCoord.xy;\n  vec2 uv = (2.0 * frag - res) / unit;\n  vec2 p = uv;\n  vec2 rowX = vec2(1.0, 0.0);\n  vec2 rowY = vec2(0.0, 1.0);\n  float presence = u[4].w;\n  float amplitude = u[2].x * presence;\n  vec2 frequency = u[2].yz;\n  for (float i = 1.0; i < 9.0; i++) {\n    if (i > u[2].w) break;\n    float a = amplitude / i;\n    float soften = exp(0.3 - 0.3 * i);\n    float argX = i * frequency.x * p.y + time;\n    p.x += a * cos(argX);\n    rowX -= a * sin(argX) * i * frequency.x * soften * rowY;\n    float argY = i * frequency.y * p.x + time;\n    p.y += a * cos(argY);\n    rowY -= a * sin(argY) * i * frequency.y * soften * rowX;\n  }\n  float phase = time - p.x - p.y;\n  vec2 field = -(rowX + rowY);\n  float density = max(length(field), 1e-3);\n  vec2 across = field / density;\n  float k = u[3].x;\n  float sn = sin(phase);\n  float cs = cos(phase);\n  float th = tanh(k * sn);\n  float bevel = (1.0 - th * th) / tanh(k);\n  float fade = smoothstep(3.0, 9.0, 3.14159 * unit / density);\n  float weight = u[3].y * presence * fade;\n  vec2 slope = k * cs * bevel * weight * across;\n  vec2 sweep = -k * bevel * (sn + 2.0 * k * cs * cs * th) * weight * density * 2.0 / unit * across;\n  vec2 stepX = dFdx(slope);\n  vec2 stepY = dFdy(slope);\n  vec2 crease = dot(stepX, stepX) > dot(stepY, stepY) ? stepX : stepY;\n  if (dot(crease, crease) > dot(sweep, sweep)) sweep = crease;\n  float bend = length(sweep);\n  float alpha = smoothstep(0.0, 0.1, length(slope));\n  vec3 f0 = mix(vec3(1.0), u[4].rgb, smoothstep(0.05, 0.6, length(slope))) * 0.92;\n  vec3 v = normalize(vec3(uv * 0.08, -1.0));\n  float blur = u[3].z * 0.35;\n  vec3 light;\n  if (bend < 0.01) {\n    light = shade(slope, v, blur + bend * 0.5, f0);\n  } else {\n    light = vec3(0.0);\n    for (float t = -0.375; t < 0.4; t += 0.25) {\n      light += shade(slope + sweep * t, v, blur + bend * 0.15, f0);\n    }\n    light *= 0.25;\n  }\n  vec3 color = pow(aces(light * u[3].w), vec3(1.0 / 2.2));\n  float grain = fract(52.9829189 * fract(dot(frag, vec2(0.06711056, 0.00583715))));\n  color += (grain - 0.5) / 255.0;\n  vec3 premultiplied = clamp(color, 0.0, 1.0) * alpha;\n  outColor = vec4((premultiplied + u[6].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n"
+      },
+      "soft": true
+    },
+    {
+      "id": "line-waves",
+      "looks": [
+        {
+          "id": "silk",
+          "posterPhase": 4.5,
+          "rate": 0.75,
+          "statics": [
+            [
+              72.0,
+              1.2999999523162842,
+              0.6000000238418579,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              -0.5759586691856384,
+              1.0,
+              0.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              0.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              0.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "gold",
+          "posterPhase": 4.5,
+          "rate": 0.75,
+          "statics": [
+            [
+              72.0,
+              1.2999999523162842,
+              0.6000000238418579,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              -0.5759586691856384,
+              1.0,
+              0.0,
+              1.0
+            ],
+            [
+              1.0,
+              0.8509804010391235,
+              0.6274510025978088,
+              0.0
+            ],
+            [
+              1.0,
+              0.7058823704719543,
+              0.3686274588108063,
+              0.0
+            ],
+            [
+              1.0,
+              0.9411764740943909,
+              0.8392156958580017,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        },
+        {
+          "id": "aurora",
+          "posterPhase": 4.5,
+          "rate": 0.75,
+          "statics": [
+            [
+              72.0,
+              1.2999999523162842,
+              0.6000000238418579,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              -0.5759586691856384,
+              1.0,
+              0.0,
+              1.0
+            ],
+            [
+              0.5607843399047852,
+              0.9411764740943909,
+              0.8156862854957581,
+              0.0
+            ],
+            [
+              0.47843137383461,
+              0.658823549747467,
+              1.0,
+              0.0
+            ],
+            [
+              0.37254902720451355,
+              0.8274509906768799,
+              0.9019607901573181,
+              0.0
+            ],
+            [
+              0.019607843831181526,
+              0.019607843831181526,
+              0.0235294122248888,
+              0.0
+            ]
+          ]
+        }
+      ],
+      "shaders": {
+        "main": "#version 300 es\n// Line Waves, from React Bits by David Haz (https://reactbits.dev, MIT +\n// Commons Clause), used in Videorc with the author's permission. Adapted for\n// Videorc (plan 190): the mouse lens, click ripples and intro reveal are\n// constants, dark mode only, drawn opaque over the look's base colour, and\n// uniforms are packed into `u` (layout in live_background/mod.rs).\nprecision highp float;\n\nuniform vec4 u[9];\nout vec4 outColor;\n\nvec2 rotate(vec2 p, float a) {\n  float c = cos(a);\n  float s = sin(a);\n  return vec2(c * p.x - s * p.y, s * p.x + c * p.y);\n}\n\nfloat hash(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\n\nfloat noise(vec2 p) {\n  vec2 i = floor(p);\n  vec2 f = p - i;\n  vec2 w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), w.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), w.x), w.y);\n}\n\nfloat smootherstep(float edge0, float edge1, float x) {\n  float t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);\n  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);\n}\n\nfloat bend(vec2 p, float t) {\n  float scale = u[3].w;\n  vec2 q = p * 2.0 / scale;\n  float w = 0.6 * sin(q.x * 0.55 + t * 0.4 + 0.6 * sin(q.y * 0.9 - t * 0.28));\n  w += 0.21 * sin(q.x * 1.3 - t * 0.33 + q.y * 0.8 + 1.3);\n  w += 0.12 * sin(q.y * 2.3 + q.x * 0.9 - t * 0.37 + 0.4);\n  return w * u[3].z * scale * 0.46;\n}\n\nfloat river(vec2 p, float y, float t) {\n  float drift = 0.7 * (0.18 * sin(p.x * 1.6 - t * 0.33 + 0.7) + 0.1 * sin(p.x * 3.1 + t * 0.21));\n  float center = 0.5 * (0.2 * sin(t * 0.17) + 0.08 * sin(t * 0.29 + 1.3));\n  float width = 0.13 * u[3].y;\n  float near = (y - center - drift) / width;\n  float far = (y + 0.22 * sin(t * 0.13 + 2.0) - drift * 0.6 + 0.3) / (width * 0.55);\n  return max(exp(-near * near), exp(-far * far) * 0.7);\n}\n\nvec3 palette(float x) {\n  x = fract(x) * 3.0;\n  if (x < 1.0) return mix(u[5].rgb, u[6].rgb, smoothstep(0.0, 1.0, x));\n  if (x < 2.0) return mix(u[6].rgb, u[7].rgb, smoothstep(1.0, 2.0, x));\n  return mix(u[7].rgb, u[5].rgb, smoothstep(2.0, 3.0, x));\n}\n\nvoid main() {\n  vec2 res = u[0].xy;\n  float aspect = res.x / res.y;\n  vec2 uv = gl_FragCoord.xy / res;\n  vec2 p = rotate((gl_FragCoord.xy - 0.5 * res) / res.y, u[4].x);\n  float t = u[0].z;\n  float pixel = u[0].w;\n  float lines = u[2].x;\n  float highlight = u[3].x;\n\n  float w = bend(p, t);\n  float y = p.y + w;\n  float phi = y * lines;\n  float fw = max(fwidth(phi), 1e-5);\n  float crowd = smoothstep(0.18, 0.5, fw);\n\n  float fold = smoothstep(1.3, 2.2, fw * res.y / lines);\n  float shimmer = mix(1.0, smoothstep(0.15, 0.85, noise(vec2(y * 1.6 + t * 0.07, p.x * 0.55 - t * 0.22))), 0.5);\n  float lit = max(river(p, y, t), fold * 0.9) * shimmer;\n  float light = mix(1.0, 0.07 + 0.93 * lit, highlight);\n\n  float dist = abs(fract(phi + 0.5) - 0.5) / fw;\n  float width = u[2].y * pixel * (1.0 + 1.5 * lit * highlight);\n  float cover = clamp(min(dist + width * 0.5, 0.5) - max(dist - width * 0.5, -0.5), 0.0, 1.0);\n  cover = mix(cover, min(width * fw, 1.0), crowd);\n  float halo = exp(-dist / (2.2 * pixel)) * (1.0 - crowd) * u[2].z;\n  float threadShade = mix(1.0, 0.55 + 0.45 * hash(vec2(floor(phi + 0.5), 7.3)), 0.45 * (1.0 - crowd));\n\n  // The intro reveal is finished (React Bits' uReveal = 1).\n  float span = 0.5 * sqrt(aspect * aspect + 1.0);\n  float sweep = span + 0.6;\n  float reveal = 1.0 - smoothstep(sweep - 0.6, sweep, p.x);\n\n  float edge = 1.0;\n  float edgeFade = u[4].z;\n  if (edgeFade > 0.0) {\n    float ex = min(uv.x, 1.0 - uv.x) * aspect;\n    float ey = min(uv.y, 1.0 - uv.y);\n    edge = smootherstep(0.0, edgeFade * 0.5, ex) * smootherstep(0.0, edgeFade * 0.5, ey);\n  }\n\n  // React Bits' colour cycle advances at speed * cycleSpeed * 0.05 per second,\n  // and its time at speed * 2.5: so cycle = time * cycleSpeed * 0.02.\n  vec3 tint = palette(y * 0.3 + p.x * 0.2 + t * u[4].y * 0.02);\n  float grain = (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) / 255.0;\n\n  float strength = (cover + halo) * threadShade * light * u[2].w * reveal * edge;\n  vec3 color = clamp(tint * strength * u[4].w, 0.0, 1.0);\n  float alpha = max(color.r, max(color.g, color.b));\n  color = clamp(color + grain, 0.0, 1.0);\n  vec3 premultiplied = min(color, vec3(alpha));\n  outColor = vec4((premultiplied + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);\n}\n"
+      },
+      "soft": false
+    }
+  ],
+  "baseColor": [
+    0.019607843831181526,
+    0.019607843831181526,
+    0.0235294122248888
+  ],
+  "plasmaMaxLightPixels": 2400000.0,
+  "sizeCases": {
+    "internal": [
+      {
+        "id": "silk",
+        "level": "full",
+        "output": [
+          1920,
+          1080
+        ],
+        "view": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "half",
+        "output": [
+          1920,
+          1080
+        ],
+        "view": [
+          960,
+          540
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "full",
+        "output": [
+          1080,
+          1920
+        ],
+        "view": [
+          1080,
+          1920
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "half",
+        "output": [
+          1080,
+          1920
+        ],
+        "view": [
+          540,
+          960
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "full",
+        "output": [
+          3840,
+          2160
+        ],
+        "view": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "half",
+        "output": [
+          3840,
+          2160
+        ],
+        "view": [
+          960,
+          540
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "full",
+        "output": [
+          2560,
+          1440
+        ],
+        "view": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "half",
+        "output": [
+          2560,
+          1440
+        ],
+        "view": [
+          960,
+          540
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "full",
+        "output": [
+          1280,
+          720
+        ],
+        "view": [
+          1280,
+          720
+        ]
+      },
+      {
+        "id": "silk",
+        "level": "half",
+        "output": [
+          1280,
+          720
+        ],
+        "view": [
+          640,
+          360
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "full",
+        "output": [
+          1920,
+          1080
+        ],
+        "view": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "half",
+        "output": [
+          1920,
+          1080
+        ],
+        "view": [
+          960,
+          540
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "full",
+        "output": [
+          1080,
+          1920
+        ],
+        "view": [
+          1080,
+          1920
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "half",
+        "output": [
+          1080,
+          1920
+        ],
+        "view": [
+          540,
+          960
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "full",
+        "output": [
+          3840,
+          2160
+        ],
+        "view": [
+          3840,
+          2160
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "half",
+        "output": [
+          3840,
+          2160
+        ],
+        "view": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "full",
+        "output": [
+          2560,
+          1440
+        ],
+        "view": [
+          2560,
+          1440
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "half",
+        "output": [
+          2560,
+          1440
+        ],
+        "view": [
+          1280,
+          720
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "full",
+        "output": [
+          1280,
+          720
+        ],
+        "view": [
+          1280,
+          720
+        ]
+      },
+      {
+        "id": "line-waves",
+        "level": "half",
+        "output": [
+          1280,
+          720
+        ],
+        "view": [
+          640,
+          360
+        ]
+      }
+    ],
+    "plasma": [
+      {
+        "coarse": [
+          640,
+          360
+        ],
+        "down": [
+          [
+            960,
+            540
+          ],
+          [
+            480,
+            270
+          ],
+          [
+            240,
+            135
+          ],
+          [
+            120,
+            67
+          ],
+          [
+            60,
+            33
+          ]
+        ],
+        "fine": [
+          1920,
+          1080
+        ],
+        "view": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "coarse": [
+          360,
+          640
+        ],
+        "down": [
+          [
+            540,
+            960
+          ],
+          [
+            270,
+            480
+          ],
+          [
+            135,
+            240
+          ],
+          [
+            67,
+            120
+          ],
+          [
+            33,
+            60
+          ]
+        ],
+        "fine": [
+          1080,
+          1920
+        ],
+        "view": [
+          1080,
+          1920
+        ]
+      },
+      {
+        "coarse": [
+          320,
+          180
+        ],
+        "down": [
+          [
+            480,
+            270
+          ],
+          [
+            240,
+            135
+          ],
+          [
+            120,
+            67
+          ],
+          [
+            60,
+            33
+          ],
+          [
+            30,
+            16
+          ]
+        ],
+        "fine": [
+          960,
+          540
+        ],
+        "view": [
+          960,
+          540
+        ]
+      },
+      {
+        "coarse": [
+          427,
+          240
+        ],
+        "down": [
+          [
+            640,
+            360
+          ],
+          [
+            320,
+            180
+          ],
+          [
+            160,
+            90
+          ],
+          [
+            80,
+            45
+          ],
+          [
+            40,
+            22
+          ]
+        ],
+        "fine": [
+          1280,
+          720
+        ],
+        "view": [
+          1280,
+          720
+        ]
+      }
+    ],
+    "silkField": [
+      {
+        "field": [
+          480,
+          270
+        ],
+        "view": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "field": [
+          270,
+          480
+        ],
+        "view": [
+          1080,
+          1920
+        ]
+      },
+      {
+        "field": [
+          240,
+          135
+        ],
+        "view": [
+          960,
+          540
+        ]
+      },
+      {
+        "field": [
+          320,
+          180
+        ],
+        "view": [
+          1280,
+          720
+        ]
+      }
+    ]
+  },
+  "softMaxShortSide": 1080.0,
+  "uniformVec4Count": 9,
+  "vertex": "#version 300 es\nconst vec2 corners[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));\nvoid main() {\n  gl_Position = vec4(corners[gl_VertexID], 0.0, 1.0);\n}\n"
+}

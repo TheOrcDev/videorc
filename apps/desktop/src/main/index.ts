@@ -203,6 +203,7 @@ import {
   previewSurfaceCanvasFromOutputs,
   withPreviewSurfaceBanners
 } from './preview-surface-banners'
+import { livePosterManifest } from '../shared/live-background-catalog'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
 import { SOUND_ASSET_HOST, SOUNDS_FOLDER, isSoundFileName } from '../shared/sound-assets'
 import type {
@@ -14731,6 +14732,28 @@ function bundledBackgroundAssetsInternal(): BackgroundImportResult[] {
   }).filter((asset) => existsSync(asset.assetPath))
 }
 
+/**
+ * Plan 190: every live background look's bundled poster. Registered with the
+ * backend like the bundled pictures, so a scene naming a live background
+ * resolves on every path, and a path that can't animate draws the poster.
+ * Registration is a path check; no poster is read or decoded until shown.
+ */
+function livePosterAssetsInternal(): BackgroundImportResult[] {
+  const directory = bundledBackgroundDirectory()
+  return livePosterManifest()
+    .map((asset) => {
+      const assetPath = join(directory, asset.fileName)
+      return {
+        id: asset.id,
+        name: asset.name,
+        assetPath,
+        thumbnailPath: assetPath,
+        fileName: asset.fileName
+      }
+    })
+    .filter((asset) => existsSync(asset.assetPath))
+}
+
 async function bundledBackgroundAssets(): Promise<BackgroundImportResult[]> {
   const assets = bundledBackgroundAssetsInternal()
   await Promise.all(
@@ -14773,7 +14796,9 @@ function importedBackgroundPathForAssetId(assetId: string): string | null {
 }
 
 async function ensureManagedBackgroundRegistered(assetId: string): Promise<boolean> {
-  const bundled = bundledBackgroundAssetsInternal().find((asset) => asset.id === assetId)
+  const bundled =
+    bundledBackgroundAssetsInternal().find((asset) => asset.id === assetId) ??
+    livePosterAssetsInternal().find((asset) => asset.id === assetId)
   const path = bundled?.assetPath ?? importedBackgroundPathForAssetId(assetId)
   if (!path) {
     return false
@@ -14783,7 +14808,9 @@ async function ensureManagedBackgroundRegistered(assetId: string): Promise<boole
 }
 
 async function rehydrateManagedBackgroundAssets(): Promise<void> {
-  const ids = new Set(bundledBackgroundAssetsInternal().map((asset) => asset.id))
+  const ids = new Set(
+    [...bundledBackgroundAssetsInternal(), ...livePosterAssetsInternal()].map((asset) => asset.id)
+  )
   const root = join(app.getPath('userData'), 'background-assets')
   try {
     for (const entry of readdirSync(root)) {

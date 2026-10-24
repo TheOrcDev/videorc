@@ -466,6 +466,12 @@ pub struct CompositorRuntime {
     /// The auxiliary output of the current run, so a banner set change can
     /// kick prepares for its canvas too.
     stream_output: Option<CompositorAuxiliaryOutput>,
+    /// Plan 190: the live background's phase clock, synced to the scene's
+    /// `background.live` once per tick. `None` while no live background
+    /// shows, and then nothing below runs.
+    live_background: Option<crate::live_background::LiveBackgroundRuntime>,
+    /// Plan 190: where the live background renderers report how they draw.
+    live_background_board: Arc<crate::live_background::LiveBackgroundBoard>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -714,6 +720,25 @@ impl CompositorRuntime {
             }
         }
         requests
+    }
+
+    /// Plan 190: follow the scene's live background (start, re-base, stop).
+    /// While none shows this is one `Option` check per tick, and the board is
+    /// left empty so status says nothing.
+    fn sync_live_background(&mut self, now: Instant) {
+        let spec = self
+            .scene
+            .as_ref()
+            .and_then(|snapshot| snapshot.scene.as_ref())
+            .and_then(|scene| scene.background.as_ref())
+            .and_then(|background| background.live.as_ref());
+        if spec.is_none() && self.live_background.is_none() {
+            return;
+        }
+        crate::live_background::runtime::sync(&mut self.live_background, spec, now);
+        if self.live_background.is_none() {
+            self.live_background_board.clear();
+        }
     }
 
     /// Drop the layers whose fade-out ended (D10). Runs every render tick
@@ -1020,6 +1045,9 @@ struct CompositorRenderCache {
     /// S3): one `Arc` clone per tick, read by both legs.
     banners: Arc<BannerSet>,
     banner_session_shape: Option<OverlaySessionShape>,
+    /// Plan 190: the live background the primary leg draws this tick, if any.
+    live_background: Option<crate::live_background::LiveBackgroundFrameInput>,
+    live_background_board: Arc<crate::live_background::LiveBackgroundBoard>,
 }
 
 impl CompositorRenderCache {
@@ -1045,7 +1073,8 @@ impl CompositorRenderCache {
     }
 
     async fn refresh_initial(state: &AppState) -> Self {
-        let compositor = state.compositor.lock().await;
+        let mut compositor = state.compositor.lock().await;
+        compositor.sync_live_background(Instant::now());
         Self::from_runtime(&compositor)
     }
 
@@ -1054,6 +1083,7 @@ impl CompositorRenderCache {
             let now = Instant::now();
             compositor.reap_editor_draft(now);
             compositor.reap_faded_banners(now);
+            compositor.sync_live_background(now);
             *self = Self::from_runtime(&compositor);
         }
     }
@@ -1097,6 +1127,15 @@ impl CompositorRenderCache {
             background_image_source,
             banners: Arc::clone(&compositor.banners),
             banner_session_shape: compositor.banner_session_shape,
+            live_background: compositor.live_background.as_ref().and_then(|runtime| {
+                compositor
+                    .scene
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.scene.as_ref())
+                    .and_then(|scene| scene.background.as_ref())
+                    .map(|background| runtime.frame_input(background))
+            }),
+            live_background_board: Arc::clone(&compositor.live_background_board),
         }
     }
 }
@@ -2480,6 +2519,7 @@ mod editor_draft_tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -2859,6 +2899,8 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         banners: Arc::new(BannerSet::default()),
         banner_session_shape: None,
         stream_output: None,
+        live_background: None,
+        live_background_board: Arc::default(),
     }
 }
 
@@ -2937,6 +2979,7 @@ async fn start_synthetic_compositor_with_lifecycle(
             ..CompositorFramePipelineStatus::default()
         },
         editor_draft: None,
+        live_background: None,
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Synthetic compositor running.".to_string()),
     };
@@ -8321,6 +8364,7 @@ async fn publish_compositor_frame(
             ),
             buddy_leg: primary_buddy.as_ref(),
             banners: &primary_banners,
+            live_background: None,
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         #[cfg(test)]
@@ -8494,6 +8538,7 @@ async fn publish_compositor_frame(
             ),
             buddy_leg: aux_buddy.as_ref(),
             banners: &aux_banners,
+            live_background: None,
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -8603,6 +8648,7 @@ async fn publish_compositor_frame(
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             };
             #[cfg(test)]
             let trace_role = leg_index + 1;
@@ -8850,6 +8896,10 @@ struct CompositorRenderInputs<'a> {
     /// The banners this leg carries this tick (plan 186 S3), bottom to top:
     /// drawn after the scene and the takeover, before captions (D5).
     banners: &'a [BannerDraw],
+    /// Plan 190: the live background this leg draws in place of the scene
+    /// background's poster, when its renderer can. Only the primary leg
+    /// carries one (the simulcast and ISO legs have no background).
+    live_background: Option<&'a crate::live_background::LiveBackgroundFrameInput>,
 }
 
 /// One banner as a leg draws it this tick (plan 186 S3): the prepared bitmap
@@ -9190,6 +9240,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         buddy_overlay: _,
         buddy_leg: _,
         banners: _,
+        live_background: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -9484,6 +9535,14 @@ fn try_update_compositor_status(
     );
     compositor.status.sources = metrics.sources;
     compositor.status.frame_pipeline = metrics.frame_pipeline;
+    // Plan 190: how the live background draws, and what it holds (0 while off).
+    let (live_status, live_programs, live_scratch) = compositor.live_background_board.snapshot();
+    compositor.status.live_background = compositor.live_background.as_ref().and(live_status);
+    compositor.status.frame_pipeline.live_background_programs = live_programs;
+    compositor
+        .status
+        .frame_pipeline
+        .live_background_scratch_bytes = live_scratch;
     compositor.status.image_cache = compositor.image_sources.status();
     compositor.status.updated_at = Utc::now().to_rfc3339();
     Ok(Some(compositor.status.clone()))
@@ -10557,6 +10616,7 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
         },
         frame_pipeline: CompositorFramePipelineStatus::default(),
         editor_draft: None,
+        live_background: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
     }
@@ -12230,6 +12290,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12250,6 +12311,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12342,6 +12404,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12474,6 +12537,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         )
@@ -12525,6 +12589,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         let snapshot = CompositorSceneSnapshot {
             selected_sources: None,
@@ -12576,6 +12641,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             false,
         )
@@ -12767,6 +12833,7 @@ mod tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         drop(held);
         publish_auxiliary_compositor_frame(
@@ -13246,6 +13313,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         ) {
@@ -13300,6 +13368,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             true,
         ) {
@@ -16140,6 +16209,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         let background = CompositorImageSource {
             image_path: "/missing/background.webp".to_string(),
@@ -16349,6 +16419,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -16430,6 +16501,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -16526,6 +16598,7 @@ mod tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -16537,6 +16610,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
                 ..base_inputs
             },
             &mut with_both,
@@ -16903,6 +16977,7 @@ mod tests {
                 buddy_overlay: buddy,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
@@ -17029,6 +17104,7 @@ mod tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
+            live_background: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -17057,6 +17133,7 @@ mod tests {
                     buddy_overlay: None,
                     buddy_leg: None,
                     banners: &[],
+                    live_background: None,
                     ..base_inputs
                 },
                 &mut frame,
@@ -17164,6 +17241,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17185,6 +17263,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut scene_only,
         );
@@ -17222,6 +17301,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17250,6 +17330,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut baseline,
         );
@@ -17292,6 +17373,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         let snapshot = CompositorSceneSnapshot {
             selected_sources: None,
@@ -17343,6 +17425,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17441,6 +17524,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17551,6 +17635,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -17629,6 +17714,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: visibility,
+            live: None,
         };
 
         assert_close(background_stage_margin(None), 0.0);
@@ -17806,6 +17892,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             },
             &mut bytes,
         );
@@ -18712,6 +18799,7 @@ mod buddy_sprite_tests {
             buddy_overlay: bubble,
             buddy_leg,
             banners: &[],
+            live_background: None,
         }
     }
 

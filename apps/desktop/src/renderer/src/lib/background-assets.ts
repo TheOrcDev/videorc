@@ -20,6 +20,16 @@ import {
   BUNDLED_BACKGROUND_MANIFEST,
   type BackgroundImportResult
 } from '../../../shared/background-import'
+import {
+  LIVE_BACKGROUND_DEFAULT_LOOKS,
+  LIVE_BACKGROUND_IDS,
+  isLiveBackgroundId,
+  isLiveBackgroundLook,
+  livePosterAssetId,
+  livePosterFileName,
+  type LiveBackgroundId,
+  type LiveBackgroundMotion
+} from '../../../shared/live-background-ids'
 import type { EffectiveSceneBackground } from './backend'
 
 export type BackgroundAssetSlotStatus =
@@ -82,6 +92,23 @@ export type BackgroundAssetRegistry = {
   activeSlotId: string | null
   // Used to seed bundled presets into older localStorage registries exactly once.
   bundledPresetVersion: number
+  // Plan 190: the live backgrounds. At most one of `activeSlotId` and
+  // `live.activeId` is set: a scene has one background.
+  live: LiveBackgroundState
+}
+
+/** A live background's choices (plan 190 D8): look, motion, Visibility, Dim. */
+export type LiveBackgroundSettings = {
+  look: string
+  motion: LiveBackgroundMotion
+  dimPercent: number
+  visibilityPercent: number
+}
+
+export type LiveBackgroundState = {
+  activeId: LiveBackgroundId | null
+  // Each background remembers its own look and style once changed.
+  settings: Partial<Record<LiveBackgroundId, LiveBackgroundSettings>>
 }
 
 // The ten initial slots: stable ids the protocol/scene will reference, plus the
@@ -161,7 +188,50 @@ export function createDefaultRegistry(): BackgroundAssetRegistry {
     slots: createDefaultBackgroundSlots(),
     assets,
     activeSlotId: null,
-    bundledPresetVersion: BUNDLED_PRESET_VERSION
+    bundledPresetVersion: BUNDLED_PRESET_VERSION,
+    live: { activeId: null, settings: {} }
+  }
+}
+
+export function defaultLiveBackgroundSettings(id: LiveBackgroundId): LiveBackgroundSettings {
+  return {
+    look: LIVE_BACKGROUND_DEFAULT_LOOKS[id],
+    motion: 'calm',
+    dimPercent: 0,
+    visibilityPercent: defaultBackgroundStyle().visibilityPercent
+  }
+}
+
+/** A live background's stored choices, or its defaults. */
+export function liveBackgroundSettings(
+  registry: BackgroundAssetRegistry,
+  id: LiveBackgroundId
+): LiveBackgroundSettings {
+  return registry.live.settings[id] ?? defaultLiveBackgroundSettings(id)
+}
+
+/** Put a live background on the scene; the picture slot leaves it. */
+export function applyLiveBackground(
+  registry: BackgroundAssetRegistry,
+  id: LiveBackgroundId
+): BackgroundAssetRegistry {
+  return { ...registry, activeSlotId: null, live: { ...registry.live, activeId: id } }
+}
+
+export function setLiveBackgroundSettings(
+  registry: BackgroundAssetRegistry,
+  id: LiveBackgroundId,
+  patch: Partial<LiveBackgroundSettings>
+): BackgroundAssetRegistry {
+  return {
+    ...registry,
+    live: {
+      ...registry.live,
+      settings: {
+        ...registry.live.settings,
+        [id]: normalizeLiveSettings(id, { ...liveBackgroundSettings(registry, id), ...patch })
+      }
+    }
   }
 }
 
@@ -234,6 +304,7 @@ export function applySlot(
   return {
     ...registry,
     activeSlotId: slotId,
+    live: { ...registry.live, activeId: null },
     slots: canRecoverBundledSlot
       ? registry.slots.map(
           (entry): BackgroundAssetSlot =>
@@ -246,7 +317,9 @@ export function applySlot(
 // Recording without a digital background is always valid, so clearing is always
 // allowed.
 export function clearActiveSlot(registry: BackgroundAssetRegistry): BackgroundAssetRegistry {
-  return registry.activeSlotId === null ? registry : { ...registry, activeSlotId: null }
+  return registry.activeSlotId === null && registry.live.activeId === null
+    ? registry
+    : { ...registry, activeSlotId: null, live: { ...registry.live, activeId: null } }
 }
 
 export function applyBundledBackgroundAssets(
@@ -696,12 +769,106 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
     }
   }
 
+  const live = normalizeLiveState((data as { live?: unknown }).live)
   return {
     version: 2,
     slots,
     assets: prunedAssets,
-    activeSlotId,
-    bundledPresetVersion: BUNDLED_PRESET_VERSION
+    // One background per scene: a stored live selection wins over a slot.
+    activeSlotId: live.activeId ? null : activeSlotId,
+    bundledPresetVersion: BUNDLED_PRESET_VERSION,
+    live
+  }
+}
+
+function normalizeLiveSettings(id: LiveBackgroundId, raw: unknown): LiveBackgroundSettings {
+  const base = defaultLiveBackgroundSettings(id)
+  if (!raw || typeof raw !== 'object') return base
+  const data = raw as Partial<LiveBackgroundSettings>
+  const clamp = (value: unknown, fallback: number, max: number): number =>
+    typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(0, Math.min(max, value))
+      : fallback
+  return {
+    look: isLiveBackgroundLook(data.look) ? data.look : base.look,
+    motion: data.motion === 'normal' ? 'normal' : 'calm',
+    dimPercent: clamp(data.dimPercent, base.dimPercent, 80),
+    visibilityPercent: clamp(data.visibilityPercent, base.visibilityPercent, 40)
+  }
+}
+
+function normalizeLiveState(raw: unknown): LiveBackgroundState {
+  const state: LiveBackgroundState = { activeId: null, settings: {} }
+  if (!raw || typeof raw !== 'object') return state
+  const data = raw as { activeId?: unknown; settings?: unknown }
+  state.activeId = isLiveBackgroundId(data.activeId) ? data.activeId : null
+  if (data.settings && typeof data.settings === 'object') {
+    for (const id of LIVE_BACKGROUND_IDS) {
+      const stored = (data.settings as Record<string, unknown>)[id]
+      if (stored !== undefined) state.settings[id] = normalizeLiveSettings(id, stored)
+    }
+  }
+  return state
+}
+
+/** The bundled poster URL a live background's managed path names. */
+export function livePosterManagedPath(id: LiveBackgroundId, look: string): string {
+  return `videorc-asset://background/${encodeURIComponent(livePosterFileName(id, look))}`
+}
+
+/** The scene background for a live background with its stored choices. */
+export function liveSceneBackground(
+  id: LiveBackgroundId,
+  settings: LiveBackgroundSettings
+): EffectiveSceneBackground {
+  const style = defaultBackgroundStyle()
+  return {
+    assetId: livePosterAssetId(id, settings.look),
+    managedAssetPath: livePosterManagedPath(id, settings.look),
+    fit: style.fit,
+    scale: style.scale,
+    offsetX: style.offsetX,
+    offsetY: style.offsetY,
+    blurPx: style.blurPx,
+    dimPercent: settings.dimPercent,
+    saturationPercent: style.saturationPercent,
+    vignettePercent: style.vignettePercent,
+    visibilityPercent: settings.visibilityPercent,
+    live: { id, look: settings.look, motion: settings.motion }
+  }
+}
+
+/**
+ * The registry after the backend committed a live `background` (the
+ * transaction's truth): that live background becomes active, the picture slot
+ * leaves, and its committed choices are remembered. Returns the same registry
+ * when nothing changes.
+ */
+export function registryForCommittedLiveBackground(
+  registry: BackgroundAssetRegistry,
+  background: EffectiveSceneBackground
+): BackgroundAssetRegistry {
+  const live = background.live
+  if (!live || !isLiveBackgroundId(live.id)) return registry
+  const settings = normalizeLiveSettings(live.id, {
+    look: live.look,
+    motion: live.motion,
+    dimPercent: background.dimPercent,
+    visibilityPercent: background.visibilityPercent
+  })
+  const current = registry.live.settings[live.id]
+  if (
+    registry.activeSlotId === null &&
+    registry.live.activeId === live.id &&
+    current &&
+    JSON.stringify(current) === JSON.stringify(settings)
+  ) {
+    return registry
+  }
+  return {
+    ...registry,
+    activeSlotId: null,
+    live: { activeId: live.id, settings: { ...registry.live.settings, [live.id]: settings } }
   }
 }
 
@@ -711,6 +878,12 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
 export function effectiveSceneBackground(
   registry: BackgroundAssetRegistry
 ): EffectiveSceneBackground | null {
+  if (registry.live.activeId) {
+    return liveSceneBackground(
+      registry.live.activeId,
+      liveBackgroundSettings(registry, registry.live.activeId)
+    )
+  }
   if (!registry.activeSlotId) {
     return null
   }

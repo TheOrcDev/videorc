@@ -2,6 +2,7 @@ import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
+import type { LiveBackgroundId, LiveBackgroundMotion } from './live-background-ids'
 import type { TwitchGifMode } from './chat-gif'
 import type {
   BuddyAvatar,
@@ -716,6 +717,43 @@ export interface EffectiveSceneBackground {
   // per side = visibilityPercent / 200. 0 keeps the recording full-canvas;
   // 20 is the classic 80% stage. Backend serde-defaults absent values to 20.
   visibilityPercent: number
+  /**
+   * Plan 190: the shader a live background runs. `assetId` is then the look's
+   * bundled poster (`live-<id>-<look>`), which every path that can't animate
+   * draws. Absent for a picture.
+   */
+  live?: LiveBackgroundSpec
+}
+
+export interface LiveBackgroundSpec {
+  id: LiveBackgroundId
+  look: string
+  motion: LiveBackgroundMotion
+}
+
+/** How a live background is drawn: the shader, at half size, or its poster. */
+export type LiveBackgroundRendering = 'shader' | 'half' | 'still'
+
+/** Why a live background shows its poster (`LiveBackgroundStillReason`). */
+export type LiveBackgroundStillReason =
+  | 'forced'
+  | 'legacy-graph'
+  | 'cpu-fallback'
+  | 'no-gpu'
+  | 'software-gpu'
+  | 'quarantined-node'
+  | 'shader-compile-failed'
+  | 'gpu-budget'
+
+export interface LiveBackgroundStatus {
+  id: LiveBackgroundId
+  look: string
+  rendering: LiveBackgroundRendering
+  reason?: LiveBackgroundStillReason
+  /** The live background's own render time p95 over the guard's last window. */
+  p95Ms?: number
+  /** A look this build doesn't know; the first look renders instead. */
+  requestedLook?: string
 }
 
 export interface Scene {
@@ -2312,6 +2350,9 @@ export interface CompositorFramePipelineStatus {
   yuvFramesConverted: number
   immutableTextureUploads: number
   immutableTextureReuses: number
+  /** Plan 190: live background programs built and scratch bytes held (0 while off). */
+  liveBackgroundPrograms?: number
+  liveBackgroundScratchBytes?: number
 }
 
 export interface CompositorStatus {
@@ -2345,6 +2386,8 @@ export interface CompositorStatus {
    * while no drag is live; never present during a session.
    */
   editorDraft?: SceneEditorDraftStatus | null
+  /** Plan 190: the applied live background and how it is drawn. */
+  liveBackground?: LiveBackgroundStatus
   updatedAt: string
   message?: string
 }

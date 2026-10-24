@@ -3,6 +3,7 @@ import { defaultCaptureConfig, reconcileSourceSelection } from './capture'
 import {
   hydrateSceneLibrary,
   hydrateWorkingScene,
+  normalizeSavedBackground,
   normalizeSceneVisual,
   resolveSavedBackground,
   sameSceneVisual,
@@ -13,7 +14,12 @@ import {
   snapshotBackground,
   sourceVisibilityFromScene
 } from './scene-presets'
-import { createDefaultRegistry, applySlot, effectiveSceneBackground } from './background-assets'
+import {
+  createDefaultRegistry,
+  applySlot,
+  effectiveSceneBackground,
+  liveSceneBackground
+} from './background-assets'
 
 const visual = () =>
   normalizeSceneVisual({
@@ -360,5 +366,41 @@ describe('scene gallery reason line (plan 174 S3.3, B-20)', () => {
     ])
     expect(line).not.toContain('unavailable')
     expect(line).not.toContain('replacement')
+  })
+})
+
+describe('saved scenes keep live backgrounds (plan 190)', () => {
+  it('round-trips a live background through a saved scene', () => {
+    const live = liveSceneBackground('side-rays', {
+      look: 'moonlight',
+      motion: 'normal',
+      dimPercent: 15,
+      visibilityPercent: 30
+    })
+    const saved = snapshotBackground(live)
+    expect(saved).not.toHaveProperty('fileName')
+    expect(saved?.live).toStrictEqual({ id: 'side-rays', look: 'moonlight', motion: 'normal' })
+    expect(resolveSavedBackground(JSON.parse(JSON.stringify(saved)))).toStrictEqual(live)
+  })
+
+  it('restores the shader from the poster id when a spec is missing or wrong', () => {
+    const live = liveSceneBackground('silk', {
+      look: 'champagne',
+      motion: 'calm',
+      dimPercent: 0,
+      visibilityPercent: 20
+    })
+    const { live: _spec, ...withoutSpec } = snapshotBackground(live)!
+    expect(normalizeSavedBackground(withoutSpec)?.live).toStrictEqual({
+      id: 'silk',
+      look: 'champagne',
+      motion: 'calm'
+    })
+    expect(
+      normalizeSavedBackground({
+        ...withoutSpec,
+        live: { id: 'plasma-wave', look: 'x', motion: 'normal' }
+      })?.live
+    ).toStrictEqual({ id: 'silk', look: 'champagne', motion: 'normal' })
   })
 })

@@ -38230,6 +38230,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         params.scene = Some(scene);
 
@@ -38341,6 +38342,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: visibility,
+            live: None,
         };
         let filter_at = |visibility: f64| {
             let mut scene = base_scene.clone();

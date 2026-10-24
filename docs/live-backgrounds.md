@@ -1,0 +1,130 @@
+# Live backgrounds
+
+A live background is an animated background behind your screen and camera
+(plan 190). Five ship, from React Bits by David Haz: **Silk**, **Side
+Rays**, **Plasma Wave**, **Liquid Chrome** and **Line Waves**. Each has three
+looks. They are free for everyone, on macOS, Windows and Linux.
+
+## Using them
+
+- **Pick** one in Assets → Backgrounds, in the **Live** group. A click puts
+  it on the scene, and a click on the active tile takes it off. Picking a
+  picture takes a live background off, and the other way round: a scene has
+  one background.
+- **Adjust style** on a live tile has four controls:
+  - **Look**: three per background.
+  - **Motion**: Calm (the default) or Normal. Calm is half the React Bits
+    speed: classier behind content and cheaper for a stream's encoder.
+  - **Visibility**: how much of the frame the background shows around the
+    screen, as for pictures.
+  - **Dim**: darkens the background.
+- **Saved scenes** remember the live background, its look and its motion.
+- The animation starts on the frame the tile shows, so the first frame is
+  the picture you clicked.
+
+| Background | Looks |
+| --- | --- |
+| Silk | Satin, Champagne, Midnight |
+| Side Rays | Sunbeam, Moonlight, Spotlight |
+| Plasma Wave | Plasma, Ember, Glacier |
+| Liquid Chrome | Polished, Gold, Mercury |
+| Line Waves | Silk, Gold, Aurora |
+
+## Where it moves, and where it shows a still
+
+A live background is a **bundled picture with a shader attached**. The
+scene's background names the look's poster (`live-<id>-<look>`, a WebP in
+the bundled backgrounds folder) and a `live` spec names the shader. Every
+path that can't animate draws the poster through the picture code that
+already exists, and says why in `CompositorStatus.liveBackground.reason`.
+
+| Path | Moves? | How |
+| --- | --- | --- |
+| macOS preview, recording, stream (Metal) | Yes | MSL ports render a live frame; the compositor draws it like a picture |
+| Windows recording and stream (D3D11 media session) | Yes | HLSL ports, the same way |
+| Windows idle preview, Linux preview (Electron proof surface) | Yes | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`) |
+| Linux recording and stream (CPU compositor) | Yes | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame |
+| 4K60 and the bridge-off override (legacy FFmpeg graph) | No, the poster | `legacy-graph`, with a start notice |
+| Windows and macOS CPU fallbacks | No, the poster | `cpu-fallback` |
+| A software GPU (llvmpipe, SwiftShader, WARP) | No, the poster | `software-gpu` |
+| Linux without EGL/GLES or a usable render node | No, the poster | `no-gpu`, `quarantined-node` |
+| Vertical simulcast leg, ISO legs, Clean cut | No background, as for pictures | |
+
+## Cost, and none when off
+
+With no live background chosen, nothing runs and nothing is allocated:
+- no shader compiles and no GPU driver loads;
+- no scratch texture, readback buffer or WebGL canvas exists;
+- each frame does one `Option` check.
+
+The posters are registered with the backend at start like the bundled
+pictures (a path check each, no decode). `pnpm smoke:live-background-off-ab`
+compares startup, frame time and memory with `origin/main`.
+
+With one on, measured on an Apple M4 (plan 190 "Measured cost"):
+- **GPU time per 1080p frame**: 0.3–0.9 ms for most looks, up to 1.7 ms
+  on a loaded machine. A still picture takes 0.05–0.08 ms.
+- **Memory**: 0–1 MB of scratch for four of the five, about 13 MB for
+  Plasma Wave, plus the live frame (8 MB at 1080p).
+
+### The budget guard
+
+Each 2 s the guard compares the background's own render time with the frame
+interval and checks the compositor's missed deadlines:
+- Over 20 % of the frame, or missed deadlines while it costs over 10 %: it
+  drops to half its internal size.
+- Over again: it shows the poster (reason `gpu-budget`, plus one Info health
+  event).
+- It never climbs back during a session (`live_background/guard.rs`).
+
+## For developers
+
+The backend owns everything in `crates/videorc-backend/src/live_background/`:
+
+- `looks.rs`: the catalogue, the looks and the uniform packing. Every pass
+  of every renderer gets `uniform vec4 u[9]`:
+  - `u[0]` = render target, phase, one React Bits "CSS pixel";
+  - `u[1]` = the background's internal size and Dim;
+  - `u[2..9]` = per-look constants.
+- `sizes.rs`: internal sizes (soft backgrounds at most 1080 on the short
+  side; Line Waves at full size), Silk's field and Plasma Wave's chain.
+- `clock.rs`: the phase clock. Re-based on every change, so a look or motion
+  change never jumps; a new background starts at its poster phase.
+- `guard.rs`: the budget guard.
+- `glsl/*.frag`: the GLSL ES 3.00 sources, the source of truth. Metal and
+  D3D11 run hand ports that must match golden grids rendered from these
+  (`crates/videorc-backend/tests/fixtures/live-background-golden.json`).
+- `export.rs`: writes `apps/desktop/src/shared/live-backgrounds.*.generated.json`
+  for the desktop. Regenerate with
+  `VIDEORC_UPDATE_LIVE_BACKGROUND_JSON=1 cargo test -p videorc-backend live_background::export`.
+
+### Porting rules (GLSL → MSL and HLSL)
+
+- GLSL `gl_FragCoord` is bottom-left; Metal and D3D11 are top-left.
+- GLSL `mod` is not `fmod`.
+- `pow(negative, 2.0)` is NaN outside WebGL: write `x * x`.
+- Rename MSL and HLSL keywords (`thread`, `sampler`, `line`, …).
+- Draw opaque over the look's base colour (`#050506`).
+- No `_sRGB` views: React Bits writes sRGB values straight into the canvas.
+
+### Adding a look
+
+1. Add it to its background in `looks.rs`, from the React Bits preset file.
+2. Regenerate the desktop JSON and add the name to
+   `apps/desktop/src/shared/live-background-catalog.ts` (a test pins them).
+3. `pnpm probe:live-background-cost -- --mode golden` and `-- --mode posters`.
+4. `cargo test -p videorc-backend live_background` on macOS (and the D3D11
+   golden test on Windows).
+
+### Measuring a machine
+
+`pnpm probe:live-background-cost` runs the GLSL in the app's Electron
+(WebGL2 on Metal, D3D11 or GL), and times every background at 1080p,
+1080 × 1920, 4K and half size. It writes `output/live-background-cost-*.json`.
+
+## Credit and licence
+
+The five shaders are ported from React Bits by David Haz
+(https://reactbits.dev), MIT + Commons Clause. They are used in Videorc with
+the author's permission (2026-10-24). Videorc never offers them for export
+or as a separate pack. See `THIRD_PARTY_NOTICES.md`.
