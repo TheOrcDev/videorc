@@ -25,8 +25,10 @@ struct LiveVsOutput
 
 LiveVsOutput LiveFullScreenVs(uint vertexId : SV_VertexID)
 {
-    // A full-screen triangle, as GLSL's VERTEX.
-    float2 corners[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
+    // A full-screen triangle, as GLSL's VERTEX but wound clockwise on screen:
+    // D3D11's default rasterizer culls counter-clockwise (back) faces, which
+    // Metal and GL don't, so GLSL's order would draw nothing here.
+    float2 corners[3] = { float2(-1.0, -1.0), float2(-1.0, 3.0), float2(3.0, -1.0) };
     LiveVsOutput output;
     output.position = float4(corners[vertexId], 0.0, 1.0);
     return output;
