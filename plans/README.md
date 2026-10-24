@@ -54,11 +54,13 @@
   Plasma Wave. S1 is a hard cost gate on all three machines before any
   product code. S9 proves zero cost when off with an A/B against
   `origin/main`. Licence: the creator gave permission. D2–D6 answered.
-  **DRAFT PR #779** 2026-10-24: every slice built (S4 Windows and S5 Linux
-  on Opus, never run on their platforms; CI is their first compile). The
-  gates found and fixed a contract bug that retired main's present pump
-  whenever a live background showed. Owed: a quiet-host smoke run, the
-  Windows and ogre checks, S1 cost on both, owner by-eye in both themes.
+  **MERGED** 2026-10-24 as #779 `2b6114e0`; shipped in 0.9.149 (macOS) and
+  0.9.150 (all three). Every slice is built (S4 Windows and S5 Linux on
+  Opus, never run on their platforms). The gates found and fixed a contract
+  bug that retired main's present pump whenever a live background showed.
+  The macOS stream leg drew the poster: fixed by plan 193. Owed: a
+  quiet-host smoke run, the Windows and ogre checks, S1 cost on both, owner
+  by-eye in both themes.
 
 - 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
   owner asked for an inspection of leaks and waste that changes no feature,
