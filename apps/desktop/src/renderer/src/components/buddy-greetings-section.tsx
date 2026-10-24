@@ -4,7 +4,7 @@ import { useEffect, useId, useState, type KeyboardEvent, type ReactElement } fro
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
@@ -24,23 +24,33 @@ import type {
   CohostActivityTemplateKind,
   CohostAutoChat,
   CohostGreetingPlatform,
+  CohostGreetings,
   CohostGreetingTemplate,
-  CohostUtteranceState
+  CohostUtteranceState,
+  CohostWelcomeKind,
+  CohostWelcomeLine
 } from '@/lib/backend'
-import { COHOST_ACTIVITY_TEMPLATE_KINDS } from '@/lib/backend'
+import { COHOST_ACTIVITY_TEMPLATE_KINDS, COHOST_WELCOME_KINDS } from '@/lib/backend'
 import {
   BUDDY_GREETING_PLATFORM_LABELS,
-  BUDDY_GREETINGS_EMPTY_NOTE,
   BUDDY_SAMPLE_FIELDS,
-  BUDDY_STARTER_TEMPLATES,
   BUDDY_TEMPLATE_FIELDS,
   BUDDY_TEMPLATE_KIND_PLATFORMS,
   BUDDY_TEMPLATE_KIND_TITLES,
   BUDDY_TEMPLATE_TEXT_MAX_CHARS,
   BUDDY_TEMPLATES_MAX,
+  BUDDY_WELCOME_FIELDS,
+  BUDDY_WELCOME_KEYS,
+  BUDDY_WELCOME_TITLES,
+  buddyDisplayName,
+  builtinGreeting,
   greetingTemplateWarnings,
+  greetingWelcomes,
+  greetingsAi,
   newGreetingTemplate,
-  resolveGreetingPreview
+  resolveGreetingPreview,
+  withWelcomeText,
+  type BuddyGreetingKind
 } from '@/lib/buddy-auto-chat-view'
 import { inlineUserError } from '@/lib/user-error'
 import { cn } from '@/lib/utils'
@@ -55,19 +65,31 @@ const STATE_OPTIONS: SegmentedControlOption<CohostUtteranceState>[] = [
 ]
 
 /**
- * Greetings (plan 164 S-D5, Buddy tab → Chat): the messages the Buddy posts
- * as you when chat does something, written by you, no AI. One row per
- * template; Enter or a click opens the inline editor. Free for every
- * account, so it never follows the tab's Premium lock. Saves on blur and on
- * every switch; no success toasts (videorc-design).
+ * Greetings (plan 164 S-D5, plan 192, Buddy tab → Chat): what Buddy posts as
+ * you when someone chats for the first time (the welcomes) or chat does
+ * something (the Activity kinds). Every kind has a built-in line until you
+ * write your own (plan 192 D1), so an empty list never means silence: a kind
+ * with no line of yours shows its built-in one as a Default row, and editing
+ * that row or switching it off makes it yours. One row per line; Enter or a
+ * click opens the inline editor. The lines are free for every account, so
+ * they never follow the tab's Premium lock; only "Write greetings with AI"
+ * does, like Answers and Banter (D3). Saves on blur and on every switch; no
+ * success toasts (videorc-design).
  */
-export function BuddyGreetingsSection(): ReactElement | null {
-  const { cohostSettings, patchCohostSettings } = useStudioCore()
+export function BuddyGreetingsSection({
+  locked = false
+}: {
+  /** Buddy Live's unlock reason shows above: the AI switch is disabled (plan 150, D7). */
+  locked?: boolean
+}): ReactElement | null {
+  const { cohostSettings, cohostGate, patchCohostSettings } = useStudioCore()
   const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   if (!cohostSettings) return null
   const autoChat = cohostSettings.autoChat
-  const templates = autoChat.greetings.templates
+  const greetings = autoChat.greetings
+  const templates = greetings.templates
+  const welcomes = greetingWelcomes(greetings)
   const save = (next: CohostAutoChat): void => {
     setError(null)
     void patchCohostSettings({ autoChat: next }).catch((failure: unknown) =>
@@ -76,24 +98,32 @@ export function BuddyGreetingsSection(): ReactElement | null {
       )
     )
   }
+  // Every save spreads the stored block, so the AI switch and the welcomes
+  // ride along with a line's edit, and the lines with theirs (plan 192).
+  const saveGreetings = (next: CohostGreetings): void => save({ ...autoChat, greetings: next })
   const saveTemplates = (next: CohostGreetingTemplate[]): void =>
-    save({ ...autoChat, greetings: { ...autoChat.greetings, templates: next } })
+    saveGreetings({ ...greetings, templates: next })
+  const saveWelcome = (kind: CohostWelcomeKind, next: CohostWelcomeLine): void =>
+    saveGreetings({ ...greetings, welcomes: { ...welcomes, [BUDDY_WELCOME_KEYS[kind]]: next } })
   const replace = (template: CohostGreetingTemplate): void =>
     saveTemplates(templates.map((current) => (current.id === template.id ? template : current)))
-  const add = (template: CohostGreetingTemplate): void => {
-    if (templates.length >= BUDDY_TEMPLATES_MAX) return
-    saveTemplates([...templates, template])
-    setEditing(template.id)
-  }
   const full = templates.length >= BUDDY_TEMPLATES_MAX
+  const add = (template: CohostGreetingTemplate, open = true): void => {
+    if (full) {
+      setError(`Remove a line first: there can be ${BUDDY_TEMPLATES_MAX}.`)
+      return
+    }
+    saveTemplates([...templates, template])
+    if (open) setEditing(template.id)
+  }
 
   return (
     <PanelSection
-      description="What Buddy posts as you when chat does something, in your own words. Free. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
+      description="What Buddy posts as you when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
       title="Greetings"
     >
       {/* A settings row sits in a grouped card like every Settings row (plan
-          168 S-02), so its label and switch line up with the templates'. */}
+          168 S-02), so its label and switch line up with the lines'. */}
       <FieldGroup variant="grouped">
         <Field>
           <div className="flex items-center justify-between gap-3">
@@ -102,51 +132,74 @@ export function BuddyGreetingsSection(): ReactElement | null {
                   summary chip says "Greetings" too. */}
               <FieldLabel htmlFor="buddy-greetings-enabled">Greetings</FieldLabel>
               <FieldDescription>
-                Follows, subs, cheers, raids and the rest, each with its own line.
+                New chatters, follows, subs, raids and the rest, each with its own line.
               </FieldDescription>
             </div>
             <Switch
-              checked={autoChat.greetings.enabled}
+              checked={greetings.enabled}
               id="buddy-greetings-enabled"
-              onCheckedChange={(enabled) =>
-                save({ ...autoChat, greetings: { ...autoChat.greetings, enabled } })
-              }
+              onCheckedChange={(enabled) => saveGreetings({ ...greetings, enabled })}
+            />
+          </div>
+        </Field>
+        {/* Plan 192 D3: Premium and cloud AI, like Answers and Banter, so it
+            follows the tab's lock; the lines below stay free. */}
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <FieldLabel htmlFor="buddy-greetings-ai">Write greetings with AI</FieldLabel>
+              <FieldDescription>
+                {`In ${buddyDisplayName(cohostSettings.persona.name)}'s voice. Your line is the example and the fallback.`}
+              </FieldDescription>
+            </div>
+            <Switch
+              checked={greetingsAi(greetings)}
+              disabled={locked || !cohostGate.allowed}
+              id="buddy-greetings-ai"
+              onCheckedChange={(ai) => saveGreetings({ ...greetings, ai })}
             />
           </div>
         </Field>
       </FieldGroup>
-      {templates.length === 0 && autoChat.greetings.enabled ? (
-        // Plan 174 F-11: on with nothing to post says so, never silently.
-        <Alert data-testid="buddy-greetings-empty-note" variant="quiet">
-          <AlertTitle>{BUDDY_GREETINGS_EMPTY_NOTE}</AlertTitle>
-        </Alert>
-      ) : null}
-      {templates.length === 0 ? (
-        <div className="flex flex-wrap items-center gap-2" data-slot="buddy-greetings-empty">
-          <span className="text-xs text-subtle">No greetings yet.</span>
-          <Button
-            size="xs"
-            type="button"
-            variant="outline"
-            onClick={() =>
-              saveTemplates(
-                BUDDY_STARTER_TEMPLATES.map((starter) => newGreetingTemplate(starter.kind, starter))
-              )
-            }
-          >
-            Add the starter set
-          </Button>
-        </div>
-      ) : (
-        <GroupedList aria-label="Greeting templates">
-          {templates.map((template) => (
+      {/* Plan 192 S1.3: the welcomes lead, above the Activity kinds. */}
+      <GroupedList aria-label="Welcomes" data-testid="buddy-welcomes" label="Welcomes">
+        {COHOST_WELCOME_KINDS.map((kind) => (
+          <WelcomeRow
+            key={kind}
+            editing={editing === `welcome:${kind}`}
+            kind={kind}
+            welcome={welcomes[BUDDY_WELCOME_KEYS[kind]]}
+            onChange={(next) => saveWelcome(kind, next)}
+            onEdit={(open) => setEditing(open ? `welcome:${kind}` : null)}
+          />
+        ))}
+      </GroupedList>
+      {/* Plan 192 S0.3: one place per kind, in a fixed order: your lines for
+          it, or its built-in line as a Default row. */}
+      <GroupedList
+        aria-label="Activity greetings"
+        data-testid="buddy-activity-greetings"
+        label="Activity"
+      >
+        {COHOST_ACTIVITY_TEMPLATE_KINDS.flatMap((kind) => {
+          const ofKind = templates.filter((template) => template.kind === kind)
+          if (ofKind.length === 0) {
+            return [
+              <DefaultGreetingRow
+                key={`default:${kind}`}
+                editing={editing === `default:${kind}`}
+                kind={kind}
+                onCreate={add}
+                onEdit={(open) => setEditing(open ? `default:${kind}` : null)}
+              />
+            ]
+          }
+          return ofKind.map((template) => (
             <GreetingRow
               key={template.id}
               editing={editing === template.id}
               template={template}
-              onAddVariant={() =>
-                add(newGreetingTemplate(template.kind, { platform: template.platform }))
-              }
+              onAddVariant={() => add(newGreetingTemplate(kind, { platform: template.platform }))}
               onChange={replace}
               onEdit={(open) => setEditing(open ? template.id : null)}
               onRemove={() => {
@@ -154,9 +207,9 @@ export function BuddyGreetingsSection(): ReactElement | null {
                 saveTemplates(templates.filter((current) => current.id !== template.id))
               }}
             />
-          ))}
-        </GroupedList>
-      )}
+          ))
+        })}
+      </GroupedList>
       <div className="flex flex-wrap items-center gap-2">
         <AddGreeting disabled={full} onAdd={(kind) => add(newGreetingTemplate(kind))} />
         <span className="text-xs tabular-nums text-muted-foreground">
@@ -202,6 +255,26 @@ function AddGreeting({
   )
 }
 
+/** A row's warnings: a mark, read out as the title button's description. */
+function RowWarnings({ id, warnings }: { id: string; warnings: string[] }): ReactElement | null {
+  if (warnings.length === 0) return null
+  return (
+    <span className="flex" data-slot="buddy-greeting-alert" id={id}>
+      <WarningIcon aria-hidden className="size-3.5 text-warning" weight="fill" />
+      <span className="sr-only">{warnings.join(' ')}</span>
+    </span>
+  )
+}
+
+/** The tag on a row that posts Buddy's built-in line (plan 192 S0.3). */
+function DefaultTag(): ReactElement {
+  return (
+    <Badge data-testid="buddy-greeting-default" variant="outline">
+      Default
+    </Badge>
+  )
+}
+
 function GreetingRow({
   template,
   editing,
@@ -241,14 +314,7 @@ function GreetingRow({
             onCheckedChange={(enabled) => onChange({ ...template, enabled })}
           />
         }
-        statusIcons={
-          warnings.length > 0 ? (
-            <span className="flex" data-slot="buddy-greeting-alert" id={warningsId}>
-              <WarningIcon aria-hidden className="size-3.5 text-warning" weight="fill" />
-              <span className="sr-only">{warnings.join(' ')}</span>
-            </span>
-          ) : undefined
-        }
+        statusIcons={<RowWarnings id={warningsId} warnings={warnings} />}
         title={
           <ListRowButton
             aria-describedby={warnings.length > 0 ? warningsId : undefined}
@@ -263,46 +329,206 @@ function GreetingRow({
         }
       />
       {editing ? (
-        <GreetingEditor
-          template={template}
-          warnings={warnings}
+        <LineEditor
+          kind={template.kind}
+          label={`${title} greeting text`}
+          platform={template.platform}
+          state={template.state}
+          text={template.text}
           onAddVariant={onAddVariant}
-          onChange={onChange}
           onClose={() => onEdit(false)}
+          onCommit={(text) => onChange({ ...template, text })}
+          onPlatform={(platform) => onChange({ ...template, platform })}
           onRemove={onRemove}
+          onState={(state) => onChange({ ...template, state })}
         />
       ) : null}
     </div>
   )
 }
 
-function GreetingEditor({
-  template,
-  warnings,
-  onChange,
+/**
+ * A kind with no line of yours (plan 192 S0.3): its built-in line, marked
+ * Default. Editing it, or switching it off, makes it yours: a line of the
+ * same kind, text and state (switched off: the built-in text, off).
+ */
+function DefaultGreetingRow({
+  kind,
+  editing,
+  onEdit,
+  onCreate
+}: {
+  kind: CohostActivityTemplateKind
+  editing: boolean
+  onEdit: (open: boolean) => void
+  onCreate: (template: CohostGreetingTemplate, open?: boolean) => void
+}): ReactElement {
+  const builtin = builtinGreeting(kind)
+  const title = BUDDY_TEMPLATE_KIND_TITLES[kind]
+  return (
+    <div data-default="" data-slot="buddy-greeting" data-template-kind={kind}>
+      <ListRow
+        alias={<DefaultTag />}
+        className="relative"
+        interactive
+        meta={
+          <Switch
+            aria-label={`${title} greeting on`}
+            checked
+            size="sm"
+            onCheckedChange={(enabled) => {
+              if (!enabled) onCreate(newGreetingTemplate(kind, { enabled: false }), false)
+            }}
+          />
+        }
+        title={
+          <ListRowButton aria-expanded={editing} onClick={() => onEdit(!editing)}>
+            {title}
+          </ListRowButton>
+        }
+        context={<span className="min-w-0 truncate text-muted-foreground">{builtin.text}</span>}
+      />
+      {editing ? (
+        <LineEditor
+          kind={kind}
+          label={`${title} greeting text`}
+          state={builtin.state}
+          text={builtin.text}
+          onClose={() => onEdit(false)}
+          onCommit={(text) => onCreate(newGreetingTemplate(kind, { text }))}
+          onPlatform={(platform) => onCreate(newGreetingTemplate(kind, { platform }))}
+          onState={(state) => onCreate(newGreetingTemplate(kind, { state }))}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * A welcome (plan 192 S1.3): first-time or returning chatters, with its
+ * switch and its line. An empty line is the built-in one, shown as the
+ * placeholder and saved as absent. A welcome goes only to the chat the
+ * message came from, so it has no platform choice.
+ */
+function WelcomeRow({
+  kind,
+  welcome,
+  editing,
+  onEdit,
+  onChange
+}: {
+  kind: CohostWelcomeKind
+  welcome: CohostWelcomeLine
+  editing: boolean
+  onEdit: (open: boolean) => void
+  onChange: (welcome: CohostWelcomeLine) => void
+}): ReactElement {
+  const builtin = builtinGreeting(kind)
+  const title = BUDDY_WELCOME_TITLES[kind]
+  const text = welcome.text?.trim() ?? ''
+  const warnings = greetingTemplateWarnings({ kind, text: text || builtin.text })
+  const warningsId = useId()
+  return (
+    <div data-slot="buddy-welcome" data-welcome-kind={kind}>
+      <ListRow
+        alias={text ? undefined : <DefaultTag />}
+        className="relative"
+        interactive
+        meta={
+          <Switch
+            aria-label={`${title} welcome on`}
+            checked={welcome.enabled}
+            size="sm"
+            onCheckedChange={(enabled) => onChange({ ...welcome, enabled })}
+          />
+        }
+        statusIcons={<RowWarnings id={warningsId} warnings={warnings} />}
+        title={
+          <ListRowButton
+            aria-describedby={warnings.length > 0 ? warningsId : undefined}
+            aria-expanded={editing}
+            onClick={() => onEdit(!editing)}
+          >
+            {title}
+          </ListRowButton>
+        }
+        context={
+          <span className="min-w-0 truncate text-muted-foreground">{text || builtin.text}</span>
+        }
+      />
+      {editing ? (
+        <LineEditor
+          fallback={builtin.text}
+          fields={BUDDY_WELCOME_FIELDS}
+          kind={kind}
+          label={`${title} welcome text`}
+          state={welcome.state ?? builtin.state}
+          text={text}
+          onClose={() => onEdit(false)}
+          onCommit={(next) => onChange(withWelcomeText(welcome, next))}
+          onState={(state) => onChange({ ...welcome, state })}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * One line's inline editor: the text (saved on blur), its state, the
+ * fields, and a live preview with the warnings. A template adds its
+ * platform, "Add variant" and Remove. A welcome passes `fallback`, its
+ * built-in line: the placeholder, and what an empty text posts. A
+ * template's text is never empty (the settings refuse it), so clearing it
+ * keeps the line it had.
+ */
+function LineEditor({
+  kind,
+  label,
+  text,
+  state,
+  platform,
+  fallback,
+  fields = BUDDY_TEMPLATE_FIELDS,
+  onCommit,
+  onState,
+  onPlatform,
   onAddVariant,
   onRemove,
   onClose
 }: {
-  template: CohostGreetingTemplate
-  warnings: string[]
-  onChange: (template: CohostGreetingTemplate) => void
-  onAddVariant: () => void
-  onRemove: () => void
+  kind: BuddyGreetingKind
+  /** The text box's accessible name. */
+  label: string
+  /** The saved text; empty for a welcome on its built-in line. */
+  text: string
+  state: CohostUtteranceState
+  platform?: CohostGreetingPlatform
+  fallback?: string
+  fields?: readonly { field: string; hint: string }[]
+  onCommit: (text: string) => void
+  onState: (state: CohostUtteranceState) => void
+  /** Absent hides the platform choice. */
+  onPlatform?: (platform: CohostGreetingPlatform | undefined) => void
+  onAddVariant?: () => void
+  onRemove?: () => void
   onClose: () => void
 }): ReactElement {
-  const [draft, setDraft] = useState(template.text)
-  useEffect(() => setDraft(template.text), [template.text])
-  const preview = resolveGreetingPreview(draft, BUDDY_SAMPLE_FIELDS[template.kind]).text
-  const draftWarnings =
-    draft === template.text ? warnings : greetingTemplateWarnings({ ...template, text: draft })
+  const [draft, setDraft] = useState(text)
+  useEffect(() => setDraft(text), [text])
+  const effective = draft.trim() || fallback || ''
+  const preview = resolveGreetingPreview(effective, BUDDY_SAMPLE_FIELDS[kind]).text
+  const warnings = greetingTemplateWarnings({ kind, platform, text: effective })
   const commit = (): void => {
-    const text = draft.trim()
-    if (text === template.text) return
-    onChange({ ...template, text })
+    const next = draft.trim()
+    if (next === text) return
+    if (!next && fallback === undefined) {
+      setDraft(text)
+      return
+    }
+    onCommit(next)
   }
   const onKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
-    if (event.key === 'n' && (event.metaKey || event.ctrlKey)) {
+    if (onAddVariant && event.key === 'n' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault()
       commit()
       onAddVariant()
@@ -322,10 +548,10 @@ function GreetingEditor({
       onKeyDown={onKeyDown}
     >
       <Textarea
-        aria-label={`${BUDDY_TEMPLATE_KIND_TITLES[template.kind]} greeting text`}
+        aria-label={label}
         className="min-h-14"
         maxLength={BUDDY_TEMPLATE_TEXT_MAX_CHARS}
-        placeholder="Welcome, {name}!"
+        placeholder={fallback ?? builtinGreeting(kind).text}
         value={draft}
         onBlur={commit}
         onChange={(event) => setDraft(event.target.value)}
@@ -338,32 +564,29 @@ function GreetingEditor({
           aria-label="Avatar state"
           options={STATE_OPTIONS}
           size="sm"
-          value={template.state}
-          onValueChange={(state) => onChange({ ...template, state })}
+          value={state}
+          onValueChange={onState}
         />
-        <Select
-          value={template.platform ?? 'any'}
-          onValueChange={(platform) =>
-            onChange({
-              ...template,
-              ...(platform === 'any'
-                ? { platform: undefined }
-                : { platform: platform as CohostGreetingPlatform })
-            })
-          }
-        >
-          <SelectTrigger aria-label="Platform" className="w-28" size="xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="any">Any</SelectItem>
-            {BUDDY_TEMPLATE_KIND_PLATFORMS[template.kind].map((platform) => (
-              <SelectItem key={platform} value={platform}>
-                {BUDDY_GREETING_PLATFORM_LABELS[platform]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {onPlatform ? (
+          <Select
+            value={platform ?? 'any'}
+            onValueChange={(next) =>
+              onPlatform(next === 'any' ? undefined : (next as CohostGreetingPlatform))
+            }
+          >
+            <SelectTrigger aria-label="Platform" className="w-28" size="xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any">Any</SelectItem>
+              {BUDDY_TEMPLATE_KIND_PLATFORMS[kind].map((option) => (
+                <SelectItem key={option} value={option}>
+                  {BUDDY_GREETING_PLATFORM_LABELS[option]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : null}
         <Popover>
           <PopoverTrigger asChild>
             <Button size="xs" type="button" variant="ghost">
@@ -372,7 +595,7 @@ function GreetingEditor({
           </PopoverTrigger>
           <PopoverContent align="start" className="w-64 p-1">
             <ul className="flex flex-col" data-slot="buddy-greeting-fields">
-              {BUDDY_TEMPLATE_FIELDS.map((entry) => (
+              {fields.map((entry) => (
                 <li key={entry.field}>
                   <Button
                     className="w-full justify-start gap-2 px-2"
@@ -391,32 +614,36 @@ function GreetingEditor({
           </PopoverContent>
         </Popover>
         <span className="flex-1" />
-        <Button
-          size="xs"
-          type="button"
-          variant="ghost"
-          onClick={() => {
-            commit()
-            onAddVariant()
-          }}
-        >
-          Add variant
-          <ShortcutKeys accelerator={ADD_VARIANT_ACCELERATOR} />
-        </Button>
-        <Button
-          aria-label="Remove greeting"
-          size="icon-xs"
-          type="button"
-          variant="ghost"
-          onClick={onRemove}
-        >
-          <CloseIcon />
-        </Button>
+        {onAddVariant ? (
+          <Button
+            size="xs"
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              commit()
+              onAddVariant()
+            }}
+          >
+            Add variant
+            <ShortcutKeys accelerator={ADD_VARIANT_ACCELERATOR} />
+          </Button>
+        ) : null}
+        {onRemove ? (
+          <Button
+            aria-label="Remove greeting"
+            size="icon-xs"
+            type="button"
+            variant="ghost"
+            onClick={onRemove}
+          >
+            <CloseIcon />
+          </Button>
+        ) : null}
       </div>
       <p className="text-xs text-muted-foreground" data-slot="buddy-greeting-preview">
         <span className="text-subtle">Preview:</span> {preview || '…'}
       </p>
-      {draftWarnings.map((warning) => (
+      {warnings.map((warning) => (
         <p
           key={warning}
           className={cn('text-xs text-muted-foreground')}

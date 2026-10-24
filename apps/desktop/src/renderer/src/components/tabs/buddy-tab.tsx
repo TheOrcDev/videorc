@@ -227,7 +227,8 @@ function BuddyUnlockAlert({
  * The Chat tab (plan 150): Greetings (plan 164 S-D5, free) and Replies
  * beside Moderation. When Buddy is locked, one alert above both columns says
  * why and every Premium field under it is disabled (D7), the same reason
- * Live shows; the greetings stay editable.
+ * Live shows; the greetings stay editable, all but their AI switch (plan
+ * 192 D3).
  */
 function BuddyChatTab(): ReactElement {
   const locked = useBuddyLive().unlock !== null
@@ -240,7 +241,7 @@ function BuddyChatTab(): ReactElement {
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>
         <div className="flex flex-col">
-          <BuddyGreetingsSection />
+          <BuddyGreetingsSection locked={locked} />
           <BuddyRepliesSection locked={locked} />
         </div>
         <BuddyModerationSection locked={locked} />

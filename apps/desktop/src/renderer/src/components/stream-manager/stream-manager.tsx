@@ -954,6 +954,7 @@ export function StreamManager({
           Chat. Neither touches Buddy Live. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
         <BuddyChatControls
+          aiGreetings={cohostGate?.allowed === true && cohostConsented}
           autoChat={cohostAutoChat}
           name={buddyName}
           picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
