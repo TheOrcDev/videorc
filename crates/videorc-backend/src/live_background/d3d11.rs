@@ -1517,4 +1517,272 @@ mod tests {
         renderer.release();
         assert_eq!(renderer.resources(), (0, 0));
     }
+
+    /// The luma plane of an NV12 target, top-down, through a staging copy
+    /// (the first `height` rows of the mapped texture, at its pitch).
+    fn read_nv12_luma(
+        device: &ID3D11Device5,
+        context: &ID3D11DeviceContext4,
+        texture: &ID3D11Texture2D,
+    ) -> Vec<u8> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: the output is initialized local storage.
+        unsafe { texture.GetDesc(&mut desc) };
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        desc.MiscFlags = 0;
+        let mut staging = None;
+        // SAFETY: the descriptor and output live for the call.
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+            .expect("staging NV12 texture");
+        let staging = staging.expect("staging NV12 texture");
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        let (width, height) = (desc.Width as usize, desc.Height as usize);
+        let mut out = Vec::with_capacity(width * height);
+        // SAFETY: the copy and map run on this test's only thread; the luma
+        // rows are read within their pitch before the unmap.
+        unsafe {
+            context.CopyResource(&staging, texture);
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .expect("map staging NV12 texture");
+            for row in 0..height {
+                let start = mapped
+                    .pData
+                    .cast::<u8>()
+                    .add(row * mapped.RowPitch as usize);
+                out.extend_from_slice(std::slice::from_raw_parts(start, width));
+            }
+            context.Unmap(&staging, 0);
+        }
+        out
+    }
+
+    /// Plan 193 S3: a same-scene record-and-stream plan (one leg, every
+    /// layer on `ALL`, as `build_scene_plan` plans it; the session test pins
+    /// that) composed through the real scene compositor on WARP with Silk,
+    /// two ticks a second apart. The AUXILIARY (stream) target's ring moves
+    /// between the ticks and its stage does not: Windows draws the live
+    /// layer on the stream target.
+    #[test]
+    fn the_stream_target_draws_the_live_frame() {
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11BgraUpload, WindowsD3d11CanvasOrientation, WindowsD3d11Compositor,
+            WindowsD3d11Crop, WindowsD3d11EncodedOutputPlan, WindowsD3d11EncodedOutputRole,
+            WindowsD3d11EncodedTarget, WindowsD3d11GpuSource, WindowsD3d11GpuSourceContent,
+            WindowsD3d11GpuTargets, WindowsD3d11LayerEffects, WindowsD3d11NormalizedTransform,
+            WindowsD3d11OutputDimensions, WindowsD3d11SceneFit, WindowsD3d11SceneLayerInput,
+            WindowsD3d11SceneMask, WindowsD3d11SceneOutputTargets, WindowsD3d11ScenePlanRequest,
+            WindowsD3d11SceneSourceKind, WindowsD3d11UploadPixelOrder,
+            build_windows_d3d11_scene_plan,
+        };
+        use crate::windows_d3d11_device::WindowsD3d11Device;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+
+        let Some((raw_device, raw_context)) = device() else {
+            return;
+        };
+        let device =
+            match WindowsD3d11Device::from_raw_for_test(raw_device.clone(), raw_context.clone()) {
+                Ok(device) => device,
+                Err(error) => {
+                    eprintln!("skipping: this adapter makes no media device: {error}");
+                    return;
+                }
+            };
+        let mut compositor = match WindowsD3d11Compositor::new(&device, 1) {
+            Ok(compositor) => compositor,
+            Err(error) => {
+                eprintln!(
+                    "skipping: this adapter makes no scene compositor: {}",
+                    error.detail
+                );
+                return;
+            }
+        };
+        let (canvas, stream) = ((640_u32, 360_u32), (320_u32, 180_u32));
+        let nv12_target = |size: (u32, u32)| -> Option<ID3D11Texture2D> {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: size.0,
+                Height: size.1,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE).0 as u32,
+                ..D3D11_TEXTURE2D_DESC::default()
+            };
+            let mut texture = None;
+            // SAFETY: the descriptor and output live for the call.
+            unsafe { raw_device.CreateTexture2D(&desc, None, Some(&mut texture)) }.ok()?;
+            texture
+        };
+        let (Some(primary_target), Some(stream_target)) =
+            (nv12_target(canvas), nv12_target(stream))
+        else {
+            eprintln!("skipping: this adapter makes no NV12 render target");
+            return;
+        };
+        let dimensions = |(width, height): (u32, u32)| {
+            WindowsD3d11OutputDimensions::new(width, height).expect("even dimensions")
+        };
+        // The scene: Silk behind a red screen on the stage (the 20 %
+        // visibility inset), both layers on every target, as the session
+        // plans a one-leg record-and-stream session.
+        let spec = spec(LiveBackgroundId::Silk, "satin");
+        let frame_size = internal_size(spec.id, canvas, GuardLevel::Full);
+        let screen = [0_u8, 0, 255, 255].repeat(32 * 18);
+        let plan = build_windows_d3d11_scene_plan(WindowsD3d11ScenePlanRequest {
+            adapter_luid: device.adapter_luid(),
+            generation: 1,
+            sequence: 1,
+            orientation: WindowsD3d11CanvasOrientation::Horizontal,
+            canvas_dimensions: dimensions(canvas),
+            layers: vec![
+                WindowsD3d11SceneLayerInput {
+                    source_id: 30,
+                    source_kind: WindowsD3d11SceneSourceKind::BackgroundImage,
+                    source_dimensions: dimensions(frame_size),
+                    transform: WindowsD3d11NormalizedTransform::full_canvas(),
+                    crop: WindowsD3d11Crop::none(),
+                    fit: WindowsD3d11SceneFit::Cover,
+                    mirror_x: false,
+                    mask: WindowsD3d11SceneMask::None,
+                    effects: WindowsD3d11LayerEffects::default(),
+                    z_index: -1,
+                    output_targets: WindowsD3d11SceneOutputTargets::ALL,
+                },
+                WindowsD3d11SceneLayerInput {
+                    source_id: 1,
+                    source_kind: WindowsD3d11SceneSourceKind::Display,
+                    source_dimensions: dimensions((32, 18)),
+                    transform: WindowsD3d11NormalizedTransform {
+                        x: 0.1,
+                        y: 0.1,
+                        width: 0.8,
+                        height: 0.8,
+                    },
+                    crop: WindowsD3d11Crop::none(),
+                    fit: WindowsD3d11SceneFit::Contain,
+                    mirror_x: false,
+                    mask: WindowsD3d11SceneMask::None,
+                    effects: WindowsD3d11LayerEffects::default(),
+                    z_index: 0,
+                    output_targets: WindowsD3d11SceneOutputTargets::ALL,
+                },
+            ],
+            encoded_outputs: vec![
+                WindowsD3d11EncodedOutputPlan {
+                    role: WindowsD3d11EncodedOutputRole::Primary,
+                    dimensions: dimensions(canvas),
+                },
+                WindowsD3d11EncodedOutputPlan {
+                    role: WindowsD3d11EncodedOutputRole::Auxiliary,
+                    dimensions: dimensions(stream),
+                },
+            ],
+        })
+        .expect("the record-and-stream plan");
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let mut renderer = LiveBackgroundD3d11Renderer::new(
+            raw_device.clone(),
+            raw_context.clone(),
+            Arc::clone(&board),
+        );
+        let start = Instant::now();
+        let mut input = frame_input(&spec, &board, LiveBackgroundTick::unmeasured(start));
+        let mut stream_luma = Vec::new();
+        for at in [start, start + Duration::from_secs(1)] {
+            input.tick = LiveBackgroundTick::unmeasured(at);
+            let frame = renderer
+                .render(&input, canvas, None, None)
+                .expect("the live frame");
+            let sources = [
+                WindowsD3d11GpuSource {
+                    source_id: 30,
+                    content: WindowsD3d11GpuSourceContent::Texture(&frame),
+                },
+                WindowsD3d11GpuSource {
+                    source_id: 1,
+                    content: WindowsD3d11GpuSourceContent::Upload(WindowsD3d11BgraUpload {
+                        pixels: &screen,
+                        dimensions: dimensions((32, 18)),
+                        row_pitch: 32 * 4,
+                        pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+                        content_revision: 1,
+                        immutable: true,
+                    }),
+                },
+            ];
+            let targets = [
+                WindowsD3d11EncodedTarget {
+                    role: WindowsD3d11EncodedOutputRole::Primary,
+                    texture: &primary_target,
+                },
+                WindowsD3d11EncodedTarget {
+                    role: WindowsD3d11EncodedOutputRole::Auxiliary,
+                    texture: &stream_target,
+                },
+            ];
+            compositor
+                .compose(
+                    &device,
+                    &plan,
+                    &sources,
+                    WindowsD3d11GpuTargets {
+                        preview_bgra: None,
+                        encoded_nv12: &targets,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("compose: {}", error.detail));
+            stream_luma.push(read_nv12_luma(&raw_device, &raw_context, &stream_target));
+        }
+        assert_eq!(
+            board.snapshot().0.map(|status| status.rendering),
+            Some(LiveBackgroundRendering::Shader)
+        );
+        let (first, later) = (&stream_luma[0], &stream_luma[1]);
+        // The stage at 320 x 180: (32, 18) to (288, 162).
+        let in_stage = |x: u32, y: u32| (32..288).contains(&x) && (18..162).contains(&y);
+        let (mut stage_pixels, mut stage_min, mut stage_max) = (0, 255_u8, 0_u8);
+        let (mut ring_pixels, mut moved, mut darkest, mut brightest) = (0, 0, 255_u8, 0_u8);
+        for y in 0..stream.1 {
+            for x in 0..stream.0 {
+                let at = (y * stream.0 + x) as usize;
+                if in_stage(x, y) {
+                    if (34..286).contains(&x) && (20..160).contains(&y) {
+                        assert_eq!(first[at], later[at], "stream stage at {x},{y} moved");
+                        stage_pixels += 1;
+                        stage_min = stage_min.min(first[at]);
+                        stage_max = stage_max.max(first[at]);
+                    }
+                    continue;
+                }
+                ring_pixels += 1;
+                darkest = darkest.min(first[at]);
+                brightest = brightest.max(first[at]);
+                if first[at].abs_diff(later[at]) > 2 {
+                    moved += 1;
+                }
+            }
+        }
+        assert!(stage_pixels > 30_000);
+        assert!(
+            stage_max - stage_min <= 2,
+            "the stream stage is the flat red screen ({stage_min}..{stage_max})"
+        );
+        assert!(
+            brightest > darkest + 10,
+            "the stream ring shows Silk, not a flat colour ({darkest}..{brightest})"
+        );
+        assert!(
+            moved * 20 > ring_pixels,
+            "{moved} of {ring_pixels} stream ring pixels moved in a second"
+        );
+    }
 }
