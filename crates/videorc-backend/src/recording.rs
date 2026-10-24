@@ -1043,6 +1043,13 @@ const FFMPEG_LIVE_MIC_FILTER_TARGET: &str = "videorc_live_mic";
 // established two-second cadence.
 const FFMPEG_PROGRESS_REPORT_PERIOD: Duration = Duration::from_millis(500);
 const FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD: Duration = Duration::from_secs(2);
+// Windows software fallback can spend several seconds draining the first
+// 1080p raw frame when GPU acceleration is unavailable. Keep startup truth
+// tied to positive FFmpeg media progress, but do not reject that slow, live
+// process on the normal eight-second deadline used elsewhere.
+#[cfg(target_os = "windows")]
+const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(target_os = "windows"))]
 const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 // Once the child exits, stderr is already closed and its reader should drain
 // immediately. Keep the final snapshot behind a short bounded join so fatal
@@ -36451,7 +36458,10 @@ mod tests {
         let error = wait_for_ffmpeg_output_startup(pending, expired_start)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("within 8000ms of process spawn"));
+        assert!(error.to_string().contains(&format!(
+            "within {}ms of process spawn",
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_millis()
+        )));
     }
 
     #[test]
