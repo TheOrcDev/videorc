@@ -1731,6 +1731,10 @@ export type StudioCaptionsContextValue = {
 const NO_SCREENS: StreamScreen[] = []
 /** The banner list before it loads: one stable empty array. */
 const NO_BANNERS: Banner[] = []
+/** What a failed takeover Show names, offline or busy (plan 195 S4). */
+const SHOW_TAKEOVER: UserErrorContext = { action: 'show', object: 'the takeover' }
+/** What a failed takeover Take off names, offline or busy (plan 195 S4). */
+const TAKE_OFF_TAKEOVER: UserErrorContext = { action: 'take off', object: 'the takeover' }
 
 const StudioContext = createContext<StudioCoreContextValue | null>(null)
 const StudioRecordingStateContext = createContext<StudioRecordingStateContextValue | null>(null)
@@ -7984,11 +7988,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const accountBootstrapToken = accountSnapshotCoordinator.beginRefresh()
         const commentHighlightRevisionAtBootstrapStart = commentHighlightRevision
         const captionsStatusRevisionAtBootstrapStart = captionsStatusRevisionRef.current
-        // The takeover commit also releases the microphone mute a takeover
-        // owns, so it must not wait on the rest of the batch: one unrelated
-        // failed request used to skip it and strand a muted microphone with
-        // no takeover selected. A failed read stays unknown and commits
-        // nothing; it still fails the batch below so the error surfaces.
         // Session authority must settle even if device discovery or another
         // bootstrap query fails. Idle fallback remains blocked until this read.
         // A failed read retries: otherwise every picker stays on "Checking the
@@ -8028,18 +8027,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           },
           () => undefined
         )
-        const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
-        void activeScreenBootstrap.then(
-          (nextActiveScreen) => {
-            if (
-              generationIsCurrent() &&
-              bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')
-            ) {
-              commitActiveScreen(nextActiveScreen)
+        // The takeover commit also releases the microphone mute a takeover
+        // owns, so it must not wait on the rest of the batch: one unrelated
+        // failed request used to skip it and strand a muted microphone with
+        // no takeover selected. Plan 195 S4: it stays out of the batch too.
+        // `screens.active` rides the liveControl lane, which a slow Record
+        // start or a long poster can hold past its queue age, and its expiry
+        // used to fail the whole launch with "Videorc hit a problem". A failed
+        // read stays unknown, commits nothing, never toasts, and retries until
+        // the lane frees or a `screens.active.changed` says the truth.
+        const readActiveScreen = (attempt: number): void => {
+          const snapshot = bootstrapGuard.snapshot()
+          void bootstrapRequest<StreamScreen | null>('screens.active').then(
+            (nextActiveScreen) => {
+              if (generationIsCurrent() && bootstrapGuard.isCurrent(snapshot, 'activeScreen')) {
+                commitActiveScreen(nextActiveScreen)
+              }
+            },
+            (error: unknown) => {
+              if (!generationIsCurrent()) return
+              console.warn('[takeover] reading the active takeover failed:', error)
+              if (attempt < 4 && bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')) {
+                setTimeout(
+                  () => generationIsCurrent() && readActiveScreen(attempt + 1),
+                  1000 * attempt
+                )
+              }
             }
-          },
-          () => undefined
-        )
+          )
+        }
+        readActiveScreen(1)
         // Banners (plan 186) load outside the batch: nothing on startup waits
         // for them, and a failed read must never fail the batch. Until a list
         // arrives (this read or the next `banners.changed`), Assets says
@@ -8069,7 +8086,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           nextPreviewScreen,
           nextScene,
           nextScreens,
-          ,
           nextStreamMetadataDraft,
           nextSessions,
           nextSessionStorage,
@@ -8091,7 +8107,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<PreviewScreenStatus>('preview.screen.status'),
           bootstrapRequest<Scene>('scene.get'),
           bootstrapRequest<StreamScreen[]>('screens.list'),
-          activeScreenBootstrap,
           bootstrapRequest<StreamMetadataDraft>('streamTargets.metadata.get'),
           bootstrapRequest<SessionListPage>('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
           bootstrapRequest<SessionStorageTotals>('sessions.storage'),
@@ -8606,6 +8621,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const deviceRead = ++deviceListReadsRef.current.issued
           const screenListRevision = screenListEventRevision.current
           const activeScreenRevision = activeScreenEventRevision.current
+          // Plan 195 S4: the takeover read rides the liveControl lane, which a
+          // slow Record start or a long poster can hold past its queue age. It
+          // is background work: it commits on its own and a failure never
+          // fails this refresh or toasts ("Videorc hit a problem").
+          const activeScreenRead = activeClient.request<StreamScreen | null>('screens.active').then(
+            (nextActiveScreen) => {
+              if (refreshIsCurrent() && activeScreenEventRevision.current === activeScreenRevision)
+                commitActiveScreen(nextActiveScreen)
+            },
+            (error: unknown) => {
+              if (refreshIsCurrent())
+                console.warn('[takeover] reading the active takeover failed:', error)
+            }
+          )
           try {
             setLastError(null)
             const [
@@ -8616,7 +8645,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               nextSessionStorage,
               nextDiagnostics,
               nextScreens,
-              nextActiveScreen,
               nextPlatformAccounts,
               nextOauthProviderCredentials,
               nextPlatformAccountValidations,
@@ -8630,7 +8658,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               activeClient.request<SessionStorageTotals>('sessions.storage'),
               activeClient.request<DiagnosticStats>('diagnostics.stats'),
               activeClient.request<StreamScreen[]>('screens.list'),
-              activeClient.request<StreamScreen | null>('screens.active'),
               activeClient.request<PlatformAccount[]>('platformAccounts.list'),
               activeClient.request<OAuthProviderCredentialStatus[]>(
                 'platformAccounts.oauth.providerCredentials'
@@ -8684,8 +8711,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
             setDiagnosticStats(nextDiagnostics)
             if (screenListEventRevision.current === screenListRevision) setScreens(nextScreens)
-            if (activeScreenEventRevision.current === activeScreenRevision)
-              commitActiveScreen(nextActiveScreen)
             setPlatformAccounts(nextPlatformAccounts)
             setOauthProviderCredentials(nextOauthProviderCredentials)
             setPlatformAccountValidations(nextPlatformAccountValidations)
@@ -8704,6 +8729,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           } finally {
             sessionListRefreshRequests.finish('first-page', sessionListRequestToken)
           }
+          await activeScreenRead
         }
       ),
     [
@@ -12367,7 +12393,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const activateScreen = useCallback(
     async (screenId: string): Promise<boolean> => {
       if (!client) {
-        toastOffline()
+        toastOffline(SHOW_TAKEOVER)
         return false
       }
 
@@ -12379,7 +12405,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       } catch (error) {
         const failurePolicy = await loadCommandFailurePolicy()
         if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
-          reportError(error, { action: 'show', object: 'the takeover' })
+          reportError(error, SHOW_TAKEOVER)
           return false
         }
         const authoritative = await client
@@ -12391,7 +12417,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (failurePolicy.screenActivateFailureCanReconcile(error, screenId, authoritative)) {
           return true
         }
-        reportError(error, { action: 'show', object: 'the takeover' })
+        reportError(error, SHOW_TAKEOVER)
         return false
       }
     },
@@ -12400,7 +12426,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const clearActiveScreen = useCallback(async (): Promise<boolean> => {
     if (!client) {
-      toastOffline()
+      toastOffline(TAKE_OFF_TAKEOVER)
       return false
     }
 
@@ -12412,7 +12438,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } catch (error) {
       const failurePolicy = await loadCommandFailurePolicy()
       if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
-        reportError(error, { action: 'take off', object: 'the takeover' })
+        reportError(error, TAKE_OFF_TAKEOVER)
         return false
       }
       const authoritative = await client
@@ -12424,7 +12450,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (failurePolicy.screenClearFailureCanReconcile(error, authoritative)) {
         return true
       }
-      reportError(error, { action: 'take off', object: 'the takeover' })
+      reportError(error, TAKE_OFF_TAKEOVER)
       return false
     }
   }, [client, commitActiveScreen, reportError])
