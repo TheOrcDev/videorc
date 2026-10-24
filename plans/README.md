@@ -1,5 +1,24 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
+  owner asked for an inspection of leaks and waste that changes no feature,
+  and then for one PR per confirmed problem. Seven read-only subsystem audits,
+  each finding re-checked at its line by the orchestrator, with measurements
+  on copies of the owner's real profile: a 2 GB Chromium cache of stale
+  backend 404s, a Library page that scanned its whole history (111–144 ms →
+  6 ms), rollback-journal writes (2.3 → ~0.3 ms in WAL), a `ps` fork every
+  second (~42 ms → ~35 µs per sample) and a 9.5–56 ms per-frame Windows preview
+  resize. **EXECUTED** overnight: one executor and one PR per problem, each
+  reviewed, then verified together on a merged tree (smoke:dev,
+  probe:comments-window, session-decay A/B against the base, clippy). Three
+  findings were closed after measurement showed no worthwhile win (#759,
+  #762, and the proof-surface decode, which moved to Part B). Part B holds the
+  owner decisions (Clips is on by default, so an idle Studio runs a full
+  encode; process-wide renderer un-throttling) and the follow-up slices, which
+  need a quiet host or a Windows box. Found on the way: CI's Rust job dies at
+  `cargo audit` (RUSTSEC-2026-0386, tokio) on main and every PR; #777 bumps
+  tokio to fix it.
+
 - 2026-10-23: [Plan 189](189-soundboard.md), Soundboard. The owner wants
   a soundboard in Studio on audiocn's sound pads, with the sounds streamers
   use most built in. Sounds join the session audio bus as a third mix
