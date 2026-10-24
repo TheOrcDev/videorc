@@ -81,7 +81,7 @@ export function BuddyGreetingsSection({
 }: {
   /** Buddy Live's unlock reason shows above: the AI switch is disabled (plan 150, D7). */
   locked?: boolean
-} = {}): ReactElement | null {
+}): ReactElement | null {
   const { cohostSettings, cohostGate, patchCohostSettings } = useStudioCore()
   const [error, setError] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
