@@ -1043,21 +1043,31 @@ const FFMPEG_LIVE_MIC_FILTER_TARGET: &str = "videorc_live_mic";
 // established two-second cadence.
 const FFMPEG_PROGRESS_REPORT_PERIOD: Duration = Duration::from_millis(500);
 const FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD: Duration = Duration::from_secs(2);
+// Windows software fallback can spend several seconds draining the first
+// 1080p raw frame when GPU acceleration is unavailable. Keep startup truth
+// tied to positive FFmpeg media progress, but do not reject that slow, live
+// process on the normal eight-second deadline used elsewhere.
+#[cfg(target_os = "windows")]
+const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(target_os = "windows"))]
 const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// The output-startup deadline for one FFmpeg graph (plan 195 S3). With only
-/// FIFO inputs FFmpeg reports its first output clock in about half a second,
-/// so the base keeps the fast fail for a wedged pipe. A direct live device
-/// input (the DirectShow fallback on Windows, the direct Pulse input on
-/// Linux) opens inside the graph: the tester's laptop microphone spent
-/// 4.8–7.2 s of the 8 s there and one take lost the whole budget (F2), so
-/// such a graph gets the DirectShow readiness budget on top. PR #769 raises
-/// `FFMPEG_OUTPUT_STARTUP_TIMEOUT` itself to 20 s on Windows; this supersedes
-/// that commit and keeps the constant's name.
+/// The output-startup deadline for one FFmpeg graph (plan 195 S3, #769).
+/// FIFO-only graphs keep the platform base: 8 s on macOS/Linux (fast fail
+/// for a wedged pipe) and 20 s on Windows (software-fallback OpenH264 can
+/// spend several seconds before the first positive output clock at 1080p).
+/// A direct live device input (DirectShow on Windows, Pulse on Linux) opens
+/// inside the graph and needs the DirectShow readiness budget on top of the
+/// 8 s FIFO deadline. Windows already has a 20 s window, which covers that
+/// 18 s need; stacking the budget on 20 s would meet the 30 s renderer RPC
+/// deadline, so Windows live-device graphs stay at the 20 s base.
 fn ffmpeg_output_startup_deadline(microphone: Option<&MicrophoneInput>) -> Duration {
     match microphone {
         Some(MicrophoneInput::WindowsDshow { .. } | MicrophoneInput::LinuxPulse { .. }) => {
-            FFMPEG_OUTPUT_STARTUP_TIMEOUT + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.max(
+                Duration::from_secs(8)
+                    + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET,
+            )
         }
         _ => FFMPEG_OUTPUT_STARTUP_TIMEOUT,
     }
@@ -37012,35 +37022,42 @@ mod tests {
             wait_for_ffmpeg_output_startup(pending, expired_start, FFMPEG_OUTPUT_STARTUP_TIMEOUT)
                 .await
                 .unwrap_err();
-        assert!(error.to_string().contains("within 8000ms of process spawn"));
+        assert!(error.to_string().contains(&format!(
+            "within {}ms of process spawn",
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_millis()
+        )));
 
         // Plan 195 S3: the error prints the deadline the graph actually got.
+        let dshow_deadline = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+            device_name: "Digital Microphone".to_string(),
+        }));
         let expired_start = Instant::now()
-            .checked_sub(Duration::from_secs(18) + Duration::from_millis(1))
+            .checked_sub(dshow_deadline + Duration::from_millis(1))
             .unwrap();
         let (_pending_sender, pending) = oneshot::channel();
-        let error = wait_for_ffmpeg_output_startup(
-            pending,
-            expired_start,
-            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
-                device_name: "Digital Microphone".to_string(),
-            })),
-        )
-        .await
-        .unwrap_err();
+        let error =
+            wait_for_ffmpeg_output_startup(pending, expired_start, dshow_deadline)
+                .await
+                .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("within 18000ms of process spawn"),
+            error.to_string().contains(&format!(
+                "within {}ms of process spawn",
+                dshow_deadline.as_millis()
+            )),
             "{error}"
         );
     }
 
     #[test]
     fn ffmpeg_output_startup_deadline_follows_the_input_topology() {
-        // Plan 195 S3: FIFO-only graphs keep the 8 s fast fail; a direct
-        // live device input gets the DirectShow readiness budget on top.
+        // Plan 195 S3 + #769: FIFO-only graphs keep the platform base
+        // (8 s macOS/Linux, 20 s Windows). A direct live device input gets
+        // the DirectShow readiness budget on top of the 8 s FIFO deadline;
+        // Windows' 20 s window already covers that 18 s need.
         let base = FFMPEG_OUTPUT_STARTUP_TIMEOUT;
+        #[cfg(target_os = "windows")]
+        assert_eq!(base, Duration::from_secs(20));
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(base, Duration::from_secs(8));
         assert_eq!(ffmpeg_output_startup_deadline(None), base);
         assert_eq!(
@@ -37062,22 +37079,28 @@ mod tests {
             })),
             base
         );
-        let with_device = base + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET;
-        assert_eq!(with_device, Duration::from_secs(18));
-        assert_eq!(
-            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
-                device_name: "Digital Microphone".to_string(),
-            })),
-            with_device
-        );
-        assert_eq!(
-            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::LinuxPulse {
-                source_name: "alsa_input.pci-0000_02_00.3.HiFi__Mic__source".to_string(),
-            })),
-            with_device
+        let live_device = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+            device_name: "Digital Microphone".to_string(),
+        }));
+        let pulse = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::LinuxPulse {
+            source_name: "alsa_input.pci-0000_02_00.3.HiFi__Mic__source".to_string(),
+        }));
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(live_device, Duration::from_secs(18));
+            assert_eq!(pulse, Duration::from_secs(18));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(live_device, Duration::from_secs(20));
+            assert_eq!(pulse, Duration::from_secs(20));
+        }
+        assert!(
+            live_device < Duration::from_secs(30),
+            "stays under the renderer's RPC deadline"
         );
         assert!(
-            with_device < Duration::from_secs(30),
+            pulse < Duration::from_secs(30),
             "stays under the renderer's RPC deadline"
         );
     }
