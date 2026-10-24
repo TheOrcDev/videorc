@@ -758,7 +758,7 @@ impl GlState {
         key: ProgramKey,
         id: LiveBackgroundId,
     ) -> Result<&Program, Failure> {
-        if !self.programs.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.programs.entry(key) {
             let source = match key {
                 ProgramKey::Pass(pass) => fragment_source(pass).into_owned(),
                 ProgramKey::Pack => PACK_FRAGMENT.to_string(),
@@ -774,7 +774,7 @@ impl GlState {
                     program,
                 }
             };
-            self.programs.insert(key, entry);
+            slot.insert(entry);
         }
         Ok(&self.programs[&key])
     }
@@ -902,12 +902,7 @@ impl GlState {
     ) -> Result<(), Failure> {
         let (program, u, l0, l1) = {
             let program = unsafe { self.program(gl, key, id) }?;
-            (
-                program.program,
-                program.u.clone(),
-                program.t0.clone(),
-                program.t1.clone(),
-            )
+            (program.program, program.u, program.t0, program.t1)
         };
         let target = &self.targets[destination];
         let flat: Vec<f32> = uniform_values.iter().flatten().copied().collect();
@@ -1002,10 +997,10 @@ impl GlState {
                 self.target(gl, "plasma-coarse", sizes.coarse, TargetKind::Float, id)?;
                 self.target(gl, "plasma-fine", sizes.fine, TargetKind::Float, id)?;
                 for (level, key) in DOWN.iter().enumerate() {
-                    self.target(gl, *key, sizes.down[level], TargetKind::Float, id)?;
+                    self.target(gl, key, sizes.down[level], TargetKind::Float, id)?;
                 }
-                for level in 1..=3 {
-                    self.target(gl, UP[level], sizes.down[level], TargetKind::Float, id)?;
+                for (level, key) in UP.iter().enumerate().skip(1) {
+                    self.target(gl, key, sizes.down[level], TargetKind::Float, id)?;
                 }
                 let coarse = ProgramKey::Pass(LivePass::PlasmaCoarse);
                 self.pass(
@@ -1034,7 +1029,7 @@ impl GlState {
                         gl,
                         down,
                         id,
-                        *key,
+                        key,
                         &packed(sizes.down[level]),
                         Some(source),
                         None,
