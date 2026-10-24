@@ -4,6 +4,9 @@ import { request as httpRequest } from 'node:http'
 import type { BackendConnection } from '../shared/backend'
 
 const REQUEST_TIMEOUT_MS = 1_000
+// Admission first hands over from a running Clips buffer (plan 181): it stops
+// that session and waits for its microphone, bounded by the backend.
+export const ACQUIRE_REQUEST_TIMEOUT_MS = 20_000
 const MAX_RESPONSE_BYTES = 4_096
 const MAX_LEASE_ID_LENGTH = 128
 const REQUEST_ATTEMPTS = 2
@@ -18,7 +21,8 @@ export type BackendInterruptionHttpResponse = {
 export type BackendInterruptionTransport = (
   connection: BackendConnection,
   method: InterruptionHttpMethod,
-  path: string
+  path: string,
+  timeoutMs?: number
 ) => Promise<BackendInterruptionHttpResponse>
 
 export type BackendInterruptionAcquireOptions = {
@@ -40,7 +44,8 @@ export type BackendInterruptionLease = {
 function defaultInterruptionTransport(
   connection: BackendConnection,
   method: InterruptionHttpMethod,
-  path: string
+  path: string,
+  timeoutMs = REQUEST_TIMEOUT_MS
 ): Promise<BackendInterruptionHttpResponse> {
   return new Promise((resolve, reject) => {
     const request = httpRequest(
@@ -69,7 +74,7 @@ function defaultInterruptionTransport(
         })
       }
     )
-    request.setTimeout(REQUEST_TIMEOUT_MS, () => {
+    request.setTimeout(timeoutMs, () => {
       request.destroy(new Error('Backend interruption request timed out.'))
     })
     request.on('error', reject)
@@ -164,7 +169,7 @@ export async function acquireBackendInterruptionLease(
   // Any committed lease whose response remains lost after these bounded
   // retries is reclaimed by the backend TTL. The caller stays fail-closed.
   const grant = await retryInterruptionRequest(async () => {
-    const response = await transport(connection, 'POST', path)
+    const response = await transport(connection, 'POST', path, ACQUIRE_REQUEST_TIMEOUT_MS)
     if (response.statusCode === 409) {
       return null
     }

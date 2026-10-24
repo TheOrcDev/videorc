@@ -1224,20 +1224,28 @@ async fn acquire_interruption_lease_handler(
         )
             .into_response();
     }
-    match state
-        .capture_interruption
-        .try_acquire_interruption(&query.owner_id, &query.action)
-    {
+    // Plan 181: the Clips buffer-only session yields to the interruption. The
+    // handover stops a session, so it runs detached: a dropped request never
+    // cancels that stop halfway.
+    let admission_state = state.clone();
+    let owner_id = query.owner_id.clone();
+    let action = query.action.clone();
+    let admission = tokio::spawn(async move {
+        recording::admit_interruption_over_replay_buffer(&admission_state, &owner_id, &action).await
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Interruption admission stopped: {error}")));
+    match admission {
         Ok(grant) => (
             StatusCode::CREATED,
             Json(interruption_lease_response(grant)),
         )
             .into_response(),
-        Err(blocker) => (
+        Err(message) => (
             StatusCode::CONFLICT,
             Json(InterruptionLeaseErrorResponse {
                 code: "capture-not-idle",
-                message: blocker.to_string(),
+                message,
             }),
         )
             .into_response(),
