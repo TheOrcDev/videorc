@@ -429,6 +429,12 @@ pub struct LiveChatMessage {
     /// intro, or the first message from an author no earlier session saw.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first_message: bool,
+    /// The author's first message this session (plan 192 S1.2), set beside
+    /// `first_message` by local bookkeeping only. Never on the wire or in
+    /// SQLite: it lives for one delivery, so the Buddy can welcome a
+    /// returning chatter.
+    #[serde(skip)]
+    pub first_in_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3228,6 +3234,9 @@ async fn mark_first_time_chatters(
             {
                 continue;
             }
+            // Plan 192 S1.2: the first row of each fresh author this session,
+            // first-time or not, so the Buddy can welcome them back.
+            message.first_in_session = true;
             if !returning.contains(&key) {
                 message.first_message = true;
             }
@@ -3966,6 +3975,7 @@ fn fake_message(
         details: None,
         reply: None,
         first_message: false,
+        first_in_session: false,
         author_affiliation: None,
         // Fake X chat shows each of X's checks and an unverified viewer, so
         // the dev Stream Manager and the smokes see all of them (plan 167).
@@ -7208,6 +7218,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
             author_affiliation: None,
             author_verified: None,
         };

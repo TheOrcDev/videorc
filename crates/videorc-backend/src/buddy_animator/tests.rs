@@ -1473,6 +1473,7 @@ fn a_greeting_that_answers_the_row_brings_its_own_reaction() {
                     true,
                 ),
             ],
+            ..CohostGreetingsSettings::default()
         },
         ..CohostAutoChat::default()
     };

@@ -841,6 +841,7 @@ fn relay_event_to_message(
         details: None,
         reply: None,
         first_message: false,
+        first_in_session: false,
     })
 }
 
@@ -888,6 +889,7 @@ fn follow_event_to_message(
         details: Some(LiveChatEventDetails::Follow { handle: username }),
         reply: None,
         first_message: false,
+        first_in_session: false,
         author_affiliation: None,
         author_verified: None,
     })

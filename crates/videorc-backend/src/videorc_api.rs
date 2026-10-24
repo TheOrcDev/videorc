@@ -31,6 +31,13 @@ const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
 /// reads the timeout as "no signal", never as a co-host error.
 pub(crate) const COHOST_SPOTLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const COHOST_SPOTLIGHT_PATH: &str = "/api/ai/cohost/spotlight";
+/// Plan 192 D4: the greet route's server budget is 3 s; the client gives it
+/// half a second more before the line goes out instead.
+pub(crate) const COHOST_GREET_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(3_500);
+const COHOST_GREET_PATH: &str = "/api/ai/cohost/greet";
+/// Greetings one greet request may carry (the route's `items` cap).
+pub(crate) const COHOST_GREET_ITEMS_MAX: usize = 6;
 /// The server rejects a larger body (checked on content-length bytes) as
 /// `invalid-request`; the engine trims candidates until the JSON fits.
 pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
@@ -587,6 +594,78 @@ pub struct CohostSpotlightMatch {
     /// candidate that carried a `questionId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered: Option<f64>,
+}
+
+// --- Buddy greet wire types (plan 192 D3/D4; field names are load-bearing) ---
+
+/// `POST /api/ai/cohost/greet`: up to [`COHOST_GREET_ITEMS_MAX`] ready
+/// greetings the AI writes in the persona's voice. Synchronous and small,
+/// like the spotlight: never on the tick. `seq` is the lane's own counter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostGreetRequest {
+    pub client_version: String,
+    pub consent_to_process_chat: bool,
+    /// The live-chat session id.
+    pub session_client_id: String,
+    pub seq: u64,
+    pub tone: CohostTone,
+    /// The persona the lines speak as; the route takes `null` too.
+    pub persona: Option<CohostTickPersona>,
+    /// The session's first AI greeting: the line may say once that viewers
+    /// can ask the persona by name (D6).
+    pub introduce: bool,
+    pub items: Vec<CohostGreetItem>,
+}
+
+/// One greeting to write: the kind, who, the facts the kind has, and the
+/// resolved line as the fallback and the style example.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostGreetItem {
+    /// Unique in the request (the utterance id), at most 80.
+    pub id: String,
+    /// One of the 16 greeting kinds (`cohost_greetings::GreetingKind::wire`).
+    pub kind: String,
+    pub platform: StreamPlatform,
+    /// The named viewers, 1 to 3, each at most 120.
+    pub names: Vec<String>,
+    /// The "and N others" of a collapsed burst.
+    pub others: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub months: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streak: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward: Option<String>,
+    /// Welcomes only: the viewer's first message, at most 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_message_text: Option<String>,
+    pub fallback_line: String,
+}
+
+/// A missing id means "use the fallback". Item-wise tolerant like the tick
+/// response: one unreadable line never fails the call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostGreetResponse {
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub lines: Vec<CohostGreetLine>,
+    #[serde(default)]
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostGreetLine {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub mood: Option<CohostTickMood>,
 }
 
 // --- Buddy look wire types (plan 169 D4, D5) ---
@@ -1729,6 +1808,48 @@ impl VideorcApiClient {
                 CohostApiError::malformed_response(
                     status.as_u16(),
                     format!("Could not read Buddy's spotlight response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// One greet call (plan 192 D4): the AI writes up to six ready greetings
+    /// in the persona's voice. Same auth and failure mapping as the
+    /// spotlight; the lane decides what each class means (a 403 stops AI
+    /// greetings for the session, anything else falls back for the batch).
+    pub async fn post_cohost_greet(
+        &self,
+        bearer_token: &str,
+        request: &CohostGreetRequest,
+    ) -> std::result::Result<CohostGreetResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_GREET_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_GREET_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, COHOST_GREET_TIMEOUT))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read Buddy's greet response: {error}"),
                 )
             });
         }
@@ -3129,6 +3250,10 @@ mod tests {
         let with: AiCapabilities = serde_json::from_value(value).unwrap();
         let cohost = with.cohost.unwrap();
         assert_eq!(cohost.tick, Some(4));
+        assert_eq!(
+            cohost.greet, None,
+            "servers before plan 192 omit the greet route"
+        );
         let avatar = cohost.avatar.unwrap();
         assert!(avatar.enabled);
         assert_eq!((avatar.remaining_today, avatar.daily_limit), (23, 24));
@@ -3185,11 +3310,146 @@ mod tests {
         );
         // Basic: the block is present and off.
         value["cohost"]["pet"] = serde_json::json!({ "enabled": false, "creationsRemainingThisMonth": 0, "monthlyLimit": 0 });
-        let basic: AiCapabilities = serde_json::from_value(value).unwrap();
+        // Plan 192 D4: the greet route rides as a number like `tick`, and the
+        // proxy hands it on.
+        value["cohost"]["greet"] = serde_json::json!(1);
+        let basic: AiCapabilities = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(
-            basic.cohost.unwrap().pet.unwrap(),
-            crate::protocol::AiCapabilitiesPet::default()
+            basic.cohost.as_ref().unwrap().pet,
+            Some(crate::protocol::AiCapabilitiesPet::default())
         );
+        assert_eq!(basic.cohost.as_ref().unwrap().greet, Some(1));
+        assert_eq!(serde_json::to_value(&basic).unwrap()["cohost"]["greet"], 1);
+        value["cohost"]["greet"] = serde_json::json!(0);
+        let off: AiCapabilities = serde_json::from_value(value).unwrap();
+        assert_eq!(off.cohost.unwrap().greet, Some(0));
+    }
+
+    /// Plan 192: the greet request matches the route's zod shape (camelCase,
+    /// absent optionals, `persona` nullable) and the response tolerates a
+    /// bad line, a missing mood and unknown keys.
+    #[test]
+    fn cohost_greet_wire_shapes_match_the_route_and_tolerate_bad_items() {
+        let request = CohostGreetRequest {
+            client_version: "videorc-desktop/0.9.151".to_string(),
+            consent_to_process_chat: true,
+            session_client_id: "session-1".to_string(),
+            seq: 3,
+            tone: CohostTone::Short,
+            persona: Some(CohostTickPersona {
+                name: "Golmar".to_string(),
+                personality: "Loud and loyal.".to_string(),
+            }),
+            introduce: true,
+            items: vec![
+                CohostGreetItem {
+                    id: "g-3".to_string(),
+                    kind: "first-time".to_string(),
+                    platform: StreamPlatform::Twitch,
+                    names: vec!["Ana".to_string(), "Bo".to_string()],
+                    others: 4,
+                    months: None,
+                    streak: None,
+                    count: None,
+                    amount: None,
+                    reward: None,
+                    first_message_text: Some("hey!".to_string()),
+                    fallback_line: "Hi Ana and Bo and 4 others, welcome to the stream!".to_string(),
+                },
+                CohostGreetItem {
+                    id: "g-4".to_string(),
+                    kind: "redemption".to_string(),
+                    platform: StreamPlatform::Twitch,
+                    names: vec!["Cy".to_string()],
+                    others: 0,
+                    months: Some(12),
+                    streak: Some(5),
+                    count: Some(500),
+                    amount: Some("500 Diamonds".to_string()),
+                    reward: Some("Hydrate".to_string()),
+                    first_message_text: None,
+                    fallback_line: "Thanks for redeeming, Cy!".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "clientVersion": "videorc-desktop/0.9.151",
+                "consentToProcessChat": true,
+                "sessionClientId": "session-1",
+                "seq": 3,
+                "tone": "short",
+                "persona": { "name": "Golmar", "personality": "Loud and loyal." },
+                "introduce": true,
+                "items": [
+                    {
+                        "id": "g-3",
+                        "kind": "first-time",
+                        "platform": "twitch",
+                        "names": ["Ana", "Bo"],
+                        "others": 4,
+                        "firstMessageText": "hey!",
+                        "fallbackLine": "Hi Ana and Bo and 4 others, welcome to the stream!"
+                    },
+                    {
+                        "id": "g-4",
+                        "kind": "redemption",
+                        "platform": "twitch",
+                        "names": ["Cy"],
+                        "others": 0,
+                        "months": 12,
+                        "streak": 5,
+                        "count": 500,
+                        "amount": "500 Diamonds",
+                        "reward": "Hydrate",
+                        "fallbackLine": "Thanks for redeeming, Cy!"
+                    }
+                ]
+            })
+        );
+        let round_trip: CohostGreetRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, request);
+        let no_persona = CohostGreetRequest {
+            persona: None,
+            ..request
+        };
+        assert_eq!(
+            serde_json::to_value(&no_persona).unwrap()["persona"],
+            serde_json::Value::Null,
+            "the route takes null, never an absent persona"
+        );
+
+        let response: CohostGreetResponse = serde_json::from_value(serde_json::json!({
+            "lines": [
+                { "id": "g-3", "text": "Ana, Bo and the rest of you: welcome in!", "mood": "amused" },
+                { "id": "g-4", "text": "Hydrate, Cy. The horde salutes you." },
+                { "id": "g-5", "text": "x", "mood": "ecstatic" },
+                { "text": "no id" },
+                null
+            ],
+            "model": "jev",
+            "future": 1
+        }))
+        .unwrap();
+        assert_eq!(response.lines.len(), 3);
+        assert_eq!(response.lines[0].mood, Some(CohostTickMood::Amused));
+        assert_eq!(response.lines[1].mood, None);
+        assert_eq!(
+            response.lines[2].mood,
+            Some(CohostTickMood::Unknown),
+            "an unknown mood reads as unknown, never fails the line"
+        );
+        assert_eq!(response.model, "jev");
+        let empty: CohostGreetResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty, CohostGreetResponse::default());
+        assert_eq!(
+            COHOST_GREET_TIMEOUT,
+            std::time::Duration::from_millis(3_500)
+        );
+        assert_eq!(COHOST_GREET_PATH, "/api/ai/cohost/greet");
+        assert_eq!(COHOST_GREET_ITEMS_MAX, 6);
     }
 
     #[test]
