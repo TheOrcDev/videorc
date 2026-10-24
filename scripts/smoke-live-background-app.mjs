@@ -134,6 +134,22 @@ try {
   const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
   const smoke = launch.connections['preview-motion-ready']
   try {
+    // Clips is on by default (plan 181): at launch the renderer arms a
+    // buffer-only session with the app's own scene, and a Record hands over
+    // from it. That scene holds whatever camera the Mac has, which the dev
+    // app can't read, so the start is refused. This smoke records its own
+    // scene: turn the switch off first, as the record-latency smoke does.
+    const clipsOff = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
+      { timeoutMs }
+    )
+    assert.equal(clipsOff?.result, true, 'the renderer has no clip buffer smoke hook')
+    await waitFor(
+      async () => (await request(ws, timeoutMs, 'replay.status'))?.state === 'off',
+      'the clip buffer to turn off'
+    )
     await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 0 }, { timeoutMs })
     await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
     await waitFor(async () => (await status()).framesRendered > 0, 'the first preview frame')
@@ -215,7 +231,6 @@ try {
     const listener = target ? spawnRtmpListener(target) : null
     let started
     let stopped
-    let early
     let late
     const samples = []
     try {
@@ -245,7 +260,6 @@ try {
         `${label}: the session must record, got ${started.state}`
       )
       await sleep(1500) // Deliberate: past the start transient before sampling uploads.
-      early = await status()
       const until = Date.now() + testCase.seconds * 1000
       while (Date.now() < until) {
         samples.push(await status())
@@ -260,9 +274,25 @@ try {
     const path = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120000 })
 
     // The guard may halve the internal size on a busy host (it still moves);
-    // falling back to the poster mid-recording fails.
+    // falling back to the poster mid-recording fails. A record-and-stream
+    // session starts a new compositor run, whose status carries no live
+    // background until its first 2 s diagnostic window: skip only those
+    // leading samples (the artifacts below judge the pixels from 1 s on).
     const allowed = forced ? ['still'] : ['shader', 'half']
-    for (const sample of samples) {
+    const firstReported = samples.findIndex((sample) => sample.liveBackground !== undefined)
+    assert(firstReported >= 0, `${label}: no status sample reported the live background`)
+    // Samples are 0.5 s apart from 1.5 s in; the first window ends by 2 s, so
+    // more than 3 s without status is a real gap, not the window.
+    assert(
+      firstReported <= 6,
+      `${label}: the live background was missing from status for ${firstReported} samples`
+    )
+    if (firstReported > 0) {
+      console.log(
+        `${label}: ${firstReported}/${samples.length} samples came before the new run's first status`
+      )
+    }
+    for (const sample of samples.slice(firstReported)) {
       assert(
         allowed.includes(sample.liveBackground?.rendering),
         `${label}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)}`
@@ -272,6 +302,8 @@ try {
     if (halved > 0) {
       console.log(`${label}: the guard drew at half size for ${halved}/${samples.length} samples`)
     }
+    // The uploads baseline is the first status the session's run published.
+    const early = samples[firstReported]
     assert.equal(
       late.framePipeline.immutableTextureUploads,
       early.framePipeline.immutableTextureUploads,
@@ -346,7 +378,13 @@ try {
     if (forced) {
       assert(motion < 0.75, `${path}: a forced still must not move (ring motion ${motion})`)
     } else {
-      assert(motion > 1, `${path}: the live background ring does not move (motion ${motion})`)
+      // Line Waves' thin lines average away in the 16 × 16 thumbnail (about
+      // 1 per 0.5 s); the finer square still sees them (about 3.7 per 0.2 s).
+      const fine = motion > 1 ? null : squareMotion(path)
+      assert(
+        motion > 1 || fine > 1,
+        `${path}: the live background ring does not move (motion ${motion}, square ${fine})`
+      )
       const freezes = freezeStarts(path, RING)
       assert.equal(freezes.length, 0, `${path}: the ring froze at ${freezes.join(', ')} s`)
     }
