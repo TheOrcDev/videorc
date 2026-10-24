@@ -12299,6 +12299,7 @@ mod tests {
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
+                live_background: None,
             };
             let len = raw_yuv420p_len(width, height);
             let mut zeroed = vec![0x00_u8; len];

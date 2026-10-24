@@ -1258,3 +1258,23 @@ live_background` pass.
     end-of-take status. A quiet-host run is owed.
   - Off: no programs and no scratch before the first live background, and
     both back to 0 after it comes off.
+
+- `smoke:live-background-off-ab` (3 alternating rounds against `63f9bb6e`,
+  no live background, load 14–45): **PASS**, but the noise bands are wide.
+  Medians, base → branch:
+
+  | Metric             | Base     | Branch   | Delta    | Allowed                          |
+  | ------------------ | -------- | -------- | -------- | -------------------------------- |
+  | App ready          | 5817 ms  | 6545 ms  | +728 ms  | 26249 ms (one 32 s base outlier) |
+  | Idle preview p95   | 4.59 ms  | 4.44 ms  | −0.15 ms | 0.70 ms                          |
+  | 1080p60 record p95 | 2.72 ms  | 3.62 ms  | +0.90 ms | 1.28 ms                          |
+  | Backend RSS        | 58.4 MB  | 60.1 MB  | +1.7 MB  | 3.0 MB                           |
+  | Renderer RSS       | 318.3 MB | 330.9 MB | +12.6 MB | 15.5 MB                          |
+
+  The record p95 and renderer RSS deltas sit inside the noise, but they
+  are not proof of zero cost:
+  - base record p95: 2.5–4.0 ms across rounds;
+  - branch record p95: 3.6–4.2 ms;
+  - with this spread, the A/B can't rule out a sub-millisecond cost.
+
+  A quiet-host rerun is owed before this counts.
