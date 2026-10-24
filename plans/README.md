@@ -1,5 +1,22 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
+  background moves on the stream. Owner report: live backgrounds animate in
+  Studio but sit still on the live stream. On macOS every record-and-stream
+  session streams from an auxiliary compositor leg, and plan 190 wired the
+  live background to the primary leg only (`live_background: None` on the
+  auxiliary inputs), so the stream drew the poster. The owner's 10-24
+  session proves it: its recording's ring moves on every frame, and the
+  stream leg's code never sees the shader. Fix (D1): the stream leg draws the
+  texture the recording rendered in the same tick, so no shader cost is
+  added and the two can't disagree. Windows gets a WARP test that pins its
+  stream target; Linux shares one frame already. The smoke gains
+  record-and-stream cases (it only recorded). D2: 4K60 stays the poster.
+  **DRAFT PR #794** 2026-10-24: built (owner took D1 and D2). The smoke
+  shows the stream ring moving like the recording's on every case. Owed: the
+  Windows CI run of the S3 tests, a quiet-host p95 run, owner by-eye on a
+  real stream.
+
 - 2026-10-24: [Plan 192](192-buddy-greets-and-talks-on-its-own.md), Buddy
   greets and talks on its own. On the owner's 10-24 stream (0.9.150), Buddy
   was in Auto and posted nothing by itself, only the owner's two Say lines.
@@ -40,11 +57,13 @@
   Plasma Wave. S1 is a hard cost gate on all three machines before any
   product code. S9 proves zero cost when off with an A/B against
   `origin/main`. Licence: the creator gave permission. D2–D6 answered.
-  **DRAFT PR #779** 2026-10-24: every slice built (S4 Windows and S5 Linux
-  on Opus, never run on their platforms; CI is their first compile). The
-  gates found and fixed a contract bug that retired main's present pump
-  whenever a live background showed. Owed: a quiet-host smoke run, the
-  Windows and ogre checks, S1 cost on both, owner by-eye in both themes.
+  **MERGED** 2026-10-24 as #779 `2b6114e0`; shipped in 0.9.149 (macOS) and
+  0.9.150 (all three). Every slice is built (S4 Windows and S5 Linux on
+  Opus, never run on their platforms). The gates found and fixed a contract
+  bug that retired main's present pump whenever a live background showed.
+  The macOS stream leg drew the poster: fixed by plan 193. Owed: a
+  quiet-host smoke run, the Windows and ogre checks, S1 cost on both, owner
+  by-eye in both themes.
 
 - 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
   owner asked for an inspection of leaks and waste that changes no feature,

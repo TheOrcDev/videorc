@@ -1106,8 +1106,9 @@ struct CompositorRenderCache {
     /// S3): one `Arc` clone per tick, read by both legs.
     banners: Arc<BannerSet>,
     banner_session_shape: Option<OverlaySessionShape>,
-    /// Plan 190: the live background the primary leg draws this tick, if any
-    /// (it carries the board the leg's renderer reports to).
+    /// Plan 190: the live background the primary leg renders this tick, if
+    /// any (it carries the board the leg's renderer reports to). Plan 193:
+    /// the same-scene stream leg draws the frame the primary leg rendered.
     live_background: Option<crate::live_background::LiveBackgroundFrameInput>,
 }
 
@@ -2586,6 +2587,8 @@ mod editor_draft_tests {
             buddy_leg: None,
             banners: &[],
             live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -5717,6 +5720,8 @@ async fn run_synthetic_compositor_loop(
                                 missed_deadline,
                             ),
                             renderer: &mut live_background_renderer,
+                            #[cfg(test)]
+                            at: None,
                         },
                     )
                         .await;
@@ -6369,12 +6374,26 @@ type LiveBackgroundGpuRenderer = crate::live_background::gl::LiveBackgroundGlRen
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 enum LiveBackgroundGpuRenderer {}
 
+/// Plan 193: the live frame one leg rendered this tick and another leg draws
+/// too (the stream leg of a record-and-stream session draws the recording
+/// leg's: D1, one shader for both). Metal's `LiveFrame` on macOS.
+#[cfg(target_os = "macos")]
+type SharedLiveFrame = crate::live_background::metal::LiveFrame;
+/// Uninhabited stand-in elsewhere (always `None`): Linux's legs share one
+/// composed frame, and Windows composes every target in its media session.
+#[cfg(not(target_os = "macos"))]
+enum SharedLiveFrame {}
+
 /// Plan 190: what a tick hands the primary leg for its live background: the
 /// loop's tick (instant, frame interval, deadline verdict for the guard) and
 /// the run's renderer slot.
 struct LiveBackgroundLeg<'a> {
     tick: crate::live_background::LiveBackgroundTick,
     renderer: &'a mut Option<Box<LiveBackgroundGpuRenderer>>,
+    /// Tests pin the instant every leg reads the live background at (two
+    /// ticks a second apart, without waiting a second).
+    #[cfg(test)]
+    at: Option<Instant>,
 }
 
 impl<'a> LiveBackgroundLeg<'a> {
@@ -6384,6 +6403,17 @@ impl<'a> LiveBackgroundLeg<'a> {
         Self {
             tick: crate::live_background::LiveBackgroundTick::unmeasured(Instant::now()),
             renderer,
+            at: None,
+        }
+    }
+
+    /// A tick pinned to `at`, for tests of the legs' shared frame (plan 193).
+    #[cfg(all(test, target_os = "macos"))]
+    fn pinned_at(renderer: &'a mut Option<Box<LiveBackgroundGpuRenderer>>, at: Instant) -> Self {
+        Self {
+            tick: crate::live_background::LiveBackgroundTick::unmeasured(at),
+            renderer,
+            at: Some(at),
         }
     }
 }
@@ -6411,6 +6441,45 @@ fn render_live_background(
         output,
         crate::live_background::preflight_still_reason(),
     )
+}
+
+#[cfg(target_os = "macos")]
+impl CompositorRenderInputs<'_> {
+    /// Plan 193: the size the live frame renders at: this leg's canvas, or
+    /// the larger canvas of the leg that draws the frame too. Line Waves
+    /// renders at full size, so a frame drawn down keeps its lines where
+    /// one drawn up would go soft; the soft four cap at 1080 either way.
+    fn live_output(&self) -> (u32, u32) {
+        let area = |(width, height): (u32, u32)| u64::from(width) * u64::from(height);
+        let own = (self.width, self.height);
+        match self.shared_live_output {
+            Some(other) if area(other) > area(own) => other,
+            _ => own,
+        }
+    }
+}
+
+/// Plan 193: a texture is only valid on the device that made it. Both legs'
+/// compositors take the system default device, so the recording leg's frame
+/// is the stream leg's to draw; should a Mac ever hand them two devices, the
+/// stream leg shows the poster and says so once, never silently.
+#[cfg(target_os = "macos")]
+fn shared_live_frame_is_local(gpu: &GpuCompositor, frame: &SharedLiveFrame) -> bool {
+    use objc2_metal::MTLResource as _;
+    let texture_device = frame.texture.device();
+    if std::ptr::eq(
+        objc2::rc::Retained::as_ptr(&texture_device),
+        objc2::rc::Retained::as_ptr(gpu.device()),
+    ) {
+        return true;
+    }
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            "live background: the stream leg runs on another Metal device; it shows the poster"
+        );
+    }
+    false
 }
 
 /// Plan 190 S5: the CPU path's live background. On Linux, the GLES
@@ -7269,7 +7338,17 @@ fn try_gpu_compose_with_chrome(
             // (forced still, a shader that failed to build, the budget
             // guard) it reports why and the poster draws exactly as before.
             let live_frame = inputs.live_background.and_then(|input| {
-                render_live_background(gpu, live_renderer, input, (inputs.width, inputs.height))
+                render_live_background(gpu, live_renderer, input, inputs.live_output())
+            });
+            // Plan 193: a leg that renders no frame of its own draws the one
+            // another leg rendered this tick (the stream leg draws the
+            // recording's: same phase, same still, no second shader), when
+            // it is this compose's device's; else the poster, as before.
+            let live_frame = live_frame.or_else(|| {
+                inputs
+                    .shared_live_frame
+                    .filter(|frame| shared_live_frame_is_local(gpu, frame))
+                    .cloned()
             });
             if let Some(frame) = live_frame {
                 let (dest, crop) = gpu_source_placement(
@@ -8564,9 +8643,13 @@ async fn publish_compositor_frame(
     let published_at = Instant::now();
     // Plan 190: every leg of this tick reads the live background at
     // `published_at`, with the loop's deadline verdict for the guard.
+    #[cfg(test)]
+    let live_at = live.at.unwrap_or(published_at);
+    #[cfg(not(test))]
+    let live_at = published_at;
     if let Some(input) = render_cache.live_background.as_mut() {
         input.tick = crate::live_background::LiveBackgroundTick {
-            at: published_at,
+            at: live_at,
             ..live.tick
         };
     }
@@ -8669,6 +8752,12 @@ async fn publish_compositor_frame(
             buddy_leg: primary_buddy.as_ref(),
             banners: &primary_banners,
             live_background: render_cache.live_background.as_ref(),
+            shared_live_frame: None,
+            // Plan 193: the same-scene stream leg draws this leg's live frame
+            // too, so it renders at the larger canvas of the two.
+            shared_live_output: stream_output
+                .filter(|output| !output.composes_simulcast_scene)
+                .map(|output| (output.width.max(1), output.height.max(1))),
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         #[cfg(test)]
@@ -8831,6 +8920,20 @@ async fn publish_compositor_frame(
             None,
             &state.banner_prepare,
         );
+        // Plan 193 (D1): the stream leg draws the live frame the primary leg
+        // rendered at `live_at`, never one of its own; the vertical simulcast
+        // leg keeps no background (plan 190 D9). The frame is complete by
+        // now: its command buffer was committed on the primary queue before
+        // the primary compose, and `compose_target_with_timings` returns
+        // only after `waitUntilCompleted`. The compose below is waited for
+        // the same way, before the next tick's draw overwrites the texture;
+        // both legs run in turn on this one loop task.
+        #[cfg(target_os = "macos")]
+        let shared_live_frame = (!stream_output.composes_simulcast_scene)
+            .then(|| live.renderer.as_ref()?.frame_at(live_at))
+            .flatten();
+        #[cfg(not(target_os = "macos"))]
+        let shared_live_frame: Option<SharedLiveFrame> = None;
         let inputs = CompositorRenderInputs {
             sequence,
             width: stream_output.width.max(1),
@@ -8865,6 +8968,8 @@ async fn publish_compositor_frame(
             buddy_leg: aux_buddy.as_ref(),
             banners: &aux_banners,
             live_background: None,
+            shared_live_frame: shared_live_frame.as_ref(),
+            shared_live_output: None,
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -8975,6 +9080,8 @@ async fn publish_compositor_frame(
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             };
             #[cfg(test)]
             let trace_role = leg_index + 1;
@@ -9224,10 +9331,21 @@ struct CompositorRenderInputs<'a> {
     /// The banners this leg carries this tick (plan 186 S3), bottom to top:
     /// drawn after the scene and the takeover, before captions (D5).
     banners: &'a [BannerDraw],
-    /// Plan 190: the live background this leg draws in place of the scene
+    /// Plan 190: the live background this leg renders in place of the scene
     /// background's poster, when its renderer can. Only the primary leg
-    /// carries one (the simulcast and ISO legs have no background).
+    /// carries one; the same-scene stream leg draws its frame through
+    /// `shared_live_frame`, and the simulcast and ISO legs have no background.
     live_background: Option<&'a crate::live_background::LiveBackgroundFrameInput>,
+    /// Plan 193: the live frame another leg rendered this tick, drawn in
+    /// place of the poster by a leg that renders none of its own (the stream
+    /// leg of a record-and-stream session; D1). Only Metal reads it: Linux's
+    /// legs share one composed frame and Windows composes in its session.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    shared_live_frame: Option<&'a SharedLiveFrame>,
+    /// Plan 193: the canvas of the leg that draws this leg's live frame too,
+    /// so the frame renders at the larger of the two (`live_output`, Metal).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    shared_live_output: Option<(u32, u32)>,
 }
 
 /// One banner as a leg draws it this tick (plan 186 S3): the prepared bitmap
@@ -9569,6 +9687,8 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         buddy_leg: _,
         banners: _,
         live_background: _,
+        shared_live_frame: _,
+        shared_live_output: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -12300,6 +12420,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             };
             let len = raw_yuv420p_len(width, height);
             let mut zeroed = vec![0x00_u8; len];
@@ -12711,6 +12833,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             true,
         )
@@ -12732,6 +12856,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             true,
         )
@@ -12825,6 +12951,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             true,
         )
@@ -12958,6 +13086,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             true,
         )
@@ -13062,6 +13192,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             false,
         )
@@ -13257,6 +13389,8 @@ mod tests {
             buddy_leg: None,
             banners: &[],
             live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
         };
         drop(held);
         publish_auxiliary_compositor_frame(
@@ -13742,6 +13876,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             true,
         ) {
@@ -13797,6 +13933,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             true,
         ) {
@@ -16849,6 +16987,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut bytes,
         );
@@ -16931,6 +17071,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -17028,6 +17170,8 @@ mod tests {
             buddy_leg: None,
             banners: &[],
             live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -17040,6 +17184,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
                 ..base_inputs
             },
             &mut with_both,
@@ -17407,6 +17553,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
@@ -17534,6 +17682,8 @@ mod tests {
             buddy_leg: None,
             banners: &[],
             live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -17563,6 +17713,8 @@ mod tests {
                     buddy_leg: None,
                     banners: &[],
                     live_background: None,
+                    shared_live_frame: None,
+                    shared_live_output: None,
                     ..base_inputs
                 },
                 &mut frame,
@@ -17671,6 +17823,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut bytes,
         );
@@ -17693,6 +17847,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut scene_only,
         );
@@ -17731,6 +17887,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut bytes,
         );
@@ -17760,6 +17918,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut baseline,
         );
@@ -17855,6 +18015,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut bytes,
         );
@@ -17954,6 +18116,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut bytes,
         );
@@ -18065,6 +18229,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut bytes,
         );
@@ -18322,6 +18488,8 @@ mod tests {
                 buddy_leg: None,
                 banners: &[],
                 live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
             },
             &mut bytes,
         );
@@ -19232,6 +19400,8 @@ mod buddy_sprite_tests {
             buddy_leg,
             banners: &[],
             live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
         }
     }
 
@@ -19717,6 +19887,8 @@ mod banner_tests {
             buddy_leg: None,
             banners,
             live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
         }
     }
 
@@ -20779,6 +20951,8 @@ mod live_background_metal_tests {
             buddy_leg: None,
             banners: &[],
             live_background: live,
+            shared_live_frame: None,
+            shared_live_output: None,
         }
     }
 
@@ -21029,6 +21203,635 @@ mod live_background_metal_tests {
         assert!(slot.is_none(), "no renderer is even made");
         assert_eq!(resources(&slot), (0, 0));
         assert_eq!(board.snapshot(), (None, 0, 0));
+    }
+
+    // Plan 193: the stream leg of a record-and-stream session draws the frame
+    // the recording leg rendered this tick. The tests below drive the real
+    // publish path with two Metal compositors, as the loop does.
+
+    /// A test-only app state (as `tests::test_state` makes one).
+    fn test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    /// A 32 x 18 solid red screen image standing in for the capture: it
+    /// fills the stage (contain, at the stage's own aspect) and never moves.
+    fn screen_image() -> CompositorImageSource {
+        CompositorImageSource {
+            image_path: "screen.png".to_string(),
+            file_revision: None,
+            width: Some(32),
+            height: Some(18),
+            rgba: Some(Arc::new([255, 0, 0, 255].repeat(32 * 18))),
+            bgra: Some(Arc::new([0, 0, 255, 255].repeat(32 * 18))),
+            content_revision: 2,
+            state: "live".to_string(),
+            message: None,
+        }
+    }
+
+    fn stream_screen(id: &str) -> crate::protocol::StreamScreen {
+        crate::protocol::StreamScreen {
+            id: id.to_string(),
+            name: "Screen".to_string(),
+            image_path: "screen.png".to_string(),
+            thumbnail_path: None,
+            sort_order: 0,
+            status: crate::protocol::StreamScreenStatus::Ready,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// A record-and-stream run under test: the recording leg at `primary`
+    /// and the stream leg at `stream`, each on its own Metal compositor and
+    /// publishing raw YUV, the scene's screen a cached image inside the
+    /// background's stage, and the one live background renderer slot the
+    /// loop hands every tick.
+    struct RecordAndStream {
+        state: AppState,
+        recording_gpu: GpuCompositor,
+        stream_gpu: GpuCompositor,
+        recording_store: CompositorFrameStore,
+        stream_store: CompositorFrameStore,
+        live_sources: CompositorLiveSources,
+        render_cache: CompositorRenderCache,
+        slot: Option<Box<LiveBackgroundGpuRenderer>>,
+        primary: (u32, u32),
+        stream: CompositorAuxiliaryOutput,
+    }
+
+    impl RecordAndStream {
+        /// `simulcast` makes the stream leg the vertical simulcast leg,
+        /// which composes that scene instead of the primary's.
+        async fn start(
+            primary: (u32, u32),
+            stream: (u32, u32),
+            live: Option<LiveBackgroundSpec>,
+            simulcast: Option<CompositorSceneSnapshot>,
+        ) -> Option<Self> {
+            let recording_gpu = new_gpu_compositor(false)?;
+            let stream_gpu = new_gpu_compositor(false)?;
+            let state = test_state();
+            let stream_store = Arc::new(StdMutex::new(FrameStore::new(2)));
+            let composes_simulcast_scene = simulcast.is_some();
+            {
+                let mut compositor = state.compositor.lock().await;
+                compositor.stream_frame_store = Some(stream_store.clone());
+                let mut snapshot = scene_snapshot(live);
+                snapshot.active_screen = Some(stream_screen("screen-1"));
+                compositor
+                    .image_sources
+                    .insert("screen-1".to_string(), screen_image());
+                for background in [&snapshot, simulcast.as_ref().unwrap_or(&snapshot)]
+                    .into_iter()
+                    .filter_map(|snapshot| snapshot.scene.as_ref())
+                    .filter_map(|scene| scene.background.as_ref())
+                {
+                    compositor
+                        .image_sources
+                        .insert(background_cache_key(background), poster());
+                }
+                compositor.scene = Some(snapshot);
+                compositor.simulcast_scene = simulcast;
+            }
+            let recording_store = compositor_frame_store(&state).await;
+            let render_cache = CompositorRenderCache::refresh_initial(&state).await;
+            Some(Self {
+                state,
+                recording_gpu,
+                stream_gpu,
+                recording_store,
+                stream_store,
+                live_sources: CompositorLiveSources::default(),
+                render_cache,
+                slot: None,
+                primary,
+                stream: CompositorAuxiliaryOutput {
+                    width: stream.0,
+                    height: stream.1,
+                    frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                    composes_simulcast_scene,
+                },
+            })
+        }
+
+        /// One loop tick at `at`: both legs publish and come back as
+        /// yuv420p (the recording's, then the stream's).
+        async fn tick(
+            &mut self,
+            sequence: u64,
+            at: Instant,
+        ) -> (Vec<u8>, Vec<u8>, CompositorPublishResult) {
+            let result = publish_compositor_frame(
+                &self.state,
+                "plan-193",
+                sequence,
+                self.primary.0,
+                self.primary.1,
+                &mut self.live_sources,
+                &mut self.render_cache,
+                Some(&mut self.recording_gpu),
+                CompositorFrameConsumer::RawYuvEncoder,
+                Some(self.stream),
+                Some(&mut self.stream_gpu),
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                LiveBackgroundLeg::pinned_at(&mut self.slot, at),
+            )
+            .await;
+            assert_eq!(
+                result.compositor_backend,
+                CompositorBackend::Metal,
+                "{:?}",
+                result.compositor_fallback_reason
+            );
+            let latest = |store: &CompositorFrameStore| {
+                let frame = store
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .latest()
+                    .expect("the leg published");
+                assert_eq!(frame.sequence, sequence);
+                frame.bytes.clone()
+            };
+            (
+                latest(&self.recording_store),
+                latest(&self.stream_store),
+                result,
+            )
+        }
+
+        /// The frame the recording leg's renderer shares at `at`.
+        fn shared_frame(&self, at: Instant) -> Option<SharedLiveFrame> {
+            self.slot.as_ref()?.frame_at(at)
+        }
+    }
+
+    /// The stage of `background` on a canvas, in luma pixels.
+    fn stage_of(background: &EffectiveSceneBackground, canvas: (u32, u32)) -> PixelRect {
+        scene_content_rect_pixels(
+            background_stage_margin(Some(background)),
+            canvas.0,
+            canvas.1,
+        )
+    }
+
+    fn in_rect(rect: &PixelRect, x: u32, y: u32) -> bool {
+        x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+    }
+
+    /// The ring (every pixel outside the stage) of two luma planes: how many
+    /// pixels there are, how many moved by more than 2, and the first
+    /// plane's darkest and brightest.
+    struct Ring {
+        pixels: usize,
+        moved: usize,
+        darkest: u8,
+        brightest: u8,
+    }
+
+    fn ring(first: &[u8], later: &[u8], canvas: (u32, u32), stage: &PixelRect) -> Ring {
+        let mut ring = Ring {
+            pixels: 0,
+            moved: 0,
+            darkest: 255,
+            brightest: 0,
+        };
+        for y in 0..canvas.1 {
+            for x in 0..canvas.0 {
+                if in_rect(stage, x, y) {
+                    continue;
+                }
+                let at = (y * canvas.0 + x) as usize;
+                ring.pixels += 1;
+                ring.darkest = ring.darkest.min(first[at]);
+                ring.brightest = ring.brightest.max(first[at]);
+                if first[at].abs_diff(later[at]) > 2 {
+                    ring.moved += 1;
+                }
+            }
+        }
+        ring
+    }
+
+    /// More than one ring pixel in twenty moved by over 2 between the
+    /// planes, and the ring is not a flat colour.
+    fn assert_ring_moves(ring: &Ring, what: &str) {
+        assert!(
+            ring.brightest > ring.darkest + 10,
+            "{what}: the ring is flat ({}..{})",
+            ring.darkest,
+            ring.brightest
+        );
+        assert!(
+            ring.moved * 20 > ring.pixels,
+            "{what}: {} of {} ring pixels moved",
+            ring.moved,
+            ring.pixels
+        );
+    }
+
+    /// Every ring pixel is `value` (± 2) and none moved: the poster.
+    fn assert_ring_is_poster(ring: &Ring, value: u8, what: &str) {
+        assert_eq!(ring.moved, 0, "{what}: the poster moved");
+        assert!(
+            ring.darkest.abs_diff(value) <= 2 && ring.brightest.abs_diff(value) <= 2,
+            "{what}: the ring is {}..{}, not the poster's {value}",
+            ring.darkest,
+            ring.brightest
+        );
+    }
+
+    /// The stage, inset by two pixels, is `value` (± 2) and identical on both
+    /// planes.
+    fn assert_stage(
+        first: &[u8],
+        later: &[u8],
+        canvas: (u32, u32),
+        stage: &PixelRect,
+        value: u8,
+        what: &str,
+    ) {
+        let mut pixels = 0;
+        for y in stage.y + 2..stage.y + stage.height - 2 {
+            for x in stage.x + 2..stage.x + stage.width - 2 {
+                let at = (y * canvas.0 + x) as usize;
+                assert_eq!(first[at], later[at], "{what}: stage at {x},{y} moved");
+                assert!(
+                    first[at].abs_diff(value) <= 2,
+                    "{what}: stage at {x},{y} is {}, not the screen's {value}",
+                    first[at]
+                );
+                pixels += 1;
+            }
+        }
+        assert!(pixels > 0);
+    }
+
+    /// The stream ring moves: a same-profile record-and-stream run with Silk,
+    /// two ticks a second apart. The stream leg's ring differs between them
+    /// and its stage (the screen's red) is identical.
+    #[tokio::test]
+    async fn the_stream_ring_moves_and_its_stage_does_not() {
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), (WIDTH, HEIGHT), Some(spec.clone()), None)
+                .await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let start = Instant::now();
+        let (_, first, _) = run.tick(1, start).await;
+        let (_, later, _) = run.tick(2, start + Duration::from_secs(1)).await;
+        let stage = stage_of(&background(Some(spec)), (WIDTH, HEIGHT));
+        let (red, _, _) = rgb_to_yuv(255, 0, 0);
+        assert_stage(&first, &later, (WIDTH, HEIGHT), &stage, red, "stream");
+        assert_ring_moves(&ring(&first, &later, (WIDTH, HEIGHT), &stage), "stream");
+        // Status keeps reporting the one renderer, which now describes both legs.
+        let board = &run.render_cache.live_background.as_ref().unwrap().board;
+        let (status, programs, scratch) = board.snapshot();
+        assert_eq!(
+            status.map(|status| status.rendering),
+            Some(LiveBackgroundRendering::Shader)
+        );
+        assert_eq!(programs, 2, "Silk's two passes, built once for both legs");
+        assert!(scratch > 0);
+    }
+
+    /// Same phase: at one tick the stream leg, at half the recording's size,
+    /// draws the frame the recording leg rendered. Its ring is the recording
+    /// ring's 2 x 2 box mean (the linear minify samples exactly those texel
+    /// corners) within a mean of 2/255.
+    #[tokio::test]
+    async fn the_stream_ring_is_the_recording_ring_at_the_same_phase() {
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), half, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let at = Instant::now();
+        let (recording, stream, _) = run.tick(1, at).await;
+        let shared = run
+            .shared_frame(at)
+            .expect("the recording leg shared this tick's frame");
+        assert_eq!((shared.width, shared.height), (WIDTH, HEIGHT));
+        let stage = stage_of(&background(Some(spec)), half);
+        let (mut total, mut count, mut max) = (0_u64, 0_u64, 0_u8);
+        for y in 0..half.1 {
+            for x in 0..half.0 {
+                // Skip the stage and one pixel around it, where the screen's
+                // nearest-sampled edge meets the ring.
+                if x + 1 >= stage.x
+                    && x < stage.x + stage.width + 1
+                    && y + 1 >= stage.y
+                    && y < stage.y + stage.height + 1
+                {
+                    continue;
+                }
+                let texel = |dx: u32, dy: u32| {
+                    u32::from(recording[((2 * y + dy) * WIDTH + 2 * x + dx) as usize])
+                };
+                let expected =
+                    ((texel(0, 0) + texel(1, 0) + texel(0, 1) + texel(1, 1) + 2) / 4) as u8;
+                let diff = stream[(y * half.0 + x) as usize].abs_diff(expected);
+                total += u64::from(diff);
+                count += 1;
+                max = max.max(diff);
+            }
+        }
+        let mean = total as f64 / count as f64;
+        eprintln!("stream ring vs the recording ring's box mean: mean {mean:.3}, max {max}");
+        assert!(count > 10_000);
+        assert!(mean <= 2.0, "mean {mean:.3}, max {max}");
+    }
+
+    /// Split profile: a 3840 x 2160 recording with a 1920 x 1080 stream and
+    /// Line Waves, which renders at the recording's full size. The stream
+    /// ring moves, drawn down from the shared frame, and its stage does not.
+    #[tokio::test]
+    async fn a_split_profile_stream_ring_moves_with_line_waves() {
+        let spec = spec(
+            LiveBackgroundId::LineWaves,
+            "gold",
+            LiveBackgroundMotion::Normal,
+        );
+        let (primary, stream) = ((3840, 2160), (1920, 1080));
+        let Some(mut run) = RecordAndStream::start(primary, stream, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let start = Instant::now();
+        let (_, first, _) = run.tick(1, start).await;
+        let later_at = start + Duration::from_secs(1);
+        let (_, later, _) = run.tick(2, later_at).await;
+        let shared = run.shared_frame(later_at).expect("shared");
+        assert_eq!(
+            (shared.width, shared.height),
+            primary,
+            "Line Waves renders at the recording's full size"
+        );
+        let stage = stage_of(&background(Some(spec)), stream);
+        let (red, _, _) = rgb_to_yuv(255, 0, 0);
+        assert_stage(&first, &later, stream, &stage, red, "stream");
+        assert_ring_moves(&ring(&first, &later, stream, &stage), "stream");
+    }
+
+    /// A stream above the recording: the frame renders at the larger leg's
+    /// canvas, so Line Waves is drawn down on the recording, never up on
+    /// the stream.
+    #[tokio::test]
+    async fn the_frame_renders_at_the_larger_leg() {
+        let spec = spec(
+            LiveBackgroundId::LineWaves,
+            "gold",
+            LiveBackgroundMotion::Normal,
+        );
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), (1280, 720), Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let at = Instant::now();
+        let (recording, stream, _) = run.tick(1, at).await;
+        let shared = run.shared_frame(at).expect("shared");
+        assert_eq!((shared.width, shared.height), (1280, 720));
+        assert_eq!(recording.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+        assert_eq!(stream.len(), raw_yuv420p_len(1280, 720));
+        let stage = stage_of(&background(Some(spec)), (1280, 720));
+        let ring = ring(&stream, &stream, (1280, 720), &stage);
+        assert!(
+            ring.brightest > ring.darkest + 10,
+            "the stream shows the lines"
+        );
+    }
+
+    /// A forced still mirrors: both legs draw the poster, still, and the
+    /// recording leg shares no frame.
+    #[tokio::test]
+    async fn a_forced_still_shows_the_poster_on_both_legs() {
+        struct Unforce;
+        impl Drop for Unforce {
+            fn drop(&mut self) {
+                crate::live_background::set_forced_still_for_test(None);
+            }
+        }
+        crate::live_background::set_forced_still_for_test(Some(true));
+        let _unforce = Unforce;
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        let Some(mut run) =
+            RecordAndStream::start((WIDTH, HEIGHT), half, Some(spec.clone()), None).await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let start = Instant::now();
+        let (recording_first, stream_first, _) = run.tick(1, start).await;
+        let later_at = start + Duration::from_secs(1);
+        let (recording_later, stream_later, _) = run.tick(2, later_at).await;
+        assert!(run.slot.is_some(), "the renderer was asked, and declined");
+        assert!(run.shared_frame(start).is_none());
+        assert!(run.shared_frame(later_at).is_none());
+        let (blue, _, _) = rgb_to_yuv(0, 0, 255);
+        let (red, _, _) = rgb_to_yuv(255, 0, 0);
+        for (first, later, canvas, what) in [
+            (
+                recording_first,
+                recording_later,
+                (WIDTH, HEIGHT),
+                "recording",
+            ),
+            (stream_first, stream_later, half, "stream"),
+        ] {
+            let stage = stage_of(&background(Some(spec.clone())), canvas);
+            assert_stage(&first, &later, canvas, &stage, red, what);
+            assert_ring_is_poster(&ring(&first, &later, canvas, &stage), blue, what);
+            assert_eq!(first, later, "{what}: still");
+        }
+        let (status, programs, scratch) = run
+            .render_cache
+            .live_background
+            .as_ref()
+            .unwrap()
+            .board
+            .snapshot();
+        assert_eq!(
+            status.map(|status| (status.rendering, status.reason)),
+            Some((
+                LiveBackgroundRendering::Still,
+                Some(LiveBackgroundStillReason::Forced)
+            ))
+        );
+        assert_eq!((programs, scratch), (0, 0));
+    }
+
+    /// Off is unchanged: with a picture background the stream leg takes the
+    /// path it always took. No renderer is made, the poster and the screen
+    /// upload once per leg and are reused, the frames never change, and the
+    /// stream frame is byte for byte what `try_gpu_compose` draws for the
+    /// same inputs with no shared frame.
+    #[tokio::test]
+    async fn off_is_unchanged_on_the_stream_leg() {
+        let half = (WIDTH / 2, HEIGHT / 2);
+        let Some(mut run) = RecordAndStream::start((WIDTH, HEIGHT), half, None, None).await else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let start = Instant::now();
+        let (_, first, first_result) = run.tick(1, start).await;
+        let (_, second, second_result) = run.tick(2, start + Duration::from_secs(1)).await;
+        let (_, third, third_result) = run.tick(3, start + Duration::from_secs(2)).await;
+        assert!(run.slot.is_none(), "no renderer is made");
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        let uploads = first_result.timings.immutable_texture_uploads;
+        assert!(uploads > 0, "the poster and the screen upload once");
+        assert_eq!(first_result.timings.immutable_texture_reuses, 0);
+        for result in [second_result, third_result] {
+            assert_eq!(result.timings.immutable_texture_uploads, 0);
+            assert_eq!(result.timings.immutable_texture_reuses, uploads);
+        }
+        // The path as it was: the same inputs, no shared frame, a fresh compositor.
+        let Some(mut fresh) = new_gpu_compositor(false) else {
+            return;
+        };
+        let snapshot = run.render_cache.snapshot.clone().expect("the scene");
+        let (screen, poster) = (screen_image(), poster());
+        let inputs = CompositorRenderInputs {
+            sequence: 3,
+            width: half.0,
+            height: half.1,
+            snapshot: Some(&snapshot),
+            active_image_source: Some(&screen),
+            background_image_source: Some(&poster),
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        };
+        let plain = try_gpu_compose(Some(&mut fresh), &inputs, true)
+            .expect("metal frame")
+            .yuv;
+        assert_eq!(third, plain);
+    }
+
+    /// The vertical simulcast leg keeps no shared frame (plan 190 D9): its
+    /// own scene names the same live background, and it still draws the
+    /// poster, still, while the recording ring moves.
+    #[tokio::test]
+    async fn the_vertical_simulcast_leg_gets_no_shared_frame() {
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let half = (WIDTH / 2, HEIGHT / 2);
+        let Some(mut run) = RecordAndStream::start(
+            (WIDTH, HEIGHT),
+            half,
+            Some(spec.clone()),
+            Some(scene_snapshot(Some(spec.clone()))),
+        )
+        .await
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let start = Instant::now();
+        let (recording_first, stream_first, _) = run.tick(1, start).await;
+        let later_at = start + Duration::from_secs(1);
+        let (recording_later, stream_later, _) = run.tick(2, later_at).await;
+        assert!(
+            run.shared_frame(later_at).is_some(),
+            "the recording leg rendered and shared; the simulcast leg declined"
+        );
+        let (blue, _, _) = rgb_to_yuv(0, 0, 255);
+        let stream_stage = stage_of(&background(Some(spec.clone())), half);
+        assert_ring_is_poster(
+            &ring(&stream_first, &stream_later, half, &stream_stage),
+            blue,
+            "simulcast",
+        );
+        let recording_stage = stage_of(&background(Some(spec)), (WIDTH, HEIGHT));
+        assert_ring_moves(
+            &ring(
+                &recording_first,
+                &recording_later,
+                (WIDTH, HEIGHT),
+                &recording_stage,
+            ),
+            "recording",
+        );
+    }
+
+    /// No stale frame: a tick whose `render` drew nothing (the guard at
+    /// Still) shares nothing at that instant, nor at the earlier one, even
+    /// while a clone of the last frame still holds the texture; a frame is
+    /// shared at its own tick's instant alone.
+    #[test]
+    fn a_tick_that_drew_nothing_shares_no_frame() {
+        let Some(gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let mut renderer = LiveBackgroundGpuRenderer::new(
+            gpu.device().clone(),
+            gpu.queue().clone(),
+            Arc::clone(&board),
+        )
+        .expect("renderer");
+        let spec = spec(LiveBackgroundId::Silk, "satin", LiveBackgroundMotion::Calm);
+        let start = Instant::now();
+        let mut input = frame_input(&spec, &board, start);
+        let frame = renderer
+            .render(&input, (WIDTH, HEIGHT), None)
+            .expect("draws");
+        let shared = renderer.frame_at(start).expect("this tick's frame");
+        assert!(std::ptr::eq(&*shared.texture, &*frame.texture));
+        assert!(renderer.frame_at(start + Duration::from_nanos(1)).is_none());
+        assert!(renderer.frame_at(start - Duration::from_nanos(1)).is_none());
+        // 10 ms per frame is 60 % of a 60 fps frame: the guard steps to Still.
+        renderer.inject_gpu_ms(Some(10.0));
+        let mut still_at = None;
+        for tick in 1..260_u32 {
+            let at = start + FRAME * tick;
+            input.tick = LiveBackgroundTick::new(at, FRAME, false);
+            if renderer.render(&input, (WIDTH, HEIGHT), None).is_none() {
+                still_at = Some(at);
+                break;
+            }
+            assert!(renderer.frame_at(at).is_some());
+        }
+        let still_at = still_at.expect("the guard steps to still");
+        assert!(renderer.frame_at(still_at).is_none());
+        assert!(renderer.frame_at(start).is_none());
+        drop((frame, shared));
+        // A release shares nothing either.
+        renderer.release();
+        assert!(renderer.frame_at(still_at).is_none());
     }
 }
 

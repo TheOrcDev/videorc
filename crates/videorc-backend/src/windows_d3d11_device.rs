@@ -1881,6 +1881,68 @@ mod runtime {
             })
         }
 
+        /// Plan 193 S3: a media device around a raw device and context a
+        /// test made (the hardware adapter, or WARP on CI), so a test can
+        /// compose through the real `WindowsD3d11Compositor`.
+        #[cfg(test)]
+        pub(crate) fn from_raw_for_test(
+            device: ID3D11Device5,
+            immediate_context: ID3D11DeviceContext4,
+        ) -> Result<Self, WindowsD3d11Error> {
+            use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+            let failed = |what: &str, error: windows::core::Error| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::DeviceCreationFailed,
+                    format!("{what}: {error}"),
+                )
+            };
+            let dxgi_device: IDXGIDevice = device
+                .cast()
+                .map_err(|error| failed("IDXGIDevice is unavailable", error))?;
+            // SAFETY: the adapter and its description are read on the test's
+            // thread, which owns the device.
+            let description = unsafe {
+                dxgi_device
+                    .GetAdapter()
+                    .map_err(|error| failed("IDXGIDevice::GetAdapter failed", error))?
+                    .GetDesc()
+                    .map_err(|error| failed("IDXGIAdapter::GetDesc failed", error))?
+            };
+            let adapter_luid = luid_from_parts(
+                description.AdapterLuid.HighPart,
+                description.AdapterLuid.LowPart,
+            );
+            let multithread: ID3D11Multithread = immediate_context
+                .cast()
+                .map_err(|error| failed("ID3D11Multithread is unavailable", error))?;
+            let mut fence: Option<ID3D11Fence> = None;
+            // SAFETY: the interface, the output Option and the device belong
+            // to this thread.
+            let feature_level = unsafe {
+                let _ = multithread.SetMultithreadProtected(true);
+                device
+                    .CreateFence(0, D3D11_FENCE_FLAG_NONE, &mut fence)
+                    .map_err(|error| failed("ID3D11Device5::CreateFence failed", error))?;
+                device.GetFeatureLevel()
+            };
+            let fence = fence.ok_or_else(|| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::FenceUnavailable,
+                    "ID3D11Device5::CreateFence returned no fence",
+                )
+            })?;
+            Ok(Self {
+                device,
+                immediate_context,
+                fence,
+                adapter_luid,
+                feature_level,
+                multithread_protected: true,
+                device_loss_code: None,
+                _thread_affinity: PhantomData,
+            })
+        }
+
         pub(crate) const fn adapter_luid(&self) -> DxgiAdapterLuid {
             self.adapter_luid
         }

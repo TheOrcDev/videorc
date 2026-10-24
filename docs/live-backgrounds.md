@@ -38,18 +38,18 @@ the bundled backgrounds folder) and a `live` spec names the shader. Every
 path that can't animate draws the poster through the picture code that
 already exists, and says why in `CompositorStatus.liveBackground.reason`.
 
-| Path                                                         | Moves?              | How                                                                                |
-| ------------------------------------------------------------ | ------------------- | ---------------------------------------------------------------------------------- |
-| macOS preview, recording, stream (Metal)                     | Yes                 | MSL ports render a live frame; the compositor draws it like a picture              |
-| Windows recording and stream (D3D11 media session)           | Yes                 | HLSL ports, the same way                                                           |
-| Windows idle preview, Linux preview (Electron proof surface) | Yes                 | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`)   |
-| Linux recording and stream (CPU compositor)                  | Yes                 | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame |
-| 4K60 and the bridge-off override (legacy FFmpeg graph)       | No, the poster      | `legacy-graph`, with a start notice                                                |
-| Windows and macOS CPU fallbacks                              | No, the poster      | `cpu-fallback`                                                                     |
-| A software GPU (llvmpipe, SwiftShader)                       | No, the poster      | `software-gpu`                                                                     |
-| Windows on WARP (no D3D11 session)                           | No, the poster      | `cpu-fallback`                                                                     |
-| Linux without EGL/GLES or a usable render node               | No, the poster      | `no-gpu`, `quarantined-node`                                                       |
-| Vertical simulcast leg, ISO legs, Clean cut                  | No, as for pictures | Windows' vertical leg draws the poster; the others draw no background              |
+| Path                                                         | Moves?              | How                                                                                                                                                            |
+| ------------------------------------------------------------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS preview, recording, stream (Metal)                     | Yes                 | MSL ports render a live frame; the compositor draws it like a picture. A record-and-stream session's stream leg draws the recording's frame from the same tick |
+| Windows recording and stream (D3D11 media session)           | Yes                 | HLSL ports, the same way                                                                                                                                       |
+| Windows idle preview, Linux preview (Electron proof surface) | Yes                 | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`)                                                                               |
+| Linux recording and stream (CPU compositor)                  | Yes                 | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame                                                                             |
+| 4K60 and the bridge-off override (legacy FFmpeg graph)       | No, the poster      | `legacy-graph`, with a start notice                                                                                                                            |
+| Windows and macOS CPU fallbacks                              | No, the poster      | `cpu-fallback`                                                                                                                                                 |
+| A software GPU (llvmpipe, SwiftShader)                       | No, the poster      | `software-gpu`                                                                                                                                                 |
+| Windows on WARP (no D3D11 session)                           | No, the poster      | `cpu-fallback`                                                                                                                                                 |
+| Linux without EGL/GLES or a usable render node               | No, the poster      | `no-gpu`, `quarantined-node`                                                                                                                                   |
+| Vertical simulcast leg, ISO legs, Clean cut                  | No, as for pictures | Windows' vertical leg draws the poster; the others draw no background                                                                                          |
 
 ## Cost, and none when off
 
@@ -124,6 +124,29 @@ The backend owns everything in `crates/videorc-backend/src/live_background/`:
 3. `pnpm probe:live-background-cost -- --mode golden` and `-- --mode posters`.
 4. `cargo test -p videorc-backend live_background` on macOS (and the D3D11
    golden test on Windows).
+
+### macOS (Metal)
+
+`live_background/metal.rs` runs the MSL ports on the primary leg's device
+and queue:
+
+- **One render per tick.** The primary leg (the recording, or the stream in
+  a stream-only session, which Studio's preview shows) renders the live frame
+  in its own command buffer just before its compose.
+- **The stream leg reuses it (plan 193).** A record-and-stream session
+  streams from an auxiliary compositor leg, even at one profile. That leg
+  draws the frame the primary rendered in the same tick (`frame_at`), so the
+  two outputs share one phase, one guard level and one cost. Before plan 193
+  it drew the poster. The vertical simulcast leg and the ISO legs keep no
+  background.
+- **Why sharing is safe.** Each compose waits until the GPU finishes, and both
+  legs run in turn on the loop thread. So the frame is complete before the
+  stream leg reads it, and the stream leg is done before the next tick
+  overwrites it.
+- **Size.** It renders at the larger of the two legs, so the stream never
+  draws Line Waves up from a smaller recording.
+- **Another device.** If the stream leg's Metal device isn't the one that
+  made the frame, the stream leg draws the poster and logs why once.
 
 ### Windows (D3D11)
 

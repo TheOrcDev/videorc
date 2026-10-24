@@ -3513,6 +3513,183 @@ mod runtime {
         );
     }
 
+    /// Plan 193 S3: a record-and-stream session composing one scene puts
+    /// the primary leg's live background on every target, the AUXILIARY
+    /// (stream) one included, at its Full internal size; with a vertical
+    /// simulcast leg it stays off the auxiliary target (plan 190 D9).
+    #[cfg(test)]
+    #[test]
+    fn windows_live_plan_draws_the_live_background_on_the_stream_target() {
+        use crate::protocol::{
+            EffectiveSceneBackground, LiveBackgroundId, LiveBackgroundMotion, LiveBackgroundSpec,
+            SceneSource, SceneTransform, SourceSelection,
+        };
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11SceneOutputTarget, WindowsD3d11SceneOutputTargets,
+            WindowsD3d11SceneSourceKind,
+        };
+        let spec = LiveBackgroundSpec {
+            id: LiveBackgroundId::Silk,
+            look: "satin".to_string(),
+            motion: LiveBackgroundMotion::Calm,
+        };
+        let background = EffectiveSceneBackground {
+            asset_id: crate::live_background::poster_asset_id(spec.id, &spec.look),
+            managed_asset_path: String::new(),
+            fit: crate::protocol::BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: Some(spec.clone()),
+        };
+        let mut scene = crate::scene::default_scene();
+        scene.background = Some(background.clone());
+        let transform = SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        scene.sources.push(SceneSource {
+            id: "screen-slot".into(),
+            name: "Screen".into(),
+            kind: SceneSourceKind::Screen,
+            device_id: Some("screen:dxgi:00000000000003f1:2".into()),
+            transform: transform.clone(),
+            default_transform: transform,
+            visible: true,
+            locked: true,
+        });
+        let layout = crate::protocol::default_layout_settings();
+        let confirmed = SourceSelection {
+            screen_id: Some("screen:dxgi:00000000000003f1:2".into()),
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+        let now = std::time::Instant::now();
+        let mut runtime = None;
+        crate::live_background::runtime::sync(&mut runtime, Some(&spec), now);
+        let live_background = runtime.unwrap().frame_input(
+            &background,
+            &Arc::default(),
+            crate::live_background::LiveBackgroundTick::unmeasured(now),
+        );
+        let snapshot = |auxiliary: Option<crate::protocol::Scene>| {
+            let edit = crate::compositor::CompositorSourceEdit::test_from_scenes(
+                scene.clone(),
+                auxiliary,
+                layout.clone(),
+                confirmed.clone(),
+            );
+            WindowsLiveSnapshot {
+                render_edit: edit.clone(),
+                edit,
+                camera: None,
+                capture: None,
+                confirmed: confirmed.clone(),
+                source_revision: 1,
+                takeover: None,
+                takeover_active: false,
+                backgrounds: vec![None, None],
+                banners: Arc::new(crate::banners::BannerSet::default()),
+                live_background: Some(live_background.clone()),
+                live_background_budget_notice: false,
+            }
+        };
+        let primary = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary,
+            auxiliary: Some(primary),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let map = |current: &WindowsLiveSnapshot| {
+            build_scene_plan(
+                &plan,
+                9,
+                4,
+                None,
+                Some(&layout),
+                &[],
+                &[],
+                &[],
+                Some(current),
+                Some((1920, 1080)),
+            )
+            .unwrap()
+        };
+        let auxiliary =
+            WindowsD3d11SceneOutputTarget::Encoded(WindowsD3d11EncodedOutputRole::Auxiliary);
+        let primary_target =
+            WindowsD3d11SceneOutputTarget::Encoded(WindowsD3d11EncodedOutputRole::Primary);
+
+        // One scene, two outputs: the live layer and the screen are on ALL.
+        let one_leg = map(&snapshot(None));
+        assert_eq!(one_leg.encoded_outputs.len(), 2);
+        let live = one_leg
+            .layers
+            .iter()
+            .find(|layer| layer.source_id == 30)
+            .expect("the live background layer");
+        assert_eq!(
+            live.source_kind,
+            WindowsD3d11SceneSourceKind::BackgroundImage
+        );
+        assert_eq!(
+            (live.source_dimensions.width, live.source_dimensions.height),
+            crate::live_background::internal_size(
+                spec.id,
+                (1280, 720),
+                crate::live_background::GuardLevel::Full
+            ),
+            "the frame at its Full internal size"
+        );
+        assert_eq!(live.output_targets, WindowsD3d11SceneOutputTargets::ALL);
+        assert!(live.applies_to(auxiliary) && live.applies_to(primary_target));
+        assert!(live.applies_to(WindowsD3d11SceneOutputTarget::Preview));
+        let screen = one_leg
+            .layers
+            .iter()
+            .find(|layer| layer.source_kind == WindowsD3d11SceneSourceKind::Display)
+            .expect("the screen layer");
+        assert!(screen.applies_to(auxiliary) && screen.applies_to(primary_target));
+
+        // A vertical simulcast leg composes its own scene: the primary's live
+        // layer stays off the auxiliary target, and the vertical leg has no
+        // live layer of its own (its poster rides in `backgrounds[1]`).
+        let two_legs = map(&snapshot(Some(scene.clone())));
+        let live = two_legs
+            .layers
+            .iter()
+            .find(|layer| layer.source_id == 30)
+            .expect("the primary leg's live background layer");
+        assert!(live.applies_to(primary_target) && !live.applies_to(auxiliary));
+        assert!(two_legs.layers.iter().all(|layer| layer.source_id != 31));
+    }
+
     /// Plan 164 S-C3: the Buddy rides its own per-target slot between the
     /// caption bar and the highlight card on both legs, and a session with no
     /// auxiliary leg refuses an auxiliary Buddy like it refuses auxiliary

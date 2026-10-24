@@ -125,6 +125,22 @@ async function measureTiming(root) {
   const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
   const smoke = launch.connections['preview-motion-ready']
   try {
+    // Clips is on by default (plan 181): the renderer arms a buffer-only
+    // session with the app's own scene, and the Record below would hand over
+    // from it (refused when that scene holds a camera the dev app can't read).
+    // Both sides measure with the switch off.
+    const clipsOff = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
+      { timeoutMs }
+    )
+    assert.equal(clipsOff?.result, true, 'the renderer has no clip buffer smoke hook')
+    const clipsDeadline = Date.now() + timeoutMs
+    while ((await request(ws, timeoutMs, 'replay.status'))?.state !== 'off') {
+      assert(Date.now() < clipsDeadline, 'timed out waiting for the clip buffer to turn off')
+      await sleep(100)
+    }
     await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 0 }, { timeoutMs })
     await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
     const idleP95Ms = await sampleP95(request, ws, IDLE_MS)
