@@ -67,6 +67,14 @@ struct Canned {
     retry_after: Option<&'static str>,
 }
 
+/// Holds the next sheet request at the fake: `arrived` is notified when it
+/// comes in, and it is answered once the test notifies `release`.
+#[derive(Clone)]
+struct SheetGate {
+    arrived: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Default)]
 struct FakeWebState {
     /// Every request: route and body.
@@ -74,7 +82,7 @@ struct FakeWebState {
     builds_failure: Option<Canned>,
     identity_failures: VecDeque<Canned>,
     sheet_failures: VecDeque<Canned>,
-    sheet_delay: Duration,
+    sheet_gate: Option<SheetGate>,
     sheets_remaining: u32,
     redos_remaining: u32,
 }
@@ -198,12 +206,15 @@ async fn spawn_fake_web() -> FakeWeb {
             axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
                 let state = sheet_state.clone();
                 async move {
-                    let (failure, delay) = {
+                    let (failure, gate) = {
                         let mut state = state.lock().unwrap();
                         state.seen.push(("sheet".to_string(), body.clone()));
-                        (state.sheet_failures.pop_front(), state.sheet_delay)
+                        (state.sheet_failures.pop_front(), state.sheet_gate.take())
                     };
-                    tokio::time::sleep(delay).await;
+                    if let Some(gate) = gate {
+                        gate.arrived.notify_one();
+                        gate.release.notified().await;
+                    }
                     if let Some(canned) = failure {
                         return failure_response(&canned);
                     }
@@ -251,6 +262,7 @@ fn env_for(root: &Path, web: &FakeWeb, shared: Arc<CreatorShared>) -> CreatorEnv
         cell_size: TEST_CELL_SIZE,
         shared,
         build_hold: None,
+        sheet_hold: None,
     }
 }
 
@@ -739,8 +751,8 @@ async fn full_sheets(state: &AppState, env: &CreatorEnv) -> String {
 
 #[tokio::test]
 async fn buddy_pet_creation_cancel_leaves_no_partial_pack() {
-    // Cancelled while a sheet is being generated: the late sheet is dropped
-    // and nothing is recreated.
+    // Cancelled while a sheet is being generated (its request held at the
+    // web): the late sheet is dropped and nothing is recreated.
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -752,7 +764,11 @@ async fn buddy_pet_creation_cancel_leaves_no_partial_pack() {
         .unwrap()
         .build_id;
     read_reference(&state, &env, &build_id).await;
-    web.with(|web| web.sheet_delay = Duration::from_millis(400));
+    let gate = SheetGate {
+        arrived: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    web.with(|web| web.sheet_gate = Some(gate.clone()));
     let mut events = state.events.subscribe();
     generate_sheet_in(
         &state,
@@ -761,6 +777,9 @@ async fn buddy_pet_creation_cancel_leaves_no_partial_pack() {
     )
     .await
     .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), gate.arrived.notified())
+        .await
+        .expect("the sheet request reached the web");
     assert_eq!(
         current(&state, &env).await.running,
         Some(BuddyPetCreationRunning {
@@ -787,10 +806,54 @@ async fn buddy_pet_creation_cancel_leaves_no_partial_pack() {
     .await
     .unwrap();
     assert!(cancelled.creation.is_none());
+    gate.release.notify_one();
     let late = next_event(&mut events, COHOST_PET_SHEET_GENERATED_EVENT).await;
     assert_eq!(late["error"]["code"], COHOST_PET_CANCELLED);
     assert!(!creation_folder(&root, &build_id).exists());
     assert!(pet_entries(&root).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Cancelled before the sheet job has read the creation (held just
+    // before its read): the job reports the cancel, not a missing creation,
+    // and asks the web for nothing.
+    let state = test_state();
+    let root = temp_root();
+    let web = spawn_fake_web().await;
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let env = CreatorEnv {
+        sheet_hold: Some(hold.clone()),
+        ..env_for(&root, &web, Arc::new(CreatorShared::default()))
+    };
+    let build_id = start_in(&state, env.clone())
+        .await
+        .unwrap()
+        .creation
+        .unwrap()
+        .build_id;
+    read_reference(&state, &env, &build_id).await;
+    let mut events = state.events.subscribe();
+    generate_sheet_in(
+        &state,
+        env.clone(),
+        params(&build_id, SheetKind::Pilot, false),
+    )
+    .await
+    .unwrap();
+    cancel_in(
+        &state,
+        env.clone(),
+        CohostPetBuildIdParams {
+            build_id: build_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!creation_folder(&root, &build_id).exists());
+    hold.notify_one();
+    let early = next_event(&mut events, COHOST_PET_SHEET_GENERATED_EVENT).await;
+    assert_eq!(early["error"]["code"], COHOST_PET_CANCELLED);
+    assert!(web.seen("sheet").is_empty());
+    assert!(!creation_folder(&root, &build_id).exists());
     let _ = std::fs::remove_dir_all(&root);
 
     // Cancelled while the pack is being built (held just before it writes):
