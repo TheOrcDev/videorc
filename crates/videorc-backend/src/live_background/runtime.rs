@@ -96,6 +96,29 @@ impl LiveBackgroundFrameInput {
     }
 }
 
+/// Plan 190 D7: the start notice when the legacy FFmpeg graph (4K60, bridge
+/// off) records a live background as its poster.
+pub const LEGACY_GRAPH_NOTICE: &str =
+    "Live backgrounds move up to 4K30. This session shows yours as a still frame.";
+
+/// The health event when the budget guard falls back to the poster.
+pub const GPU_BUDGET_NOTICE: &str =
+    "Your graphics card is busy, so the live background is showing a still frame.";
+
+/// Whether a status change is the guard's first fall back to the poster (say
+/// it once, not on every status refresh).
+pub fn entered_gpu_budget_still(
+    previous: Option<&LiveBackgroundStatus>,
+    next: Option<&LiveBackgroundStatus>,
+) -> bool {
+    let budget = |status: Option<&LiveBackgroundStatus>| {
+        status.is_some_and(|status| {
+            status.reason == Some(crate::protocol::LiveBackgroundStillReason::GpuBudget)
+        })
+    };
+    budget(next) && !budget(previous)
+}
+
 #[derive(Debug, Default, Clone)]
 struct BoardState {
     status: Option<LiveBackgroundStatus>,
@@ -202,6 +225,46 @@ mod tests {
         );
         assert_eq!(status.look, "satin");
         assert_eq!(status.requested_look.as_deref(), Some("lava"));
+    }
+
+    #[test]
+    fn the_budget_notice_fires_once_on_entering_the_poster() {
+        let input = {
+            let mut slot = None;
+            sync(&mut slot, Some(&spec("satin")), Instant::now());
+            slot.unwrap()
+        };
+        let background = EffectiveSceneBackground {
+            asset_id: "live-silk-satin".to_string(),
+            managed_asset_path: "live-silk-satin.webp".to_string(),
+            fit: crate::protocol::BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: Some(spec("satin")),
+        };
+        let input = input.frame_input(&background);
+        let half = input.status(LiveBackgroundRendering::Half, None, Some(4.0));
+        let still = input.status(
+            LiveBackgroundRendering::Still,
+            Some(LiveBackgroundStillReason::GpuBudget),
+            Some(5.0),
+        );
+        let forced = input.status(
+            LiveBackgroundRendering::Still,
+            Some(LiveBackgroundStillReason::Forced),
+            None,
+        );
+        assert!(entered_gpu_budget_still(Some(&half), Some(&still)));
+        assert!(entered_gpu_budget_still(None, Some(&still)));
+        assert!(!entered_gpu_budget_still(Some(&still), Some(&still)));
+        assert!(!entered_gpu_budget_still(Some(&half), Some(&forced)));
+        assert!(!entered_gpu_budget_still(Some(&still), None));
     }
 
     #[test]

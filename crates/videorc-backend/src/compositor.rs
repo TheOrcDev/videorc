@@ -9537,7 +9537,12 @@ fn try_update_compositor_status(
     compositor.status.frame_pipeline = metrics.frame_pipeline;
     // Plan 190: how the live background draws, and what it holds (0 while off).
     let (live_status, live_programs, live_scratch) = compositor.live_background_board.snapshot();
-    compositor.status.live_background = compositor.live_background.as_ref().and(live_status);
+    let live_status = compositor.live_background.as_ref().and(live_status);
+    let budget_notice = crate::live_background::runtime::entered_gpu_budget_still(
+        compositor.status.live_background.as_ref(),
+        live_status.as_ref(),
+    );
+    compositor.status.live_background = live_status;
     compositor.status.frame_pipeline.live_background_programs = live_programs;
     compositor
         .status
@@ -9545,7 +9550,18 @@ fn try_update_compositor_status(
         .live_background_scratch_bytes = live_scratch;
     compositor.status.image_cache = compositor.image_sources.status();
     compositor.status.updated_at = Utc::now().to_rfc3339();
-    Ok(Some(compositor.status.clone()))
+    let status = compositor.status.clone();
+    drop(compositor);
+    if budget_notice {
+        let _ = crate::recording::emit_health_event(
+            state,
+            None,
+            crate::protocol::HealthLevel::Info,
+            "live-background-gpu-budget",
+            crate::live_background::runtime::GPU_BUDGET_NOTICE,
+        );
+    }
+    Ok(Some(status))
 }
 
 fn apply_compositor_status_metal_target_handoff(
@@ -11203,6 +11219,8 @@ mod tests {
                 background_image_source: None,
                 banners: Arc::new(BannerSet::default()),
                 banner_session_shape: None,
+                live_background: None,
+                live_background_board: Arc::default(),
             };
             assert_eq!(
                 cache.capture_source_needs(),
@@ -19284,6 +19302,7 @@ mod banner_tests {
             buddy_overlay: None,
             buddy_leg: None,
             banners,
+            live_background: None,
         }
     }
 
