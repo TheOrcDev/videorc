@@ -465,6 +465,9 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     // Plan 164 S-D5: Greetings lead the Chat tab, above Replies.
     expect(titles).toEqual(['Greetings', 'Replies', 'Moderation'])
     expect(document.querySelector('[data-testid="buddy-tab-unlock"]')).toBeNull()
+    expect((document.getElementById('buddy-greetings-ai') as HTMLButtonElement).disabled).toBe(
+      false
+    )
 
     await render({ tab: 'chat', gate: basic })
     // Greetings stay free under the lock, and the lock says so (plan 174 F-19).
@@ -476,6 +479,8 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
       false
     )
     expect((document.getElementById('cohost-answers') as HTMLButtonElement).disabled).toBe(true)
+    // Plan 192 D3: writing them with AI is Premium, like Answers.
+    expect((document.getElementById('buddy-greetings-ai') as HTMLButtonElement).disabled).toBe(true)
   })
 })
 
