@@ -20,14 +20,35 @@ pub fn rgb_to_yuv_full_range_bt601(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
 /// readback bridge; keep both paths on this one function. Coefficients are the
 /// standard BT.709 studio-swing matrix scaled by 65536, tuned so neutral grey
 /// maps to exactly (128, 128) chroma.
+///
+/// The formulas live in the two single-plane helpers below (plan 191), so the
+/// CPU compositor's luma and chroma passes each compute only their own plane.
+#[inline]
 pub fn rgb_to_yuv_video_range_bt709(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let (u, v) = rgb_to_uv_video_range_bt709(r, g, b);
+    (rgb_to_y_video_range_bt709(r, g, b), u, v)
+}
+
+/// The Y' of `rgb_to_yuv_video_range_bt709` alone, for luma-plane passes
+/// (plan 191: they computed all three channels per pixel and dropped two).
+#[inline]
+pub fn rgb_to_y_video_range_bt709(r: u8, g: u8, b: u8) -> u8 {
     let r = i32::from(r);
     let g = i32::from(g);
     let b = i32::from(b);
-    let y = (16 + ((11968 * r + 40258 * g + 4064 * b + 32768) >> 16)).clamp(0, 255) as u8;
+    (16 + ((11968 * r + 40258 * g + 4064 * b + 32768) >> 16)).clamp(0, 255) as u8
+}
+
+/// The (Cb, Cr) of `rgb_to_yuv_video_range_bt709` alone, for chroma-plane
+/// passes (plan 191).
+#[inline]
+pub fn rgb_to_uv_video_range_bt709(r: u8, g: u8, b: u8) -> (u8, u8) {
+    let r = i32::from(r);
+    let g = i32::from(g);
+    let b = i32::from(b);
     let u = (128 + ((-6596 * r - 22189 * g + 28785 * b + 32768) >> 16)).clamp(0, 255) as u8;
     let v = (128 + ((28785 * r - 26147 * g - 2638 * b + 32768) >> 16)).clamp(0, 255) as u8;
-    (y, u, v)
+    (u, v)
 }
 
 /// BT.709 limited-("video"-)range Y'CbCr to BGR. Capture devices (e.g. an Elgato
@@ -118,5 +139,41 @@ mod tests {
         assert_eq!(rgb_to_yuv_video_range_bt709(255, 0, 0), (63, 102, 240));
         assert_eq!(rgb_to_yuv_video_range_bt709(0, 255, 0), (173, 42, 26));
         assert_eq!(rgb_to_yuv_video_range_bt709(0, 0, 255), (32, 240, 118));
+    }
+
+    /// The pre-plan-191 body of `rgb_to_yuv_video_range_bt709`, verbatim: the
+    /// frozen oracle the single-plane helpers must reproduce bit for bit.
+    fn rgb_to_yuv_video_range_bt709_before_plan_191(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        let r = i32::from(r);
+        let g = i32::from(g);
+        let b = i32::from(b);
+        let y = (16 + ((11968 * r + 40258 * g + 4064 * b + 32768) >> 16)).clamp(0, 255) as u8;
+        let u = (128 + ((-6596 * r - 22189 * g + 28785 * b + 32768) >> 16)).clamp(0, 255) as u8;
+        let v = (128 + ((28785 * r - 26147 * g - 2638 * b + 32768) >> 16)).clamp(0, 255) as u8;
+        (y, u, v)
+    }
+
+    #[test]
+    fn single_plane_video_range_bt709_helpers_match_the_three_channel_conversion_for_every_rgb() {
+        // Exhaustive over all 256^3 inputs (plan 191): the CPU compositor's
+        // luma passes use the Y' helper and its chroma passes the (Cb, Cr)
+        // helper, so every recorded pixel depends on this being exact.
+        for r in 0..=255_u8 {
+            for g in 0..=255_u8 {
+                for b in 0..=255_u8 {
+                    let expected = rgb_to_yuv_video_range_bt709_before_plan_191(r, g, b);
+                    let combined = rgb_to_yuv_video_range_bt709(r, g, b);
+                    let y = rgb_to_y_video_range_bt709(r, g, b);
+                    let uv = rgb_to_uv_video_range_bt709(r, g, b);
+                    assert_eq!(combined, expected, "three-channel at rgb({r}, {g}, {b})");
+                    assert_eq!(y, combined.0, "Y' helper at rgb({r}, {g}, {b})");
+                    assert_eq!(
+                        uv,
+                        (combined.1, combined.2),
+                        "CbCr helper at rgb({r}, {g}, {b})"
+                    );
+                }
+            }
+        }
     }
 }
