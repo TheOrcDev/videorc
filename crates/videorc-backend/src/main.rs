@@ -187,7 +187,7 @@ use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Html;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -606,7 +606,8 @@ async fn run_backend() -> Result<()> {
         )
         .route("/oauth/callback", get(oauth_callback_handler))
         .route("/ws", get(ws_handler))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .layer(axum::middleware::map_response(default_no_store));
 
     // READY is a private bootstrap message consumed by Electron main. Main
     // must strip `adminToken` before any log, smoke marker, preload response,
@@ -678,7 +679,8 @@ async fn run_backend() -> Result<()> {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
                 .route("/oauth/callback", get(oauth_callback_handler))
-                .with_state(state.clone());
+                .with_state(state.clone())
+                .layer(axum::middleware::map_response(default_no_store));
             state.emit_log(
                 "info",
                 format!("OAuth callback listener bound on 127.0.0.1:{oauth_port}."),
@@ -1300,6 +1302,21 @@ async fn release_interruption_lease_handler(
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
+}
+
+/// Plan 191: Chromium's HTTP cache stores any response without a
+/// Cache-Control header. The handlers mark their successes `no-store`, but
+/// their bare 401/400/403/404/500s carried no header, and builds from
+/// June–July 2026 that polled `/preview/{camera,screen}/live.png` with a fresh
+/// `t=` left ~472K cached 404s (~2 GB) that Chromium never evicts. So every
+/// response from the backend's routers is `no-store` unless its handler
+/// already chose a Cache-Control, which is kept exactly as it is.
+async fn default_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn preview_handler(
@@ -20042,6 +20059,77 @@ mod tests {
             .await
             .expect("graceful Axum server completion")
             .expect("graceful Axum server task");
+    }
+
+    #[tokio::test]
+    async fn default_no_store_marks_a_bare_error_response_no_store() {
+        // Plan 191: a bare error carried no Cache-Control, so Chromium cached it.
+        let response = default_no_store(StatusCode::NOT_FOUND.into_response()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+    }
+
+    #[tokio::test]
+    async fn default_no_store_keeps_an_explicit_cache_control() {
+        // The poster's stronger header is its handler's choice: kept, never doubled.
+        let response = default_no_store(
+            (
+                [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")],
+                "poster",
+            )
+                .into_response(),
+        )
+        .await;
+        let values: Vec<_> = response
+            .headers()
+            .get_all(header::CACHE_CONTROL)
+            .iter()
+            .collect();
+        assert_eq!(
+            values,
+            [&HeaderValue::from_static(
+                "no-store, no-cache, must-revalidate"
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_no_store_layer_marks_a_routed_404_no_store() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
+            .layer(axum::middleware::map_response(default_no_store));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // The handler's own 404, then the router's fallback 404 for a path
+        // that has no route: both leave the server marked no-store.
+        for path in ["/missing", "/no-such-route"] {
+            let response = timeout(
+                Duration::from_secs(2),
+                reqwest::Client::new()
+                    .get(format!("http://{address}{path}"))
+                    .send(),
+            )
+            .await
+            .expect("no-store HTTP response")
+            .expect("no-store HTTP request");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(reqwest::header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{path}"
+            );
+        }
+        server.abort();
     }
 
     #[tokio::test]
