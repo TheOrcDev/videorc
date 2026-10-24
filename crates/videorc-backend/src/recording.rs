@@ -20373,6 +20373,8 @@ fn source_switch_output_options_are_known(options: &[String]) -> bool {
             "-color_trc",
             "-color_range",
             "-bsf:v",
+            // Media Foundation copies declare their video rate; audio is untouched.
+            "-r",
         ]
         .contains(&option.as_str())
             || option.starts_with("-metadata:s:a:")
@@ -42140,69 +42142,90 @@ mod tests {
             let capture = bus_capture(VideoInput::TestPattern);
             let output = Path::new("/tmp/timing-record.mkv");
             let fifo = Path::new("/tmp/timing-record.ts");
-            let video = EncoderBridgeVideoOutput::VideoToolboxH264MpegTs;
             let timing = |role, output_index, filter_shift_ms| SourceSwitchOutputAudioTiming {
                 role,
                 output_index,
                 input_offset_ms: 0,
                 filter_shift_ms,
             };
-            let record_params = params_with_offset(true, false, 0);
-            let record_args =
-                bridge_recording_ffmpeg_args(&capture, &record_params, Some(output), fifo, video)
-                    .unwrap();
-            assert_eq!(
-                inspect_source_switch_output_audio_timing(
-                    &record_args,
+            // Media Foundation copies also carry color tags, the VUI rewrite
+            // and a declared `-r`; none of them may hide the audio timing.
+            for video in [
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            ] {
+                let record_params = params_with_offset(true, false, 0);
+                let record_args = bridge_recording_ffmpeg_args(
                     &capture,
+                    &record_params,
                     Some(output),
-                    &[]
-                ),
-                Some(vec![timing("local", 0, 0)])
-            );
-
-            let targets = vec![build_stream_url(&base_params(false, true).output.rtmp).unwrap()];
-            // Stream-only and same-profile combined both use neutral copy
-            // fanout. Mode flags therefore cannot establish an audio advance.
-            for local in [None, Some(output)] {
-                let params = params_with_offset(local.is_some(), true, 0);
-                let args =
-                    bridge_compositor_ffmpeg_args(&capture, &params, local, &targets, fifo, video)
-                        .unwrap();
-                let expected = if local.is_some() {
-                    vec![timing("local", 0, 0), timing("stream", 1, 0)]
-                } else {
-                    vec![timing("stream", 0, 0)]
-                };
+                    fifo,
+                    video,
+                )
+                .unwrap();
                 assert_eq!(
-                    inspect_source_switch_output_audio_timing(&args, &capture, local, &targets),
-                    Some(expected)
+                    inspect_source_switch_output_audio_timing(
+                        &record_args,
+                        &capture,
+                        Some(output),
+                        &[]
+                    ),
+                    Some(vec![timing("local", 0, 0)]),
+                    "{video:?}"
+                );
+
+                let targets =
+                    vec![build_stream_url(&base_params(false, true).output.rtmp).unwrap()];
+                // Stream-only and same-profile combined both use neutral copy
+                // fanout. Mode flags therefore cannot establish an audio advance.
+                for local in [None, Some(output)] {
+                    let params = params_with_offset(local.is_some(), true, 0);
+                    let args = bridge_compositor_ffmpeg_args(
+                        &capture, &params, local, &targets, fifo, video,
+                    )
+                    .unwrap();
+                    let expected = if local.is_some() {
+                        vec![timing("local", 0, 0), timing("stream", 1, 0)]
+                    } else {
+                        vec![timing("stream", 0, 0)]
+                    };
+                    assert_eq!(
+                        inspect_source_switch_output_audio_timing(&args, &capture, local, &targets),
+                        Some(expected),
+                        "{video:?}"
+                    );
+                }
+
+                let (params, targets) = simulcast_split_params(true);
+                let stream_output = recording_compositor_stream_output(&params, video)
+                    .unwrap()
+                    .expect("actual split topology");
+                let args = bridge_compositor_split_output_ffmpeg_args(
+                    &capture,
+                    &params,
+                    Some(output),
+                    &targets,
+                    fifo,
+                    Path::new("/tmp/timing-stream.ts"),
+                    video,
+                    stream_output,
+                )
+                .unwrap();
+                assert_eq!(
+                    inspect_source_switch_output_audio_timing(
+                        &args,
+                        &capture,
+                        Some(output),
+                        &targets
+                    ),
+                    Some(vec![
+                        timing("local", 0, 0),
+                        timing("stream", 1, -130),
+                        timing("stream", 2, -130)
+                    ]),
+                    "{video:?}"
                 );
             }
-
-            let (params, targets) = simulcast_split_params(true);
-            let stream_output = recording_compositor_stream_output(&params, video)
-                .unwrap()
-                .expect("actual split topology");
-            let args = bridge_compositor_split_output_ffmpeg_args(
-                &capture,
-                &params,
-                Some(output),
-                &targets,
-                fifo,
-                Path::new("/tmp/timing-stream.ts"),
-                video,
-                stream_output,
-            )
-            .unwrap();
-            assert_eq!(
-                inspect_source_switch_output_audio_timing(&args, &capture, Some(output), &targets),
-                Some(vec![
-                    timing("local", 0, 0),
-                    timing("stream", 1, -130),
-                    timing("stream", 2, -130)
-                ])
-            );
         }
 
         #[cfg(debug_assertions)]
