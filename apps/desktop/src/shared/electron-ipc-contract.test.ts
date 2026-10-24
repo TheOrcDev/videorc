@@ -950,6 +950,23 @@ describe('comments delivery IPC metadata', () => {
     expect(validateElectronInvokeResult('comments-window:get-snapshot', view)).toEqual(view)
     expect(validateElectronEventPayload('comments-window:snapshot', view)).toEqual(view)
   })
+  // Plan 191: the main renderer discards both push results, so main resolves
+  // them to nothing; a view cost a full validation walk and clone per message.
+  it('resolves both chat push channels to nothing (plan 191)', () => {
+    expectTypeOf<ElectronInvokeResult<'comments-window:push-snapshot'>>().toEqualTypeOf<void>()
+    expectTypeOf<ElectronInvokeResult<'comments-window:push-delta'>>().toEqualTypeOf<void>()
+    const mainSource = readFileSync(new URL('../main/index.ts', import.meta.url), 'utf8')
+    const pushChannels = ['comments-window:push-snapshot', 'comments-window:push-delta'] as const
+    for (const channel of pushChannels) {
+      expect(validateElectronInvokeResult(channel, undefined)).toBeUndefined()
+      expect(() => validateElectronInvokeResult(channel, view)).toThrow('result must be undefined')
+      const handler =
+        mainSource.split(`secureIpcHandle('${channel}',`)[1]?.split('secureIpcHandle(')[0] ?? ''
+      expect(handler).toContain('event.sender.id !== mainWindow.webContents.id')
+      // `return undefined` only: no path hands a value back.
+      expect(handler).not.toMatch(/\breturn[ \t]+(?!undefined\b)[^\s;]/)
+    }
+  })
   it.each([
     null,
     { ...delivery, ownerId: '' },
