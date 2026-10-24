@@ -86,26 +86,11 @@ function warnings(): string[] {
 }
 
 describe('Greetings editor (plan 164 S-D5)', () => {
-  it('offers the starter set when the list is empty, in one save', async () => {
+  it('never asks for a starter set: an empty list posts the built-in lines (plan 192 D1)', async () => {
     await render([])
-    expect(document.querySelector('[data-slot="buddy-greetings-empty"]')).toBeTruthy()
-    const add = [...document.querySelectorAll('button')].find(
-      (button) => button.textContent?.trim() === 'Add the starter set'
-    )
-    await act(async () => add?.click())
-    expect(patchCohostSettings).toHaveBeenCalledTimes(1)
-    const patch = patchCohostSettings.mock.calls[0]![0] as {
-      autoChat: CohostSettings['autoChat']
-    }
-    expect(patch.autoChat.greetings.templates.map((template) => template.kind)).toEqual([
-      'follow',
-      'sub',
-      'resub',
-      'cheer',
-      'raid',
-      'watch-streak'
-    ])
-    expect(patch.autoChat.greetings.enabled).toBe(true)
+    expect(document.body.textContent).not.toContain('Add the starter set')
+    expect(document.body.textContent).not.toContain('No greetings yet')
+    expect(document.querySelector('[data-testid="buddy-greetings-empty-note"]')).toBeNull()
   })
 
   it('warns inline about an unknown field, with a live preview', async () => {

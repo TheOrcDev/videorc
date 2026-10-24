@@ -4,7 +4,6 @@ import { useEffect, useId, useState, type KeyboardEvent, type ReactElement } fro
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow, ListRowButton } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
@@ -30,9 +29,7 @@ import type {
 import { COHOST_ACTIVITY_TEMPLATE_KINDS } from '@/lib/backend'
 import {
   BUDDY_GREETING_PLATFORM_LABELS,
-  BUDDY_GREETINGS_EMPTY_NOTE,
   BUDDY_SAMPLE_FIELDS,
-  BUDDY_STARTER_TEMPLATES,
   BUDDY_TEMPLATE_FIELDS,
   BUDDY_TEMPLATE_KIND_PLATFORMS,
   BUDDY_TEMPLATE_KIND_TITLES,
@@ -115,29 +112,7 @@ export function BuddyGreetingsSection(): ReactElement | null {
           </div>
         </Field>
       </FieldGroup>
-      {templates.length === 0 && autoChat.greetings.enabled ? (
-        // Plan 174 F-11: on with nothing to post says so, never silently.
-        <Alert data-testid="buddy-greetings-empty-note" variant="quiet">
-          <AlertTitle>{BUDDY_GREETINGS_EMPTY_NOTE}</AlertTitle>
-        </Alert>
-      ) : null}
-      {templates.length === 0 ? (
-        <div className="flex flex-wrap items-center gap-2" data-slot="buddy-greetings-empty">
-          <span className="text-xs text-subtle">No greetings yet.</span>
-          <Button
-            size="xs"
-            type="button"
-            variant="outline"
-            onClick={() =>
-              saveTemplates(
-                BUDDY_STARTER_TEMPLATES.map((starter) => newGreetingTemplate(starter.kind, starter))
-              )
-            }
-          >
-            Add the starter set
-          </Button>
-        </div>
-      ) : (
+      {templates.length === 0 ? null : (
         <GroupedList aria-label="Greeting templates">
           {templates.map((template) => (
             <GreetingRow

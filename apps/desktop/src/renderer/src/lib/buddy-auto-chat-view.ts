@@ -3,8 +3,13 @@ import type {
   CohostAutoChat,
   CohostAutoChatMode,
   CohostGreetingPlatform,
+  CohostGreetings,
   CohostGreetingTemplate,
+  CohostGreetingWelcomes,
+  CohostUtteranceState,
   CohostUtteranceTriggerKind,
+  CohostWelcomeKind,
+  CohostWelcomeLine,
   StreamPlatform
 } from '@/lib/backend'
 import { CHAT_SEND_PLATFORM_MAX_CHARS } from '@/lib/chat-send'
@@ -66,35 +71,31 @@ export interface BuddyBehaviourChip {
   id: BuddyBehaviourId
   label: string
   on: boolean
-  /** On with nothing to post (plan 174 F-11): Greetings without a line. */
-  empty: boolean
-  /** "Greetings on", "Answers off", "Greetings on, no lines": the chip's text. */
+  /** "Greetings on · AI", "Greetings on", "Answers off": the chip's text. */
   text: string
   /** The chip's accessible name: its state and the way to change it. */
   name: string
 }
 
-/** Greetings is on but has no line to post (plan 174 F-11). */
-export const BUDDY_GREETINGS_EMPTY_NOTE =
-  'Greetings is on, but has no lines yet: nothing is posted until you add some.'
-
 /**
  * The three behaviours as read-only summary chips (plan 174 S3.14a, D7): each
  * says whether it is on and links to its one home, Buddy → Chat, so the
- * Stream Manager never grows a second set of switches.
+ * Stream Manager never grows a second set of switches. An empty greetings
+ * list posts the built-in lines (plan 192 D1), so "on" never means silent.
+ * The chips say what will actually happen (D7): "Greetings on · AI" only
+ * when Buddy may write them, `aiGreetings` (Premium and cloud AI allowed)
+ * with Greetings' own AI switch on.
  */
 export function buddyBehaviourChips(
-  autoChat: Pick<CohostAutoChat, 'greetings' | 'answers' | 'banter'>
+  autoChat: Pick<CohostAutoChat, 'greetings' | 'answers' | 'banter'>,
+  { aiGreetings = false }: { aiGreetings?: boolean } = {}
 ): BuddyBehaviourChip[] {
   return BUDDY_BEHAVIOUR_IDS.map((id) => {
     const label = BUDDY_BEHAVIOUR_LABELS[id]
     const on = autoChat[id].enabled
-    const empty = id === 'greetings' && on && autoChat.greetings.templates.length === 0
-    const text = empty ? `${label} on, no lines` : `${label} ${on ? 'on' : 'off'}`
-    const name = empty
-      ? `${text}. Nothing is posted until you add some in ${BUDDY_BEHAVIOUR_HOME}.`
-      : `${text}. Change it in ${BUDDY_BEHAVIOUR_HOME}.`
-    return { id, label, on, empty, text, name }
+    const ai = id === 'greetings' && on && aiGreetings && greetingsAi(autoChat.greetings)
+    const text = `${label} ${on ? 'on' : 'off'}${ai ? ' · AI' : ''}`
+    return { id, label, on, text, name: `${text}. Change it in ${BUDDY_BEHAVIOUR_HOME}.` }
   })
 }
 
@@ -130,6 +131,10 @@ export function buddyModeChangeStep({
   return next === 'auto' ? 'confirm-auto' : 'apply'
 }
 
+/** Every kind Buddy greets: the Activity kinds (`templates[]`) and the two
+ * welcomes (`greetings.welcomes`, plan 192 D2). */
+export type BuddyGreetingKind = CohostActivityTemplateKind | CohostWelcomeKind
+
 export const BUDDY_TEMPLATE_KIND_TITLES: Record<CohostActivityTemplateKind, string> = {
   follow: 'Follow',
   sub: 'Sub',
@@ -147,11 +152,25 @@ export const BUDDY_TEMPLATE_KIND_TITLES: Record<CohostActivityTemplateKind, stri
   redemption: 'Redemption'
 }
 
+/** The welcome rows' names (plan 192 S1.3), word for word. */
+export const BUDDY_WELCOME_TITLES: Record<CohostWelcomeKind, string> = {
+  'first-time': 'First-time chatters',
+  returning: 'Returning chatters'
+}
+
+/** Where each welcome lives in `greetings.welcomes`. */
+export const BUDDY_WELCOME_KEYS: Record<CohostWelcomeKind, keyof CohostGreetingWelcomes> = {
+  'first-time': 'firstTime',
+  returning: 'returning'
+}
+
 /** The platforms each kind comes from, for the row's hint. */
 export const BUDDY_TEMPLATE_KIND_PLATFORMS: Record<
-  CohostActivityTemplateKind,
+  BuddyGreetingKind,
   readonly CohostGreetingPlatform[]
 > = {
+  'first-time': ['twitch', 'youtube', 'kick', 'x'],
+  returning: ['twitch', 'youtube', 'kick', 'x'],
   follow: ['twitch', 'kick', 'x'],
   sub: ['twitch'],
   resub: ['twitch'],
@@ -189,6 +208,10 @@ export const BUDDY_TEMPLATE_FIELDS: readonly { field: string; hint: string }[] =
   { field: 'others', hint: 'How many more in a burst' }
 ]
 
+/** The fields a welcome offers (plan 192 S1.3): a chat row has only these. */
+export const BUDDY_WELCOME_FIELDS: readonly { field: string; hint: string }[] =
+  BUDDY_TEMPLATE_FIELDS.filter((entry) => ['name', 'handle', 'platform'].includes(entry.field))
+
 const KNOWN_FIELDS = new Set(BUDDY_TEMPLATE_FIELDS.map((entry) => entry.field))
 
 /** The sample the preview resolves against, one per kind (the same shapes
@@ -204,7 +227,9 @@ export interface BuddySampleFields {
   reward?: string
 }
 
-export const BUDDY_SAMPLE_FIELDS: Record<CohostActivityTemplateKind, BuddySampleFields> = {
+export const BUDDY_SAMPLE_FIELDS: Record<BuddyGreetingKind, BuddySampleFields> = {
+  'first-time': { name: 'first_timer', handle: '@first_timer', platform: 'Twitch' },
+  returning: { name: 'regular', handle: '@regular', platform: 'YouTube' },
   follow: { name: 'new_friend', handle: '@new_friend', platform: 'Twitch' },
   sub: { name: 'morgaesis', handle: 'morgaesis', platform: 'Twitch' },
   resub: { name: 'morgaesis', handle: 'morgaesis', platform: 'Twitch', months: 8 },
@@ -246,33 +271,126 @@ export const BUDDY_SAMPLE_FIELDS: Record<CohostActivityTemplateKind, BuddySample
   }
 }
 
-/** The starter set an empty list offers (plan 164 S-D5, owner copy). */
-export const BUDDY_STARTER_TEMPLATES: readonly Omit<CohostGreetingTemplate, 'id'>[] = [
-  { kind: 'follow', text: 'Welcome, {name}!', state: 'talk', enabled: true },
-  { kind: 'sub', text: '{name} joined the ranks', state: 'laugh', enabled: true },
+/** One built-in line (plan 192 D1): what a kind posts while you have none. */
+export interface BuddyBuiltinGreeting {
+  kind: BuddyGreetingKind
+  text: string
+  state: CohostUtteranceState
+}
+
+/**
+ * Buddy's built-in greeting lines (plan 192 D1, owner: "something simple
+ * like hi"), one per kind, using only `{name}` so they read right whatever a
+ * platform leaves empty. The mirror of Rust's `BUILTIN_GREETINGS`; both
+ * suites assert they equal `protocol-fixtures/buddy-builtin-greetings.json`.
+ */
+export const BUDDY_BUILTIN_GREETINGS: readonly BuddyBuiltinGreeting[] = [
+  { kind: 'first-time', text: 'Hi {name}, welcome to the stream!', state: 'talk' },
+  { kind: 'returning', text: 'Welcome back, {name}!', state: 'talk' },
+  { kind: 'follow', text: 'Welcome, {name}! Thanks for the follow.', state: 'talk' },
+  { kind: 'sub', text: '{name} joined the ranks. Thank you!', state: 'laugh' },
+  { kind: 'resub', text: '{name} is back in the ranks. Thank you!', state: 'laugh' },
+  { kind: 'sub-gift', text: 'Thanks for the gift sub, {name}!', state: 'laugh' },
   {
-    kind: 'resub',
-    text: '{name} joined the ranks ({months} months)',
-    state: 'laugh',
-    enabled: true
+    kind: 'community-sub-gift',
+    text: '{name} gifted subs to the chat. Thank you!',
+    state: 'laugh'
   },
-  { kind: 'cheer', text: '{amount} from {name}, much obliged', state: 'talk', enabled: true },
-  { kind: 'raid', text: '{name} brings {count} warriors. Welcome!', state: 'laugh', enabled: true },
-  { kind: 'watch-streak', text: '{name}, {streak} streams strong', state: 'talk', enabled: true }
+  { kind: 'membership', text: 'Welcome to the members, {name}!', state: 'laugh' },
+  { kind: 'cheer', text: 'Thanks for the bits, {name}!', state: 'talk' },
+  { kind: 'kicks', text: 'Thanks for the Kicks, {name}!', state: 'talk' },
+  { kind: 'super-chat', text: 'Thanks for the Super Chat, {name}!', state: 'talk' },
+  { kind: 'super-sticker', text: 'Thanks for the Super Sticker, {name}!', state: 'talk' },
+  { kind: 'raid', text: '{name} is raiding! Welcome, everyone!', state: 'laugh' },
+  { kind: 'watch-streak', text: '{name}, thanks for the watch streak!', state: 'talk' },
+  { kind: 'power-up', text: 'Thanks for the power-up, {name}!', state: 'talk' },
+  { kind: 'redemption', text: 'Thanks for redeeming, {name}!', state: 'talk' }
 ]
+
+const BUILTIN_BY_KIND = new Map(BUDDY_BUILTIN_GREETINGS.map((line) => [line.kind, line]))
+
+/** The built-in line a kind posts while you have none of your own. */
+export function builtinGreeting(kind: BuddyGreetingKind): BuddyBuiltinGreeting {
+  return BUILTIN_BY_KIND.get(kind)!
+}
+
+/**
+ * What a greeting kind posts (plan 192 D1, Rust's `pick_template`
+ * mirrored): your enabled lines for the kind (and the platform, when one is
+ * named); else off when the kind has lines and every one is switched off;
+ * else the built-in line. An empty list never means silence.
+ */
+export type BuddyGreetingLine =
+  | { source: 'yours'; templates: CohostGreetingTemplate[] }
+  | { source: 'off' }
+  | { source: 'built-in'; line: BuddyBuiltinGreeting }
+
+export function resolveGreetingLine(
+  templates: readonly CohostGreetingTemplate[],
+  kind: CohostActivityTemplateKind,
+  platform?: CohostGreetingPlatform
+): BuddyGreetingLine {
+  const ofKind = templates.filter((template) => template.kind === kind)
+  const enabled = ofKind.filter(
+    (template) =>
+      template.enabled && (!platform || !template.platform || template.platform === platform)
+  )
+  if (enabled.length > 0) return { source: 'yours', templates: enabled }
+  if (ofKind.length > 0 && ofKind.every((template) => !template.enabled)) return { source: 'off' }
+  return { source: 'built-in', line: builtinGreeting(kind) }
+}
+
+/** Greetings' AI switch (plan 192 D3); an older backend omits it: on. */
+export function greetingsAi(greetings: Pick<CohostGreetings, 'ai'>): boolean {
+  return greetings.ai ?? true
+}
+
+/** The welcomes as stored, or Rust's default (both on, built-in lines). */
+export function greetingWelcomes(
+  greetings: Pick<CohostGreetings, 'welcomes'>
+): CohostGreetingWelcomes {
+  return greetings.welcomes ?? { firstTime: { enabled: true }, returning: { enabled: true } }
+}
+
+/** What a welcome posts (plan 192 S1.1): off, your line, or the built-in one. */
+export function resolveWelcomeLine(
+  welcome: CohostWelcomeLine,
+  kind: CohostWelcomeKind
+): { source: 'off' } | { source: 'yours' | 'built-in'; text: string; state: CohostUtteranceState } {
+  if (!welcome.enabled) return { source: 'off' }
+  const text = welcome.text?.trim()
+  if (text) return { source: 'yours', text, state: welcome.state ?? 'talk' }
+  const line = builtinGreeting(kind)
+  return { source: 'built-in', text: line.text, state: welcome.state ?? line.state }
+}
+
+/**
+ * A welcome with its line edited (plan 192 S1.1): trimmed, and an empty line
+ * is absent (the built-in line), never `''` or null. Its other fields stay.
+ */
+export function withWelcomeText(welcome: CohostWelcomeLine, text: string): CohostWelcomeLine {
+  const { text: _old, ...rest } = welcome
+  const trimmed = text.trim()
+  return trimmed ? { ...rest, text: trimmed } : rest
+}
 
 export const BUDDY_TEMPLATE_TEXT_MAX_CHARS = 200
 export const BUDDY_TEMPLATES_MAX = 60
 
+/**
+ * A new line for a kind. It starts from the built-in line (plan 192 D1),
+ * never empty: the settings refuse an empty line.
+ */
 export function newGreetingTemplate(
   kind: CohostActivityTemplateKind,
   overrides: Partial<Omit<CohostGreetingTemplate, 'id' | 'kind'>> = {}
 ): CohostGreetingTemplate {
+  const builtin = builtinGreeting(kind)
   return {
     id: crypto.randomUUID(),
     kind,
-    text: '',
-    state: 'talk',
+    text: builtin.text,
+    state: builtin.state,
     enabled: true,
     ...overrides
   }
@@ -327,9 +445,16 @@ export function resolveGreetingPreview(
   return { text: resolved.split(/\s+/).filter(Boolean).join(' '), unknown }
 }
 
+/** A line the editor checks: a template, or a welcome's line (plan 192). */
+export interface BuddyGreetingLineDraft {
+  kind: BuddyGreetingKind
+  platform?: CohostGreetingPlatform
+  text: string
+}
+
 /** The platforms a template reaches: its own, else every one it is for. */
 export function greetingTemplatePlatforms(
-  template: Pick<CohostGreetingTemplate, 'kind' | 'platform'>
+  template: Pick<BuddyGreetingLineDraft, 'kind' | 'platform'>
 ): readonly CohostGreetingPlatform[] {
   return template.platform ? [template.platform] : BUDDY_TEMPLATE_KIND_PLATFORMS[template.kind]
 }
@@ -339,9 +464,7 @@ export function greetingTemplatePlatforms(
  * platform it reaches (X takes 140), and braces nothing fills. Never a
  * silent cut: the backend clips with an ellipsis and says so in the log.
  */
-export function greetingTemplateWarnings(
-  template: Pick<CohostGreetingTemplate, 'kind' | 'platform' | 'text'>
-): string[] {
+export function greetingTemplateWarnings(template: BuddyGreetingLineDraft): string[] {
   const warnings: string[] = []
   const { text, unknown } = resolveGreetingPreview(
     template.text,
