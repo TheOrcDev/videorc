@@ -58,7 +58,9 @@ pub(crate) enum GreetingKind {
 
 impl GreetingKind {
     /// Every kind, in the order of the shared fixture
-    /// (`protocol-fixtures/buddy-builtin-greetings.json`).
+    /// (`protocol-fixtures/buddy-builtin-greetings.json`); the fixture test
+    /// walks it.
+    #[cfg(test)]
     pub(crate) const ALL: [GreetingKind; 16] = {
         use CohostActivityTemplateKind as K;
         [
