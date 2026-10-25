@@ -624,4 +624,111 @@ segment index continuing.
 
 ## As built
 
-(Empty until executed.)
+Executed 2026-10-25 on `plan-199-clip-length`, based on origin/main
+`f16a0b8a`.
+
+**Who did what.** A `fable` executor wrote S1–S4. It hit the Fable usage
+limit after committing S4, so the orchestrator took over on Opus. It reviewed
+S1–S4, wrote S5 (UI) and S6, and ran the gates.
+
+**Commits:**
+
+- `c80eac0e` S1: a press chooses its length.
+- `1250a922` S2: voice for the minute; marks remember their length.
+- `2758b92b` S3: the wire, both sides.
+- `accd8fe8` S4: the renderer model.
+- `29ee42c1` cargo fmt.
+- `cac4b3e5` S5: UI.
+- `252d5916` S6: smoke and docs.
+- `4e3321af` the live-lab phrase test.
+
+### What was built
+
+- **Backend.**
+  - `replay_buffer.rs` holds `DEFAULT_CLIP_SECONDS` (30),
+    `LONG_CLIP_SECONDS` (60), `CLIP_LENGTHS` and `DEFAULT_SECONDS`. The
+    last is the ring's fallback when off, and is now 60.
+  - `requested_clip_seconds` refuses any length outside `CLIP_LENGTHS`
+    with `invalid-clip-length` ("A clip is 30 seconds or 1 minute.").
+    `clip_seconds` clamps to the ring.
+  - `request_save(state, source, seconds)` queues a `QueuedSave { save_id,
+    source, seconds }`. A press that joins it raises the length to the
+    longer of the two.
+  - `ReplaySaveAccepted.seconds` is required on the wire.
+  - `clip.mark` and `replay.save` take `{ seconds? }`; null or absent params
+    mean `{}`.
+  - `RemoteIntent::ClipMark { seconds }`, validated, in the same `clip`
+    debounce bucket.
+- **Voice.** `CLIP_PHRASES` rows carry their length. "clip the last
+  minute" and "long clip" save 60 s. `TAIL_WORDS` is computed from the
+  table (3).
+- **Marks.** `ClipMark.lookback_seconds`: a column added through
+  `ensure_column`, and `lookbackSeconds` on the wire, omitted when None.
+  `record_mark` stores the press's length. `moments.rs` reads it, with
+  NULL meaning 30 s, capped at 90 s.
+- **Renderer.**
+  - `REPLAY_RING_SECONDS = 60`.
+  - `replayBuffer.seconds` is dropped from the settings and the normalizer.
+    A smoke-only `smokeRingSeconds` remains, which the normalizer drops on
+    reload.
+  - `markClip(seconds?)`.
+  - The global action `clip-mark-long` (`clipMarkLong`, unbound).
+  - `ClipContext.seconds` is now the 30-s length, never the ring's. It
+    gains `longSeconds` and `longShortcutLabel`.
+  - `ClipMarkCommand.seconds`, checked in main with `parseClipLength`.
+  - `/clip`, `/clip 30` and `/clip 60`; anything else is the D6 error line.
+  - The Stream-Manager-only helpers moved to the lazy
+    `shared/clip-lengths.ts`.
+- **UI (S5).**
+  - Output → Clips: the Length row is removed. The copy names both clips,
+    and there are two recorders, "Save a 30-second clip" and "Save a
+    1-minute clip".
+  - Settings → Shortcuts gains the second row.
+  - ⌘K: "Save a 30-second clip" and "Save a 1-minute clip".
+  - Stream Manager: two `StatusBarAction`s, "Clip 30 s" (with the icon) and
+    "1 min", each with its own hint ("…or say “clip the last minute”").
+    Below 640 px they are two ⋯ menu items with their keys.
+  - Composer: a `/clip 60` completion, the help line, and a notice that
+    names the length asked for.
+  - The removed Length row's `replayLengthLabel` is deleted.
+
+### Deviations
+
+- **`smokeRingSeconds`.** The plan said to keep `--seconds` for the ring.
+  The product has no ring setting any more, so the smoke hook writes a
+  smoke-only `smokeRingSeconds` that the normalizer drops on reload.
+- **The live-lab phrase check** (`scripts/live-lab/lib/phrases.test.mjs`)
+  reads `clip_marks.rs`'s phrase table with a regex. The plan did not name
+  it. It failed on the new row shape and now matches `Some(("phrase", 30))`.
+
+### Gates (2026-10-25, this Mac, dev build, bundled FFmpeg 8.1.1)
+
+| Gate | Result |
+| --- | --- |
+| `cargo test -p videorc-backend -- replay clip_marks moments remote_control shared_high_risk_contract_fixture` | pass: 110, 1 ignored |
+| `cargo test … real_ffmpeg_ring_saves -- --include-ignored` (bundled FFmpeg) | pass |
+| `cargo clippy -p videorc-backend -- -D warnings` | pass |
+| `cargo fmt --check --all` | pass |
+| `pnpm typecheck` / `pnpm lint` / `pnpm format:check` | pass (lint: only the pre-existing `exhaustive-deps` warning in `use-studio.tsx`) |
+| `pnpm --filter @videorc/desktop test` | pass: 523 files, 5,423 tests, 1 skipped |
+| `pnpm test:scripts` | pass: 2,552 (after the live-lab phrase fix) |
+| `pnpm build` + `pnpm check:renderer-assets` | pass. Eager JS is 1,965,591 raw / 394,859 gzip. Main at `f16a0b8a` is 1,965,629 / 394,848, so this branch adds **+11 gzip bytes** under the 395,000 ceiling. Main itself has only 152 bytes of headroom, and plan 198 (#828) reports 4. Whichever lands second needs a small eager trim. |
+| `pnpm smoke:replay-buffer` | **pass**. The ring came up at launch keeping 60 s and was full after 61.4 s. The disk bound held at 33 files (bound 33) over 91 samples. Clips, each H.264 1080p + AAC, analyzer pass, with a "Clip" Library row: 30.00 s (`clip.mark` with no length); 60.00 s (`clip.mark { seconds: 60 }`); 60.00 s (remote `clipMark { seconds: 60 }`); 60.00 s mid-recording, with a mark at 66.0 s holding `lookbackSeconds: 60`. `seconds: 45` was refused with the sentence and wrote nothing. Record handed over in 130 ms; the 75.27 s recording passed the analyzer; the ring re-armed after Stop. |
+
+| `pnpm smoke:remote-control` | pass |
+| `VIDEORC_SMOKE_REPLAY_SECONDS=15 pnpm smoke:multistream` | pass: with no length, the press clamped to the 15-s ring and saved a 16.00 s clip mid-stream (event `seconds` 15). Three legs got 1,203,085 bytes each and passed their quality gates; the recording finalized and passed; the dead leg was isolated. The host warned of a load of 26 on 10 cores and 7.5 GB of swap. |
+
+### Owed
+
+- The owner's by-eye check in **light and dark**:
+  - Output → Clips
+  - Settings → Shortcuts
+  - ⌘K with both items
+  - the Stream Manager status bar, wide and below 640 px (the ⋯ menu)
+  - the `/cl` completions
+  - "Clip saved · Last 1:00"
+- Voice "clip the last minute" with captions or Buddy listening, on a real
+  take.
+- Windows and Linux runtime. CI covers compile and unit tests only.
+- The rebase onto plan 198 (#828), with the eager trim if the budget
+  needs it.
