@@ -22,6 +22,7 @@ const AUDIOCN_BASE_UI_FILES = [
   'channel-toggle',
   'clip-indicator',
   'fader',
+  'lcd-display',
   'parameter-slider'
 ].map((name) => `apps/desktop/src/renderer/src/components/ui/${name}.tsx`)
 

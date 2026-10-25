@@ -122,7 +122,10 @@ export const DOCK_BLOCKING_POPPER_SLOTS = [
 export const DOCK_NON_BLOCKING_SLOTS: Readonly<Record<string, string>> = {
   'tooltip-content': 'transient hint beside its trigger',
   'dialog-content': 'its scrim blocks',
-  'alert-dialog-content': 'its scrim blocks'
+  'alert-dialog-content': 'its scrim blocks',
+  'lcd-display-content': "the LCD's own screen: inline, never portalled",
+  'lcd-display-select-content':
+    'the LCD select, which Videorc never renders (plan 196); make it a popper before using it'
 }
 
 function openSlotSelector(slots: readonly string[]): string {

@@ -465,13 +465,7 @@ export function MicrophoneChannel({
         {microphoneSelected ? null : <SourceFacts>No microphone selected.</SourceFacts>}
         {/* data-videorc-mic-preview: perf-idle-probe opens Sources on it. */}
         <div className="flex min-w-0" data-videorc-mic-preview="">
-          <MicLevelMeter
-            aria-label="Microphone level"
-            className="min-w-0 flex-1"
-            meter={meter}
-            orientation="horizontal"
-            variant="segmented"
-          />
+          <MicLevelMeter aria-label="Microphone level" className="min-w-0 flex-1" meter={meter} />
         </div>
         <SourceControlRow
           label="Gain"
@@ -784,8 +778,6 @@ export function SystemAudioSettings({
                   aria-label="System audio level"
                   className="min-w-0 flex-1"
                   meter={meter}
-                  orientation="horizontal"
-                  variant="segmented"
                 />
               </div>
             )}
@@ -907,13 +899,7 @@ export function SoundsSettings({
           </p>
         ) : (
           <div className="flex min-w-0" data-videorc-sounds-visualizer="">
-            <MicLevelMeter
-              aria-label="Sounds level"
-              className="min-w-0 flex-1"
-              meter={meter}
-              orientation="horizontal"
-              variant="segmented"
-            />
+            <MicLevelMeter aria-label="Sounds level" className="min-w-0 flex-1" meter={meter} />
           </div>
         )}
         <SourceControlRow

@@ -135,17 +135,48 @@ describe('signed Windows electron-builder config', () => {
       new URL('../../.github/workflows/release-windows-alpha.yml', import.meta.url),
       'utf8'
     )
+    const sourceJsStart = workflow.indexOf('\n  source-js:')
+    const sourceRustStart = workflow.indexOf('\n  source-rust:')
+    const reusableGatesStart = workflow.indexOf('\n  gates:')
     const unsignedStart = workflow.indexOf('\n  unsigned:')
     const signingStart = workflow.indexOf('\n  sign:')
-    assert.ok(unsignedStart >= 0, 'workflow must define the unsigned job')
+    assert.ok(sourceJsStart >= 0, 'workflow must define the JS source-gate job')
+    assert.ok(
+      sourceRustStart > sourceJsStart,
+      'Windows Rust source gates must follow JS source gates'
+    )
+    assert.ok(
+      reusableGatesStart > sourceRustStart,
+      'controller reusable gates must follow the legacy source-gate jobs'
+    )
+    assert.ok(
+      unsignedStart > reusableGatesStart,
+      'workflow must define the unsigned job after source gates'
+    )
     assert.ok(signingStart > unsignedStart, 'signing job must follow the unsigned job')
 
+    const sourceJsJob = workflow.slice(sourceJsStart, sourceRustStart)
+    const sourceRustJob = workflow.slice(sourceRustStart, reusableGatesStart)
     const unsignedJob = workflow.slice(unsignedStart, signingStart)
     const signingJob = workflow.slice(signingStart)
 
+    assert.match(sourceJsJob, /node scripts\/reuse-release-ci-gates\.mjs --spec windows-js/)
+    assert.match(sourceJsJob, /pnpm format:check/)
+    assert.match(sourceJsJob, /pnpm --filter @videorc\/desktop test/)
+    assert.doesNotMatch(sourceJsJob, /cargo test/)
+    assert.doesNotMatch(sourceJsJob, /environment: windows-alpha-release/)
+    assert.match(sourceRustJob, /node scripts\/reuse-release-ci-gates\.mjs --spec windows-rust/)
+    assert.match(sourceRustJob, /function Invoke-NativeGate/)
+    assert.equal((sourceRustJob.match(/Invoke-NativeGate '/g) ?? []).length, 3)
+    assert.match(sourceRustJob, /shared-key: release-windows-debug-gates-v1/)
+    assert.match(sourceRustJob, /cache-workspace-crates: true/)
+    assert.match(sourceRustJob, /CARGO_INCREMENTAL: '1'/)
+    assert.doesNotMatch(sourceRustJob, /pnpm package:desktop:windows:unsigned/)
     assert.match(unsignedJob, /pnpm package:desktop:windows:unsigned/)
-    assert.match(unsignedJob, /function Invoke-NativeGate/)
-    assert.equal((unsignedJob.match(/Invoke-NativeGate '/g) ?? []).length, 9)
+    assert.match(unsignedJob, /shared-key: release-windows-package-v1/)
+    assert.match(unsignedJob, /cache-workspace-crates: true/)
+    assert.doesNotMatch(unsignedJob, /function Invoke-NativeGate/)
+    assert.doesNotMatch(unsignedJob, /cargo test -p videorc-backend/)
     assert.match(unsignedJob, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/)
     assert.match(unsignedJob, /retention-days: 1/)
     assert.match(unsignedJob, /artifact_id: \$\{\{ steps\.upload\.outputs\.artifact-id \}\}/)
@@ -181,10 +212,13 @@ describe('signed Windows electron-builder config', () => {
     )
     assert.equal((unsignedJob.match(/\$\{\{ secrets\./g) ?? []).length, unsignedSecrets.length)
 
-    assert.match(signingJob, /needs: unsigned/)
-    // `unsigned` needs `resolve`, which the legacy path skips. Without an
-    // explicit status check the implicit success() skips signing too.
-    assert.match(signingJob, /!cancelled\(\) && needs\.unsigned\.result == 'success'/)
+    assert.match(signingJob, /needs:\n      - source-js\n      - source-rust\n      - unsigned/)
+    // Legacy signing waits for the parallel JS/Rust gates and the unsigned
+    // payload. `resolve` is skipped, so name every required status explicitly.
+    assert.match(
+      signingJob,
+      /!cancelled\(\) && needs\.unsigned\.result == 'success' && needs\.source-js\.result ==\n      'success' && needs\.source-rust\.result == 'success'/
+    )
     assert.match(signingJob, /environment: windows-alpha-release/)
     assert.match(signingJob, /id-token: write/)
     assert.match(signingJob, /pnpm install --frozen-lockfile --ignore-scripts/)
