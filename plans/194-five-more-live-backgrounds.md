@@ -313,6 +313,240 @@ the PR.
 
 ## As built
 
+### S3: Metal (2026-10-25)
+
+Commit `455a2d21` (the ports and their tests); this section's commit holds the
+numbers.
+
+**Ports** (`live_background/metal.rs`, `LIVE_BACKGROUND_MSL`): the five as
+vendored, nothing made cheaper and no look parameter changed.
+
+- **Beams**: `beams_field` into a mipmapped field at `beams_field_size`
+  (three quarters of the view), `generateMipmaps`, then `beams_composite`
+  samples levels 0, 2, 3, 4 and 5 in Metal's orientation (the levels were
+  written the same way); only the grain and the jitter hash GLSL's fragment
+  coordinate.
+- **Color Bends**: one pass.
+- **Dither**: `dither_wave` into a one-texel-per-cell `BGRA8Unorm` field
+  (the reference's RGBA8), `dither_composite` at full size with a texel read
+  flipped by `last.y - y`.
+- **Ferrofluid** (N1): `ferrofluid_field` (the settled target) and
+  `ferrofluid_bound` into `RGBA16Float` grids sized by `sizes::ferrofluid_grid`
+  for the look's camera (`ferrofluid_look_camera`), then `ferrofluid_render`.
+  The grid origin is the shader's own `ferro_grid_origin` from `u[1]`, the
+  GLSL formula. `out float` became `thread float&`; the field is sampled with
+  an explicit `level(0.0)` (one level, so the reference's linear sample, and
+  no derivatives inside the march's branches); the bound is a texel read.
+- **Ghost Fibers** (N2): the instanced pipeline. `ghost_fibers_dots_vertex`
+  and `ghost_fibers_dust_vertex` take `[[instance_id]]` and `[[vertex_id]]`
+  and the same `u` block (`setVertexBytes`), one fragment function
+  `ghost_fibers_dot` (with `discard_fragment`), `ONE, ONE` blending on colour
+  and alpha, a `Clear` load action to transparent black for the dots and
+  `Load` for the dust, `drawPrimitives(triangleStrip, 0, 4, instances)`
+  with the look's counts (`LivePass::kind`). GL and Metal agree on NDC and
+  on where a row lands, so the scene has the orientation the full-screen
+  passes write; the bright, down, up and composite passes sample it in
+  Metal's orientation like Plasma's chain, and only the grain hashes the
+  GLSL coordinate. The `-1e4` cull and the integer division per instance
+  port as they are. GLSL's `pow((s - tipEnd) / 0.0065, 2.0)` has a negative
+  base: `sq()`, per the porting rules.
+- **Formats**: one `LIGHT_FORMAT` (`RG11B10Float`) for the HDR scratch
+  nothing reads the alpha of: Plasma's chain, Beams' field (mip generation
+  works on it, checked) and Ghost Fibers' bloom chain. The Ghost Fibers scene
+  stays `RGBA16Float` (tens of thousands of dim quads add into it), as does
+  Ferrofluid's grid (its `a < 0.002` thresholds).
+- **Targets follow the look** as well as the background and the size:
+  Dither's cell and Ferrofluid's grid read it.
+- `ported()` and the S2 "unported background poisons nothing" test are
+  gone: nothing is unported.
+
+**Fast math**: the library compiles with the default options, as plan 190's
+did. Ghost Fibers' `hash11(sin(n × 91.3458))` (arguments up to about
+1.4 × 10^5 rad) matched ANGLE's rendering within the tolerance below, so no
+per-shader compile option was needed; ANGLE evidently builds with the same
+math mode.
+
+**Goldens** (`golden_grids_match_the_glsl_reference`, all 60; mean / max
+cell, 0–255 units; the tolerance is 2.0 / 10):
+
+| Background   | Look        | Phase 1   | Phase 2   |
+| ------------ | ----------- | --------- | --------- |
+| Beams        | Studio      | 0.217 / 2 | 0.203 / 2 |
+| Beams        | Chrome      | 0.323 / 4 | 0.239 / 3 |
+| Beams        | Ember       | 0.143 / 2 | 0.114 / 2 |
+| Color Bends  | Default     | 0.000 / 1 | 0.000 / 0 |
+| Color Bends  | Ember       | 0.000 / 1 | 0.000 / 0 |
+| Color Bends  | Ocean       | 0.000 / 1 | 0.000 / 1 |
+| Dither       | all three   | 0.000 / 0 | 0.000 / 0 |
+| Ferrofluid   | Studio      | 0.000 / 1 | 0.000 / 0 |
+| Ferrofluid   | Ember       | 0.000 / 0 | 0.000 / 0 |
+| Ferrofluid   | Frost       | 0.000 / 1 | 0.000 / 0 |
+| Ghost Fibers | Violet      | 0.039 / 3 | 0.040 / 3 |
+| Ghost Fibers | Fiber Optic | 0.003 / 1 | 0.007 / 1 |
+| Ghost Fibers | Ember       | 0.073 / 3 | 0.117 / 4 |
+
+The plan 190 five are unchanged (Plasma Wave's 1.025 / 9 is its packed
+format, as in plan 190; the other four 0.000 / 0). The light format,
+measured (`light_formats_both_match_the_goldens`, worst over the
+background's six goldens at 640 × 360):
+
+| Background   | `RG11B10Float` (shipped) | `RGBA16Float` (the reference's) | Scratch at 640 × 360 |
+| ------------ | -----------------------: | ------------------------------: | -------------------: |
+| Plasma Wave  |                1.025 / 9 |                       0.000 / 0 |      2.9 MB / 4.3 MB |
+| Beams        |                0.323 / 4 |                       0.021 / 1 |      2.0 MB / 2.7 MB |
+| Ghost Fibers |                0.117 / 4 |                       0.000 / 1 |      3.9 MB / 4.6 MB |
+
+**Tests** (the plan 190 set for the five, `cargo test -p videorc-backend
+live_background`, 66 pass): the goldens; two draws two seconds apart differ
+and two at the same phase are byte-identical for each of the five
+(instanced dots included); a forced still builds no pipeline and holds
+nothing for each; each builds exactly its passes' pipelines and holds its own
+scratch beside the live frame (Color Bends none; Ghost Fibers 31.8 MB at
+1080p), Dither renders 4K at full size and the soft four at 1080p, the
+guard's Half level halves the instanced one to 960 × 540, and a release frees
+everything. Plus the plan 193 test
+(`ghost_fibers_shares_its_frame_with_the_stream_leg_of_a_split`): on a
+record-and-stream split the recording leg renders Ghost Fibers at its
+canvas, `frame_at` hands the stream leg that very texture at the same tick
+(519,416 of 2,073,600 pixels lit: the dots, not a cleared scene), nothing at
+another instant, and the next tick's frame replaces it. The compositor's own
+plan 193 leg tests still pass. Gates run here: `cargo fmt --all --check`,
+`cargo clippy -p videorc-backend -- -D warnings`, the targeted tests and
+`CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p videorc-backend`.
+The dev-app "each of the ten moving" check in this slice's "Done when" is
+S8's (no app was launched here).
+
+**Cost** (`live_frame_gpu_times`: the live command buffer's
+`GPUEndTime - GPUStartTime`, median and p95 of 60 frames after 10 warm-up
+frames, every look, at the output's internal size per `sizes.rs`). Two
+consecutive passes on the owner's M4 at a 1-minute load average of 5.7 → 5.3
+and 5.4 → 5.2 (the 5- and 15-minute averages were still 13 and 16 from the
+other agent's builds, which had just finished; no RTMP process; the S1
+probe ran at load 4.3–5.0). An earlier run at load 17 → 13 was discarded
+(every p95 read 3–7 ms). Each cell is `median / p95 · median / p95` in ms
+for pass 1 · pass 2; scratch includes the live frame.
+
+| Background | Look | 1920 × 1080 | 1080 × 1920 | 3840 × 2160 (renders) | Half at 1080p (960 × 540) | Scratch MB (1080p / 4K) |
+| --- | --- | --- | --- | --- | --- | --- |
+| silk | satin | 0.81 / 1.55 · 0.36 / 0.48 | 0.64 / 0.97 · 0.34 / 0.34 | 0.45 / 0.56 · 0.34 / 0.35 (1920 × 1080) | 0.12 / 0.13 · 0.12 / 0.12 | 8.4 / 8.4 |
+| silk | champagne | 0.35 / 0.35 · 0.34 / 0.35 | 0.35 / 0.35 · 0.34 / 0.35 | 0.34 / 0.35 · 0.34 / 0.34 (1920 × 1080) | 0.12 / 0.13 · 0.12 / 0.12 | 8.4 / 8.4 |
+| silk | midnight | 0.35 / 0.35 · 0.34 / 0.34 | 0.35 / 0.35 · 0.34 / 0.35 | 0.35 / 0.35 · 0.34 / 0.35 (1920 × 1080) | 0.12 / 0.12 · 0.12 / 0.12 | 8.4 / 8.4 |
+| side-rays | sunbeam | 0.37 / 0.37 · 0.36 / 0.36 | 0.37 / 0.37 · 0.36 / 0.36 | 0.37 / 0.37 · 0.36 / 0.36 (1920 × 1080) | 0.11 / 0.11 · 0.10 / 0.11 | 8.1 / 8.1 |
+| side-rays | moonlight | 0.36 / 0.37 · 0.36 / 0.39 | 0.37 / 0.37 · 0.36 / 0.38 | 0.37 / 0.37 · 0.37 / 0.39 (1920 × 1080) | 0.11 / 0.11 · 0.10 / 0.10 | 8.1 / 8.1 |
+| side-rays | spotlight | 0.37 / 0.37 · 0.36 / 0.39 | 0.36 / 0.37 · 0.91 / 1.67 | 0.36 / 0.37 · 0.91 / 0.92 (1920 × 1080) | 0.10 / 0.11 · 0.24 / 0.44 | 8.1 / 8.1 |
+| plasma-wave | plasma | 0.55 / 0.58 · 1.28 / 4.31 | 0.51 / 0.55 · 1.26 / 2.27 | 0.55 / 0.60 · 0.72 / 0.90 (1920 × 1080) | 0.40 / 0.52 · 0.35 / 0.38 | 22.1 / 22.1 |
+| plasma-wave | ember | 0.55 / 0.57 · 0.54 / 0.56 | 0.51 / 0.56 · 0.50 / 0.54 | 0.55 / 0.56 · 0.54 / 0.55 (1920 × 1080) | 0.36 / 0.47 · 0.35 / 0.38 | 22.1 / 22.1 |
+| plasma-wave | glacier | 0.54 / 0.56 · 0.54 / 0.56 | 0.51 / 0.59 · 0.50 / 0.53 | 0.55 / 0.60 · 0.54 / 0.57 (1920 × 1080) | 0.39 / 0.42 · 0.35 / 0.43 | 22.1 / 22.1 |
+| liquid-chrome | polished | 0.86 / 0.86 · 0.85 / 0.86 | 0.87 / 0.88 · 0.86 / 0.87 | 0.85 / 0.86 · 0.85 / 0.86 (1920 × 1080) | 0.29 / 0.30 · 0.29 / 0.30 | 8.1 / 8.1 |
+| liquid-chrome | gold | 0.86 / 0.88 · 0.85 / 0.88 | 0.86 / 0.88 · 0.86 / 0.96 | 0.86 / 0.87 · 0.85 / 0.93 (1920 × 1080) | 0.30 / 0.30 · 0.29 / 0.30 | 8.1 / 8.1 |
+| liquid-chrome | mercury | 0.58 / 0.59 · 0.58 / 0.58 | 0.60 / 0.60 · 0.59 / 0.60 | 0.58 / 0.59 · 0.58 / 0.58 (1920 × 1080) | 0.24 / 0.25 · 0.24 / 0.24 | 8.1 / 8.1 |
+| line-waves | silk | 0.30 / 0.31 · 0.30 / 0.30 | 0.30 / 0.30 · 0.30 / 0.30 | 1.15 / 1.20 · 1.15 / 1.24 (3840 × 2160) | 0.09 / 0.09 · 0.08 / 0.08 | 8.1 / 32.4 |
+| line-waves | gold | 0.30 / 0.31 · 0.30 / 0.30 | 0.30 / 0.30 · 0.30 / 0.30 | 1.15 / 1.34 · 1.15 / 1.23 (3840 × 2160) | 0.09 / 0.09 · 0.08 / 0.08 | 8.1 / 32.4 |
+| line-waves | aurora | 0.30 / 0.30 · 0.30 / 0.30 | 0.30 / 0.30 · 0.30 / 0.30 | 1.15 / 1.24 · 1.15 / 1.23 (3840 × 2160) | 0.09 / 0.09 · 0.08 / 0.08 | 8.1 / 32.4 |
+| beams | studio | 0.53 / 0.57 · 0.52 / 0.54 | 0.52 / 0.60 · 0.52 / 0.52 | 0.53 / 0.61 · 0.52 / 0.60 (1920 × 1080) | 0.18 / 0.19 · 0.18 / 0.18 | 14.9 / 14.9 |
+| beams | chrome | 0.53 / 0.56 · 0.52 / 0.58 | 0.52 / 0.55 · 0.52 / 0.52 | 0.53 / 0.56 · 0.52 / 0.53 (1920 × 1080) | 0.19 / 0.20 · 0.18 / 0.18 | 14.9 / 14.9 |
+| beams | ember | 0.53 / 0.61 · 0.52 / 0.53 | 0.52 / 0.53 · 0.52 / 0.52 | 0.52 / 0.54 · 0.52 / 0.64 (1920 × 1080) | 0.18 / 0.23 · 0.18 / 0.19 | 14.9 / 14.9 |
+| color-bends | default | 0.36 / 0.37 · 0.36 / 0.36 | 0.36 / 0.36 · 0.36 / 0.39 | 0.36 / 0.36 · 0.36 / 0.36 (1920 × 1080) | 0.10 / 0.10 · 0.10 / 0.10 | 8.1 / 8.1 |
+| color-bends | ember | 0.36 / 0.36 · 0.36 / 0.36 | 0.36 / 0.36 · 0.36 / 0.36 | 0.36 / 0.36 · 0.36 / 0.36 (1920 × 1080) | 0.10 / 0.10 · 0.10 / 0.10 | 8.1 / 8.1 |
+| color-bends | ocean | 0.36 / 0.36 · 0.36 / 0.36 | 0.36 / 0.36 · 0.36 / 0.36 | 0.36 / 0.36 · 0.36 / 0.36 (1920 × 1080) | 0.10 / 0.10 · 0.10 / 0.10 | 8.1 / 8.1 |
+| dither | classic | 0.37 / 0.38 · 0.37 / 0.38 | 0.37 / 0.37 · 0.37 / 0.37 | 0.66 / 0.67 · 0.66 / 0.67 (3840 × 2160) | 0.30 / 0.30 · 0.30 / 0.30 | 10.2 / 34.5 |
+| dither | amber | 0.36 / 0.36 · 0.36 / 0.37 | 0.36 / 0.36 · 0.36 / 0.36 | 0.61 / 0.61 · 0.61 / 0.61 (3840 × 2160) | 0.30 / 0.30 · 0.30 / 0.30 | 10.2 / 34.5 |
+| dither | blueprint | 0.37 / 0.37 · 0.37 / 0.37 | 0.36 / 0.36 · 0.36 / 0.45 | 0.63 / 0.80 · 0.63 / 0.72 (3840 × 2160) | 0.30 / 0.30 · 0.30 / 0.30 | 10.2 / 34.5 |
+| ferrofluid | studio | 1.64 / **1.76** · 1.64 / **1.78** | 1.67 / **1.79** · 1.67 / **1.86** | 1.64 / 1.75 · 1.65 / 1.74 (1920 × 1080) | 0.46 / 0.47 · 0.46 / 0.47 | 8.3 / 8.3 |
+| ferrofluid | ember | 1.64 / **1.77** · 1.64 / **1.73** | 1.68 / **1.77** · 1.67 / **1.72** | 1.64 / 1.78 · 1.64 / 1.73 (1920 × 1080) | 0.46 / 0.47 · 0.46 / 0.47 | 8.3 / 8.3 |
+| ferrofluid | frost | 1.64 / **1.78** · 1.65 / **1.75** | 1.67 / **1.89** · 1.67 / **1.87** | 1.64 / 1.77 · 1.64 / 1.74 (1920 × 1080) | 0.46 / 0.47 · 0.46 / 0.47 | 8.3 / 8.3 |
+| ghost-fibers | violet | 1.07 / 1.19 · 1.08 / 1.11 | 0.93 / 0.97 · 0.93 / 0.96 | 1.07 / 1.10 · 1.09 / 1.17 (1920 × 1080) | 0.65 / 0.70 · 0.66 / 0.70 | 30.3 / 30.3 |
+| ghost-fibers | fiber | 1.19 / 1.46 · 1.18 / 1.39 | 1.06 / 1.13 · 1.06 / 1.12 | 1.19 / 1.42 · 1.18 / 1.28 (1920 × 1080) | 0.60 / 0.63 · 0.61 / 0.66 | 30.3 / 30.3 |
+| ghost-fibers | ember | 1.24 / 1.49 · 1.24 / 1.48 | 1.00 / 1.03 · 1.00 / 1.14 | 1.25 / 1.58 · 1.26 / 1.33 (1920 × 1080) | 0.61 / 0.64 · 0.61 / 0.64 | 30.3 / 30.3 |
+
+Three cells are transients, not costs: Silk Satin in pass 1 (the first case
+of the run, 0.81 / 1.55), Side Rays Spotlight at 1080 × 1920 and Plasma
+Wave Plasma at 1080p and 1080 × 1920 in pass 2. Each reads its plan 190
+number in the other pass.
+
+**Calibration** against plan 190 S2 (Metal, load 33) and S1's probe (ANGLE,
+load 5), 1080p median / p95, ms:
+
+| Background      | Plan 190 Metal | S3 Metal (this run) | S1 probe (ANGLE) |
+| --------------- | -------------- | ------------------- | ---------------- |
+| Silk            | 0.34 / 0.41    | 0.34 / 0.35         | 0.49 / 0.56      |
+| Side Rays       | 0.36 / 0.38    | 0.36 / 0.37         | 0.45 / 0.59      |
+| Plasma Wave     | 0.56 / 1.06    | 0.55 / 0.57         | 1.26 / 1.35      |
+| Liquid Chrome   | 0.85 / 0.92    | 0.85 / 0.86         | 1.10 / 1.19      |
+| Line Waves      | 0.30 / 0.32    | 0.30 / 0.30         | 0.39 / 0.46      |
+| Line Waves (4K) | 1.24 / 1.35    | 1.15 / 1.23         | 1.34 / 1.44      |
+| Beams           |                | 0.53 / 0.57         | 0.89 / 0.99      |
+| Color Bends     |                | 0.36 / 0.36         | 0.50 / 0.55      |
+| Dither          |                | 0.37 / 0.38         | 0.55 / 0.60      |
+| Ferrofluid      |                | 1.64 / 1.76         | 1.60 / 1.94      |
+| Ghost Fibers    |                | 1.07 / 1.19         | 1.71 / 1.78      |
+
+The instrument reproduces plan 190's medians to the hundredth, and the
+quiet-host p95s sit on the medians. S1's calibration held for four of the
+five: the ANGLE excess was 0.14–0.64 ms. Ferrofluid is the exception: its
+march is ALU-bound, so ANGLE's per-pass excess hardly shows, and the native
+median is the probe's (1.64 against 1.60).
+
+**Verdicts** (p95, 1080p ≤ 1.5 ms, 4K ≤ 3.0 ms; owner chose A, 2026-10-25:
+ship as designed if the native numbers fit, the guard's half size on slower
+machines):
+
+- **Beams: inside.** 0.52–0.64 ms at every size and look; Half 0.18–0.23.
+- **Color Bends: inside.** 0.36 ms everywhere; Half 0.10.
+- **Dither: inside.** 0.36–0.45 ms at 1080p and 1080 × 1920; 0.61–0.80 ms
+  at 4K, where it renders every pixel; Half 0.30.
+- **Ghost Fibers: inside, Ember at the line.** 1080p p95: Violet 1.11–1.19,
+  Fiber Optic 1.39–1.46, Ember 1.48–1.49 ms (within 0.02 ms of the budget;
+  its median is 1.24). 1080 × 1920: 0.96–1.14. 4K (renders 1080p):
+  1.10–1.58 against 3.0. Half: 0.63–0.70. On the M4 the guard's 20 % trip
+  is 3.3 ms at 60 fps, so it stays at Full; a slower GPU drops it to Half.
+  Ships under A.
+- **Ferrofluid: over at 1080p, a STOP.** Median 1.64–1.68 ms and p95
+  1.72–1.89 ms at 1080p and 1080 × 1920 in both passes and all three looks
+  (the median alone is over 1.5). 4K is inside (1.73–1.78 against 3.0,
+  it renders at 1080p). Half is 0.46 / 0.47. Nothing was made cheaper (the
+  owner's instruction); the numbers go back to the owner. For that call:
+  1.8 ms is 11 % of a 60 fps frame and 5 % of a 30 fps one, so on the M4
+  the guard would keep it at Full; S1's ladder stands (B: half size by
+  design at 0.46 ms, slightly softer spikes; D: defer).
+
+**Risks for the D3D11 and GLES ports** found here:
+
+- Ferrofluid samples its field inside the march's divergent loops: HLSL's
+  `Sample` (implicit LOD) there is an fxc error ("gradient instructions in
+  divergent flow"); use `SampleLevel(…, 0)`, which is what the Metal port's
+  `level(0.0)` is. The bound is a `Load`.
+- Ghost Fibers' tip, `pow((s - tipEnd) / 0.0065, 2.0)`, has a negative base:
+  NaN in HLSL; square it.
+- Ghost Fibers' `hash11` takes `sin` of arguments up to about 1.4 × 10^5 rad.
+  Metal's default (fast) math matched ANGLE's rendering; another GPU's (or
+  WARP's) range reduction may place the dust and seed the fibers differently,
+  so a WARP golden miss on Ghost Fibers alone would be the hash, not the
+  port.
+- `R11G11B10_FLOAT` carries Beams' field (with `GenerateMips`) and Ghost
+  Fibers' bloom within tolerance on Metal (0.323 / 4 and 0.117 / 4); the
+  scene must stay `RGBA16_FLOAT`, since the additive blend (ONE, ONE on
+  colour and alpha, over a transparent-black clear) would round away in a
+  packed format. On GLES `R11F_G11F_B10F` is renderable only with
+  `EXT_color_buffer_float`, which Plasma already needs.
+- The dots pass is 56,160 instances of a vertex shader that evaluates the
+  ribbon twice (several `sin` each): S1's probe put the dots at about 0.6 ms
+  of its 1.7 ms (the no-dots run), and the Metal pass was not timed apart.
+  An iGPU will be vertex-bound there; the Windows and Linux budget is
+  3.0 ms.
+- Scratch must follow the look, not only the background and the size:
+  Dither's cell and Ferrofluid's grid read it (Metal keys `Targets` by
+  `look.id`). Ferrofluid's render pass derives the grid's span from the
+  field texture's size, so the field and bound textures must be exactly
+  `sizes::ferrofluid_grid`'s sizes, never a pooled larger one.
+- Dither's wave field must be 8-bit UNORM: the composite reconstructs
+  `r + g / 255` and the goldens carry that quantisation.
+
+**Deviations**: the five landed in one commit, not three (all went green in
+the same run). The plan 193 test lives in `metal.rs` at the renderer level
+(`render`, `frame_at`, texture identity, a lit readback), not beside the
+compositor's leg tests, which still pass. No shared file changed.
+
 ### S2: catalogue, wire and the wider block (2026-10-25)
 
 Commit `fe5eb1fc`.
