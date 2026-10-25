@@ -1438,3 +1438,50 @@ describe('Stream Manager soundboard IPC (plan 189 S9)', () => {
     expect(broker.pendingCount).toBe(0)
   })
 })
+
+describe('Stream Manager clip IPC (plan 199)', () => {
+  const clip = {
+    available: true,
+    seconds: 30,
+    longSeconds: 60,
+    shortcutLabel: '⌥⌘C',
+    longShortcutLabel: '⌥⌘M'
+  }
+  const context = { sessionId: 'session-1', available: true, clip }
+
+  it('pushes both clip lengths and both keys in the marker context', () => {
+    for (const payload of [
+      context,
+      { ...context, clip: { available: false, seconds: 30, longSeconds: 60, off: 'switch' } },
+      null
+    ]) {
+      expect(validateElectronEventPayload('comments-window:marker-context', payload)).toEqual(
+        payload
+      )
+      expect(validateElectronInvokeResult('comments-window:marker-context-get', payload)).toEqual(
+        payload
+      )
+    }
+    const { longSeconds: _longSeconds, ...withoutLong } = clip
+    for (const forged of [
+      { ...context, clip: withoutLong },
+      { ...context, clip: { ...clip, longSeconds: '60' } },
+      { ...context, clip: { ...clip, extra: true } }
+    ]) {
+      expect(() => validateElectronEventPayload('comments-window:marker-context', forged)).toThrow()
+    }
+  })
+
+  it('carries a clip length on the relay command, and none for the 30-second clip', () => {
+    for (const command of [
+      { requestId: 'r-30' },
+      { requestId: 'r-60', seconds: 60 },
+      { requestId: 'r-30n', seconds: 30 }
+    ]) {
+      expect(validateElectronInvokeArgs('comments-window:clip-mark', [command])).toEqual([command])
+      expect(validateElectronEventPayload('comments-window:clip-mark-request', command)).toEqual(
+        command
+      )
+    }
+  })
+})

@@ -79,10 +79,15 @@ export interface MarkerContext {
 export interface ClipContext {
   /** The ring holds frames or a recording runs: a press keeps something. */
   available: boolean
-  /** The ring's length, for the words ("the last 0:30"). */
+  /** The 30-second clip's length, for the words ("the last 0:30"). Plan
+   * 199: never the ring's length, which is the minute. */
   seconds: number
-  /** The Save clip key as it reads on this platform ("⌥⌘C"), when bound. */
+  /** Plan 199: the 1-minute clip's length ("the last 1:00"). */
+  longSeconds: number
+  /** The Save a 30-second clip key as it reads on this platform ("⌥⌘C"), when bound. */
   shortcutLabel?: string
+  /** Plan 199: the Save a 1-minute clip key, when bound. */
+  longShortcutLabel?: string
   /** Why a press would keep nothing, when it would: the switch is off, the
    * backend keeps the default off on this computer, or the ring is still
    * starting. The window says it in words. */
@@ -203,7 +208,9 @@ export const markerContextSchema = nullableSchema(
           {
             available: booleanSchema,
             seconds: numberSchema({ integer: true, min: 0, max: 3600 }),
+            longSeconds: numberSchema({ integer: true, min: 0, max: 3600 }),
             shortcutLabel: optionalSchema(stringSchema({ maxLength: 160 })),
+            longShortcutLabel: optionalSchema(stringSchema({ maxLength: 160 })),
             off: optionalSchema(enumSchema(['switch', 'blocked', 'starting', 'idle']))
           },
           strict

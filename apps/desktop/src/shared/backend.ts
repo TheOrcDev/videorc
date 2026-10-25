@@ -1707,6 +1707,15 @@ export interface ReplaySaveAccepted {
   sessionId: string
   /** A save was already running; this press waits behind it. */
   queued?: boolean
+  /** The length this save will take (plan 199): the press's 30 or 60 s,
+   * clamped to the ring, or the longer of the two when the press joined a
+   * queued save. */
+  seconds: number
+}
+
+/** `replay.save` params (plan 199): no `seconds` is today's 30-second clip. */
+export interface ReplaySaveParams {
+  seconds?: ClipLength
 }
 
 /** `replay.saved`: the MP4 is on disk, probed and in Library. */
@@ -1716,7 +1725,7 @@ export interface ReplaySavedEvent {
   /** The Library row. */
   replaySessionId: string
   path: string
-  /** The requested length. */
+  /** The requested length: the press's 30 or 60 s (plan 199), clamped to the ring. */
   seconds: number
   /** What the file holds: shorter than `seconds` while the buffer was filling. */
   coveredSeconds: number
@@ -3598,6 +3607,16 @@ export type * from './session-markers'
 
 export type ClipMarkSource = 'voice' | 'manual'
 
+/** The two clip lengths a press may ask for (plan 199): today's 30-second
+ * clip and the 1-minute clip. The values live in `shared/clip-marks.ts`
+ * (`CLIP_LENGTHS`), mirrored from `replay_buffer::CLIP_LENGTHS`. */
+export type ClipLength = 30 | 60
+
+/** `clip.mark` params (plan 199): no `seconds` is today's 30-second clip. */
+export interface ClipMarkParams {
+  seconds?: ClipLength
+}
+
 /** One persisted clip mark at a recording-file time (plan 068 D6). */
 export interface ClipMark {
   id: string
@@ -3607,6 +3626,9 @@ export interface ClipMark {
   /** The spoken phrase for a voice mark. Omitted, never null. */
   phrase?: string
   createdAt: string
+  /** How far back the moment reaches (plan 199 D8): the press's clip
+   * length. Absent on every mark made before plan 199, which reads as 30 s. */
+  lookbackSeconds?: number
 }
 
 /** `clip.marked` event and the `clip.mark` reply. `saved: false` carries a
@@ -3622,6 +3644,8 @@ export interface ClipMarkedEvent {
 /** Stream Manager → main renderer: mark a clip now (plan 068 D6). */
 export interface ClipMarkCommand {
   requestId: string
+  /** Plan 199: the clip's length; absent is today's 30 s. */
+  seconds?: ClipLength
 }
 
 /** Show who followed (plan 071, S2): reconnect a platform with its follow

@@ -1,5 +1,38 @@
-import type { ClipMarkedEvent } from './backend'
+import type { ClipLength, ClipMarkParams, ClipMarkedEvent } from './backend'
 import { formatTimecode } from './timecode'
+
+export type { ClipLength } from './backend'
+
+/** Plan 199: a press that names no length saves today's 30 s. Mirrors
+ * `replay_buffer::DEFAULT_CLIP_SECONDS`. */
+export const DEFAULT_CLIP_SECONDS = 30 satisfies ClipLength
+/** Plan 199: the 1-minute clip. Mirrors `replay_buffer::LONG_CLIP_SECONDS`. */
+export const LONG_CLIP_SECONDS = 60 satisfies ClipLength
+/** The two lengths a press may ask for. Mirrors `replay_buffer::CLIP_LENGTHS`. */
+export const CLIP_LENGTHS: readonly ClipLength[] = [DEFAULT_CLIP_SECONDS, LONG_CLIP_SECONDS]
+/** The refusal for any other length. Mirrors
+ * `replay_buffer::INVALID_CLIP_LENGTH_CODE` and `INVALID_CLIP_LENGTH_MESSAGE`. */
+export const INVALID_CLIP_LENGTH_CODE = 'invalid-clip-length'
+export const INVALID_CLIP_LENGTH_MESSAGE = 'A clip is 30 seconds or 1 minute.'
+
+export function isClipLength(value: unknown): value is ClipLength {
+  return value === DEFAULT_CLIP_SECONDS || value === LONG_CLIP_SECONDS
+}
+
+/** A length that rode a relay or a remote intent: absent (or null) is no
+ * length, which is today's 30 s; anything but 30 or 60 is refused with the
+ * backend's own sentence. */
+export function parseClipLength(value: unknown): ClipLength | undefined {
+  if (value === undefined || value === null) return undefined
+  if (isClipLength(value)) return value
+  throw new Error(INVALID_CLIP_LENGTH_MESSAGE)
+}
+
+/** `clip.mark` params for a press: none at all without a length, so an
+ * existing caller sends exactly what it sent before plan 199. */
+export function clipMarkParams(seconds?: ClipLength): ClipMarkParams | undefined {
+  return seconds === undefined ? undefined : { seconds }
+}
 
 /** Recording-file time as the one timecode: m:ss, or h:mm:ss from one hour (plan 068 D6, plan 174 S1.4). */
 export function formatClipMarkClock(atSeconds: number): string {

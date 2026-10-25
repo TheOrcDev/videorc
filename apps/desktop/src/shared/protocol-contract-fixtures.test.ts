@@ -237,6 +237,8 @@ interface HighRiskContractFixtures {
     markedSaved: ClipMarkedEvent
     markedUnsaved: ClipMarkedEvent
     listParams: BackendRpcParams<'clip.marks.list'>
+    markParams: BackendRpcParams<'clip.mark'>
+    markParamsLong: BackendRpcParams<'clip.mark'>
     marks: ClipMark[]
   }
   replay: {
@@ -248,6 +250,8 @@ interface HighRiskContractFixtures {
     stateError: ReplayStateEvent
     saveAccepted: ReplaySaveAccepted
     saveAcceptedMinimal: ReplaySaveAccepted
+    saveParams: BackendRpcParams<'replay.save'>
+    saveParamsLong: BackendRpcParams<'replay.save'>
     savedEvent: ReplaySavedEvent
     saveFailedEvent: ReplaySaveFailedEvent
   }
@@ -1108,6 +1112,37 @@ describe('shared high-risk protocol fixture', () => {
       fixtures.clip.marks
     )
     expect(fixtures.clip.marks[1]).not.toHaveProperty('phrase')
+    // Plan 199 D8: a mark made before the plan has no length; a 1-min press
+    // carries its 60.
+    expect(fixtures.clip.marks[0]).not.toHaveProperty('lookbackSeconds')
+    expect(fixtures.clip.marks[2]?.lookbackSeconds).toBe(60)
+    expect(() =>
+      validateBackendRpcResult('clip.marks.list', [
+        { ...fixtures.clip.marks[0], lookbackSeconds: null }
+      ])
+    ).toThrow()
+  })
+
+  it('keeps the clip length optional on clip.mark and replay.save (plan 199)', () => {
+    // Every older caller sends no params at all.
+    expect(validateBackendRpcParams('clip.mark', undefined)).toBeUndefined()
+    expect(validateBackendRpcParams('replay.save', undefined)).toBeUndefined()
+    for (const [method, params] of [
+      ['clip.mark', fixtures.clip.markParams],
+      ['clip.mark', fixtures.clip.markParamsLong],
+      ['replay.save', fixtures.replay.saveParams],
+      ['replay.save', fixtures.replay.saveParamsLong]
+    ] as const) {
+      expect(validateBackendRpcParams(method, params)).toStrictEqual(params)
+    }
+    expect(fixtures.clip.markParams).toEqual({})
+    expect(fixtures.clip.markParamsLong).toEqual({ seconds: 60 })
+    expect(validateBackendRpcParams('clip.mark', { seconds: 30 })).toEqual({ seconds: 30 })
+    for (const method of ['clip.mark', 'replay.save'] as const) {
+      for (const params of [{ seconds: 45 }, { seconds: '60' }, { seconds: null }, { other: 1 }]) {
+        expect(() => validateBackendRpcParams(method, params), JSON.stringify(params)).toThrow()
+      }
+    }
   })
 
   it('keeps the replay buffer request, status mark, state and save envelopes identical across languages (plan 181)', () => {
@@ -1129,6 +1164,12 @@ describe('shared high-risk protocol fixture', () => {
     for (const accepted of [replay.saveAccepted, replay.saveAcceptedMinimal]) {
       expect(validateBackendRpcResult('replay.save', accepted)).toStrictEqual(accepted)
     }
+    // Plan 199: the accepted save always names its length.
+    expect(replay.saveAcceptedMinimal.seconds).toBe(30)
+    expect(replay.saveAccepted.seconds).toBe(60)
+    const withoutSeconds: Partial<ReplaySaveAccepted> = { ...replay.saveAcceptedMinimal }
+    delete withoutSeconds.seconds
+    expect(() => validateBackendRpcResult('replay.save', withoutSeconds)).toThrow()
     expect(validateBackendEventPayload('replay.saved', replay.savedEvent)).toStrictEqual(
       replay.savedEvent
     )

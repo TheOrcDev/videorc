@@ -72,6 +72,7 @@ import type {
   CohostReportSavedEvent,
   CohostSessionReport,
   ClipMark,
+  ClipMarkParams,
   ClipMarkedEvent,
   ClipMoment,
   CleanCutGetResult,
@@ -563,11 +564,15 @@ export interface BackendRpcMethodMap {
   'session.marker.get': BackendRpcDefinition<MarkerParams, MarkerLookup>
   'session.marker.rename': BackendRpcDefinition<RenameMarkerParams, SessionMarker>
   'session.marker.delete': BackendRpcDefinition<MarkerParams, MarkerChanged>
-  'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
+  // Plan 199: an optional `{ seconds?: 30 | 60 }`; none is today's 30 s.
+  'clip.mark': BackendRpcDefinition<ClipMarkParams | undefined, ClipMarkedEvent>
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
   // --- Replay buffer (plan 181) ---
   'replay.status': BackendRpcDefinition<undefined, import('./backend').ReplayStateEvent>
-  'replay.save': BackendRpcDefinition<undefined, import('./backend').ReplaySaveAccepted>
+  'replay.save': BackendRpcDefinition<
+    import('./backend').ReplaySaveParams | undefined,
+    import('./backend').ReplaySaveAccepted
+  >
   // --- end replay buffer (plan 181) ---
 }
 
@@ -835,10 +840,19 @@ const replaySaveAcceptedSchema = objectSchema(
   {
     saveId: boundedString,
     sessionId: boundedString,
-    queued: optionalSchema(booleanSchema)
+    queued: optionalSchema(booleanSchema),
+    // Plan 199: the length this save takes, always present.
+    seconds: numberSchema({ integer: true, min: 0, max: 3600 })
   },
   { allowUnknown: false }
 ) as RuntimeSchema<import('./backend').ReplaySaveAccepted>
+// Plan 199: a press asks for 30 or 60 seconds, or names no length (today's
+// 30 s). `clip.mark` and `replay.save` share the shape; absent params stay
+// valid for every older caller.
+const clipLengthSchema = unionSchema([literalSchema(30), literalSchema(60)])
+const clipLengthParamsSchema = optionalSchema(
+  objectSchema({ seconds: optionalSchema(clipLengthSchema) }, { allowUnknown: false })
+)
 const replaySavedEventSchema = objectSchema(
   {
     saveId: boundedString,
@@ -3531,7 +3545,9 @@ const clipMarkSchema = objectSchema(
     atSeconds: numberSchema({ min: 0, max: 1_000_000_000 }),
     source: clipMarkSourceSchema,
     phrase: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
-    createdAt: timestamp
+    createdAt: timestamp,
+    // Plan 199 D8: the press's clip length; absent on older marks.
+    lookbackSeconds: optionalSchema(numberSchema({ integer: true, min: 1, max: 3600 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMark>
@@ -5014,14 +5030,14 @@ const runtimeContracts = {
   'session.marker.get': { params: markerParamsSchema, result: markerLookupSchema },
   'session.marker.rename': { params: renameMarkerParamsSchema, result: sessionMarkerSchema },
   'session.marker.delete': { params: markerParamsSchema, result: markerChangedSchema },
-  'clip.mark': { params: undefinedSchema, result: clipMarkedEventSchema },
+  'clip.mark': { params: clipLengthParamsSchema, result: clipMarkedEventSchema },
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(clipMarkSchema, { maxLength: 10_000 })
   },
   // --- Replay buffer (plan 181) ---
   'replay.status': { params: undefinedSchema, result: replayStateEventSchema },
-  'replay.save': { params: undefinedSchema, result: replaySaveAcceptedSchema },
+  'replay.save': { params: clipLengthParamsSchema, result: replaySaveAcceptedSchema },
   // --- end replay buffer (plan 181) ---
   'cohost.report.get': { params: cohostReportGetParamsSchema, result: cohostReportPayloadSchema },
   'cohost.report.latest': {

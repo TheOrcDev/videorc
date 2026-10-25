@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  CLIP_LENGTHS,
   CLIP_MARK_CLIP_SAVED_REASON,
   CLIP_MARK_IN_REPORT,
+  DEFAULT_CLIP_SECONDS,
+  INVALID_CLIP_LENGTH_CODE,
+  INVALID_CLIP_LENGTH_MESSAGE,
+  LONG_CLIP_SECONDS,
+  clipMarkParams,
+  isClipLength,
+  parseClipLength,
   clipLengthWords,
   clipMarkKeptSomething,
   clipMarkSavedClip,
@@ -100,5 +108,35 @@ describe('clip marked toast', () => {
       title: 'Clips are off, and nothing is recording.',
       description: 'Turn on Keep the last seconds on the Output page, or start a recording.'
     })
+  })
+})
+
+describe('clip lengths (plan 199)', () => {
+  it('mirrors the backend: 30 s by default, 1 min beside it, nothing else', () => {
+    expect(DEFAULT_CLIP_SECONDS).toBe(30)
+    expect(LONG_CLIP_SECONDS).toBe(60)
+    expect(CLIP_LENGTHS).toEqual([30, 60])
+    expect(INVALID_CLIP_LENGTH_CODE).toBe('invalid-clip-length')
+    expect(INVALID_CLIP_LENGTH_MESSAGE).toBe('A clip is 30 seconds or 1 minute.')
+    for (const value of CLIP_LENGTHS) expect(isClipLength(value)).toBe(true)
+    for (const value of [0, 15, 45, 120, '30', null, undefined, 30.5]) {
+      expect(isClipLength(value)).toBe(false)
+    }
+  })
+
+  it('reads a relayed length: none is the 30-second clip, an odd one is refused in words', () => {
+    expect(parseClipLength(undefined)).toBeUndefined()
+    expect(parseClipLength(null)).toBeUndefined()
+    expect(parseClipLength(30)).toBe(30)
+    expect(parseClipLength(60)).toBe(60)
+    for (const value of [45, '60', 0, {}]) {
+      expect(() => parseClipLength(value)).toThrow('A clip is 30 seconds or 1 minute.')
+    }
+  })
+
+  it('sends no params for a press without a length, exactly as before', () => {
+    expect(clipMarkParams()).toBeUndefined()
+    expect(clipMarkParams(30)).toEqual({ seconds: 30 })
+    expect(clipMarkParams(60)).toEqual({ seconds: 60 })
   })
 })

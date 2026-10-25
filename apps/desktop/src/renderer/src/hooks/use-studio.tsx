@@ -11,6 +11,8 @@ import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { acceleratorLabel } from '../../../shared/accelerator-format'
 import {
+  DEFAULT_CLIP_SECONDS,
+  LONG_CLIP_SECONDS,
   clipMarkKeptSomething,
   clipMarkSavedClip,
   clipMarkedToast
@@ -4146,7 +4148,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           : undefined,
       clip: {
         available: clipAvailable,
-        seconds: replayState.seconds,
+        // Plan 199: the two clip lengths, never the ring's (the minute).
+        seconds: DEFAULT_CLIP_SECONDS,
+        longSeconds: LONG_CLIP_SECONDS,
         ...(clipShortcut
           ? { shortcutLabel: acceleratorLabel(clipShortcut, runtimeInfo?.platform) }
           : {}),
@@ -4163,7 +4167,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     recording.state,
     recording.replayOnly,
     replayBlockedReason,
-    replayState.seconds,
     replayState.state,
     runtimeInfo?.platform,
     settings.globalShortcuts?.clipMark,
