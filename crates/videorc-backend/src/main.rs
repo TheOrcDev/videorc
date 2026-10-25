@@ -13477,19 +13477,23 @@ async fn handle_text_message_with_role(
         }
         // Plan 199: both take an optional `{ seconds?: 30 | 60 }`. Older
         // callers send no params (or null): that is `{}`, today's 30 s.
-        "clip.mark" => match serde_json::from_value::<protocol::ClipMarkParams>(
-            if command.params.is_null() {
+        "clip.mark" => {
+            match serde_json::from_value::<protocol::ClipMarkParams>(if command.params.is_null() {
                 serde_json::json!({})
             } else {
                 command.params
-            },
-        ) {
-            Ok(params) => match clip_marks::mark_manual(state, params.seconds).await {
-                Ok(event) => ServerResponse::ok(command.id, event),
-                Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
+            }) {
+                Ok(params) => match clip_marks::mark_manual(state, params.seconds).await {
+                    Ok(event) => ServerResponse::ok(command.id, event),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "replay.status" => ServerResponse::ok(command.id, replay_buffer::snapshot(state)),
         "replay.save" => match serde_json::from_value::<protocol::ReplaySaveParams>(
             if command.params.is_null() {

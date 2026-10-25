@@ -1720,7 +1720,10 @@ mod runtime_tests {
             "replay-starting"
         );
         drop(guard);
-        assert_eq!(request_save(&state, None, None).unwrap_err().code, "replay-off");
+        assert_eq!(
+            request_save(&state, None, None).unwrap_err().code,
+            "replay-off"
+        );
     }
 
     /// Plan 199: a press names its length, a press that joins a queued save

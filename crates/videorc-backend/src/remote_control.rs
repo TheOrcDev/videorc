@@ -429,11 +429,15 @@ mod tests {
             serde_json::from_str::<RemoteIntent>(r#"{"kind":"clipMark","seconds":null}"#).unwrap(),
             RemoteIntent::ClipMark { seconds: None }
         );
-        let long = serde_json::from_str::<RemoteIntent>(r#"{"kind":"clipMark","seconds":60}"#)
-            .unwrap();
+        let long =
+            serde_json::from_str::<RemoteIntent>(r#"{"kind":"clipMark","seconds":60}"#).unwrap();
         assert_eq!(long, RemoteIntent::ClipMark { seconds: Some(60) });
         assert!(long.validate().is_ok());
-        assert_eq!(long.debounce_kind(), "clip", "both lengths share one bucket");
+        assert_eq!(
+            long.debounce_kind(),
+            "clip",
+            "both lengths share one bucket"
+        );
         assert_eq!(
             serde_json::to_value(&long).unwrap(),
             serde_json::json!({ "kind": "clipMark", "seconds": 60 })
