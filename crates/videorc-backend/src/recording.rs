@@ -3662,15 +3662,27 @@ async fn start_session_with_timeline(
     let session_id = Uuid::new_v4().to_string();
     timeline.set_session_id(&session_id);
     wait_for_encoder_bridge_start_admission(&session_id, Duration::from_secs(2)).await?;
+    timeline.mark(RecordingStartPhase::BridgeAdmission);
 
     // Plan 181: the default ring's capture is light to the FFmpeg work
     // coordinator, so posters, quality checks and repairs run beside it and
     // its re-arm after every Stop never cancels a maintenance job.
+    let maintenance_running_before_permit = state.ffmpeg_work.snapshot().maintenance_running;
     let capture_permit = if replay_only {
         state.ffmpeg_work.begin_light_capture_when_available().await
     } else {
         state.ffmpeg_work.begin_capture_when_available().await
     };
+    if maintenance_running_before_permit && !replay_only {
+        // Plan 195 F3: on a weak CPU a post-recording quality check runs for
+        // minutes, and Record waits for it to cancel; the timeline mark below
+        // shows how long, this line says why.
+        tracing::info!(
+            session = %session_id,
+            "A recording maintenance job was running when Record asked for the FFmpeg work permit; it was asked to cancel"
+        );
+    }
+    timeline.mark(RecordingStartPhase::FfmpegWorkPermit);
     validate_outputs(&params)?;
     if let Some(scene) = params.scene.as_ref()
         && let Err(message) = validate_scene_background(scene)
@@ -3695,6 +3707,9 @@ async fn start_session_with_timeline(
     };
     #[cfg(not(target_os = "windows"))]
     let recordable_video_notice: Option<String> = None;
+    // Marked on every platform so the start timeline keeps one phase order;
+    // only Windows spends time here.
+    timeline.mark(RecordingStartPhase::RecordableVideoProbe);
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
     if params.output.record_enabled && !replay_only {
@@ -3876,6 +3891,7 @@ async fn start_session_with_timeline(
     }
 
     let recording_preview_generation = stop_idle_live_preview_for_recording(state.clone()).await;
+    timeline.mark(RecordingStartPhase::PreviewStop);
 
     let mut startup_resources = CaptureStartupResources::default();
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &params).await;

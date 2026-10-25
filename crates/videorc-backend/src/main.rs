@@ -6180,6 +6180,56 @@ fn websocket_command_method(text: &str) -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
+impl WebSocketIsolatedCommandLaneKind {
+    /// The lane's name as the transport diagnostics report it.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Observation => "observation",
+            Self::AccountMaintenance => "account",
+            Self::AssetImport => "assetImport",
+            Self::DurableChat => "durableChat",
+            Self::LiveControl => "liveControl",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// The isolated lane a queued command belongs to, by its method.
+fn websocket_lane_label(text: &str) -> &'static str {
+    websocket_isolated_command_lane(text)
+        .map_or("isolated", WebSocketIsolatedCommandLaneKind::label)
+}
+
+/// Plan 195 S1 (F4): a command that expired in a lane used to leave only a
+/// counter behind, so a support bundle could not say which feature "Videorc
+/// was busy" for. One line names the lane, the method, the queue age and the
+/// cause. Never the params: they carry chat text, file paths and keys.
+fn expired_before_dispatch_log_line(
+    lane: &str,
+    text: &str,
+    queued_for: Option<Duration>,
+    cause: &str,
+) -> String {
+    let queued =
+        queued_for.map_or_else(|| "unknown".to_string(), |age| age.as_millis().to_string());
+    format!(
+        "Command expired before dispatch: lane={lane} method={} queuedMs={queued} cause={cause}",
+        websocket_command_method(text)
+    )
+}
+
+fn warn_command_expired_before_dispatch(
+    lane: &str,
+    text: &str,
+    queued_for: Option<Duration>,
+    cause: &str,
+) {
+    tracing::warn!(
+        "{}",
+        expired_before_dispatch_log_line(lane, text, queued_for, cause)
+    );
+}
+
 /// A stateful mutation that outlives this budget gets named in the log — the
 /// 2026-08-27 live incident produced 30 seconds of silence because the stuck
 /// command was the RUNNING stateful mutation, invisible to the queue-age
@@ -6649,12 +6699,19 @@ async fn run_websocket_command_lane_worker(
                 let rejected = pending.pop_front().expect("lane front exists");
                 let WebSocketQueuedLaneCommand {
                     command_id,
+                    text,
                     queue_ticket,
                     _admission,
                     ..
                 } = rejected;
                 metrics.record_dispatch(queue_ticket);
                 metrics.record_expired_before_dispatch();
+                warn_command_expired_before_dispatch(
+                    websocket_lane_label(&text),
+                    &text,
+                    Some(queue_ticket.queued_for(std::time::Instant::now())),
+                    "backend shutdown",
+                );
                 let response = ServerResponse::error(
                     command_id,
                     "command-expired-before-dispatch",
@@ -6674,12 +6731,19 @@ async fn run_websocket_command_lane_worker(
                 let expired = pending.pop_front().expect("lane front exists");
                 let WebSocketQueuedLaneCommand {
                     command_id,
+                    text,
                     queue_ticket,
                     _admission,
                     ..
                 } = expired;
                 metrics.record_dispatch(queue_ticket);
                 metrics.record_expired_before_dispatch();
+                warn_command_expired_before_dispatch(
+                    websocket_lane_label(&text),
+                    &text,
+                    Some(queue_ticket.queued_for(std::time::Instant::now())),
+                    "lane queue deadline",
+                );
                 let response = ServerResponse::error(
                     command_id,
                     "command-expired-before-dispatch",
@@ -6710,6 +6774,7 @@ async fn run_websocket_command_lane_worker(
                     command_id,
                     text,
                     dispatch_deadline,
+                    queue_ticket,
                     dispatch_fence,
                     _admission,
                     ..
@@ -6729,6 +6794,16 @@ async fn run_websocket_command_lane_worker(
                 };
                 if !fence_ready {
                     lane_metrics.record_expired_before_dispatch();
+                    warn_command_expired_before_dispatch(
+                        websocket_lane_label(&text),
+                        &text,
+                        Some(queue_ticket.queued_for(std::time::Instant::now())),
+                        if order_ready {
+                            "reconciliation fence"
+                        } else {
+                            "live-control order"
+                        },
+                    );
                     let response = ServerResponse::error(
                         command_id,
                         "command-expired-before-dispatch",
@@ -6749,6 +6824,12 @@ async fn run_websocket_command_lane_worker(
                 // accepted work cannot start inside the recycling generation.
                 if command_state.process_shutdown_requested() {
                     lane_metrics.record_expired_before_dispatch();
+                    warn_command_expired_before_dispatch(
+                        websocket_lane_label(&text),
+                        &text,
+                        Some(queue_ticket.queued_for(std::time::Instant::now())),
+                        "backend shutdown at dispatch",
+                    );
                     let response = ServerResponse::error(
                         command_id,
                         "command-expired-before-dispatch",
@@ -6937,12 +7018,19 @@ async fn run_websocket_command_lane_worker(
                     let expired = pending.pop_front().expect("expired lane front exists");
                     let WebSocketQueuedLaneCommand {
                         command_id,
+                        text,
                         queue_ticket,
                         _admission,
                         ..
                     } = expired;
                     metrics.record_dispatch(queue_ticket);
                     metrics.record_expired_before_dispatch();
+                    warn_command_expired_before_dispatch(
+                        websocket_lane_label(&text),
+                        &text,
+                        Some(queue_ticket.queued_for(std::time::Instant::now())),
+                        "lane queue deadline",
+                    );
                     let response = ServerResponse::error(
                         command_id,
                         "command-expired-before-dispatch",
@@ -7079,6 +7167,7 @@ async fn run_websocket_command_dispatcher(
         command_metrics.record_dequeue_oldest();
         let WebSocketAcceptedCommand {
             text,
+            _accepted_at,
             dispatch_deadline,
             operator_mutation,
             live_control_order,
@@ -7087,6 +7176,12 @@ async fn run_websocket_command_dispatcher(
             ..
         } = accepted;
         if dispatch_deadline <= tokio::time::Instant::now() {
+            warn_command_expired_before_dispatch(
+                "connection",
+                &text,
+                Some(tokio::time::Instant::now().saturating_duration_since(_accepted_at)),
+                "connection queue deadline",
+            );
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -7249,6 +7344,7 @@ async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
             _session_start,
         } = command;
         if dispatch_deadline <= tokio::time::Instant::now() {
+            warn_command_expired_before_dispatch("ordered", &text, None, "ordered queue deadline");
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -7264,6 +7360,7 @@ async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
             continue;
         }
         if !wait_for_websocket_dispatch_fence(dispatch_fence, dispatch_deadline).await {
+            warn_command_expired_before_dispatch("ordered", &text, None, "reconciliation fence");
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -7279,6 +7376,7 @@ async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
             continue;
         }
         if state.process_shutdown_requested() {
+            warn_command_expired_before_dispatch("ordered", &text, None, "backend shutdown");
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -14430,6 +14528,38 @@ mod tests {
         assert!(
             state.process_shutdown_requested(),
             "losing the terminal-outcome owner must remain fail closed"
+        );
+    }
+
+    #[test]
+    fn expired_before_dispatch_log_names_lane_method_and_age_never_params() {
+        // Plan 195 S1 (F4): the bundle can say which feature "Videorc was
+        // busy" for. Params never reach the log.
+        let text = r#"{"id":"c-1","method":"banners.show","params":{"text":"SECRET-BANNER"}}"#;
+        let line = expired_before_dispatch_log_line(
+            websocket_lane_label(text),
+            text,
+            Some(Duration::from_millis(2_345)),
+            "lane queue deadline",
+        );
+        assert_eq!(
+            line,
+            "Command expired before dispatch: lane=liveControl method=banners.show queuedMs=2345 cause=lane queue deadline"
+        );
+        assert!(!line.contains("SECRET"), "{line}");
+        let line =
+            expired_before_dispatch_log_line("ordered", "not json", None, "backend shutdown");
+        assert_eq!(
+            line,
+            "Command expired before dispatch: lane=ordered method=unknown queuedMs=unknown cause=backend shutdown"
+        );
+        assert_eq!(
+            websocket_lane_label(r#"{"id":"c-2","method":"liveChat.send","params":{}}"#),
+            "durableChat"
+        );
+        assert_eq!(
+            websocket_lane_label(r#"{"id":"c-3","method":"session.start","params":{}}"#),
+            "isolated"
         );
     }
 
