@@ -292,7 +292,6 @@ import {
   NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
-import { replayBufferShouldRestartForSources } from '@/lib/replay-buffer-reconcile'
 import {
   mergePreviewSurfaceHostStatus,
   nativePreviewFramePollingRequestKey,
@@ -2441,6 +2440,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const setReplayArmedRef = useRef<(armed: boolean) => void>(() => {})
   const stopReplayBufferRef = useRef<() => Promise<void>>(async () => {})
   const scheduleReplayReconcileRef = useRef<(delayMs?: number) => void>(() => {})
+  const rearmReplayAfterErrorRef = useRef<() => void>(() => {})
+  // Whether the last session to run was the buffer-only ring: its own end
+  // never re-arms a ring that died (no retry loop on a failing session).
+  const replayLastSessionRingOnlyRef = useRef(false)
   // Held while a layout transaction stops the default ring to change the
   // canvas orientation, so the reconcile does not re-arm it in the old
   // orientation before the new layout lands.
@@ -7361,15 +7364,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Treat the backend's terminal state as authoritative even when it
         // races the initial snapshot. Dedupe in publishRecordingFailure keeps
         // repeated status events to one persistent notice.
-        if (status.state === 'failed') {
+        // A buffer-only Clips ring that died is not a recording: the
+        // replay.state error says "Clips stopped" instead.
+        if (status.state === 'failed' && !sessionIsReplayOnly(status)) {
           void publishRecordingFailure(status)
         }
         // Plan 181: a session ended or began; the switch decides what the
         // ring does next (re-arm after a recording, stop after the switch).
         // A session that ran and ended is proof a start can work: the
         // failed-start count begins again. A refused start's Idle is not
-        // (plan 198), or the give-up limit never trips.
+        // (plan 198), or the give-up limit never trips. A ring that died
+        // with its own session comes back after the next recording or livestream.
+        if (isActiveRecordingState(status.state))
+          replayLastSessionRingOnlyRef.current = status.replayOnly === true
         if (ranToIdle) replayFailedStartsRef.current = 0
+        if (
+          (status.state === 'idle' || status.state === 'failed') &&
+          !replayLastSessionRingOnlyRef.current
+        )
+          rearmReplayAfterErrorRef.current()
         scheduleReplayReconcile()
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the
@@ -15615,6 +15628,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the record block clears, it tries again from a clean count.
   useEffect(() => {
     replayFailedStartsRef.current = 0
+    rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
   }, [recordBlockedReason, scheduleReplayReconcile])
   // A source change while only the buffer-only session runs is an idle
@@ -15634,16 +15648,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (replaySourcesRef.current === replaySources) return
     replaySourcesRef.current = replaySources
     replayFailedStartsRef.current = 0
-    if (
-      replayBufferShouldRestartForSources({
-        recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
-        recordingState: recordingRef.current.state
-      })
-    ) {
-      void stopReplayBuffer().then(() => scheduleReplayReconcile())
-      return
-    }
-    scheduleReplayReconcile()
+    rearmReplayAfterErrorRef.current()
+    void import('@/lib/replay-buffer-reconcile').then(({ replayBufferShouldRestartForSources }) => {
+      if (
+        replayBufferShouldRestartForSources({
+          recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
+          recordingState: recordingRef.current.state
+        })
+      ) {
+        void stopReplayBuffer().then(() => scheduleReplayReconcile())
+        return
+      }
+      scheduleReplayReconcile()
+    })
   }, [replaySources, scheduleReplayReconcile, stopReplayBuffer])
   // Settings that shape the session restart a buffer-only ring: the Output
   // quality, the canvas orientation and the ring's length. A recording or
@@ -15674,6 +15691,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [scheduleReplayReconcile]
   )
   setReplayArmedRef.current = setReplayArmed
+
+  // A ring that died with its session stays off (the switch still on) until
+  // the user's next move: a session that ends, a source change, the switch.
+  const rearmReplayAfterError = useCallback((): void => {
+    void import('@/lib/replay-buffer-reconcile').then(({ replayShouldRearmAfterError }) => {
+      if (
+        !replayShouldRearmAfterError({
+          armed: replayArmedRef.current,
+          replayState: replayStateRef.current.state,
+          switchOn: captureConfigRef.current.replayBuffer.enabled,
+          blocked: replayBlockedReasonRef.current !== null
+        })
+      )
+        return
+      replayArmedRef.current = true
+      setReplayArmedState(true)
+      scheduleReplayReconcile()
+    })
+  }, [scheduleReplayReconcile])
+  rearmReplayAfterErrorRef.current = rearmReplayAfterError
 
   // The one switch (Output → Clips → Keep the last seconds): persisted as
   // the user's explicit choice, so a default the backend refused (the
