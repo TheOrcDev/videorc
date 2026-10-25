@@ -57,6 +57,15 @@ describe('replayBufferReconcileAction (plan 181 S4)', () => {
     expect(replayBufferReconcileAction({ ...idle, armed: false, replayState: 'error' })).toBeNull()
     // The switch, a source change or a session's end armed it again: start as from off.
     expect(replayBufferReconcileAction({ ...idle, replayState: 'error' })).toBe('start')
+    // The ring's own session ends 'failed', not 'idle': that is over too.
+    expect(
+      replayBufferReconcileAction({
+        ...idle,
+        replayState: 'error',
+        recordingState: 'failed',
+        recordingReplayOnly: true
+      })
+    ).toBe('start')
     expect(
       replayBufferReconcileAction({ ...idle, replayState: 'error', recordingState: 'recording' })
     ).toBeNull()

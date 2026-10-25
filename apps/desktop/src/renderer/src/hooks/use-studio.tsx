@@ -7357,7 +7357,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Treat the backend's terminal state as authoritative even when it
         // races the initial snapshot. Dedupe in publishRecordingFailure keeps
         // repeated status events to one persistent notice.
-        if (status.state === 'failed') {
+        // A buffer-only Clips ring that died is not a recording: the
+        // replay.state error says "Clips stopped" instead.
+        if (status.state === 'failed' && !sessionIsReplayOnly(status)) {
           void publishRecordingFailure(status)
         }
         // Plan 181: a session ended or began; the switch decides what the
@@ -7367,10 +7369,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // session comes back after the next recording or livestream.
         if (isActiveRecordingState(status.state))
           replayLastSessionRingOnlyRef.current = status.replayOnly === true
-        if (status.state === 'idle') {
-          replayFailedStartsRef.current = 0
-          if (!replayLastSessionRingOnlyRef.current) rearmReplayAfterErrorRef.current()
-        }
+        if (status.state === 'idle') replayFailedStartsRef.current = 0
+        if (
+          (status.state === 'idle' || status.state === 'failed') &&
+          !replayLastSessionRingOnlyRef.current
+        )
+          rearmReplayAfterErrorRef.current()
         scheduleReplayReconcile()
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the

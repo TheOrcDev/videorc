@@ -42,7 +42,8 @@ export function replayBufferReconcileAction(input: ReplayReconcileInput): Replay
       // A ring that died with its session ('error') disarms the switch; once
       // something arms it again (below), it starts like a ring that is off.
       (input.replayState === 'off' || input.replayState === 'error') &&
-      input.recordingState === 'idle' &&
+      // A failed session is over too (a ring that died ends 'failed').
+      (input.recordingState === 'idle' || input.recordingState === 'failed') &&
       !input.startPending &&
       !input.stopPending &&
       !input.replayStartInFlight
