@@ -490,6 +490,9 @@ pub struct FinishedSourceIsoRole {
     pub end_reason: Option<String>,
     pub expect_audio: bool,
     pub muxer_exit_code: Option<i32>,
+    /// The supervisor already emitted `HEALTH_ROLE_FAILED` for `outcome`'s
+    /// reason while the take ran: one event per role per take.
+    pub failure_reported: bool,
 }
 
 /// Inputs shared by ISO construction and the Combined startup barrier.
@@ -1097,6 +1100,15 @@ async fn supervise_role(
     let mut failure = None;
     let mut end_reason = None;
     let mut ended_at = None;
+    // Plan 198: the recovery latch is process-global and outlives sessions.
+    // An incident already latched when this take armed is not a failure of
+    // the take (Combined records the same source regardless); only a new
+    // incident that exhausts recovery may end this role's file.
+    let armed_recovery_epoch = state
+        .capture_recovery
+        .lock()
+        .await
+        .terminal_incident_epoch();
     let mut tick = tokio::time::interval(Duration::from_millis(10));
     loop {
         tick.tick().await;
@@ -1193,10 +1205,9 @@ async fn supervise_role(
                 RecordingRole::Combined => None,
             };
             let terminal = source_key.as_ref().is_some_and(|key| {
-                state
-                    .capture_recovery
-                    .try_lock()
-                    .is_ok_and(|recovery| recovery.source_failed_after_recovery(key))
+                state.capture_recovery.try_lock().is_ok_and(|recovery| {
+                    recovery.source_failed_after_recovery_since(key, armed_recovery_epoch)
+                })
             });
             if terminal {
                 failure = Some(format!(
@@ -1237,6 +1248,9 @@ async fn supervise_role(
             reason,
         );
     }
+    // Later steps only fill an empty failure, so a live report stays the
+    // role's final reason and the commit does not repeat it.
+    let failure_reported = failure.is_some();
     #[cfg(test)]
     test_trace_teardown(session_id, writer.role, "boundary-observed");
     let elapsed = epoch.get().map(|epoch| {
@@ -1451,6 +1465,7 @@ async fn supervise_role(
         end_reason,
         expect_audio: role_audio_tap(&taps, role).is_some(),
         muxer_exit_code,
+        failure_reported,
     }
 }
 
@@ -1660,8 +1675,8 @@ pub fn commit_finished_source_iso_roles(
                 "failed",
                 crate::recording_finalization::FINALIZATION_STATE_FAILED,
                 Some(format!(
-                    "The {} file was missing after Stop.",
-                    role.role.as_str()
+                    "{} file was missing after Stop.",
+                    role.role.title_suffix()
                 )),
             ),
             (Err(reason), _) => (
@@ -1711,13 +1726,23 @@ pub fn commit_finished_source_iso_roles(
             continue;
         }
         if let Some(reason) = finalization_error {
-            let _ = crate::recording::emit_health_event(
-                state,
-                Some(combined_session_id),
-                crate::protocol::HealthLevel::Warn,
-                HEALTH_ROLE_FAILED,
-                &reason,
-            );
+            if !(role.failure_reported && role.outcome.is_err()) {
+                // The event rides the Combined session, so it names its file
+                // (the Studio's toast reads the role from it).
+                let suffix = role.role.title_suffix();
+                let message = if reason.starts_with(suffix) {
+                    reason
+                } else {
+                    format!("{suffix} file: {reason}")
+                };
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(combined_session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    HEALTH_ROLE_FAILED,
+                    &message,
+                );
+            }
             continue;
         }
         let output_ownership = crate::storage::capture_session_file_bound_identity(&role.mkv_path)

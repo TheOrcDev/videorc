@@ -81,7 +81,12 @@ import {
   finalizingBadgeLabel,
   isFinalizingSession
 } from '@/lib/session-finalization'
-import { recordingRoleLabel, recordingRoleRowNote } from '@/lib/separate-source-recordings-view'
+import {
+  recordingRoleLabel,
+  recordingRoleRowNote,
+  SEPARATE_FILE_NOTHING_TO_EXPORT,
+  separateFileStopped
+} from '@/lib/separate-source-recordings-view'
 import { dayLabel, durationMsLabel, formatBytes, plural } from '@/lib/format'
 import { openCleanCut } from '@/lib/clean-cut-events'
 import {
@@ -876,6 +881,8 @@ function LibraryRow({
   // still runs; the row says so instead of claiming an MKV.
   const finalizing = isFinalizingSession(session)
   const exportFailed = finalizationFailed(session)
+  // Plan 198: a Screen or Camera file that stopped during the take.
+  const fileStopped = separateFileStopped(session)
   // A Clean cut copy (plan 119 S14): `cleanCutOfSessionId` names its source.
   const cleanCutMode = (session as CleanCutSession).cleanCutOfSessionId
     ? ((session as CleanCutSession).cleanCutMode ?? 'clean')
@@ -1036,6 +1043,13 @@ function LibraryRow({
               <Spinner data-icon="inline-start" />
               {finalizingBadgeLabel(session)}
             </Badge>
+          ) : fileStopped ? (
+            // The file stopped during the take; its MP4 never ran (plan 198).
+            <InfoTooltip content={fileStopped.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-separate-file-stopped="" variant="destructive">
+                {fileStopped.label}
+              </Badge>
+            </InfoTooltip>
           ) : exportFailed ? (
             // Why the export failed, on hover and on focus (plan 174 S1.10, E-23).
             <InfoTooltip content={session.finalizationError} tabIndex={active ? 0 : -1}>
@@ -1201,10 +1215,15 @@ function useSessionMenu({
   // Background finalization (instant-record P2): the file is still being
   // produced, so play/duplicate/export wait; a failed export gets a retry.
   const finalizing = isFinalizingSession(session)
+  // Plan 198: a stopped Screen or Camera file exports what it recorded, and
+  // nothing when it recorded nothing.
+  const fileStopped = separateFileStopped(session)
   const canExportMp4 =
     Boolean(
       session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
-    ) && !finalizing
+    ) &&
+    !finalizing &&
+    fileStopped?.exportable !== false
   const canOpenComments = session.commentCount > 0
   const cleanupJob = latestNoiseCleanupJobForSession(noiseCleanupJobs, session.id)
   const cleanupView = withNoiseCleanupConnectionState(
@@ -1449,9 +1468,13 @@ function useSessionMenu({
       id: 'export-mp4',
       group: 'open',
       icon: VideoFileIcon,
-      label: finalizationFailed(session) ? 'Retry MP4 export' : 'Export MP4',
+      label: finalizationFailed(session) && !fileStopped ? 'Retry MP4 export' : 'Export MP4',
       disabled: !canExportMp4 || fileActionsBusy,
-      disabledReason: canExportMp4 ? holdReason : null,
+      disabledReason: canExportMp4
+        ? holdReason
+        : fileStopped && !fileStopped.exportable
+          ? SEPARATE_FILE_NOTHING_TO_EXPORT
+          : null,
       onSelect: () => void remuxSession(session.id)
     },
     {

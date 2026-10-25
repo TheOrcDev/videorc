@@ -30,6 +30,10 @@ import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { discordFailureToast } from '@/lib/discord-announce'
 import { openHealthToastAction } from '@/lib/health-door'
+import {
+  separateFileFailedToast,
+  separateFileRoleFromMessage
+} from '@/lib/separate-source-recordings-view'
 import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
 import {
   youtubeBroadcastToast,
@@ -315,6 +319,26 @@ export function showBackendError(
   }
 }
 
+/**
+ * Plan 198 (D1): a take's Screen or Camera file stopped. One warning per file
+ * per take, the reason in plain words, and the door to Health for the rest.
+ */
+export function showSeparateFileFailed(
+  event: HealthEvent,
+  recording: Pick<RecordingStatus, 'sessionId' | 'state'>
+): void {
+  const takeRunning =
+    recording.sessionId === event.sessionId &&
+    (recording.state === 'recording' || recording.state === 'streaming')
+  const copy = separateFileFailedToast(event.message, takeRunning)
+  const role = separateFileRoleFromMessage(event.message) ?? 'file'
+  notifyOnce(`separate-file:${event.sessionId ?? 'take'}:${role}`, 'warning', copy.title, {
+    description: copy.description,
+    action: openHealthToastAction(),
+    duration: TOAST_WITH_DESCRIPTION_MS
+  })
+}
+
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
   // One toast per playback state: the backend re-checks on a timer.
   if (event.status === 'verified') {
@@ -429,8 +453,13 @@ export function showSessionFinished({
 
 export function showSessionHealthEvent(
   event: HealthEvent,
-  qualityToastAlreadyShown: boolean
+  qualityToastAlreadyShown: boolean,
+  recording?: Pick<RecordingStatus, 'sessionId' | 'state'>
 ): string | null {
+  if (event.code === 'separate-source-recordings-role-failed') {
+    showSeparateFileFailed(event, recording ?? { state: 'idle' })
+    return null
+  }
   const startupToast = recordingStartupHealthToast(event)
   if (startupToast) {
     const show = startupToast.variant === 'warning' ? toast.warning : toast.error
