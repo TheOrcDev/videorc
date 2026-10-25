@@ -14,8 +14,10 @@
 //   --mode frames    writes one PNG per look (--size WxH, --phase-offset n,
 //                    --level full|half)
 //                    into --out <dir>, for by-eye checks
-//   --mode posters   writes every look's poster (1672×941) and thumbnail
-//                    (384×216) WebP into the desktop's bundled backgrounds
+//   --mode posters   writes every look's poster (1672×941, at most 250 KB)
+//                    and thumbnail (384×216, at most 20 KB) WebP into the
+//                    desktop's bundled backgrounds, prints each file's size
+//                    and encoding, and fails on a file over its limit
 //
 // --ids a,b limits every mode to those backgrounds; --render <file> swaps in
 // another render JSON (timing a variant of a look).
@@ -225,10 +227,28 @@ if (options.mode === 'posters') {
   const backgrounds = join(repoRoot, 'apps/desktop/src/renderer/src/assets/backgrounds')
   const thumbs = join(backgrounds, 'live-thumbs')
   mkdirSync(thumbs, { recursive: true })
+  const rows = []
+  const over = []
   for (const entry of result.posters) {
     const name = `live-${entry.id}-${entry.look}`
-    writeFileSync(join(backgrounds, `${name}.webp`), Buffer.from(entry.poster, 'base64'))
-    writeFileSync(join(thumbs, `${name}.webp`), Buffer.from(entry.thumb, 'base64'))
+    const files = [
+      ['poster', join(backgrounds, `${name}.webp`), entry.poster],
+      ['thumb', join(thumbs, `${name}.webp`), entry.thumb]
+    ]
+    const row = { file: `${name}.webp` }
+    for (const [kind, file, encoded] of files) {
+      const bytes = Buffer.from(encoded.data, 'base64')
+      writeFileSync(file, bytes)
+      row[`${kind} KB`] = (bytes.length / 1000).toFixed(1)
+      row[kind] = encoded.encoding
+      if (bytes.length > encoded.limitBytes) over.push(`${file} (${bytes.length} bytes)`)
+    }
+    rows.push(row)
   }
+  console.table(rows)
   console.log(`wrote ${result.posters.length} posters and thumbnails`)
+  if (over.length > 0) {
+    console.error(`over the size limit (poster 250 KB, thumbnail 20 KB):\n${over.join('\n')}`)
+    process.exitCode = 1
+  }
 }

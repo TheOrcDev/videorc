@@ -94,18 +94,24 @@ async function openStyle(name: string): Promise<void> {
 }
 
 describe('Assets → Backgrounds → Live (plan 190 S8)', () => {
-  it("shows the five live tiles above the pictures, each with its current look's thumbnail", async () => {
+  it("shows the ten live tiles above the pictures, each with its current look's thumbnail", async () => {
     const registry = setLiveBackgroundSettings(createDefaultRegistry(), 'silk', {
       look: 'midnight'
     })
     await renderAssets(registry)
 
+    // Plan 194 S6: the five more join after the first five.
     expect(liveTiles().map((tile) => tile.dataset.videorcLiveBackgroundTile)).toEqual([
       'silk',
       'side-rays',
       'plasma-wave',
       'liquid-chrome',
-      'line-waves'
+      'line-waves',
+      'beams',
+      'color-bends',
+      'dither',
+      'ferrofluid',
+      'ghost-fibers'
     ])
     const thumbnail = (id: string): string =>
       liveTile(id).querySelector('img')?.getAttribute('src') ?? ''

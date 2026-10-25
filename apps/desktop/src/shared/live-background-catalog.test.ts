@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
@@ -64,5 +64,14 @@ describe('live background catalogue (plan 190)', () => {
     expect(parseLivePosterAssetId('builtin-bg-01')).toBeNull()
     expect(parseLivePosterAssetId('live-unknown-look')).toBeNull()
     expect(parseLivePosterAssetId('live-silk-')).toBeNull()
+  })
+
+  it("bundles every look's poster, so main registers each one as a file (plan 194 S6)", () => {
+    // Main registers a poster only when its file exists; a missing one would
+    // leave a scene naming that look without its still.
+    const bundled = new URL('../renderer/src/assets/backgrounds/', import.meta.url)
+    for (const poster of livePosterManifest()) {
+      expect(existsSync(new URL(poster.fileName, bundled)), poster.fileName).toBe(true)
+    }
   })
 })

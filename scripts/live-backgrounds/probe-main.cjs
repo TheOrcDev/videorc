@@ -106,6 +106,26 @@ async function blobBase64(canvas, type, quality) {
   return btoa(binary);
 }
 
+// A poster or thumbnail as WebP inside its size limit (plan 190: posters at
+// 250 KB or less, thumbnails at 20 KB). Plan 190's lossy quality first. A
+// picture of a few flat colours (Dither's cells, plan 194) is many times
+// smaller lossless, and exact: Chromium encodes WebP losslessly at quality 1,
+// so the smaller of the two wins. Still over the limit (a dither pattern
+// scaled down to a thumbnail), the lossy quality steps down until it fits;
+// cost-probe.mjs fails a file that never does.
+async function webpWithin(canvas, quality, limitBytes) {
+  const bytes = (data) => (data.length * 3) / 4 - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0);
+  const lossy = await blobBase64(canvas, 'image/webp', quality);
+  const lossless = await blobBase64(canvas, 'image/webp', 1);
+  let best = bytes(lossless) < bytes(lossy)
+    ? { data: lossless, encoding: 'lossless' }
+    : { data: lossy, encoding: 'lossy ' + quality.toFixed(2) };
+  for (let step = quality - 0.04; bytes(best.data) > limitBytes && step >= 0.3; step -= 0.04) {
+    best = { data: await blobBase64(canvas, 'image/webp', step), encoding: 'lossy ' + step.toFixed(2) };
+  }
+  return { ...best, limitBytes };
+}
+
 async function runProbe(options) {
   const canvas = document.createElement('canvas');
   document.body.appendChild(canvas);
@@ -293,7 +313,7 @@ async function runProbe(options) {
           gl.finish();
         };
         draw(1672, 941);
-        const poster = await blobBase64(canvas, 'image/webp', 0.92);
+        const poster = await webpWithin(canvas, 0.92, 250_000);
         // The thumbnail is the poster scaled down, so a tile shows exactly what
         // a click puts on the scene (Line Waves' thin lines vanish if rendered
         // at thumbnail size).
@@ -304,7 +324,7 @@ async function runProbe(options) {
         context.imageSmoothingEnabled = true;
         context.imageSmoothingQuality = 'high';
         context.drawImage(canvas, 0, 0, 384, 216);
-        const thumb = await blobBase64(small, 'image/webp', 0.86);
+        const thumb = await webpWithin(small, 0.86, 20_000);
         result.posters.push({ id: background.id, look: look.id, poster, thumb });
       }
     }
