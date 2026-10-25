@@ -2434,6 +2434,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const setReplayArmedRef = useRef<(armed: boolean) => void>(() => {})
   const stopReplayBufferRef = useRef<() => Promise<void>>(async () => {})
   const scheduleReplayReconcileRef = useRef<(delayMs?: number) => void>(() => {})
+  const rearmReplayAfterErrorRef = useRef<() => void>(() => {})
+  // Whether the last session to run was the buffer-only ring: its own end
+  // never re-arms a ring that died (no retry loop on a failing session).
+  const replayLastSessionRingOnlyRef = useRef(false)
   // Held while a layout transaction stops the default ring to change the
   // canvas orientation, so the reconcile does not re-arm it in the old
   // orientation before the new layout lands.
@@ -7359,8 +7363,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Plan 181: a session ended or began; the switch decides what the
         // ring does next (re-arm after a recording, stop after the switch).
         // A session that ended cleanly is proof a start can work: the
-        // failed-start count begins again.
-        if (status.state === 'idle') replayFailedStartsRef.current = 0
+        // failed-start count begins again, and a ring that died with its own
+        // session comes back after the next recording or livestream.
+        if (isActiveRecordingState(status.state))
+          replayLastSessionRingOnlyRef.current = status.replayOnly === true
+        if (status.state === 'idle') {
+          replayFailedStartsRef.current = 0
+          if (!replayLastSessionRingOnlyRef.current) rearmReplayAfterErrorRef.current()
+        }
         scheduleReplayReconcile()
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the
@@ -15590,6 +15600,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // clean count.
   useEffect(() => {
     replayFailedStartsRef.current = 0
+    rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
   }, [
     recordBlockedReason,
@@ -15627,6 +15638,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [scheduleReplayReconcile]
   )
   setReplayArmedRef.current = setReplayArmed
+
+  // A ring that died with its session stays off (the switch still on) until
+  // the user's next move: a session that ends, a source change, the switch.
+  const rearmReplayAfterError = useCallback((): void => {
+    void import('@/lib/replay-buffer-reconcile').then(({ replayShouldRearmAfterError }) => {
+      if (
+        !replayShouldRearmAfterError({
+          armed: replayArmedRef.current,
+          replayState: replayStateRef.current.state,
+          switchOn: captureConfigRef.current.replayBuffer.enabled,
+          blocked: replayBlockedReasonRef.current !== null
+        })
+      )
+        return
+      replayArmedRef.current = true
+      setReplayArmedState(true)
+      scheduleReplayReconcile()
+    })
+  }, [scheduleReplayReconcile])
+  rearmReplayAfterErrorRef.current = rearmReplayAfterError
 
   // The one switch (Output → Clips → Keep the last seconds): persisted as
   // the user's explicit choice, so a default the backend refused (the

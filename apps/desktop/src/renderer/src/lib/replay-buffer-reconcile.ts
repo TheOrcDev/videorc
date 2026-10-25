@@ -39,7 +39,9 @@ const ACTIVE = new Set(['starting', 'recording', 'streaming', 'stopping'])
 export function replayBufferReconcileAction(input: ReplayReconcileInput): ReplayReconcileAction {
   if (input.armed) {
     if (
-      input.replayState === 'off' &&
+      // A ring that died with its session ('error') disarms the switch; once
+      // something arms it again (below), it starts like a ring that is off.
+      (input.replayState === 'off' || input.replayState === 'error') &&
       input.recordingState === 'idle' &&
       !input.startPending &&
       !input.stopPending &&
@@ -48,7 +50,6 @@ export function replayBufferReconcileAction(input: ReplayReconcileInput): Replay
       return input.failedStarts >= REPLAY_START_RETRY_LIMIT ? 'give-up' : 'start'
     }
     // On, starting, riding a recording, or waiting on a session: nothing to do.
-    // An error is the event handler's: it turns the switch off and says why.
     return null
   }
   if (
@@ -65,4 +66,18 @@ export function replayBufferReconcileAction(input: ReplayReconcileInput): Replay
   // A ring riding a recording ends with that recording; the switch only
   // decides whether it comes back afterwards.
   return null
+}
+
+/** After the ring died with its session, the event handler disarms it so a
+ * failing session is not retried in a loop. The switch stays on, and the
+ * user's next move arms it again: a recording or livestream that ends, a
+ * source change, or the switch itself. Never past a refusal (the software
+ * encoder guard), which keeps its own reason on the Output page. */
+export function replayShouldRearmAfterError(input: {
+  armed: boolean
+  replayState: ReplayBufferState
+  switchOn: boolean
+  blocked: boolean
+}): boolean {
+  return !input.armed && input.replayState === 'error' && input.switchOn && !input.blocked
 }
