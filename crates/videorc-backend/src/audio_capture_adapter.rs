@@ -1386,6 +1386,12 @@ fn observe_wall(
     if watch.observe(classify_wall_offset(offset))
         && let Ok(next) = ClockPair::sample()
     {
+        // Rare by design: a real step or a sustained drift. Logged so a
+        // capture timeline jump can be matched to it.
+        tracing::warn!(
+            offset_us = (offset / 1_000) as i64,
+            "Capture wall clock moved; the capture clock pair was re-taken"
+        );
         *clock_pair = next;
     }
 }
