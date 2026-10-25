@@ -45,6 +45,47 @@ describe('MicLevelMeter on the LCD (plan 196)', () => {
     }
   })
 
+  it('lights amber from −20 dB and red from −9, where the old segmented meter did', () => {
+    const markup = render({ kind: 'value', peakDb: -12 })
+    const fill = /--mic-meter-zones:([^;"]+)/.exec(markup)?.[1] ?? ''
+    const stops = fill.match(/var\(--[a-z-]+\) [\d.]+% [\d.]+%/g) ?? []
+    expect(stops.map((stop) => stop.split(' ')[0])).toEqual([
+      'var(--lcd-display-lit)',
+      'var(--meter-warn)',
+      'var(--meter-clip)'
+    ])
+    // Each zone starts where the one before it ends, from 0 to 100%.
+    const bounds = stops.map((stop) => stop.split(' ').slice(1).map(parseFloat))
+    expect(bounds[0]?.[0]).toBe(0)
+    expect(bounds.at(-1)?.[1]).toBe(100)
+    for (let index = 1; index < bounds.length; index += 1) {
+      expect(bounds[index]?.[0]).toBe(bounds[index - 1]?.[1])
+    }
+    expect(markup).toMatch(
+      /class="[^"]*bg-\(image:--mic-meter-zones\)[^"]*"[^>]*data-slot="lcd-meter-bar"/
+    )
+    expect(markup).toMatch(
+      /class="[^"]*bg-\(image:--mic-meter-zones\)[^"]*"[^>]*data-slot="lcd-meter-hold"/
+    )
+    const clip = /<button[^>]*data-slot="lcd-meter-clip"[^>]*>/.exec(markup)?.[0] ?? ''
+    expect(clip).toContain('data-clipping:bg-meter-clip')
+  })
+
+  it('prints the digits in the zone of the level', () => {
+    for (const [peakDb, zone] of [
+      [-30, 'ok'],
+      [-12, 'warn'],
+      [-3, 'clip']
+    ] as const) {
+      const value =
+        /<span[^>]*data-slot="lcd-meter-value"[^>]*>/.exec(
+          render({ kind: 'value', peakDb })
+        )?.[0] ?? ''
+      expect(value, String(peakDb)).toContain(`data-zone="${zone}"`)
+      expect(value, String(peakDb)).toContain('data-[zone=warn]:text-meter-warn-foreground')
+    }
+  })
+
   it('prints the screen: the level without a unit, the scale and the CLIP flag (D2)', () => {
     const markup = render({ kind: 'value', peakDb: Number.NEGATIVE_INFINITY })
     expect(markup).toMatch(/data-slot="lcd-meter-value"[^>]*>−∞</)
