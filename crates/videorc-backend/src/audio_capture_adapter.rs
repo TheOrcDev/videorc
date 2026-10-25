@@ -173,21 +173,98 @@ struct CaptureAnchor {
     uncertainty: Duration,
 }
 
+const WALL_TOLERANCE_NS: u128 = 5_000_000;
+const WALL_STEP_NS: u128 = 50_000_000;
+const WALL_STEP_STREAK: u8 = 3;
+const WALL_BRACKET_BUDGET: Duration = Duration::from_millis(1);
+const PULSE_WALL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 struct ClockPair {
     monotonic: Instant,
     host_ns: Option<u64>,
     wall_ns: i128,
     uncertainty: Duration,
 }
-impl ClockPair {
-    fn validate_wall(&self, now: Instant, wall: SystemTime) -> Result<()> {
-        let actual = wall.duration_since(UNIX_EPOCH)?.as_nanos() as i128;
-        let expected =
-            self.wall_ns + now.saturating_duration_since(self.monotonic).as_nanos() as i128;
-        if (actual - expected).unsigned_abs() > 5_000_000 {
-            bail!("The capture wall clock changed; select the microphone again");
+
+/// How far wall has drifted from the pair's linear prediction.
+fn wall_offset_ns(pair: &ClockPair, now: Instant, wall_ns: i128) -> i128 {
+    let expected = pair.wall_ns + now.saturating_duration_since(pair.monotonic).as_nanos() as i128;
+    wall_ns - expected
+}
+
+/// Midpoint of a mono → wall → mono bracket. `None` when the two monotonic
+/// reads are more than 1 ms apart (preemption): skip the check, do not stop.
+fn bracket_wall_sample(before: Instant, wall_ns: i128, after: Instant) -> Option<(Instant, i128)> {
+    let uncertainty = after.checked_duration_since(before)?;
+    if uncertainty > WALL_BRACKET_BUDGET {
+        return None;
+    }
+    Some((before + uncertainty / 2, wall_ns))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WallOffsetKind {
+    Steady,
+    Drift,
+    Step,
+}
+
+fn classify_wall_offset(offset_ns: i128) -> WallOffsetKind {
+    let abs = offset_ns.unsigned_abs();
+    if abs <= WALL_TOLERANCE_NS {
+        WallOffsetKind::Steady
+    } else if abs > WALL_STEP_NS {
+        WallOffsetKind::Step
+    } else {
+        WallOffsetKind::Drift
+    }
+}
+
+/// Confirms a real clock step: one offset past 50 ms, or three consecutive
+/// drifts past the 5 ms tolerance. A confirmed step re-takes the pair.
+#[derive(Default)]
+struct WallStepWatch {
+    consecutive_drifts: u8,
+}
+
+impl WallStepWatch {
+    fn observe(&mut self, kind: WallOffsetKind) -> bool {
+        match kind {
+            WallOffsetKind::Steady => {
+                self.consecutive_drifts = 0;
+                false
+            }
+            WallOffsetKind::Step => {
+                self.consecutive_drifts = 0;
+                true
+            }
+            WallOffsetKind::Drift => {
+                self.consecutive_drifts = self.consecutive_drifts.saturating_add(1);
+                if self.consecutive_drifts >= WALL_STEP_STREAK {
+                    self.consecutive_drifts = 0;
+                    true
+                } else {
+                    false
+                }
+            }
         }
-        Ok(())
+    }
+}
+
+impl ClockPair {
+    fn sample_wall_now() -> Option<(Instant, i128)> {
+        for _ in 0..3 {
+            let before = Instant::now();
+            let wall_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_nanos() as i128;
+            let after = Instant::now();
+            if let Some(sample) = bracket_wall_sample(before, wall_ns, after) {
+                return Some(sample);
+            }
+        }
+        None
     }
     fn instant_from_wall(&self, wall_ns: i128) -> Result<Instant> {
         let delta = wall_ns - self.wall_ns;
@@ -1291,9 +1368,37 @@ impl CaptureDiagnostics {
     }
 }
 
+fn observe_wall(
+    clock_pair: &mut ClockPair,
+    watch: &mut WallStepWatch,
+    last_check: &mut Instant,
+    rate_limit: bool,
+) {
+    let now = Instant::now();
+    if rate_limit && now.saturating_duration_since(*last_check) < PULSE_WALL_CHECK_INTERVAL {
+        return;
+    }
+    *last_check = now;
+    let Some((sampled_now, wall_ns)) = ClockPair::sample_wall_now() else {
+        return;
+    };
+    let offset = wall_offset_ns(clock_pair, sampled_now, wall_ns);
+    if watch.observe(classify_wall_offset(offset))
+        && let Ok(next) = ClockPair::sample()
+    {
+        // Rare by design: a real step or a sustained drift. Logged so a
+        // capture timeline jump can be matched to it.
+        tracing::warn!(
+            offset_us = (offset / 1_000) as i64,
+            "Capture wall clock moved; the capture clock pair was re-taken"
+        );
+        *clock_pair = next;
+    }
+}
+
 fn assemble_pcm(
     protocol: CaptureProtocol,
-    clock_pair: ClockPair,
+    mut clock_pair: ClockPair,
     metadata: mpsc::Receiver<String>,
     raw: mpsc::Receiver<Vec<u8>>,
     output: mpsc::SyncSender<AudioFrame>,
@@ -1311,6 +1416,10 @@ fn assemble_pcm(
     // Pulse only: the sample count and capture clock (see `PulseTimeline`).
     let mut pulse = PulseTimeline::default();
     let mut last_diagnostic = Instant::now();
+    let mut wall_watch = WallStepWatch::default();
+    let mut last_wall_check = Instant::now()
+        .checked_sub(PULSE_WALL_CHECK_INTERVAL)
+        .unwrap_or_else(Instant::now);
     while !stop.load(Ordering::Acquire) {
         let line = match metadata.recv_timeout(Duration::from_millis(10)) {
             Ok(line) => line,
@@ -1323,7 +1432,12 @@ fn assemble_pcm(
             bail!("DirectShow could not map the selected device capture clock");
         }
         if line.contains("VIDEORC_DSHOW_CLOCK version=") {
-            clock_pair.validate_wall(Instant::now(), SystemTime::now())?;
+            observe_wall(
+                &mut clock_pair,
+                &mut wall_watch,
+                &mut last_wall_check,
+                false,
+            );
             clock.push(dshow_anchor(&line, &clock_pair)?)?;
             continue;
         }
@@ -1338,7 +1452,7 @@ fn assemble_pcm(
         }
         let mut packet = parse_pcm_description(&line)?;
         if protocol == CaptureProtocol::Pulse {
-            clock_pair.validate_wall(Instant::now(), SystemTime::now())?;
+            observe_wall(&mut clock_pair, &mut wall_watch, &mut last_wall_check, true);
             let (position, captured) = pulse.place(packet.pts, packet.frames);
             packet.pts = position;
             clock.push(pulse_anchor(
@@ -2008,7 +2122,9 @@ mod tests {
     /// On-device check (release test 147, plan 0001): opens the real Pulse
     /// worker on `VIDEORC_PULSE_TEST_SOURCE` with `VIDEORC_PULSE_TEST_FFMPEG`
     /// and requires ~8 s of continuous, finite PCM without the worker
-    /// stopping. `cargo test … pulse_worker_keeps_delivering -- --ignored`.
+    /// stopping. A loaded-host false wall-clock stop needs a longer run
+    /// (1080p encode + `stress-ng --cpu` on the same cores).
+    /// `cargo test … pulse_worker_keeps_delivering -- --ignored`.
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "needs a PulseAudio/PipeWire source and the bundled FFmpeg"]
@@ -2121,21 +2237,68 @@ mod tests {
         ] {
             assert!(dshow_anchor(&bad, &mapping).is_err());
         }
-        assert!(
-            mapping
-                .validate_wall(now, UNIX_EPOCH + Duration::from_secs(1))
-                .is_ok()
+        assert_eq!(
+            classify_wall_offset(wall_offset_ns(&mapping, now, 1_000_000_000)),
+            WallOffsetKind::Steady
         );
-        assert!(
-            mapping
-                .validate_wall(now, UNIX_EPOCH + Duration::from_secs(2))
-                .is_err()
+        assert_eq!(
+            classify_wall_offset(wall_offset_ns(&mapping, now, 2_000_000_000)),
+            WallOffsetKind::Step
         );
         let uncertain = ClockPair {
             uncertainty: Duration::from_millis(3),
             ..mapping
         };
         assert!(dshow_anchor(&dshow_metadata(), &uncertain).is_err());
+    }
+
+    #[test]
+    fn a_six_millisecond_preemption_gap_is_not_a_wall_clock_change() {
+        let now = Instant::now();
+        let pair = pair(now);
+        // The two monotonic reads are 6 ms apart: skip, never treat as a step.
+        assert!(bracket_wall_sample(now, pair.wall_ns, now + Duration::from_millis(6)).is_none());
+        let tight =
+            bracket_wall_sample(now, pair.wall_ns, now + Duration::from_micros(400)).unwrap();
+        assert_eq!(
+            classify_wall_offset(wall_offset_ns(&pair, tight.0, tight.1)),
+            WallOffsetKind::Steady
+        );
+    }
+
+    #[test]
+    fn a_persistent_thirty_millisecond_step_reanchors_and_slew_never_does() {
+        let now = Instant::now();
+        let pair = pair(now);
+        let mut watch = WallStepWatch::default();
+        let drift = classify_wall_offset(30_000_000);
+        assert_eq!(drift, WallOffsetKind::Drift);
+        assert!(!watch.observe(drift));
+        assert!(!watch.observe(drift));
+        assert!(
+            watch.observe(drift),
+            "three consecutive 30 ms drifts confirm a step"
+        );
+
+        let mut once = WallStepWatch::default();
+        assert!(once.observe(classify_wall_offset(50_000_001)));
+
+        let mut slew = WallStepWatch::default();
+        // ±2.5 ms of NTP slew for 10 minutes at 1 Hz never confirms.
+        for index in 0..(10 * 60) {
+            let sign = if index % 2 == 0 { 1 } else { -1 };
+            let kind = classify_wall_offset(sign * 2_500_000);
+            assert_eq!(kind, WallOffsetKind::Steady);
+            assert!(!slew.observe(kind));
+        }
+        // A 6 ms preemption-sized offset is a single drift, not a stop.
+        assert_eq!(classify_wall_offset(6_000_000), WallOffsetKind::Drift);
+        let mut one = WallStepWatch::default();
+        assert!(!one.observe(WallOffsetKind::Drift));
+        assert_eq!(
+            wall_offset_ns(&pair, now, pair.wall_ns + 6_000_000).unsigned_abs(),
+            6_000_000
+        );
     }
 
     #[test]

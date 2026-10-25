@@ -462,6 +462,22 @@ describe('record+stream notices (plan 174 B-6)', () => {
     )
   })
 
+  it('does not say a recording continues when only the Clips buffer runs', () => {
+    const presentation = microphoneLossPresentation({
+      event: microphoneLost,
+      recording: { state: 'recording', sessionId: 'go-live', replayOnly: true },
+      lastActivity: 'recording',
+      currentDedupeKey: null
+    })!
+    expect(presentation.activity).toBe('clips')
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe(
+      'Microphone stopped: Clips continue with silence'
+    )
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).not.toContain(
+      'recording continues with silence'
+    )
+  })
+
   it('reads each stored session mode as what the session did', () => {
     expect(sessionModeActivity('record')).toBe('recording')
     expect(sessionModeActivity('imported')).toBe('recording')
