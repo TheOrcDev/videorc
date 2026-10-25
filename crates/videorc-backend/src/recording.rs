@@ -3718,7 +3718,7 @@ async fn start_session_with_timeline(
     #[cfg(target_os = "windows")]
     let recordable_video_notice = {
         let requested_output_video = params.output.video.clone();
-        resolve_windows_recordable_video(&ffmpeg_path, &params)
+        resolve_windows_recordable_video(&state, &ffmpeg_path, &params)
             .await
             .and_then(|selected| {
                 let message =
@@ -16275,6 +16275,40 @@ const WINDOWS_SOFTWARE_SHORT_EDGE_CAP: u32 = 1080;
 const WINDOWS_SOFTWARE_SMALL_CPU_SHORT_EDGE_CAP: u32 = 720;
 #[cfg(any(test, target_os = "windows"))]
 const WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES: usize = 4;
+// The performance check's floor (plan 090): a stored verdict never caps the
+// software encoder below it.
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_SOFTWARE_FLOOR_SHORT_EDGE: u32 = 540;
+
+/// Plan 195 S5: the software cap this machine's own performance check
+/// implies, as a short edge and the bitrate of that rung. The highest rung
+/// that passed; the floor when nothing did; `None` when there is no check or
+/// it was measured on another GPU, driver or app version (stale), so the
+/// CPU-class cap stays in charge. Applies only after every hardware probe
+/// rejected the request (`select_windows_recordable_video`).
+#[cfg(any(test, target_os = "windows"))]
+fn performance_check_software_cap(
+    check: &crate::protocol::PerformanceCheckState,
+) -> Option<(u32, u32)> {
+    let result = check.result.as_ref()?;
+    if check.stale {
+        return None;
+    }
+    let passed = result
+        .rungs
+        .iter()
+        .filter(|rung| rung.verdict == crate::protocol::PerformanceCheckRungVerdict::Passed)
+        .map(|rung| &rung.video)
+        .max_by_key(|video| video.width.min(video.height));
+    let video = passed.or_else(|| result.below_floor.then_some(&result.recommended))?;
+    Some((
+        video
+            .width
+            .min(video.height)
+            .max(WINDOWS_SOFTWARE_FLOOR_SHORT_EDGE),
+        video.bitrate_kbps,
+    ))
+}
 
 /// Same aspect and orientation, short edge scaled to `short_edge`, even dims.
 #[cfg(any(test, target_os = "windows"))]
@@ -16316,11 +16350,16 @@ fn windows_recordable_video_rungs(video: &VideoSettings) -> Vec<VideoSettings> {
 /// Picks the canvas a Windows record-only session can actually sustain.
 /// `hardware_accepts` is the real Media Foundation topology probe in
 /// production and a fake in tests. The requested size is tried first, so a
-/// healthy GPU pays exactly one probe and nothing changes.
+/// healthy GPU pays exactly one probe and nothing changes. With no hardware
+/// encoder, the software cap is the CPU-class envelope, tightened to this
+/// machine's own measured verdict when one exists (`verdict_cap`, plan 195
+/// S5: the tester's laptop passed only 540p30 yet recorded 1080p30 at 0.98×
+/// with 5 s freezes).
 #[cfg(any(test, target_os = "windows"))]
 fn select_windows_recordable_video(
     requested: &VideoSettings,
     logical_cores: usize,
+    verdict_cap: Option<(u32, u32)>,
     mut hardware_accepts: impl FnMut(&VideoSettings) -> bool,
 ) -> WindowsRecordableVideo {
     if hardware_accepts(requested) {
@@ -16337,10 +16376,16 @@ fn select_windows_recordable_video(
             };
         }
     }
-    let cap = if logical_cores <= WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES {
+    let cpu_cap = if logical_cores <= WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES {
         WINDOWS_SOFTWARE_SMALL_CPU_SHORT_EDGE_CAP
     } else {
         WINDOWS_SOFTWARE_SHORT_EDGE_CAP
+    };
+    let (cap, verdict_bitrate_kbps) = match verdict_cap {
+        Some((short_edge, bitrate_kbps)) if short_edge < cpu_cap => {
+            (short_edge, Some(bitrate_kbps))
+        }
+        _ => (cpu_cap, None),
     };
     if requested.width.min(requested.height) <= cap {
         return WindowsRecordableVideo {
@@ -16348,10 +16393,12 @@ fn select_windows_recordable_video(
             reason: None,
         };
     }
-    let bitrate_kbps = WINDOWS_RECORDABLE_SHORT_EDGE_RUNGS
-        .iter()
-        .find(|(rung, _)| *rung == cap)
-        .map_or(requested.bitrate_kbps, |(_, bitrate_kbps)| *bitrate_kbps);
+    let bitrate_kbps = verdict_bitrate_kbps.unwrap_or_else(|| {
+        WINDOWS_RECORDABLE_SHORT_EDGE_RUNGS
+            .iter()
+            .find(|(rung, _)| *rung == cap)
+            .map_or(requested.bitrate_kbps, |(_, bitrate_kbps)| *bitrate_kbps)
+    });
     WindowsRecordableVideo {
         video: scale_video_to_short_edge(requested, cap, bitrate_kbps),
         reason: Some(WindowsRecordableVideoReason::SoftwareCap),
@@ -16391,6 +16438,7 @@ static WINDOWS_RECORDABLE_VIDEO_CACHE: std::sync::OnceLock<
 /// still start. Streaming sessions keep their provider-planned profile.
 #[cfg(target_os = "windows")]
 async fn resolve_windows_recordable_video(
+    state: &AppState,
     ffmpeg_path: &str,
     params: &StartSessionParams,
 ) -> Option<WindowsRecordableVideo> {
@@ -16405,11 +16453,15 @@ async fn resolve_windows_recordable_video(
     }
     let requested = params.output.video.clone();
     let identity = graphics_adapter_driver_identity();
+    // Plan 195 S5: this machine's own measured verdict, when it has one.
+    let verdict_cap =
+        performance_check_software_cap(&crate::performance_check::current_state(state).await);
     let key = (
         // A verdict measured under one encoder preference must not answer
         // for another: Quick Sync changes what "no usable GPU encoder" means.
+        // A new performance check changes the software cap.
         format!(
-            "{identity}|h264={}",
+            "{identity}|h264={}|cap={verdict_cap:?}",
             windows_h264_encoder_preference_label(windows_h264_encoder_preference().0)
         ),
         ffmpeg_path.to_string(),
@@ -16461,11 +16513,12 @@ async fn resolve_windows_recordable_video(
         }
     }
     let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    let selected = select_windows_recordable_video(&requested, logical_cores, |candidate| {
-        verdicts
-            .iter()
-            .any(|(probed, accepted)| *accepted && probed == candidate)
-    });
+    let selected =
+        select_windows_recordable_video(&requested, logical_cores, verdict_cap, |candidate| {
+            verdicts
+                .iter()
+                .any(|(probed, accepted)| *accepted && probed == candidate)
+        });
     if let Ok(mut cache) = cache.lock() {
         cache.insert(key, selected.clone());
     }
@@ -16812,6 +16865,93 @@ where
 static WINDOWS_MF_PROBE_REJECTIONS: std::sync::OnceLock<StdMutex<MediaFoundationProbeRejections>> =
     std::sync::OnceLock::new();
 
+/// Plan 195 S5: Media Foundation rejections remembered across app runs
+/// (`windows_mf_rejections`), so a PC whose MFT rejects everything stops
+/// paying seconds of probes on the first start of every run. Loaded once at
+/// backend start; written through on every real rejection. A probe that
+/// timed out or was refused behind a wedged driver is NOT stored: a reboot
+/// may clear that, and the process-lifetime cache above already covers it.
+#[cfg(target_os = "windows")]
+struct WindowsMfRejectionStore {
+    database: Database,
+    store: StdMutex<crate::windows_mf_rejections::StoredRejections>,
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_MF_PERSISTED_REJECTIONS: std::sync::OnceLock<WindowsMfRejectionStore> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "windows")]
+pub(crate) fn load_windows_mf_rejection_store(database: &Database) {
+    use crate::windows_mf_rejections::{SETTING_KEY, StoredRejections};
+    let stored = match database.load_setting::<StoredRejections>(SETTING_KEY) {
+        Ok(stored) => stored,
+        Err(error) => {
+            tracing::warn!("Could not load the remembered Media Foundation rejections: {error:#}");
+            None
+        }
+    };
+    let adopted = StoredRejections::adopt(
+        stored,
+        &graphics_adapter_driver_identity(),
+        &crate::performance_check::desktop_app_version(),
+        Utc::now(),
+    );
+    tracing::info!(
+        remembered = adopted.entries.len(),
+        "Media Foundation rejection store loaded"
+    );
+    if WINDOWS_MF_PERSISTED_REJECTIONS
+        .set(WindowsMfRejectionStore {
+            database: database.clone(),
+            store: StdMutex::new(adopted),
+        })
+        .is_err()
+    {
+        tracing::warn!("The Media Foundation rejection store was already loaded");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remembered_mf_rejection(
+    key: &crate::windows_mf_rejections::RejectionKey,
+    graphics_adapter_driver_identity: &str,
+) -> Option<String> {
+    let handle = WINDOWS_MF_PERSISTED_REJECTIONS.get()?;
+    let store = handle.store.lock().ok()?;
+    if store.driver_identity != graphics_adapter_driver_identity {
+        return None;
+    }
+    store.lookup(key, Utc::now()).map(str::to_string)
+}
+
+#[cfg(target_os = "windows")]
+fn remember_mf_rejection(
+    key: crate::windows_mf_rejections::RejectionKey,
+    graphics_adapter_driver_identity: &str,
+    reason: &str,
+) {
+    let Some(handle) = WINDOWS_MF_PERSISTED_REJECTIONS.get() else {
+        return;
+    };
+    let snapshot = {
+        let Ok(mut store) = handle.store.lock() else {
+            return;
+        };
+        if store.driver_identity != graphics_adapter_driver_identity {
+            return;
+        }
+        store.remember(key, reason, Utc::now());
+        store.clone()
+    };
+    if let Err(error) = handle
+        .database
+        .save_setting(crate::windows_mf_rejections::SETTING_KEY, &snapshot)
+    {
+        tracing::warn!("Could not save the remembered Media Foundation rejections: {error:#}");
+    }
+}
+
 #[cfg(target_os = "windows")]
 static WINDOWS_NATIVE_ENCODED_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<std::collections::HashMap<WindowsNativeEncodedProbeKey, Option<String>>>,
@@ -16913,6 +17053,22 @@ async fn probe_windows_native_encoded_bridge_uncached(
     {
         bail!("{reason} (remembered from an earlier probe)");
     }
+    // Plan 195 S5: a rejection remembered from an earlier app run.
+    let remembered_key = crate::windows_mf_rejections::RejectionKey {
+        encoder_preference: windows_h264_encoder_preference_label(
+            windows_h264_encoder_preference().0,
+        )
+        .to_string(),
+        topology: topology.to_string(),
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+    };
+    if let Some(reason) = remembered_mf_rejection(&remembered_key, graphics_adapter_driver_identity)
+    {
+        bail!("{reason} (remembered from an earlier app run)");
+    }
     let probe = match blocking_probe_with_deadline(
         &WINDOWS_MF_WEDGED_PROBES,
         WINDOWS_MF_HARDWARE_PROBE_DEADLINE,
@@ -16922,9 +17078,11 @@ async fn probe_windows_native_encoded_bridge_uncached(
     {
         BlockingProbeOutcome::Finished(Ok(probe)) => probe,
         BlockingProbeOutcome::Finished(Err(error)) => {
+            let reason = format!("{error:#}");
             if let Ok(mut cache) = rejections.lock() {
-                cache.insert(rejection_key, format!("{error:#}"), Instant::now());
+                cache.insert(rejection_key, reason.clone(), Instant::now());
             }
+            remember_mf_rejection(remembered_key, graphics_adapter_driver_identity, &reason);
             return Err(error);
         }
         BlockingProbeOutcome::Panicked(error) => {
@@ -43640,7 +43798,7 @@ mod low_end_windows_recording_tests {
     fn healthy_gpu_keeps_the_requested_canvas_with_one_probe() {
         let requested = video(2560, 1440, 30, 8_000);
         let mut probes = 0;
-        let selected = select_windows_recordable_video(&requested, 4, |_| {
+        let selected = select_windows_recordable_video(&requested, 4, None, |_| {
             probes += 1;
             true
         });
@@ -43656,8 +43814,9 @@ mod low_end_windows_recording_tests {
     #[test]
     fn rejected_1440p_steps_down_to_the_first_size_the_gpu_accepts() {
         let requested = video(2560, 1440, 30, 8_000);
-        let selected =
-            select_windows_recordable_video(&requested, 4, |candidate| candidate.height <= 1080);
+        let selected = select_windows_recordable_video(&requested, 4, None, |candidate| {
+            candidate.height <= 1080
+        });
         assert_eq!(selected.video, custom(1920, 1080, 30, 6_000));
         assert_eq!(
             selected.reason,
@@ -43671,19 +43830,133 @@ mod low_end_windows_recording_tests {
     fn no_hardware_at_any_size_caps_software_by_cpu_class() {
         let requested = video(2560, 1440, 30, 8_000);
         // The tester's 4-thread Gemini Lake.
-        let small = select_windows_recordable_video(&requested, 4, |_| false);
+        let small = select_windows_recordable_video(&requested, 4, None, |_| false);
         assert_eq!(small.video, custom(1280, 720, 30, 4_000));
         assert_eq!(
             small.reason,
             Some(WindowsRecordableVideoReason::SoftwareCap)
         );
-        let larger = select_windows_recordable_video(&requested, 8, |_| false);
+        let larger = select_windows_recordable_video(&requested, 8, None, |_| false);
         assert_eq!(larger.video, custom(1920, 1080, 30, 6_000));
         // Already inside the software envelope: untouched, no notice.
         let modest = video(1280, 720, 30, 4_000);
-        let kept = select_windows_recordable_video(&modest, 2, |_| false);
+        let kept = select_windows_recordable_video(&modest, 2, None, |_| false);
         assert_eq!(kept.video, modest);
         assert_eq!(kept.reason, None);
+    }
+
+    #[test]
+    fn a_measured_verdict_tightens_the_software_cap_but_never_loosens_it() {
+        // Plan 195 S5: the tester's Iris Xe laptop (8 logical cores, every
+        // hardware probe rejected) passed only 540p30 in its own check.
+        let requested = video(1920, 1080, 30, 6_000);
+        let capped = select_windows_recordable_video(&requested, 8, Some((540, 2_500)), |_| false);
+        assert_eq!(capped.video, custom(960, 540, 30, 2_500));
+        assert_eq!(
+            capped.reason,
+            Some(WindowsRecordableVideoReason::SoftwareCap)
+        );
+        let message = windows_recordable_video_health_message(&requested, &capped).unwrap();
+        assert!(
+            message.contains("1920x1080") && message.contains("960x540"),
+            "{message}"
+        );
+        // A vertical canvas keeps its orientation.
+        let vertical = video(1080, 1920, 30, 6_000);
+        let capped = select_windows_recordable_video(&vertical, 8, Some((720, 4_000)), |_| false);
+        assert_eq!(capped.video, custom(720, 1280, 30, 4_000));
+        // A verdict at or above the CPU-class cap changes nothing.
+        let loose = select_windows_recordable_video(&requested, 4, Some((1080, 6_000)), |_| false);
+        assert_eq!(loose.video, custom(1280, 720, 30, 4_000));
+        // A request already inside the verdict is untouched, no notice.
+        let modest = video(960, 540, 30, 2_500);
+        let kept = select_windows_recordable_video(&modest, 8, Some((540, 2_500)), |_| false);
+        assert_eq!(kept.video, modest);
+        assert_eq!(kept.reason, None);
+        // Hardware acceptance wins over any verdict.
+        let accepted = select_windows_recordable_video(&requested, 8, Some((540, 2_500)), |_| true);
+        assert_eq!(accepted.video, requested);
+        assert_eq!(accepted.reason, None);
+    }
+
+    #[test]
+    fn performance_check_software_cap_reads_the_highest_passed_rung_of_a_current_verdict() {
+        use crate::protocol::{
+            PerformanceCheckResult, PerformanceCheckRung, PerformanceCheckRungVerdict,
+            PerformanceCheckState,
+        };
+        let rung = |height: u32, bitrate: u32, verdict: PerformanceCheckRungVerdict| {
+            PerformanceCheckRung {
+                video: video(height * 16 / 9, height, 30, bitrate),
+                verdict,
+                encode_backend: None,
+                compositor_backend: None,
+                encoder_speed: None,
+                delivered_fps: None,
+                drain_after_stop_ms: None,
+                reasons: Vec::new(),
+            }
+        };
+        let result = |rungs: Vec<PerformanceCheckRung>, below_floor: bool| PerformanceCheckResult {
+            capability_key: "performance-check-v2:abc".to_string(),
+            checked_at: "2026-10-08T12:00:00Z".to_string(),
+            app_version: "0.9.150".to_string(),
+            duration_ms: 30_000,
+            recommended: video(960, 540, 30, 2_500),
+            below_floor,
+            rungs,
+        };
+        let state = |result: Option<PerformanceCheckResult>, stale: bool| PerformanceCheckState {
+            running: false,
+            result,
+            stale,
+        };
+        assert_eq!(performance_check_software_cap(&state(None, false)), None);
+        // The tester's laptop: 1080p failed to start, 720p failed, 540p passed.
+        let laptop = result(
+            vec![
+                rung(1080, 6_000, PerformanceCheckRungVerdict::Failed),
+                rung(720, 4_000, PerformanceCheckRungVerdict::Failed),
+                rung(540, 2_500, PerformanceCheckRungVerdict::Passed),
+            ],
+            false,
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(laptop.clone()), false)),
+            Some((540, 2_500))
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(laptop), true)),
+            None,
+            "a verdict from another GPU, driver or app version is ignored"
+        );
+        // The highest passed rung, not the first listed.
+        let healthy = result(
+            vec![
+                rung(1440, 8_000, PerformanceCheckRungVerdict::Skipped),
+                rung(720, 4_000, PerformanceCheckRungVerdict::Passed),
+                rung(1080, 6_000, PerformanceCheckRungVerdict::Passed),
+            ],
+            false,
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(healthy), false)),
+            Some((1080, 6_000))
+        );
+        // Nothing passed: the floor, never below it.
+        let floor = result(
+            vec![rung(540, 2_500, PerformanceCheckRungVerdict::Failed)],
+            true,
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(floor), false)),
+            Some((540, 2_500))
+        );
+        let nothing_measured = result(Vec::new(), false);
+        assert_eq!(
+            performance_check_software_cap(&state(Some(nothing_measured), false)),
+            None
+        );
     }
 
     #[test]
@@ -43691,12 +43964,12 @@ mod low_end_windows_recording_tests {
         let four_k = video_with_preset(VideoPreset::Record4k30, 3840, 2160, 30, 30_000);
         validate_named_video_profile(&four_k).expect("the request itself is a valid preset");
         let selected =
-            select_windows_recordable_video(&four_k, 8, |candidate| candidate.height <= 1440);
+            select_windows_recordable_video(&four_k, 8, None, |candidate| candidate.height <= 1440);
         assert_eq!(selected.video, custom(2560, 1440, 30, 8_000));
         validate_named_video_profile(&selected.video)
             .expect("a stepped-down profile must not keep a fixed-value preset label");
         // Untouched requests keep their preset.
-        let kept = select_windows_recordable_video(&four_k, 8, |_| true);
+        let kept = select_windows_recordable_video(&four_k, 8, None, |_| true);
         assert_eq!(kept.video.preset, VideoPreset::Record4k30);
     }
 

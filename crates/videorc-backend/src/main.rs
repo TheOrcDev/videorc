@@ -175,6 +175,8 @@ mod windows_graphics_capture;
 #[cfg(target_os = "windows")]
 mod windows_media_foundation_encoder;
 mod windows_mf_probe;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_mf_rejections;
 mod x_chat;
 mod x_live;
 mod x_oauth1;
@@ -640,6 +642,11 @@ async fn run_backend() -> Result<()> {
         Ok(None) => {}
         Err(error) => tracing::warn!("Could not load the saved encoder preference: {error}"),
     }
+    // Plan 195 S5: Media Foundation rejections remembered from earlier runs,
+    // loaded once so the first record start of this run skips probes that
+    // this driver already failed.
+    #[cfg(target_os = "windows")]
+    recording::load_windows_mf_rejection_store(&state.database);
     // Plan 166 S1: the metrics journal, off unless the setting or
     // VIDEORC_METRICS_JOURNAL=1 turns it on. Nothing is running yet, so there
     // is no state to seed.
