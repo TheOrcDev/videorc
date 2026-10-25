@@ -4,6 +4,8 @@ import {
   CLIP_LENGTHS,
   INVALID_CLIP_LENGTH_CODE,
   INVALID_CLIP_LENGTH_MESSAGE,
+  clipLastWords,
+  clipLengthLabel,
   clipLengthWords,
   clipSavingToast,
   isClipLength,
@@ -36,6 +38,13 @@ describe('clip mark clock', () => {
     expect(clipLengthWords(120)).toBe('2 minutes')
     expect(clipLengthWords(90)).toBe('1.5 minutes')
     expect(clipLengthWords(undefined)).toBe('seconds')
+  })
+
+  it('names the two clip lengths on buttons and after "the last" (plan 199 D4)', () => {
+    expect(clipLengthLabel(30)).toBe('30 s')
+    expect(clipLengthLabel(60)).toBe('1 min')
+    expect(clipLastWords(30)).toBe('30 seconds')
+    expect(clipLastWords(60)).toBe('minute')
   })
 })
 

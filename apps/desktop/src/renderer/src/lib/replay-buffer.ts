@@ -34,13 +34,6 @@ const REPLAY_AUDIO_KBPS = 192
 
 const TOAST_ID = 'clips'
 
-/** "15 s", "30 s", "1 min", "2 min", "5 min". */
-export function replayLengthLabel(seconds: number): string {
-  if (seconds < 60) return `${seconds} s`
-  const minutes = seconds / 60
-  return Number.isInteger(minutes) ? `${minutes} min` : `${minutes.toFixed(1)} min`
-}
-
 /** The ring's length as the Studio's timecode: "0:30", "5:00". */
 export function replayClock(seconds: number): string {
   return formatTimecode(Math.max(0, seconds) * 1000)

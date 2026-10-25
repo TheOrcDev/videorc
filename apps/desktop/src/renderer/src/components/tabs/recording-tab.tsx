@@ -16,8 +16,7 @@ import {
   CLIPS_LABEL,
   KEEP_LAST_SECONDS_LABEL,
   estimatedReplayDiskBytes,
-  formatBytes,
-  replayLengthLabel
+  formatBytes
 } from '@/lib/replay-buffer'
 
 import { LockAlert, SessionLockAlert } from '@/components/lock-alert'
@@ -80,12 +79,18 @@ export function RecordingTab(): ReactElement {
   )
 }
 
+/** The two clip keys (plan 199 D5): the 30-second clip, then the minute. */
+const CLIP_SHORTCUT_ACTIONS = [
+  { action: 'clip-mark', key: 'clipMark' },
+  { action: 'clip-mark-long', key: 'clipMarkLong' }
+] as const
+
 /**
  * Clips (plan 181, the owner's redesign): the one switch that keeps the last
- * seconds whenever Videorc is open (R2, on by default), the length (R1), what
- * it takes on disk at the current quality, the Save clip key, and where
- * clips go (R4). On a software encoder path the backend keeps the default
- * off and this section says why; the switch still turns it on.
+ * minute whenever Videorc is open (R2, on by default; plan 199 fixed the
+ * length), what it takes on disk at the current quality, the two clip keys,
+ * and where clips go (R4). On a software encoder path the backend keeps the
+ * default off and this section says why; the switch still turns it on.
  */
 function ClipsSection(): ReactElement {
   const { captureConfig, settings, setSettings, runtimeInfo, recordBlockedReason } = useStudioCore()
@@ -103,9 +108,8 @@ function ClipsSection(): ReactElement {
     globalShortcutRegistration.getSnapshot
   )
   return (
-    // plan 199 S5: the description names both clips (30 seconds or the whole minute).
     <PanelSection
-      description={`Videorc keeps the last ${replayLengthLabel(REPLAY_RING_SECONDS)} of your screen and microphone while it is open, so one key saves them as a clip. While you record, the moment is also marked in the recording.`}
+      description="Videorc keeps the last minute of your screen and microphone while it is open, so one key saves the last 30 seconds or the whole minute as a clip. While you record, the moment is also marked in the recording."
       icon={ClipIcon}
       title={CLIPS_LABEL}
     >
@@ -131,7 +135,6 @@ function ClipsSection(): ReactElement {
             onCheckedChange={(checked) => clips.setEnabled(checked)}
           />
         </SettingsRow>
-        {/* Plan 199 D2: the Length row is gone; the two clip lengths are fixed. */}
         <SettingsRow
           data-testid="output-clips-disk"
           description={`At ${formatVideoQuality(captureConfig.video)}, however long it runs.`}
@@ -139,29 +142,31 @@ function ClipsSection(): ReactElement {
         >
           <span className="text-sm tabular-nums text-muted-foreground">about {estimate}</span>
         </SettingsRow>
-        {/* plan 199 S5: a second recorder for 'clip-mark-long' ("Save a 1-minute clip"). */}
-        <ShortcutRecorderField
-          id="global-shortcut-clip-mark"
-          label={globalShortcutLabel('clip-mark')}
-          platform={runtimeInfo?.platform}
-          registrationFailed={shortcutRegistration['clip-mark'] === false}
-          validate={(accelerator) => {
-            const owner = findAcceleratorOwner(
-              settings.globalShortcuts ?? {},
-              accelerator,
-              'clip-mark',
-              runtimeInfo?.platform
-            )
-            return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
-          }}
-          value={settings.globalShortcuts?.clipMark}
-          onChange={(accelerator) =>
-            setSettings((current) => ({
-              ...current,
-              globalShortcuts: withGlobalShortcut(current.globalShortcuts, 'clip-mark', accelerator)
-            }))
-          }
-        />
+        {CLIP_SHORTCUT_ACTIONS.map(({ action, key }) => (
+          <ShortcutRecorderField
+            key={action}
+            id={`global-shortcut-${action}`}
+            label={globalShortcutLabel(action)}
+            platform={runtimeInfo?.platform}
+            registrationFailed={shortcutRegistration[action] === false}
+            validate={(accelerator) => {
+              const owner = findAcceleratorOwner(
+                settings.globalShortcuts ?? {},
+                accelerator,
+                action,
+                runtimeInfo?.platform
+              )
+              return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
+            }}
+            value={settings.globalShortcuts?.[key]}
+            onChange={(accelerator) =>
+              setSettings((current) => ({
+                ...current,
+                globalShortcuts: withGlobalShortcut(current.globalShortcuts, action, accelerator)
+              }))
+            }
+          />
+        ))}
         <SettingsRow
           data-testid="output-clips-folder"
           description="A Clips folder inside your recordings folder. Every clip is listed in Library."

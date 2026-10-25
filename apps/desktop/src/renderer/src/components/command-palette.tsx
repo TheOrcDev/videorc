@@ -32,6 +32,7 @@ import {
   CommandShortcut
 } from '@/components/ui/command'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
 import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
 import { HEALTH_SEARCH_KEYWORDS } from '@/lib/health-door'
@@ -246,17 +247,29 @@ export function CommandPalette({
             {shortcut(settings.globalShortcuts?.micToggle)}
           </CommandItem>
           {/* The one clip action (plan 181 R4): the last seconds whenever the
-              ring holds frames, and a mark in the recording while one runs. */}
+              ring holds frames, and a mark in the recording while one runs.
+              Plan 199: two lengths, 30 seconds and the minute. */}
           {live || replayBuffer.state.state === 'on' ? (
-            <CommandItem
-              value="Save clip"
-              keywords={['clip', 'replay', 'marker', 'moment']}
-              onSelect={() => run(() => void markClip())}
-            >
-              <ClipIcon className="size-4" />
-              Save clip
-              {shortcut(settings.globalShortcuts?.clipMark)}
-            </CommandItem>
+            <>
+              <CommandItem
+                value="Save a 30-second clip"
+                keywords={['clip', 'replay', 'marker', 'moment', '30', 'seconds']}
+                onSelect={() => run(() => void markClip())}
+              >
+                <ClipIcon className="size-4" />
+                Save a 30-second clip
+                {shortcut(settings.globalShortcuts?.clipMark)}
+              </CommandItem>
+              <CommandItem
+                value="Save a 1-minute clip"
+                keywords={['clip', 'replay', 'marker', 'moment', '60', 'minute', 'long']}
+                onSelect={() => run(() => void markClip(LONG_CLIP_SECONDS))}
+              >
+                <ClipIcon className="size-4" />
+                Save a 1-minute clip
+                {shortcut(settings.globalShortcuts?.clipMarkLong)}
+              </CommandItem>
+            </>
           ) : null}
         </CommandGroup>
 

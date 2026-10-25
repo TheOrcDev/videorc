@@ -31,10 +31,11 @@ import { STAT_NAMES } from '@/components/stream-manager/stats-bar'
 import type {
   AudienceSnapshot,
   ClipContext,
+  ClipLength,
   CommentHighlightAnchor,
   LiveChatProviderState
 } from '@/lib/backend'
-import { clipLengthWords } from '../../../../shared/clip-lengths'
+import { clipLastWords, clipLengthLabel } from '../../../../shared/clip-lengths'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { chatStateLabel } from '@/lib/state-labels'
@@ -175,10 +176,42 @@ function BannerMenuItems({
   )
 }
 
-/** The Clip button's hint: what it saves, its key, and the spoken way. */
-function clipHint(clip: ClipContext | undefined): string {
-  const key = clip?.shortcutLabel ? ` (${clip.shortcutLabel})` : ''
-  return `Save the last ${clipLengthWords(clip?.seconds)} as a clip${key}, or say “clip that”`
+/** A Clip button's hint: what it saves, its key, and the spoken way (plan
+ * 199: one per length). */
+function clipHint(seconds: number, shortcutLabel: string | undefined, spoken: string): string {
+  const key = shortcutLabel ? ` (${shortcutLabel})` : ''
+  return `Save the last ${clipLastWords(seconds)} as a clip${key}, or say “${spoken}”`
+}
+
+/** The two Clip buttons (plan 199 D4, D9): today's 30 s, then the minute. */
+function clipButtons(clip: ClipContext | undefined): Array<{
+  seconds: ClipLength
+  text: string
+  menuText: string
+  label: string
+  hint: string
+  shortcutLabel?: string
+}> {
+  const short = clip?.seconds ?? 30
+  const long = clip?.longSeconds ?? 60
+  return [
+    {
+      seconds: 30,
+      text: `Clip ${clipLengthLabel(short)}`,
+      menuText: `Clip ${clipLengthLabel(short)}`,
+      label: 'Save a 30-second clip',
+      hint: clipHint(short, clip?.shortcutLabel, 'clip that'),
+      shortcutLabel: clip?.shortcutLabel
+    },
+    {
+      seconds: 60,
+      text: clipLengthLabel(long),
+      menuText: `Clip ${clipLengthLabel(long)}`,
+      label: 'Save a 1-minute clip',
+      hint: clipHint(long, clip?.longShortcutLabel, 'clip the last minute'),
+      shortcutLabel: clip?.longShortcutLabel
+    }
+  ]
 }
 
 export function StreamManagerStatusBar({
@@ -211,9 +244,9 @@ export function StreamManagerStatusBar({
   onClear?: () => void
   /** The one Clip action (plan 068 D6; plan 181 R4): present whenever the
    * ring holds frames or a session runs. Word and icon: mid-stream there is
-   * no time to hover. */
-  onMarkClip?: () => void
-  /** The ring's length and the Save clip key, for the button's hint. */
+   * no time to hover. Plan 199: two buttons, 30 s and the minute. */
+  onMarkClip?: (seconds: ClipLength) => void
+  /** The two clip lengths and their keys, for the buttons' hints. */
   clip?: ClipContext
   /** Plan 186 S7: the Banners menu, on air or not (banners matter in
    * recordings too). `banners` is null until Studio has read the list. */
@@ -397,15 +430,18 @@ export function StreamManagerStatusBar({
                     </DropdownMenuContent>
                   </DropdownMenu>
                 ) : null}
-                {onMarkClip ? (
-                  <StatusBarAction
-                    hint={clipHint(clip)}
-                    icon={<ClipIcon aria-hidden />}
-                    label="Clip"
-                    text="Clip"
-                    onClick={onMarkClip}
-                  />
-                ) : null}
+                {onMarkClip
+                  ? clipButtons(clip).map((button, index) => (
+                      <StatusBarAction
+                        key={button.seconds}
+                        hint={button.hint}
+                        icon={index === 0 ? <ClipIcon aria-hidden /> : undefined}
+                        label={button.label}
+                        text={button.text}
+                        onClick={() => onMarkClip(button.seconds)}
+                      />
+                    ))
+                  : null}
                 {bannerItems ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -516,15 +552,20 @@ export function StreamManagerStatusBar({
                         {PIN_WINDOW_LABEL}
                       </DropdownMenuCheckboxItem>
                     ) : null}
-                    {onMarkClip ? (
-                      <DropdownMenuItem onSelect={onMarkClip}>
-                        <ClipIcon />
-                        Clip
-                        {clip?.shortcutLabel ? (
-                          <DropdownMenuShortcut>{clip.shortcutLabel}</DropdownMenuShortcut>
-                        ) : null}
-                      </DropdownMenuItem>
-                    ) : null}
+                    {onMarkClip
+                      ? clipButtons(clip).map((button) => (
+                          <DropdownMenuItem
+                            key={button.seconds}
+                            onSelect={() => onMarkClip(button.seconds)}
+                          >
+                            <ClipIcon />
+                            {button.menuText}
+                            {button.shortcutLabel ? (
+                              <DropdownMenuShortcut>{button.shortcutLabel}</DropdownMenuShortcut>
+                            ) : null}
+                          </DropdownMenuItem>
+                        ))
+                      : null}
                     {bannerItems ? (
                       <DropdownMenuSub>
                         <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>

@@ -285,7 +285,8 @@ export interface StreamManagerProps {
   markerContext?: import('@/lib/backend').MarkerContext | null
   onMarker?: (label?: string) => Promise<import('@/lib/backend').SessionMarker>
   onUndoMarker?: (marker: import('@/lib/backend').SessionMarker) => Promise<void>
-  onMarkClip?: () => void
+  /** The Clip buttons (plan 199: 30 s or the minute). */
+  onMarkClip?: (seconds: ClipLength) => void
   /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */
   onClip?: (seconds: ClipLength) => Promise<string>
   /**

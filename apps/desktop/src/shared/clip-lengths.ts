@@ -41,6 +41,17 @@ export function clipLengthWords(seconds: number | undefined): string {
   return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minute${minutes === 1 ? '' : 's'}`
 }
 
+/** What follows "the last": "30 seconds", or "minute" for the 1-minute clip
+ * ("Save the last minute as a clip", never "the last 1 minute"). */
+export function clipLastWords(seconds: number | undefined): string {
+  return seconds === 60 ? 'minute' : clipLengthWords(seconds)
+}
+
+/** A clip length on a button: "30 s", "1 min" (plan 199 D4). */
+export function clipLengthLabel(seconds: number): string {
+  return seconds < 60 ? `${seconds} s` : `${seconds / 60} min`
+}
+
 /**
  * The Stream Manager's toast for a press the ring took (its own window never
  * hears replay.saved, which is the main window's "Clip saved"). `seconds` is

@@ -834,9 +834,8 @@ function CommentsWindowApp(): ReactElement {
               : undefined
           }
           onHighlight={live ? requestHighlight : undefined}
-          // plan 199 S5: two buttons, "Clip 30 s" and "1 min", call onMarkClip(seconds).
-          onMarkClip={() => {
-            void saveClip()
+          onMarkClip={(seconds) => {
+            void saveClip(seconds)
               .then((copy) => {
                 ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
                   id: 'clip-marked',
