@@ -2,8 +2,8 @@
 
 **Status:** BUILT 2026-10-25 on the recommended defaults (D1 to D5), U1 to
 S2; see [Execution notes](#execution-notes). Owed: audiocn PR #32 merged and
-deployed, the live-mic CPU comparison (needs a Microphone grant for this
-worktree's dev app), and the owner's by-eye.
+deployed, and the owner's by-eye. The live-mic CPU comparison ran (renderer
+down, GPU up about 4.5 points; see the notes).
 **Priority:** P2. Owner request: "In our studio
 instead of the meter for the microphone that we already have, let's plan to add
 this one https://www.audiocn.dev/docs/components/lcd-meter. Also inside the
@@ -410,32 +410,37 @@ under the 395,000 ceiling. Before the rebase the same change read 394,306
 against main's 394,285, so the LCD adds about 20 gzip bytes of chunk-name
 churn to the entry; the rest of the rise is main's #797.
 
+**S2 live-mic CPU comparison.** Run 2026-10-25 in this worktree with the probe
+fix from #804, interleaved main (`01e440e2`), branch, main, branch at load
+average 8 to 10:
+`VIDEORC_SMOKE_SKIP_PREBUILD=1 VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1 pnpm
+smoke:preview-performance`. Every run held about 1,800 frames with the Studio
+meter receiving (state `monitoring`).
+
+| Run | Renderer avg | Renderer p95 | GPU avg | GPU p95 |
+| --- | ---: | ---: | ---: | ---: |
+| main 1 | 27.4% | 49.9% | 11.1% | 14.2% |
+| main 2 | 27.7% | 42.3% | 11.9% | 16.9% |
+| LCD 1 | 17.5% | 23.6% | 16.5% | 23.6% |
+| LCD 2 | 22.1% | 46.0% | 15.4% | 20.5% |
+
+The LCD lowers renderer CPU by 5 to 10 points and raises GPU by about 4.5,
+likely its glow (`drop-shadow`) and dot mask; together they come out a few
+points lower. Every run, main's too, failed only the probe's 80 KiB/s
+WebSocket wire ceiling (about 84 KiB/s), which is backend traffic.
+
+An earlier attempt blamed a missing macOS Microphone grant. That was wrong:
+the probe had two bugs of its own (it read the picker 250 ms after launch,
+before discovery, and waited for the `live` state that only a session gives),
+both fixed in #804. The backend log showed CoreAudio capture running all
+along.
+
+`pnpm smoke:sources` failed on main the same way (its expectations predate
+#742's `captureOff` key); #803 fixes the smoke, and this change doesn't touch
+what it checks.
+
 **Owed.**
 
-- **The S2 live-mic CPU comparison.** Once the host quietened, the backend
-  built in this worktree (7 min 39 s) and
-  `VIDEORC_SMOKE_SKIP_PREBUILD=1 VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1
-  pnpm smoke:preview-performance` ran on the branch and, after
-  `git switch --detach origin/main` in the same worktree, on main. Both failed
-  the same way, before measuring:
-  - The probe looks for microphone options 250 ms after opening the picker,
-    right after launch, and found none ("No available Studio microphone could
-    be selected"). A scratch copy that waits up to 10 s selected one, so this
-    is a probe timing bug on main (not fixed here).
-  - With a microphone selected, the Studio meter mounted but never went live:
-    `micLivePeakDb` stayed null. This worktree's dev Electron and backend have
-    no macOS Microphone grant (TCC is per binary), and only the owner can
-    click Allow.
-
-  To run it: in `~/projects/videorc-wt-196`, `pnpm dev`, select a microphone
-  and allow access once, quit, then run the command above on the branch and
-  on main as described. The base probe, without the microphone, ran on the
-  branch (1,800 frames; renderer 22.1%, GPU 19.0% at load average 34) and
-  failed only its 80 KiB/s WebSocket ceiling at 84.4, backend traffic this
-  renderer change does not touch; main's run of it was not taken.
-- **`pnpm smoke:sources`** fails on main too, the same way: an extra
-  `captureOff: undefined` key in the reconciled sources (a script assertion,
-  no app; likely since #742). Not this change's.
 - audiocn PR #32 merged and audiocn.dev deployed, so a re-install from the
   site matches `lcd-display.tsx`.
 - The owner's by-eye in both themes (S2 list), and a look on the next Windows
