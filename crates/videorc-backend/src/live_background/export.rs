@@ -25,8 +25,9 @@ use super::looks::{
 };
 use super::sizes::{
     BEAMS_FIELD_SCALE, BEAMS_MAX_FIELD_PIXELS, FERROFLUID_BOUND_CELL, FERROFLUID_CELL,
-    PLASMA_MAX_LIGHT_PIXELS, SOFT_MAX_SHORT_SIDE, beams_field_size, dither_cell, dither_field_size,
-    ferrofluid_grid, ghost_fibers_bloom_sizes, internal_size, plasma_sizes, silk_field_size,
+    FERROFLUID_MAX_SHORT_SIDE, PLASMA_MAX_LIGHT_PIXELS, SOFT_MAX_SHORT_SIDE, beams_field_size,
+    dither_cell, dither_field_size, ferrofluid_grid, ghost_fibers_bloom_sizes, internal_size,
+    plasma_sizes, silk_field_size,
 };
 use crate::protocol::LiveBackgroundId;
 
@@ -64,6 +65,7 @@ fn size_cases() -> Value {
         LiveBackgroundId::Silk,
         LiveBackgroundId::LineWaves,
         LiveBackgroundId::Dither,
+        LiveBackgroundId::Ferrofluid,
     ] {
         for output in outputs {
             for (level, name) in [(GuardLevel::Full, "full"), (GuardLevel::Half, "half")] {
@@ -194,6 +196,7 @@ fn render() -> Value {
         "uniformVec4Count": UNIFORM_VEC4_COUNT,
         "baseColor": BASE_COLOR,
         "softMaxShortSide": SOFT_MAX_SHORT_SIDE,
+        "ferrofluidMaxShortSide": FERROFLUID_MAX_SHORT_SIDE,
         "plasmaMaxLightPixels": PLASMA_MAX_LIGHT_PIXELS,
         "beamsFieldScale": BEAMS_FIELD_SCALE,
         "beamsMaxFieldPixels": BEAMS_MAX_FIELD_PIXELS,

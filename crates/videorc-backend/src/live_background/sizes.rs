@@ -10,6 +10,11 @@ use crate::protocol::LiveBackgroundId;
 /// cost").
 pub const SOFT_MAX_SHORT_SIDE: f64 = 1080.0;
 
+/// Ferrofluid's march costs about 1.8 ms at 1080p on an M4, over the 1.5 ms
+/// budget, so it renders at three quarters of that: at most 810 on its short
+/// side (owner call, plan 194 "As built → S3").
+pub const FERROFLUID_MAX_SHORT_SIDE: f64 = 810.0;
+
 /// React Bits' Plasma Wave caps its ray-traced (fine) target at 2.4 MP.
 pub const PLASMA_MAX_LIGHT_PIXELS: f64 = 2_400_000.0;
 
@@ -36,11 +41,16 @@ pub const GHOST_FIBERS_BLOOM_LEVELS: usize = 5;
 
 /// The background's full internal size for an output (`view`). Line Waves
 /// and Dither render at full size; the soft backgrounds at most 1080 on
-/// their short side. The guard's Half level halves either.
+/// their short side (Ferrofluid 810). The guard's Half level halves either.
 pub fn internal_size(id: LiveBackgroundId, output: (u32, u32), level: GuardLevel) -> (u32, u32) {
     let (width, height) = (f64::from(output.0.max(1)), f64::from(output.1.max(1)));
+    let max_short_side = if id == LiveBackgroundId::Ferrofluid {
+        FERROFLUID_MAX_SHORT_SIDE
+    } else {
+        SOFT_MAX_SHORT_SIDE
+    };
     let mut scale = if is_soft(id) {
-        (SOFT_MAX_SHORT_SIDE / width.min(height)).min(1.0)
+        (max_short_side / width.min(height)).min(1.0)
     } else {
         1.0
     };
@@ -293,6 +303,32 @@ mod tests {
         assert_eq!(
             internal_size(silk, (3840, 2160), GuardLevel::Half),
             (960, 540)
+        );
+    }
+
+    #[test]
+    fn ferrofluid_renders_at_most_810_on_the_short_side() {
+        let ferrofluid = LiveBackgroundId::Ferrofluid;
+        assert_eq!(
+            internal_size(ferrofluid, (1920, 1080), GuardLevel::Full),
+            (1440, 810)
+        );
+        assert_eq!(
+            internal_size(ferrofluid, (3840, 2160), GuardLevel::Full),
+            (1440, 810)
+        );
+        assert_eq!(
+            internal_size(ferrofluid, (1080, 1920), GuardLevel::Full),
+            (810, 1440)
+        );
+        // Below 810 it renders at full size: the goldens (640 × 360) and 720p.
+        assert_eq!(
+            internal_size(ferrofluid, (1280, 720), GuardLevel::Full),
+            (1280, 720)
+        );
+        assert_eq!(
+            internal_size(ferrofluid, (1920, 1080), GuardLevel::Half),
+            (720, 405)
         );
     }
 

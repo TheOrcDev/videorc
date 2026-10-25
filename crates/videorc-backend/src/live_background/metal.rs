@@ -3247,7 +3247,8 @@ mod tests {
 
     /// Each of the five builds exactly its passes' pipelines and holds its
     /// own scratch beside the live frame (Color Bends none); Dither renders
-    /// 4K at full size and the soft four at 1080p; the guard's Half level
+    /// 4K at full size, Ferrofluid at 1440 × 810 and the other soft three at
+    /// 1080p; the guard's Half level
     /// halves the instanced one too; and a release frees everything.
     #[test]
     fn the_new_scratch_follows_the_background_and_release_frees_everything() {
@@ -3261,7 +3262,9 @@ mod tests {
             let frame = renderer
                 .render(&input, (1920, 1080), None)
                 .expect("renders");
-            assert_eq!((frame.width, frame.height), (1920, 1080), "{id:?}");
+            // Ferrofluid renders at most 810 on its short side.
+            let expected = internal_size(id, (1920, 1080), GuardLevel::Full);
+            assert_eq!((frame.width, frame.height), expected, "{id:?}");
             assert_eq!(frame.rendering, LiveBackgroundRendering::Shader, "{id:?}");
             programs_so_far += passes(id).len() as u32;
             let (programs, bytes) = renderer.resources();
@@ -3284,10 +3287,10 @@ mod tests {
             }
             assert_eq!(board.snapshot().2, bytes);
             let frame = renderer.render(&input, (3840, 2160), None).unwrap();
-            let expected = if id == LiveBackgroundId::Dither {
-                (3840, 2160)
-            } else {
-                (1920, 1080)
+            let expected = match id {
+                LiveBackgroundId::Dither => (3840, 2160),
+                LiveBackgroundId::Ferrofluid => (1440, 810),
+                _ => (1920, 1080),
             };
             assert_eq!((frame.width, frame.height), expected, "{id:?} at 4K");
         }

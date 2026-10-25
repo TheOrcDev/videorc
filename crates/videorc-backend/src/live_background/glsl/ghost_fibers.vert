@@ -187,7 +187,9 @@ void main() {
   float endFade = smoothstep(0.5, 0.4, abs(s)) * smoothstep(1.6, 4.2, depth);
   float uTips = u[6].x;
   float tipEnd = mix(0.6, 0.06 + 0.26 * hash11(fi * 9.137 + place.w * 3.0), uTips);
-  float tip = exp(-pow((s - tipEnd) / 0.0065, 2.0)) * uTips;
+  // Squared by hand: GLSL leaves pow() of a negative base undefined (HLSL gives NaN).
+  float tipOffset = (s - tipEnd) / 0.0065;
+  float tip = exp(-tipOffset * tipOffset) * uTips;
   endFade *= smoothstep(tipEnd + 0.003, tipEnd - 0.001, s);
   // The intro is finished (React Bits' appear = 1) and no click pulses.
   float uDotLength = u[5].y;

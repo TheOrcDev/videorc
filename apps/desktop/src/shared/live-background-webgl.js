@@ -69,10 +69,9 @@
     var background = findBackground(render, id)
     var width = Math.max(1, output[0])
     var height = Math.max(1, output[1])
+    var maxShortSide = id === 'ferrofluid' ? render.ferrofluidMaxShortSide : render.softMaxShortSide
     var scale =
-      background && background.soft
-        ? Math.min(render.softMaxShortSide / Math.min(width, height), 1)
-        : 1
+      background && background.soft ? Math.min(maxShortSide / Math.min(width, height), 1) : 1
     if (level === 'half') scale *= 0.5
     return [Math.max(16, roundHalfUp(width * scale)), Math.max(16, roundHalfUp(height * scale))]
   }

@@ -464,8 +464,9 @@ describe('live background WebGL runner (plan 194 S5)', () => {
   it('renders Ferrofluid through its grid and a nearest bound', () => {
     const fake = fakeGl()
     const live = runner.create(fake.gl, render)
-    live.draw({ id: 'ferrofluid', look: 'studio', phase: 5, width: 1920, height: 1080 })
-    const grid = runner.ferrofluidGrid(render, look('ferrofluid', 'studio'), [1920, 1080])
+    // 720p: under Ferrofluid's 810 cap, so it draws straight to the canvas.
+    live.draw({ id: 'ferrofluid', look: 'studio', phase: 5, width: 1280, height: 720 })
+    const grid = runner.ferrofluidGrid(render, look('ferrofluid', 'studio'), [1280, 720])
     expect(grid.size).toStrictEqual([139, 93])
     const [field, bound] = Array.from(fake.textures.entries())
     expect([field[1].width, field[1].height, field[1].format]).toStrictEqual([
@@ -483,6 +484,19 @@ describe('live background WebGL runner (plan 194 S5)', () => {
     expect(fake.named('drawArrays')).toHaveLength(3)
     expect(live.programsCompiled()).toBe(3)
     expect(live.scratchBytes()).toBe((139 * 93 + 47 * 31) * 8)
+    live.dispose()
+  })
+
+  it('renders Ferrofluid at most 810 on its short side, then presents it', () => {
+    const fake = fakeGl()
+    const live = runner.create(fake.gl, render)
+    live.draw({ id: 'ferrofluid', look: 'studio', phase: 5, width: 1920, height: 1080 })
+    expect(runner.internalSize(render, 'ferrofluid', [1920, 1080], 'full')).toStrictEqual([
+      1440, 810
+    ])
+    const viewports = fake.named('viewport').map((call) => [call.args[2], call.args[3]])
+    expect(viewports).toContainEqual([1440, 810])
+    expect(viewports[viewports.length - 1]).toStrictEqual([1920, 1080])
     live.dispose()
   })
 

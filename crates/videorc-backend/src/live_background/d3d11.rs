@@ -1896,7 +1896,6 @@ mod tests {
     /// couldn't make its blend or rasterizer state would show the poster.
     #[test]
     fn plan_194_backgrounds_render_with_their_own_scratch() {
-        let frame_bytes = 1920 * 1080 * 4;
         let cases: [(LiveBackgroundId, &str, u32, (u64, u64)); 5] = [
             // 1440 × 810 × 8 bytes, with its mip chain (4/3).
             (
@@ -1944,7 +1943,10 @@ mod tests {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             // SAFETY: the output is initialized local storage.
             unsafe { texture.GetDesc(&mut desc) };
-            assert_eq!((desc.Width, desc.Height), (1920, 1080), "{id:?}");
+            // Ferrofluid renders at most 810 on its short side.
+            let size = internal_size(id, (1920, 1080), GuardLevel::Full);
+            assert_eq!((desc.Width, desc.Height), size, "{id:?}");
+            let frame_bytes = u64::from(size.0) * u64::from(size.1) * 4;
             assert_eq!(
                 board.snapshot().0.map(|status| status.rendering),
                 Some(LiveBackgroundRendering::Shader),
