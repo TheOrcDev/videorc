@@ -50,6 +50,9 @@ const MAX_RETAINED_RECORDINGS: usize = 2;
 pub enum ClipMarkError {
     #[error("No session is running, so there is nothing to mark.")]
     NoActiveSession,
+    /// Plan 199: a length that is not 30 or 60 s. Refused before any mark.
+    #[error("{}", crate::replay_buffer::INVALID_CLIP_LENGTH_MESSAGE)]
+    InvalidLength,
     #[error("{0}")]
     Storage(#[from] anyhow::Error),
 }
@@ -58,6 +61,7 @@ impl ClipMarkError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NoActiveSession => "no-active-session",
+            Self::InvalidLength => crate::replay_buffer::INVALID_CLIP_LENGTH_CODE,
             Self::Storage(_) => "clip-mark-failed",
         }
     }
@@ -410,6 +414,7 @@ pub(crate) fn note_transcript_final(
             Some(found.at_seconds),
             ClipMarkSource::Voice,
             Some(found.phrase.clone()),
+            crate::replay_buffer::DEFAULT_CLIP_SECONDS,
         )
         .await
         {
@@ -435,22 +440,31 @@ pub(crate) fn note_transcript_final(
     });
 }
 
-/// `clip.mark`: a manual mark at the capture's current elapsed time.
-pub async fn mark_manual(state: &AppState) -> Result<ClipMarkedEvent, ClipMarkError> {
-    record_mark(state, None, None, ClipMarkSource::Manual, None).await
+/// `clip.mark`: a manual mark at the capture's current elapsed time. Plan
+/// 199: `seconds` is the press's length (30 or 60; none is 30), refused
+/// before anything is marked or saved when it is neither.
+pub async fn mark_manual(
+    state: &AppState,
+    seconds: Option<u32>,
+) -> Result<ClipMarkedEvent, ClipMarkError> {
+    let seconds = crate::replay_buffer::requested_clip_seconds(seconds)
+        .map_err(|_| ClipMarkError::InvalidLength)?;
+    record_mark(state, None, None, ClipMarkSource::Manual, None, seconds).await
 }
 
 /// Store a mark and emit `clip.marked`. With a `target` (a voice mark, whose
 /// time the transcript already carries) the mark lands on that capture even
 /// after its recording slot was retired; otherwise it lands on the active
 /// session, and `at_seconds` `None` stamps its elapsed time now. Without a
-/// recording output nothing is stored and the event says why.
+/// recording output nothing is stored and the event says why. `seconds` is
+/// the press's length (plan 199), already one of the clip lengths.
 async fn record_mark(
     state: &AppState,
     target: Option<MarkTarget>,
     at_seconds: Option<f64>,
     source: ClipMarkSource,
     phrase: Option<String>,
+    seconds: u32,
 ) -> Result<ClipMarkedEvent, ClipMarkError> {
     let (session_id, at_seconds, records_to_file) = match (target, at_seconds) {
         (Some(target), Some(at_seconds)) => {
@@ -482,7 +496,7 @@ async fn record_mark(
     // Plan 181 (owner redesign R4): one action. Whenever the ring holds
     // frames the press saves the last N seconds as a clip, and while a
     // recording runs the moment is also kept as a mark in it, for the report.
-    let clip_save = crate::replay_buffer::request_save(state, Some(source)).ok();
+    let clip_save = crate::replay_buffer::request_save(state, Some(source), Some(seconds)).ok();
     let mark_stored = if records_to_file {
         state.database.insert_clip_mark(&ClipMark {
             id: uuid::Uuid::new_v4().to_string(),
@@ -837,7 +851,7 @@ mod tests {
         let mut active = crate::recording::test_active_recording_stub("manual-a");
         active.output_path = Some(std::path::PathBuf::from("/tmp/manual-a.mp4"));
         *state.recording.lock().await = Some(active);
-        let manual = mark_manual(&state).await.unwrap();
+        let manual = mark_manual(&state, None).await.unwrap();
         assert!(manual.saved);
         assert_eq!(manual.session_id, "manual-a");
         assert!(
@@ -897,7 +911,7 @@ mod tests {
         active.replay_only = true;
         *state.recording.lock().await = Some(active);
         let mut events = state.events.subscribe();
-        let reply = mark_manual(&state).await.unwrap();
+        let reply = mark_manual(&state, None).await.unwrap();
         assert!(!reply.saved);
         assert_eq!(reply.reason.as_deref(), Some(CLIP_SAVED_REASON));
         assert_eq!(reply.session_id, "ring-only");
@@ -930,7 +944,7 @@ mod tests {
         active.output_path = Some(recordings.join("ring-rec.mkv"));
         *state.recording.lock().await = Some(active);
         let mut events = state.events.subscribe();
-        let reply = mark_manual(&state).await.unwrap();
+        let reply = mark_manual(&state, None).await.unwrap();
         assert!(reply.saved, "the recording keeps the mark");
         assert_eq!(reply.reason.as_deref(), Some(CLIP_SAVED_REASON));
         let outcome = wait_for_save_outcome(&mut events).await;
@@ -1055,6 +1069,7 @@ mod tests {
             Some(1_804.5),
             ClipMarkSource::Voice,
             Some("clip that".to_string()),
+            30,
         )
         .await
         .expect("a carried target needs no recording slot");
@@ -1076,6 +1091,7 @@ mod tests {
             Some(12.0),
             ClipMarkSource::Voice,
             Some("clip it".to_string()),
+            30,
         )
         .await
         .unwrap();
@@ -1085,7 +1101,17 @@ mod tests {
 
         // Without a target (a manual mark) the active slot is still required.
         assert!(matches!(
-            record_mark(&state, None, None, ClipMarkSource::Manual, None).await,
+            record_mark(&state, None, None, ClipMarkSource::Manual, None, 30).await,
+            Err(ClipMarkError::NoActiveSession)
+        ));
+        // Plan 199: a length nobody offers is refused before anything else,
+        // even with no session to mark.
+        let refused = mark_manual(&state, Some(45)).await.unwrap_err();
+        assert!(matches!(refused, ClipMarkError::InvalidLength));
+        assert_eq!(refused.code(), "invalid-clip-length");
+        assert_eq!(refused.to_string(), "A clip is 30 seconds or 1 minute.");
+        assert!(matches!(
+            mark_manual(&state, Some(60)).await,
             Err(ClipMarkError::NoActiveSession)
         ));
     }
