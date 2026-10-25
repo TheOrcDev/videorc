@@ -40,9 +40,14 @@ const htmlPath = resolve(
 // visuals, live confirmations) is Studio correctness logic of ~300 gzip bytes,
 // tipping it to 390,086. Raise gzip to 395,000 (~1.3%); keep re-splitting the
 // answer for net-new UI.
+// Recalibrated 2026-10-25: main measured 394,874 gzip (126 bytes of headroom)
+// and keeping the Linux source pickers live while only the Clips buffer runs
+// (full retest 148, plan 0001: replay-only session state, ring re-arm on a
+// source change) is Studio correctness logic of ~700 gzip bytes (395,577). Raise gzip to
+// 400,000 (~1.3%); keep re-splitting the answer for net-new UI.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 395_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 400_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }
