@@ -589,7 +589,9 @@ const truthFailures = [
   ...teardownFailures,
   ...activeBudgetMetricFailures,
   ...(requireStudioMicVisuals && studioMicVisualStatus?.live !== true
-    ? ['Studio live microphone visualizer did not remain active through measurement']
+    ? [
+        `Studio live microphone visualizer did not remain active through measurement (meter state: ${studioMicVisualStatus?.state ?? 'none'})`
+      ]
     : []),
   ...(detachedPreviewGeometryEvidence?.failures ?? []).map(
     (failure) => `detached preview geometry: ${failure}`
@@ -764,33 +766,59 @@ async function ensureStudioMicVisuals(smoke, { selectDevice = true } = {}) {
         );
         const trigger = label?.htmlFor ? document.getElementById(label.htmlFor) : null;
         if (!trigger) throw new Error('Studio microphone picker was not found.');
-        trigger.click();
-        await sleep(250);
-        // The device picker (plan 174 S1.9) lists cmdk options, whose
-        // data-disabled reads "true" or "false"; its no-device item says Off.
-        const option = Array.from(document.querySelectorAll('[role="option"]')).find(
-          (candidate) =>
-            candidate.getAttribute('aria-disabled') !== 'true' &&
-            !['', 'true'].includes(candidate.getAttribute('data-disabled')) &&
-            !['None', 'Off'].includes(candidate.textContent?.trim())
-        );
-        if (!option) throw new Error('No available Studio microphone could be selected.');
+        // Right after launch the picker can still be looking for devices: its
+        // list offers only Off until discovery lands. Wait for a microphone
+        // to be listed instead of reading the list once.
+        let option = null;
+        let listed = [];
+        let listStatus = null;
+        for (const until = Date.now() + 15000; !option && Date.now() < until; ) {
+          if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
+          await sleep(250);
+          const popup = document.getElementById(trigger.getAttribute('aria-controls') ?? '');
+          const options = Array.from((popup ?? document).querySelectorAll('[role="option"]'));
+          listed = options.map((candidate) => candidate.textContent?.trim());
+          listStatus = popup?.querySelector('[role="status"]')?.textContent?.trim() ?? null;
+          // The device picker (plan 174 S1.9) lists cmdk options, whose
+          // data-disabled reads "true" or "false"; its no-device item says Off.
+          option = options.find(
+            (candidate) =>
+              candidate.getAttribute('aria-disabled') !== 'true' &&
+              !['', 'true'].includes(candidate.getAttribute('data-disabled')) &&
+              !['None', 'Off'].includes(candidate.textContent?.trim())
+          );
+        }
+        if (!option) {
+          throw new Error(
+            'No available Studio microphone could be selected within 15 s (listed: ' +
+              JSON.stringify(listed) + '; list status: ' + (listStatus ?? 'none') + ').'
+          );
+        }
         option.click();
         await sleep(1000);
       }
       await openTab('studio', '[data-videorc-mic-visualizer]');
       const deadline = Date.now() + 10000;
+      let state = null;
       while (Date.now() < deadline) {
         const visualizer = document.querySelector('[data-videorc-mic-visualizer]');
         // The meter's state attribute, not its words: plan 174 C-38 says
-        // "Receiving" where it once said "Live".
-        const live = Boolean(document.querySelector('[data-videorc-mic-monitor-state="live"]'));
-        if (visualizer && live) return { mounted: true, live: true };
+        // "Receiving" where it once said "Live". This probe never starts a
+        // session, so a receiving meter reads monitoring (live needs a
+        // session, mic-visual-gate.ts); either means the signal is up.
+        state =
+          document
+            .querySelector('[data-videorc-mic-monitor-state]')
+            ?.getAttribute('data-videorc-mic-monitor-state') ?? null;
+        if (visualizer && ['live', 'monitoring'].includes(state)) {
+          return { mounted: true, live: true, state };
+        }
         await sleep(100);
       }
       return {
         mounted: Boolean(document.querySelector('[data-videorc-mic-visualizer]')),
-        live: false
+        live: false,
+        state
       };
     `
   })
