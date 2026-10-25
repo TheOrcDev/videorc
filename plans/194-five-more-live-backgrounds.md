@@ -313,6 +313,96 @@ the PR.
 
 ## As built
 
+### Ferrofluid at three quarters (owner call, 2026-10-25)
+
+S3's STOP went back to the owner, who chose three quarters over half size,
+full cost or deferring it. `sizes::internal_size` now caps Ferrofluid at
+**810 on its short side** (`FERROFLUID_MAX_SHORT_SIDE`):
+- 1440 × 810 at 1080p and 4K;
+- 810 × 1440 in portrait;
+- full size below that (720p, and the 640 × 360 goldens, which didn't move).
+
+Every renderer reads that one rule, and the WebGL runner mirrors it through
+the export's `ferrofluidMaxShortSide`. The export's size cases now pin
+Ferrofluid too. Metal cost (`live_frame_gpu_times`, load 41–43 from other
+work, so an upper bound), median / p95 in ms:
+
+| Look   | 1920 × 1080 (1440 × 810) | 1080 × 1920 (810 × 1440) | 4K (1440 × 810) | Half (720 × 405) |
+| ------ | ------------------------ | ------------------------ | --------------- | ---------------- |
+| studio | 1.02 / 1.15              | 1.04 / 1.15              | 1.07 / 1.28     | 0.32 / 0.35      |
+| ember  | 1.08 / 1.24              | 1.10 / 1.34              | 1.11 / 1.41     | 0.33 / 0.36      |
+| frost  | 1.11 / 1.25              | 1.12 / 1.33              | 1.12 / 1.37     | 0.33 / 0.36      |
+
+**Inside** the 1.5 ms budget. Scratch is 5.2 MB with the live frame.
+
+Also: Ghost Fibers' tip, `pow(x, 2.0)` with a negative base, is now squared
+by hand in `ghost_fibers.vert`. GLSL leaves that undefined, and ANGLE on
+D3D11 (the Windows preview) and some GLES drivers return NaN. The goldens
+didn't move.
+
+### S5: GLES and the WebGL2 previews (2026-10-25)
+
+Commits `de6c76a9` (WebGL2) and `acb24620` (GLES), cherry-picked from
+`feat/194-s4s5-d3d11-gles`.
+
+- **`gl.rs`**:
+  - `link_program` takes the vertex source: `ghost_fibers.vert` for the dots
+    and dust, the triangle otherwise.
+  - An instanced pass draws `glDrawArraysInstanced(TRIANGLE_STRIP, 0,
+    vertices, instances)` with `BLEND ONE, ONE`, and blending goes off
+    again after.
+  - A target clears when `clears_target()`.
+  - `TargetKind` is now format × mip chain × filter.
+  - Half-float targets still need `EXT_color_buffer_float`. Without it,
+    Beams, Ferrofluid and Ghost Fibers show their poster, as Plasma does.
+- **`live-background-webgl.js`**:
+  - S1's probe runner moved in: `beamsFieldSize`, `ditherCell`,
+    `ditherFieldSize`, `ferrofluidGrid` and `ghostFibersBloomSizes`, each
+    pinned to the generated size cases.
+  - Instanced passes and the mipmapped float target.
+  - `runnable` is true for all ten.
+  - Unit tests on a recording fake WebGL2 (no GPU) cover each background's
+    draws, blends, targets and scratch.
+- Clippy with `live-background-gl-check` adds no new error class over the
+  base (the `gl` module is unreachable on macOS, so its `dead_code` set only
+  moved names).
+- **Owed**: the GLES goldens need a Linux box with EGL (ogre).
+  `scripts/live-backgrounds/probe-passes.js` is no longer used by the probe's
+  runner choice; S8 deletes it.
+
+### S4: D3D11 (2026-10-25)
+
+Commit `bf224496`, cherry-picked from `feat/194-s4s5-d3d11-gles`.
+
+- **Ports**: five HLSL ports in `d3d11.hlsl`, prefixed per background.
+  Helpers: `gmod2/3/4`, plus `hermite`/`hermite2`, which use GLSL's
+  smoothstep formula for the reversed-edge calls (HLSL's intrinsic is only
+  specified for min < max).
+- **The instanced pass**:
+  - `GhostFibersDotsVs` and `GhostFibersDustVs` on
+    `SV_VertexID`/`SV_InstanceID`;
+  - `DrawInstanced(4, n, 0, 0)` as a strip with a `ONE, ONE` blend state;
+  - a `D3D11_CULL_NONE` rasterizer state for every live pass (the quads keep
+    GLSL's winding);
+  - `unbind()` resets the blend and rasterizer state before the scene
+    composes.
+- **Formats**:
+  - Beams' field is `R16G16B16A16_FLOAT` with `GENERATE_MIPS`;
+  - Dither's wave is `R8G8B8A8_UNORM`;
+  - Ferrofluid's grid and bound are RGBA16F;
+  - Ghost Fibers' scene is RGBA16F and its bloom chains are `R11G11B10_FLOAT`.
+
+  That is about 22.1 MB at 1080p.
+- **S3's risks, handled**: the Ferrofluid march uses `SampleLevel(…, 0)`, and
+  the tip is squared (`sq`).
+- **Checks**: `cargo xwin clippy` for `x86_64-pc-windows-msvc` adds nothing
+  to the base's 124-entry error set.
+- **Tests**: `every_live_background_entry_point_compiles`, all 60 golden
+  frames on WARP, and `plan_194_backgrounds_render_with_their_own_scratch`.
+- **Owed**: fxc has never seen this HLSL. Windows CI is the first compile and
+  the first WARP run. If Ghost Fibers alone misses there with a small mean,
+  `hash11`'s `sin` precision is the likely cause.
+
 ### S3: Metal (2026-10-25)
 
 Commit `455a2d21` (the ports and their tests); this section's commit holds the
