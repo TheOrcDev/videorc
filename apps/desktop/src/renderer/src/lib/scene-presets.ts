@@ -332,6 +332,22 @@ export function sceneSourcesTurnedOff(
   }
 }
 
+/**
+ * Whether a Studio gallery card is the scene on air: its preset, with no saved
+ * scene applied and the layout not in Freeform (Freeform keeps the last
+ * preset's name underneath, but arranges sources its own way; the Scene page
+ * already shows Freeform as the choice).
+ */
+export function galleryPresetIsActive(
+  layout: Pick<SceneVisual['layout'], 'layoutPreset' | 'arrangementMode'>,
+  presetId: string,
+  activeSavedSceneId: string | null | undefined
+): boolean {
+  return (
+    !activeSavedSceneId && layout.arrangementMode !== 'freeform' && layout.layoutPreset === presetId
+  )
+}
+
 export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
   return sceneSourceGaps(visual, devices).map(({ source }) =>
     source === 'camera'
