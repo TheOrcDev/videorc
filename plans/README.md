@@ -1,5 +1,16 @@
 # Implementation Plans
 
+- 2026-10-26: [Plan 200](200-better-recordings-export-separate-files-sound.md),
+  Better recordings: exports, separate files and sound. Owner request: make
+  exporting with separate sources, sound and system audio even better. Four
+  audits plus measurements of real takes found: Clips squash a frame at every
+  2 s join; the mic fold distorts 2-input interfaces; MP4 frame times sit on a
+  1 ms grid (editors see VFR); 5.3 GB of leaked repair temps and backups;
+  record+stream audio re-encoded AAC→AAC; separate files at 4K can damage
+  Combined; the Camera file is upscaled with nearest sampling. Groups A
+  (sound), B (Clips), C (export and files), D (separate files and picture),
+  19 slices. **EXECUTING** 2026-10-26 on `plan-200-better-recordings`, D1–D7
+  at the recommendations (owner: "execute the entire plan and create a pr").
 - 2026-10-25: [Plan 199](199-one-minute-clips.md), A 1-minute clip beside
   the 30-second clip. Owner request: "Let's also add a 60-second clip." The
   ring always keeps 1 min, and each press says 30 or 60. There is a second
