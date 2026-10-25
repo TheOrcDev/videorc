@@ -1,8 +1,9 @@
 # Clips: the replay buffer
 
 Plan 181, as the owner redesigned it after trying the first build (R1–R4,
-2026-10-12). Videorc keeps the last N seconds of the program whenever it is
-open, and one action saves them as a **clip**. The words are the glossary's
+2026-10-12), with plan 199's two lengths (2026-10-25). Videorc keeps the
+last minute of the program whenever it is open, and one action saves the
+last 30 seconds or the whole minute as a **clip**. The words are the glossary's
 (`CONTEXT.md`): a clip is the saved video, **Clip** / **Save clip** the one
 action, **Clips** the Output section and its one switch ("Keep the last
 seconds"). Code keeps the older names (`replay.*` RPCs, `replay_buffer.rs`,
@@ -13,31 +14,39 @@ seconds"). Code keeps the older names (`replay.*` RPCs, `replay_buffer.rs`,
 - **Nothing in the Studio.** The ring is not a session the streamer starts;
   it runs by default whenever Videorc is open (R2). Record and Go Live…
   stand alone under the status pill.
-- **Status bar**: "Clip · 0:30" with a neutral dot while the ring holds
-  frames (what a press saves right now), "Clips starting…" while it fills.
+- **Status bar**: "Clip · 1:00" with a neutral dot while the ring holds
+  frames (how much it holds right now, up to the minute), "Clips starting…"
+  while it fills.
   This is the one place that shows the ring is on. A buffer-only session
   never reads "Recording" or "On air": the session words stay at Ready, and
   Record and Go Live stay available.
 - **Output → Clips**: the settings and the one switch. **Keep the last
   seconds** (on by default; off, a clip can only be marked while recording),
-  **Length** (15 s, 30 s, 1 min, 2 min, 5 min; 30 s by default, R1), the
-  disk use at the current recording quality, the **Save a clip** shortcut
-  recorder (unbound by default so a game's keys are never stolen), and
-  where clips go. On a computer that encodes on its processor the switch
+  the disk use at the current recording quality (the ring always keeps the
+  minute; plan 199 D2 removed the Length setting, so a saved 15 s, 2 min or
+  5 min choice is dropped), the **Save a 30-second clip** and **Save a
+  1-minute clip** shortcut recorders (both unbound by default so a game's
+  keys are never stolen), and where clips go. On a computer that encodes on
+  its processor the switch
   shows off and the row says why (the guard below); turning it on there is
   the user's call and runs.
-- **One action** (R4): the Stream Manager's **Clip** button (where Mark clip
-  used to be, with the key in its hint), the `clipMark` global shortcut, ⌘K
-  **Save clip**, a Stream Deck or phone `clipMark` intent, `/clip` in the
+- **One action, two lengths** (R4, plan 199). The last 30 seconds: the
+  Stream Manager's **Clip 30 s** button (where Mark clip used to be, with
+  the key in its hint), the `clipMark` global shortcut, ⌘K **Save a
+  30-second clip**, a Stream Deck or phone `clipMark` intent, `/clip` in the
   Stream Manager's own composer, and the spoken "clip that" / "Buddy, clip
-  that". Whenever the ring holds frames the press saves the last N seconds;
-  while a recording runs the moment is also kept as a mark in the recording,
-  for the report. With the ring off and nothing recording the press says
-  which switch to turn on.
-- **Toasts**: "Clip saved · Last 0:30" with Show in Finder (a still-filling
-  ring says "Last 0:12, the buffer was still filling"); the Stream Manager's
-  own press says "Saving the last 30 seconds as a clip" and, while
-  recording, that the moment is marked too.
+  that". The last minute: the **1 min** button beside it, the
+  `clipMarkLong` shortcut, ⌘K **Save a 1-minute clip**, `clipMark` with
+  `seconds: 60`, `/clip 60`, and the spoken "clip the last minute" or "long
+  clip". Below 640 px both buttons are items in the Stream Manager's ⋯ menu.
+  Whenever the ring holds frames the press saves the last 30 seconds or the
+  minute; while a recording runs the moment is also kept as a mark in the
+  recording, for the report, spanning the length asked for. With the ring
+  off and nothing recording the press says which switch to turn on.
+- **Toasts**: "Clip saved · Last 0:30" or "Last 1:00" with Show in Finder (a
+  still-filling ring says "Last 0:12, the buffer was still filling"); the
+  Stream Manager's own press says "Saving the last 30 seconds as a clip" (or
+  "the last 1:00") and, while recording, that the moment is marked too.
 - **Clips** go to `<recordings folder>/Clips/Clip YYYY-MM-DD HH-MM-SS.mp4`
   and get a Library row titled "Clip" (so Reveal and Play work).
 
@@ -46,7 +55,10 @@ The buffer is free: it is fully local, and recording is free.
 ### When voice works
 
 "Clip that" (and "clip it", "clip this", "that's a clip", "make a clip",
-with or without the wake word in front) is heard by the transcript the
+with or without the wake word in front) saves 30 seconds; "clip the last
+minute" and "long clip" save the minute (plan 199). A phrase is matched
+across two transcript finals, and a second phrase of either length within
+10 s of the first is the same moment said twice. Each is heard by the transcript the
 session already produces: live captions, or Buddy listening. So the spoken
 clip works **while a recording or livestream runs with captions on or Buddy
 listening on**, exactly where "clip that" marked a clip before. The idle
@@ -59,7 +71,8 @@ the key, ⌘K, a deck key or `/clip`.
 The ring is **one more output on the session's FFmpeg child**, never a
 second capture:
 
-- A session with `replay: { seconds, auto? }` adds a `-f segment` MPEG-TS
+- A session with `replay: { seconds, auto? }` (the renderer always sends 60,
+  the longer clip, so both lengths work at any moment) adds a `-f segment` MPEG-TS
   output beside its file and stream outputs: `-segment_time 2` on the 2 s
   keyframe cadence every encoder keeps, a `+live` CSV list of the newest
   `ceil(N/2) + 2` complete segments, AAC audio at 192 kbps with the same
@@ -94,22 +107,27 @@ second capture:
   over inside `session.start`: the backend stops the buffer-only session
   (bounded, nothing to finalize), waits for its microphone to release, and
   starts the real session with the ring attached. The ring restarts at that
-  boundary, so the first N seconds of a session hold less. When the session
-  ends, the renderer re-arms a buffer-only session.
-- **Clip** (`clip.mark`): whenever the ring holds frames the backend asks it
-  to save (the save answers at once and runs on its own task: it waits for
-  the segment that holds the press to close, 4 s at most, hard-links the
-  newest segments that cover N seconds into a staging folder, concat
-  stream-copies them into a `.partial` MP4 with faststart, probes H.264 +
-  AAC and the length (N to N + 2.5 s, keyframe-aligned at the start),
-  renames it, inserts the Library row and emits `replay.saved`); while a
-  recording runs it also stores the mark. The reply says `reason:
-  "clip-saved"` and `saved` (the mark); no `clip.marked` event follows, so
-  each window shows one toast. With the ring off the old behaviour stands:
-  a mark while recording, else `recording-off`. Any save failure removes
-  the staging and the partial and emits `replay.saveFailed` with a stable
-  reason. A press during a save queues one more; a third joins the queued
-  one.
+  boundary, so the first minute of a session holds less (a 1-minute press
+  then saves what the ring has, and says the buffer was still filling).
+  When the session ends, the renderer re-arms a buffer-only session.
+- **Clip** (`clip.mark`, optional `seconds: 30 | 60`): whenever the ring
+  holds frames the backend asks it to save L seconds, the press's length
+  clamped to the ring (no `seconds` is 30; any other length is refused with
+  `invalid-clip-length` before any work). The save answers at once and runs
+  on its own task: it waits for the segment that holds the press to close,
+  4 s at most, hard-links the newest segments that cover L seconds into a
+  staging folder, concat stream-copies them into a `.partial` MP4 with
+  faststart, probes H.264 + AAC and the length (L to L + 2.5 s,
+  keyframe-aligned at the start), renames it, inserts the Library row and
+  emits `replay.saved`. While a recording runs it also stores the mark with
+  `lookbackSeconds: L`, so the report's moment spans the clip. The reply
+  says `reason: "clip-saved"` and `saved` (the mark); no `clip.marked`
+  event follows, so each window shows one toast. With the ring off the old
+  behaviour stands: a mark while recording, else `recording-off`. Any save
+  failure removes the staging and the partial and emits
+  `replay.saveFailed` with a stable reason. A press during a save queues
+  one more; a later press joins the queued one and raises its length to
+  the longer of the two, so nobody loses footage.
 - **Lifecycle**: the ring lives under the backend's app data beside the
   database (`replay-buffer/<session>`, mode 0700). A task prunes it once a
   second to the list; the ring never holds more than `ceil(N/2) + 3`
@@ -124,21 +142,29 @@ second capture:
 - `replay.state` (`off | starting | on | error`, `seconds`,
   `bufferedSeconds`, `replayOnly`, `reason`, `segmentFiles`) is emitted on
   every change and once a second while on; `replay.status` answers it.
-- `clip.mark` → `{ saved, reason? }`: `reason: "clip-saved"` when the ring
-  took the press (then `replay.saved` or `replay.saveFailed` follows),
-  `recording-off` when nothing kept it.
-- `replay.save` → `{ saveId, sessionId, queued }` is the save alone
-  (internal; `clip.mark` is the product's action).
-- The remote intent is `clipMark`; `replaySave` is gone.
+- `clip.mark { seconds?: 30 | 60 }` → `{ saved, reason? }`: `reason:
+"clip-saved"` when the ring took the press (then `replay.saved` or
+  `replay.saveFailed` follows, its `seconds` the length saved),
+  `recording-off` when nothing kept it. Error `invalid-clip-length` for any
+  other length.
+- `replay.save { seconds?: 30 | 60 }` → `{ saveId, sessionId, queued,
+seconds }` is the save alone (internal; `clip.mark` is the product's
+  action).
+- `clip.marks.list` marks carry `lookbackSeconds` (30 or 60) from plan 199
+  on; older marks omit it, which reads as 30.
+- The remote intent is `clipMark { seconds?: 30 | 60 }`; `replaySave` is
+  gone.
 - The Stream Manager learns the ring's state through the marker context
-  (`clip: { available, seconds, shortcutLabel, reason }`) the main window
-  pushes.
+  (`clip: { available, seconds, longSeconds, shortcutLabel,
+longShortcutLabel, off }`) the main window pushes.
 
 ## Cost
 
-- Disk: about `(ceil(N/2) + 3) × 2 s × (bitrate + 192 kbps)`: 28 MB for
-  30 s at 6 Mbps, however long the ring runs. The Output page shows the
-  number.
+- Disk: about `(ceil(N/2) + 3) × 2 s × (bitrate + 192 kbps)` for the ring's
+  N = 60 s: 33 segment files, about 51 MB at 6 Mbps, 68 MB at 8 Mbps and
+  332 MB at 40 Mbps (4K), however long the ring runs; plan 199 roughly
+  doubled it from the 30-s ring. Arming needs `4 × 60 s × bitrate` free
+  (246 MB at 8 Mbps, 1.2 GB at 40 Mbps). The Output page shows the number.
 - CPU and GPU: with the ring on by default, a buffer-only session runs
   whenever Videorc is open: the compositor, the hardware encoder and one
   FFmpeg child muxing segments. The plan's As built records the idle cost
@@ -169,12 +195,14 @@ second capture:
   copy and split), the registry, pruning, the clip routing (ring alone,
   ring plus mark, ring off) and the real-FFmpeg save test (ignored; run
   with `--include-ignored` and `VIDEORC_BUNDLED_FFMPEG_PATH`).
-- `pnpm smoke:replay-buffer`: the real dev app arms the ring by itself at
-  launch, turns the switch off and on, holds the disk bound over 3 × N,
-  saves a clip through `clip.mark` and through a remote `clipMark`, records
-  while armed (the handover, the ride-along, one press mid-recording that
-  saves a clip and keeps the mark, the recording's own gates, the re-arm),
-  and turns it off. Every clip passes ffprobe and the recording analyzer
+- `pnpm smoke:replay-buffer`: the real dev app arms the 1-minute ring by
+  itself at launch, turns the switch off and on, holds the disk bound until
+  30 s after the ring is full, saves a 30-second clip through `clip.mark`
+  and a 1-minute clip through `clip.mark { seconds: 60 }` and a remote
+  `clipMark { seconds: 60 }`, refuses `seconds: 45` without writing
+  anything, records while armed (the handover, the ride-along, one 1-minute
+  press mid-recording that saves a clip and keeps a 60-s mark, the
+  recording's own gates, the re-arm), and turns it off. Every clip passes ffprobe and the recording analyzer
   (H.264 + AAC, the length window, no audio gap, the 2 s keyframe cadence,
   BT.709 tags) and has its Library row titled Clip.
 - `VIDEORC_SMOKE_REPLAY_SECONDS=15 pnpm smoke:multistream`: the ring rides a

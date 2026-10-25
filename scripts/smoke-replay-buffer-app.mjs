@@ -1,24 +1,29 @@
-// Clip buffer smoke (plan 181 S6, the owner's redesign R1-R4).
+// Clip buffer smoke (plan 181 S6, the owner's redesign R1-R4; plan 199's two
+// clip lengths).
 //
 // Drives the REAL dev app through the Output switch's own path and the one
-// clip action (clip.mark: the Stream Manager's Clip, its key, ⌘K, a deck key,
-// /clip and the spoken "clip that" all call it):
+// clip action (clip.mark: the Stream Manager's Clip buttons, their keys, ⌘K,
+// a deck key, /clip and the spoken "clip that" all call it):
 //
-//   1. proves the ring runs by default at launch (R2: a buffer-only session:
-//      recording.status says replayOnly, no Library row, the status bar never
-//      says Recording), then turns the switch off and on at the requested
-//      length;
-//   2. watches the ring for 3 × N seconds: the backend's segment count never
-//      passes ceil(N/2) + 3 (the disk bound), and the ring fills to N;
-//   3. saves a clip through clip.mark (the reply says clip-saved, nothing
-//      marked: no recording runs), then through a remote clipMark intent;
+//   1. proves the ring runs by default at launch and keeps the minute (R2,
+//      plan 199: a buffer-only session: recording.status says replayOnly, no
+//      Library row, the status bar never says Recording), then turns the
+//      switch off and on at the requested ring length;
+//   2. watches the ring until it is full plus 30 s: the backend's segment
+//      count never passes ceil(N/2) + 3 (the disk bound), and the ring fills
+//      to N;
+//   3. saves clips through clip.mark: no length (today's 30 s) and
+//      `seconds: 60` (the minute), each replying clip-saved with nothing
+//      marked (no recording runs); then the minute through a remote clipMark
+//      intent; a length nobody offers (45) is refused and writes nothing;
 //   4. checks every clip with ffprobe and the recording analyzer: H.264 +
-//      AAC, a length of N to N + 2.5 s, no audio gap, a 2 s keyframe cadence,
-//      and a Library row titled Clip whose mp4Path is the file;
+//      AAC, a length of L to L + 2.5 s for the press's length L, no audio
+//      gap, a 2 s keyframe cadence, and a Library row titled Clip whose
+//      mp4Path is the file;
 //   5. records while armed: the backend hands over, the ring rides the
-//      recording (S7), one clip.mark mid-recording saves a clip AND keeps a
-//      mark in the recording (R4), the recording itself passes the analyzer,
-//      and the ring re-arms after Stop;
+//      recording (S7), one 1-minute clip.mark mid-recording saves a clip AND
+//      keeps a mark that remembers its 60 s (R4, plan 199 D8), the recording
+//      itself passes the analyzer, and the ring re-arms after Stop;
 //   6. turns the switch off: the ring reports off and no session runs.
 //
 // The dev binary has no microphone or Screen Recording grant, so the
@@ -27,7 +32,15 @@
 // copied packets is the recording's (same clock, same packets); the
 // real-game acceptance checks it by ear.
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -55,9 +68,10 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const { values: args } = parseArgs({
   options: {
-    // The ring's length. 30 s is the shipping default; a shorter ring keeps
-    // an investigative run quick.
-    seconds: { type: 'string', default: '30' },
+    // The ring's length. The product's ring always keeps the minute (plan
+    // 199); a shorter ring keeps an investigative run quick, and both clip
+    // lengths then clamp to it.
+    seconds: { type: 'string', default: '60' },
     report: { type: 'string' },
     debug: { type: 'boolean', default: false }
   },
@@ -68,6 +82,13 @@ const seconds = Number(args.seconds)
 if (!Number.isInteger(seconds) || seconds < 5) fail('--seconds must be an integer of at least 5')
 const SEGMENT_SECONDS = 2
 const MAX_OVERSHOOT_SECONDS = 2.5
+/** The ring the app keeps by itself at launch (plan 199: the minute). */
+const PRODUCT_RING_SECONDS = 60
+/** The two clip lengths (plan 199), clamped to the ring as the backend does. */
+const SHORT_CLIP_SECONDS = Math.min(30, seconds)
+const LONG_CLIP_SECONDS = Math.min(60, seconds)
+/** Watch the disk bound this long after the ring is full. */
+const WATCH_AFTER_FULL_MS = 30_000
 /** The backend's bound: ceil(N/2) + 2 listed segments plus the one being written. */
 const maxSegmentFiles = Math.ceil(seconds / SEGMENT_SECONDS) + 2 + 1
 const debug = args.debug || process.env.VIDEORC_REPLAY_SMOKE_DEBUG === '1'
@@ -120,14 +141,13 @@ async function seedRendererProfile(smoke) {
           layout,
           recordEnabled: true,
           streamEnabled: false,
-          replayBuffer: { seconds: params.seconds, enabled: true, explicit: false }
+          replayBuffer: { enabled: true, explicit: false }
         };
         localStorage.setItem(key, JSON.stringify(seeded));
         setTimeout(() => location.reload(), 50);
         return true;
       `,
-      video: VIDEO_PROFILE,
-      seconds
+      video: VIDEO_PROFILE
     },
     { timeoutMs }
   )
@@ -166,7 +186,14 @@ function replayOutcome(saveLabel, predicate = () => true) {
   )
 }
 
-async function verifyReplay(event, label) {
+/** The clip files in `<recordings>/Clips`, to prove a refused press wrote nothing. */
+function clipFiles() {
+  const dir = join(outputDirectory, 'app-data', 'recordings', 'Clips')
+  return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith('.mp4')) : []
+}
+
+/** `clipSeconds` is the press's length (plan 199): 30 or 60, clamped to the ring. */
+async function verifyReplay(event, label, clipSeconds) {
   if (event.event === 'replay.saveFailed') {
     fail(`${label} failed: ${JSON.stringify(event.payload)}`)
   }
@@ -181,7 +208,9 @@ async function verifyReplay(event, label) {
   if (!/\/Clip \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.mp4$/.test(path)) {
     fail(`${label}: clip is not named Clip YYYY-MM-DD HH-MM-SS.mp4: ${path}`)
   }
-  if (saved.seconds !== seconds) fail(`${label}: event seconds ${saved.seconds} != ${seconds}`)
+  if (saved.seconds !== clipSeconds) {
+    fail(`${label}: event seconds ${saved.seconds} != ${clipSeconds}`)
+  }
   const analysis = await analyzeRecording(path, {
     ffmpegPath,
     ffprobePath,
@@ -210,7 +239,7 @@ async function verifyReplay(event, label) {
       `${label}: replay is ${width}x${height}, expected ${VIDEO_PROFILE.width}x${VIDEO_PROFILE.height}`
     )
   }
-  const expected = saved.complete ? seconds : saved.coveredSeconds
+  const expected = saved.complete ? clipSeconds : saved.coveredSeconds
   if (durationSeconds < expected - 0.75 || durationSeconds > expected + MAX_OVERSHOOT_SECONDS) {
     fail(
       `${label}: replay runs ${durationSeconds.toFixed(2)} s, expected ${expected} to ${expected + MAX_OVERSHOOT_SECONDS} s`
@@ -229,6 +258,7 @@ async function verifyReplay(event, label) {
   )
   return {
     path,
+    clipSeconds,
     durationSeconds,
     width,
     height,
@@ -290,16 +320,17 @@ try {
   await waitForRemoteDescribe(remote, { timeoutMs })
 
   // 1. The default (R2): the ring runs whenever Videorc is open, so the dev
-  // app armed itself at launch with nobody touching a switch, at the seeded
-  // length. Then the Output switch's own path: off, and on again.
+  // app armed itself at launch with nobody touching a switch, keeping the
+  // minute (plan 199). Then the Output switch's own path: off, and on again
+  // at the requested ring length.
   const defaultRing = await waitForBackendState(
     'replay.status',
     (ring) => ring?.state === 'on' && ring?.replayOnly === true,
     'the default buffer-only session at launch',
     45_000
   )
-  if (defaultRing.seconds !== seconds) {
-    fail(`the default ring keeps ${defaultRing.seconds} s, expected ${seconds} s`)
+  if (defaultRing.seconds !== PRODUCT_RING_SECONDS) {
+    fail(`the default ring keeps ${defaultRing.seconds} s, expected ${PRODUCT_RING_SECONDS} s`)
   }
   log(`ring on by default at launch: session ${defaultRing.sessionId} (${defaultRing.seconds} s)`)
   await setReplayBuffer(smoke, false)
@@ -319,6 +350,9 @@ try {
       ring?.sessionId !== defaultRing.sessionId,
     'the buffer-only session'
   )
+  if (ringOn.seconds !== seconds) {
+    fail(`the re-armed ring keeps ${ringOn.seconds} s, expected ${seconds} s`)
+  }
   const status = await request(renderer, timeoutMs, 'recording.status')
   if (status?.replayOnly !== true || status?.sessionId !== ringOn.sessionId) {
     fail(`recording.status is not the buffer-only session: ${JSON.stringify(status)}`)
@@ -346,10 +380,11 @@ try {
     `armed: session ${ringOn.sessionId}, status bar "${statusBar?.result?.state}" / "${statusBar?.result?.replay}"`
   )
 
-  // 2. The disk bound over 3 × N, and the ring fills to N by N + 10 s.
-  const watchUntil = armedAt + 3 * seconds * 1000
+  // 2. The ring fills to N by N + 10 s, and the disk bound holds from arming
+  // until 30 s after it is full (15 prune passes past full; plan 199 keeps
+  // the smoke short now that N is the minute).
   let filledAt = null
-  while (Date.now() < watchUntil) {
+  while (filledAt === null || Date.now() < filledAt + WATCH_AFTER_FULL_MS) {
     const ring = await request(renderer, timeoutMs, 'replay.status')
     if (ring?.state !== 'on') fail(`ring left the on state while armed: ${JSON.stringify(ring)}`)
     report.ring.samples += 1
@@ -367,30 +402,75 @@ try {
     if (filledAt === null && Date.now() > armedAt + (seconds + 10) * 1000) {
       fail(`ring holds ${ring.bufferedSeconds} s after ${seconds + 10} s; expected ${seconds} s`)
     }
-    if (filledAt !== null && Date.now() >= watchUntil) break
     await sleep(1000)
   }
   log(
     `disk bound held: at most ${report.ring.maxSegmentFilesSeen} segment files (bound ${maxSegmentFiles}) over ${report.ring.samples} samples`
   )
 
-  // 3a. The one clip action (R4): clip.mark is what the Stream Manager's
-  // Clip, its key, ⌘K, /clip and the spoken "clip that" call. No recording
-  // runs, so the reply says clip-saved and nothing was marked.
-  const rpcOutcome = replayOutcome('clip.mark')
+  // 3a + 3b. The one clip action (R4): clip.mark is what the Stream
+  // Manager's Clip buttons, their keys, ⌘K, /clip and the spoken "clip that"
+  // call. No recording runs, so each reply says clip-saved and nothing was
+  // marked. Plan 199: no length is today's 30-second clip, `seconds: 60` the
+  // minute. Both are pressed back to back, before either clip is analyzed:
+  // the second press queues behind the first save, and neither window holds
+  // the analyzer's own load (#827).
+  const twoSaves = []
+  const bothOutcomes = recorder.waitFor(
+    'the 30-second and 1-minute clips',
+    (record) => {
+      if (record.event !== 'replay.saved' && record.event !== 'replay.saveFailed') return false
+      twoSaves.push(record)
+      return twoSaves.length === 2
+    },
+    timeoutMs
+  )
   const rpcReply = await request(renderer, timeoutMs, 'clip.mark')
   if (rpcReply?.reason !== 'clip-saved' || rpcReply?.saved !== false) {
     fail(`clip.mark with the ring on did not save a clip: ${JSON.stringify(rpcReply)}`)
   }
-  report.replays.push(await verifyReplay(await rpcOutcome, 'save from clip.mark'))
+  const longReply = await request(renderer, timeoutMs, 'clip.mark', { seconds: 60 })
+  if (longReply?.reason !== 'clip-saved' || longReply?.saved !== false) {
+    fail(`clip.mark seconds 60 did not save a clip: ${JSON.stringify(longReply)}`)
+  }
+  await bothOutcomes
+  // Saves are serialized, so they report in press order.
+  report.replays.push(
+    await verifyReplay(twoSaves[0], 'save from clip.mark (no length)', SHORT_CLIP_SECONDS)
+  )
+  report.replays.push(
+    await verifyReplay(twoSaves[1], 'save from clip.mark (60 s)', LONG_CLIP_SECONDS)
+  )
+
+  // 3c. A length nobody offers is refused before any work, and writes nothing.
+  const clipsBefore = clipFiles().length
+  const eventsBefore = recorder.events.length
+  let refusal = null
+  try {
+    await request(renderer, timeoutMs, 'clip.mark', { seconds: 45 })
+  } catch (error) {
+    refusal = error instanceof Error ? error.message : String(error)
+  }
+  if (refusal !== 'A clip is 30 seconds or 1 minute.') {
+    fail(`clip.mark seconds 45 was not refused with the length sentence: ${refusal}`)
+  }
+  await sleep(5000)
+  const lateSaves = recorder.events
+    .slice(eventsBefore)
+    .filter((record) => record.event === 'replay.saved' || record.event === 'replay.saveFailed')
+  if (lateSaves.length > 0 || clipFiles().length !== clipsBefore) {
+    fail(`the refused length still saved: ${JSON.stringify(lateSaves)}`)
+  }
+  log('clip.mark seconds 45 refused: "A clip is 30 seconds or 1 minute.", nothing written')
 
   // The analyzer above (framemd5 + freezedetect on a full clip) competes with
   // the live compositor; on a CPU-composited host (the Linux box) that stalls
   // a few frames, and the next clip would hold the smoke's own load instead of
-  // the ring. Let the ring roll a whole window past the analysis first.
-  await sleep((seconds + SEGMENT_SECONDS) * 1000)
+  // the ring. Let the ring roll a whole window past the analysis first (#827).
+  await sleep((LONG_CLIP_SECONDS + SEGMENT_SECONDS) * 1000)
 
-  // 3b. The same action from a remote intent (a Stream Deck key).
+  // 3d. The minute from a remote intent (a Stream Deck key, plan 199's
+  // `seconds` on clipMark).
   const markOutcome = replayOutcome(
     'the clipMark intent',
     (payload) => payload?.source === 'manual'
@@ -399,7 +479,7 @@ try {
   const markTicket = await remoteRequest(
     remote,
     'remote.intent',
-    { kind: 'clipMark' },
+    { kind: 'clipMark', seconds: 60 },
     { timeoutMs }
   )
   if (!markTicket.payload?.accepted) fail('clipMark intent was not accepted')
@@ -407,7 +487,11 @@ try {
   if (markAcked?.intentId !== markTicket.payload.intentId || markAcked?.ok !== true) {
     fail(`clipMark with the ring on was not acknowledged: ${JSON.stringify(markAcked)}`)
   }
-  const marked = await verifyReplay(await markOutcome, 'save from the remote clipMark intent')
+  const marked = await verifyReplay(
+    await markOutcome,
+    'save from the remote clipMark intent (60 s)',
+    LONG_CLIP_SECONDS
+  )
   if (marked.source !== 'manual') fail(`the clip-mark clip carries source ${marked.source}`)
   report.replays.push(marked)
 
@@ -443,13 +527,18 @@ try {
   )
   await sleep((seconds + 6) * 1000)
   // R4 mid-recording: one press saves the clip AND keeps a mark in the
-  // recording (the reply says both), with no clip.marked event.
+  // recording (the reply says both), with no clip.marked event. The press
+  // asks for the minute, so the mark remembers 60 s (plan 199 D8).
   const midOutcome = replayOutcome('the mid-recording clip')
-  const midReply = await request(renderer, timeoutMs, 'clip.mark')
+  const midReply = await request(renderer, timeoutMs, 'clip.mark', { seconds: 60 })
   if (midReply?.reason !== 'clip-saved' || midReply?.saved !== true) {
     fail(`clip.mark during a recording did not save a clip and a mark: ${JSON.stringify(midReply)}`)
   }
-  const midRecording = await verifyReplay(await midOutcome, 'save during a recording (S7)')
+  const midRecording = await verifyReplay(
+    await midOutcome,
+    'save during a recording (S7, 60 s)',
+    LONG_CLIP_SECONDS
+  )
   report.replays.push(midRecording)
   const marks = await request(renderer, timeoutMs, 'clip.marks.list', {
     sessionId: cycle.sessionId
@@ -458,7 +547,12 @@ try {
   if (manualMarks.length !== 1) {
     fail(`the recording keeps ${manualMarks.length} manual marks after one press, expected 1`)
   }
-  log(`the recording keeps the mark at ${manualMarks[0].atSeconds.toFixed(1)} s beside the clip`)
+  if (manualMarks[0].lookbackSeconds !== 60) {
+    fail(`the 1-minute press's mark remembers ${manualMarks[0].lookbackSeconds} s, expected 60`)
+  }
+  log(
+    `the recording keeps the mark at ${manualMarks[0].atSeconds.toFixed(1)} s (lookback 60 s) beside the clip`
+  )
 
   const stop = await stopRecordLatencyCycle({
     remote,
