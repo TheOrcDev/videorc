@@ -10,8 +10,10 @@
   start delay. Slices: S0 Windows measurement script, S1 evidence, S2
   per-protocol readiness budget, S3 deadline per input topology (with PR
   #769), S4 busy toasts, S5 output right-sizing. Part W is a self-contained
-  Windows test guide. **PLANNED**; D1 (land #769) and D2 (Quick Sync
-  default) are owner calls.
+  Windows test guide. **BUILT** 2026-10-25 on
+  `fix/195-windows-slow-mic-recording-start`: S1–S5 done; S0/W3/W4 need
+  Windows hardware; D1 (land #769) and D2 (Quick Sync default) are owner
+  calls.
 
 - 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
   background moves on the stream. Owner report: live backgrounds animate in

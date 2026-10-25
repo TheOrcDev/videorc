@@ -9,7 +9,9 @@
 
 ## Status
 
-- Status: PLANNED 2026-10-25. Diagnosed from a support bundle
+- Status: BUILT 2026-10-25 on branch `fix/195-windows-slow-mic-recording-start`
+  (S1–S5; see Execution notes). Owed: S0 and W4 on the affected laptop, W3
+  on any Windows PC, owner calls D1 and D2. Diagnosed from a support bundle
   (`videorc-support-bundle-20261024-230023Z.json`, kept outside the repo) and
   its screenshot. Windows 11 build 26200, packaged 0.9.150, Intel Iris Xe
   laptop, "Digital Microphone (2- Cirrus Logic High Definition Audio)" plus an
@@ -33,6 +35,82 @@
     duplicate it.
   - Merged #790 (petercr) caches hardware probe successes. Not shipped in
     0.9.150, so the tester has not had it yet.
+
+## Execution notes (2026-10-25)
+
+What was built, and where the code corrected the findings above:
+
+- **S1.**
+  - Readiness failures now say what arrived, for example "The microphone
+    did not deliver fresh PCM within 10s: 0 frames received." or "...: 9
+    frames received, all stale (newest 2480 ms old), largest packet 500 ms,
+    first after 1210 ms."
+  - When the worker passed or dropped packets before the bus saw any, the
+    reason adds "capture worker passed N and dropped M PCM frames".
+  - The worker's last stderr lines are kept (3 lines, 300 bytes, device name
+    and moniker redacted).
+  - New start-timeline marks: `bridge-admission`, `ffmpeg-work-permit`,
+    `recordable-video-probe`, `preview-stop`. No TypeScript consumer
+    enumerates phases.
+  - Every expired command logs `Command expired before dispatch:
+    lane=... method=... queuedMs=...` (never params).
+- **S2.**
+  - Readiness budget: 10 s for `microphone:windows-dshow:*`, 2 s for
+    everything else. The outer wait gets 500 ms on top, so the owner thread's
+    reason wins.
+  - **Correction to F1/W2:** the worker already judged a packet's age at its
+    end. Big DirectShow packets were rejected by three hard caps instead:
+    `CaptureClock::interval` (PCM more than 100 ms past its anchor),
+    `parse_pcm_description` (4,800 frames) and `dshow_anchor` (100 ms). They
+    are now bounded by the packet's own duration, up to 1 s. The raw PCM
+    queue grew from 8 to 64 chunks.
+  - Test switches (Part W, W3), honored only with `VIDEORC_ENABLE_SMOKE_RPC=1`
+    (release builds included): `VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS`
+    and `VIDEORC_TEST_CAPTURE_WORKER_FAIL`.
+  - Live replacement fits: backend switch execution 65 s, renderer request
+    76 s.
+- **S3.** `ffmpeg_output_startup_deadline`: 8 s with only FIFO inputs, 18 s
+  (8 + 10) with a direct DirectShow or Pulse input. This supersedes PR #769's
+  "20 s on Windows" commit; expect a one-hunk conflict on
+  `FFMPEG_OUTPUT_STARTUP_TIMEOUT` if #769 lands later. Probe flags were not
+  added (S0 decides).
+- **S4.**
+  - **Correction to F4:** the tester's toast came from the background
+    `screens.active` reads inside the launch and focus-refresh request
+    batches.
+  - Live-control commands wait behind a running `session.start`
+    reconciliation fence and expire after 5 s of queueing
+    (`WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE`). A 3–31 s Record start expired
+    the read, failed the whole batch and toasted with no context.
+  - Fix: the read now runs on its own, never toasts, and retries at launch.
+    Takeover Show and Take off name the takeover when offline. Every other
+    live-control action already named itself; tests now pin those titles.
+- **S5.**
+  - Media Foundation rejections persist in the settings table under
+    `windows_mf_probe_rejections`, keyed by adapter driver identity and app
+    version (either change drops them). Entries are per encoder preference,
+    topology and profile; they expire after 7 days, with at most 64 kept.
+  - The stored performance check (when not stale) caps record-only software
+    encoding at its highest passed rung, never below 540p. It only tightens
+    the CPU cap, and only after every hardware probe was rejected, using the
+    existing step-down message.
+  - Electron retries hardware acceleration once per app version after a
+    persisted GPU fallback. A crash in that launch restores software
+    rendering for that version. `VIDEORC_DISABLE_GPU` and
+    `VIDEORC_FORCE_GPU` still win.
+- **Not done:** S0, W3 and W4 (need Windows hardware), D1, D2, and the probe
+  flags.
+- **Follow-ups found during the work:**
+  - Other background reads in the launch and focus batches can still fail
+    the batch with a context-free toast.
+  - Busy banner and sound actions from the Stream Manager lose the busy code
+    in `runBannerAction`/`runSoundAction`.
+  - `executeRemoteIntent` reports errors without context.
+  - Live-control commands queue behind a slow `session.start` at all; that
+    fence is the deeper fix.
+  - The worker's `-rtbufsize 65536` is smaller than one 500 ms s16 stereo
+    packet (96 KB); watch S0's `nb_samples`.
+
 
 ## What the user saw
 
@@ -504,8 +582,8 @@ $env:VIDEORC_ENABLE_SMOKE_RPC = '1'   # allows the test-only controls below
 & "$env:LOCALAPPDATA\Programs\Videorc\Videorc.exe"
 ```
 
-The test-only controls are added by the fix PR (S2/S3). Their exact names go
-here when they exist:
+These test-only controls ship with plan 195's build and are ignored unless
+`VIDEORC_ENABLE_SMOKE_RPC=1` is also set:
 
 - `VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS=<ms>`: hold back the
   worker's first audio by that long (simulates the slow laptop microphone).
