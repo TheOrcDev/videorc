@@ -10,7 +10,9 @@
   one upstream line (U1) and allowlists (S1). S2 swaps the meter and
   measures the glow's CPU cost. The meter grows from 8 px to about 95 px.
   Owner calls D1 to D5 (ink, readout, size, clip colour, which Sources rows)
-  have recommended defaults. **PLANNED**, nothing built.
+  have recommended defaults. **PR #800** 2026-10-25: built on the
+  defaults, with audiocn PR #32 (U1). Owed: #32 merged and deployed, the CPU
+  comparison and `smoke:sources` on a quiet host, owner by-eye.
 
 - 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
   background moves on the stream. Owner report: live backgrounds animate in
