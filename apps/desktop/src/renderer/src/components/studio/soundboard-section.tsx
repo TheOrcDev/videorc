@@ -27,8 +27,8 @@ export function SoundboardSection(): ReactElement {
   const { setActive } = useWorkspaceNav()
   const board = useSoundboard()
   const disconnectedReason = connectionBlockedReason(wsStatus)
-  // A buffer-only Clips session (plan 181) is not a recording: its ring keeps
-  // the sounds for a clip, but only the streamer hears them now.
+  // A buffer-only Clips session (plan 181) is not a recording: idle presses
+  // stay off the ring, so only the streamer hears them.
   const sessionActive = sessionOwnsTransport(recording)
   useSoundKeys(board.sounds, board.press, board.stop, disconnectedReason === null)
 

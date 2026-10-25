@@ -32,10 +32,9 @@ pub(crate) const SOUNDS_PLAYBACK_EVENT: &str = "sounds.playback";
 struct SessionBus {
     session_id: String,
     handle: SoundboardHandle,
-    /// A recording or a stream. A buffer-only Clips session (plan 181) mixes
-    /// sounds into its ring, so a saved clip has them, but it is not on air:
-    /// its voices stay `onAir: false`, and the monitor plays them as between
-    /// sessions.
+    /// A recording or a stream. A buffer-only Clips session (plan 181) does
+    /// not attach this bus: idle presses stay monitor-only and out of the
+    /// ring. Record and Go Live attach with `on_air: true`.
     on_air: bool,
 }
 
@@ -600,6 +599,38 @@ mod tests {
         player.evict(&state, &gong.id);
         assert!(player.playback().voices.is_empty());
         assert!(player.lock().library.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_replay_only_session_does_not_mix_idle_presses_into_the_bus() {
+        // Option A: recording.rs skips session_started on a buffer-only
+        // Clips session. The handle exists (the ring has a bus) but the
+        // player never attaches, so a press is monitor-only and the bus
+        // gets no Start. Record / Go Live attach with on_air: true and
+        // mix once. The old path attached with on_air: false, which still
+        // mixed voices into the ring while sounds.press answered false.
+        use std::sync::atomic::Ordering;
+
+        let (state, _events, dir) = player_state();
+        let player = state.soundboard.clone();
+        let ding = seed_sound(&state, "Ding", SoundMode::OneShot, 10_000);
+        let (handle, starts) = SoundboardHandle::test_recording_bus();
+
+        let idle = player.press(&state, &ding.id).await.unwrap();
+        assert!(!idle.on_air);
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            0,
+            "an unattached replay-only bus must not hear the press"
+        );
+        player.stop(&state, None);
+
+        player.session_started("record", handle, 0, true);
+        let live = player.press(&state, &ding.id).await.unwrap();
+        assert!(live.on_air);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        player.stop(&state, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
