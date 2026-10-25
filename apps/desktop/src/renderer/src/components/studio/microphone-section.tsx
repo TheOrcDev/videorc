@@ -157,8 +157,8 @@ export function MicrophoneSectionView({
         onChange={onChange}
       />
       {/* Exactly the picker's width: the LCD screen (plan 196), which prints
-          the level, a scale and a CLIP flag, and names the level in dB to
-          screen readers (aria-valuetext). */}
+          the level and a CLIP flag, and names the level in dB to screen
+          readers (aria-valuetext). No dB scale here (owner 2026-10-25). */}
       <div
         className={cn('flex items-center', muted && 'opacity-50')}
         data-muted={muted ? '' : undefined}
@@ -169,6 +169,7 @@ export function MicrophoneSectionView({
           className="min-w-0 flex-1"
           data-videorc-mic-visualizer=""
           meter={meter}
+          scale={false}
         />
         {/* Receiving / Muted / No signal for screen readers, and its state for the perf probe, off screen. */}
         <span className="sr-only" data-videorc-mic-monitor-state={monitorState}>

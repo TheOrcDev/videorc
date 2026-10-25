@@ -147,6 +147,9 @@ describe('Microphone section (plan 092)', () => {
       expect(markup).toContain('data-slot="lcd-meter-value"')
       expect(markup).not.toContain('data-slot="db-readout"')
       expect(markup).not.toContain(' dB<')
+      // No dB numbers under the segments in Studio (owner 2026-10-25); the CLIP flag stays.
+      expect(markup).not.toContain('data-slot="lcd-meter-scale"')
+      expect(markup).toContain('data-slot="lcd-meter-clip"')
     }
   })
 

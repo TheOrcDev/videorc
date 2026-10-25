@@ -15,6 +15,7 @@ import {
 import { useLevelMeter } from '@/components/ui/level-meter'
 import type { MeterZone, MeterZoneName, Taper } from '@/lib/audio/types'
 import type { MeterInput } from '@/lib/mic-meter-input'
+import { cn } from '@/lib/utils'
 
 type MicLevelMeterProps = Omit<
   ComponentProps<typeof LcdMeter>,
@@ -23,7 +24,26 @@ type MicLevelMeterProps = Omit<
   meter: MeterInput
   /** The screen's place in the caller's layout (it lands on the bezel). */
   className?: string
+  /** Print the dB numbers and the clip bracket under the segments. Default true. */
+  scale?: boolean
 }
+
+/**
+ * The screen on Videorc's glass. The bezel is a glass chip in both themes (the
+ * chip tokens: fill, rim, top highlight, drop). In dark the screen lets the
+ * window glass through instead of an opaque black well, with a softer recess
+ * and fainter scanlines. Each base variable is set again under `dark:` so it
+ * replaces the screen's own dark value.
+ */
+const ON_GLASS = [
+  '[--lcd-display-bezel:var(--chip-fill-top)] dark:[--lcd-display-bezel:var(--chip-fill-top)]',
+  '[--lcd-display-bezel-edge:var(--chip-fill-bottom)] dark:[--lcd-display-bezel-edge:var(--chip-fill-bottom)]',
+  '[--lcd-display-bezel-ring:var(--chip-rim)] dark:[--lcd-display-bezel-ring:var(--chip-rim)]',
+  '[--lcd-display-bezel-shadow:inset_0_1px_0_var(--chip-highlight),0_1px_2px_var(--chip-drop)] dark:[--lcd-display-bezel-shadow:inset_0_1px_0_var(--chip-highlight),0_1px_2px_var(--chip-drop)]',
+  'dark:[--lcd-display-glass:color-mix(in_oklab,var(--glass-solid)_35%,transparent)]',
+  'dark:[--lcd-display-recess:inset_0_1px_3px_var(--chip-drop),inset_0_0_0_1px_var(--chip-drop)]',
+  'dark:[--lcd-display-scanline:color-mix(in_oklab,var(--chip-drop)_30%,transparent)]'
+].join(' ')
 
 /**
  * The colours of the segmented meter the LCD replaced: the screen's own ink
@@ -64,7 +84,7 @@ function channelLabel(index: number, count: number): string | null {
 }
 
 /** `LcdMeter`'s own rows, with the segments, held peak and digits in zone colours. */
-function ZonedRows(): ReactElement {
+function ZonedRows({ scale }: { scale: boolean }): ReactElement {
   const { channelCount, taper, zones } = useLevelMeter('MicLevelMeter')
   const track = { '--mic-meter-zones': zoneFill(zones, taper) } as CSSProperties
   return (
@@ -82,8 +102,10 @@ function ZonedRows(): ReactElement {
           </LcdMeterChannel>
         )
       })}
-      <LcdMeterScale />
-      <LcdMeterClip className="data-clipping:bg-meter-clip" />
+      {scale ? <LcdMeterScale /> : null}
+      {/* The lit flag's words in the opaque solid: the dark screen colour is
+          translucent now, so it would let the red through. */}
+      <LcdMeterClip className="data-clipping:bg-meter-clip data-clipping:text-(--glass-solid)" />
     </>
   )
 }
@@ -91,23 +113,29 @@ function ZonedRows(): ReactElement {
 /**
  * One microphone, System audio or Sounds level, whatever drives it (plans 092,
  * 093 and 196), on audiocn's LCD screen: segments, a held peak, the level in
- * digits, a printed scale and a CLIP flag. `LcdDisplay` keeps its defaults,
- * so the ink is Videorc's `--primary` and the screen follows the theme; the
- * segments turn amber and red where the old meter did. A live source moves
- * with `peak` ballistics; a plain reading arrives once a second at most, so
- * `vu` ballistics glide between readings. Shared by the Studio Microphone
- * section and the Sources rows, so they never drift apart.
+ * digits, a printed scale (unless `scale` is off) and a CLIP flag. The ink
+ * is Videorc's `--primary` and the screen follows the theme, on the app's
+ * glass (`ON_GLASS`); the segments turn amber and red where the old meter
+ * did. A live source moves with `peak` ballistics; a plain reading arrives
+ * once a second at most, so `vu` ballistics glide between readings. Shared by
+ * the Studio Microphone section and the Sources rows, so they never drift
+ * apart.
  */
-export function MicLevelMeter({ meter, className, ...props }: MicLevelMeterProps): ReactElement {
+export function MicLevelMeter({
+  meter,
+  className,
+  scale = true,
+  ...props
+}: MicLevelMeterProps): ReactElement {
   return (
-    <LcdDisplay className={className}>
+    <LcdDisplay className={cn(ON_GLASS, className)}>
       {meter.kind === 'source' ? (
         <LcdMeter ballistics="peak" source={meter.source} {...props}>
-          <ZonedRows />
+          <ZonedRows scale={scale} />
         </LcdMeter>
       ) : (
         <LcdMeter ballistics="vu" peakDb={meter.peakDb} {...props}>
-          <ZonedRows />
+          <ZonedRows scale={scale} />
         </LcdMeter>
       )}
     </LcdDisplay>
