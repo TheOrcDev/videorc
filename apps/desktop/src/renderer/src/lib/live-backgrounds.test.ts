@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import type { LiveBackgroundStillReason } from '@/lib/backend'
 import {
   LIVE_BACKGROUND_CATALOG,
+  LIVE_BACKGROUND_OFFERED,
   LIVE_BACKGROUND_THUMBNAILS,
   liveBackgroundLabel,
   liveBackgroundLook,
@@ -28,7 +29,7 @@ const ALL_REASONS: readonly LiveBackgroundStillReason[] = [
 
 describe('live background thumbnails (plan 190 S8)', () => {
   it('pins every look to its own thumbnail file, and every file to a look', () => {
-    const posterIds = LIVE_BACKGROUND_CATALOG.flatMap((entry) =>
+    const posterIds = LIVE_BACKGROUND_OFFERED.flatMap((entry) =>
       entry.looks.map((look) => livePosterAssetId(entry.id, look.id))
     )
     expect(posterIds).toHaveLength(15)
@@ -38,6 +39,19 @@ describe('live background thumbnails (plan 190 S8)', () => {
     }
     const files = readdirSync(THUMBNAIL_DIR).filter((file) => file.endsWith('.webp'))
     expect(files.map((file) => file.replace(/\.webp$/, '')).sort()).toEqual([...posterIds].sort())
+  })
+
+  it('offers only the backgrounds whose every look has a thumbnail (plan 194 S2)', () => {
+    // The catalogue has the ten; the plan 194 five join Assets with their
+    // thumbnails (S6), so no tile ever shows without a picture.
+    expect(LIVE_BACKGROUND_CATALOG.map((entry) => entry.id)).toHaveLength(10)
+    expect(LIVE_BACKGROUND_OFFERED.map((entry) => entry.id)).toEqual([
+      'silk',
+      'side-rays',
+      'plasma-wave',
+      'liquid-chrome',
+      'line-waves'
+    ])
   })
 
   it("shows the current look's thumbnail, and the first look's for a look this build lacks", () => {

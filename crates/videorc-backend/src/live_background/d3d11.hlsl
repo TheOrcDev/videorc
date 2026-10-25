@@ -11,7 +11,7 @@
 
 cbuffer LiveConstants : register(b0)
 {
-    float4 u[9];
+    float4 u[16];
 };
 
 Texture2D t0 : register(t0);

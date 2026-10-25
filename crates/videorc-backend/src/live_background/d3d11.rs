@@ -86,7 +86,23 @@ const PRESENT_ENTRY: &str = "LivePresentPs";
 /// goes unmeasured.
 const MAX_TIMERS: usize = 4;
 
-/// The HLSL pixel shader of a pass.
+/// The backgrounds this renderer has an HLSL port for. The plan 194 five show
+/// their poster (`shader-compile-failed`) until S4 ports them; the gate sits
+/// before any shader compiles, so an unported background never fails the
+/// others.
+pub fn ported(id: LiveBackgroundId) -> bool {
+    !matches!(
+        id,
+        LiveBackgroundId::Beams
+            | LiveBackgroundId::ColorBends
+            | LiveBackgroundId::Dither
+            | LiveBackgroundId::Ferrofluid
+            | LiveBackgroundId::GhostFibers
+    )
+}
+
+/// The HLSL pixel shader of a pass (the plan 194 entries are the S4 port's;
+/// `ported` keeps them unreachable until then).
 fn pass_entry(pass: LivePass) -> &'static str {
     match pass {
         LivePass::SilkField => "SilkFieldPs",
@@ -99,6 +115,20 @@ fn pass_entry(pass: LivePass) -> &'static str {
         LivePass::PlasmaComposite => "PlasmaCompositePs",
         LivePass::LiquidChrome => "LiquidChromePs",
         LivePass::LineWaves => "LineWavesPs",
+        LivePass::BeamsField => "BeamsFieldPs",
+        LivePass::BeamsComposite => "BeamsCompositePs",
+        LivePass::ColorBends => "ColorBendsPs",
+        LivePass::DitherWave => "DitherWavePs",
+        LivePass::DitherComposite => "DitherCompositePs",
+        LivePass::FerrofluidField => "FerrofluidFieldPs",
+        LivePass::FerrofluidBound => "FerrofluidBoundPs",
+        LivePass::FerrofluidRender => "FerrofluidRenderPs",
+        LivePass::GhostFibersDots => "GhostFibersDotsPs",
+        LivePass::GhostFibersDust => "GhostFibersDustPs",
+        LivePass::GhostFibersBright => "GhostFibersBrightPs",
+        LivePass::GhostFibersDown => "GhostFibersDownPs",
+        LivePass::GhostFibersUp => "GhostFibersUpPs",
+        LivePass::GhostFibersComposite => "GhostFibersCompositePs",
     }
 }
 
@@ -422,6 +452,11 @@ impl LiveBackgroundD3d11Renderer {
     /// guard and status live in `render`). The returned texture is this
     /// renderer's live frame: the next draw overwrites it.
     pub fn draw(&mut self, draw: &LiveDraw<'_>) -> Result<LiveFrame, DrawError> {
+        if !ported(draw.id) {
+            // Plan 194 S4 ports it; until then its poster, with the others
+            // untouched (no shader is tried).
+            return Err(DrawError::ShaderCompileFailed);
+        }
         let frame_size = internal_size(draw.id, draw.output, GuardLevel::Full);
         let view = internal_size(draw.id, draw.output, draw.level);
         let half = view != frame_size;
@@ -830,6 +865,12 @@ impl LiveBackgroundD3d11Renderer {
             LiveBackgroundId::SideRays
             | LiveBackgroundId::LiquidChrome
             | LiveBackgroundId::LineWaves => Scratch::None,
+            // Plan 194 S4 adds their scratch; `ported` keeps them out here.
+            LiveBackgroundId::Beams
+            | LiveBackgroundId::ColorBends
+            | LiveBackgroundId::Dither
+            | LiveBackgroundId::Ferrofluid
+            | LiveBackgroundId::GhostFibers => Scratch::None,
         };
         self.targets = Some(Targets {
             id,
@@ -1165,12 +1206,12 @@ mod tests {
         "/tests/fixtures/live-background-golden.json"
     );
 
-    /// Every entry point compiles (D3DCompile needs no device), and the
-    /// constant buffer is the nine float4s the HLSL reads.
+    /// Every ported entry point compiles (D3DCompile needs no device), and
+    /// the constant buffer is the sixteen float4s the HLSL reads.
     #[test]
     fn every_live_background_entry_point_compiles() {
         let mut entries = vec![(VERTEX_ENTRY, "vs_5_0"), (PRESENT_ENTRY, "ps_5_0")];
-        for id in ALL_LIVE_BACKGROUNDS {
+        for id in ALL_LIVE_BACKGROUNDS.into_iter().filter(|id| ported(*id)) {
             for pass in crate::live_background::glsl::passes(id) {
                 entries.push((pass_entry(*pass), "ps_5_0"));
             }
@@ -1179,7 +1220,7 @@ mod tests {
             let bytecode = compile(entry, target).unwrap_or_else(|error| panic!("{error}"));
             assert!(!bytecode.is_empty(), "{entry} has bytecode");
         }
-        assert_eq!(std::mem::size_of::<Uniforms>(), 9 * 16);
+        assert_eq!(std::mem::size_of::<Uniforms>(), UNIFORM_VEC4_COUNT * 16);
     }
 
     #[test]
@@ -1336,6 +1377,10 @@ mod tests {
                 .into_iter()
                 .find(|id| css_id(*id) == css)
                 .unwrap_or_else(|| panic!("unknown live background {css}"));
+            if !ported(id) {
+                // Plan 194 S4 ports it and lifts this.
+                continue;
+            }
             let (look, known) = look_or_first(id, frame["look"].as_str().unwrap());
             assert!(known);
             let phase = frame["phase"].as_f64().unwrap();

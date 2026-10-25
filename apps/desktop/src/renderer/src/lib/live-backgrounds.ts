@@ -58,6 +58,17 @@ export const LIVE_BACKGROUND_THUMBNAILS: Readonly<Record<string, string>> = {
 }
 
 /**
+ * The live backgrounds Assets offers: those with a bundled thumbnail for
+ * every look. Plan 194's five are on the wire and in the catalogue, but join
+ * the Live group only when S6 bundles their posters and thumbnails (and S7
+ * lays the group out for ten); a tile without a picture is never shown.
+ */
+export const LIVE_BACKGROUND_OFFERED: readonly LiveBackgroundEntry[] =
+  LIVE_BACKGROUND_CATALOG.filter((entry) =>
+    entry.looks.every((look) => livePosterAssetId(entry.id, look.id) in LIVE_BACKGROUND_THUMBNAILS)
+  )
+
+/**
  * The look this build shows for a stored look id: the look itself, or the
  * background's first look when a stored id names one this build doesn't have
  * (the backend renders the first look then too).

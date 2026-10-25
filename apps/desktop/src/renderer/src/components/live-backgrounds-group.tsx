@@ -28,9 +28,9 @@ import {
   setLiveBackgroundSettings
 } from '@/lib/background-library'
 import {
-  LIVE_BACKGROUND_CATALOG,
   LIVE_BACKGROUND_CREDIT,
   LIVE_BACKGROUND_MOTION_OPTIONS,
+  LIVE_BACKGROUND_OFFERED,
   liveBackgroundEntry,
   liveBackgroundLook,
   liveBackgroundStillLine,
@@ -71,7 +71,7 @@ export function LiveBackgroundsGroup(): ReactElement {
     <div className="flex flex-col gap-2" data-videorc-live-backgrounds="">
       <SectionLabel as="h3">Live</SectionLabel>
       <Gallery className="gap-3">
-        {LIVE_BACKGROUND_CATALOG.map((entry) => {
+        {LIVE_BACKGROUND_OFFERED.map((entry) => {
           const active = registry.live.activeId === entry.id
           return (
             <LiveBackgroundTile

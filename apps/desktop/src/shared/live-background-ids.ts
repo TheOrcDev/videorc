@@ -1,5 +1,5 @@
-// Live backgrounds (plan 190): the ids and defaults the eager bundle needs.
-// Names, looks and thumbnails live in the lazy Assets chunk
+// Live backgrounds (plans 190 and 194): the ids and defaults the eager bundle
+// needs. Names, looks and thumbnails live in the lazy Assets chunk
 // (renderer/src/lib/live-backgrounds.ts); the backend owns the shaders and the
 // catalogue (crates/videorc-backend/src/live_background/), and the generated
 // `live-backgrounds.catalog.generated.json` pins both to it.
@@ -10,7 +10,12 @@ export const LIVE_BACKGROUND_DEFAULT_LOOKS = {
   'side-rays': 'sunbeam',
   'plasma-wave': 'plasma',
   'liquid-chrome': 'polished',
-  'line-waves': 'silk'
+  'line-waves': 'silk',
+  beams: 'studio',
+  'color-bends': 'default',
+  dither: 'classic',
+  ferrofluid: 'studio',
+  'ghost-fibers': 'violet'
 } as const
 
 export type LiveBackgroundId = keyof typeof LIVE_BACKGROUND_DEFAULT_LOOKS

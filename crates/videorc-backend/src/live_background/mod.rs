@@ -1,5 +1,5 @@
-//! Live backgrounds (plan 190): five React Bits shaders behind the screen and
-//! camera, on every platform.
+//! Live backgrounds (plans 190 and 194): ten React Bits shaders behind the
+//! screen and camera, on every platform.
 //!
 //! A live background is a bundled picture with a shader attached. The scene's
 //! `EffectiveSceneBackground.asset_id` names the look's poster
@@ -10,16 +10,21 @@
 //! This module is the one source of truth all renderers share:
 //!
 //! - [`looks`]: the catalogue (names, looks, speeds) and the uniform packing.
-//!   Every renderer gets the same nine `vec4`s per pass:
+//!   Every renderer gets the same sixteen `vec4`s per pass:
 //!   - `u[0] = (target_w, target_h, phase, pixel_scale)`: the pass's render
 //!     target, the shader clock and one React Bits "CSS pixel" in render
 //!     pixels (`min(view) / 1080`).
 //!   - `u[1] = (view_w, view_h, dim, 0)`: the background's full internal
 //!     size (passes like Silk's field or Plasma's coarse trace render smaller
 //!     targets) and the Dim style (0–0.8).
-//!   - `u[2..9]`: per-look constants ([`looks::LiveLook::statics`]).
+//!   - `u[2..16]`: per-look constants ([`looks::LiveLook::statics`]); each
+//!     shader's header says what it reads.
 //! - [`sizes`]: internal render sizes (soft backgrounds render at most 1080
-//!   on their short side and are drawn up; the guard halves them).
+//!   on their short side and are drawn up; the guard halves them), and the
+//!   scratch sizes: Silk's and Beams' fields, Plasma Wave's and Ghost
+//!   Fibers' chains, Dither's cells and Ferrofluid's grid.
+//! - [`glsl::PassKind`]: full-screen, or instanced quads (Ghost Fibers' dots
+//!   and dust, plan 194 N2).
 //! - [`clock`]: the phase clock (re-based on every change, never jumps).
 //! - [`guard`]: the budget guard (full → half → poster, never climbs back).
 //! - [`glsl`]: the GLSL ES 3.00 sources (the source of truth; the Linux
@@ -52,18 +57,25 @@ mod export;
 #[allow(unused_imports)]
 pub use clock::LiveBackgroundClock;
 #[allow(unused_imports)]
+pub use glsl::{PassBlend, PassKind};
+#[allow(unused_imports)]
 pub use guard::{GuardLevel, LiveBackgroundGuard};
 #[allow(unused_imports)]
 pub use looks::{
-    ALL_LIVE_BACKGROUNDS, BASE_COLOR, LiveLook, UNIFORM_VEC4_COUNT, Uniforms, css_id, display_name,
-    is_soft, look_or_first, looks, motion_factor, poster_asset_id, uniforms,
+    ALL_LIVE_BACKGROUNDS, BASE_COLOR, FerrofluidCamera, GhostFibersInstances, LiveLook,
+    UNIFORM_VEC4_COUNT, Uniforms, css_id, display_name, ferrofluid_camera, ferrofluid_look_camera,
+    ghost_fibers_instances, is_soft, look_or_first, looks, motion_factor, poster_asset_id,
+    uniforms,
 };
 pub use runtime::{
     CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundFrameInput, LiveBackgroundRuntime,
     LiveBackgroundTick,
 };
 #[allow(unused_imports)]
-pub use sizes::{PlasmaSizes, internal_size, plasma_sizes, silk_field_size};
+pub use sizes::{
+    FerrofluidGrid, PlasmaSizes, beams_field_size, dither_cell, dither_field_size, ferrofluid_grid,
+    ghost_fibers_bloom_sizes, internal_size, plasma_sizes, silk_field_size,
+};
 
 use crate::protocol::{LiveBackgroundSpec, LiveBackgroundStillReason};
 

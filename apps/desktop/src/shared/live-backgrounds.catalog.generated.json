@@ -105,6 +105,111 @@
         }
       ],
       "name": "Line Waves"
+    },
+    {
+      "id": "beams",
+      "looks": [
+        {
+          "id": "studio",
+          "name": "Studio",
+          "posterAssetId": "live-beams-studio"
+        },
+        {
+          "id": "chrome",
+          "name": "Chrome",
+          "posterAssetId": "live-beams-chrome"
+        },
+        {
+          "id": "ember",
+          "name": "Ember",
+          "posterAssetId": "live-beams-ember"
+        }
+      ],
+      "name": "Beams"
+    },
+    {
+      "id": "color-bends",
+      "looks": [
+        {
+          "id": "default",
+          "name": "Default",
+          "posterAssetId": "live-color-bends-default"
+        },
+        {
+          "id": "ember",
+          "name": "Ember",
+          "posterAssetId": "live-color-bends-ember"
+        },
+        {
+          "id": "ocean",
+          "name": "Ocean",
+          "posterAssetId": "live-color-bends-ocean"
+        }
+      ],
+      "name": "Color Bends"
+    },
+    {
+      "id": "dither",
+      "looks": [
+        {
+          "id": "classic",
+          "name": "Classic",
+          "posterAssetId": "live-dither-classic"
+        },
+        {
+          "id": "amber",
+          "name": "Amber",
+          "posterAssetId": "live-dither-amber"
+        },
+        {
+          "id": "blueprint",
+          "name": "Blueprint",
+          "posterAssetId": "live-dither-blueprint"
+        }
+      ],
+      "name": "Dither"
+    },
+    {
+      "id": "ferrofluid",
+      "looks": [
+        {
+          "id": "studio",
+          "name": "Studio",
+          "posterAssetId": "live-ferrofluid-studio"
+        },
+        {
+          "id": "ember",
+          "name": "Ember",
+          "posterAssetId": "live-ferrofluid-ember"
+        },
+        {
+          "id": "frost",
+          "name": "Frost",
+          "posterAssetId": "live-ferrofluid-frost"
+        }
+      ],
+      "name": "Ferrofluid"
+    },
+    {
+      "id": "ghost-fibers",
+      "looks": [
+        {
+          "id": "violet",
+          "name": "Violet",
+          "posterAssetId": "live-ghost-fibers-violet"
+        },
+        {
+          "id": "fiber",
+          "name": "Fiber Optic",
+          "posterAssetId": "live-ghost-fibers-fiber"
+        },
+        {
+          "id": "ember",
+          "name": "Ember",
+          "posterAssetId": "live-ghost-fibers-ember"
+        }
+      ],
+      "name": "Ghost Fibers"
     }
   ]
 }

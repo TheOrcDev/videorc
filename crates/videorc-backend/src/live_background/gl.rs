@@ -31,7 +31,7 @@ use glow::HasContext;
 
 use super::glsl::{LivePass, VERTEX, fragment_source, passes};
 use super::guard::{GuardLevel, LiveBackgroundGuard};
-use super::looks::{LiveLook, uniforms};
+use super::looks::{LiveLook, UNIFORM_VEC4_COUNT, Uniforms, uniforms};
 use super::runtime::{CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundFrameInput};
 use super::sizes::{internal_size, plasma_sizes, silk_field_size};
 use crate::linux_vaapi::{ProbeQuarantine, QuarantineEntry, RenderNodeCandidate};
@@ -52,7 +52,7 @@ const READBACK_TIMEOUT_NS: i32 = 250_000_000;
 /// swizzled so the RGBA readback bytes are BGRA.
 const PACK_FRAGMENT: &str = "#version 300 es
 precision highp float;
-uniform vec4 u[9];
+uniform vec4 u[16];
 uniform sampler2D t0;
 out vec4 outColor;
 void main() {
@@ -353,6 +353,21 @@ impl Drop for LiveBackgroundGlRenderer {
     fn drop(&mut self) {
         self.stop_worker();
     }
+}
+
+/// The backgrounds this renderer can draw. The GLSL runs as it is, but the
+/// plan 194 five need scratch this renderer does not allocate yet and, for
+/// Ghost Fibers, the instanced pass; they show their poster
+/// (`shader-compile-failed`) until S5.
+pub fn ported(id: LiveBackgroundId) -> bool {
+    !matches!(
+        id,
+        LiveBackgroundId::Beams
+            | LiveBackgroundId::ColorBends
+            | LiveBackgroundId::Dither
+            | LiveBackgroundId::Ferrofluid
+            | LiveBackgroundId::GhostFibers
+    )
 }
 
 /// The background tag a frame's sequence carries in its top byte.
@@ -896,7 +911,7 @@ impl GlState {
         key: ProgramKey,
         id: LiveBackgroundId,
         destination: &'static str,
-        uniform_values: &[[f32; 4]; 9],
+        uniform_values: &Uniforms,
         t0: Option<&'static str>,
         t1: Option<&'static str>,
     ) -> Result<(), Failure> {
@@ -934,6 +949,15 @@ impl GlState {
         reuse: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, Failure> {
         let id = request.id;
+        if !ported(id) {
+            // Plan 194 S5 adds the instanced pass and the new scratch; until
+            // then its poster, with the others untouched.
+            return Err(Failure::background(
+                LiveBackgroundStillReason::ShaderCompileFailed,
+                id,
+                "not ported to GLES yet (plan 194 S5)",
+            ));
+        }
         let view = request.view;
         let look = request.look;
         let packed = |target: (u32, u32)| uniforms(look, target, view, request.phase, request.dim);
@@ -1066,7 +1090,7 @@ impl GlState {
             },
         }
         unsafe {
-            let mut pack_uniforms = [[0.0f32; 4]; 9];
+            let mut pack_uniforms: Uniforms = [[0.0f32; 4]; UNIFORM_VEC4_COUNT];
             pack_uniforms[0] = [view.0 as f32, view.1 as f32, 0.0, 0.0];
             self.pass(
                 gl,
@@ -1367,6 +1391,10 @@ mod tests {
         let (width, height) = (640u32, 360u32);
         for frame in fixture["frames"].as_array().unwrap() {
             let id: LiveBackgroundId = serde_json::from_value(frame["id"].clone()).unwrap();
+            if !ported(id) {
+                // Plan 194 S5 ports it and lifts this.
+                continue;
+            }
             let (look, _) = super::super::looks::look_or_first(id, frame["look"].as_str().unwrap());
             let request = Request {
                 id,

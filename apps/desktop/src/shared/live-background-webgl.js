@@ -19,13 +19,36 @@
 ;(function (root) {
   'use strict'
 
-  var PRESENT_FRAGMENT =
-    '#version 300 es\n' +
-    'precision highp float;\n' +
-    'uniform vec4 u[9];\n' +
-    'uniform sampler2D t0;\n' +
-    'out vec4 outColor;\n' +
-    'void main() { outColor = texture(t0, gl_FragCoord.xy / u[0].xy); }\n'
+  /** The block every shader declares: `uniform vec4 u[N]` (`looks::UNIFORM_VEC4_COUNT`). */
+  function uniformVec4Count(render) {
+    return render.uniformVec4Count || 16
+  }
+
+  function presentFragment(render) {
+    return (
+      '#version 300 es\n' +
+      'precision highp float;\n' +
+      'uniform vec4 u[' +
+      uniformVec4Count(render) +
+      '];\n' +
+      'uniform sampler2D t0;\n' +
+      'out vec4 outColor;\n' +
+      'void main() { outColor = texture(t0, gl_FragCoord.xy / u[0].xy); }\n'
+    )
+  }
+
+  /**
+   * The backgrounds this runner draws. The plan 194 five need scratch and,
+   * for Ghost Fibers, an instanced pass this runner does not have yet (S5);
+   * the preview shows their poster (`shader-compile-failed`) until then.
+   */
+  var RUNNABLE = {
+    silk: true,
+    'side-rays': true,
+    'plasma-wave': true,
+    'liquid-chrome': true,
+    'line-waves': true
+  }
 
   function roundHalfUp(value) {
     return Math.round(value)
@@ -80,9 +103,9 @@
     return background.looks[0]
   }
 
-  /** Mirrors `looks::uniforms`: nine vec4s, flattened. */
+  /** Mirrors `looks::uniforms`: two shared vec4s then the look's statics, flattened. */
   function packUniforms(look, target, view, phase, dim) {
-    var out = new Float32Array(36)
+    var out = new Float32Array(8 + look.statics.length * 4)
     out[0] = target[0]
     out[1] = target[1]
     out[2] = phase
@@ -219,6 +242,11 @@
     function draw(options) {
       var background = findBackground(render, options.id)
       if (!background) throw new Error('unknown live background ' + options.id)
+      if (!RUNNABLE[background.id]) {
+        throw new Error(
+          'live background ' + background.id + ' has no WebGL runner yet (plan 194 S5)'
+        )
+      }
       var look = findLook(background, options.look)
       var output = [options.width, options.height]
       var view = internalSize(render, background.id, output, options.level || 'full')
@@ -310,8 +338,8 @@
       }
 
       if (!direct) {
-        var present = program('present', PRESENT_FRAGMENT)
-        var presentUniforms = new Float32Array(36)
+        var present = program('present', presentFragment(render))
+        var presentUniforms = new Float32Array(uniformVec4Count(render) * 4)
         presentUniforms[0] = output[0]
         presentUniforms[1] = output[1]
         pass(present, null, output, presentUniforms, frame)
@@ -358,6 +386,9 @@
     internalSize: internalSize,
     silkFieldSize: silkFieldSize,
     plasmaSizes: plasmaSizes,
-    packUniforms: packUniforms
+    packUniforms: packUniforms,
+    runnable: function (id) {
+      return Boolean(RUNNABLE[id])
+    }
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this)

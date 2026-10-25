@@ -13,7 +13,7 @@
 // fine light (t0) and the bloom (t1).
 precision highp float;
 
-uniform vec4 u[9];
+uniform vec4 u[16];
 uniform sampler2D t0;
 uniform sampler2D t1;
 out vec4 outColor;

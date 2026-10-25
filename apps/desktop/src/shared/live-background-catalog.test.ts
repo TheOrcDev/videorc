@@ -50,7 +50,7 @@ describe('live background catalogue (plan 190)', () => {
 
   it('parses every poster id back into its background and look', () => {
     const manifest = livePosterManifest()
-    expect(manifest).toHaveLength(15)
+    expect(manifest).toHaveLength(30)
     for (const poster of manifest) {
       const parsed = parseLivePosterAssetId(poster.id)
       expect(parsed).not.toBeNull()

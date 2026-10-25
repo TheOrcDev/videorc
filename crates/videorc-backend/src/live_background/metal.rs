@@ -83,9 +83,10 @@ pub const LIVE_BACKGROUND_MSL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-// Live backgrounds (plan 190). Every pass reads the same nine float4s
-// (live_background/mod.rs): u[0] = (target w, h, phase, pixel scale),
-// u[1] = (view w, h, dim, 0), u[2..9] = the look's constants. GLSL's
+// Live backgrounds (plans 190 and 194). Every pass reads the same sixteen
+// float4s (live_background/mod.rs, UNIFORM_VEC4_COUNT; the block is sent at
+// its full size): u[0] = (target w, h, phase, pixel scale),
+// u[1] = (view w, h, dim, 0), u[2..16] = the look's constants. GLSL's
 // gl_FragCoord is bottom-left and Metal's position is top-left: gl_frag flips
 // y, and a scratch texture written by one pass is read by the next with 1 - v.
 
@@ -611,7 +612,23 @@ fragment float4 line_waves_main(LiveVOut in [[stage_in]], constant float4* u [[b
 }
 "#;
 
-/// The MSL fragment function of a pass.
+/// The backgrounds this renderer has an MSL port for. The plan 194 five show
+/// their poster (`shader-compile-failed`) until S3 ports them; the gate sits
+/// before any pipeline is built, so an unported background never marks the
+/// library as failed for the others.
+pub fn ported(id: LiveBackgroundId) -> bool {
+    !matches!(
+        id,
+        LiveBackgroundId::Beams
+            | LiveBackgroundId::ColorBends
+            | LiveBackgroundId::Dither
+            | LiveBackgroundId::Ferrofluid
+            | LiveBackgroundId::GhostFibers
+    )
+}
+
+/// The MSL fragment function of a pass (the plan 194 names are the S3
+/// port's; `ported` keeps them unreachable until then).
 fn pass_function(pass: LivePass) -> &'static str {
     match pass {
         LivePass::SilkField => "silk_field",
@@ -624,6 +641,20 @@ fn pass_function(pass: LivePass) -> &'static str {
         LivePass::PlasmaComposite => "plasma_composite",
         LivePass::LiquidChrome => "liquid_chrome_main",
         LivePass::LineWaves => "line_waves_main",
+        LivePass::BeamsField => "beams_field",
+        LivePass::BeamsComposite => "beams_composite",
+        LivePass::ColorBends => "color_bends_main",
+        LivePass::DitherWave => "dither_wave",
+        LivePass::DitherComposite => "dither_composite",
+        LivePass::FerrofluidField => "ferrofluid_field",
+        LivePass::FerrofluidBound => "ferrofluid_bound",
+        LivePass::FerrofluidRender => "ferrofluid_render",
+        LivePass::GhostFibersDots => "ghost_fibers_dots",
+        LivePass::GhostFibersDust => "ghost_fibers_dust",
+        LivePass::GhostFibersBright => "ghost_fibers_bright",
+        LivePass::GhostFibersDown => "ghost_fibers_down",
+        LivePass::GhostFibersUp => "ghost_fibers_up",
+        LivePass::GhostFibersComposite => "ghost_fibers_composite",
     }
 }
 
@@ -634,11 +665,26 @@ fn pass_format(pass: LivePass, plasma_light: MTLPixelFormat) -> MTLPixelFormat {
         LivePass::SilkField => SILK_FIELD_FORMAT,
         LivePass::PlasmaCoarse => PLASMA_COARSE_FORMAT,
         LivePass::PlasmaFine | LivePass::PlasmaDown | LivePass::PlasmaUp => plasma_light,
+        // Plan 194 scratch (S3 settles the formats): float fields and chains.
+        LivePass::BeamsField
+        | LivePass::FerrofluidField
+        | LivePass::FerrofluidBound
+        | LivePass::GhostFibersDots
+        | LivePass::GhostFibersDust
+        | LivePass::GhostFibersBright
+        | LivePass::GhostFibersDown
+        | LivePass::GhostFibersUp => MTLPixelFormat::RGBA16Float,
         LivePass::SilkComposite
         | LivePass::SideRays
         | LivePass::PlasmaComposite
         | LivePass::LiquidChrome
-        | LivePass::LineWaves => FRAME_FORMAT,
+        | LivePass::LineWaves
+        | LivePass::BeamsComposite
+        | LivePass::ColorBends
+        | LivePass::DitherWave
+        | LivePass::DitherComposite
+        | LivePass::FerrofluidRender
+        | LivePass::GhostFibersComposite => FRAME_FORMAT,
     }
 }
 
@@ -865,6 +911,11 @@ impl LiveBackgroundMetalRenderer {
     /// guard and status live in `render`). The returned texture is this
     /// renderer's live frame: the next `draw` overwrites it.
     pub fn draw(&mut self, draw: &LiveDraw<'_>) -> Result<LiveFrame, DrawError> {
+        if !ported(draw.id) {
+            // Plan 194 S3 ports it; until then its poster, with the others
+            // untouched (no pipeline is tried, so `compile_failed` stays off).
+            return Err(DrawError::ShaderCompileFailed);
+        }
         let view = internal_size(draw.id, draw.output, draw.level);
         // Pipelines first: a background whose shader won't build allocates
         // nothing.
@@ -1216,6 +1267,12 @@ impl LiveBackgroundMetalRenderer {
             LiveBackgroundId::SideRays
             | LiveBackgroundId::LiquidChrome
             | LiveBackgroundId::LineWaves => Scratch::None,
+            // Plan 194 S3 adds their scratch; `ported` keeps them out here.
+            LiveBackgroundId::Beams
+            | LiveBackgroundId::ColorBends
+            | LiveBackgroundId::Dither
+            | LiveBackgroundId::Ferrofluid
+            | LiveBackgroundId::GhostFibers => Scratch::None,
         };
         self.targets = Some(Targets {
             id,
@@ -1431,7 +1488,9 @@ mod tests {
         frames: Vec<GoldenFrame>,
     }
 
-    /// The fixture: 30 grids rendered from the GLSL in WebGL2.
+    /// The fixture: the grids rendered from the GLSL in WebGL2, 30 for the
+    /// backgrounds this renderer has ported (plan 194 S3 lifts the filter to
+    /// all 60).
     fn load_golden() -> Golden {
         let fixture: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(GOLDEN).expect("golden fixture"))
@@ -1448,6 +1507,7 @@ mod tests {
             .as_array()
             .expect("frames")
             .iter()
+            .filter(|frame| ported(id_from_css(frame["id"].as_str().unwrap())))
             .map(|frame| {
                 let id = id_from_css(frame["id"].as_str().unwrap());
                 let look_id = frame["look"].as_str().unwrap();
@@ -1760,6 +1820,42 @@ mod tests {
         );
     }
 
+    /// Plan 194 S2: a background this renderer has not ported yet shows its
+    /// poster with `shader-compile-failed`, holds nothing, and leaves the
+    /// library usable: a ported background still renders afterwards.
+    #[test]
+    fn an_unported_background_shows_its_poster_and_poisons_nothing() {
+        let Some((mut renderer, board)) = renderer() else {
+            return;
+        };
+        let now = Instant::now();
+        let beams = frame_input(
+            &spec(LiveBackgroundId::Beams, "studio"),
+            &board,
+            LiveBackgroundTick::unmeasured(now),
+        );
+        assert!(renderer.render(&beams, (640, 360), None).is_none());
+        let (status, programs, scratch) = board.snapshot();
+        let status = status.expect("status reported");
+        assert_eq!(status.rendering, LiveBackgroundRendering::Still);
+        assert_eq!(
+            status.reason,
+            Some(LiveBackgroundStillReason::ShaderCompileFailed)
+        );
+        assert_eq!((programs, scratch), (0, 0));
+        assert!(!renderer.compile_failed);
+        let silk = frame_input(
+            &spec(LiveBackgroundId::Silk, "satin"),
+            &board,
+            LiveBackgroundTick::unmeasured(now),
+        );
+        let frame = renderer
+            .render(&silk, (640, 360), None)
+            .expect("silk still renders after an unported background");
+        assert_eq!(frame.rendering, LiveBackgroundRendering::Shader);
+        renderer.release();
+    }
+
     /// The live frame's GPU time per background at 1080p and 4K (median of
     /// 60 frames), for the plan's "As built". Informational: this machine is
     /// shared, so the numbers are not asserted.
@@ -1768,7 +1864,7 @@ mod tests {
         let Some((mut renderer, _board)) = renderer() else {
             return;
         };
-        for id in ALL_LIVE_BACKGROUNDS {
+        for id in ALL_LIVE_BACKGROUNDS.into_iter().filter(|id| ported(*id)) {
             let look = &looks(id)[0];
             for output in [(1920_u32, 1080_u32), (3840, 2160)] {
                 let mut times = Vec::new();

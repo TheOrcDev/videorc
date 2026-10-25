@@ -1,5 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
+import { LIVE_BACKGROUND_DEFAULT_LOOKS, LIVE_BACKGROUND_IDS } from './live-background-ids'
+
 import type {
   Banner,
   CompositorStatus,
@@ -1187,6 +1189,16 @@ describe('backend RPC contract', () => {
       expect(
         validateBackendEventPayload('compositor.status', { ...status, liveBackground })
       ).toEqual({ ...status, liveBackground })
+      expect(validateBackendRpcResult('compositor.status', { ...status, liveBackground })).toEqual({
+        ...status,
+        liveBackground
+      })
+    }
+    // Every catalogue id passes, the plan 194 five included: the strict
+    // contract once rejected a status by omission (plan 190 S11).
+    expect(LIVE_BACKGROUND_IDS).toHaveLength(10)
+    for (const id of LIVE_BACKGROUND_IDS) {
+      const liveBackground = { ...shader, id, look: LIVE_BACKGROUND_DEFAULT_LOOKS[id] }
       expect(validateBackendRpcResult('compositor.status', { ...status, liveBackground })).toEqual({
         ...status,
         liveBackground
