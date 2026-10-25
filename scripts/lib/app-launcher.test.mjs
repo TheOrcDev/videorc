@@ -21,6 +21,7 @@ import {
   devBackendPrebuildSpec,
   devAppSpawnSpec,
   launchDevApp,
+  releaseBackendFakeOriginRefusal,
   macosAppBundlePath,
   macosLaunchServicesAppSpawnSpec,
   performanceAppSpawnSpec,
@@ -948,4 +949,35 @@ test('dev backend prebuild failures name the compile race instead of GPU noise',
     error: new Error('spawnSync cargo ENOENT')
   })
   assert.match(missing, /could not start/)
+})
+
+test('a fake API origin refuses the release dev backend, which would call the real service', async () => {
+  const fake = { VIDEORC_DISCORD_API_BASE_URL: 'http://127.0.0.1:4555' }
+  const refusal = releaseBackendFakeOriginRefusal(fake, { VIDEORC_DEV_BACKEND_PROFILE: 'release' })
+  assert.match(refusal, /VIDEORC_DISCORD_API_BASE_URL only works with the debug backend/)
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      {
+        VIDEORC_DEV_BACKEND_PROFILE: 'release',
+        VIDEORC_YOUTUBE_API_BASE_URL: 'http://127.0.0.1:1'
+      },
+      {}
+    ),
+    /VIDEORC_YOUTUBE_API_BASE_URL/
+  )
+  // Debug backend, or no fake origin: launch as before.
+  assert.equal(releaseBackendFakeOriginRefusal(fake, {}), null)
+  assert.equal(
+    releaseBackendFakeOriginRefusal(fake, { VIDEORC_DEV_BACKEND_PROFILE: 'debug' }),
+    null
+  )
+  assert.equal(
+    releaseBackendFakeOriginRefusal({}, { VIDEORC_DEV_BACKEND_PROFILE: 'release' }),
+    null
+  )
+  // launchDevApp refuses before spawning anything.
+  await assert.rejects(
+    launchDevApp({ env: { ...fake, VIDEORC_DEV_BACKEND_PROFILE: 'release' }, timeoutMs: 1000 }),
+    /only works with the debug backend/
+  )
 })

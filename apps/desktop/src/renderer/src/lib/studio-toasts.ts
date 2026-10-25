@@ -34,9 +34,16 @@ export function sourceSwitchFailedTitle(
   return `Couldn't switch the ${SOURCE_NOUNS[source.kind]}`
 }
 
+/** Internal adapter text: never shown. Same fix as the Linux mid-session
+ * refusals (stop, change the source, start again). */
+const SOURCE_SWITCH_UNSUPPORTED =
+  'This source cannot change until you stop, pick a new one, then start again.'
+
 /** The switch's reason as a sentence, then the one fix. */
 export function sourceSwitchFailedDescription(reason: string): string {
-  const trimmed = reason.trim()
+  const trimmed = /session source transactions/i.test(reason)
+    ? SOURCE_SWITCH_UNSUPPORTED
+    : reason.trim()
   const sentence = !trimmed || /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
   return `${sentence ? `${sentence} ` : ''}Choose it again in Sources.`
 }

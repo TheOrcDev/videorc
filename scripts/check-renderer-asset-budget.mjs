@@ -41,11 +41,10 @@ const htmlPath = resolve(
 // tipping it to 390,086. Raise gzip to 395,000 (~1.3%); keep re-splitting the
 // answer for net-new UI.
 // Recalibrated 2026-10-25 (Linux retests 148 and 150): main measured 394,848
-// gzip (152 bytes of headroom). Three Studio correctness fixes need eager
-// bytes: the source pickers stay live while only the Clips buffer runs (~700
-// bytes), a start waits with plain copy when the scene shows a source turned
-// off (~280), and an error toast with two actions of its own still offers
-// Copy (~220). Raise gzip to 400,000 (~1.3%); keep re-splitting the answer
+// gzip (152 bytes of headroom). Two Studio correctness fixes need eager bytes:
+// the source pickers stay live while only the Clips buffer runs (~700 bytes)
+// and a start waits with plain copy when the scene shows a source turned off
+// (~280 bytes). Raise gzip to 400,000 (~1.3%); keep re-splitting the answer
 // for net-new UI.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),

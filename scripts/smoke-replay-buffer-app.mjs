@@ -384,6 +384,12 @@ try {
   }
   report.replays.push(await verifyReplay(await rpcOutcome, 'save from clip.mark'))
 
+  // The analyzer above (framemd5 + freezedetect on a full clip) competes with
+  // the live compositor; on a CPU-composited host (the Linux box) that stalls
+  // a few frames, and the next clip would hold the smoke's own load instead of
+  // the ring. Let the ring roll a whole window past the analysis first.
+  await sleep((seconds + SEGMENT_SECONDS) * 1000)
+
   // 3b. The same action from a remote intent (a Stream Deck key).
   const markOutcome = replayOutcome(
     'the clipMark intent',

@@ -391,6 +391,29 @@ describe('session audio news (plan 076)', () => {
     )
   })
 
+  it('says once that a Screen file stopped, and that the Combined recording keeps going', () => {
+    // Plan 198 (D1): the role-failed event rides the Combined session.
+    const event = {
+      ...healthEvent('separate-source-recordings-role-failed'),
+      message: 'Screen capture failed after source recovery'
+    }
+    expect(showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })).toBe(
+      null
+    )
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Screen file stopped',
+      expect.objectContaining({
+        description:
+          "The screen stopped sending video and couldn't be restarted. Your Combined recording keeps going.",
+        action: expect.objectContaining({ label: 'Open Health' })
+      })
+    )
+    const [, first] = toastSpies.warning.mock.calls[0] as [string, { id: string }]
+    showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })
+    const [, second] = toastSpies.warning.mock.calls[1] as [string, { id: string }]
+    expect(second.id).toBe(first.id)
+  })
+
   it('reports a stopped screen capture by severity, and its return', () => {
     showSessionHealthEvent(healthEvent('screen-capture-stopped'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(
@@ -459,6 +482,22 @@ describe('record+stream notices (plan 174 B-6)', () => {
     })!
     expect(sessionRuntimeNoticeTitle(recordingOnly.notice)).toBe(
       'Microphone stopped: recording continues with silence'
+    )
+  })
+
+  it('does not say a recording continues when only the Clips buffer runs', () => {
+    const presentation = microphoneLossPresentation({
+      event: microphoneLost,
+      recording: { state: 'recording', sessionId: 'go-live', replayOnly: true },
+      lastActivity: 'recording',
+      currentDedupeKey: null
+    })!
+    expect(presentation.activity).toBe('clips')
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).toBe(
+      'Microphone stopped: Clips continue with silence'
+    )
+    expect(sessionRuntimeNoticeTitle(presentation.notice)).not.toContain(
+      'recording continues with silence'
     )
   })
 

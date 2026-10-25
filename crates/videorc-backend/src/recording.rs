@@ -3585,21 +3585,30 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
     result
 }
 
+/// Plan 181: a buffer-only session composes exactly like a record-only
+/// session (same bridge, encoder posture, overlay plan) and writes no file;
+/// the replay ring is its only output. The request shape is kept in the
+/// returned `replay_only`, `record_enabled` is raised for every pipeline
+/// decision, and every file-only step checks `replay_only` instead. Plan 198:
+/// the ring has no file for Screen and Camera files to sit beside, so a
+/// buffer-only session never arms them; Record and Go Live hand-overs carry
+/// their own request.
+fn normalize_replay_only_params(params: &mut StartSessionParams) -> bool {
+    let replay_only = params.replay_only();
+    if replay_only {
+        params.output.record_enabled = true;
+        params.captions = None;
+        params.output.separate_source_recordings = None;
+    }
+    replay_only
+}
+
 async fn start_session_with_timeline(
     state: AppState,
     mut params: StartSessionParams,
     timeline: &mut RecordingStartTimeline,
 ) -> Result<RecordingStatus> {
-    // Plan 181: a buffer-only session composes exactly like a record-only
-    // session (same bridge, encoder posture, overlay plan) and writes no
-    // file; the replay ring is its only output. The request shape is kept in
-    // `replay_only`, `record_enabled` is raised for every pipeline decision
-    // below, and every file-only step checks `replay_only` instead.
-    let replay_only = params.replay_only();
-    if replay_only {
-        params.output.record_enabled = true;
-        params.captions = None;
-    }
+    let replay_only = normalize_replay_only_params(&mut params);
     // Held until this start has run or failed, so a Record or Go Live that
     // lands meanwhile waits in `hand_over_replay_only_session`.
     let _replay_start_in_flight =
@@ -6714,7 +6723,10 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
-        if let Some(handle) = session_soundboard {
+        // A buffer-only Clips session keeps the handle off the player:
+        // idle presses stay monitor-only. The ring is what viewers would
+        // have heard: nothing until Record or Go Live.
+        if !replay_only && let Some(handle) = session_soundboard {
             let volume_db = state
                 .database
                 .sound_settings()
@@ -6722,7 +6734,7 @@ async fn start_session_with_timeline(
                 .unwrap_or(0);
             state
                 .soundboard
-                .session_started(&session_id, handle, volume_db, !replay_only);
+                .session_started(&session_id, handle, volume_db, true);
         }
         // Buddy's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
@@ -10183,7 +10195,15 @@ async fn monitor_session(
                     }
                 }
             }
-            encoder_bridge_lifecycle = report.lifecycle;
+            // Plan 198: the batch snapshot is taken when the Combined bridge
+            // reaps, while each ISO bridge is still reaping under its own
+            // supervisor. `finish` above has joined them; count again so an
+            // ISO take is not reported as leaking a writer it just released.
+            encoder_bridge_lifecycle = if source_iso_finished.is_some() {
+                crate::encoder_bridge::encoder_bridge_lifecycle_snapshot()
+            } else {
+                report.lifecycle
+            };
             if encoder_bridge_lifecycle.live_resources > 0 {
                 let message = format!(
                     "Encoder bridge teardown left {} capture-relevant resource(s) live (outer={}, FIFO={}, detached={}); restart Videorc before recording again.",
@@ -29285,6 +29305,13 @@ mod tests {
             crate::protocol::Device { id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
             crate::protocol::Device { id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
         ]);
+        let failure_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").ok();
+        // Plan 198 (owner's 0.11.0 take): a screen latch from an incident long
+        // before Record is still set when the take arms. All three files save.
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_STALE_LATCH").is_some() {
+            state.capture_recovery.lock().await.test_screen_recovery_failed(screen_fixture_id, true);
+        }
+        let camera_fails = failure_case.is_some();
         let start_click = Instant::now();
         let start = start_session(state.clone(), params.clone()).await;
         let start_ms = start_click.elapsed().as_secs_f64() * 1000.0;
@@ -29351,7 +29378,6 @@ mod tests {
             }).await;
             assert!(changed.applied);
         }
-        let failure_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").ok();
         if failure_case.as_deref() == Some("capture-recovery") {
             state.capture_recovery.lock().await.test_camera_recovery_failed("camera:iso-runtime", false);
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -29440,7 +29466,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 if take.len() == 3
                     && take.iter().all(|item| {
-                        item.finalization_state == Some(if failure_case.is_some() && item.recording_role.as_deref() == Some("camera") {
+                        item.finalization_state == Some(if camera_fails && item.recording_role.as_deref() == Some("camera") {
                             crate::protocol::RecordingFinalizationState::Failed
                         } else { crate::protocol::RecordingFinalizationState::Finalized })
                     })
@@ -29448,7 +29474,7 @@ mod tests {
                     break;
                 }
                 if take.iter().any(|item| {
-                    !(failure_case.is_some() && item.recording_role.as_deref() == Some("camera")) && item.finalization_state
+                    !(camera_fails && item.recording_role.as_deref() == Some("camera")) && item.finalization_state
                         == Some(crate::protocol::RecordingFinalizationState::Failed)
                 }) {
                     panic!("runtime take failed: {take:?}");
@@ -29458,6 +29484,16 @@ mod tests {
         })
         .await
         .expect("all three exports finish");
+        // Plan 198: one role-failed event per failed role per take, none when
+        // only a pre-take latch was set.
+        // The leak check counts after the ISO bridges reap: no false
+        // "restart Videorc before recording again".
+        let take_events = state.database.list_health_events(session_id).unwrap();
+        let role_failed_events = take_events.iter()
+            .filter(|event| event.code == crate::source_iso::HEALTH_ROLE_FAILED).count();
+        assert_eq!(role_failed_events, usize::from(camera_fails), "role-failed events for {failure_case:?}");
+        assert!(!take_events.iter().any(|event| event.code == "encoder-bridge-writer-leaked"),
+            "ISO teardown reported a leak: {take_events:?}");
         let camera_final = state.database.session_finalization_snapshot(&format!("{session_id}-camera")).unwrap();
         let camera_diagnostics: serde_json::Value = serde_json::from_str(&camera_final.diagnostics_json).unwrap();
         if failure_case.as_deref() == Some("bridge") {
@@ -33363,6 +33399,38 @@ mod tests {
         args.windows(2)
             .filter_map(|pair| (pair[0] == "-i").then_some(pair[1].as_str()))
             .collect()
+    }
+
+    /// Plan 198: Clips' buffer-only session arms no Separate source files
+    /// (0.11.0 refused it 62 times in 40 s: "need a local recording path"),
+    /// while Record with the same Output settings still arms them.
+    #[test]
+    fn buffer_only_session_never_arms_separate_source_recordings() {
+        let separate = Some(crate::protocol::SeparateSourceRecordingsSettings {
+            enabled: true,
+            keep_combined: true,
+        });
+        let mut buffer = base_params(false, false);
+        buffer.output.separate_source_recordings = separate;
+        buffer.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(normalize_replay_only_params(&mut buffer));
+        assert!(buffer.output.record_enabled);
+        assert!(crate::source_iso::armed_plan(&buffer.output).is_none());
+        crate::source_iso::validate_separate_source_recordings(&buffer)
+            .expect("a buffer-only start carries no ISO request");
+
+        let mut record = base_params(true, false);
+        record.output.separate_source_recordings = separate;
+        record.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(!normalize_replay_only_params(&mut record));
+        assert_eq!(record.output.separate_source_recordings, separate);
+        assert!(crate::source_iso::armed_plan(&record.output).is_some());
     }
 
     /// Plan 181: the replay ring output on every FFmpeg arg builder.

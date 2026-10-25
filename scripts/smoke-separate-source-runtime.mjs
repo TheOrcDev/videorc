@@ -658,6 +658,9 @@ if (process.env.VIDEORC_SOURCE_ISO_RUNTIME_QUICK !== '1') {
     ['bridge-failure', { VIDEORC_SOURCE_ISO_RUNTIME_FAILURE: 'bridge' }],
     ['capture-recovery', { VIDEORC_SOURCE_ISO_RUNTIME_FAILURE: 'capture-recovery' }],
     ['early-eof', { VIDEORC_SOURCE_ISO_RUNTIME_FAILURE: 'early-eof' }],
+    // Plan 198: a screen recovery latch from before Record must not cost the
+    // take its Screen file; all three files save.
+    ['stale-recovery-latch', { VIDEORC_SOURCE_ISO_RUNTIME_STALE_LATCH: '1' }],
     ['camera-off', { VIDEORC_SOURCE_ISO_RUNTIME_REMOVE: 'camera' }],
     [
       'remove-stop-race',

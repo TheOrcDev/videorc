@@ -4247,6 +4247,41 @@ impl SoundboardHandle {
     pub fn set_volume_db(&self, volume_db: f32) {
         self.volume_db.store(volume_db.to_bits(), Ordering::Release);
     }
+
+    /// A handle that answers `OnAir` and counts `start` calls. Used to prove
+    /// a replay-only session (no `session_started`) never mixes a press.
+    #[cfg(test)]
+    pub(crate) fn test_recording_bus() -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::Ordering;
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (commands, rx) = mpsc::sync_channel(16);
+        let counted = starts.clone();
+        std::thread::spawn(move || {
+            while let Ok(command) = rx.recv() {
+                match command {
+                    SoundCommand::Start {
+                        acknowledgement, ..
+                    } => {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let _ = acknowledgement.send(SoundPlacement::OnAir {
+                            sample: 0,
+                            late: false,
+                        });
+                    }
+                    SoundCommand::Stop { .. } => {}
+                }
+            }
+        });
+        (
+            Self {
+                commands,
+                volume_db: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0f32.to_bits())),
+                stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                draining: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            starts,
+        )
+    }
 }
 
 /// Applies queued sound commands at a chunk boundary (`cursor` is the next

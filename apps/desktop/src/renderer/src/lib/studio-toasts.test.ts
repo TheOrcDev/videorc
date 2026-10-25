@@ -45,6 +45,13 @@ describe('sourceSwitchFailedTitle', () => {
       'The display is gone. Choose it again in Sources.'
     )
     expect(sourceSwitchFailedDescription('  ')).toBe('Choose it again in Sources.')
+    expect(
+      sourceSwitchFailedDescription(
+        'The running capture adapter does not support session source transactions.'
+      )
+    ).toBe(
+      'This source cannot change until you stop, pick a new one, then start again. Choose it again in Sources.'
+    )
   })
 })
 

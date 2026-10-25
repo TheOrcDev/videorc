@@ -313,6 +313,31 @@ function smokeEnvValue(env, name) {
  * @param {(line:string)=>void} [options.onLine] - called for every stdout/stderr line.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
+// API origins the backend honours only in debug builds (`cfg!(debug_assertions)`
+// in discord_announce/client.rs and youtube_quota.rs). A release dev backend
+// logs "refused in packaged builds" and sends the smoke's fixture webhook or
+// token to the real service instead of the local fake.
+export const DEBUG_ONLY_API_ORIGIN_ENV = Object.freeze([
+  'VIDEORC_DISCORD_API_BASE_URL',
+  'VIDEORC_YOUTUBE_API_BASE_URL'
+])
+
+/**
+ * Why a dev-app launch must not start, or null: a fake API origin with the
+ * release dev backend would reach the real service. Pure for the unit test.
+ */
+export function releaseBackendFakeOriginRefusal(env = {}, processEnv = process.env) {
+  const profile = env.VIDEORC_DEV_BACKEND_PROFILE ?? processEnv.VIDEORC_DEV_BACKEND_PROFILE
+  if (profile !== 'release') return null
+  const names = DEBUG_ONLY_API_ORIGIN_ENV.filter((name) => env[name] ?? processEnv[name])
+  if (names.length === 0) return null
+  return (
+    `${names.join(', ')} only works with the debug backend; with ` +
+    'VIDEORC_DEV_BACKEND_PROFILE=release the backend ignores it and calls the real ' +
+    'service. Unset VIDEORC_DEV_BACKEND_PROFILE (or set it to debug) for this smoke.'
+  )
+}
+
 export function launchDevApp({
   env = {},
   timeoutMs = 120000,
@@ -322,6 +347,8 @@ export function launchDevApp({
   launchViaMacosLaunchServices = false,
   spawnSpec: requestedSpawnSpec
 } = {}) {
+  const fakeOriginRefusal = requestedSpawnSpec ? null : releaseBackendFakeOriginRefusal(env)
+  if (fakeOriginRefusal) return Promise.reject(new Error(fakeOriginRefusal))
   return new Promise((resolveLaunch, rejectLaunch) => {
     const connections = {}
     let settled = false
