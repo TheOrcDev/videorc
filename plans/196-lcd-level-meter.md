@@ -1,7 +1,9 @@
 # Plan 196: the LCD meter for every audio level
 
-**Status:** PLANNED 2026-10-25. Nothing is built; this file and its README
-entry are the only changes. **Priority:** P2. Owner request: "In our studio
+**Status:** BUILT 2026-10-25 on the recommended defaults (D1 to D5), U1 to
+S2; see [Execution notes](#execution-notes). Owed: audiocn PR #32 merged and
+deployed, the S2 CPU comparison, `pnpm smoke:sources`, and the owner's by-eye.
+**Priority:** P2. Owner request: "In our studio
 instead of the meter for the microphone that we already have, let's plan to add
 this one https://www.audiocn.dev/docs/components/lcd-meter. Also inside the
 sources as well." **Size:** S: one line upstream in audiocn (U1) and two
@@ -368,3 +370,58 @@ owner has accepted the by-eye (or changed any of D1 to D5).
 - **Glow cost.** Measured in S2 against main.
 - **Eager budget.** Main has 706 gzip bytes of headroom. The LCD is lazy, but
   any eager import of it would fail `check:renderer-assets`.
+
+## Execution notes
+
+Built 2026-10-25 on the recommended defaults: chrome ink (D1), the full
+screen (D2), `default` size (D3), one ink (D4), all three Sources rows (D5).
+
+**U1 (audiocn PR #32, `5ffbf9f`, branch `fix/lcd-select-default-cursor`).**
+`LcdDisplaySelectTrigger` lost `cursor-pointer` and `disabled:cursor-default`,
+with a test that keeps any `cursor-*` class off it. The PR also formats
+`lcd-meter.test.tsx`, which failed `pnpm check` on audiocn main. `pnpm test`
+(494), `pnpm typecheck`, `pnpm check`, `pnpm registry:build` and `pnpm build`
+pass. `pnpm test:install` did not run: `pnpm dlx shadcn@rc init` stopped on
+pnpm's `ERR_PNPM_TRUST_DOWNGRADE` for `semver@6.3.1` under `@babel/core`
+("possible package takeover"); that is the dependency tree, not this change,
+and it was not overridden. Not merged or deployed yet.
+
+**S1.** `@audiocn/lcd-meter` from audiocn.dev (`bcc737f`), then
+`lcd-display.json` from a local registry build of U1, both through
+`shadcn@4.21.1 add --overwrite`. The CLI rewrote the 20 shared files and
+added 4; all were restored or dropped as planned. After Prettier,
+`lcd-meter.tsx` and `level-meter.tsx` equal `bcc737f` and `lcd-display.tsx`
+equals `5ffbf9f`. `package.json`, the lockfile and `components.json` did not
+change. Gate edits as in S1 steps 4 to 8; no cursor exception was needed.
+
+**S2.** `MicLevelMeter` draws `LcdDisplay` + `LcdMeter`; the four call sites
+dropped `orientation` and `variant`; the Studio fallback skeleton is
+`h-24 rounded-row` (96 px). New `mic-level-meter.test.ts`; the adoption test
+holds D1; the Studio and Sources tests assert the screen.
+
+**Gates** (on `90a91148`): `pnpm typecheck`, `pnpm lint` (the one warning,
+`use-studio` line 12244, is on main), `pnpm format:check`, `pnpm build`.
+`pnpm --filter @videorc/desktop test`: 5,345 passed and one failed,
+`studio-provider.integration.test.ts` "starts one clean cut when a recording
+finalizes", at load average 67; that file passed 188 of 188 twice when rerun
+alone. `check:renderer-assets`: 394,539 gzip / 1,964,531 raw eager bytes
+under the 395,000 ceiling. Before the rebase the same change read 394,306
+against main's 394,285, so the LCD adds about 20 gzip bytes of chunk-name
+churn to the entry; the rest of the rise is main's #797.
+
+**Owed.**
+
+- The S2 CPU comparison and `pnpm smoke:sources`. Both need a backend build in
+  this worktree. At execution two peer `cargo test` compiles were running,
+  swap stood at 11.8 of 12.3 GB and load at 40 to 67, so a third compile
+  would have thrashed the host and a CPU comparison would have measured the
+  other sessions. Run them on a quiet host: `cargo build -p videorc-backend`,
+  then `VIDEORC_SMOKE_SKIP_PREBUILD=1 VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1
+  pnpm smoke:preview-performance` on this branch and again after
+  `git switch --detach origin/main` in the same worktree (the change is
+  renderer-only, so both share one backend build), and
+  `VIDEORC_SMOKE_SKIP_PREBUILD=1 pnpm smoke:sources`.
+- audiocn PR #32 merged and audiocn.dev deployed, so a re-install from the
+  site matches `lcd-display.tsx`.
+- The owner's by-eye in both themes (S2 list), and a look on the next Windows
+  build.
