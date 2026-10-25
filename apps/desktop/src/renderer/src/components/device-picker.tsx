@@ -2,6 +2,14 @@ import { useId, useRef, useState, type ReactElement, type ReactNode, type RefObj
 
 import { ChevronDownIcon } from '@/components/icons'
 import {
+  LCD_LIST_GROUP,
+  LCD_LIST_ITEM,
+  LCD_VALUE_BUTTON,
+  LcdPanelRow,
+  LcdPixelChevron,
+  LcdPopupScreen
+} from '@/components/lcd-panel'
+import {
   Command,
   CommandGroup,
   CommandInput,
@@ -28,7 +36,9 @@ import { cn } from '@/lib/utils'
 // item height, a muted status after a device that cannot run, one status line
 // while discovery runs or when nothing is found, and the same "no device"
 // words. `searchable` only adds the search field; `trigger="inline"` only
-// changes the closed look, for a row whose label sits beside it.
+// changes the closed look, for a row whose label sits beside it, and
+// `trigger="lcd"` draws the row and its list on an LCD screen (the Studio,
+// plan 197).
 
 export interface DevicePickerProps {
   /** Which source it picks: decides the words ("Finding cameras…"). */
@@ -52,8 +62,17 @@ export interface DevicePickerProps {
   searchable?: boolean
   /** Screens and windows under their own headings. */
   groupByKind?: boolean
-  /** `field`: a labelled form control. `inline`: a row's value, right-aligned. */
-  trigger?: 'field' | 'inline'
+  /**
+   * `field`: a labelled form control. `inline`: a row's value, right-aligned.
+   * `lcd`: a row on an LCD screen (plan 197), its own dim label and the value
+   * lit, opening its list as a small screen. It goes inside an `LcdPanel`.
+   */
+  trigger?: 'field' | 'inline' | 'lcd'
+  /**
+   * The LCD row's visible label when the row is too narrow for `label`
+   * ("Mic"). Part of `label`, which stays the accessible name.
+   */
+  rowLabel?: string
   /** A status line under a field trigger (the live switch status). */
   description?: ReactNode
   /**
@@ -80,6 +99,7 @@ export function DevicePicker({
   searchable = false,
   groupByKind = false,
   trigger = 'field',
+  rowLabel,
   description,
   statusInTrigger = true,
   disabled = false,
@@ -90,6 +110,7 @@ export function DevicePicker({
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const inline = trigger === 'inline'
+  const lcd = trigger === 'lcd'
   const selection = { kind, devices, value, selectedName, selectedDevice, discoveryPending }
   const view = devicePickerTriggerView({ ...selection, noneLabel, selectionLabel })
 
@@ -106,12 +127,20 @@ export function DevicePicker({
           aria-expanded={open}
           aria-haspopup={searchable ? 'dialog' : 'listbox'}
           aria-label={label}
-          className={cn(
-            selectTriggerClassName,
-            'w-full min-w-0',
-            inline &&
-              'justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent'
-          )}
+          className={
+            lcd
+              ? cn(
+                  LCD_VALUE_BUTTON,
+                  'data-[state=open]:bg-(--lcd-display-ink-unlit)',
+                  view.placeholder && 'text-(--lcd-display-ink-dim)'
+                )
+              : cn(
+                  selectTriggerClassName,
+                  'w-full min-w-0',
+                  inline &&
+                    'justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent'
+                )
+          }
           data-placeholder={view.placeholder ? '' : undefined}
           data-size="default"
           data-slot="device-picker-trigger"
@@ -121,28 +150,42 @@ export function DevicePicker({
           type="button"
         >
           <span
-            className={cn('flex min-w-0 items-center gap-1.5', inline ? 'justify-end' : 'flex-1')}
+            className={cn(
+              'flex min-w-0 items-center gap-1.5',
+              inline || lcd ? 'justify-end' : 'flex-1'
+            )}
           >
             {/* A long name truncates in a narrow row: the title on the cut
                 text itself reveals it (plan 174 S1.10, truncation only). */}
-            <span className="min-w-0 truncate" title={inline ? view.label : undefined}>
+            <span className="min-w-0 truncate" title={inline || lcd ? view.label : undefined}>
               {view.label}
             </span>
             {statusInTrigger && view.status ? (
-              <span className="shrink-0 text-xs font-normal text-muted-foreground">
+              <span
+                className={
+                  lcd
+                    ? 'shrink-0 text-(--lcd-display-ink-dim)'
+                    : 'shrink-0 text-xs font-normal text-muted-foreground'
+                }
+              >
                 {view.status}
               </span>
             ) : null}
           </span>
-          <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
+          {lcd ? (
+            <LcdPixelChevron />
+          ) : (
+            <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
+          )}
         </button>
       </PopoverTrigger>
       <DevicePickerList
-        align={inline ? 'end' : 'start'}
-        className={inline ? 'w-72' : 'w-(--radix-popover-trigger-width) min-w-56'}
+        align={inline || lcd ? 'end' : 'start'}
+        className={inline || lcd ? 'w-72' : 'w-(--radix-popover-trigger-width) min-w-56'}
         groups={devicePickerGroups({ ...selection, noneLabel, groupByKind, query })}
         id={`${id}-popup`}
         label={label}
+        lcd={lcd}
         listRef={listRef}
         query={query}
         searchPlaceholder={searchable ? devicePickerCopy(kind).search : null}
@@ -162,6 +205,13 @@ export function DevicePicker({
   )
 
   if (inline) return picker
+  if (lcd) {
+    return (
+      <LcdPanelRow htmlFor={id} label={rowLabel ?? label}>
+        {picker}
+      </LcdPanelRow>
+    )
+  }
   return (
     <Field>
       <FieldLabel className={labelHidden ? 'sr-only' : undefined} htmlFor={id}>
@@ -188,6 +238,7 @@ function DevicePickerList({
   status,
   query,
   searchPlaceholder,
+  lcd,
   listRef,
   onQueryChange,
   onSelect
@@ -196,6 +247,8 @@ function DevicePickerList({
   label: string
   align: 'start' | 'end'
   className: string
+  /** Draw the list as a small LCD screen inside the popup (plan 197). */
+  lcd: boolean
   groups: ReturnType<typeof devicePickerGroups>
   status: string | null
   query: string
@@ -209,10 +262,62 @@ function DevicePickerList({
   const current = groups
     .flatMap((group) => group.items)
     .find((item) => item.selected && !item.disabled)?.value
+  const command = (
+    <Command defaultValue={current} shouldFilter={false}>
+      {searchPlaceholder !== null ? (
+        <CommandInput
+          aria-label={`Search ${label}`}
+          autoFocus
+          placeholder={searchPlaceholder}
+          value={query}
+          onValueChange={onQueryChange}
+        />
+      ) : null}
+      <CommandList label={label} ref={listRef}>
+        {groups.map((group, index) => (
+          <CommandGroup
+            className={lcd ? LCD_LIST_GROUP : 'p-1'}
+            heading={group.heading}
+            key={group.heading ?? index}
+          >
+            {group.items.map((item) => (
+              <CommandItem
+                className={lcd ? LCD_LIST_ITEM : 'min-h-7 gap-2 rounded-row py-1 pr-2 pl-2'}
+                data-checked={item.selected}
+                disabled={item.disabled}
+                key={item.value}
+                value={item.value}
+                onSelect={() => onSelect(item.value)}
+              >
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                {item.status ? (
+                  <span className={cn('shrink-0', !lcd && 'text-xs text-muted-foreground')}>
+                    {item.status}
+                  </span>
+                ) : null}
+              </CommandItem>
+            ))}
+          </CommandGroup>
+        ))}
+      </CommandList>
+      {status ? (
+        <p
+          className={
+            lcd
+              ? 'px-2 py-2 text-(--lcd-display-ink-dim)'
+              : 'px-3 py-2 text-sm text-muted-foreground'
+          }
+          role="status"
+        >
+          {status}
+        </p>
+      ) : null}
+    </Command>
+  )
   return (
     <PopoverContent
       align={align}
-      className={cn('gap-0 p-0', className)}
+      className={cn('gap-0', lcd ? 'p-1' : 'p-0', className)}
       id={id}
       onOpenAutoFocus={(event) => {
         // Without a search field the list takes focus: its keys move the
@@ -222,43 +327,7 @@ function DevicePickerList({
         listRef.current?.focus()
       }}
     >
-      <Command defaultValue={current} shouldFilter={false}>
-        {searchPlaceholder !== null ? (
-          <CommandInput
-            aria-label={`Search ${label}`}
-            autoFocus
-            placeholder={searchPlaceholder}
-            value={query}
-            onValueChange={onQueryChange}
-          />
-        ) : null}
-        <CommandList label={label} ref={listRef}>
-          {groups.map((group, index) => (
-            <CommandGroup className="p-1" heading={group.heading} key={group.heading ?? index}>
-              {group.items.map((item) => (
-                <CommandItem
-                  className="min-h-7 gap-2 rounded-row py-1 pr-2 pl-2"
-                  data-checked={item.selected}
-                  disabled={item.disabled}
-                  key={item.value}
-                  value={item.value}
-                  onSelect={() => onSelect(item.value)}
-                >
-                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                  {item.status ? (
-                    <span className="shrink-0 text-xs text-muted-foreground">{item.status}</span>
-                  ) : null}
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          ))}
-        </CommandList>
-        {status ? (
-          <p className="px-3 py-2 text-sm text-muted-foreground" role="status">
-            {status}
-          </p>
-        ) : null}
-      </Command>
+      {lcd ? <LcdPopupScreen>{command}</LcdPopupScreen> : command}
     </PopoverContent>
   )
 }

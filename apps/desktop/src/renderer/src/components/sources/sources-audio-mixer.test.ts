@@ -100,8 +100,9 @@ describe('Sources System audio row (plans 069, 173)', () => {
     )
     expect(markup).toContain('data-videorc-system-audio-visualizer=""')
     expect(markup).toContain('aria-label="System audio level"')
-    // Plan 196: the same LCD screen as the Microphone.
-    expect(markup).toMatch(/data-videorc-system-audio-visualizer=""[^]*data-slot="lcd-display"/)
+    // The segmented bar; the LCD screen is Retro LCD's (plan 197).
+    expect(markup).toMatch(/data-videorc-system-audio-visualizer=""[^]*data-slot="level-meter"/)
+    expect(markup).not.toContain('data-slot="lcd-display"')
     expect(markup).not.toContain('Level shows while recording or live.')
   })
 
@@ -243,7 +244,8 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(markup).toContain('data-videorc-mic-channel=""')
     expect(markup).toContain('data-videorc-mic-monitor-state="monitoring"')
     expect(markup).toMatch(/data-videorc-mic-preview=""[^]*aria-label="Microphone level"/)
-    expect(markup).toMatch(/data-videorc-mic-preview=""[^]*data-slot="lcd-display"/)
+    expect(markup).toMatch(/data-videorc-mic-preview=""[^]*data-slot="level-meter"/)
+    expect(markup).not.toContain('data-slot="lcd-display"')
     expect(markup).toContain('data-slot="fader"')
     expect(markup).toContain('aria-label="Microphone gain"')
     expect(markup).toContain('>Gain<')
@@ -484,7 +486,7 @@ describe('Sources Sounds row (plan 189 S7)', () => {
     const source = createFrameEmitter<MeterFrame>()
     const markup = renderSounds({ meter: { kind: 'source', source }, volumeDb: -6 })
     expect(markup).toContain('data-videorc-sounds-visualizer=""')
-    expect(markup).toMatch(/data-videorc-sounds-visualizer=""[^]*data-slot="lcd-display"/)
+    expect(markup).toMatch(/data-videorc-sounds-visualizer=""[^]*data-slot="level-meter"/)
     expect(markup).not.toContain('Level shows while recording or live.')
     expect(markup).toContain('Reset to 0.0 dB')
     expect(markup).toContain('−6.0 dB')

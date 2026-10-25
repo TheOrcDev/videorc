@@ -57,6 +57,11 @@ export type SettingsState = {
    */
   openStreamManagerOnLive?: boolean
   /**
+   * Retro LCD (plan 197, owner 2026-10-25): the Studio inspector draws every
+   * section on an audiocn LCD screen. Default off: the inspector's own rows.
+   */
+  retroLcdStudio?: boolean
+  /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
    */

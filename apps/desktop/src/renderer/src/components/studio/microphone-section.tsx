@@ -5,6 +5,7 @@ import { DevicePicker } from '@/components/device-picker'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
+import { RetroMicrophoneSectionView } from '@/components/studio/retro-lcd-studio'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { MuteToggle } from '@/components/ui/channel-toggle'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
@@ -40,9 +41,12 @@ export function MicrophoneSection(): ReactElement {
   } = useStudioCore()
   const { meter, monitorState } = useMicrophoneMeter()
   const microphones = microphonePickerDevices(deviceList.devices)
+  // Settings → General → Retro LCD (plan 197): the same section on a screen.
+  const retro = settings.retroLcdStudio === true
+  const View = retro ? RetroMicrophoneSectionView : MicrophoneSectionView
 
   return (
-    <MicrophoneSectionView
+    <View
       devices={microphones}
       disabled={Boolean(sourceSwitchReason('microphone'))}
       discoveryPending={wsStatus !== 'connected'}
@@ -53,7 +57,7 @@ export function MicrophoneSection(): ReactElement {
       platform={runtimeInfo?.platform}
       selectedDevice={selectedMicrophone}
       selectedName={captureConfig.sources.microphoneName}
-      switchStatus={<SourceSwitchStatus kind="microphone" />}
+      switchStatus={<SourceSwitchStatus kind="microphone" look={retro ? 'lcd' : 'default'} />}
       value={captureConfig.sources.microphoneId}
       onChange={(microphoneId) =>
         void switchSourceDeviceLive(
@@ -156,9 +160,9 @@ export function MicrophoneSectionView({
         value={value}
         onChange={onChange}
       />
-      {/* Exactly the picker's width: the LCD screen (plan 196), which prints
-          the level and a CLIP flag, and names the level in dB to screen
-          readers (aria-valuetext). No dB scale here (owner 2026-10-25). */}
+      {/* Exactly the picker's width: the meter alone (with Retro LCD, the
+          LCD screen; plan 197). It still names its level in dB to screen
+          readers (aria-valuetext). */}
       <div
         className={cn('flex items-center', muted && 'opacity-50')}
         data-muted={muted ? '' : undefined}
@@ -169,7 +173,6 @@ export function MicrophoneSectionView({
           className="min-w-0 flex-1"
           data-videorc-mic-visualizer=""
           meter={meter}
-          scale={false}
         />
         {/* Receiving / Muted / No signal for screen readers, and its state for the perf probe, off screen. */}
         <span className="sr-only" data-videorc-mic-monitor-state={monitorState}>
@@ -179,3 +182,5 @@ export function MicrophoneSectionView({
     </PanelSection>
   )
 }
+
+export type MicrophoneSectionViewProps = Parameters<typeof MicrophoneSectionView>[0]

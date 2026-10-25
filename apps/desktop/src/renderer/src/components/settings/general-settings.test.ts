@@ -62,6 +62,22 @@ describe('GeneralSettings', () => {
     expect(container.textContent).toContain('Open Stream Manager when you go live')
   })
 
+  it('offers Retro LCD under Appearance, off until turned on (plan 197)', async () => {
+    await act(async () => root.render(createElement(GeneralSettings)))
+    const toggle = container.querySelector('#retro-lcd-studio')
+    expect(toggle?.getAttribute('role')).toBe('switch')
+    expect(toggle?.getAttribute('aria-checked')).toBe('false')
+    const appearance = container.querySelector('h2')?.closest('[data-slot="panel-section"]')
+    expect(appearance?.textContent).toContain('Retro LCD')
+    await act(async () => (toggle as HTMLElement).click())
+    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
+    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
+    expect(update({ keepOriginalRecording: false })).toEqual({
+      keepOriginalRecording: false,
+      retroLcdStudio: true
+    })
+  })
+
   it('hides the Stream Manager section when that window is off', async () => {
     mocked.core = {
       ...mocked.core,
