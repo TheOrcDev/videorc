@@ -252,14 +252,6 @@ impl WallStepWatch {
 }
 
 impl ClockPair {
-    fn validate_wall(&self, now: Instant, wall: SystemTime) -> Result<()> {
-        let actual = wall.duration_since(UNIX_EPOCH)?.as_nanos() as i128;
-        if wall_offset_ns(self, now, actual).unsigned_abs() > WALL_TOLERANCE_NS {
-            bail!("The capture wall clock changed; select the microphone again");
-        }
-        Ok(())
-    }
-
     fn sample_wall_now() -> Option<(Instant, i128)> {
         for _ in 0..3 {
             let before = Instant::now();
@@ -1390,14 +1382,11 @@ fn observe_wall(
     let Some((sampled_now, wall_ns)) = ClockPair::sample_wall_now() else {
         return;
     };
-    if watch.observe(classify_wall_offset(wall_offset_ns(
-        clock_pair,
-        sampled_now,
-        wall_ns,
-    ))) {
-        if let Ok(next) = ClockPair::sample() {
-            *clock_pair = next;
-        }
+    let offset = wall_offset_ns(clock_pair, sampled_now, wall_ns);
+    if watch.observe(classify_wall_offset(offset))
+        && let Ok(next) = ClockPair::sample()
+    {
+        *clock_pair = next;
     }
 }
 
@@ -2242,15 +2231,13 @@ mod tests {
         ] {
             assert!(dshow_anchor(&bad, &mapping).is_err());
         }
-        assert!(
-            mapping
-                .validate_wall(now, UNIX_EPOCH + Duration::from_secs(1))
-                .is_ok()
+        assert_eq!(
+            classify_wall_offset(wall_offset_ns(&mapping, now, 1_000_000_000)),
+            WallOffsetKind::Steady
         );
-        assert!(
-            mapping
-                .validate_wall(now, UNIX_EPOCH + Duration::from_secs(2))
-                .is_err()
+        assert_eq!(
+            classify_wall_offset(wall_offset_ns(&mapping, now, 2_000_000_000)),
+            WallOffsetKind::Step
         );
         let uncertain = ClockPair {
             uncertainty: Duration::from_millis(3),
