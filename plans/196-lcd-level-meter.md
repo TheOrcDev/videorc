@@ -2,7 +2,8 @@
 
 **Status:** BUILT 2026-10-25 on the recommended defaults (D1 to D5), U1 to
 S2; see [Execution notes](#execution-notes). Owed: audiocn PR #32 merged and
-deployed, the S2 CPU comparison, `pnpm smoke:sources`, and the owner's by-eye.
+deployed, the live-mic CPU comparison (needs a Microphone grant for this
+worktree's dev app), and the owner's by-eye.
 **Priority:** P2. Owner request: "In our studio
 instead of the meter for the microphone that we already have, let's plan to add
 this one https://www.audiocn.dev/docs/components/lcd-meter. Also inside the
@@ -411,16 +412,30 @@ churn to the entry; the rest of the rise is main's #797.
 
 **Owed.**
 
-- The S2 CPU comparison and `pnpm smoke:sources`. Both need a backend build in
-  this worktree. At execution two peer `cargo test` compiles were running,
-  swap stood at 11.8 of 12.3 GB and load at 40 to 67, so a third compile
-  would have thrashed the host and a CPU comparison would have measured the
-  other sessions. Run them on a quiet host: `cargo build -p videorc-backend`,
-  then `VIDEORC_SMOKE_SKIP_PREBUILD=1 VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1
-  pnpm smoke:preview-performance` on this branch and again after
-  `git switch --detach origin/main` in the same worktree (the change is
-  renderer-only, so both share one backend build), and
-  `VIDEORC_SMOKE_SKIP_PREBUILD=1 pnpm smoke:sources`.
+- **The S2 live-mic CPU comparison.** Once the host quietened, the backend
+  built in this worktree (7 min 39 s) and
+  `VIDEORC_SMOKE_SKIP_PREBUILD=1 VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1
+  pnpm smoke:preview-performance` ran on the branch and, after
+  `git switch --detach origin/main` in the same worktree, on main. Both failed
+  the same way, before measuring:
+  - The probe looks for microphone options 250 ms after opening the picker,
+    right after launch, and found none ("No available Studio microphone could
+    be selected"). A scratch copy that waits up to 10 s selected one, so this
+    is a probe timing bug on main (not fixed here).
+  - With a microphone selected, the Studio meter mounted but never went live:
+    `micLivePeakDb` stayed null. This worktree's dev Electron and backend have
+    no macOS Microphone grant (TCC is per binary), and only the owner can
+    click Allow.
+
+  To run it: in `~/projects/videorc-wt-196`, `pnpm dev`, select a microphone
+  and allow access once, quit, then run the command above on the branch and
+  on main as described. The base probe, without the microphone, ran on the
+  branch (1,800 frames; renderer 22.1%, GPU 19.0% at load average 34) and
+  failed only its 80 KiB/s WebSocket ceiling at 84.4, backend traffic this
+  renderer change does not touch; main's run of it was not taken.
+- **`pnpm smoke:sources`** fails on main too, the same way: an extra
+  `captureOff: undefined` key in the reconciled sources (a script assertion,
+  no app; likely since #742). Not this change's.
 - audiocn PR #32 merged and audiocn.dev deployed, so a re-install from the
   site matches `lcd-display.tsx`.
 - The owner's by-eye in both themes (S2 list), and a look on the next Windows
