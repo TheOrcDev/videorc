@@ -8133,17 +8133,20 @@ mod tests {
         );
     }
 
-    /// A producer whose first frame comes `delay` after the open, then fresh
-    /// 10 ms frames; `stop` ends it.
-    fn delayed_fresh_source(
-        delay: Duration,
+    /// A producer that sends nothing until `release` is signaled, then fresh
+    /// 10 ms frames; `stop` ends it. The first frame is a channel, not a
+    /// sleep, so a loaded runner cannot slide it across a readiness deadline.
+    fn gated_fresh_source(
+        release: mpsc::Receiver<()>,
         closed: mpsc::Sender<()>,
     ) -> (ProducerSource, Arc<AtomicBool>) {
         let (sender, receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let producer_stop = stop.clone();
         thread::spawn(move || {
-            thread::sleep(delay);
+            if release.recv().is_err() {
+                return;
+            }
             while !producer_stop.load(Ordering::Acquire) {
                 let mut packet = frame(0.3, 480);
                 packet.captured_at = Instant::now();
@@ -8158,81 +8161,96 @@ mod tests {
         (source, stop)
     }
 
-    #[tokio::test]
-    async fn a_slow_first_frame_passes_inside_its_budget_and_fails_outside_it() {
-        // Plan 195 S2, scaled: the first frame arrives 700 ms after the open.
-        // A 1.5 s budget (the DirectShow shape) accepts it; a 300 ms budget
-        // (the standard shape) reports the budget and that nothing arrived.
-        for (budget, expect_ready) in [
-            (Duration::from_millis(1_500), true),
-            (Duration::from_millis(300), false),
-        ] {
-            let count = Arc::new(AtomicU64::new(0));
-            let (closed_tx, closed_rx) = mpsc::channel();
-            let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
-            let opened_stop = stop_slot.clone();
-            let started = Instant::now();
-            let result = prepare_producer_in(
-                SourceRole::Microphone,
-                move || {
-                    let (source, stop) =
-                        delayed_fresh_source(Duration::from_millis(700), closed_tx);
-                    *opened_stop.lock().unwrap() = Some(stop);
-                    Ok(source)
-                },
-                Arc::new(AtomicBool::new(false)),
-                count.clone(),
-                spawn_owner,
-                |_| {},
-                Some(ReadinessPolicy {
-                    budget,
-                    withhold_first_pcm: None,
-                    fail_with: None,
-                }),
-            )
-            .await;
-            match result {
-                Ok(producer) => {
-                    assert!(
-                        expect_ready,
-                        "a 300 ms budget must not accept a 700 ms microphone"
-                    );
-                    assert!(
-                        started.elapsed() >= Duration::from_millis(650),
-                        "{:?}",
-                        started.elapsed()
-                    );
-                    drop(producer);
-                }
-                Err(error) => {
-                    assert!(!expect_ready, "{error}");
-                    let error = error.to_string();
-                    assert!(
-                        error.starts_with("The microphone did not deliver fresh PCM within 0.3s: 0 frames received"),
-                        "{error}"
-                    );
-                }
-            }
-            if let Some(stop) = stop_slot.lock().unwrap().take() {
-                stop.store(true, Ordering::Release);
-            }
-            closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-            assert_eq!(count.load(Ordering::Acquire), 0);
+    /// The owner closes the source first, then drops the permit (see
+    /// `cancelled_open_and_ready_handoffs_close_the_owned_source_before_releasing_capacity`).
+    /// Waiting only on source-close races the permit on a loaded Windows runner.
+    fn assert_source_closed_and_capacity_released(
+        count: &AtomicU64,
+        closed_rx: &mpsc::Receiver<()>,
+    ) {
+        closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("source close");
+        assert!(
+            wait_for_producer_cleanup(count, Instant::now() + Duration::from_secs(2)),
+            "owner capacity stayed held after the source closed"
+        );
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    fn stop_gated_source(stop_slot: &std::sync::Mutex<Option<Arc<AtomicBool>>>) {
+        if let Some(stop) = stop_slot.lock().unwrap().take() {
+            stop.store(true, Ordering::Release);
         }
     }
 
     #[tokio::test]
-    async fn the_injected_first_pcm_delay_holds_readiness_and_the_injected_failure_ends_it() {
-        // Part W, W3 cases B and C on the real path minus the worker binary.
+    async fn a_slow_first_frame_passes_inside_its_budget_and_fails_outside_it() {
+        // Plan 195 S2, scaled: the first frame is held on a channel until the
+        // test releases it. A 1.5 s budget (the DirectShow shape) accepts a
+        // frame that arrives after the open; a 300 ms budget with no frame
+        // reports the budget and that nothing arrived.
         let count = Arc::new(AtomicU64::new(0));
         let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let opened_tx = std::sync::Mutex::new(Some(opened_tx));
         let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
         let opened_stop = stop_slot.clone();
-        let started = Instant::now();
-        let producer = prepare_producer_in(
+        let task_count = count.clone();
+        let task = tokio::spawn(async move {
+            prepare_producer_in(
+                SourceRole::Microphone,
+                move || {
+                    let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                    *opened_stop.lock().unwrap() = Some(stop);
+                    Ok(source)
+                },
+                Arc::new(AtomicBool::new(false)),
+                task_count,
+                spawn_owner,
+                move |phase| {
+                    if phase == OwnerPhase::BeforeOpened {
+                        if let Some(tx) = opened_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                Some(ReadinessPolicy {
+                    budget: Duration::from_millis(1_500),
+                    withhold_first_pcm: None,
+                    fail_with: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), opened_rx)
+            .await
+            .expect("owner opened")
+            .expect("opened handoff");
+        assert!(
+            !task.is_finished(),
+            "readiness must still be waiting for the first frame"
+        );
+        release_tx.send(()).unwrap();
+        let producer = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("readiness after release")
+            .expect("prepare task")
+            .expect("a 1.5 s budget must accept a frame after the open");
+        drop(producer);
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let result = prepare_producer_in(
             SourceRole::Microphone,
             move || {
-                let (source, stop) = delayed_fresh_source(Duration::ZERO, closed_tx);
+                let (source, stop) = gated_fresh_source(release_rx, closed_tx);
                 *opened_stop.lock().unwrap() = Some(stop);
                 Ok(source)
             },
@@ -8241,31 +8259,89 @@ mod tests {
             spawn_owner,
             |_| {},
             Some(ReadinessPolicy {
-                budget: Duration::from_secs(2),
-                withhold_first_pcm: Some(Duration::from_millis(400)),
+                budget: Duration::from_millis(300),
+                withhold_first_pcm: None,
                 fail_with: None,
             }),
         )
         .await;
+        drop(release_tx);
+        let error = match result {
+            Ok(_) => panic!("a 300 ms budget must not accept a microphone that never delivered"),
+            Err(error) => error.to_string(),
+        };
         assert!(
-            producer.is_ok(),
-            "{:?}",
-            producer.err().map(|e| e.to_string())
+            error.starts_with(
+                "The microphone did not deliver fresh PCM within 0.3s: 0 frames received"
+            ),
+            "{error}"
         );
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+    }
+
+    #[tokio::test]
+    async fn the_injected_first_pcm_delay_holds_readiness_and_the_injected_failure_ends_it() {
+        // Part W, W3 cases B and C on the real path minus the worker binary.
+        // Fresh frames are available at the open; the injected delay must
+        // hold readiness until it expires, then the owner becomes ready.
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let opened_tx = std::sync::Mutex::new(Some(opened_tx));
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let task_count = count.clone();
+        let started = Instant::now();
+        let task = tokio::spawn(async move {
+            prepare_producer_in(
+                SourceRole::Microphone,
+                move || {
+                    let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                    *opened_stop.lock().unwrap() = Some(stop);
+                    release_tx.send(()).unwrap();
+                    Ok(source)
+                },
+                Arc::new(AtomicBool::new(false)),
+                task_count,
+                spawn_owner,
+                move |phase| {
+                    if phase == OwnerPhase::BeforeOpened {
+                        if let Some(tx) = opened_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                Some(ReadinessPolicy {
+                    budget: Duration::from_secs(2),
+                    withhold_first_pcm: Some(Duration::from_millis(400)),
+                    fail_with: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), opened_rx)
+            .await
+            .expect("owner opened")
+            .expect("opened handoff");
+        assert!(
+            !task.is_finished(),
+            "the injected first-PCM delay must still be holding readiness"
+        );
+        let producer = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("readiness after withhold")
+            .expect("prepare task")
+            .expect("withheld frames must become ready once the delay expires");
         assert!(
             started.elapsed() >= Duration::from_millis(390),
             "{:?}",
             started.elapsed()
         );
         drop(producer);
-        stop_slot
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap()
-            .store(true, Ordering::Release);
-        closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(count.load(Ordering::Acquire), 0);
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
 
         let (closed_tx, closed_rx) = mpsc::channel();
         let (_keep_tx, receiver) = mpsc::channel();
@@ -8298,8 +8374,7 @@ mod tests {
             .is_none(),
             "an injected failure drives the direct DirectShow fallback, never silence"
         );
-        closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
     }
 
     #[test]
