@@ -313,17 +313,72 @@ fn check_or_write(file: &str, value: Value) {
     if current == text {
         return;
     }
-    // Pretty-print and key order can differ across serde_json / rustc while
-    // the values the desktop reads stay the same. Compare the parsed trees
-    // so a byte-level drift that is not a data change does not fail the
-    // gate; a real catalogue / shader / size miss still does.
+    // Bytes can drift: serde_json pretty-print, and Ghost Fibers' orientation
+    // `sin`/`cos` differ by one f32 ULP across libm (macOS wrote
+    // 0.9999998807907104; Linux writes 0.9999999403953552). Compare the
+    // trees so a catalogue / shader / size miss still fails, while a one-ulp
+    // libm residual does not. 1e-6 is well under any real packed change.
     let current_value: Value = serde_json::from_str(&current).unwrap_or(Value::Null);
-    assert_eq!(
-        current_value,
-        value,
-        "{} is stale. Regenerate with VIDEORC_UPDATE_LIVE_BACKGROUND_JSON=1 cargo test -p videorc-backend live_background::export",
-        path.display()
+    let mut failures = Vec::new();
+    values_close(&current_value, &value, "", &mut failures);
+    assert!(
+        failures.is_empty(),
+        "{} is stale ({}). Regenerate with VIDEORC_UPDATE_LIVE_BACKGROUND_JSON=1 cargo test -p videorc-backend live_background::export",
+        path.display(),
+        failures.join("; ")
     );
+}
+
+fn values_close(current: &Value, expected: &Value, path: &str, failures: &mut Vec<String>) {
+    match (current, expected) {
+        (Value::Null, Value::Null) | (Value::Bool(_), Value::Bool(_)) if current == expected => {}
+        (Value::Number(a), Value::Number(b)) => {
+            let (a, b) = (
+                a.as_f64().unwrap_or(f64::NAN),
+                b.as_f64().unwrap_or(f64::NAN),
+            );
+            if (a - b).abs() > 1e-6 {
+                failures.push(format!("{path}: {a} vs {b}"));
+            }
+        }
+        (Value::String(a), Value::String(b)) if a == b => {}
+        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
+            for (i, (left, right)) in a.iter().zip(b).enumerate() {
+                values_close(left, right, &format!("{path}[{i}]"), failures);
+            }
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                match (a.get(key), b.get(key)) {
+                    (Some(left), Some(right)) => {
+                        values_close(left, right, &format!("{path}.{key}"), failures);
+                    }
+                    (None, Some(_)) => failures.push(format!("{path}.{key}: missing in file")),
+                    (Some(_), None) => failures.push(format!("{path}.{key}: extra in file")),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => failures.push(format!(
+            "{path}: {} vs {}",
+            value_kind(current),
+            value_kind(expected)
+        )),
+    }
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[test]
@@ -334,4 +389,31 @@ fn the_desktop_catalog_json_is_current() {
 #[test]
 fn the_desktop_render_json_is_current() {
     check_or_write("live-backgrounds.render.generated.json", render());
+}
+
+#[test]
+fn values_close_allows_a_libm_ulp_and_refuses_a_real_miss() {
+    let mut failures = Vec::new();
+    values_close(
+        &json!(0.9999998807907104),
+        &json!(0.9999999403953552),
+        "",
+        &mut failures,
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+    values_close(
+        &json!({"a": "shader"}),
+        &json!({"a": "other"}),
+        "",
+        &mut failures,
+    );
+    assert_eq!(failures, [".a: string vs string"]);
+    failures.clear();
+    values_close(
+        &json!({"n": 810.0}),
+        &json!({"n": 1080.0}),
+        "",
+        &mut failures,
+    );
+    assert_eq!(failures, [".n: 810 vs 1080"]);
 }
