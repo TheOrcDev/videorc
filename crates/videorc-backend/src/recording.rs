@@ -6723,7 +6723,10 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
-        if let Some(handle) = session_soundboard {
+        // A buffer-only Clips session keeps the handle off the player:
+        // idle presses stay monitor-only. The ring is what viewers would
+        // have heard: nothing until Record or Go Live.
+        if !replay_only && let Some(handle) = session_soundboard {
             let volume_db = state
                 .database
                 .sound_settings()
@@ -6731,7 +6734,7 @@ async fn start_session_with_timeline(
                 .unwrap_or(0);
             state
                 .soundboard
-                .session_started(&session_id, handle, volume_db, !replay_only);
+                .session_started(&session_id, handle, volume_db, true);
         }
         // Buddy's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
