@@ -49,6 +49,8 @@ function parseArgs(argv) {
   }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
+    // `pnpm probe:live-background-cost -- --mode …` passes the `--` through.
+    if (arg === '--') continue
     if (arg === '--mode') options.mode = argv[++index]
     else if (arg.startsWith('--mode=')) options.mode = arg.slice('--mode='.length)
     else if (arg === '--all-looks') options.allLooks = true

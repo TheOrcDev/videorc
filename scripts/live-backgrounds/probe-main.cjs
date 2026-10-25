@@ -1,9 +1,7 @@
 // Electron main for the live background probe (plan 190 S1, plan 194 S1). One
 // hidden window runs the shared WebGL2 runner (apps/desktop/src/shared/
-// live-background-webgl.js) over the generated GLSL, plus the probe's own
-// runner for the plan 194 backgrounds the shared one cannot draw yet
-// (probe-passes.js: new scratch and the instanced passes), writes its result
-// JSON to VIDEORC_LIVE_PROBE_OUT, and quits.
+// live-background-webgl.js) over the generated GLSL, writes its result JSON
+// to VIDEORC_LIVE_PROBE_OUT, and quits.
 //
 // Chromium runs WebGL on Metal (macOS), D3D11 (Windows) and GL (Linux), so
 // the cost numbers predict each native port's cost on that machine.
@@ -21,7 +19,6 @@ const runner = readFileSync(
   join(repoRoot, 'apps/desktop/src/shared/live-background-webgl.js'),
   'utf8'
 )
-const probeRunner = readFileSync(join(__dirname, 'probe-passes.js'), 'utf8')
 // --render <file> (cost-probe.mjs) swaps in another render JSON, for timing a
 // variant of a look without touching the generated one.
 const render = readFileSync(
@@ -32,29 +29,13 @@ const render = readFileSync(
 const page = `<!doctype html><html><head><meta charset="utf-8"></head>
 <body style="margin:0;background:#000">
 <script>${runner}</script>
-<script>${probeRunner}</script>
 <script>
 const RENDER = ${render};
 
-// The shared runner for the backgrounds it draws, the probe's for the rest;
-// one surface for the modes below.
+// The shared runner draws all ten (plan 194 S5 moved the probe's instanced
+// passes into it).
 function combinedRunner(gl) {
-  const shared = VideorcLiveBackground.create(gl, RENDER);
-  const probe = VideorcLiveBackgroundProbe.create(gl, RENDER, VideorcLiveBackground);
-  const pick = (id) => (VideorcLiveBackground.runnable(id) ? shared : probe);
-  return {
-    draw: (options) => pick(options.id).draw(options),
-    releaseExcept: (id) => {
-      shared.releaseExcept(id);
-      probe.releaseExcept(id);
-    },
-    dispose: () => {
-      shared.dispose();
-      probe.dispose();
-    },
-    programsCompiled: () => shared.programsCompiled() + probe.programsCompiled(),
-    scratchBytes: () => shared.scratchBytes() + probe.scratchBytes()
-  };
+  return VideorcLiveBackground.create(gl, RENDER);
 }
 
 function selectedBackgrounds(options) {
