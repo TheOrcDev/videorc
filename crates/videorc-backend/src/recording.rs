@@ -39482,8 +39482,10 @@ mod tests {
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
                 "-t",
                 "0.2",
+                // The MP4 export rewrites the H.264 VUI with `h264_metadata`,
+                // which rejects any other codec; recordings are always H.264.
                 "-c:v",
-                "mpeg4",
+                "libx264",
                 "-c:a",
                 "pcm_s16le",
             ])
