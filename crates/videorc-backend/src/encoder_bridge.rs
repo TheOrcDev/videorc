@@ -5201,13 +5201,20 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &mut metal_target_handle_frames,
                 &mut raw_video_fifo_write_times_ms,
             ) {
-                let error = record_encoder_bridge_terminal_failure(
-                    &terminal_failure,
+                let error = if io_error_is_downstream_closed(&error) {
                     format!(
-                        "{} raw-video encoder output stopped: {error}",
+                        "{} raw-video encoder output ended: downstream closed ({error})",
                         encoder_bridge_output_role_label(output_queue_policy.role)
-                    ),
-                );
+                    )
+                } else {
+                    record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        format!(
+                            "{} raw-video encoder output stopped: {error}",
+                            encoder_bridge_output_role_label(output_queue_policy.role)
+                        ),
+                    )
+                };
                 terminal_writer_error = Some(error.clone());
                 emit_encoder_bridge_diagnostics_from_thread(
                     &diagnostics_tx,
@@ -5488,7 +5495,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             &mut metal_target_copied_frames,
             &mut metal_target_handle_frames,
             &mut raw_video_fifo_write_times_ms,
-        ) {
+        ) && !io_error_is_downstream_closed(&error)
+        {
             terminal_writer_error.get_or_insert_with(|| {
                 format!(
                     "{} raw-video encoder output stopped while draining: {error}",
@@ -6009,6 +6017,7 @@ enum RawVideoFifoWriterResult {
     Error {
         synthetic_buffer: Option<Vec<u8>>,
         message: String,
+        downstream_closed: bool,
     },
 }
 
@@ -6259,16 +6268,25 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
                 });
             }
             Err(error) => {
-                let message = record_encoder_bridge_terminal_failure(
-                    &terminal_failure,
+                let downstream_closed = io_error_is_downstream_closed(&error);
+                let message = if downstream_closed {
                     format!(
-                        "{} raw-video encoder output stopped: {error}",
+                        "{} raw-video encoder output ended: downstream closed ({error})",
                         encoder_bridge_output_role_label(role)
-                    ),
-                );
+                    )
+                } else {
+                    record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        format!(
+                            "{} raw-video encoder output stopped: {error}",
+                            encoder_bridge_output_role_label(role)
+                        ),
+                    )
+                };
                 let _ = result_tx.send(RawVideoFifoWriterResult::Error {
                     synthetic_buffer: frame.into_synthetic_buffer(),
                     message,
+                    downstream_closed,
                 });
                 return;
             }
@@ -6277,16 +6295,25 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
     if !stop.load(Ordering::Relaxed)
         && let Err(error) = sink.flush()
     {
-        let message = record_encoder_bridge_terminal_failure(
-            &terminal_failure,
+        let downstream_closed = io_error_is_downstream_closed(&error);
+        let message = if downstream_closed {
             format!(
-                "{} raw-video encoder output flush failed: {error}",
+                "{} raw-video encoder output ended: downstream closed ({error})",
                 encoder_bridge_output_role_label(role)
-            ),
-        );
+            )
+        } else {
+            record_encoder_bridge_terminal_failure(
+                &terminal_failure,
+                format!(
+                    "{} raw-video encoder output flush failed: {error}",
+                    encoder_bridge_output_role_label(role)
+                ),
+            )
+        };
         let _ = result_tx.send(RawVideoFifoWriterResult::Error {
             synthetic_buffer: None,
             message,
+            downstream_closed,
         });
     }
 }
@@ -6329,11 +6356,17 @@ fn drain_raw_video_fifo_writer_results(
             RawVideoFifoWriterResult::Error {
                 synthetic_buffer,
                 message,
+                downstream_closed,
             } => {
                 retain_recycled_synthetic_buffer(recycled_synthetic_buffer, synthetic_buffer);
                 *pending_frames = 0;
                 pending_started_at.clear();
-                return Err(io::Error::other(message));
+                let kind = if downstream_closed {
+                    io::ErrorKind::BrokenPipe
+                } else {
+                    io::ErrorKind::Other
+                };
+                return Err(io::Error::new(kind, message));
             }
         }
     }
@@ -6683,11 +6716,20 @@ fn run_video_toolbox_fifo_writer_loop<W: StdWrite>(
 
 /// EPIPE/EOF class: the reader (FFmpeg) went away. The writer must stop, but
 /// the SESSION verdict belongs to the process exit status, not this error.
+/// Windows `ERROR_NO_DATA` (232) is the named-pipe equivalent of Unix EPIPE;
+/// some Windows runtimes report it as `Other` rather than `BrokenPipe`.
 fn io_error_is_downstream_closed(error: &io::Error) -> bool {
+    #[cfg(target_os = "windows")]
+    let os_pipe_closing = error.raw_os_error() == Some(232); // ERROR_NO_DATA
+    #[cfg(unix)]
+    let os_pipe_closing = error.raw_os_error() == Some(libc::EPIPE);
+    #[cfg(not(any(target_os = "windows", unix)))]
+    let os_pipe_closing = false;
+
     matches!(
         error.kind(),
         io::ErrorKind::BrokenPipe | io::ErrorKind::WriteZero | io::ErrorKind::UnexpectedEof
-    )
+    ) || os_pipe_closing
 }
 
 #[cfg(target_os = "macos")]
@@ -8918,6 +8960,41 @@ mod tests {
         assert!(!drain_state.pending_timeout_is_terminal(3, 2));
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_error_no_data_is_classified_as_a_closed_downstream() {
+        let error = io::Error::from_raw_os_error(232); // ERROR_NO_DATA
+
+        assert!(io_error_is_downstream_closed(&error));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_epipe_is_classified_as_a_closed_downstream() {
+        let error = io::Error::from_raw_os_error(libc::EPIPE);
+
+        assert!(io_error_is_downstream_closed(&error));
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn portable_pipe_kinds_are_classified_as_a_closed_downstream() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::WriteZero,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(
+                io_error_is_downstream_closed(&io::Error::new(kind, "closed")),
+                "{kind:?} must classify as a closed downstream"
+            );
+        }
+        assert!(!io_error_is_downstream_closed(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "still a real writer failure"
+        )));
+    }
+
     fn test_session_with_writer(
         stop: Arc<AtomicBool>,
         writer: thread::JoinHandle<()>,
@@ -11010,6 +11087,104 @@ mod tests {
             panic!("raw frame must be reported as written")
         };
         assert_eq!(synthetic_buffer, Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn raw_fifo_writer_does_not_promote_a_closed_downstream_to_terminal_failure() {
+        struct DownstreamClosedSink;
+
+        impl StdWrite for DownstreamClosedSink {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "The pipe is being closed.",
+                ))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(2);
+        frame_tx
+            .send(QueuedRawVideoFrame::synthetic(vec![1, 2, 3]))
+            .expect("queue raw frame");
+        drop(frame_tx);
+        let terminal_failure = Arc::new(StdMutex::new(None));
+
+        run_raw_video_fifo_writer_loop(
+            DownstreamClosedSink,
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            terminal_failure.clone(),
+            EncoderBridgeOutputRole::Shared,
+        );
+
+        let RawVideoFifoWriterResult::Error {
+            downstream_closed,
+            message,
+            ..
+        } = result_rx.recv().expect("closed downstream result")
+        else {
+            panic!("closed downstream must surface as a writer error")
+        };
+        assert!(downstream_closed);
+        assert!(message.contains("downstream closed"));
+        assert_eq!(
+            read_encoder_bridge_terminal_failure(&terminal_failure),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_fifo_writer_does_not_promote_unix_epipe_to_terminal_failure() {
+        struct EpipeSink;
+
+        impl StdWrite for EpipeSink {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from_raw_os_error(libc::EPIPE))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(2);
+        frame_tx
+            .send(QueuedRawVideoFrame::synthetic(vec![1, 2, 3]))
+            .expect("queue raw frame");
+        drop(frame_tx);
+        let terminal_failure = Arc::new(StdMutex::new(None));
+
+        run_raw_video_fifo_writer_loop(
+            EpipeSink,
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            terminal_failure.clone(),
+            EncoderBridgeOutputRole::Shared,
+        );
+
+        let RawVideoFifoWriterResult::Error {
+            downstream_closed,
+            message,
+            ..
+        } = result_rx.recv().expect("EPIPE result")
+        else {
+            panic!("Unix EPIPE must surface as a writer error")
+        };
+        assert!(downstream_closed);
+        assert!(message.contains("downstream closed"));
+        assert_eq!(
+            read_encoder_bridge_terminal_failure(&terminal_failure),
+            None
+        );
     }
 
     #[test]

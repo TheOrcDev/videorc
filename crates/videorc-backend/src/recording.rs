@@ -1043,21 +1043,30 @@ const FFMPEG_LIVE_MIC_FILTER_TARGET: &str = "videorc_live_mic";
 // established two-second cadence.
 const FFMPEG_PROGRESS_REPORT_PERIOD: Duration = Duration::from_millis(500);
 const FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD: Duration = Duration::from_secs(2);
+// Windows software fallback can spend several seconds draining the first
+// 1080p raw frame when GPU acceleration is unavailable. Keep startup truth
+// tied to positive FFmpeg media progress, but do not reject that slow, live
+// process on the normal eight-second deadline used elsewhere.
+#[cfg(target_os = "windows")]
+const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(target_os = "windows"))]
 const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// The output-startup deadline for one FFmpeg graph (plan 195 S3). With only
-/// FIFO inputs FFmpeg reports its first output clock in about half a second,
-/// so the base keeps the fast fail for a wedged pipe. A direct live device
-/// input (the DirectShow fallback on Windows, the direct Pulse input on
-/// Linux) opens inside the graph: the tester's laptop microphone spent
-/// 4.8–7.2 s of the 8 s there and one take lost the whole budget (F2), so
-/// such a graph gets the DirectShow readiness budget on top. PR #769 raises
-/// `FFMPEG_OUTPUT_STARTUP_TIMEOUT` itself to 20 s on Windows; this supersedes
-/// that commit and keeps the constant's name.
+/// The output-startup deadline for one FFmpeg graph (plan 195 S3, #769).
+/// FIFO-only graphs keep the platform base: 8 s on macOS/Linux (fast fail
+/// for a wedged pipe) and 20 s on Windows (software-fallback OpenH264 can
+/// spend several seconds before the first positive output clock at 1080p).
+/// A direct live device input (DirectShow on Windows, Pulse on Linux) opens
+/// inside the graph and needs the DirectShow readiness budget on top of the
+/// 8 s FIFO deadline. Windows already has a 20 s window, which covers that
+/// 18 s need; stacking the budget on 20 s would meet the 30 s renderer RPC
+/// deadline, so Windows live-device graphs stay at the 20 s base.
 fn ffmpeg_output_startup_deadline(microphone: Option<&MicrophoneInput>) -> Duration {
     match microphone {
         Some(MicrophoneInput::WindowsDshow { .. } | MicrophoneInput::LinuxPulse { .. }) => {
-            FFMPEG_OUTPUT_STARTUP_TIMEOUT + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.max(
+                Duration::from_secs(8) + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET,
+            )
         }
         _ => FFMPEG_OUTPUT_STARTUP_TIMEOUT,
     }
@@ -7920,7 +7929,7 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-loglevel".to_string(),
         "warning".to_string(),
         "-i".to_string(),
-        input.display().to_string(),
+        ffmpeg_file_path(input),
         "-map".to_string(),
         "0".to_string(),
         "-c:v".to_string(),
@@ -7935,11 +7944,16 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-movflags".to_string(),
         "+faststart".to_string(),
     ];
+    // #792 dropped the Media Foundation helper that took a frame rate; MP4
+    // export is a remux of an MKV that already declares its rate, so stamp
+    // BT.709 / video-range with the shared tag + VUI rewrite helpers.
+    args.extend(h264_bt709_color_tag_args());
+    args.extend(h264_bt709_vui_rewrite_bsf_args());
     if let Some(trim_seconds) = trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
     }
-    args.push(output.display().to_string());
+    args.push(ffmpeg_file_path(output));
     args
 }
 
@@ -10066,34 +10080,77 @@ async fn monitor_session(
     #[cfg(target_os = "windows")]
     if let Some(mut active) = retired_active {
         let mut final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
-        let bridge_persistence_gate = gate_encoder_bridge_lifecycle_persistence(
-            active
-                .encoder_bridge
-                .iter()
-                .chain(active.encoder_bridge_stream.iter()),
+        // The process may have been terminated after its normal stop grace
+        // expired while a raw fallback writer was still draining a complete
+        // frame. Reap both legs behind one absolute deadline; the old direct
+        // JoinHandle::join here could hold the monitor until the writer's
+        // thirty-second frame timeout (or forever on a wedged pipe), which
+        // prevented MP4 export from ever running.
+        let bridge_teardown = begin_recording_encoder_bridge_teardown(
+            &mut active.encoder_bridge,
+            &mut active.encoder_bridge_stream,
+            ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
-        if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref() {
-            stream_bridge.stop();
+        if let Some(report) = finish_recording_encoder_bridge_teardown(
+            &state,
+            bridge_teardown,
+            "recording-process-exit",
+        )
+        .await
+        {
+            encoder_bridge_teardown_duration_ms = report.teardown_duration_ms;
+            for bridge in &report.reports {
+                if let Some(failure) = bridge.terminal_failure.clone() {
+                    match bridge.role {
+                        Some(EncoderBridgeOutputRole::Stream) => {
+                            monitored_recording.stream_bridge_terminal_failure = Some(failure);
+                        }
+                        Some(
+                            EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared,
+                        )
+                        | None => {
+                            monitored_recording.recording_bridge_terminal_failure = Some(failure);
+                        }
+                    }
+                }
+            }
+            encoder_bridge_lifecycle = report.lifecycle;
+            if encoder_bridge_lifecycle.live_resources > 0 {
+                let message = format!(
+                    "Encoder bridge teardown left {} capture-relevant resource(s) live (outer={}, FIFO={}, detached={}); restart Videorc before recording again.",
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.detached_writers,
+                );
+                state.emit_log("warn", message.clone());
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "encoder-bridge-writer-leaked",
+                    &message,
+                );
+            }
+            let _ = emit_session_log(
+                &state,
+                &session_id,
+                HealthLevel::Info,
+                "encoder-bridge-writer-lifecycle",
+                &format!(
+                    "state=teardown-complete durationMs={} liveOuter={} liveFifo={} liveResources={} detached={}",
+                    encoder_bridge_teardown_duration_ms,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.detached_writers,
+                ),
+                None,
+            );
         }
-        if let Some(recording_bridge) = active.encoder_bridge.as_ref() {
-            recording_bridge.stop();
-        }
-        if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
-            stream_bridge.stop_and_join_writer();
-        }
-        if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
-            recording_bridge.stop_and_join_writer();
-        }
-        drop(bridge_persistence_gate);
         final_snapshot_phase
             .writers_joined()
             .expect("Windows D3D11 writers join exactly once before final diagnostics");
-        // Terminal bridge failures may be published only as the writer exits;
-        // refresh them after the bounded MF drain/flush has completed.
-        monitored_recording.recording_bridge_terminal_failure =
-            active.recording_bridge_terminal_failure();
-        monitored_recording.stream_bridge_terminal_failure =
-            active.stream_bridge_terminal_failure();
         let mut retained_snapshot = None;
         if let Some(mut monitor) = active.windows_d3d11_monitor.take() {
             monitor.request_stop();
@@ -10429,6 +10486,7 @@ async fn monitor_session(
             if should_finalize_recording_session(
                 exit_status.success(),
                 monitored_recording.stop_intent_preceded_exit,
+                monitored_recording.stop_escalated,
                 recording_bridge_terminal_failure.as_deref(),
                 stream_bridge_terminal_failure.as_deref(),
             ) =>
@@ -12498,6 +12556,7 @@ struct MonitoredRecording {
 fn should_finalize_recording_session(
     ffmpeg_exit_success: bool,
     stop_intent_preceded_exit: bool,
+    stop_escalated: bool,
     recording_bridge_terminal_failure: Option<&str>,
     stream_bridge_terminal_failure: Option<&str>,
 ) -> bool {
@@ -12505,13 +12564,25 @@ fn should_finalize_recording_session(
     // before the user asks to stop is still an early termination (for example,
     // a source/pipe that silently ended) and must never publish a shortened
     // artifact as successful.
-    // Stop intent must win the monitor's exit-ready race, but that alone is not
-    // proof that muxer flush completed. A forced
-    // TERM/KILL or any non-zero FFmpeg exit keeps the artifact as recovery
-    // media and marks the session failed unless a future explicit verifier can
-    // prove the container is complete.
-    if recording_bridge_terminal_failure.is_some() || !ffmpeg_exit_success {
+    // Stop intent must win the monitor's exit-ready race. Windows FFmpeg can
+    // report a non-zero status while closing a stopped graph even though the
+    // local MKV is still exportable; let the MP4 exporter validate that output
+    // instead of unconditionally marooning it as recovery media. That only
+    // holds when FFmpeg exited on its own: once Videorc escalated to TERM/KILL
+    // the muxer never flushed, so the MKV stays recovery media and the exit is
+    // reported as `recording-stop-forced`.
+    // macOS VideoToolbox and Linux keep main's contract: any non-zero FFmpeg
+    // exit stays recovery media. A recording bridge failure remains terminal
+    // because it means the video producer did not finish its contract.
+    if recording_bridge_terminal_failure.is_some() {
         return false;
+    }
+    if !ffmpeg_exit_success {
+        let windows_nonzero_after_own_stop =
+            cfg!(target_os = "windows") && stop_intent_preceded_exit && !stop_escalated;
+        if !windows_nonzero_after_own_stop {
+            return false;
+        }
     }
     // A dead STREAM output ends FFmpeg without a user stop, but the RECORDING
     // data is intact and the muxer flushed cleanly (exit 0) — finalize it.
@@ -37033,35 +37104,41 @@ mod tests {
             wait_for_ffmpeg_output_startup(pending, expired_start, FFMPEG_OUTPUT_STARTUP_TIMEOUT)
                 .await
                 .unwrap_err();
-        assert!(error.to_string().contains("within 8000ms of process spawn"));
+        assert!(error.to_string().contains(&format!(
+            "within {}ms of process spawn",
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_millis()
+        )));
 
         // Plan 195 S3: the error prints the deadline the graph actually got.
+        let dshow_deadline = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+            device_name: "Digital Microphone".to_string(),
+        }));
         let expired_start = Instant::now()
-            .checked_sub(Duration::from_secs(18) + Duration::from_millis(1))
+            .checked_sub(dshow_deadline + Duration::from_millis(1))
             .unwrap();
         let (_pending_sender, pending) = oneshot::channel();
-        let error = wait_for_ffmpeg_output_startup(
-            pending,
-            expired_start,
-            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
-                device_name: "Digital Microphone".to_string(),
-            })),
-        )
-        .await
-        .unwrap_err();
+        let error = wait_for_ffmpeg_output_startup(pending, expired_start, dshow_deadline)
+            .await
+            .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("within 18000ms of process spawn"),
+            error.to_string().contains(&format!(
+                "within {}ms of process spawn",
+                dshow_deadline.as_millis()
+            )),
             "{error}"
         );
     }
 
     #[test]
     fn ffmpeg_output_startup_deadline_follows_the_input_topology() {
-        // Plan 195 S3: FIFO-only graphs keep the 8 s fast fail; a direct
-        // live device input gets the DirectShow readiness budget on top.
+        // Plan 195 S3 + #769: FIFO-only graphs keep the platform base
+        // (8 s macOS/Linux, 20 s Windows). A direct live device input gets
+        // the DirectShow readiness budget on top of the 8 s FIFO deadline;
+        // Windows' 20 s window already covers that 18 s need.
         let base = FFMPEG_OUTPUT_STARTUP_TIMEOUT;
+        #[cfg(target_os = "windows")]
+        assert_eq!(base, Duration::from_secs(20));
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(base, Duration::from_secs(8));
         assert_eq!(ffmpeg_output_startup_deadline(None), base);
         assert_eq!(
@@ -37083,22 +37160,28 @@ mod tests {
             })),
             base
         );
-        let with_device = base + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET;
-        assert_eq!(with_device, Duration::from_secs(18));
-        assert_eq!(
-            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
-                device_name: "Digital Microphone".to_string(),
-            })),
-            with_device
-        );
-        assert_eq!(
-            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::LinuxPulse {
-                source_name: "alsa_input.pci-0000_02_00.3.HiFi__Mic__source".to_string(),
-            })),
-            with_device
+        let live_device = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+            device_name: "Digital Microphone".to_string(),
+        }));
+        let pulse = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::LinuxPulse {
+            source_name: "alsa_input.pci-0000_02_00.3.HiFi__Mic__source".to_string(),
+        }));
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(live_device, Duration::from_secs(18));
+            assert_eq!(pulse, Duration::from_secs(18));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(live_device, Duration::from_secs(20));
+            assert_eq!(pulse, Duration::from_secs(20));
+        }
+        assert!(
+            live_device < Duration::from_secs(30),
+            "stays under the renderer's RPC deadline"
         );
         assert!(
-            with_device < Duration::from_secs(30),
+            pulse < Duration::from_secs(30),
             "stays under the renderer's RPC deadline"
         );
     }
@@ -38632,6 +38715,7 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            false,
             None,
             None
         ));
@@ -38660,6 +38744,7 @@ mod tests {
         assert!(should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            false,
             None,
             None
         ));
@@ -38701,15 +38786,37 @@ mod tests {
 
     #[test]
     fn only_an_explicit_graceful_stop_can_finalize_an_unbounded_capture() {
-        assert!(!should_finalize_recording_session(true, false, None, None));
+        assert!(!should_finalize_recording_session(
+            true, false, false, None, None
+        ));
+        #[cfg(target_os = "windows")]
         assert!(
-            !should_finalize_recording_session(false, true, None, None),
+            should_finalize_recording_session(false, true, false, None, None),
+            "a stopped Windows graph may have a non-zero exit while its MKV remains exportable"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            !should_finalize_recording_session(false, true, false, None, None),
             "a non-zero/forced FFmpeg exit after stop must remain failed"
         );
-        assert!(should_finalize_recording_session(true, true, None, None));
+        assert!(should_finalize_recording_session(
+            true, true, false, None, None
+        ));
+        assert!(
+            !should_finalize_recording_session(false, true, true, None, None),
+            "a forced TERM/KILL after Stop keeps the MKV as recovery media"
+        );
+        assert!(
+            should_finalize_recording_session(true, true, true, None, None),
+            "FFmpeg that still exited cleanly after escalation flushed its muxer"
+        );
+        let (_, health_code, _) =
+            classify_failed_ffmpeg_exit(true, true, None, "exit code: 1", true);
+        assert_eq!(health_code, "recording-stop-forced");
 
         assert!(!should_finalize_recording_session(
             true,
+            false,
             false,
             Some("recording raw-video encoder output stopped: FIFO timed out"),
             None
@@ -38717,6 +38824,7 @@ mod tests {
         assert!(!should_finalize_recording_session(
             false,
             true,
+            false,
             Some("recording raw-video encoder output stopped: FIFO timed out"),
             None
         ));
@@ -38730,6 +38838,7 @@ mod tests {
         assert!(should_finalize_recording_session(
             true,
             false,
+            false,
             None,
             Some("stream encoder output stopped: exceeded its bounded latency contract")
         ));
@@ -38737,10 +38846,12 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true,
             false,
+            false,
             Some("recording raw-video encoder output stopped"),
             Some("stream encoder output stopped")
         ));
         assert!(!should_finalize_recording_session(
+            false,
             false,
             false,
             None,
@@ -39618,6 +39729,41 @@ mod tests {
     }
 
     #[test]
+    fn mp4_export_includes_bt709_h264_metadata() {
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            None,
+        );
+
+        assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_primaries"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_trc"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
+        assert_eq!(
+            arg_value(&args, "-bsf:v"),
+            Some(
+                "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            )
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mp4_export_normalizes_windows_verbatim_paths() {
+        let args = mp4_export_args(
+            Path::new(r"\\?\C:\recordings\capture.mkv"),
+            Path::new(r"\\?\C:\recordings\.videorc-export.partial\export.mp4"),
+            None,
+        );
+        assert_eq!(arg_value(&args, "-i"), Some(r"C:\recordings\capture.mkv"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(r"C:\recordings\.videorc-export.partial\export.mp4")
+        );
+    }
+
+    #[test]
     fn mp4_export_uses_no_overwrite_with_an_absent_child_in_an_owned_directory() {
         let directory = std::env::temp_dir().join(format!(
             "videorc-mp4-private-staging-test-{}",
@@ -39701,8 +39847,10 @@ mod tests {
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
                 "-t",
                 "0.2",
+                // The MP4 export rewrites the H.264 VUI with `h264_metadata`,
+                // which rejects any other codec; recordings are always H.264.
                 "-c:v",
-                "mpeg4",
+                "libx264",
                 "-c:a",
                 "pcm_s16le",
             ])
