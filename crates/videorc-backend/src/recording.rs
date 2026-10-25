@@ -1044,6 +1044,24 @@ const FFMPEG_LIVE_MIC_FILTER_TARGET: &str = "videorc_live_mic";
 const FFMPEG_PROGRESS_REPORT_PERIOD: Duration = Duration::from_millis(500);
 const FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD: Duration = Duration::from_secs(2);
 const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// The output-startup deadline for one FFmpeg graph (plan 195 S3). With only
+/// FIFO inputs FFmpeg reports its first output clock in about half a second,
+/// so the base keeps the fast fail for a wedged pipe. A direct live device
+/// input (the DirectShow fallback on Windows, the direct Pulse input on
+/// Linux) opens inside the graph: the tester's laptop microphone spent
+/// 4.8–7.2 s of the 8 s there and one take lost the whole budget (F2), so
+/// such a graph gets the DirectShow readiness budget on top. PR #769 raises
+/// `FFMPEG_OUTPUT_STARTUP_TIMEOUT` itself to 20 s on Windows; this supersedes
+/// that commit and keeps the constant's name.
+fn ffmpeg_output_startup_deadline(microphone: Option<&MicrophoneInput>) -> Duration {
+    match microphone {
+        Some(MicrophoneInput::WindowsDshow { .. } | MicrophoneInput::LinuxPulse { .. }) => {
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET
+        }
+        _ => FFMPEG_OUTPUT_STARTUP_TIMEOUT,
+    }
+}
 // Once the child exits, stderr is already closed and its reader should drain
 // immediately. Keep the final snapshot behind a short bounded join so fatal
 // lines and the last progress sample belong to this session, never the next.
@@ -1453,10 +1471,11 @@ fn spawn_ffmpeg_output_startup_watchdog(
     session_id: String,
     receiver: oneshot::Receiver<std::result::Result<(), String>>,
     started_at: Instant,
+    deadline: Duration,
     pid: u32,
 ) {
     tokio::spawn(async move {
-        match wait_for_ffmpeg_output_startup(receiver, started_at).await {
+        match wait_for_ffmpeg_output_startup(receiver, started_at, deadline).await {
             Ok(()) => {
                 let _ = emit_session_log(
                     &state,
@@ -1501,9 +1520,12 @@ fn spawn_ffmpeg_output_startup_watchdog(
     });
 }
 
+/// `deadline` is absolute from `started_at` (the process spawn); see
+/// [`ffmpeg_output_startup_deadline`] for its value per input topology.
 async fn wait_for_ffmpeg_output_startup(
     mut receiver: oneshot::Receiver<std::result::Result<(), String>>,
     started_at: Instant,
+    deadline: Duration,
 ) -> Result<()> {
     // A bridge can finish its own first-frame proof after FFmpeg has already
     // reported output progress. Observe that completed ACK before applying the
@@ -1519,7 +1541,7 @@ async fn wait_for_ffmpeg_output_startup(
         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
     }
 
-    let remaining = FFMPEG_OUTPUT_STARTUP_TIMEOUT.saturating_sub(started_at.elapsed());
+    let remaining = deadline.saturating_sub(started_at.elapsed());
     match timeout(remaining, receiver).await {
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Err(message))) => Err(anyhow::anyhow!(message)),
@@ -1528,7 +1550,7 @@ async fn wait_for_ffmpeg_output_startup(
         )),
         Err(_) => Err(anyhow::anyhow!(
             "FFmpeg did not confirm positive output media progress within {}ms of process spawn",
-            FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_millis()
+            deadline.as_millis()
         )),
     }
 }
@@ -6200,7 +6222,12 @@ async fn start_session_with_timeline(
             Ok(())
         }
         Some(receiver) => {
-            wait_for_ffmpeg_output_startup(receiver, ffmpeg_output_startup_started_at).await
+            wait_for_ffmpeg_output_startup(
+                receiver,
+                ffmpeg_output_startup_started_at,
+                ffmpeg_output_startup_deadline(capture.microphone.as_ref()),
+            )
+            .await
         }
         None => Ok(()),
     };
@@ -6592,6 +6619,7 @@ async fn start_session_with_timeline(
             session_id.clone(),
             receiver,
             ffmpeg_output_startup_started_at,
+            ffmpeg_output_startup_deadline(capture.microphone.as_ref()),
             watchdog_pid,
         );
     }
@@ -36770,15 +36798,83 @@ mod tests {
 
         let (ready_sender, ready) = oneshot::channel();
         ready_sender.send(Ok(())).unwrap();
-        wait_for_ffmpeg_output_startup(ready, expired_start)
+        wait_for_ffmpeg_output_startup(ready, expired_start, FFMPEG_OUTPUT_STARTUP_TIMEOUT)
             .await
             .unwrap();
 
         let (_pending_sender, pending) = oneshot::channel();
-        let error = wait_for_ffmpeg_output_startup(pending, expired_start)
-            .await
-            .unwrap_err();
+        let error =
+            wait_for_ffmpeg_output_startup(pending, expired_start, FFMPEG_OUTPUT_STARTUP_TIMEOUT)
+                .await
+                .unwrap_err();
         assert!(error.to_string().contains("within 8000ms of process spawn"));
+
+        // Plan 195 S3: the error prints the deadline the graph actually got.
+        let expired_start = Instant::now()
+            .checked_sub(Duration::from_secs(18) + Duration::from_millis(1))
+            .unwrap();
+        let (_pending_sender, pending) = oneshot::channel();
+        let error = wait_for_ffmpeg_output_startup(
+            pending,
+            expired_start,
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+                device_name: "Digital Microphone".to_string(),
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("within 18000ms of process spawn"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ffmpeg_output_startup_deadline_follows_the_input_topology() {
+        // Plan 195 S3: FIFO-only graphs keep the 8 s fast fail; a direct
+        // live device input gets the DirectShow readiness budget on top.
+        let base = FFMPEG_OUTPUT_STARTUP_TIMEOUT;
+        assert_eq!(base, Duration::from_secs(8));
+        assert_eq!(ffmpeg_output_startup_deadline(None), base);
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::SessionPcm {
+                fifo_path: PathBuf::from("/tmp/mic.fifo"),
+            })),
+            base
+        );
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::CoreAudio {
+                device_id: 42,
+                fifo_path: None,
+            })),
+            base
+        );
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::AvFoundationUid {
+                uid_hex: "6465736b".to_string(),
+            })),
+            base
+        );
+        let with_device = base + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET;
+        assert_eq!(with_device, Duration::from_secs(18));
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+                device_name: "Digital Microphone".to_string(),
+            })),
+            with_device
+        );
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::LinuxPulse {
+                source_name: "alsa_input.pci-0000_02_00.3.HiFi__Mic__source".to_string(),
+            })),
+            with_device
+        );
+        assert!(
+            with_device < Duration::from_secs(30),
+            "stays under the renderer's RPC deadline"
+        );
     }
 
     #[test]
