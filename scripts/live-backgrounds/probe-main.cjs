@@ -1,7 +1,9 @@
-// Electron main for the live background probe (plan 190 S1). One hidden
-// window runs the shared WebGL2 runner (apps/desktop/src/shared/
-// live-background-webgl.js) over the generated GLSL, writes its result JSON to
-// VIDEORC_LIVE_PROBE_OUT, and quits.
+// Electron main for the live background probe (plan 190 S1, plan 194 S1). One
+// hidden window runs the shared WebGL2 runner (apps/desktop/src/shared/
+// live-background-webgl.js) over the generated GLSL, plus the probe's own
+// runner for the plan 194 backgrounds the shared one cannot draw yet
+// (probe-passes.js: new scratch and the instanced passes), writes its result
+// JSON to VIDEORC_LIVE_PROBE_OUT, and quits.
 //
 // Chromium runs WebGL on Metal (macOS), D3D11 (Windows) and GL (Linux), so
 // the cost numbers predict each native port's cost on that machine.
@@ -19,16 +21,46 @@ const runner = readFileSync(
   join(repoRoot, 'apps/desktop/src/shared/live-background-webgl.js'),
   'utf8'
 )
+const probeRunner = readFileSync(join(__dirname, 'probe-passes.js'), 'utf8')
+// --render <file> (cost-probe.mjs) swaps in another render JSON, for timing a
+// variant of a look without touching the generated one.
 const render = readFileSync(
-  join(repoRoot, 'apps/desktop/src/shared/live-backgrounds.render.generated.json'),
+  args.render || join(repoRoot, 'apps/desktop/src/shared/live-backgrounds.render.generated.json'),
   'utf8'
 )
 
 const page = `<!doctype html><html><head><meta charset="utf-8"></head>
 <body style="margin:0;background:#000">
 <script>${runner}</script>
+<script>${probeRunner}</script>
 <script>
 const RENDER = ${render};
+
+// The shared runner for the backgrounds it draws, the probe's for the rest;
+// one surface for the modes below.
+function combinedRunner(gl) {
+  const shared = VideorcLiveBackground.create(gl, RENDER);
+  const probe = VideorcLiveBackgroundProbe.create(gl, RENDER, VideorcLiveBackground);
+  const pick = (id) => (VideorcLiveBackground.runnable(id) ? shared : probe);
+  return {
+    draw: (options) => pick(options.id).draw(options),
+    releaseExcept: (id) => {
+      shared.releaseExcept(id);
+      probe.releaseExcept(id);
+    },
+    dispose: () => {
+      shared.dispose();
+      probe.dispose();
+    },
+    programsCompiled: () => shared.programsCompiled() + probe.programsCompiled(),
+    scratchBytes: () => shared.scratchBytes() + probe.scratchBytes()
+  };
+}
+
+function selectedBackgrounds(options) {
+  const ids = Array.isArray(options.ids) && options.ids.length ? options.ids : null;
+  return RENDER.backgrounds.filter((background) => !ids || ids.includes(background.id));
+}
 
 function percentile(sorted, share) {
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * share) - 1));
@@ -95,21 +127,80 @@ async function runProbe(options) {
     golden: [],
     posters: []
   };
-  const runner = VideorcLiveBackground.create(gl, RENDER);
+  let runner = combinedRunner(gl);
+  const backgrounds = selectedBackgrounds(options);
   const looksFor = (background) => (options.allLooks ? background.looks : background.looks.slice(0, 1));
 
   if (options.mode === 'cost') {
     // gl.finish() does not wait for Chromium's GPU process and page timers are
-    // coarse, so time on the GPU (EXT_disjoint_timer_query_webgl2), and cross-
-    // check with a batch closed by a 1-pixel readPixels (which must wait).
+    // coarse. Two timings:
+    //
+    // - Live frame (the gate's number, plan 194 S1): the live frame alone at
+    //   its internal size, as the guard and the Metal test time it (no
+    //   upscale to the output: the compose draws that like a picture). The
+    //   render pass ends after every frame (a 1 × 1 clear elsewhere), so a
+    //   tile GPU can't hidden-surface-remove whole frames, and the frames
+    //   run in 30 batches of 8, each closed by a 1-pixel readPixels (which
+    //   must wait). A batch's wall time over 8 is a frame's cost: GPU-bound
+    //   it is the GPU time, CPU-bound it is an over-estimate. p95 is over the
+    //   batch means.
+    // - Timer query (EXT_disjoint_timer_query_webgl2), as plan 190's probe:
+    //   on ANGLE over Metal it carries a floor of about 1 ms and a cost per
+    //   canvas pixel (calibrated against the Metal numbers, plan 194 S1), so
+    //   it is reported, never gated on.
     const timer = gl.getExtension('EXT_disjoint_timer_query_webgl2');
     const pixel = new Uint8Array(4);
     const sizes = options.sizes || [[1920, 1080, 'full'], [1080, 1920, 'full'], [3840, 2160, 'full'], [1920, 1080, 'half']];
     const frames = options.frames || 240;
+    const batchFrames = 8;
     const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-    for (const background of RENDER.backgrounds) {
+    const breakTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, breakTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const breakTarget = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, breakTarget);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, breakTexture, 0);
+    const breakPass = () => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, breakTarget);
+      gl.viewport(0, 0, 1, 1);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    };
+    for (const background of backgrounds) {
       for (const look of looksFor(background)) {
         for (const [width, height, level] of sizes) {
+          const view = VideorcLiveBackground.internalSize(RENDER, background.id, [width, height], level);
+          // A fresh runner per case, so the scratch it reports is this
+          // case's alone.
+          runner.dispose();
+          runner = combinedRunner(gl);
+          // The live frame at its internal size: drawn at the view with level
+          // full, which the size rules leave at the view (a soft view is at
+          // most 1080 on its short side; the full-size ones are identity).
+          canvas.width = view[0];
+          canvas.height = view[1];
+          const liveDraw = (index) =>
+            runner.draw({ id: background.id, look: look.id, phase: look.posterPhase + index / 60, dim: 0, width: view[0], height: view[1], level: 'full' });
+          for (let index = 0; index < 20; index += 1) {
+            liveDraw(index);
+            breakPass();
+          }
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+          const liveTimes = [];
+          for (let batch = 0; batch < Math.ceil(frames / batchFrames); batch += 1) {
+            const start = performance.now();
+            for (let index = 0; index < batchFrames; index += 1) {
+              liveDraw(batch * batchFrames + index);
+              breakPass();
+            }
+            gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+            liveTimes.push((performance.now() - start) / batchFrames);
+          }
+          liveTimes.sort((a, b) => a - b);
+          const liveScratch = runner.scratchBytes();
+          runner.releaseExcept('');
+
           canvas.width = width;
           canvas.height = height;
           const draw = (index) =>
@@ -138,24 +229,20 @@ async function runProbe(options) {
               gl.deleteQuery(query);
             }
           }
-          const batch = 60;
-          const start = performance.now();
-          for (let index = 0; index < batch; index += 1) draw(index);
-          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
-          const batchMs = (performance.now() - start) / batch;
           gpuTimes.sort((a, b) => a - b);
-          const view = VideorcLiveBackground.internalSize(RENDER, background.id, [width, height], level);
           result.cases.push({
             id: background.id,
             look: look.id,
             output: [width, height],
             level,
             view,
+            liveFrameSamples: liveTimes.length * batchFrames,
+            liveMedianMs: percentile(liveTimes, 0.5),
+            liveP95Ms: percentile(liveTimes, 0.95),
             gpuSamples: gpuTimes.length,
             medianMs: gpuTimes.length ? percentile(gpuTimes, 0.5) : null,
             p95Ms: gpuTimes.length ? percentile(gpuTimes, 0.95) : null,
-            batchMeanMs: batchMs,
-            scratchBytes: runner.scratchBytes()
+            scratchBytes: liveScratch
           });
           runner.releaseExcept('');
         }
@@ -168,7 +255,7 @@ async function runProbe(options) {
     const [width, height] = [640, 360];
     canvas.width = width;
     canvas.height = height;
-    for (const background of RENDER.backgrounds) {
+    for (const background of backgrounds) {
       for (const look of background.looks) {
         for (const phase of [look.posterPhase, look.posterPhase + 5]) {
           runner.draw({ id: background.id, look: look.id, phase, dim: 0, width, height, level: 'full' });
@@ -179,8 +266,25 @@ async function runProbe(options) {
     }
   }
 
+  if (options.mode === 'frames') {
+    // Every look of the selected backgrounds at one size and phase offset, as
+    // PNG (by-eye checks, picking poster phases and palettes).
+    const [width, height] = options.size || [960, 540];
+    result.frames = [];
+    for (const background of backgrounds) {
+      for (const look of looksFor(background)) {
+        canvas.width = width;
+        canvas.height = height;
+        const phase = look.posterPhase + (options.phaseOffset || 0);
+        runner.draw({ id: background.id, look: look.id, phase, dim: 0, width, height, level: options.level || 'full' });
+        gl.finish();
+        result.frames.push({ id: background.id, look: look.id, phase, level: options.level || 'full', png: await blobBase64(canvas, 'image/png') });
+      }
+    }
+  }
+
   if (options.mode === 'posters') {
-    for (const background of RENDER.backgrounds) {
+    for (const background of backgrounds) {
       for (const look of background.looks) {
         const draw = (width, height) => {
           canvas.width = width;

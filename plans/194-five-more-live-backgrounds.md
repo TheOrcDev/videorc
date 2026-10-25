@@ -313,4 +313,250 @@ the PR.
 
 ## As built
 
-(Filled in by the executor.)
+### S2: catalogue, wire and the wider block (2026-10-25)
+
+Commit `fe5eb1fc`.
+
+- **Ids**: `beams`, `color-bends`, `dither`, `ferrofluid` and `ghost-fibers`, in
+  Rust, TS and the catalogue. The strict contract takes its id enum from the
+  shared list, so a new background can't be rejected there by omission (the
+  plan 190 S11 trap). A protocol test round-trips all ten.
+- **`UNIFORM_VEC4_COUNT` is 16**, the smallest block that fits all ten:
+  - Ghost Fibers uses all 16 (its orientation is three columns plus
+    about 30 floats);
+  - Color Bends and Dither use 14 (eight colour or palette slots).
+
+  The plan 190 five keep their indices; their new rows are zero.
+  `u[16]` is in every GLSL, HLSL and GLES source.
+
+- **Looks** (the D4 rule):
+
+  | Background   | Looks                                |
+  | ------------ | ------------------------------------ |
+  | Beams        | Studio, Chrome, Ember                |
+  | Color Bends  | Default, Ember, Ocean                |
+  | Dither       | Classic, Amber, Blueprint            |
+  | Ferrofluid   | Studio, Ember, Frost                 |
+  | Ghost Fibers | Violet, Fiber Optic (`fiber`), Ember |
+  - Color Bends' first look is Background Studio's default palette.
+    `backgroundThemeProps.js` has no Color Bends palettes, only one light-mode
+    colour (`#6d28d9`), so Ember (`#ff6a1a`, `#ff2d6f`, `#ffd59a`) and Ocean
+    (`#2a4bd7`, `#06b6d4`, `#93c5fd`) are picked by eye from the other plans'
+    accents. That is an owner call to confirm.
+
+- **`PassKind`**: `FullScreen` or `Instanced { vertices, instances, blend }`,
+  with `PassBlend`. Only Ghost Fibers' dots and dust are instanced. The
+  counts come from the look:
+  - Violet: 3 × 72 × 260 = 56,160 dots and 210 dust;
+  - Fiber Optic: 2 × 96 × 260 = 49,920 dots and 210 dust;
+  - Ember: 56,160 dots and 378 dust.
+
+  The guard's half size shrinks the target, not the fibers.
+
+- **Sizes**:
+  - Beams' field: ¾ of the view, at most 1.6 MP.
+  - Dither: full size; its cell is `round(2 × min(view) / 1080)` px.
+  - Ferrofluid's grid: React Bits' camera footprint, ⅓ unit per cell
+    (139 × 93 at 16:9).
+  - Ghost Fibers' bloom: five levels from half size.
+- **Interim paths** for the renderers S3–S5 port:
+  - Metal, D3D11, GLES and the WebGL runner give each new id its poster with
+    `shader-compile-failed` before any shader is tried, so nothing is
+    poisoned for the five that work (a Metal test proves it).
+  - Their golden tests skip the unported.
+  - Assets offers only backgrounds with a thumbnail for every look, so the five
+    join the Live group with their posters (S6), never as blank tiles.
+- **Deviation**: the GLSL sources landed in this commit, not S1's, because
+  `glsl.rs` includes them and the export ships them.
+
+### S1: GLSL, the probe, goldens and the cost gate (2026-10-25)
+
+**Sources** (`glsl/`):
+
+- Beams, Color Bends, Dither, Ferrofluid (N1: the settled target, three
+  passes, no ping-pong), and Ghost Fibers (`ghost_fibers.vert` for the
+  instanced dots and dust, `ghost_fibers.frag` for the shading, the bloom
+  chain and the composite).
+- N3: pointer, hover, click and intro are constants.
+- Grain: React Bits' fixed-in-place grain is kept at a third (Silk's rule).
+  Color Bends' per-frame noise is fixed in place at a third. Ghost Fibers'
+  per-frame grain is fixed in place.
+- Color Bends keeps React Bits' pull toward the resting pointer (the centre):
+  it is part of the look at rest.
+
+**The probe** (`scripts/live-backgrounds/`):
+
+- `probe-passes.js` draws the five (new scratch targets and
+  `drawArraysInstanced` with additive blending) until S5 moves this into the
+  shared runner. It checks its size rules against the generated cases on
+  start.
+- `--mode golden` merges into the fixture and fails if a shipped entry
+  renders differently.
+- New: `--mode frames`, `--ids`, `--level` and `--render`.
+- `cost` reports the load average.
+
+**Goldens**: 60 grids (30 new). The 30 shipped ones re-rendered byte-identical
+with `u[16]`, so the wider block moved no shipped golden: the probe checks it,
+and the Metal golden test still passes all 30.
+
+**By eye**: React Bits' own GLSL from each `.tsx`, with the uniforms its
+component sets for the preset, the pointer at rest and the intro finished,
+beside the vendored GLSL at the same phase. Every look matches:
+
+- Beams: lane for lane, glint for glint.
+- Color Bends: same bands; the grain is lighter.
+- Dither: pixel-identical patterns.
+- Ferrofluid: spike for spike.
+- Ghost Fibers: same ribbons, dots, tips and bloom.
+
+The pairs must be rendered at Videorc's scale: a frame's short side is 1080
+React Bits CSS pixels, so at 640 × 360 React Bits renders a 1920 × 1080 CSS
+canvas at a device ratio of ⅓. At a device ratio of 1 the beams, Dither's cells
+and Ghost Fibers' dots differ by exactly that scale.
+
+**Measuring.** Plan 190's timer query (`EXT_disjoint_timer_query_webgl2`) is
+not a usable gate on ANGLE over Metal:
+
+- It reads 4–6× the Metal command-buffer times plan 190 S2 measured for the
+  same shaders (Silk 1.45 / 2.51 ms against 0.34 / 0.41).
+- It carries about 1 ms even for a 960 × 540 frame, plus a cost per canvas
+  pixel.
+
+The probe now also times the live frame the way the guard and the Metal test
+do:
+
+- the live frame alone, at its internal size, with no upscale;
+- the render pass ends after every frame, so the tile GPU can't
+  hidden-surface-remove whole frames;
+- 30 batches of 8 frames, each closed by a 1-pixel `readPixels`;
+- median and p95 over the batch means.
+
+Calibration against plan 190 S2's Metal numbers (1080p, median / p95, ms):
+
+| Background      | Probe live frame (load 5) | Metal (plan 190 S2, load 33) |
+| --------------- | ------------------------- | ---------------------------- |
+| Silk            | 0.49 / 0.56               | 0.34 / 0.41                  |
+| Side Rays       | 0.45 / 0.59               | 0.36 / 0.38                  |
+| Plasma Wave     | 1.26 / 1.35               | 0.56 / 1.06                  |
+| Liquid Chrome   | 1.10 / 1.19               | 0.85 / 0.92                  |
+| Line Waves      | 0.39 / 0.46               | 0.30 / 0.32                  |
+| Line Waves (4K) | 1.34 / 1.44               | 1.24 / 1.35                  |
+
+So it never reads low:
+
+- about +0.1–0.25 ms for one or two passes;
+- about +0.06 ms more per extra pass (Plasma's 11 read about 2× at the
+  median). That excess is GPU-side; committing each frame did not reduce it.
+
+The p95 gate on this instrument is therefore strict, and Metal (S3) will read
+lower.
+
+**Cost**: `GL_RENDERER` "ANGLE (Apple, ANGLE Metal Renderer: Apple M4)", 240
+frames per case. Load average 4.3–5.0 (a Unity editor held about 160 % CPU and
+part of the GPU throughout). "Live" is the gate's number; "timer" is plan 190's
+query, for reference only. 4K renders the soft four at 1920 × 1080 (the
+compose draws them up) and Dither at full size.
+
+| Background   | Look      | Output      | Renders     | Live median / p95 (ms) | Timer median / p95 (ms) | Scratch MB |
+| ------------ | --------- | ----------- | ----------- | ---------------------- | ----------------------- | ---------- |
+| beams        | studio    | 1920 × 1080 | 1920 × 1080 | 0.89 / 0.99            | 3.16 / 5.75             | 11.9       |
+| beams        | studio    | 1080 × 1920 | 1080 × 1920 | 0.85 / 1.04            | 3.21 / 5.70             | 11.9       |
+| beams        | studio    | 3840 × 2160 | 1920 × 1080 | 0.85 / 0.91            | 5.97 / 11.81            | 11.9       |
+| beams        | studio    | half        | 960 × 540   | 0.27 / 0.33            | 1.29 / 2.30             | 3.0        |
+| beams        | chrome    | 1920 × 1080 | 1920 × 1080 | 0.82 / 0.98            | 2.97 / 5.45             | 11.9       |
+| beams        | chrome    | 1080 × 1920 | 1080 × 1920 | 0.81 / 0.89            | 3.19 / 5.41             | 11.9       |
+| beams        | chrome    | 3840 × 2160 | 1920 × 1080 | 0.83 / 0.89            | 5.69 / 11.24            | 11.9       |
+| beams        | chrome    | half        | 960 × 540   | 0.27 / 0.31            | 1.28 / 2.27             | 3.0        |
+| beams        | ember     | 1920 × 1080 | 1920 × 1080 | 0.82 / 0.89            | 3.24 / 5.50             | 11.9       |
+| beams        | ember     | 1080 × 1920 | 1080 × 1920 | 0.82 / 0.90            | 3.19 / 5.58             | 11.9       |
+| beams        | ember     | 3840 × 2160 | 1920 × 1080 | 0.84 / 0.90            | 5.57 / 11.09            | 11.9       |
+| beams        | ember     | half        | 960 × 540   | 0.28 / 0.35            | 1.23 / 2.26             | 3.0        |
+| color-bends  | default   | 1920 × 1080 | 1920 × 1080 | 0.50 / 0.55            | 1.89 / 3.08             | 0.0        |
+| color-bends  | default   | 1080 × 1920 | 1080 × 1920 | 0.49 / 0.55            | 1.76 / 3.05             | 0.0        |
+| color-bends  | default   | 3840 × 2160 | 1920 × 1080 | 0.49 / 0.55            | 4.97 / 9.45             | 0.0        |
+| color-bends  | default   | half        | 960 × 540   | 0.18 / 0.19            | 1.08 / 2.07             | 0.0        |
+| color-bends  | ember     | 1920 × 1080 | 1920 × 1080 | 0.48 / 0.51            | 1.81 / 3.05             | 0.0        |
+| color-bends  | ember     | 1080 × 1920 | 1080 × 1920 | 0.48 / 0.54            | 1.75 / 3.04             | 0.0        |
+| color-bends  | ember     | 3840 × 2160 | 1920 × 1080 | 0.49 / 0.54            | 5.37 / 9.53             | 0.0        |
+| color-bends  | ember     | half        | 960 × 540   | 0.18 / 0.25            | 1.20 / 2.11             | 0.0        |
+| color-bends  | ocean     | 1920 × 1080 | 1920 × 1080 | 0.49 / 0.55            | 1.84 / 3.05             | 0.0        |
+| color-bends  | ocean     | 1080 × 1920 | 1080 × 1920 | 0.49 / 0.54            | 1.87 / 3.04             | 0.0        |
+| color-bends  | ocean     | 3840 × 2160 | 1920 × 1080 | 0.49 / 0.54            | 5.34 / 9.61             | 0.0        |
+| color-bends  | ocean     | half        | 960 × 540   | 0.18 / 0.19            | 1.12 / 2.07             | 0.0        |
+| dither       | classic   | 1920 × 1080 | 1920 × 1080 | 0.55 / 0.60            | 1.91 / 3.30             | 2.0        |
+| dither       | classic   | 1080 × 1920 | 1080 × 1920 | 0.54 / 0.59            | 1.90 / 3.28             | 2.0        |
+| dither       | classic   | 3840 × 2160 | 3840 × 2160 | 1.11 / 1.19            | 4.29 / 7.61             | 2.0        |
+| dither       | classic   | half        | 960 × 540   | 0.38 / 0.44            | 1.76 / 3.42             | 2.0        |
+| dither       | amber     | 1920 × 1080 | 1920 × 1080 | 0.54 / 0.60            | 2.00 / 3.35             | 2.0        |
+| dither       | amber     | 1080 × 1920 | 1080 × 1920 | 0.54 / 0.60            | 1.89 / 3.26             | 2.0        |
+| dither       | amber     | 3840 × 2160 | 3840 × 2160 | 1.09 / 1.18            | 4.30 / 7.54             | 2.0        |
+| dither       | amber     | half        | 960 × 540   | 0.38 / 0.43            | 1.77 / 3.42             | 2.0        |
+| dither       | blueprint | 1920 × 1080 | 1920 × 1080 | 0.54 / 0.60            | 1.72 / 3.23             | 2.0        |
+| dither       | blueprint | 1080 × 1920 | 1080 × 1920 | 0.54 / 0.60            | 1.90 / 3.30             | 2.0        |
+| dither       | blueprint | 3840 × 2160 | 3840 × 2160 | 1.09 / 1.16            | 4.24 / 7.60             | 2.0        |
+| dither       | blueprint | half        | 960 × 540   | 0.38 / 0.44            | 1.85 / 3.55             | 2.0        |
+| ferrofluid   | studio    | 1920 × 1080 | 1920 × 1080 | 1.60 / **1.94**        | 6.43 / 12.54            | 0.1        |
+| ferrofluid   | studio    | 1080 × 1920 | 1080 × 1920 | 1.66 / **2.06**        | 6.49 / 12.63            | 0.0        |
+| ferrofluid   | studio    | 3840 × 2160 | 1920 × 1080 | 1.56 / 1.95            | 8.87 / 17.47            | 0.1        |
+| ferrofluid   | studio    | half        | 960 × 540   | 0.54 / 0.64            | 2.18 / 4.13             | 0.1        |
+| ferrofluid   | ember     | 1920 × 1080 | 1920 × 1080 | 1.63 / **1.99**        | 6.58 / 12.69            | 0.1        |
+| ferrofluid   | ember     | 1080 × 1920 | 1080 × 1920 | 1.68 / **2.07**        | 6.74 / 13.22            | 0.0        |
+| ferrofluid   | ember     | 3840 × 2160 | 1920 × 1080 | 1.65 / 2.09            | 8.98 / 18.17            | 0.1        |
+| ferrofluid   | ember     | half        | 960 × 540   | 0.51 / 0.60            | 2.21 / 4.27             | 0.1        |
+| ferrofluid   | frost     | 1920 × 1080 | 1920 × 1080 | 1.66 / **2.01**        | 6.74 / 12.98            | 0.1        |
+| ferrofluid   | frost     | 1080 × 1920 | 1080 × 1920 | 1.70 / **2.13**        | 6.67 / 13.24            | 0.0        |
+| ferrofluid   | frost     | 3840 × 2160 | 1920 × 1080 | 1.65 / 2.04            | 8.72 / 18.54            | 0.1        |
+| ferrofluid   | frost     | half        | 960 × 540   | 0.53 / 0.63            | 2.12 / 4.22             | 0.1        |
+| ghost-fibers | violet    | 1920 × 1080 | 1920 × 1080 | 1.71 / **1.78**        | 4.32 / 6.82             | 26.3       |
+| ghost-fibers | violet    | 1080 × 1920 | 1080 × 1920 | 1.53 / **1.66**        | 3.76 / 6.06             | 26.3       |
+| ghost-fibers | violet    | 3840 × 2160 | 1920 × 1080 | 1.65 / 1.86            | 6.38 / 8.87             | 26.3       |
+| ghost-fibers | violet    | half        | 960 × 540   | 0.68 / 0.77            | 1.50 / 2.30             | 6.6        |
+| ghost-fibers | fiber     | 1920 × 1080 | 1920 × 1080 | 1.85 / **1.93**        | 4.59 / 7.26             | 26.3       |
+| ghost-fibers | fiber     | 1080 × 1920 | 1080 × 1920 | 1.66 / **1.75**        | 4.13 / 6.64             | 26.3       |
+| ghost-fibers | fiber     | 3840 × 2160 | 1920 × 1080 | 1.88 / 1.95            | 6.46 / 9.54             | 26.3       |
+| ghost-fibers | fiber     | half        | 960 × 540   | 0.69 / 0.75            | 1.47 / 2.34             | 6.6        |
+| ghost-fibers | ember     | 1920 × 1080 | 1920 × 1080 | 1.85 / **1.94**        | 4.84 / 7.67             | 26.3       |
+| ghost-fibers | ember     | 1080 × 1920 | 1080 × 1920 | 1.61 / **1.71**        | 4.10 / 6.55             | 26.3       |
+| ghost-fibers | ember     | 3840 × 2160 | 1920 × 1080 | 1.86 / 1.94            | 6.91 / 9.34             | 26.3       |
+| ghost-fibers | ember     | half        | 960 × 540   | 0.75 / 0.84            | 1.72 / 2.59             | 6.6        |
+
+"Half" is 1920 × 1080 at the guard's Half level. Scratch is the probe's
+(RGBA16F; Metal will use smaller formats where it can).
+
+**Gate verdict**:
+
+- **Beams, Color Bends, Dither: inside**, at every size, in every look.
+- **Ferrofluid: over at 1080p** (p95 1.94–2.13 ms); inside at 4K (1.95–2.09
+  ms against 3.0). The ladder:
+  1. Half size fits (0.60–0.64 ms), but at 1:1 the spikes are softer and their
+     rims step. Close, not identical.
+  2. Fewer iterations: not tried. The march's limits are React Bits' own;
+     cutting them risks holes at grazing angles.
+  3. A coarser bloom: none (Ferrofluid has no bloom).
+- **Ghost Fibers: over at 1080p** (p95 1.66–1.94 ms); inside at 4K. The
+  ladder, on Violet:
+  1. Half size fits (0.75–0.84 ms) but changes the look. Its dot radii, DoF
+     circles and floor are in render pixels, so the fold blows out and the
+     ribbon brightens.
+  2. Fewer instances: dots cost about 0.6 ms (no dots: 1.10 / 1.16 ms; no
+     dust: 1.68 / 1.75). Density 0.6 gives 1.40 / 1.56, still over.
+  3. A coarser bloom (the chain from quarter size): 1.56 / 1.68 alone.
+     **With density 0.6: 1.27 / 1.38 (inside)**, but that is a different look
+     (sparser, larger bokeh dots and a dimmer fold, closer to React Bits'
+     "bokeh" preset than to Violet).
+
+Per the STOP rule, Ferrofluid and Ghost Fibers wait for the owner. Their
+per-pass ANGLE excess suggests the native Metal cost is lower (by the
+calibration, roughly 1.2–1.6 ms p95 for Ferrofluid and 1.0–1.5 ms for Ghost
+Fibers), but that is an estimate until S3 measures them. Options:
+
+- **A.** Port them in S3 as they are, and gate on the Metal numbers. The guard
+  drops them to half size on a machine where they cost more.
+- **B.** Half size by design for Ferrofluid (slightly softer).
+- **C.** The cheaper Ghost Fibers variant as its looks.
+- **D.** Defer the two and ship three.
+
+By-eye PNGs (not committed): `beams-`, `color-bends-`, `dither-`,
+`ferrofluid-` and `ghost-fibers-side-by-side.png`, the half-size crops and
+`ghost-fibers-cheaper-variant.png`, in the session scratchpad
+(`plan194-s1/`).
