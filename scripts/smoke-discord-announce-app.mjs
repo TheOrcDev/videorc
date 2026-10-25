@@ -415,7 +415,10 @@ function sessionParams(outputDirectoryCapability) {
       recordEnabled: true,
       streamEnabled: true,
       outputDirectoryCapability,
-      video: { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 },
+      // The stream's own profile (stream-safe-1080p30 below): a computer that
+      // runs one encode for both (Linux, and any host without a second
+      // encoder) refuses a recording that differs from the stream.
+      video: { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
     streaming: {
