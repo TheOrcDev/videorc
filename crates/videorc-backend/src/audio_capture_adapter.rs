@@ -68,7 +68,18 @@ fn probe_error(label: &str, error: std::io::Error) -> anyhow::Error {
     }
 }
 const MAX_ANCHORS: usize = 64;
+/// A packet whose END is older than this when it reaches the assembler is
+/// dropped as stale. `captured_at` is the end of the packet (plan 195 W2: a
+/// driver that hands over 500 ms buffers is judged by when the audio was
+/// handed over, not by how old its first sample is).
 const MAX_CAPTURE_AGE: Duration = Duration::from_millis(100);
+/// The largest PCM record the worker may describe: one second at 48 kHz.
+/// Big-buffer DirectShow drivers deliver 500 ms packets (plan 195 W2); the
+/// 20 ms the worker asks for is a request, not a contract.
+const MAX_PCM_PACKET_FRAMES: usize = 48_000;
+/// Raw PCM bytes buffered between the stdout reader and the assembler: a
+/// 1 s float-stereo packet (384 KB) must fit when its metadata line is late.
+const RAW_PCM_QUEUE_CHUNKS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 struct PcmDescription {
@@ -144,7 +155,7 @@ fn parse_pcm_description(line: &str) -> Result<PcmDescription> {
     let frames = usize::try_from(integer(line, "nb_samples:")?)?;
     let sequence = u64::try_from(integer(line, " n:")?)?;
     let pts = integer(line, " pts:")?;
-    if frames == 0 || frames > 4800 || pts < 0 {
+    if frames == 0 || frames > MAX_PCM_PACKET_FRAMES || pts < 0 {
         bail!("Capture worker PCM metadata exceeds its bounded format");
     }
     Ok(PcmDescription {
@@ -244,16 +255,19 @@ fn dshow_anchor(line: &str, clock: &ClockPair) -> Result<CaptureAnchor> {
     let channels = integer(line, "channels=")?;
     let bits = integer(line, "bits=")?;
     let format = integer(line, "format=")?;
+    // The callback may run up to one second after the packet's first sample
+    // (a 500 ms driver buffer, plan 195 W2); the age check judges delivery.
     if sample < 0
         || graph < sample
-        || graph - sample > 1_000_000
+        || graph - sample > 10_000_000
         || before <= 0
         || after < before
         || after - before > 10_000
         || !(8000..=384000).contains(&rate)
         || !(1..=32).contains(&channels)
         || frames <= 0
-        || frames > rate / 10
+        // Up to one second per packet (plan 195 W2); the age check judges it.
+        || frames > rate
         || !((format == 1 && [8, 16, 24, 32].contains(&bits))
             || (format == 3 && [32, 64].contains(&bits)))
         || bytes != frames * channels * (bits / 8)
@@ -427,12 +441,16 @@ impl CaptureClock {
             .rev()
             .find(|anchor| anchor.pts_us <= pts_us + 25)
             .context("PCM has no exact capture clock anchor")?;
+        // PCM may start up to one packet after its anchor (plus 25 µs of
+        // resampler slack). A 500 ms DirectShow packet (plan 195 W2) is as
+        // valid as a 10 ms one; only an anchor of unknown length keeps the
+        // 100 ms bound.
         let delta_us = pts_us - anchor.pts_us;
-        if !(-25..=100_000).contains(&delta_us)
-            || anchor
-                .input_duration
-                .is_some_and(|duration| delta_us > duration.as_micros() as i64 + 25)
-        {
+        let max_delta_us = anchor
+            .input_duration
+            .map_or(100_000, |duration| duration.as_micros() as i64)
+            + 25;
+        if delta_us < -25 || delta_us > max_delta_us {
             bail!("PCM lies outside its captured packet clock interval");
         }
         let start = if delta_us >= 0 {
@@ -476,12 +494,83 @@ use std::thread;
 
 type Failure = Arc<Mutex<Option<String>>>;
 
+/// How much of the worker's stderr a readiness failure may carry (plan 195
+/// S1): the last few diagnostic lines, never the PCM metadata stream.
+const STDERR_TAIL_LINES: usize = 3;
+const STDERR_TAIL_BYTES: usize = 300;
+const STDERR_TAIL_LINE_BYTES: usize = 120;
+
+/// The worker's last stderr lines, with the device name and its DirectShow
+/// moniker redacted, so a failure reason in a support bundle says what FFmpeg
+/// said (a device busy, a format it could not open, a dropped real-time
+/// buffer) without naming the user's hardware.
+#[derive(Debug, Default)]
+pub(crate) struct WorkerStderrTail {
+    lines: VecDeque<String>,
+    redact: Vec<String>,
+}
+
+pub(crate) type StderrTail = Arc<Mutex<WorkerStderrTail>>;
+
+impl WorkerStderrTail {
+    pub(crate) fn new(redact: Vec<String>) -> Self {
+        Self {
+            lines: VecDeque::new(),
+            redact: redact
+                .into_iter()
+                .filter(|needle| !needle.is_empty())
+                .collect(),
+        }
+    }
+
+    /// Keeps a diagnostic line; metadata records and blank lines are skipped.
+    pub(crate) fn push(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() || !metadata_records(line).is_empty() {
+            return;
+        }
+        let mut redacted = line.to_string();
+        for needle in &self.redact {
+            redacted = redacted.replace(needle, "<device>");
+        }
+        let redacted = bounded_prefix(&redacted, STDERR_TAIL_LINE_BYTES);
+        self.lines.push_back(redacted);
+        while self.lines.len() > STDERR_TAIL_LINES {
+            self.lines.pop_front();
+        }
+    }
+
+    /// `line | line | line`, at most `STDERR_TAIL_BYTES`, or `None` when the
+    /// worker printed nothing but metadata.
+    pub(crate) fn render(&self) -> Option<String> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let joined = self.lines.iter().cloned().collect::<Vec<_>>().join(" | ");
+        Some(bounded_prefix(&joined, STDERR_TAIL_BYTES))
+    }
+}
+
+/// The first `max_bytes` of `text` on a char boundary, with an ellipsis when
+/// anything was cut.
+fn bounded_prefix(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes.saturating_sub(1);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 pub(crate) struct CapturedInput {
     pub device_name: String,
     pub receiver: mpsc::Receiver<AudioFrame>,
     pub stats: Arc<AudioCaptureStats>,
     pub owner: Box<dyn Send>,
     pub failure: Failure,
+    pub stderr_tail: StderrTail,
 }
 
 struct Worker {
@@ -1020,6 +1109,10 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
     let child = spawn_owned_std(&mut capture_command(&worker, &device, protocol))?;
     let stop = Arc::new(AtomicBool::new(false));
     let failure: Failure = Arc::new(Mutex::new(None));
+    let stderr_tail: StderrTail = Arc::new(Mutex::new(WorkerStderrTail::new(vec![
+        device_name.clone(),
+        device.clone(),
+    ])));
     let stats = Arc::new(AudioCaptureStats::default());
     let mut owner = Worker {
         child,
@@ -1036,7 +1129,7 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
         .stderr
         .take()
         .context("Capture metadata pipe is unavailable")?;
-    let (raw_tx, raw_rx) = mpsc::sync_channel::<Vec<u8>>(8);
+    let (raw_tx, raw_rx) = mpsc::sync_channel::<Vec<u8>>(RAW_PCM_QUEUE_CHUNKS);
     let (metadata_tx, metadata_rx) = mpsc::sync_channel::<String>(64);
     let (pcm_tx, receiver) = mpsc::sync_channel::<AudioFrame>(4);
     let read_stop = stop.clone();
@@ -1066,6 +1159,7 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
     );
     let read_stop = stop.clone();
     let read_failure = failure.clone();
+    let read_tail = stderr_tail.clone();
     owner.threads.push(
         thread::Builder::new()
             .name("capture-clock-read".into())
@@ -1083,6 +1177,10 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
                         if *byte == b'\n' || *byte == b'\r' {
                             let text = String::from_utf8_lossy(&line).into_owned();
                             line.clear();
+                            read_tail
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .push(&text);
                             for record in metadata_records(&text) {
                                 if metadata_tx.try_send(record).is_err() {
                                     fail(
@@ -1143,6 +1241,7 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
         stats,
         owner: Box::new(owner),
         failure,
+        stderr_tail,
     })
 }
 
@@ -1347,6 +1446,47 @@ mod tests {
     }
 
     #[test]
+    fn stderr_tail_keeps_the_last_diagnostic_lines_redacted_and_bounded() {
+        // Plan 195 S1: a readiness failure carries what FFmpeg said, without
+        // the device name or its moniker, and never the metadata stream.
+        let mut tail = WorkerStderrTail::new(vec![
+            "Digital Microphone (2- Cirrus Logic High Definition Audio)".into(),
+            "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{ABC}".into(),
+        ]);
+        assert_eq!(tail.render(), None);
+        tail.push("");
+        tail.push(&metadata());
+        tail.push(&pcm(0, 0, 480));
+        assert_eq!(tail.render(), None, "metadata never enters the tail");
+        tail.push(
+            "[dshow @ 0x1] Could not open \"Digital Microphone (2- Cirrus Logic High Definition Audio)\"",
+        );
+        tail.push("[dshow @ 0x1] Selecting pin Capture on @device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{ABC}");
+        let rendered = tail.render().unwrap();
+        assert!(
+            rendered.contains("Could not open \"<device>\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("pin Capture on <device>"), "{rendered}");
+        assert!(!rendered.contains("Cirrus"), "{rendered}");
+        assert!(!rendered.contains("wave_"), "{rendered}");
+        for index in 0..10 {
+            tail.push(&format!("line {index} {}", "x".repeat(200)));
+        }
+        let rendered = tail.render().unwrap();
+        assert!(rendered.starts_with("line 7 "), "{rendered}");
+        assert!(
+            rendered.len() <= STDERR_TAIL_BYTES + '…'.len_utf8(),
+            "{}",
+            rendered.len()
+        );
+        assert!(
+            !rendered.contains("line 6 "),
+            "only the last three lines stay"
+        );
+    }
+
+    #[test]
     fn interval_diagnostics_distinguish_native_overwrite_and_pcm_gaps() {
         let now = Instant::now();
         let mut diagnostics = CaptureDiagnostics::default();
@@ -1465,10 +1605,15 @@ mod tests {
     #[test]
     fn pcm_format_and_capture_clock_are_fail_closed() {
         assert_eq!(parse_pcm_description(&pcm(0, 0, 480)).unwrap().frames, 480);
+        assert_eq!(
+            parse_pcm_description(&pcm(0, 0, 48_000)).unwrap().frames,
+            48_000,
+            "a one-second packet is the bound (plan 195 W2)"
+        );
         for malformed in [
             pcm(0, 0, 0),
             pcm(0, -1, 480),
-            pcm(0, 0, 4801),
+            pcm(0, 0, 48_001),
             pcm(0, 0, 480).replace("flt", "s16"),
             pcm(0, 0, 480).replace("channels:2", "channels:1"),
             pcm(0, 0, 480).replace("rate:48000", "rate:44100"),
@@ -1573,6 +1718,96 @@ mod tests {
         let (result, frames, _) = assembled(vec![bad], pcm(0, 0, 480), metadata(), Instant::now());
         assert!(result.unwrap_err().to_string().contains("non-finite"));
         assert!(frames.is_empty());
+    }
+
+    /// A `VIDEORC_DSHOW_CLOCK` record for a packet of `frames` s16 stereo
+    /// frames whose capture started `started_ago` before the callback that
+    /// delivered it, the callback being `pair.monotonic`.
+    fn dshow_clock_line(
+        pair: &ClockPair,
+        sample_100ns: i64,
+        frames: i64,
+        started_ago: Duration,
+    ) -> String {
+        let callback_wall_100ns = pair.wall_ns / 100;
+        let graph_100ns = sample_100ns + started_ago.as_nanos() as i64 / 100;
+        format!(
+            "VIDEORC_DSHOW_CLOCK version=1 sample_100ns={sample_100ns} graph_100ns={graph_100ns} wall_before_100ns={callback_wall_100ns} wall_after_100ns={callback_wall_100ns} bytes={} frames={frames} rate=48000 channels=2 bits=16 format=1",
+            frames * 4
+        )
+    }
+
+    #[test]
+    fn a_big_directshow_packet_handed_over_at_its_end_is_fresh_pcm() {
+        // Plan 195 W2: a driver that ignores the 20 ms request and delivers
+        // 500 ms packets. Each packet's first sample is 500 ms old when the
+        // callback runs; the packet is judged by its end, which is now.
+        let pair = ClockPair::sample().unwrap();
+        let packet = Duration::from_millis(500);
+        let anchor = dshow_anchor(&dshow_clock_line(&pair, 0, 24_000, packet), &pair).unwrap();
+        assert_eq!(anchor.input_duration, Some(packet));
+        // The wall clock is exported in 100 ns units, so the start may sit
+        // under 100 ns from the exact instant.
+        let expected_start = pair.monotonic - packet;
+        let skew = if anchor.captured_start >= expected_start {
+            anchor.captured_start - expected_start
+        } else {
+            expected_start - anchor.captured_start
+        };
+        assert!(skew < Duration::from_micros(1), "{skew:?}");
+        let bytes: Vec<u8> = (0..48_000).flat_map(|_| 0.25f32.to_le_bytes()).collect();
+        let (meta_tx, meta_rx) = mpsc::channel();
+        meta_tx
+            .send(dshow_clock_line(&pair, 0, 24_000, packet))
+            .unwrap();
+        meta_tx.send(pcm(0, 0, 24_000)).unwrap();
+        drop(meta_tx);
+        let (raw_tx, raw_rx) = mpsc::channel();
+        raw_tx.send(bytes).unwrap();
+        drop(raw_tx);
+        let (out_tx, out_rx) = mpsc::sync_channel(4);
+        let stats = Arc::new(AudioCaptureStats::default());
+        let result = assemble_pcm(
+            CaptureProtocol::DirectShow,
+            pair,
+            meta_rx,
+            raw_rx,
+            out_tx,
+            &AtomicBool::new(false),
+            &stats,
+        );
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("stopped producing")),
+            "the fixture ends at EOF, not at a rejection: {result:?}"
+        );
+        let frames: Vec<AudioFrame> = out_rx.try_iter().collect();
+        assert_eq!(frames.len(), 1, "the 500 ms packet is fresh, not stale");
+        assert_eq!(frames[0].samples.len(), 48_000);
+        assert_eq!(stats.captured_frames(), 24_000);
+        assert_eq!(stats.dropped_frames(), 0);
+        assert!(frames[0].captured_at.elapsed() < MAX_CAPTURE_AGE);
+    }
+
+    #[test]
+    fn a_directshow_packet_over_one_second_is_still_refused() {
+        let pair = ClockPair::sample().unwrap();
+        assert!(
+            dshow_anchor(
+                &dshow_clock_line(&pair, 0, 48_000, Duration::from_secs(1)),
+                &pair
+            )
+            .is_ok()
+        );
+        assert!(
+            dshow_anchor(
+                &dshow_clock_line(&pair, 0, 48_001, Duration::from_secs(1)),
+                &pair
+            )
+            .is_err()
+        );
     }
 
     #[test]

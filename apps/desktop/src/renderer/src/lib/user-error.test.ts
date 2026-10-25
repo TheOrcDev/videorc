@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
 vi.mock('@/lib/toast', () => ({ toast }))
 
+import { bannerActionContext } from './banners'
+import { soundActionContext } from './sounds'
 import {
   OFFLINE_REASON,
   OFFLINE_TOAST_ID,
@@ -178,5 +180,57 @@ describe('inlineUserError', () => {
     expect(text).toBe(`Couldn't import the image. ${UNKNOWN_REASON}`)
     expect(text).not.toContain('/Users/streamer')
     expect(console.warn).toHaveBeenCalledWith("[buddy-look] Couldn't import the image:", raw)
+  })
+})
+
+// Plan 195 S4: a slow Record start or a long poster holds the liveControl
+// lane, and a command that waits past its queue age is dropped. A live
+// control the streamer pressed names itself; only a caller that passes no
+// action gets "Videorc hit a problem", so background reads never toast.
+describe('a live control a busy lane dropped (plan 195 S4)', () => {
+  const BUSY = "Videorc was busy and didn't do it. Try again in a moment."
+  const BUSY_CODES = ['command-expired-before-dispatch', 'command-lane-full', 'command-not-applied']
+  const busy = (code = 'command-expired-before-dispatch'): Error =>
+    backendError(code, 'The command expired while awaiting its reconciliation fence.')
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  })
+
+  it.each([
+    [bannerActionContext('show'), "Couldn't show the banner"],
+    [bannerActionContext('hide'), "Couldn't hide the banner"],
+    [bannerActionContext('hideAll'), "Couldn't hide the banners"],
+    [soundActionContext('play'), "Couldn't play the sound"],
+    [soundActionContext('press'), "Couldn't play the sound"],
+    [soundActionContext('stop'), "Couldn't stop the sound"],
+    [soundActionContext('stopAll'), "Couldn't stop the sounds"],
+    [{ action: 'start', object: 'live captions' }, "Couldn't start live captions"],
+    [{ action: 'show', object: 'the takeover' }, "Couldn't show the takeover"],
+    [{ action: 'take off', object: 'the takeover' }, "Couldn't take off the takeover"],
+    [{ action: 'restart', object: 'capture' }, "Couldn't restart capture"],
+    [{ action: 'show', object: 'the message on stream' }, "Couldn't show the message on stream"]
+  ])('names %j: "%s"', (context, title) => {
+    for (const code of BUSY_CODES) {
+      expect(userErrorMessage(busy(code), context)).toMatchObject({
+        kind: 'known',
+        title,
+        description: BUSY,
+        text: `${title}. ${BUSY}`,
+        tone: 'warning'
+      })
+    }
+    toastUserError(busy(), context, { id: 'live-control' })
+    expect(toast.warning).toHaveBeenCalledWith(title, { id: 'live-control', description: BUSY })
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('says "Videorc hit a problem" only when the caller names no action', () => {
+    expect(userErrorMessage(busy())).toMatchObject({
+      title: 'Videorc hit a problem',
+      description: BUSY,
+      tone: 'warning'
+    })
   })
 })

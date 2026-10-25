@@ -592,6 +592,9 @@ pub struct ProducerSource {
     stats: Arc<AudioCaptureStats>,
     _owner: Box<dyn Send>,
     failure: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    /// The capture worker's last stderr lines (plan 195 S1); only a worker
+    /// source has them.
+    stderr_tail: Option<crate::audio_capture_adapter::StderrTail>,
     #[cfg(debug_assertions)]
     caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
@@ -609,6 +612,7 @@ impl ProducerSource {
             caption_injector: source.caption_contract_test_injector.clone(),
             _owner: Box::new(source),
             failure: None,
+            stderr_tail: None,
         }
     }
     fn worker(device_id: String, source: crate::audio_capture_adapter::CapturedInput) -> Self {
@@ -619,9 +623,16 @@ impl ProducerSource {
             stats: source.stats,
             _owner: source.owner,
             failure: Some(source.failure),
+            stderr_tail: Some(source.stderr_tail),
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
+    }
+    /// The worker's redacted stderr tail, when it printed anything.
+    fn worker_stderr_tail(&self) -> Option<String> {
+        self.stderr_tail
+            .as_ref()
+            .and_then(|tail| tail.lock().unwrap_or_else(|p| p.into_inner()).render())
     }
     /// Plan 069 S2: adapt a system-audio capture (S3's
     /// `system_audio_capture.rs` handle on macOS, S8's WASAPI loopback on
@@ -643,6 +654,7 @@ impl ProducerSource {
             stats,
             _owner: owner,
             failure: Some(failure),
+            stderr_tail: None,
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
@@ -766,6 +778,306 @@ impl std::fmt::Display for PreparationCleanupPending {
 }
 impl std::error::Error for PreparationCleanupPending {}
 
+/// How long a microphone may take, after its open returned, to deliver the
+/// first frame the bus can accept. CoreAudio and Pulse deliver well inside
+/// this; see [`microphone_readiness_budget`] for DirectShow (plan 195).
+const MICROPHONE_READINESS_BUDGET: Duration = Duration::from_secs(2);
+
+/// Plan 195 S2: a laptop DSP microphone over DirectShow (the tester's Cirrus
+/// Logic on an Iris Xe) took longer than 2 s to deliver its first buffer, and
+/// the same device needed 4.8–7.2 s to start inside FFmpeg's graph. The
+/// fallback that followed cost the user live microphone switching and system
+/// audio on every take. A slow microphone keeps the capture worker; only one
+/// that never delivers falls back. `recording.rs` adds this to FFmpeg's
+/// output-startup deadline when the fallback does keep a direct device input.
+pub(crate) const DSHOW_MICROPHONE_READINESS_BUDGET: Duration = Duration::from_secs(10);
+
+/// The readiness budget a microphone gets by its protocol: DirectShow the
+/// laptop budget, everything else the standard 2 s.
+pub(crate) fn microphone_readiness_budget(device_id: &str) -> Duration {
+    if crate::audio::parse_windows_dshow_microphone_id(device_id).is_some() {
+        DSHOW_MICROPHONE_READINESS_BUDGET
+    } else {
+        MICROPHONE_READINESS_BUDGET
+    }
+}
+
+/// Plan 195 Part W: test-only controls for Windows testers (W3 cases B and
+/// C). Honored only with `VIDEORC_ENABLE_SMOKE_RPC=1`, in packaged builds
+/// too, because testers run CI installers. Read once per open, never in a
+/// hot loop.
+pub(crate) const TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV: &str =
+    "VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS";
+pub(crate) const TEST_CAPTURE_WORKER_FAIL_ENV: &str = "VIDEORC_TEST_CAPTURE_WORKER_FAIL";
+const INJECTED_WORKER_READINESS_FAILURE: &str =
+    "Injected capture-worker readiness failure (VIDEORC_TEST_CAPTURE_WORKER_FAIL=1)";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CaptureWorkerTestFaults {
+    /// Discard the worker's frames for this long after the open, so
+    /// readiness sees its first fresh frame then (the slow laptop microphone).
+    first_pcm_delay: Option<Duration>,
+    /// Fail readiness at once, which drives the direct DirectShow fallback.
+    fail: bool,
+}
+
+/// The faults the environment asks for. Without the smoke-RPC gate both
+/// variables are inert; with it, a malformed delay is an error the tester
+/// sees, not a silently ignored setting.
+fn capture_worker_test_faults(
+    smoke_rpc: Option<&str>,
+    first_pcm_delay_ms: Option<&str>,
+    fail: Option<&str>,
+) -> Result<CaptureWorkerTestFaults, String> {
+    if smoke_rpc != Some("1") {
+        return Ok(CaptureWorkerTestFaults::default());
+    }
+    let first_pcm_delay = match first_pcm_delay_ms.map(str::trim) {
+        None | Some("") => None,
+        Some(text) => Some(Duration::from_millis(text.parse::<u64>().map_err(
+            |_| {
+                format!(
+                    "{TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV} must be a whole number of milliseconds, got {text:?}"
+                )
+            },
+        )?)),
+    };
+    Ok(CaptureWorkerTestFaults {
+        first_pcm_delay,
+        fail: fail.map(str::trim) == Some("1"),
+    })
+}
+
+fn capture_worker_test_faults_from_env() -> Result<CaptureWorkerTestFaults, String> {
+    let smoke_rpc = std::env::var("VIDEORC_ENABLE_SMOKE_RPC").ok();
+    let first_pcm_delay_ms = std::env::var(TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV).ok();
+    let fail = std::env::var(TEST_CAPTURE_WORKER_FAIL_ENV).ok();
+    if smoke_rpc.as_deref() != Some("1") && (first_pcm_delay_ms.is_some() || fail.is_some()) {
+        tracing::warn!(
+            "{TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV} / {TEST_CAPTURE_WORKER_FAIL_ENV} are set without VIDEORC_ENABLE_SMOKE_RPC=1 and ignored"
+        );
+    }
+    capture_worker_test_faults(
+        smoke_rpc.as_deref(),
+        first_pcm_delay_ms.as_deref(),
+        fail.as_deref(),
+    )
+}
+
+/// How a microphone proves itself after opening. `None` at the call site
+/// means no readiness wait at all (the warm standby, a system source).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadinessPolicy {
+    /// The owner thread's deadline for the first fresh frame. The caller's
+    /// outer wait gets this plus a margin, so the owner's reason (with its
+    /// evidence) wins over a bare timeout.
+    budget: Duration,
+    /// Test-only: frames before `open + this` are discarded (counted as
+    /// withheld), so readiness sees its first fresh frame then.
+    withhold_first_pcm: Option<Duration>,
+    /// Test-only: fail readiness at once with this reason.
+    fail_with: Option<&'static str>,
+}
+
+impl ReadinessPolicy {
+    const fn standard() -> Self {
+        Self {
+            budget: MICROPHONE_READINESS_BUDGET,
+            withhold_first_pcm: None,
+            fail_with: None,
+        }
+    }
+
+    fn for_worker(device_id: &str, faults: CaptureWorkerTestFaults) -> Self {
+        Self {
+            budget: microphone_readiness_budget(device_id),
+            withhold_first_pcm: faults.first_pcm_delay,
+            fail_with: faults.fail.then_some(INJECTED_WORKER_READINESS_FAILURE),
+        }
+    }
+}
+
+/// Margin the caller's outer readiness wait adds past the owner thread's
+/// deadline: the owner must have had its chance to report what it saw.
+const READINESS_OUTER_MARGIN: Duration = Duration::from_millis(500);
+
+/// `10s`, `2s`, `2.5s`: the budget as the readiness sentences print it.
+fn readiness_budget_label(budget: Duration) -> String {
+    let seconds = budget.as_secs_f64();
+    if seconds.fract() == 0.0 {
+        format!("{}s", seconds as u64)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// How the readiness wait judged one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessVerdict {
+    Fresh,
+    Stale,
+    FutureDated,
+    Malformed,
+    /// Discarded by the test-only first-PCM delay.
+    Withheld,
+}
+
+/// What the readiness wait saw (plan 195 S1), so the failure reason in a
+/// support bundle separates a microphone that never delivered from one whose
+/// frames the bus could not accept: too old, stamped in the future, or the
+/// wrong shape.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ReadinessEvidence {
+    received: u64,
+    stale: u64,
+    future_dated: u64,
+    malformed: u64,
+    withheld: u64,
+    /// When the first frame of any kind arrived, after the open returned.
+    first_arrival: Option<Duration>,
+    /// Age of the youngest stale frame when it was judged.
+    newest_stale_age: Option<Duration>,
+    /// How far ahead of the clock the furthest future-dated frame was.
+    furthest_ahead: Option<Duration>,
+    largest_frame: Option<Duration>,
+}
+
+impl ReadinessEvidence {
+    fn judge(
+        &mut self,
+        frame: &AudioFrame,
+        now: Instant,
+        since: Instant,
+        withheld: bool,
+    ) -> ReadinessVerdict {
+        self.received += 1;
+        self.first_arrival
+            .get_or_insert_with(|| now.saturating_duration_since(since));
+        let duration = frame_duration(frame);
+        self.largest_frame = Some(
+            self.largest_frame
+                .map_or(duration, |largest| largest.max(duration)),
+        );
+        if withheld {
+            self.withheld += 1;
+            return ReadinessVerdict::Withheld;
+        }
+        if !valid_frame_shape(frame) {
+            self.malformed += 1;
+            return ReadinessVerdict::Malformed;
+        }
+        if frame.captured_at > now {
+            self.future_dated += 1;
+            let ahead = frame.captured_at.duration_since(now);
+            self.furthest_ahead = Some(
+                self.furthest_ahead
+                    .map_or(ahead, |furthest| furthest.max(ahead)),
+            );
+            return ReadinessVerdict::FutureDated;
+        }
+        let age = now.duration_since(frame.captured_at);
+        if age > MAX_FRAME_AGE {
+            self.stale += 1;
+            self.newest_stale_age =
+                Some(self.newest_stale_age.map_or(age, |newest| newest.min(age)));
+            return ReadinessVerdict::Stale;
+        }
+        ReadinessVerdict::Fresh
+    }
+
+    /// `0 frames received`, or `9 frames received, all stale (newest 480 ms
+    /// old), largest packet 500 ms, first after 1210 ms`.
+    fn summary(&self) -> String {
+        if self.received == 0 {
+            return "0 frames received".to_string();
+        }
+        let ms = |duration: Duration| duration.as_millis();
+        let count = |n: u64| {
+            if n == self.received {
+                "all".to_string()
+            } else {
+                n.to_string()
+            }
+        };
+        let mut parts = vec![format!("{} frames received", self.received)];
+        if self.stale > 0 {
+            parts.push(format!(
+                "{} stale (newest {} ms old)",
+                count(self.stale),
+                self.newest_stale_age.map_or(0, ms)
+            ));
+        }
+        if self.future_dated > 0 {
+            parts.push(format!(
+                "{} future-dated (up to {} ms ahead)",
+                count(self.future_dated),
+                self.furthest_ahead.map_or(0, ms)
+            ));
+        }
+        if self.malformed > 0 {
+            parts.push(format!("{} malformed", count(self.malformed)));
+        }
+        if self.withheld > 0 {
+            parts.push(format!(
+                "{} withheld by {TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV}",
+                count(self.withheld)
+            ));
+        }
+        if let Some(largest) = self.largest_frame {
+            parts.push(format!("largest packet {} ms", ms(largest)));
+        }
+        if let Some(first) = self.first_arrival {
+            parts.push(format!("first after {} ms", ms(first)));
+        }
+        parts.join(", ")
+    }
+}
+
+fn frame_duration(frame: &AudioFrame) -> Duration {
+    let frames = frame.samples.len() / usize::from(frame.channels.max(1));
+    Duration::from_secs_f64(frames as f64 / f64::from(frame.sample_rate.max(1)))
+}
+
+/// Counts the readiness wait never reached the bus: the capture worker
+/// accepts and drops packets before they leave the adapter (plan 195 S1).
+fn worker_stats_summary(stats: &AudioCaptureStats) -> Option<String> {
+    let (captured, dropped) = (stats.captured_frames(), stats.dropped_frames());
+    (captured > 0 || dropped > 0)
+        .then(|| format!("capture worker passed {captured} and dropped {dropped} PCM frames"))
+}
+
+/// The readiness failure a support bundle can answer from: the first sentence
+/// with the budget, then what arrived, the worker's own counts, and its last
+/// stderr lines when it has any.
+fn readiness_failure_reason(
+    source: &ProducerSource,
+    budget: Duration,
+    evidence: &ReadinessEvidence,
+    stopped: bool,
+) -> String {
+    let first = if stopped {
+        "The microphone stopped before readiness".to_string()
+    } else {
+        format!(
+            "The microphone did not deliver fresh PCM within {}",
+            readiness_budget_label(budget)
+        )
+    };
+    let mut detail = vec![evidence.summary()];
+    detail.extend(worker_stats_summary(&source.stats));
+    let fallback = format!("{first}: {}.", detail.join("; "));
+    let mut reason = source.failure_reason(&fallback);
+    if reason != fallback {
+        // The platform's own failure (the worker died, the stream stopped)
+        // leads; the readiness counts still follow it.
+        reason = format!("{reason} ({})", detail.join("; "));
+    }
+    if let Some(tail) = source.worker_stderr_tail() {
+        reason = format!("{reason} Worker stderr: {tail}");
+    }
+    reason
+}
+
 async fn prepare_producer_with(
     open: impl FnOnce() -> anyhow::Result<ProducerSource> + Send + 'static,
     operation_cancelled: Arc<AtomicBool>,
@@ -781,7 +1093,7 @@ async fn prepare_producer_with(
         count,
         spawn,
         phase,
-        require_readiness,
+        require_readiness.then_some(ReadinessPolicy::standard()),
     )
     .await
 }
@@ -793,7 +1105,7 @@ async fn prepare_producer_in(
     count: Arc<AtomicU64>,
     spawn: impl FnOnce(OwnerTask) -> io::Result<thread::JoinHandle<()>>,
     phase: impl Fn(OwnerPhase) + Send + 'static,
-    require_readiness: bool,
+    readiness: Option<ReadinessPolicy>,
 ) -> anyhow::Result<ManagedProducer> {
     let permit = ProducerPermit::acquire_role(role, count)?;
     let mut cancellation = OpenCancellation(Some(Arc::new(AtomicBool::new(false))));
@@ -802,6 +1114,9 @@ async fn prepare_producer_in(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (completion_guard, completion) = completion_channel();
     let mut closed = completion.state.clone();
+    // Shared with the outer wait, so a timeout there still reports the counts.
+    let evidence: Arc<std::sync::Mutex<ReadinessEvidence>> = Arc::default();
+    let owner_evidence = evidence.clone();
     spawn(Box::new(move || {
         let _completion = completion_guard;
         let _permit = permit;
@@ -822,28 +1137,51 @@ async fn prepare_producer_in(
         if cancelled() || opened_tx.send(Ok(())).is_err() {
             return;
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if !require_readiness {
-                break;
-            }
-            if cancelled() {
+        if let Some(policy) = readiness {
+            let opened_at = Instant::now();
+            let deadline = opened_at + policy.budget;
+            let withhold_until = policy.withhold_first_pcm.map(|delay| opened_at + delay);
+            if let Some(reason) = policy.fail_with {
+                let _ = ready_tx.send(Err(anyhow::anyhow!(reason)));
                 return;
             }
-            if Instant::now() >= deadline {
-                let _ = ready_tx.send(Err(anyhow::anyhow!(
-                    source.failure_reason("The microphone did not deliver fresh PCM within 2s.")
-                )));
-                return;
-            }
-            match source.receiver.recv_timeout(Duration::from_millis(20)) {
-                Ok(frame) if valid_fresh_frame(&frame, Instant::now()) => break,
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = ready_tx.send(Err(anyhow::anyhow!(
-                        source.failure_reason("The microphone stopped before readiness.")
-                    )));
+            loop {
+                if cancelled() {
                     return;
+                }
+                if Instant::now() >= deadline {
+                    let evidence = owner_evidence.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = ready_tx.send(Err(anyhow::anyhow!(readiness_failure_reason(
+                        &source,
+                        policy.budget,
+                        &evidence,
+                        false
+                    ))));
+                    return;
+                }
+                match source.receiver.recv_timeout(Duration::from_millis(20)) {
+                    Ok(frame) => {
+                        let now = Instant::now();
+                        let withheld = withhold_until.is_some_and(|until| now < until);
+                        let verdict = owner_evidence
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .judge(&frame, now, opened_at, withheld);
+                        if verdict == ReadinessVerdict::Fresh {
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let evidence = owner_evidence.lock().unwrap_or_else(|p| p.into_inner());
+                        let _ = ready_tx.send(Err(anyhow::anyhow!(readiness_failure_reason(
+                            &source,
+                            policy.budget,
+                            &evidence,
+                            true
+                        ))));
+                        return;
+                    }
                 }
             }
         }
@@ -866,9 +1204,17 @@ async fn prepare_producer_in(
                     role.open_budget().as_secs()
                 )
             })???;
-        let producer = tokio::time::timeout(Duration::from_secs(2), ready_rx)
+        let budget = readiness.map_or(MICROPHONE_READINESS_BUDGET, |policy| policy.budget);
+        let producer = tokio::time::timeout(budget + READINESS_OUTER_MARGIN, ready_rx)
             .await
-            .map_err(|_| anyhow::anyhow!("Microphone readiness exceeded 2s."))???;
+            .map_err(|_| {
+                let evidence = evidence.lock().unwrap_or_else(|p| p.into_inner());
+                anyhow::anyhow!(
+                    "Microphone readiness exceeded {}: {}.",
+                    readiness_budget_label(budget),
+                    evidence.summary()
+                )
+            })???;
         Ok(producer)
     }
     .await;
@@ -1308,7 +1654,10 @@ async fn prepare_adapter(
     cancelled: Arc<AtomicBool>,
     count: Arc<AtomicU64>,
 ) -> anyhow::Result<ManagedProducer> {
-    prepare_producer_with(
+    let faults = capture_worker_test_faults_from_env().map_err(anyhow::Error::msg)?;
+    let policy = ReadinessPolicy::for_worker(&device_id, faults);
+    prepare_producer_in(
+        SourceRole::Microphone,
         move || {
             crate::audio_capture_adapter::open(&ffmpeg_path, &device_id)
                 .map(|source| ProducerSource::worker(device_id, source))
@@ -1317,7 +1666,7 @@ async fn prepare_adapter(
         count,
         spawn_owner,
         |_| {},
-        true,
+        Some(policy),
     )
     .await
 }
@@ -3710,7 +4059,7 @@ async fn prepare_system_audio_in(
         count,
         spawn_system_owner,
         |_| {},
-        false,
+        None,
     )
     .await?;
     let failure = failure_slot
@@ -6935,6 +7284,7 @@ mod tests {
             stats: Arc::new(AudioCaptureStats::default()),
             _owner: Box::new(SignalDrop(closed)),
             failure: None,
+            stderr_tail: None,
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
@@ -7089,6 +7439,7 @@ mod tests {
                     receiver,
                     stats: Arc::new(AudioCaptureStats::default()),
                     failure: None,
+                    stderr_tail: None,
                     _owner: Box::new(PcmTestOwner {
                         stop,
                         thread: Some(worker),
@@ -7457,6 +7808,7 @@ mod tests {
                         receiver: pcm_rx,
                         stats: Arc::new(AudioCaptureStats::default()),
                         failure: None,
+                        stderr_tail: None,
                         _owner: Box::new(HeldClose {
                             started: Some(close_tx),
                             release: release_rx,
@@ -7643,6 +7995,483 @@ mod tests {
         }
     }
 
+    #[test]
+    fn readiness_evidence_counts_what_the_bus_could_not_accept() {
+        // Plan 195 S1: the failure reason says what arrived, so the next
+        // support bundle separates "nothing" from "stale" from "future-dated".
+        let mut evidence = ReadinessEvidence::default();
+        assert_eq!(evidence.summary(), "0 frames received");
+        let opened_at = Instant::now() - Duration::from_millis(1_210);
+        let now = Instant::now();
+        let mut stale = frame(0.1, 24_000);
+        stale.captured_at = now - Duration::from_millis(2_480);
+        assert_eq!(
+            evidence.judge(&stale, now, opened_at, false),
+            ReadinessVerdict::Stale
+        );
+        let mut staler = frame(0.1, 480);
+        staler.captured_at = now - Duration::from_millis(3_000);
+        assert_eq!(
+            evidence.judge(&staler, now, opened_at, false),
+            ReadinessVerdict::Stale
+        );
+        let summary = evidence.summary();
+        assert_eq!(
+            summary,
+            "2 frames received, all stale (newest 2480 ms old), largest packet 500 ms, first after 1210 ms",
+            "{summary}"
+        );
+        let mut ahead = frame(0.1, 480);
+        ahead.captured_at = now + Duration::from_millis(30);
+        assert_eq!(
+            evidence.judge(&ahead, now, opened_at, false),
+            ReadinessVerdict::FutureDated
+        );
+        let mut malformed = frame(0.1, 480);
+        malformed.sample_rate = 44_100;
+        assert_eq!(
+            evidence.judge(&malformed, now, opened_at, false),
+            ReadinessVerdict::Malformed
+        );
+        let mut fresh = frame(0.1, 480);
+        fresh.captured_at = now - Duration::from_millis(5);
+        assert_eq!(
+            evidence.judge(&fresh, now, opened_at, true),
+            ReadinessVerdict::Withheld
+        );
+        assert_eq!(
+            evidence.judge(&fresh, now, opened_at, false),
+            ReadinessVerdict::Fresh
+        );
+        let summary = evidence.summary();
+        assert_eq!(
+            summary,
+            "6 frames received, 2 stale (newest 2480 ms old), 1 future-dated (up to 30 ms ahead), 1 malformed, 1 withheld by VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS, largest packet 500 ms, first after 1210 ms",
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn directshow_microphones_get_the_laptop_readiness_budget() {
+        // Plan 195 S2: DirectShow 10 s, everything else 2 s.
+        assert_eq!(
+            microphone_readiness_budget(&crate::audio::windows_dshow_microphone_device_id(
+                "Digital Microphone (2- Cirrus Logic High Definition Audio)"
+            )),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            microphone_readiness_budget("microphone:coreaudio:42"),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            microphone_readiness_budget(
+                "microphone:pulse:alsa_input.pci-0000_02_00.3.HiFi__Mic__source"
+            ),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            microphone_readiness_budget("microphone:avfoundation-uid:6465736b"),
+            Duration::from_secs(2)
+        );
+        assert_eq!(DSHOW_MICROPHONE_READINESS_BUDGET, Duration::from_secs(10));
+        assert_eq!(readiness_budget_label(Duration::from_secs(10)), "10s");
+        assert_eq!(readiness_budget_label(Duration::from_millis(2_500)), "2.5s");
+    }
+
+    #[test]
+    fn capture_worker_test_faults_need_the_smoke_rpc_gate() {
+        // Plan 195 Part W: inert without the gate, parsed with it, and a
+        // malformed delay is an error the tester sees.
+        let off = CaptureWorkerTestFaults::default();
+        assert_eq!(capture_worker_test_faults(None, None, None), Ok(off));
+        assert_eq!(
+            capture_worker_test_faults(None, Some("6000"), Some("1")),
+            Ok(off)
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("0"), Some("6000"), Some("1")),
+            Ok(off)
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("1"), Some("6000"), None),
+            Ok(CaptureWorkerTestFaults {
+                first_pcm_delay: Some(Duration::from_millis(6_000)),
+                fail: false,
+            })
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("1"), None, Some("1")),
+            Ok(CaptureWorkerTestFaults {
+                first_pcm_delay: None,
+                fail: true,
+            })
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("1"), Some(""), Some("0")),
+            Ok(off)
+        );
+        let error = capture_worker_test_faults(Some("1"), Some("six"), None).unwrap_err();
+        assert!(
+            error.contains("VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS")
+                && error.contains("six"),
+            "{error}"
+        );
+        let policy = ReadinessPolicy::for_worker(
+            "microphone:coreaudio:1",
+            CaptureWorkerTestFaults {
+                first_pcm_delay: Some(Duration::from_secs(6)),
+                fail: true,
+            },
+        );
+        assert_eq!(policy.withhold_first_pcm, Some(Duration::from_secs(6)));
+        assert!(
+            policy
+                .fail_with
+                .unwrap()
+                .contains("VIDEORC_TEST_CAPTURE_WORKER_FAIL=1")
+        );
+    }
+
+    /// A producer that sends nothing until `release` is signaled, then fresh
+    /// 10 ms frames; `stop` ends it. The first frame is a channel, not a
+    /// sleep, so a loaded runner cannot slide it across a readiness deadline.
+    fn gated_fresh_source(
+        release: mpsc::Receiver<()>,
+        closed: mpsc::Sender<()>,
+    ) -> (ProducerSource, Arc<AtomicBool>) {
+        let (sender, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let producer_stop = stop.clone();
+        thread::spawn(move || {
+            if release.recv().is_err() {
+                return;
+            }
+            while !producer_stop.load(Ordering::Acquire) {
+                let mut packet = frame(0.3, 480);
+                packet.captured_at = Instant::now();
+                if sender.send(packet).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let mut source = fake_source(receiver, closed);
+        source.device_id = "microphone:windows-dshow:test".into();
+        (source, stop)
+    }
+
+    /// The owner closes the source first, then drops the permit (see
+    /// `cancelled_open_and_ready_handoffs_close_the_owned_source_before_releasing_capacity`).
+    /// Waiting only on source-close races the permit on a loaded Windows runner.
+    fn assert_source_closed_and_capacity_released(
+        count: &AtomicU64,
+        closed_rx: &mpsc::Receiver<()>,
+    ) {
+        closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("source close");
+        assert!(
+            wait_for_producer_cleanup(count, Instant::now() + Duration::from_secs(2)),
+            "owner capacity stayed held after the source closed"
+        );
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    fn stop_gated_source(stop_slot: &std::sync::Mutex<Option<Arc<AtomicBool>>>) {
+        if let Some(stop) = stop_slot.lock().unwrap().take() {
+            stop.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_first_frame_passes_inside_its_budget_and_fails_outside_it() {
+        // Plan 195 S2, scaled: the first frame is held on a channel until the
+        // test releases it. A 1.5 s budget (the DirectShow shape) accepts a
+        // frame that arrives after the open; a 300 ms budget with no frame
+        // reports the budget and that nothing arrived.
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let opened_tx = std::sync::Mutex::new(Some(opened_tx));
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let task_count = count.clone();
+        let task = tokio::spawn(async move {
+            prepare_producer_in(
+                SourceRole::Microphone,
+                move || {
+                    let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                    *opened_stop.lock().unwrap() = Some(stop);
+                    Ok(source)
+                },
+                Arc::new(AtomicBool::new(false)),
+                task_count,
+                spawn_owner,
+                move |phase| {
+                    if phase == OwnerPhase::BeforeOpened {
+                        if let Some(tx) = opened_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                Some(ReadinessPolicy {
+                    budget: Duration::from_millis(1_500),
+                    withhold_first_pcm: None,
+                    fail_with: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), opened_rx)
+            .await
+            .expect("owner opened")
+            .expect("opened handoff");
+        assert!(
+            !task.is_finished(),
+            "readiness must still be waiting for the first frame"
+        );
+        release_tx.send(()).unwrap();
+        let producer = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("readiness after release")
+            .expect("prepare task")
+            .expect("a 1.5 s budget must accept a frame after the open");
+        drop(producer);
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let result = prepare_producer_in(
+            SourceRole::Microphone,
+            move || {
+                let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                *opened_stop.lock().unwrap() = Some(stop);
+                Ok(source)
+            },
+            Arc::new(AtomicBool::new(false)),
+            count.clone(),
+            spawn_owner,
+            |_| {},
+            Some(ReadinessPolicy {
+                budget: Duration::from_millis(300),
+                withhold_first_pcm: None,
+                fail_with: None,
+            }),
+        )
+        .await;
+        drop(release_tx);
+        let error = match result {
+            Ok(_) => panic!("a 300 ms budget must not accept a microphone that never delivered"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.starts_with(
+                "The microphone did not deliver fresh PCM within 0.3s: 0 frames received"
+            ),
+            "{error}"
+        );
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+    }
+
+    #[tokio::test]
+    async fn the_injected_first_pcm_delay_holds_readiness_and_the_injected_failure_ends_it() {
+        // Part W, W3 cases B and C on the real path minus the worker binary.
+        // Fresh frames are available at the open; the injected delay must
+        // hold readiness until it expires, then the owner becomes ready.
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let opened_tx = std::sync::Mutex::new(Some(opened_tx));
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let task_count = count.clone();
+        let started = Instant::now();
+        let task = tokio::spawn(async move {
+            prepare_producer_in(
+                SourceRole::Microphone,
+                move || {
+                    let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                    *opened_stop.lock().unwrap() = Some(stop);
+                    release_tx.send(()).unwrap();
+                    Ok(source)
+                },
+                Arc::new(AtomicBool::new(false)),
+                task_count,
+                spawn_owner,
+                move |phase| {
+                    if phase == OwnerPhase::BeforeOpened {
+                        if let Some(tx) = opened_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                Some(ReadinessPolicy {
+                    budget: Duration::from_secs(2),
+                    withhold_first_pcm: Some(Duration::from_millis(400)),
+                    fail_with: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), opened_rx)
+            .await
+            .expect("owner opened")
+            .expect("opened handoff");
+        assert!(
+            !task.is_finished(),
+            "the injected first-PCM delay must still be holding readiness"
+        );
+        let producer = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("readiness after withhold")
+            .expect("prepare task")
+            .expect("withheld frames must become ready once the delay expires");
+        assert!(
+            started.elapsed() >= Duration::from_millis(390),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(producer);
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (_keep_tx, receiver) = mpsc::channel();
+        let result = prepare_producer_in(
+            SourceRole::Microphone,
+            move || Ok(fake_source(receiver, closed_tx)),
+            Arc::new(AtomicBool::new(false)),
+            count.clone(),
+            spawn_owner,
+            |_| {},
+            Some(ReadinessPolicy {
+                budget: Duration::from_secs(2),
+                withhold_first_pcm: None,
+                fail_with: Some(INJECTED_WORKER_READINESS_FAILURE),
+            }),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("an injected failure must not become ready"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("VIDEORC_TEST_CAPTURE_WORKER_FAIL=1"),
+            "{error}"
+        );
+        assert!(
+            crate::audio_capture_adapter::worker_start_failure_kind(&anyhow::anyhow!(
+                error.clone()
+            ))
+            .is_none(),
+            "an injected failure drives the direct DirectShow fallback, never silence"
+        );
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+    }
+
+    #[test]
+    fn readiness_failure_reason_keeps_the_first_sentence_then_the_evidence_and_worker_tail() {
+        let (_tx, receiver) = mpsc::channel();
+        let (closed_tx, _closed_rx) = mpsc::channel();
+        let mut source = fake_source(receiver, closed_tx);
+        let evidence = ReadinessEvidence::default();
+        assert_eq!(
+            readiness_failure_reason(&source, Duration::from_secs(10), &evidence, false),
+            "The microphone did not deliver fresh PCM within 10s: 0 frames received."
+        );
+        assert_eq!(
+            readiness_failure_reason(&source, Duration::from_millis(2_500), &evidence, true),
+            "The microphone stopped before readiness: 0 frames received."
+        );
+        // A worker that accepted and dropped packets before the bus saw any,
+        // plus its last stderr lines, with the device redacted.
+        source.stats.record_captured_frames(960);
+        source.stats.record_dropped_frames(24_000);
+        let mut tail =
+            crate::audio_capture_adapter::WorkerStderrTail::new(vec!["Test microphone".into()]);
+        tail.push("[dshow @ 0x1] real-time buffer [Test microphone] [audio input] too full");
+        source.stderr_tail = Some(Arc::new(std::sync::Mutex::new(tail)));
+        let reason = readiness_failure_reason(&source, Duration::from_secs(2), &evidence, false);
+        assert_eq!(
+            reason,
+            "The microphone did not deliver fresh PCM within 2s: 0 frames received; capture worker passed 960 and dropped 24000 PCM frames. Worker stderr: [dshow @ 0x1] real-time buffer [<device>] [audio input] too full",
+            "{reason}"
+        );
+        // The platform's own failure leads when the worker died.
+        let failure: ProducerFailure = Arc::new(std::sync::Mutex::new(Some(
+            "Capture PCM read failed: broken pipe".to_string(),
+        )));
+        source.failure = Some(failure);
+        let reason = readiness_failure_reason(&source, Duration::from_secs(2), &evidence, true);
+        assert!(
+            reason.starts_with(
+                "Capture PCM read failed: broken pipe (0 frames received; capture worker passed 960 and dropped 24000 PCM frames) Worker stderr: "
+            ),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_only_producer_fails_readiness_with_its_counts_inside_the_budget() {
+        // A producer whose every frame is older than `MAX_FRAME_AGE` never
+        // becomes ready; the reason carries the budget and the counts, and the
+        // owner's deadline reports before the caller's outer wait.
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let started = Instant::now();
+        let result = prepare_producer_in(
+            SourceRole::Microphone,
+            move || {
+                let (sender, receiver) = mpsc::channel();
+                for _ in 0..3 {
+                    let mut stale = frame(0.2, 480);
+                    stale.captured_at = Instant::now() - MAX_FRAME_AGE - Duration::from_millis(500);
+                    sender.send(stale).unwrap();
+                }
+                // Keep the sender alive past readiness so the loop sees a
+                // deadline, not a disconnect.
+                std::mem::forget(sender);
+                Ok(fake_source(receiver, closed_tx))
+            },
+            Arc::new(AtomicBool::new(false)),
+            count.clone(),
+            spawn_owner,
+            |_| {},
+            Some(ReadinessPolicy {
+                budget: Duration::from_millis(300),
+                withhold_first_pcm: None,
+                fail_with: None,
+            }),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("a stale-only producer must not become ready"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.starts_with(
+                "The microphone did not deliver fresh PCM within 0.3s: 3 frames received, all stale (newest "
+            ),
+            "{error}"
+        );
+        assert!(error.contains("largest packet 10 ms"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
     #[tokio::test]
     async fn failed_readiness_waits_for_actual_owner_close_before_returning() {
         let count = Arc::new(AtomicU64::new(0));
@@ -7660,6 +8489,7 @@ mod tests {
                         receiver: rx,
                         stats: Arc::new(AudioCaptureStats::default()),
                         failure: None,
+                        stderr_tail: None,
                         _owner: Box::new(HeldClose {
                             started: Some(close_tx),
                             release: release_rx,
@@ -8359,6 +9189,7 @@ mod mix_tests {
                 thread: Some(worker),
             }),
             failure,
+            stderr_tail: None,
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
@@ -10857,6 +11688,7 @@ mod mix_tests {
                     receiver: pcm_rx,
                     stats: Arc::new(AudioCaptureStats::default()),
                     failure: None,
+                    stderr_tail: None,
                     _owner: Box::new(HeldOwner {
                         closing: Some(mic_closing_tx),
                         release: mic_release_rx,

@@ -375,6 +375,14 @@ pub struct WebSocketQueueTicket {
     sequence: u64,
 }
 
+impl WebSocketQueueTicket {
+    /// How long the command has waited in its lane (plan 195 S1: the expiry
+    /// log names the queue age).
+    pub fn queued_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.enqueued_at)
+    }
+}
+
 #[derive(Debug, Default)]
 struct WebSocketQueueTotals {
     current_depth: AtomicU64,

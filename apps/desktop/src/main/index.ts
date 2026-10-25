@@ -293,8 +293,10 @@ import {
 import { startLocalCrashReporter } from './local-crash-reporter'
 import {
   GPU_RETRY_STABILITY_MS,
+  armGpuFallbackVersionRetry,
   clearGpuFallbackState,
   decideGpuFallback,
+  gpuCrashFallbackState,
   gpuFallbackStatePath,
   isGpuCrashReason,
   readGpuFallbackState,
@@ -1046,8 +1048,19 @@ const electronBackgroundPolicy = electronBackgroundPolicyFromEnv(process.env)
 // before app.ready: VIDEORC_DISABLE_GPU=1 is the explicit user hatch, a
 // persisted gpu-fallback.json (written after repeated GPU crashes, below)
 // self-heals the next launch, and VIDEORC_FORCE_GPU=1 overrides + clears it.
+// A fallback another app version recorded gets one accelerated launch on this
+// version (plan 195 S5); a crash in it restores the fallback for this version.
 const gpuFallbackFile = gpuFallbackStatePath(app.getPath('userData'))
 let gpuFallbackState = readGpuFallbackState(gpuFallbackFile)
+const gpuFallbackVersionRetry = armGpuFallbackVersionRetry({
+  env: process.env,
+  persisted: gpuFallbackState,
+  appVersion: app.getVersion(),
+  requestedAt: new Date().toISOString()
+})
+if (gpuFallbackVersionRetry) {
+  gpuFallbackState = gpuFallbackVersionRetry
+}
 const gpuFallbackLaunchState = gpuFallbackState
 const gpuFallbackDecision = decideGpuFallback({
   env: process.env,
@@ -1058,7 +1071,11 @@ if (gpuFallbackDecision.clearPersisted) {
   gpuFallbackState = null
 }
 if (gpuFallbackDecision.source === 'retry' && gpuFallbackState) {
-  gpuFallbackState = startGpuFallbackRetry(gpuFallbackState, new Date().toISOString())
+  gpuFallbackState = startGpuFallbackRetry(
+    gpuFallbackState,
+    new Date().toISOString(),
+    app.getVersion()
+  )
   writeGpuFallbackState(gpuFallbackFile, gpuFallbackState)
 } else if (
   gpuFallbackDecision.source === 'persisted' &&
@@ -1141,18 +1158,13 @@ app.on('child-process-gone', (_event, details) => {
   if (!gpuFallbackDecision.disable && !gpuFallbackPersistedThisLaunch) {
     if (shouldPersistGpuFallback(gpuProcessCrashCount)) {
       gpuFallbackPersistedThisLaunch = true
-      gpuFallbackState = {
-        disableHardwareAcceleration: true,
-        reason: gpuFallbackDecision.source === 'retry' ? 'gpu-retry-failed' : 'gpu-process-crashes',
+      gpuFallbackState = gpuCrashFallbackState({
+        previous: gpuFallbackState ?? gpuFallbackLaunchState,
         crashCount: gpuProcessCrashCount,
-        updatedAt: new Date().toISOString(),
-        ...((gpuFallbackState ?? gpuFallbackLaunchState)?.retryRequestedAt
-          ? { retryRequestedAt: (gpuFallbackState ?? gpuFallbackLaunchState)?.retryRequestedAt }
-          : {}),
-        ...((gpuFallbackState ?? gpuFallbackLaunchState)?.retryAttempts !== undefined
-          ? { retryAttempts: (gpuFallbackState ?? gpuFallbackLaunchState)?.retryAttempts }
-          : {})
-      }
+        duringRetry: gpuFallbackDecision.source === 'retry',
+        appVersion: app.getVersion(),
+        updatedAt: new Date().toISOString()
+      })
       writeGpuFallbackState(gpuFallbackFile, gpuFallbackState)
       logBackend(
         'warn',
@@ -15123,6 +15135,12 @@ app.whenReady().then(async () => {
   }
 
   if (gpuFallbackDecision.source === 'retry') {
+    if (gpuFallbackVersionRetry) {
+      logBackend(
+        'info',
+        `Retrying hardware acceleration once on Videorc ${app.getVersion()} (software rendering began after graphics crashes on ${gpuFallbackVersionRetry.appVersion ? `Videorc ${gpuFallbackVersionRetry.appVersion}` : 'an earlier version'}). Two GPU crashes in this launch restore software rendering for this version.`
+      )
+    }
     setTimeout(() => {
       if (!gpuFallbackPersistedThisLaunch) {
         clearGpuFallbackState(gpuFallbackFile)

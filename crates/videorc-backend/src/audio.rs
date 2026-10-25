@@ -652,7 +652,7 @@ pub fn parse_windows_dshow_microphone_id(id: &str) -> Option<String> {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn windows_dshow_microphone_device_id(device_name: &str) -> String {
+pub(crate) fn windows_dshow_microphone_device_id(device_name: &str) -> String {
     format!(
         "{WINDOWS_DSHOW_MICROPHONE_PREFIX}{}",
         encode_hex(device_name.as_bytes())

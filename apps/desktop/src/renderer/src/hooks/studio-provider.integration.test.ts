@@ -3838,6 +3838,207 @@ describe('real StudioProvider lifecycle', () => {
     expect(releaseWrites.slice(0, 2)).toEqual(['unmuted config', 'ownership removed'])
   })
 
+  // Plan 195 S4: `screens.active` rides the liveControl lane, which a slow
+  // Record start (its reconciliation fence) or a long poster can hold past
+  // the lane's queue age. The expiry used to fail the whole launch or focus
+  // batch and toast "Videorc hit a problem" with "Videorc was busy…" for a
+  // read the streamer never asked for. Background reads never toast; a live
+  // control the streamer pressed names itself.
+  const BUSY_DESCRIPTION = "Videorc was busy and didn't do it. Try again in a moment."
+  const busyLaneError = (): Error =>
+    Object.assign(
+      new Error('The command expired while awaiting its reconciliation fence and was not applied.'),
+      { code: 'command-expired-before-dispatch' }
+    )
+  const toastCalls = (): unknown[][] =>
+    [toastSpies.error, toastSpies.warning, toastSpies.info, toastSpies.message].flatMap(
+      (spy) => spy.mock.calls
+    )
+  const expectNoBusyOrGenericToast = (): void => {
+    expect(
+      toastCalls()
+        .map(([title, options]) => [
+          title,
+          (options as { description?: unknown } | undefined)?.description
+        ])
+        .filter(
+          ([title, description]) =>
+            title === 'Videorc hit a problem' || description === BUSY_DESCRIPTION
+        )
+    ).toEqual([])
+  }
+
+  it('never toasts a busy takeover read at launch, commits the rest and retries it (plan 195 S4)', async () => {
+    const backend = new StudioBackend()
+    backend.screens = [takeoverScreen]
+    backend.activeScreen = takeoverScreen
+    let busyReads = 1
+    const respond = backend.response.bind(backend)
+    vi.spyOn(backend, 'response').mockImplementation((command) => {
+      if (command.method === 'screens.active' && busyReads > 0) {
+        busyReads -= 1
+        throw busyLaneError()
+      }
+      return respond(command)
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const warn = vi.spyOn(console, 'warn')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue | undefined => observations.at(-1)?.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    // The rest of the launch commits: the busy read no longer fails the batch.
+    await waitForObservation(() => latest()?.canSaveScene === true)
+    expect(latest()?.screens).toEqual([takeoverScreen])
+    // A retry reads the takeover once the lane is free.
+    await waitForObservation(() => latest()?.activeScreen?.id === takeoverScreen.id)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'screens.active')
+    ).toHaveLength(2)
+    expect(warn).toHaveBeenCalledWith(
+      '[takeover] reading the active takeover failed:',
+      expect.objectContaining({ code: 'command-expired-before-dispatch' })
+    )
+    expectNoBusyOrGenericToast()
+    expect(latest()?.lastError).toBeNull()
+  })
+
+  it('never toasts a busy takeover read on a focus refresh, and commits the rest (plan 195 S4)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => [],
+        // Main owns the account refresh; it has nothing to say here.
+        refreshAccount: async () => ({ outcome: 'deferred' as const })
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    toastSpies.error.mockClear()
+    toastSpies.warning.mockClear()
+
+    const respond = backend.response.bind(backend)
+    vi.spyOn(backend, 'response').mockImplementation((command) => {
+      if (command.method === 'screens.active') throw busyLaneError()
+      return respond(command)
+    })
+    const plugged: Device = {
+      id: 'camera:plugged',
+      name: 'Plugged Camera',
+      kind: 'camera',
+      status: 'available'
+    }
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [plugged, ...backend.deviceList.devices]
+    }
+    await act(async () => {
+      await latest().refreshBackend({ fresh: true })
+    })
+
+    expect(latest().deviceList.devices).toContainEqual(plugged)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'screens.active').length
+    ).toBeGreaterThanOrEqual(2)
+    // Give a lazily loaded error toast the time it would need to land.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expectNoBusyOrGenericToast()
+    expect(latest().lastError).toBeNull()
+  })
+
+  it('names the takeover when a busy lane drops Show or Take off (plan 195 S4)', async () => {
+    const backend = new StudioBackend()
+    backend.screens = [takeoverScreen]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+
+    for (const [method, run, title] of [
+      [
+        'screens.activate',
+        () => latest().activateScreen(takeoverScreen.id),
+        "Couldn't show the takeover"
+      ],
+      ['screens.clear', () => latest().clearActiveScreen(), "Couldn't take off the takeover"]
+    ] as const) {
+      toastSpies.warning.mockClear()
+      backend.deferFailure(method, busyLaneError())()
+      let result: boolean | undefined
+      await act(async () => {
+        result = await run()
+      })
+      expect(result).toBe(false)
+      // The failure copy loads on demand, so its toast lands a moment later.
+      await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
+      expect(toastSpies.warning).toHaveBeenCalledWith(
+        title,
+        expect.objectContaining({ description: BUSY_DESCRIPTION })
+      )
+    }
+    expect(toastCalls().map(([title]) => title)).not.toContain('Videorc hit a problem')
+  })
+
+  it('names the banner when a busy lane drops Show or Hide (plan 195 S4)', async () => {
+    const { backend, latest } = await mountBannerProvider([testBanner('sponsor', 0)])
+    for (const [method, run, title] of [
+      ['banners.show', () => latest().banners.showBanner('sponsor'), "Couldn't show the banner"],
+      ['banners.hide', () => latest().banners.hideBanner('sponsor'), "Couldn't hide the banner"],
+      ['banners.hide', () => latest().banners.hideBanner(), "Couldn't hide the banners"]
+    ] as const) {
+      toastSpies.warning.mockClear()
+      backend.deferFailure(method, busyLaneError())()
+      let result: boolean | undefined
+      await act(async () => {
+        result = await run()
+      })
+      expect(result).toBe(false)
+      await waitForObservation(() => toastSpies.warning.mock.calls.length > 0)
+      expect(toastSpies.warning).toHaveBeenCalledWith(
+        title,
+        expect.objectContaining({ description: BUSY_DESCRIPTION })
+      )
+    }
+    expect(toastCalls().map(([title]) => title)).not.toContain('Videorc hit a problem')
+  })
+
   // Plan 174 S3.18 (I-1): the bundle lands in a folder Finder hides, so the
   // export toast reveals it, through main, by the path the export returned.
   it('offers to show an exported support bundle in the file manager', async () => {

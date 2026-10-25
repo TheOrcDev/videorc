@@ -1,5 +1,20 @@
 # Implementation Plans
 
+- 2026-10-25: [Plan 195](195-windows-slow-microphone-breaks-recording-start.md),
+  A slow Windows microphone makes Record fail. Tester bundle (0.9.150, Iris
+  Xe, Cirrus Logic mic): the capture worker's fixed 2 s readiness never
+  passes, so the mic falls back to FFmpeg's direct DirectShow input, and
+  FFmpeg then needs 5-7 s to start against an 8 s deadline (0.5 s without a
+  mic on the same PC). Also explains "Microphone can't be changed", "Videorc
+  was busy" (liveControl expiries behind a 19 s poster) and the 3-31 s
+  start delay. Slices: S0 Windows measurement script, S1 evidence, S2
+  per-protocol readiness budget, S3 deadline per input topology (with PR
+  #769), S4 busy toasts, S5 output right-sizing. Part W is a self-contained
+  Windows test guide. **BUILT** 2026-10-25 on
+  `fix/195-windows-slow-mic-recording-start`: S1–S5 done; S0/W3/W4 need
+  Windows hardware; D1 (land #769) and D2 (Quick Sync default) are owner
+  calls.
+
 - 2026-10-25: [Plan 196](196-lcd-level-meter.md), The LCD meter for every
   audio level. Owner request: the Studio microphone meter and the meters on
   Sources become audiocn's LCD meter. `MicLevelMeter` stays the one meter
