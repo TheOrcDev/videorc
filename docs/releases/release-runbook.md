@@ -24,8 +24,12 @@ lane is `.github/workflows/release-linux-alpha.yml`. It writes only:
 
 It must never write `releases/macos/`, `releases/windows/`, `updates/macos/`,
 `updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Public
-download remains disabled. See [../distribution.md](../distribution.md) and
-[../linux-port-plan.md](../linux-port-plan.md).
+download remains disabled. Hold the Linux Discord announcement until that
+download is public; preview with
+`pnpm release:notify:discord <releaseId> --dry-run`, then send with
+`pnpm release:notify:discord <releaseId>`. Never print
+`VIDEORC_DISCORD_RELEASE_WEBHOOK`. See [../distribution.md](../distribution.md)
+and [../linux-port-plan.md](../linux-port-plan.md).
 
 ## Windows Alpha Is A Separate Gated Track
 
@@ -215,11 +219,16 @@ Newsletter: `pnpm changelog:email <releaseId>` renders the entry to
 email-ready HTML + plaintext under `dist/changelog/email/` (sending is manual —
 no ESP is wired yet).
 
-Discord announcement: after the feed is verified, `pnpm release:notify:discord`
-posts a short "what's new" (release title + up to 4 changelog highlights) to the
-Videorc Discord channel. `-- --dry-run` previews without posting; a releaseId
-argument re-announces an older release. The webhook is a post-anywhere
-credential and this repo is PUBLIC, so it is **never committed** — it lives in
+Discord announcement: after the macOS feed is verified, preview with
+`pnpm release:notify:discord <releaseId> --dry-run`, then send with
+`pnpm release:notify:discord <releaseId>`. The post is a short "what's new"
+(release title + up to 4 changelog highlights). A releaseId argument
+re-announces an older release. This is the macOS Beta post. After Windows
+public promotion, send that platform's Alpha entry the same way. After the
+Linux download is public, send the Linux Alpha entry the same way. If one
+Alpha entry names both Windows and Linux, send that post only when every
+named platform is publicly live. The webhook is a post-anywhere credential
+and this repo is PUBLIC, so it is **never committed** — it lives in
 `~/.videorc-release.env` as `VIDEORC_DISCORD_RELEASE_WEBHOOK` (gitignored,
 already sourced by the build); the script refuses to run without it and never
 echoes the URL.
