@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 // Plans 092 and 093: audiocn's meter and channel tokens are Videorc tokens, written by hand in
@@ -42,5 +42,35 @@ describe('audiocn tokens (plans 092 and 093)', () => {
 
   it('has no self-referencing custom property', () => {
     expect(styles).not.toMatch(/--([a-z0-9-]+):\s*var\(--\1\)\s*;/)
+  })
+})
+
+// Plan 196, D1: the LCD draws in Videorc's ink. LcdDisplay's defaults are the
+// theme's --primary and the theme's appearance, so the one screen Videorc
+// renders passes neither a hardware ink nor a pinned appearance.
+function rendererSources(directory: string): string[] {
+  return readdirSync(directory).flatMap((entry) => {
+    const path = join(directory, entry)
+    if (statSync(path).isDirectory()) return rendererSources(path)
+    return /\.tsx$/.test(entry) && !/\.test\.tsx$/.test(entry) ? [path] : []
+  })
+}
+
+describe('audiocn LCD (plan 196)', () => {
+  const screens = rendererSources(__dirname).flatMap((path) =>
+    Array.from(readFileSync(path, 'utf8').matchAll(/<LcdDisplay\b([^>]*)>/g), (match) => ({
+      path: relative(__dirname, path).split(sep).join('/'),
+      props: match[1]
+    }))
+  )
+
+  it('renders LcdDisplay only inside MicLevelMeter', () => {
+    expect(screens.map(({ path }) => path)).toEqual(['components/studio/mic-level-meter.tsx'])
+  })
+
+  it('never picks a hardware ink or pins an appearance', () => {
+    for (const { path, props } of screens) {
+      expect(props, path).not.toMatch(/\b(?:variant|appearance)=/)
+    }
   })
 })

@@ -44,7 +44,11 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/components/notes-window.tsx',
   // shadcn chart: selectors that MATCH Recharts' own default strokes
   // ([stroke='#ccc']) to restyle them with tokens; it paints no literal.
-  'src/components/ui/chart.tsx'
+  'src/components/ui/chart.tsx',
+  // audiocn's LCD (plan 196): the screen's bezel and glass are the
+  // instrument's own materials, and the hardware inks are choices Videorc
+  // never makes. Videorc draws the ink in --primary (MicLevelMeter).
+  'src/components/ui/lcd-display.tsx'
 ])
 
 function rendererFiles(): string[] {
@@ -671,7 +675,9 @@ const POPUP_TIER_FILES = new Set([
   'src/components/ui/chart.tsx',
   // audiocn (plan 092): its channel chips and slider well keep the kit's look.
   'src/components/ui/channel-toggle.tsx',
-  'src/components/ui/parameter-slider.tsx'
+  'src/components/ui/parameter-slider.tsx',
+  // audiocn (plan 196): the LCD's bezel, 10 px like a row.
+  'src/components/ui/lcd-display.tsx'
 ])
 
 const OFF_TIER_RADIUS_ALLOWLIST = new Set([
@@ -689,7 +695,10 @@ const OFF_TIER_RADIUS_ALLOWLIST = new Set([
   'src/components/ui/mixer.tsx',
   // audiocn (plan 189): the pad root's `rounded-xl`; Videorc passes
   // `rounded-row` from outside (docs/audiocn.md), so no pad shows it.
-  'src/components/ui/sound-pad.tsx'
+  'src/components/ui/sound-pad.tsx',
+  // audiocn (plan 196): the LCD's screen, its select and the CLIP flag.
+  'src/components/ui/lcd-display.tsx',
+  'src/components/ui/lcd-meter.tsx'
 ])
 
 describe('guardrails consolidated (plan 174 S4.1)', SOURCE_SCAN_TIMEOUT, () => {

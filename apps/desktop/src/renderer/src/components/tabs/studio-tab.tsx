@@ -253,12 +253,12 @@ function StudioDashboardBottomRowFallback(): ReactElement {
   )
 }
 
-/** The Microphone section's height while its chunk loads: the picker and the meter row. */
+/** The Microphone section's height while its chunk loads: the picker and the LCD screen. */
 function MicrophoneSectionFallback(): ReactElement {
   return (
     <PanelSection title="Microphone">
       <Skeleton className="h-control rounded-chip" />
-      <Skeleton className="h-4 rounded-chip" />
+      <Skeleton className="h-24 rounded-row" />
     </PanelSection>
   )
 }
