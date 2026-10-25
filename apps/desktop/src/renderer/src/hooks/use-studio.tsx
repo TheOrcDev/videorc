@@ -16,6 +16,7 @@ import {
   clipMarkedToast
 } from '../../../shared/clip-marks'
 import {
+  idleEndsSessionThatRan,
   sessionActivity,
   sessionIsLive,
   sessionIsReplayOnly,
@@ -7318,11 +7319,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // artifact, so they must not claim that a recording was saved; nor
         // does a buffer-only session (plan 181) ending for the switch or the
         // handover into a real session.
-        if (
-          status.state === 'idle' &&
-          !previouslyReplayOnly &&
-          ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
-        ) {
+        const ranToIdle = idleEndsSessionThatRan(previousState, status.state)
+        if (ranToIdle && !previouslyReplayOnly) {
           const finishedActivity = lastSessionActivityRef.current
           const finishedSessionId =
             status.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
@@ -7358,9 +7356,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         // Plan 181: a session ended or began; the switch decides what the
         // ring does next (re-arm after a recording, stop after the switch).
-        // A session that ended cleanly is proof a start can work: the
-        // failed-start count begins again.
-        if (status.state === 'idle') replayFailedStartsRef.current = 0
+        // A session that ran and ended is proof a start can work: the
+        // failed-start count begins again. A refused start's Idle is not
+        // (plan 198), or the give-up limit never trips.
+        if (ranToIdle) replayFailedStartsRef.current = 0
         scheduleReplayReconcile()
       }),
       // Viewer rider V2: relay the latest concurrent-viewer sample to the
@@ -7462,7 +7461,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               return
             const shownKey = runtime.showSessionHealthEvent(
               event,
-              qualityToastSessionsRef.current.has(qualityDedupeKey)
+              qualityToastSessionsRef.current.has(qualityDedupeKey),
+              recordingRef.current
             )
             if (shownKey) qualityToastSessionsRef.current.add(shownKey)
           })

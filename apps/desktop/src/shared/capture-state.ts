@@ -75,6 +75,19 @@ export function sessionIsReplayOnly(status: { replayOnly?: boolean } | null | un
   return status?.replayOnly === true
 }
 
+/** An Idle that ends a session which ran (plan 198). A refused start also
+ * ends in Idle, the backend's terminal replacement for Starting, but proves
+ * nothing: only a session that reached recording or streaming shows a start
+ * can work. */
+export function idleEndsSessionThatRan(
+  previousState: string | null | undefined,
+  nextState: string
+): boolean {
+  return (
+    nextState === 'idle' && ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
+  )
+}
+
 /** A running session that owns the transport: active and not buffer-only. */
 export function sessionOwnsTransport(status: {
   state?: string | null
