@@ -83,16 +83,21 @@ export const CONFIG_GRID_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*
 /**
  * Gallery archetype: picture cards that fill by available width. `dense`
  * packs smaller cards (10 rem), for a picker inside a dialog (plan 174
- * S3.15b: the Buddy onboarding's official five).
+ * S3.15b: the Buddy onboarding's official five). `rowsOfFive` holds a row to
+ * five cards, which may shrink to 11 rem so that five fit the default window:
+ * ten cards read as two rows of five, and a narrower pane wraps them like the
+ * default gallery (Assets → Backgrounds, plan 194 S7).
  */
 export function Gallery({
   children,
   className,
   dense = false,
+  rowsOfFive = false,
   ...props
 }: ComponentProps<'div'> & {
   children: ReactNode
   dense?: boolean
+  rowsOfFive?: boolean
 }): ReactElement {
   return (
     <div
@@ -100,7 +105,12 @@ export function Gallery({
         'grid gap-3',
         dense
           ? '[grid-template-columns:repeat(auto-fill,minmax(10rem,1fr))]'
-          : '[grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
+          : rowsOfFive
+            ? // A track is never narrower than a fifth of the row less its
+              // four 12 px gaps (and a pixel, against rounding), so auto-fill
+              // never fits a sixth.
+              '[grid-template-columns:repeat(auto-fill,minmax(max(11rem,calc((100%_-_3rem)/5_-_1px)),1fr))]'
+            : '[grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
         className
       )}
       {...props}

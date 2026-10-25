@@ -254,7 +254,12 @@ describe('proof surface live background library script', () => {
       'side-rays',
       'plasma-wave',
       'liquid-chrome',
-      'line-waves'
+      'line-waves',
+      'beams',
+      'color-bends',
+      'dither',
+      'ferrofluid',
+      'ghost-fibers'
     ])
     expect(renderJson).toBe(
       readFileSync(join(here, '../shared/live-backgrounds.render.generated.json'), 'utf8')

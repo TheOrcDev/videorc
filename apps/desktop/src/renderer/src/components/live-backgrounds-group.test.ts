@@ -20,9 +20,10 @@ import {
 import { STORAGE_KEYS } from '@/lib/capture'
 import { AssetsTab } from '@/components/tabs/assets-tab'
 
-// Plan 190 S8: Assets → Backgrounds → Live. Five built-in tiles above the
-// pictures; a click toggles one on the scene; Adjust style holds Look,
-// Motion, Visibility and Dim, and says why a still frame shows.
+// Plan 190 S8: Assets → Backgrounds → Live. Built-in tiles above the
+// pictures (ten since plan 194, in two rows of five where five fit); a click
+// toggles one on the scene; Adjust style holds Look, Motion, Visibility and
+// Dim, and says why a still frame shows.
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -94,18 +95,24 @@ async function openStyle(name: string): Promise<void> {
 }
 
 describe('Assets → Backgrounds → Live (plan 190 S8)', () => {
-  it("shows the five live tiles above the pictures, each with its current look's thumbnail", async () => {
+  it("shows the ten live tiles above the pictures, each with its current look's thumbnail", async () => {
     const registry = setLiveBackgroundSettings(createDefaultRegistry(), 'silk', {
       look: 'midnight'
     })
     await renderAssets(registry)
 
+    // Plan 194 S6: the five more join after the first five.
     expect(liveTiles().map((tile) => tile.dataset.videorcLiveBackgroundTile)).toEqual([
       'silk',
       'side-rays',
       'plasma-wave',
       'liquid-chrome',
-      'line-waves'
+      'line-waves',
+      'beams',
+      'color-bends',
+      'dither',
+      'ferrofluid',
+      'ghost-fibers'
     ])
     const thumbnail = (id: string): string =>
       liveTile(id).querySelector('img')?.getAttribute('src') ?? ''
@@ -115,6 +122,11 @@ describe('Assets → Backgrounds → Live (plan 190 S8)', () => {
     expect(thumbnail('plasma-wave')).toContain('live-thumbs/live-plasma-wave-plasma.webp')
     expect(thumbnail('liquid-chrome')).toContain('live-thumbs/live-liquid-chrome-polished.webp')
     expect(thumbnail('line-waves')).toContain('live-thumbs/live-line-waves-silk.webp')
+    expect(thumbnail('beams')).toContain('live-thumbs/live-beams-studio.webp')
+    expect(thumbnail('color-bends')).toContain('live-thumbs/live-color-bends-default.webp')
+    expect(thumbnail('dither')).toContain('live-thumbs/live-dither-classic.webp')
+    expect(thumbnail('ferrofluid')).toContain('live-thumbs/live-ferrofluid-studio.webp')
+    expect(thumbnail('ghost-fibers')).toContain('live-thumbs/live-ghost-fibers-violet.webp')
 
     // Name and a monochrome Live tag; built in, so no ⋯ menu.
     const silk = liveTile('silk')
@@ -134,6 +146,69 @@ describe('Assets → Backgrounds → Live (plan 190 S8)', () => {
     expect(document.body.textContent).toContain(
       'Live backgrounds move behind your screen and camera. Images can be PNG, JPEG or WebP.'
     )
+  })
+
+  it("lays the ten out on the pictures' grid: rows of five where five fit (plan 194 S7)", async () => {
+    await renderAssets()
+    const liveGrid = document.querySelector<HTMLElement>('[data-videorc-live-backgrounds] > .grid')!
+    const imageGrid = document.querySelector<HTMLElement>(
+      '[data-videorc-image-backgrounds] > .grid'
+    )!
+    // happy-dom has no layout: pin the track recipe, which caps a row at five
+    // (a track is at least a fifth of the row) and wraps narrower panes.
+    expect(liveGrid.children).toHaveLength(10)
+    expect(liveGrid.className).toContain(
+      '[grid-template-columns:repeat(auto-fill,minmax(max(11rem,calc((100%_-_3rem)/5_-_1px)),1fr))]'
+    )
+    expect(liveGrid.className).toContain('gap-3')
+    // The Images group shares the grid, so both groups' tiles line up.
+    expect(imageGrid.className).toBe(liveGrid.className)
+  })
+
+  it('applies a plan 194 tile on click like the first five (plan 194 S7)', async () => {
+    await renderAssets()
+    const dither = tileButton('dither')
+    expect(dither.getAttribute('aria-pressed')).toBe('false')
+    expect(dither.getAttribute('aria-label')).toBe('Apply Dither to the scene')
+    await act(async () => dither.click())
+    expect(applyLive).toHaveBeenLastCalledWith('dither')
+
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await renderAssets(applyLiveBackground(createDefaultRegistry(), 'ghost-fibers'))
+    const active = tileButton('ghost-fibers')
+    expect(active.getAttribute('aria-pressed')).toBe('true')
+    expect(active.getAttribute('aria-label')).toBe('Remove Ghost Fibers from the scene')
+    expect(liveTile('ghost-fibers').querySelector('[data-videorc-in-use]')?.textContent).toBe(
+      'In use'
+    )
+    expect(
+      liveTile('ghost-fibers').querySelector('[data-slot="badge"][data-variant="outline"]')
+        ?.textContent
+    ).toBe('Live')
+    expect(byLabel('Actions for Ghost Fibers')).toBeNull()
+    await act(async () => active.click())
+    expect(applyLive).toHaveBeenLastCalledWith(null)
+  })
+
+  it("switches a plan 194 background's look in Adjust style (plan 194 S7)", async () => {
+    await renderAssets(applyLiveBackground(createDefaultRegistry(), 'ghost-fibers'))
+    await openStyle('Ghost Fibers')
+    expect(popover()!.dataset.videorcLiveBackgroundStyle).toBe('ghost-fibers')
+    const labels = [...popover()!.querySelectorAll('label')].map((label) => label.textContent)
+    expect(labels).toEqual(['Look', 'Motion', 'Visibility', 'Dim'])
+    const trigger = popover()!.querySelector<HTMLElement>('[data-slot="select-trigger"]')!
+    expect(trigger.textContent).toContain('Violet')
+    await act(async () => trigger.click())
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    expect(options.map((option) => option.textContent)).toEqual(['Violet', 'Fiber Optic', 'Ember'])
+    await act(async () => options[1].click())
+
+    expect(storedRegistry().live.settings['ghost-fibers']?.look).toBe('fiber')
+    expect(liveTile('ghost-fibers').querySelector('img')?.getAttribute('src')).toContain(
+      'live-ghost-fibers-fiber.webp'
+    )
+    expect(liveTile('ghost-fibers').dataset.videorcLiveBackgroundLook).toBe('fiber')
   })
 
   it('applies a live tile on click, and takes the active one off', async () => {

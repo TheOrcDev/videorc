@@ -187,6 +187,7 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from './live-background-ids'
 import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
 import { isBuddyPackId, parseBuddyDraftPath } from './buddy-assets'
@@ -1525,10 +1526,12 @@ const sceneEditorDraftAckSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<SceneEditorDraftAck>
 
-// Plan 190: how the live background draws (Rust `LiveBackgroundStatus`).
+// Plan 190: how the live background draws (Rust `LiveBackgroundStatus`). The
+// ids come from the shared list, so a new background (plan 194) cannot be
+// rejected here by omission.
 const liveBackgroundStatusSchema = objectSchema(
   {
-    id: enumSchema(['silk', 'side-rays', 'plasma-wave', 'liquid-chrome', 'line-waves']),
+    id: enumSchema(LIVE_BACKGROUND_IDS as [LiveBackgroundId, ...LiveBackgroundId[]]),
     look: boundedString,
     rendering: enumSchema(['shader', 'half', 'still']),
     reason: optionalSchema(

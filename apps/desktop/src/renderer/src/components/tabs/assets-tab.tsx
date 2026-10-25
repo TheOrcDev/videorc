@@ -251,7 +251,8 @@ export function AssetsTab(): ReactElement {
         <LiveBackgroundsGroup />
         <div className="flex flex-col gap-2" data-videorc-image-backgrounds="">
           <SectionLabel as="h3">Images</SectionLabel>
-          <Gallery className="gap-3">
+          {/* The Live group's grid (plan 194 S7), so both groups' tiles line up. */}
+          <Gallery className="gap-3" rowsOfFive>
             {registry.slots.map((slot) => (
               <PresetTile
                 key={slot.id}

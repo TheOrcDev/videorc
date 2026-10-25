@@ -1,13 +1,16 @@
 # Live backgrounds
 
 A live background is an animated background behind your screen and camera
-(plan 190). Five ship, from React Bits by David Haz: **Silk**, **Side
-Rays**, **Plasma Wave**, **Liquid Chrome** and **Line Waves**. Each has three
-looks. They are free for everyone, on macOS, Windows and Linux.
+(plan 190). Ten ship, from React Bits by David Haz: **Silk**, **Side
+Rays**, **Plasma Wave**, **Liquid Chrome** and **Line Waves** (plan 190), and
+**Beams**, **Color Bends**, **Dither**, **Ferrofluid** and **Ghost Fibers**
+(plan 194). Each has three looks. They are free for everyone, on macOS,
+Windows and Linux.
 
 ## Using them
 
-- **Pick** one in Assets → Backgrounds, in the **Live** group. A click puts
+- **Pick** one in Assets → Backgrounds, in the **Live** group (two rows of
+  five). A click puts
   it on the scene, and a click on the active tile takes it off. Picking a
   picture takes a live background off, and the other way round: a scene has
   one background.
@@ -29,6 +32,11 @@ looks. They are free for everyone, on macOS, Windows and Linux.
 | Plasma Wave   | Plasma, Ember, Glacier        |
 | Liquid Chrome | Polished, Gold, Mercury       |
 | Line Waves    | Silk, Gold, Aurora            |
+| Beams         | Studio, Chrome, Ember         |
+| Color Bends   | Default, Ember, Ocean         |
+| Dither        | Classic, Amber, Blueprint     |
+| Ferrofluid    | Studio, Ember, Frost          |
+| Ghost Fibers  | Violet, Fiber Optic, Ember    |
 
 ## Where it moves, and where it shows a still
 
@@ -63,12 +71,16 @@ The posters are registered with the backend at start like the bundled
 pictures (a path check each, no decode). `pnpm smoke:live-background-off-ab`
 compares startup, frame time and memory with `origin/main`.
 
-With one on, measured on an Apple M4 (plan 190 "Measured cost"):
+With one on, measured on an Apple M4 (plan 190 "Measured cost", plan 194
+"As built"):
 
-- **GPU time per 1080p frame**: 0.3–0.9 ms for most looks, up to 1.7 ms
-  on a loaded machine. A still picture takes 0.05–0.08 ms.
-- **Memory**: 0–1 MB of scratch for four of the five, about 13 MB for
-  Plasma Wave, plus the live frame (8 MB at 1080p).
+- **GPU time per 1080p frame** (p95): 0.3–0.9 ms for most looks; Ferrofluid
+  1.2–1.4 ms (it renders at three quarters, see below) and Ghost Fibers
+  1.1–1.5 ms. A still picture takes 0.05–0.08 ms.
+- **Memory**: scratch beside the live frame (8 MB at 1080p):
+  - 0–2 MB for Silk, Side Rays, Liquid Chrome, Line Waves, Color Bends,
+    Dither (at 1080p) and Ferrofluid;
+  - about 7 MB for Beams, 13 MB for Plasma Wave and 22 MB for Ghost Fibers.
 
 ### The budget guard
 
@@ -80,7 +92,7 @@ interval and checks the compositor's missed deadlines:
 - Over again: it shows the poster (reason `gpu-budget`, plus one Info health
   event).
 - It never climbs back for the same background (a new look or motion
-  included). A different background starts again at full size, since the five
+  included). A different background starts again at full size, since the ten
   cost very different amounts (`live_background/guard.rs`).
 
 ## For developers
@@ -88,18 +100,32 @@ interval and checks the compositor's missed deadlines:
 The backend owns everything in `crates/videorc-backend/src/live_background/`:
 
 - `looks.rs`: the catalogue, the looks and the uniform packing. Every pass
-  of every renderer gets `uniform vec4 u[9]`:
+  of every renderer gets `uniform vec4 u[16]` (`UNIFORM_VEC4_COUNT`, widened
+  from 9 in plan 194; Ghost Fibers uses all 16):
   - `u[0]` = render target, phase, one React Bits "CSS pixel";
   - `u[1]` = the background's internal size and Dim;
-  - `u[2..9]` = per-look constants.
-- `sizes.rs`: internal sizes (soft backgrounds at most 1080 on the short
-  side; Line Waves at full size), Silk's field and Plasma Wave's chain.
+  - `u[2..16]` = per-look constants.
+- `sizes.rs`: internal sizes and scratch:
+  - soft backgrounds render at most 1080 on the short side, Ferrofluid at
+    most 810 (its march is the costliest; owner call, plan 194);
+  - Line Waves and Dither render at full size;
+  - plus Silk's field, Plasma Wave's chain, Beams' mipmapped field,
+    Dither's cell field, Ferrofluid's grid and Ghost Fibers' bloom chain.
 - `clock.rs`: the phase clock. Re-based on every change, so a look or motion
   change never jumps; a new background starts at its poster phase.
 - `guard.rs`: the budget guard.
-- `glsl/*.frag`: the GLSL ES 3.00 sources, the source of truth. Metal and
-  D3D11 run hand ports that must match golden grids rendered from these
+- `glsl/*.frag` (and `ghost_fibers.vert`): the GLSL ES 3.00 sources, the
+  source of truth. Metal and D3D11 run hand ports that must match golden
+  grids rendered from these
   (`crates/videorc-backend/tests/fixtures/live-background-golden.json`).
+- `glsl.rs`: each background's passes. A pass is `FullScreen` (one triangle)
+  or `Instanced { vertices, instances, blend }`: Ghost Fibers draws its dots
+  and dust as instanced quads, additively blended into a cleared scene, then
+  blooms it. Every renderer (Metal, D3D11, GLES, WebGL2) runs both kinds.
+- **Ferrofluid has no simulation.** React Bits springs its surface toward a
+  target each frame; Videorc evaluates the settled target directly (a pure
+  function of the phase), so every leg and every frame agree and nothing is
+  carried between frames.
 - `export.rs`: writes `apps/desktop/src/shared/live-backgrounds.*.generated.json`
   for the desktop. Regenerate with
   `VIDEORC_UPDATE_LIVE_BACKGROUND_JSON=1 cargo test -p videorc-backend live_background::export`.
@@ -108,7 +134,10 @@ The backend owns everything in `crates/videorc-backend/src/live_background/`:
 
 - GLSL `gl_FragCoord` is bottom-left; Metal and D3D11 are top-left.
 - GLSL `mod` is not `fmod`.
-- `pow(negative, 2.0)` is NaN outside WebGL: write `x * x`.
+- `pow(negative, 2.0)` is undefined in GLSL and NaN in HLSL (and in WebGL on
+  ANGLE's D3D11): write `x * x`, in the GLSL source too.
+- HLSL `Sample` inside a loop with a data-dependent exit is an fxc error:
+  use `SampleLevel(…, 0)` (Ferrofluid's march).
 - Rename MSL and HLSL keywords (`thread`, `sampler`, `line`, …).
 - HLSL: write vector arguments out (`float3(1, 1, 1)`, `gray.xxx`) where GLSL
   mixes a scalar and a vector, and keep `fwidth`/`ddx` out of branches that
@@ -214,7 +243,7 @@ EGL and accepts Mesa's llvmpipe only with
 
 ## Credit and licence
 
-The five shaders are ported from React Bits by David Haz
+The ten shaders are ported from React Bits by David Haz
 (https://reactbits.dev), MIT + Commons Clause. They are used in Videorc with
 the author's permission (2026-10-24). Videorc never offers them for export
 or as a separate pack. See `THIRD_PARTY_NOTICES.md`.

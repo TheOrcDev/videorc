@@ -28,9 +28,9 @@ import {
   setLiveBackgroundSettings
 } from '@/lib/background-library'
 import {
-  LIVE_BACKGROUND_CATALOG,
   LIVE_BACKGROUND_CREDIT,
   LIVE_BACKGROUND_MOTION_OPTIONS,
+  LIVE_BACKGROUND_OFFERED,
   liveBackgroundEntry,
   liveBackgroundLook,
   liveBackgroundStillLine,
@@ -39,11 +39,13 @@ import {
 import { cn } from '@/lib/utils'
 import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 
-// Live backgrounds in Assets → Backgrounds (plan 190 S8): a Live group of five
-// tiles above the pictures. A click puts one on the scene and a click on the
-// active tile takes it off, like the picture tiles. They are built in, so a
-// tile has no ⋯ menu: no Remove, Rename or Replace. Adjust style holds the
-// four choices a live background has (D8): Look, Motion, Visibility and Dim.
+// Live backgrounds in Assets → Backgrounds (plans 190 S8 and 194 S7): a Live
+// group of ten tiles above the pictures, in two rows of five where five fit
+// (the plan 190 five, then plan 194's). A click puts one on the scene and a
+// click on the active tile takes it off, like the picture tiles. They are
+// built in, so a tile has no ⋯ menu: no Remove, Rename or Replace. Adjust
+// style holds the four choices a live background has (D8): Look, Motion,
+// Visibility and Dim.
 
 /**
  * KebabMenu's `reveal="hover"` recipe: a tile that isn't on the scene shows
@@ -70,8 +72,8 @@ export function LiveBackgroundsGroup(): ReactElement {
   return (
     <div className="flex flex-col gap-2" data-videorc-live-backgrounds="">
       <SectionLabel as="h3">Live</SectionLabel>
-      <Gallery className="gap-3">
-        {LIVE_BACKGROUND_CATALOG.map((entry) => {
+      <Gallery className="gap-3" rowsOfFive>
+        {LIVE_BACKGROUND_OFFERED.map((entry) => {
           const active = registry.live.activeId === entry.id
           return (
             <LiveBackgroundTile

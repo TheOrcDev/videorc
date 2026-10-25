@@ -11,13 +11,15 @@
 //! and soft-1080 internal sizes scale up smoothly. The poster is never
 //! uploaded while the shader draws.
 //!
-//! The MSL below is a hand port of `glsl/*.frag` (the source of truth), checked
-//! against golden grids rendered from the GLSL in WebGL2
-//! (`tests/fixtures/live-background-golden.json`). Porting rules (plan 190):
-//! GLSL's `gl_FragCoord` is bottom-left and Metal's position top-left, so every
-//! pass flips y first (`gl_frag`); a scratch texture one pass wrote is read by
-//! the next with `1 - v` (or `last.y - y` for a texel fetch); `mod` is not
-//! `fmod`; no `pow` of a negative base.
+//! The MSL below is a hand port of `glsl/*.frag` and `ghost_fibers.vert` (the
+//! source of truth), checked against golden grids rendered from the GLSL in
+//! WebGL2 (`tests/fixtures/live-background-golden.json`). Porting rules (plan
+//! 190): GLSL's `gl_FragCoord` is bottom-left and Metal's position top-left,
+//! so every pass flips y first (`gl_frag`); a scratch texture one pass wrote
+//! is read by the next with `1 - v` (or `last.y - y` for a texel fetch);
+//! `mod` is not `fmod`; no `pow` of a negative base. Plan 194 adds the
+//! instanced pass kind (Ghost Fibers' dots and dust: a vertex function on
+//! `instance_id` and `vertex_id`, additive blending, a cleared scene).
 //!
 //! The budget guard (`guard.rs`) is fed at the start of each tick with the
 //! previous tick's live command buffer GPU time (`GPUEndTime - GPUStartTime`,
@@ -38,18 +40,21 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder,
-    MTLCommandQueue, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-    MTLRenderPipelineState, MTLResource, MTLSamplerAddressMode, MTLSamplerDescriptor,
-    MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLStorageMode, MTLStoreAction,
-    MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer,
+    MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLLibrary,
+    MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResource,
+    MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter,
+    MTLSamplerState, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
+    MTLTextureUsage,
 };
 
 use super::glsl::LivePass;
 use super::{
     GuardLevel, LiveBackgroundBoard, LiveBackgroundFrameInput, LiveBackgroundGuard, LiveLook,
-    Uniforms, internal_size, plasma_sizes, silk_field_size, uniforms,
+    PassBlend, PassKind, Uniforms, beams_field_size, dither_field_size, ferrofluid_grid,
+    ferrofluid_look_camera, ghost_fibers_bloom_sizes, internal_size, plasma_sizes, silk_field_size,
+    uniforms,
 };
 use crate::protocol::{
     LiveBackgroundId, LiveBackgroundRendering, LiveBackgroundStatus, LiveBackgroundStillReason,
@@ -69,23 +74,34 @@ pub const SILK_FIELD_FORMAT: MTLPixelFormat = MTLPixelFormat::R8Unorm;
 /// Plasma Wave's coarse trace keeps its alpha (the edge field the fine pass
 /// tests), so it needs four channels.
 pub const PLASMA_COARSE_FORMAT: MTLPixelFormat = MTLPixelFormat::RGBA16Float;
-/// Plasma Wave's fine trace and bloom chain: nothing reads their alpha, so
-/// three packed float channels (renderable and filterable on every macOS GPU)
-/// hold the HDR light in half the bytes of `RGBA16Float`. The golden grids
-/// pass with it; `plasma_light_formats_both_match_the_goldens` prints what
-/// `RGBA16Float` would change (the WebGL reference renders in `RGBA16F`).
-pub const PLASMA_LIGHT_FORMAT: MTLPixelFormat = MTLPixelFormat::RG11B10Float;
+/// The HDR light scratch nothing reads the alpha of: Plasma Wave's fine trace
+/// and bloom chain, Beams' glint field (mipmapped) and Ghost Fibers' bloom
+/// chain. Three packed float channels (renderable, filterable and
+/// mip-generatable on every macOS GPU) hold them in half the bytes of
+/// `RGBA16Float`. The golden grids pass with it;
+/// `light_formats_both_match_the_goldens` prints what `RGBA16Float` would
+/// change (the WebGL reference renders in `RGBA16F`).
+pub const LIGHT_FORMAT: MTLPixelFormat = MTLPixelFormat::RG11B10Float;
+/// Dither's wave field: one byte texel per cell, as the reference's RGBA8.
+pub const DITHER_WAVE_FORMAT: MTLPixelFormat = FRAME_FORMAT;
+/// Ferrofluid's grid (the field and its bound): a few hundred texels whose
+/// thresholds (`a < 0.002`) want the reference's half-float precision.
+pub const FERROFLUID_GRID_FORMAT: MTLPixelFormat = MTLPixelFormat::RGBA16Float;
+/// Ghost Fibers' scene: tens of thousands of dim quads add into it, which
+/// the packed format's 5–6-bit mantissas would round away.
+pub const GHOST_FIBERS_SCENE_FORMAT: MTLPixelFormat = MTLPixelFormat::RGBA16Float;
 
-/// The MSL for every pass of the five backgrounds, compiled at runtime the
+/// The MSL for every pass of the ten backgrounds, compiled at runtime the
 /// first time a leg needs a live background (this Mac has no offline Metal
 /// toolchain; `metal_compositor.rs` does the same for the scene shader).
 pub const LIVE_BACKGROUND_MSL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-// Live backgrounds (plan 190). Every pass reads the same nine float4s
-// (live_background/mod.rs): u[0] = (target w, h, phase, pixel scale),
-// u[1] = (view w, h, dim, 0), u[2..9] = the look's constants. GLSL's
+// Live backgrounds (plans 190 and 194). Every pass reads the same sixteen
+// float4s (live_background/mod.rs, UNIFORM_VEC4_COUNT; the block is sent at
+// its full size): u[0] = (target w, h, phase, pixel scale),
+// u[1] = (view w, h, dim, 0), u[2..16] = the look's constants. GLSL's
 // gl_FragCoord is bottom-left and Metal's position is top-left: gl_frag flips
 // y, and a scratch texture written by one pass is read by the next with 1 - v.
 
@@ -100,7 +116,16 @@ vertex LiveVOut live_vertex(uint vid [[vertex_id]]) {
 
 inline float2 gl_frag(float4 pos, float height) { return float2(pos.x, height - pos.y); }
 inline float gl_mod(float x, float y) { return x - y * floor(x / y); }
+inline float2 gl_mod2(float2 x, float y) { return x - y * floor(x / y); }
+inline float3 gl_mod3(float3 x, float y) { return x - y * floor(x / y); }
+inline float4 gl_mod4(float4 x, float y) { return x - y * floor(x / y); }
 inline float sq(float x) { return x * x; }
+// The classic hash12 (Ferrofluid's field and Ghost Fibers' grain).
+inline float hash12(float2 p) {
+  float3 p3 = fract(float3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
 inline float hash21(float2 p) {
   p = fract(p * float2(123.34, 456.21));
   p += dot(p, p + 45.32);
@@ -609,7 +634,1103 @@ fragment float4 line_waves_main(LiveVOut in [[stage_in]], constant float4* u [[b
   float3 premultiplied = min(color, float3(alpha));
   return float4((premultiplied + u[8].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);
 }
+
+// ---------------------------------------------------------------- Beams
+// Ported from React Bits by David Haz (https://reactbits.dev), used with permission (plan 194).
+constant float BEAMS_PI = 3.141592653589793;
+
+inline float4 beams_permute(float4 x) { return gl_mod4(((x * 34.0) + 1.0) * x, 289.0); }
+inline float4 beams_taylor_inv_sqrt(float4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+inline float3 beams_fade(float3 t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+inline float beams_cnoise(float3 P) {
+  float3 Pi0 = floor(P);
+  float3 Pi1 = Pi0 + float3(1.0);
+  Pi0 = gl_mod3(Pi0, 289.0);
+  Pi1 = gl_mod3(Pi1, 289.0);
+  float3 Pf0 = fract(P);
+  float3 Pf1 = Pf0 - float3(1.0);
+  float4 ix = float4(Pi0.x, Pi1.x, Pi0.x, Pi1.x);
+  float4 iy = float4(Pi0.yy, Pi1.yy);
+  float4 iz0 = Pi0.zzzz;
+  float4 iz1 = Pi1.zzzz;
+  float4 ixy = beams_permute(beams_permute(ix) + iy);
+  float4 ixy0 = beams_permute(ixy + iz0);
+  float4 ixy1 = beams_permute(ixy + iz1);
+  float4 gx0 = ixy0 / 7.0;
+  float4 gy0 = fract(floor(gx0) / 7.0) - 0.5;
+  gx0 = fract(gx0);
+  float4 gz0 = float4(0.5) - abs(gx0) - abs(gy0);
+  float4 sz0 = step(gz0, float4(0.0));
+  gx0 -= sz0 * (step(float4(0.0), gx0) - 0.5);
+  gy0 -= sz0 * (step(float4(0.0), gy0) - 0.5);
+  float4 gx1 = ixy1 / 7.0;
+  float4 gy1 = fract(floor(gx1) / 7.0) - 0.5;
+  gx1 = fract(gx1);
+  float4 gz1 = float4(0.5) - abs(gx1) - abs(gy1);
+  float4 sz1 = step(gz1, float4(0.0));
+  gx1 -= sz1 * (step(float4(0.0), gx1) - 0.5);
+  gy1 -= sz1 * (step(float4(0.0), gy1) - 0.5);
+  float3 g000 = float3(gx0.x, gy0.x, gz0.x);
+  float3 g100 = float3(gx0.y, gy0.y, gz0.y);
+  float3 g010 = float3(gx0.z, gy0.z, gz0.z);
+  float3 g110 = float3(gx0.w, gy0.w, gz0.w);
+  float3 g001 = float3(gx1.x, gy1.x, gz1.x);
+  float3 g101 = float3(gx1.y, gy1.y, gz1.y);
+  float3 g011 = float3(gx1.z, gy1.z, gz1.z);
+  float3 g111 = float3(gx1.w, gy1.w, gz1.w);
+  float4 norm0 = beams_taylor_inv_sqrt(float4(dot(g000, g000), dot(g010, g010), dot(g100, g100), dot(g110, g110)));
+  g000 *= norm0.x;
+  g010 *= norm0.y;
+  g100 *= norm0.z;
+  g110 *= norm0.w;
+  float4 norm1 = beams_taylor_inv_sqrt(float4(dot(g001, g001), dot(g011, g011), dot(g101, g101), dot(g111, g111)));
+  g001 *= norm1.x;
+  g011 *= norm1.y;
+  g101 *= norm1.z;
+  g111 *= norm1.w;
+  float n000 = dot(g000, Pf0);
+  float n100 = dot(g100, float3(Pf1.x, Pf0.yz));
+  float n010 = dot(g010, float3(Pf0.x, Pf1.y, Pf0.z));
+  float n110 = dot(g110, float3(Pf1.xy, Pf0.z));
+  float n001 = dot(g001, float3(Pf0.xy, Pf1.z));
+  float n101 = dot(g101, float3(Pf1.x, Pf0.y, Pf1.z));
+  float n011 = dot(g011, float3(Pf0.x, Pf1.yz));
+  float n111 = dot(g111, Pf1);
+  float3 fade_xyz = beams_fade(Pf0);
+  float4 n_z = mix(float4(n000, n100, n010, n110), float4(n001, n101, n011, n111), fade_xyz.z);
+  float2 n_yz = mix(n_z.xy, n_z.zw, fade_xyz.y);
+  float n_xyz = mix(n_yz.x, n_yz.y, fade_xyz.x);
+  return 2.2 * n_xyz;
+}
+
+inline float beams_lane_hash(float lane, constant float4* u) {
+  return fract(sin(lane * 91.3458 + u[4].x * 17.17) * 47453.5453);
+}
+
+inline float beams_lobe(float nh, float nl, float nv, float vh, float roughness) {
+  float a = roughness * roughness;
+  float a2 = a * a;
+  float d = nh * nh * (a2 - 1.0) + 1.0;
+  float distribution = a2 / (BEAMS_PI * d * d);
+  float gv = nl * sqrt(nv * nv * (1.0 - a2) + a2);
+  float gl = nv * sqrt(nl * nl * (1.0 - a2) + a2);
+  float visibility = 0.5 / max(gv + gl, 0.0001);
+  float fresnel = 0.028 + 0.972 * pow(1.0 - vh, 5.0);
+  return distribution * visibility * fresnel * nl;
+}
+
+inline float2 beams_glint(float lane, float2 local, float uTime, float camera, constant float4* u) {
+  float along = local.y / u[2].y - beams_lane_hash(lane, u) * 60.0;
+  float delta = 0.01;
+  float slope = (beams_cnoise(float3(0.0, along + delta, uTime)) - beams_cnoise(float3(0.0, along - delta, uTime))) / (2.0 * delta);
+  slope *= 0.2 * u[2].z;
+  float spin = beams_lane_hash(lane + 0.37, u);
+  float tilt = ((spin - 0.5) * 0.5 + sin(uTime * 2.1 + spin * 6.2831) * 0.06) * u[3].z;
+  float3 normal = normalize(float3(tilt, -slope, 1.0));
+  float3 view = normalize(float3(-local, camera));
+  float nv = max(dot(normal, view), 0.0001);
+  // The light rests at React Bits' (0, 3, 10): the intro sweep is over and
+  // the pointer never lifts it.
+  float3 light = normalize(float3(0.0, 3.0, 10.0));
+  float3 halfway = normalize(light + view);
+  float roughness = u[2].w;
+  float core = beams_lobe(max(dot(normal, halfway), 0.0), max(dot(normal, light), 0.0), nv, max(dot(view, halfway), 0.0), roughness);
+  float3 fill = normalize(float3(0.0, -3.0 * 1.25, 10.0));
+  float3 fillHalf = normalize(fill + view);
+  core += u[3].w * beams_lobe(max(dot(normal, fillHalf), 0.0), max(dot(normal, fill), 0.0), nv, max(dot(view, fillHalf), 0.0), roughness);
+  return float2(core, core);
+}
+
+fragment float4 beams_field(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]]) {
+  // React Bits sizes the beams in CSS pixels; one is min(view) / 1080 render
+  // pixels, so uScale is CSS pixels per field texel.
+  float2 viewCss = u[1].xy / u[0].w;
+  float2 uScale = viewCss / u[0].xy;
+  float2 css = gl_frag(in.pos, u[0].y) * uScale;
+  float2 centered = css - viewCss * 0.5;
+  float2 local = float2x2(float2(u[3].x, -u[3].y), float2(u[3].y, u[3].x)) * centered;
+  float uTime = gl_mod(u[0].z * 0.12, 289.0);
+  float camera = viewCss.y * 1.866;
+
+  float across = local.x / u[2].x + 0.5;
+  float lane = floor(across);
+  float along = across - lane;
+  float2 value = beams_glint(lane, local, uTime, camera, u);
+
+  float pixel = max(uScale.x, uScale.y);
+  float seam = min(along, 1.0 - along) * u[2].x;
+  if (seam < pixel * 1.5) {
+    float other = along < 0.5 ? lane - 1.0 : lane + 1.0;
+    float blend = 0.5 * (1.0 - smoothstep(0.0, pixel * 1.5, seam));
+    value = mix(value, beams_glint(other, local, uTime, camera, u), blend);
+  }
+
+  // The pointer rests (React Bits' uPointer.z = 0), so nothing brightens
+  // near it.
+  float hot = max(value.y - 0.18, 0.0);
+  return float4(value.x, value.y, min(hot, 6.0), 1.0);
+}
+
+inline float beams_random(float2 st) {
+  return fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453123);
+}
+
+inline float beams_grain_noise(float2 st) {
+  float2 i = floor(st);
+  float2 f = fract(st);
+  float a = beams_random(i);
+  float b = beams_random(i + float2(1.0, 0.0));
+  float c = beams_random(i + float2(0.0, 1.0));
+  float d = beams_random(i + float2(1.0, 1.0));
+  float2 w = f * f * (3.0 - 2.0 * f);
+  return mix(a, b, w.x) + (c - a) * w.y * (1.0 - w.x) + (d - b) * w.x * w.y;
+}
+
+inline float3 beams_aces_filmic(float3 color) {
+  float3x3 inputMatrix = float3x3(
+    float3(0.59719, 0.07600, 0.02840),
+    float3(0.35458, 0.90834, 0.13383),
+    float3(0.04823, 0.01566, 0.83777)
+  );
+  float3x3 outputMatrix = float3x3(
+    float3(1.60475, -0.10208, -0.00327),
+    float3(-0.53108, 1.10813, -0.07276),
+    float3(-0.07367, -0.00605, 1.07602)
+  );
+  color = inputMatrix * (color / 0.6);
+  float3 a = color * (color + 0.0245786) - 0.000090537;
+  float3 b = color * (0.983729 * color + 0.4329510) + 0.238081;
+  color = outputMatrix * (a / b);
+  return clamp(color, 0.0, 1.0);
+}
+
+inline float3 beams_to_srgb(float3 color) {
+  return mix(color * 12.92, 1.055 * pow(color, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), color));
+}
+
+// The field is sampled in Metal's orientation (the mip levels were written
+// the same way); only the grain and the jitter hash GLSL's fragment coordinate.
+fragment float4 beams_composite(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                texture2d<float> t0 [[texture(0)]], sampler smp [[sampler(0)]]) {
+  float2 frag = gl_frag(in.pos, u[0].y);
+  float2 uv = in.pos.xy / u[0].xy;
+  float radiance = t0.sample(smp, uv, level(0.0)).r;
+  float bloom = 0.0;
+  bloom += t0.sample(smp, uv, level(2.0)).b * 0.3;
+  bloom += t0.sample(smp, uv, level(3.0)).b * 0.3;
+  bloom += t0.sample(smp, uv, level(4.0)).b * 0.22;
+  bloom += t0.sample(smp, uv, level(5.0)).b * 0.18;
+
+  float hot = t0.sample(smp, uv, level(0.0)).g;
+  float3 tint = u[5].rgb;
+  float gain = u[4].y;
+  float3 light = tint * (radiance + bloom * u[4].z) * gain;
+  light += mix(tint, float3(1.0), 0.7) * hot * hot * 0.12 * gain;
+  // The intro is finished (React Bits' uPresence = 1).
+  float3 color = beams_to_srgb(beams_aces_filmic(light));
+  color -= beams_grain_noise(frag) / 15.0 * u[4].w;
+  color = max(color, float3(0.0));
+
+  // No edge fade and full opacity: React Bits' mask is 1.
+  float jitter = (beams_random(frag.yx + 31.7) - 0.5) / 255.0;
+  color = clamp(color + jitter, 0.0, 1.0);
+  float alpha = max(color.r, max(color.g, color.b));
+  return float4((color + u[6].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);
+}
+
+// ---------------------------------------------------------------- Color Bends
+// Ported from React Bits by David Haz (https://reactbits.dev), used with permission (plan 194).
+fragment float4 color_bends_main(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]]) {
+  float2 frag = gl_frag(in.pos, u[0].y);
+  float2 vUv = frag / u[0].xy;
+  float t = u[0].z;
+  float2 p = vUv * 2.0 - 1.0;
+  float2 rp = float2(p.x * u[2].x - p.y * u[2].y, p.x * u[2].y + p.y * u[2].x);
+  float2 q = float2(rp.x * (u[0].x / u[0].y), rp.y);
+  q /= max(u[2].z, 0.0001);
+  q /= 0.5 + 0.2 * dot(q, q);
+  q += 0.2 * cos(t) - 7.56;
+  // The pointer rests at the centre (React Bits' uPointer = 0).
+  float2 toward = -rp;
+  q += toward * u[4].z * 0.2;
+
+  float frequency = u[2].w;
+  float iterations = u[3].z;
+  for (int j = 0; j < 5; j++) {
+    if (float(j) >= iterations - 1.0) break;
+    float2 rr = sin(1.5 * (q.yx * frequency) + 2.0 * cos(q * frequency));
+    q += (rr - q) * 0.15;
+  }
+
+  float warpStrength = u[3].x;
+  float bandWidth = u[4].x;
+  float count = u[4].y;
+  float kBelow = clamp(warpStrength, 0.0, 1.0);
+  float kMix = pow(kBelow, 0.3);
+  float gain = 1.0 + max(warpStrength - 1.0, 0.0);
+  float3 col = float3(0.0);
+  float a = 1.0;
+
+  if (count > 0.5) {
+    float2 s = q;
+    float3 sumCol = float3(0.0);
+    float cover = 0.0;
+    for (int i = 0; i < 8; ++i) {
+      if (float(i) >= count) break;
+      s -= 0.01;
+      float2 r = sin(1.5 * (s.yx * frequency) + 2.0 * cos(s * frequency));
+      float m0 = length(r + sin(5.0 * r.y * frequency - 3.0 * t + float(i)) / 4.0);
+      float2 disp = (r - s) * kBelow;
+      float2 warped = s + disp * gain;
+      float m1 = length(warped + sin(5.0 * warped.y * frequency - 3.0 * t + float(i)) / 4.0);
+      float m = mix(m0, m1, kMix);
+      float w = 1.0 - exp(-bandWidth / exp(bandWidth * m));
+      sumCol += u[5 + i].rgb * w;
+      cover = max(cover, w);
+    }
+    col = clamp(sumCol, 0.0, 1.0);
+    a = cover;
+  } else {
+    float2 s = q;
+    for (int k = 0; k < 3; ++k) {
+      s -= 0.01;
+      float2 r = sin(1.5 * (s.yx * frequency) + 2.0 * cos(s * frequency));
+      float m0 = length(r + sin(5.0 * r.y * frequency - 3.0 * t + float(k)) / 4.0);
+      float2 disp = (r - s) * kBelow;
+      float2 warped = s + disp * gain;
+      float m1 = length(warped + sin(5.0 * warped.y * frequency - 3.0 * t + float(k)) / 4.0);
+      float m = mix(m0, m1, kMix);
+      col[k] = 1.0 - exp(-bandWidth / exp(bandWidth * m));
+    }
+    a = max(max(col.r, col.g), col.b);
+  }
+
+  col *= u[3].w;
+
+  float noise = u[3].y;
+  if (noise > 0.0001) {
+    // Fixed in place: React Bits adds the time to the hash every frame.
+    float n = fract(sin(dot(frag, float2(12.9898, 78.233))) * 43758.5453123);
+    col += (n - 0.5) * noise;
+    col = clamp(col, 0.0, 1.0);
+  }
+
+  // Premultiplied (React Bits' transparent mode) over the base colour.
+  float3 rgb = col * a;
+  return float4((rgb + u[13].rgb * (1.0 - a)) * (1.0 - u[1].z), 1.0);
+}
+
+// ---------------------------------------------------------------- Dither
+// Ported from React Bits by David Haz (https://reactbits.dev), used with permission (plan 194).
+// One cell in render pixels: the look's pixel size in CSS pixels (one is
+// min(view) / 1080 render pixels), at least one. sizes::dither_cell.
+inline float dither_cell_size(constant float4* u) {
+  return max(1.0, floor(u[3].z * u[0].w + 0.5));
+}
+
+inline float4 dither_mod289(float4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+inline float4 dither_permute(float4 x) { return dither_mod289(((x * 34.0) + 1.0) * x); }
+inline float4 dither_taylor_inv_sqrt(float4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+inline float2 dither_fade(float2 t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+inline float dither_cnoise(float2 P) {
+  float4 Pi = floor(P.xyxy) + float4(0.0, 0.0, 1.0, 1.0);
+  float4 Pf = fract(P.xyxy) - float4(0.0, 0.0, 1.0, 1.0);
+  Pi = dither_mod289(Pi);
+  float4 ix = Pi.xzxz;
+  float4 iy = Pi.yyww;
+  float4 fx = Pf.xzxz;
+  float4 fy = Pf.yyww;
+  float4 i = dither_permute(dither_permute(ix) + iy);
+  float4 gx = fract(i * (1.0 / 41.0)) * 2.0 - 1.0;
+  float4 gy = abs(gx) - 0.5;
+  float4 tx = floor(gx + 0.5);
+  gx = gx - tx;
+  float2 g00 = float2(gx.x, gy.x);
+  float2 g10 = float2(gx.y, gy.y);
+  float2 g01 = float2(gx.z, gy.z);
+  float2 g11 = float2(gx.w, gy.w);
+  float4 norm = dither_taylor_inv_sqrt(float4(dot(g00, g00), dot(g01, g01), dot(g10, g10), dot(g11, g11)));
+  g00 *= norm.x;
+  g01 *= norm.y;
+  g10 *= norm.z;
+  g11 *= norm.w;
+  float n00 = dot(g00, float2(fx.x, fy.x));
+  float n10 = dot(g10, float2(fx.y, fy.y));
+  float n01 = dot(g01, float2(fx.z, fy.z));
+  float n11 = dot(g11, float2(fx.w, fy.w));
+  float2 fadeXY = dither_fade(Pf.xy);
+  float2 nx = mix(float2(n00, n01), float2(n10, n11), fadeXY.x);
+  return 2.3 * mix(nx.x, nx.y, fadeXY.y);
+}
+
+inline float dither_fbm(float2 p, constant float4* u) {
+  float value = 0.0;
+  float amp = 1.0;
+  for (int i = 0; i < 4; i++) {
+    value += amp * abs(dither_cnoise(p));
+    p *= u[2].y;
+    amp *= u[2].z;
+  }
+  return value;
+}
+
+inline float dither_pattern(float2 p, constant float4* u) {
+  float2 p2 = p - u[0].z * u[2].x;
+  return dither_fbm(p + dither_fbm(p2, u), u);
+}
+
+fragment float4 dither_wave(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]]) {
+  float ratio = u[0].w;
+  float cell = dither_cell_size(u);
+  // React Bits works in CSS pixels here: the canvas over its device ratio.
+  float2 uResolution = u[1].xy / ratio;
+  float uCell = cell / ratio;
+  float2 corner = (gl_frag(in.pos, u[0].y) - 0.5) * uCell;
+  float2 uv = corner / uResolution - 0.5;
+  uv.x *= uResolution.x / uResolution.y;
+
+  // No trail, no ripples (N3).
+  float f = dither_pattern(uv / u[2].w, u);
+  f = (f - 0.5) * u[3].x + 0.5 + u[3].y;
+  // The intro reveal is finished (React Bits' show = 1).
+  float v = clamp(f, 0.0, 1.0);
+  return float4(floor(v * 255.0) / 255.0, fract(v * 255.0), 0.0, 1.0);
+}
+
+constant float DITHER_BAYER8[64] = {
+  0.0 / 64.0, 48.0 / 64.0, 12.0 / 64.0, 60.0 / 64.0, 3.0 / 64.0, 51.0 / 64.0, 15.0 / 64.0, 63.0 / 64.0,
+  32.0 / 64.0, 16.0 / 64.0, 44.0 / 64.0, 28.0 / 64.0, 35.0 / 64.0, 19.0 / 64.0, 47.0 / 64.0, 31.0 / 64.0,
+  8.0 / 64.0, 56.0 / 64.0, 4.0 / 64.0, 52.0 / 64.0, 11.0 / 64.0, 59.0 / 64.0, 7.0 / 64.0, 55.0 / 64.0,
+  40.0 / 64.0, 24.0 / 64.0, 36.0 / 64.0, 20.0 / 64.0, 43.0 / 64.0, 27.0 / 64.0, 39.0 / 64.0, 23.0 / 64.0,
+  2.0 / 64.0, 50.0 / 64.0, 14.0 / 64.0, 62.0 / 64.0, 1.0 / 64.0, 49.0 / 64.0, 13.0 / 64.0, 61.0 / 64.0,
+  34.0 / 64.0, 18.0 / 64.0, 46.0 / 64.0, 30.0 / 64.0, 33.0 / 64.0, 17.0 / 64.0, 45.0 / 64.0, 29.0 / 64.0,
+  10.0 / 64.0, 58.0 / 64.0, 6.0 / 64.0, 54.0 / 64.0, 9.0 / 64.0, 57.0 / 64.0, 5.0 / 64.0, 53.0 / 64.0,
+  42.0 / 64.0, 26.0 / 64.0, 38.0 / 64.0, 22.0 / 64.0, 41.0 / 64.0, 25.0 / 64.0, 37.0 / 64.0, 21.0 / 64.0
+};
+
+constant float DITHER_BAYER4[16] = {
+  0.0 / 16.0, 8.0 / 16.0, 2.0 / 16.0, 10.0 / 16.0,
+  12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0, 6.0 / 16.0,
+  3.0 / 16.0, 11.0 / 16.0, 1.0 / 16.0, 9.0 / 16.0,
+  15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0, 5.0 / 16.0
+};
+
+constant float DITHER_BAYER2[4] = { 0.0 / 4.0, 2.0 / 4.0, 3.0 / 4.0, 1.0 / 4.0 };
+
+constant float3 DITHER_LUMA = float3(0.2126, 0.7152, 0.0722);
+
+// React Bits' MODES: bayer 0, bayer4 1, bayer2 2, halftone 3, lines 4,
+// crosshatch 5, noise 6, none 7.
+inline float dither_threshold(float2 cell, constant float4* u) {
+  int mode = int(u[3].w + 0.5);
+  if (mode == 1) {
+    int2 c = int2(gl_mod2(cell, 4.0));
+    return DITHER_BAYER4[c.y * 4 + c.x];
+  }
+  if (mode == 2) {
+    int2 c = int2(gl_mod2(cell, 2.0));
+    return DITHER_BAYER2[c.y * 2 + c.x];
+  }
+  if (mode == 3) {
+    float2 r = float2(cell.x + cell.y, cell.x - cell.y) * 0.70710678 / 4.0;
+    return clamp(length(fract(r) - 0.5) * 1.41421356, 0.0, 0.999);
+  }
+  if (mode == 4) {
+    return abs(fract(cell.y / 4.0) - 0.5) * 2.0 * 0.999;
+  }
+  if (mode == 5) {
+    float a = abs(fract((cell.x + cell.y) / 6.0) - 0.5) * 2.0;
+    float b = abs(fract((cell.x - cell.y) / 6.0) - 0.5) * 2.0;
+    return min(a, b) * 0.999;
+  }
+  if (mode == 6) {
+    return fract(52.9829189 * fract(dot(cell, float2(0.06711056, 0.00583715))));
+  }
+  if (mode == 7) {
+    return 0.25;
+  }
+  int2 c = int2(gl_mod2(cell, 8.0));
+  return DITHER_BAYER8[c.y * 8 + c.x];
+}
+
+inline float3 dither_to_srgb(float3 c) {
+  c = clamp(c, 0.0, 1.0);
+  return mix(c * 12.92, 1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), c));
+}
+
+fragment float4 dither_composite(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                 texture2d<float> t0 [[texture(0)]]) {
+  float2 cell = floor(gl_frag(in.pos, u[0].y) / dither_cell_size(u));
+  int2 last = int2(t0.get_width(), t0.get_height()) - 1;
+  int2 c = clamp(int2(cell), int2(0), last);
+  float4 sampleValue = t0.read(uint2(c.x, last.y - c.y));
+  float f = sampleValue.r + sampleValue.g / 255.0;
+  float t = dither_threshold(cell, u) - 0.25;
+  float paletteCount = u[4].y;
+  float3 color;
+
+  if (paletteCount > 1.5) {
+    float n = paletteCount;
+    float v = f + t / (n - 1.0);
+    v = clamp(v - mix(0.2, 0.0, smoothstep(0.45, 0.8, v)), 0.0, 1.0);
+    int index = int(floor(v * (n - 1.0) + 0.5));
+    color = dither_to_srgb(u[7 + index].rgb);
+  } else {
+    float levels = max(u[4].x, 1.01) - 1.0;
+    float3 wave = u[5].rgb;
+    float3 background = u[6].rgb;
+    float base = dot(background, DITHER_LUMA);
+    float3 offset = (wave - float3(base)) * f + t / levels;
+    float luminance = dot(background + offset, DITHER_LUMA);
+    offset -= mix(0.2, 0.0, smoothstep(0.45, 0.8, luminance));
+    bool rising = dot(wave, DITHER_LUMA) >= base;
+    float lower = rising ? 0.0 : -max(background.r, max(background.g, background.b));
+    float upper = rising ? 1.0 - min(background.r, min(background.g, background.b)) : 0.0;
+    offset = floor(clamp(offset, lower, upper) * levels + 0.5) / levels;
+    color = dither_to_srgb(background + offset);
+  }
+  return float4(color * (1.0 - u[1].z), 1.0);
+}
+
+// ---------------------------------------------------------------- Ferrofluid
+// Ported from React Bits by David Haz (https://reactbits.dev), used with permission (plan 194).
+constant float FERRO_CELL = 1.0 / 3.0;
+constant float FERRO_BOUND_CELL = 1.0;
+// tan(19°): half of React Bits' 38° field of view.
+constant float FERRO_TAN_HALF = 0.34432761;
+constant float FERRO_G = 7.2551975;
+constant float2 FERRO_E1 = float2(0.8660254, 0.5);
+constant float2 FERRO_E2 = float2(-0.8660254, 0.5);
+constant float2 FERRO_E3 = float2(0.0, -1.0);
+constant float FERRO_F0 = 0.06;
+
+inline float2x2 ferro_turn() {
+  return float2x2(float2(0.9902681, 0.1391731), float2(-0.1391731, 0.9902681));
+}
+
+// Where a camera ray through NDC (x, y) meets the ground (React Bits'
+// groundAt).
+inline float2 ferro_ground_at(float x, float y, float aspect, constant float4* u) {
+  float3 d = normalize(float3(x * aspect * FERRO_TAN_HALF, u[5].x + y * FERRO_TAN_HALF * u[5].z, u[5].y + y * FERRO_TAN_HALF * u[5].w));
+  float t = d.z < -0.004 ? min(-u[4].y / d.z, u[4].z) : u[4].z;
+  return float2(d.x * t, u[4].x + d.y * t);
+}
+
+// The grid's corner for this view (React Bits' layout()): the four corner
+// rays and the top centre meet the ground, padded by three units.
+// sizes::ferrofluid_grid cells the same footprint, so the grid texture is
+// exactly this origin plus its size × CELL.
+inline float2 ferro_grid_origin(constant float4* u) {
+  float aspect = u[1].x / u[1].y;
+  float2 a = ferro_ground_at(-1.0, -1.0, aspect, u);
+  float2 b = ferro_ground_at(1.0, -1.0, aspect, u);
+  float2 c = ferro_ground_at(-1.0, 1.0, aspect, u);
+  float2 d = ferro_ground_at(1.0, 1.0, aspect, u);
+  float2 e = ferro_ground_at(0.0, 1.0, aspect, u);
+  return min(min(min(a, b), min(c, d)), e) - 3.0;
+}
+
+inline float ferro_noise(float2 p) {
+  float2 i = floor(p);
+  float2 f = fract(p);
+  float2 w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float a = hash12(i);
+  float b = hash12(i + float2(1.0, 0.0));
+  float c = hash12(i + float2(0.0, 1.0));
+  float d = hash12(i + float2(1.0, 1.0));
+  return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
+inline float ferro_flow_field(float2 p, constant float4* u) {
+  float uTime = u[0].z;
+  float2 q = p / 5.5 + u[3].xy;
+  float2 drift = u[2].xy * uTime * 0.55;
+  float2 warp = float2(ferro_noise(q * 0.6 + float2(uTime * 0.07, 3.1)), ferro_noise(q * 0.6 - float2(7.3, uTime * 0.06))) - 0.5;
+  float2 r = q + warp * 1.8 * u[2].z - drift;
+  float n = ferro_noise(r) * 0.65 + ferro_noise(r * 2.03 + 11.7 - drift * 0.5) * 0.35;
+  return smoothstep(0.44, 0.86, n);
+}
+
+fragment float4 ferrofluid_field(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]]) {
+  float2 texel = floor(gl_frag(in.pos, u[0].y));
+  float2 p = ferro_grid_origin(u) + (texel + 0.5) * FERRO_CELL;
+  float swell = ferro_flow_field(p, u);
+  float field = u[2].w * (0.03 + 1.0 * swell * swell);
+  // No cursor and no pulse add to the field; the intro front has passed.
+  float target = u[3].z * min(pow(max(field - 0.04, 0.0), 1.6), 1.0);
+  // N1: the height is the target itself (uSettle); no velocity, no mound.
+  return float4(target, 0.0, 0.0, 1.0);
+}
+
+fragment float4 ferrofluid_bound(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                 texture2d<float> t0 [[texture(0)]]) {
+  float2 origin = ferro_grid_origin(u);
+  float2 stateSize = float2(t0.get_width(), t0.get_height());
+  float2 center = origin + (floor(gl_frag(in.pos, u[0].y)) + 0.5) * FERRO_BOUND_CELL;
+  float2 base = floor((center - origin) / FERRO_CELL);
+  int lastRow = int(stateSize.y) - 1;
+  float top = 0.0;
+  float peak = 0.0;
+  for (int y = -4; y <= 4; y++) {
+    for (int x = -4; x <= 4; x++) {
+      int2 texel = int2(clamp(base + float2(float(x), float(y)), float2(0.0), stateSize - 1.0));
+      float4 s = t0.read(uint2(texel.x, lastRow - texel.y));
+      top = max(top, max(s.x, 0.0) * 1.05 + s.z);
+      peak = max(peak, s.x);
+    }
+  }
+  return float4(top, peak, 0.0, 1.0);
+}
+
+inline float2 ferro_lattice(float2 p, constant float4* u) {
+  float2 q = ferro_turn() * p;
+  // React Bits' render time is twice the simulation's.
+  float t = u[0].z * 2.0 * 0.35;
+  return q + u[7].x * float2(sin(q.y * 0.9 + t), cos(q.x * 0.8 - t * 0.8));
+}
+
+inline float ferro_pixel_angle(constant float4* u) {
+  return (2.0 * FERRO_TAN_HALF) / u[0].y;
+}
+
+inline float ferro_detail(float t, constant float4* u) {
+  float fogStart = u[4].w;
+  float far = u[4].z;
+  return smoothstep(3.0, 8.0, 1.0 / max(t * ferro_pixel_angle(u), 1e-5)) * (1.0 - smoothstep(fogStart, mix(fogStart, far, 0.7), t));
+}
+
+inline float ferro_profile(float v, thread float& rate, constant float4* u) {
+  float uRound = u[6].y;
+  float uSpan = u[6].z;
+  float root = sqrt(max(1.0 - v, 0.0) + uRound * uRound);
+  rate = 0.5 / (uSpan * root);
+  return clamp(1.0 - (root - uRound) / uSpan, 0.0, 1.0);
+}
+
+inline float ferro_spikes(float2 p, float a, float rise, thread float& clearance, constant float4* u) {
+  clearance = 10.0;
+  if (a < 0.002) return 0.0;
+  float2 q = ferro_lattice(p, u);
+  float v = (cos(FERRO_G * dot(FERRO_E1, q)) + cos(FERRO_G * dot(FERRO_E2, q)) + cos(FERRO_G * dot(FERRO_E3, q)) + 1.5) / 4.5;
+  float uRound = u[6].y;
+  float uSpan = u[6].z;
+  float uExponent = u[6].w;
+  if (a > 0.05) {
+    float root = uRound + (1.0 - pow(clamp(rise / a, 0.0, 1.0), 1.0 / uExponent)) * uSpan;
+    clearance = sqrt(max(1.0 - v, 0.0) / 8.77) - sqrt(max(root * root - uRound * uRound, 0.0) / 8.77);
+  }
+  float rate;
+  return a * pow(ferro_profile(v, rate, u), uExponent);
+}
+
+inline float2 ferro_spikes_slope(float2 p, float a, float2 aSlope, constant float4* u) {
+  if (a < 0.002) return float2(0.0);
+  float2 q = ferro_lattice(p, u);
+  float c1 = FERRO_G * dot(FERRO_E1, q);
+  float c2 = FERRO_G * dot(FERRO_E2, q);
+  float c3 = FERRO_G * dot(FERRO_E3, q);
+  float v = (cos(c1) + cos(c2) + cos(c3) + 1.5) / 4.5;
+  float2 du = -(FERRO_G / 4.5) * (sin(c1) * FERRO_E1 + sin(c2) * FERRO_E2 + sin(c3) * FERRO_E3) * ferro_turn();
+  float rate;
+  float s = max(ferro_profile(v, rate, u), 1e-4);
+  float uExponent = u[6].w;
+  float shape = pow(s, uExponent);
+  return a * uExponent * shape / s * rate * du + aSlope * shape;
+}
+
+inline float2 ferro_grid_span(texture2d<float> t0) {
+  return float2(t0.get_width(), t0.get_height()) * FERRO_CELL;
+}
+
+// The field was written with GLSL's orientation; it has one level, so an
+// explicit level 0 is the reference's linear sample and needs no
+// derivatives inside the march's branches.
+inline float4 ferro_field(texture2d<float> t0, sampler smp, float2 uv) {
+  return t0.sample(smp, float2(uv.x, 1.0 - uv.y), level(0.0));
+}
+
+inline float ferro_surface(float2 p, float2 origin, float z, float t, thread float& clearance,
+                           texture2d<float> t0, sampler smp, constant float4* u) {
+  float4 f = ferro_field(t0, smp, (p - origin) / ferro_grid_span(t0));
+  // f.z is the cursor's mound: 0 without a pointer.
+  return f.z + ferro_spikes(p, f.x * ferro_detail(t, u), z - f.z, clearance, u);
+}
+
+// React Bits samples the bound nearest and clamped; a texel read is the
+// same and needs no sampler state.
+inline float2 ferro_bound(float2 p, float2 origin, texture2d<float> t1) {
+  int2 size = int2(t1.get_width(), t1.get_height());
+  int2 texel = clamp(int2(floor((p - origin) / FERRO_BOUND_CELL)), int2(0), size - 1);
+  return t1.read(uint2(texel.x, size.y - 1 - texel.y)).rg;
+}
+
+inline float ferro_panel(float3 r, float3 dir, float3 up, float2 extent, float soft) {
+  float3 side = normalize(cross(dir, up));
+  float3 top = cross(side, dir);
+  float facing = dot(r, dir);
+  if (facing <= 0.0) return 0.0;
+  float2 q = float2(dot(r, side), dot(r, top)) / facing;
+  float2 e = smoothstep(extent + soft, extent - soft, abs(q));
+  return e.x * e.y;
+}
+
+inline float3 ferro_studio(float3 r, float3 rd, float soft, constant float4* u) {
+  float3 z = float3(0.0, 0.0, 1.0);
+  float3 col = u[8].rgb * 4.2 * ferro_panel(r, normalize(float3(-0.3, -0.5, 0.81)), z, float2(0.36, 0.22), 0.08 + soft);
+  col += u[9].rgb * 1.5 * ferro_panel(r, normalize(float3(-0.9, -0.2, 0.38)), z, float2(0.12, 0.7), 0.07 + soft);
+  col += u[9].rgb * 1.5 * ferro_panel(r, normalize(float3(0.9, -0.1, 0.42)), z, float2(0.12, 0.7), 0.07 + soft);
+  float lift = asin(clamp(r.z, -1.0, 1.0)) - asin(clamp(-rd.z, -1.0, 1.0));
+  col += u[10].rgb * 0.45 * smoothstep(0.08 - soft, 0.7 + soft, lift) * smoothstep(1.6, 1.0, lift);
+  return col;
+}
+
+// React Bits' finish() in dark, transparent mode: the glow premultiplied by
+// the fog, drawn here over the base colour.
+inline float4 ferro_finish(float3 light, float alpha, constant float4* u) {
+  float3 glow = light * alpha;
+  float cover = max(glow.r, max(glow.g, glow.b));
+  return float4((glow + u[11].rgb * (1.0 - cover)) * (1.0 - u[1].z), 1.0);
+}
+
+fragment float4 ferrofluid_render(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                  texture2d<float> t0 [[texture(0)]], texture2d<float> t1 [[texture(1)]],
+                                  sampler smp [[sampler(0)]]) {
+  float2 res = u[0].xy;
+  float2 ndc = (gl_frag(in.pos, res.y) - 0.5 * res) / (0.5 * res.y);
+  float3 camera = float3(0.0, u[4].x, u[4].y);
+  float3 forward = float3(0.0, u[5].x, u[5].y);
+  float3 upward = float3(0.0, u[5].z, u[5].w);
+  float far = u[4].z;
+  float fogStart = u[4].w;
+  float3 side = normalize(cross(forward, upward));
+  float3 rd = normalize(forward + (ndc.x * side + ndc.y * upward) * FERRO_TAN_HALF);
+  if (rd.z > -0.004) {
+    return ferro_finish(float3(0.0), 0.0, u);
+  }
+  float tTop = max((u[6].x - camera.z) / rd.z, 0.0);
+  float tEnd = min((-0.05 - camera.z) / rd.z, far);
+  if (tTop >= tEnd) {
+    return ferro_finish(float3(0.0), 0.0, u);
+  }
+  float2 origin = ferro_grid_origin(u);
+  float sink = max(-rd.z, 0.2);
+  float glide = max(length(rd.xy), 0.05);
+  float chunk = 0.9 / glide;
+  float t = tEnd;
+  float tPrev = tEnd;
+  bool found = false;
+  bool smoothHit = false;
+  float ta = tTop;
+  float2 b0 = ferro_bound(camera.xy + rd.xy * ta, origin, t1);
+  for (int c = 0; c < 64; c++) {
+    if (ta >= tEnd) break;
+    float tb = min(ta + chunk, tEnd);
+    float2 b1 = ferro_bound(camera.xy + rd.xy * tb, origin, t1);
+    float b = max(b0.x, b1.x) + 0.03;
+    float z1 = camera.z + rd.z * tb;
+    if (z1 > b) {
+      ta = tb;
+      b0 = b1;
+      continue;
+    }
+    float tt = max(ta, (b - camera.z) / rd.z);
+    if (max(b0.y, b1.y) < 0.002) {
+      // Flat fluid: settle on the ground (the cursor's mound is 0).
+      for (int k = 0; k < 3; k++) {
+        float3 probe = camera + rd * tt;
+        tt += probe.z / sink * 0.95;
+      }
+      if (tt <= tb + 0.02 || tb >= tEnd) {
+        t = tt;
+        smoothHit = true;
+        break;
+      }
+      ta = tb;
+      b0 = b1;
+      continue;
+    }
+    float tp = tt;
+    for (int k = 0; k < 48; k++) {
+      float3 pos = camera + rd * tt;
+      float clearance;
+      float gap = pos.z - ferro_surface(pos.xy, origin, pos.z, tt, clearance, t0, smp, u);
+      if (gap < 0.0) {
+        found = true;
+        break;
+      }
+      tp = tt;
+      float pixel = tt * ferro_pixel_angle(u);
+      float limit = pos.z > ferro_bound(pos.xy, origin, t1).x + 0.02 ? 0.6 / glide : max(clearance * 0.9, pixel) / glide;
+      tt += max(min(gap * 0.75 / sink, limit), pixel);
+      if (tt > tb) break;
+    }
+    if (found) {
+      t = tt;
+      tPrev = tp;
+      break;
+    }
+    ta = tb;
+    b0 = b1;
+  }
+
+  float3 pos;
+  float2 slope;
+  if (smoothHit || !found) {
+    pos = camera + rd * t;
+    slope = float2(0.0);
+  } else {
+    float lo = tPrev;
+    float hi = t;
+    for (int k = 0; k < 4; k++) {
+      float mid = 0.5 * (lo + hi);
+      float3 probe = camera + rd * mid;
+      float clearance;
+      if (probe.z - ferro_surface(probe.xy, origin, probe.z, mid, clearance, t0, smp, u) < 0.0) hi = mid;
+      else lo = mid;
+    }
+    t = hi;
+    pos = camera + rd * t;
+    float2 span = ferro_grid_span(t0);
+    float2 uv = (pos.xy - origin) / span;
+    float2 delta = FERRO_CELL / span;
+    float fade = ferro_detail(t, u);
+    float a = ferro_field(t0, smp, uv).x * fade;
+    float2 aSlope = float2(
+      ferro_field(t0, smp, uv + float2(delta.x, 0.0)).x - ferro_field(t0, smp, uv - float2(delta.x, 0.0)).x,
+      ferro_field(t0, smp, uv + float2(0.0, delta.y)).x - ferro_field(t0, smp, uv - float2(0.0, delta.y)).x
+    ) * fade / (2.0 * FERRO_CELL);
+    slope = ferro_spikes_slope(pos.xy, a, aSlope, u);
+  }
+
+  float3 n = normalize(float3(-slope, 1.0));
+  float3 r = reflect(rd, n);
+  float soft = length(fwidth(r)) * 0.6;
+  float facing = max(dot(n, -rd), 0.0);
+  float fresnel = FERRO_F0 + (1.0 - FERRO_F0) * pow(1.0 - facing, 5.0);
+  float rim = pow(1.0 - clamp(abs(dot(rd, n)), 0.0, 1.0), 3.0) * smoothstep(0.85, 0.4, n.z);
+  float fog = 1.0 - smoothstep(fogStart, far, t);
+
+  float3 shine = 1.0 - exp(-(ferro_studio(r, rd, soft, u) * fresnel + u[10].rgb * rim * 0.35) * u[7].y);
+  return ferro_finish(shine, fog, u);
+}
+
+// ---------------------------------------------------------------- Ghost Fibers
+// Ported from React Bits by David Haz (https://reactbits.dev), used with permission (plan 194).
+// The dots and the dust are instanced quads (plan 194 N2): every position
+// comes from the instance and vertex ids, nothing is uploaded. GL and Metal
+// agree on NDC (+y up) and on where a row lands, so the scene these rasterise
+// has the orientation the full-screen passes write, and the bloom chain and
+// the composite sample it in Metal's orientation as Plasma's chain does.
+struct GhostVOut {
+  float4 pos [[position]];
+  float2 local;
+  float radius;
+  float segment;
+  float3 light;
+  float tint;
+};
+
+// React Bits' camera: the eye at z = 7.5 looking down −z through a 0.56 rad
+// frustum (near 0.1, far 60), whose x, y and w are all a point needs here.
+constant float GHOST_CAMERA = 7.5;
+constant float GHOST_FRUSTUM = 3.4776037;
+constant float GHOST_FOCAL = 1.73880;
+constant float GHOST_RIBBON_LENGTH = 24.0;
+constant float GHOST_DEPTH_SPREAD = 0.12;
+constant float4 GHOST_PLACEMENTS[3] = { float4(0.0, 0.0, 0.0, 0.0), float4(1.9, -4.6, -0.08, 2.4), float4(-1.05, 2.0, 0.12, 4.1) };
+constant float GHOST_RIBBON_GAIN[3] = { 1.0, 0.5, 0.55 };
+constant float GHOST_RIBBON_TINT[3] = { 0.0, 0.75, 0.35 };
+
+inline float ghost_hash11(float n) {
+  return fract(sin(n * 91.3458) * 47453.5453);
+}
+
+// React Bits' `fit`: the canvas aspect over 1.5, clamped to 0.6–1.
+inline float ghost_fit(constant float4* u) {
+  return clamp(u[1].x / u[1].y / 1.5, 0.6, 1.0);
+}
+
+inline float3 ghost_project(float3 world, float2 viewport, thread float& depth) {
+  depth = GHOST_CAMERA - world.z;
+  float aspect = viewport.x / viewport.y;
+  float2 ndc = float2(GHOST_FRUSTUM * world.x / aspect, GHOST_FRUSTUM * world.y) / depth;
+  return float3((ndc * 0.5 + 0.5) * viewport, depth);
+}
+
+inline float2 ghost_quad_corner(uint vid) {
+  return float2(vid == 1 || vid == 3 ? 1.0 : 0.0, vid >= 2 ? 1.0 : 0.0);
+}
+
+vertex GhostVOut ghost_fibers_dust_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                          constant float4* u [[buffer(0)]]) {
+  float2 viewport = u[0].xy;
+  float dpr = u[0].w;
+  float uTime = u[0].z;
+  float id = float(iid);
+  float3 seed = float3(ghost_hash11(id * 1.37 + 0.3), ghost_hash11(id * 2.91 + 1.7), ghost_hash11(id * 4.17 + 2.9));
+  float3 box = float3(9.0, 5.4, 6.0);
+  float3 p = (seed - 0.5) * box;
+  p.z -= 0.6;
+  p += 0.18 * float3(sin(uTime * 0.21 + seed.x * 40.0), sin(uTime * 0.17 + seed.y * 40.0), sin(uTime * 0.13 + seed.z * 40.0));
+  p *= mix(1.0, u[3].x * ghost_fit(u), 0.5);
+  float depth;
+  float3 projected = ghost_project(p, viewport, depth);
+  float2 px = projected.xy;
+  float size = u[8].x * mix(0.5, 1.4, ghost_hash11(id * 7.7));
+  float baseRadius = max(0.5 * size * dpr * GHOST_CAMERA / max(depth, 0.1), 0.45);
+  float coc = min(u[4].w * abs(1.0 - u[4].z / max(depth, 0.1)) * viewport.y * 0.035, 22.0 * dpr * 1.6);
+  float radius = baseRadius + coc;
+  float spill = max(10.0 * dpr, baseRadius);
+  float energy = pow(baseRadius / min(radius, spill), 0.9) * pow(min(1.0, spill / radius), 2.0);
+  float twinkle = pow(max(sin(uTime * (0.8 + 1.6 * seed.y) * 2.0 + seed.z * 50.0), 0.0), 8.0);
+  // The intro is finished (React Bits' uIntro = 1).
+  float intensity = energy * (0.35 + 0.65 * twinkle) * mix(0.4, 1.0, seed.x) * (depth > 0.2 ? 1.0 : 0.0);
+  float2 corner = ghost_quad_corner(vid) * 2.0 - 1.0;
+  float2 position = px + corner * radius;
+  GhostVOut out;
+  out.local = corner * radius;
+  out.radius = radius;
+  out.segment = 0.0;
+  out.light = float3(intensity * 0.8 * u[8].y, 0.3 + 0.6 * twinkle * u[5].z, coc / max(radius, 1e-3));
+  out.tint = u[6].y < 0.5 ? 0.45 + 0.55 * seed.y : seed.y;
+  out.pos = float4(position / viewport * 2.0 - 1.0, 0.0, 1.0);
+  return out;
+}
+
+inline float3 ghost_center_local(float s, float4 place, constant float4* u) {
+  float t = u[0].z;
+  float ph = place.w;
+  float x = s * GHOST_RIBBON_LENGTH;
+  float y = u[2].z * (0.52 * sin(x * 0.43 + t * 0.31 + ph) + 0.26 * sin(x * 0.79 - t * 0.23 + 1.3 + ph * 0.7)) + place.x + x * place.z;
+  float z = u[2].z * 0.65 * sin(x * 0.33 + t * 0.19 + 0.7 + ph * 1.3) + place.y;
+  return float3(x, y, z);
+}
+
+inline float ghost_twist_at(float s, float layer, float4 place, constant float4* u) {
+  float x = s * GHOST_RIBBON_LENGTH;
+  // The roll advances with the phase at the look's roll speed.
+  float roll = u[0].z * u[2].y;
+  return u[2].x * 0.483 * x + roll + place.w * 0.6 + layer * u[3].y * 0.42 + 0.5 * sin(x * 0.26 + u[0].z * 0.27 + place.w);
+}
+
+inline float3 ghost_ribbon_point(float s, float v, float n, float layer, float4 place, float3x3 orient,
+                                 float scale, thread float3& normal, constant float4* u) {
+  float3 c0 = ghost_center_local(s, place, u);
+  float3 c1 = ghost_center_local(s + 0.004, place, u);
+  float3 tangent = normalize(c1 - c0);
+  float3 up = float3(0.0, 1.0, 0.0);
+  float3 n0 = normalize(up - tangent * dot(up, tangent));
+  float3 b0 = cross(tangent, n0);
+  float th = ghost_twist_at(s, layer, place, u);
+  float3 across = cos(th) * n0 + sin(th) * b0;
+  float3 sheet = -sin(th) * n0 + cos(th) * b0;
+  float halfWidth = u[2].w * (0.78 + 0.22 * cos(s * 3.14159));
+  float3 local = c0 + across * v * halfWidth + sheet * (n + layer * u[3].y * 0.16) * halfWidth;
+  normal = orient * sheet;
+  return orient * (local * scale);
+}
+
+vertex GhostVOut ghost_fibers_dots_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                          constant float4* u [[buffer(0)]]) {
+  float2 viewport = u[0].xy;
+  float dpr = u[0].w;
+  float uTime = u[0].z;
+  float3x3 orient = float3x3(u[9].xyz, u[10].xyz, u[11].xyz);
+  float scale = u[3].x * ghost_fit(u);
+  float uFibers = u[3].z;
+  float uDots = u[3].w;
+  float uFlow = u[0].z * u[4].x;
+
+  // One draw for every ribbon: the instance id names the ribbon, then the
+  // fiber, then the bead (React Bits draws each ribbon with its own
+  // uRibbon, uPlace, uGain and uTint).
+  int perFiber = int(uDots);
+  int perRibbon = int(uFibers) * perFiber;
+  int ribbon = int(iid) / perRibbon;
+  int withinRibbon = int(iid) - ribbon * perRibbon;
+  int fiber = withinRibbon / perFiber;
+  int bead = withinRibbon - fiber * perFiber;
+  float uRibbon = float(ribbon);
+  float4 place = GHOST_PLACEMENTS[ribbon];
+  float uGain = GHOST_RIBBON_GAIN[ribbon] * u[5].w;
+  float uTint = GHOST_RIBBON_TINT[ribbon];
+  float fi = float(fiber);
+  float fk = float(bead);
+
+  float seed = ghost_hash11(fi * 1.731 + uRibbon * 17.0);
+  float s = fract((fk + uFlow + seed * uDots) / uDots) - 0.5;
+  float sNext = s + 1.0 / uDots;
+  float layer = gl_mod(fi, 3.0) - 1.0;
+  float slot = floor(fi / 3.0);
+  float perLayer = max(floor(uFibers / 3.0), 1.0);
+  float v = ((slot + 0.5) / perLayer) * 2.0 - 1.0 + (ghost_hash11(fi * 3.113 + 4.0) - 0.5) * (1.6 / perLayer) + layer * 0.12 / perLayer;
+  float depthOffset = (ghost_hash11(fi * 7.919 + 2.0) - 0.5) * GHOST_DEPTH_SPREAD * (0.35 + 6.0 * s * s);
+
+  float3 normal;
+  float3 world = ghost_ribbon_point(s, v, depthOffset, layer, place, orient, scale, normal, u);
+  float3 nextNormal;
+  float3 nextWorld = ghost_ribbon_point(sNext, v, depthOffset, layer, place, orient, scale, nextNormal, u);
+
+  float depth;
+  float3 p0 = ghost_project(world, viewport, depth);
+  float nextDepth;
+  float3 p1 = ghost_project(nextWorld, viewport, nextDepth);
+  // No hover parts the fibers (React Bits' uHover.w = 0).
+  float2 px = p0.xy;
+  float2 pxNext = p1.xy;
+
+  float uSize = u[4].y;
+  float uFocus = u[4].z;
+  float uDof = u[4].w;
+  float baseRadius = max(0.5 * uSize * dpr * GHOST_CAMERA / max(depth, 0.1), 0.45);
+  float coc = min(uDof * abs(1.0 - uFocus / max(depth, 0.1)) * viewport.y * 0.035, u[5].x * dpr);
+  float radius = baseRadius + coc;
+  float spill = max(10.0 * dpr, baseRadius);
+  float energy = pow(baseRadius / min(radius, spill), 1.25) * pow(min(1.0, spill / radius), 2.0);
+
+  float3 toEye = normalize(float3(0.0, 0.0, GHOST_CAMERA) - world);
+  float facing = abs(dot(normalize(normal), toEye));
+  float focalPx = viewport.y * GHOST_FOCAL / max(depth, 0.1);
+  float widthPx = 2.0 * u[2].w * scale * focalPx;
+  float stack = (widthPx * facing + 2.0 * baseRadius) / (widthPx + 2.0 * baseRadius);
+  float spacingFace = length(nextWorld - world) * focalPx;
+  float trail = (length(p1.xy - p0.xy) + 2.0 * baseRadius) / (spacingFace + 2.0 * baseRadius);
+  float crowd = sqrt(clamp(stack * trail, 0.002, 1.0));
+  float fold = pow(1.0 - facing, 6.0) * u[6].z;
+  float endFade = smoothstep(0.5, 0.4, abs(s)) * smoothstep(1.6, 4.2, depth);
+  float uTips = u[6].x;
+  float tipEnd = mix(0.6, 0.06 + 0.26 * ghost_hash11(fi * 9.137 + place.w * 3.0), uTips);
+  // GLSL's pow((s - tipEnd) / 0.0065, 2.0): a negative base squared.
+  float tip = exp(-sq((s - tipEnd) / 0.0065)) * uTips;
+  endFade *= smoothstep(tipEnd + 0.003, tipEnd - 0.001, s);
+  // The intro is finished (React Bits' appear = 1) and no click pulses.
+  float uDotLength = u[5].y;
+  float twinklePhase = ghost_hash11(fi * 13.7 + fk * 0.917 + uRibbon * 3.0);
+  float twinkle = pow(max(sin(uTime * (1.2 + 2.6 * twinklePhase) * 3.0 + twinklePhase * 61.0), 0.0), 36.0) * u[5].z * (1.0 - 0.85 * uDotLength);
+  float strength = mix(0.45, 1.0, ghost_hash11(fi * 5.37 + 1.0)) * mix(1.0, 0.72, abs(layer) * u[3].y);
+  float intensity = energy * crowd * strength * endFade * 0.8 * uGain * (1.0 + fold * 7.0 + twinkle * 5.0 + tip * 7.0);
+  float highlight = clamp(fold * 0.55 + twinkle + tip, 0.0, 1.0);
+
+  float2 segment = (pxNext - px) * uDotLength;
+  float segmentLength = length(segment);
+  intensity *= mix(1.0, (2.0 * radius) / (segmentLength + 2.0 * radius) * 1.6, uDotLength);
+  float2 axis = segmentLength > 1e-3 ? segment / segmentLength : float2(1.0, 0.0);
+  float2 perp = float2(-axis.y, axis.x);
+  float2 corner = ghost_quad_corner(vid);
+  float along = mix(-radius, segmentLength + radius, corner.x);
+  float across = mix(-radius, radius, corner.y);
+  float2 position = px + axis * along + perp * across;
+
+  GhostVOut out;
+  out.local = float2(along, across);
+  out.radius = radius;
+  out.segment = segmentLength;
+  out.light = float3(intensity, highlight, coc / max(radius, 1e-3));
+  float depthTint = clamp(uTint + smoothstep(uFocus, uFocus + 5.0, depth) * 0.5, 0.0, 1.0);
+  float uGradient = u[6].y;
+  out.tint = uGradient < 0.5 ? depthTint : uGradient < 1.5 ? smoothstep(-0.42, 0.42, s) : clamp(v * 0.5 + 0.5, 0.0, 1.0);
+  if (intensity < 0.0005) position = float2(-1e4);
+  out.pos = float4(position / viewport * 2.0 - 1.0, 0.0, 1.0);
+  return out;
+}
+
+// The dots' and the dust's fragments (additive, into the cleared scene).
+fragment float4 ghost_fibers_dot(GhostVOut in [[stage_in]], constant float4* u [[buffer(0)]]) {
+  float along = clamp(in.local.x, 0.0, in.segment);
+  float d = length(float2(in.local.x - along, in.local.y));
+  float rho = d / max(in.radius, 1e-3);
+  if (rho > 1.0) discard_fragment();
+  float soft = clamp(2.6 / max(in.radius, 1e-3), 0.14, 1.0);
+  float disk = 1.0 - smoothstep(1.0 - soft, 1.0, rho);
+  float bokeh = disk * (0.94 + 0.08 * smoothstep(0.55, 0.95, rho));
+  float core = exp(-rho * rho * 3.2);
+  float shape = mix(core, bokeh, smoothstep(0.25, 0.7, in.light.z));
+  float3 color = mix(mix(u[12].rgb, u[14].rgb, in.tint), u[13].rgb, in.light.y);
+  return float4(color * shape * in.light.x, shape * in.light.x);
+}
+
+inline float3 ghost_pick(texture2d<float> t0, sampler smp, float2 uv) {
+  float3 c = t0.sample(smp, uv).rgb;
+  float peak = max(max(c.r, c.g), c.b);
+  return c * smoothstep(0.35, 1.2, peak);
+}
+
+fragment float4 ghost_fibers_bright(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                    texture2d<float> t0 [[texture(0)]], sampler smp [[sampler(0)]]) {
+  float2 uv = in.pos.xy / u[0].xy;
+  float2 o = 0.5 / float2(t0.get_width(), t0.get_height());
+  float3 c = ghost_pick(t0, smp, uv + float2(-o.x, -o.y)) + ghost_pick(t0, smp, uv + float2(o.x, -o.y)) + ghost_pick(t0, smp, uv + float2(-o.x, o.y)) + ghost_pick(t0, smp, uv + float2(o.x, o.y));
+  return float4(c * 0.25, 1.0);
+}
+
+fragment float4 ghost_fibers_down(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                  texture2d<float> t0 [[texture(0)]], sampler smp [[sampler(0)]]) {
+  float2 uv = in.pos.xy / u[0].xy;
+  float2 o = 1.0 / float2(t0.get_width(), t0.get_height());
+  float3 c = t0.sample(smp, uv).rgb * 4.0;
+  c += t0.sample(smp, uv + float2(-o.x, -o.y)).rgb;
+  c += t0.sample(smp, uv + float2(o.x, -o.y)).rgb;
+  c += t0.sample(smp, uv + float2(-o.x, o.y)).rgb;
+  c += t0.sample(smp, uv + float2(o.x, o.y)).rgb;
+  return float4(c / 8.0, 1.0);
+}
+
+fragment float4 ghost_fibers_up(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                texture2d<float> t0 [[texture(0)]], texture2d<float> t1 [[texture(1)]],
+                                sampler smp [[sampler(0)]]) {
+  float2 uv = in.pos.xy / u[0].xy;
+  float2 o = 0.5 / float2(t0.get_width(), t0.get_height());
+  float3 c = t0.sample(smp, uv + float2(-o.x * 2.0, 0.0)).rgb;
+  c += t0.sample(smp, uv + float2(-o.x, o.y)).rgb * 2.0;
+  c += t0.sample(smp, uv + float2(0.0, o.y * 2.0)).rgb;
+  c += t0.sample(smp, uv + float2(o.x, o.y)).rgb * 2.0;
+  c += t0.sample(smp, uv + float2(o.x * 2.0, 0.0)).rgb;
+  c += t0.sample(smp, uv + float2(o.x, -o.y)).rgb * 2.0;
+  c += t0.sample(smp, uv + float2(0.0, -o.y * 2.0)).rgb;
+  c += t0.sample(smp, uv + float2(-o.x, -o.y)).rgb * 2.0;
+  return float4(c / 12.0 + t1.sample(smp, uv).rgb, 1.0);
+}
+
+inline float ghost_smoother(float x) {
+  x = clamp(x, 0.0, 1.0);
+  return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+}
+
+fragment float4 ghost_fibers_composite(LiveVOut in [[stage_in]], constant float4* u [[buffer(0)]],
+                                       texture2d<float> t0 [[texture(0)]], texture2d<float> t1 [[texture(1)]],
+                                       sampler smp [[sampler(0)]]) {
+  // The scene and the bloom in Metal's orientation; the vignette is
+  // symmetric, and only the grain hashes GLSL's fragment coordinate.
+  float2 uv = in.pos.xy / u[0].xy;
+  float2 vUv = gl_frag(in.pos, u[0].y) / u[0].xy;
+  float4 scene = t0.sample(smp, uv);
+  float3 bloom = t1.sample(smp, uv).rgb;
+  float3 light = (scene.rgb + bloom * u[7].x) * u[7].y;
+  float uVignette = u[7].w;
+  float reach = max(uVignette * 0.3, 1e-4);
+  float mask = uVignette > 0.0 ? ghost_smoother(vUv.x / reach) * ghost_smoother((1.0 - vUv.x) / reach) * ghost_smoother(vUv.y / reach) * ghost_smoother((1.0 - vUv.y) / reach) : 1.0;
+  // The grain is fixed in place (React Bits moves it every frame).
+  float2 cell = floor(vUv * u[0].xy / max(u[0].w, 1.0));
+  float grain = hash12(cell) + hash12(cell * 1.31 + 9.1) - 1.0;
+  float3 color = (1.0 - exp(-light * 1.25)) * mask;
+  float peak = max(color.r, max(color.g, color.b));
+  color = max(color + grain * u[7].z * (0.25 + 0.75 * sqrt(peak)), float3(0.0));
+  float alpha = max(color.r, max(color.g, color.b));
+  return float4((color + u[15].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);
+}
 "#;
+
+/// The MSL vertex function of a pass: the full-screen triangle, or an
+/// instanced pass's own.
+fn pass_vertex_function(pass: LivePass) -> &'static str {
+    match pass {
+        LivePass::GhostFibersDots => "ghost_fibers_dots_vertex",
+        LivePass::GhostFibersDust => "ghost_fibers_dust_vertex",
+        _ => "live_vertex",
+    }
+}
 
 /// The MSL fragment function of a pass.
 fn pass_function(pass: LivePass) -> &'static str {
@@ -624,22 +1745,55 @@ fn pass_function(pass: LivePass) -> &'static str {
         LivePass::PlasmaComposite => "plasma_composite",
         LivePass::LiquidChrome => "liquid_chrome_main",
         LivePass::LineWaves => "line_waves_main",
+        LivePass::BeamsField => "beams_field",
+        LivePass::BeamsComposite => "beams_composite",
+        LivePass::ColorBends => "color_bends_main",
+        LivePass::DitherWave => "dither_wave",
+        LivePass::DitherComposite => "dither_composite",
+        LivePass::FerrofluidField => "ferrofluid_field",
+        LivePass::FerrofluidBound => "ferrofluid_bound",
+        LivePass::FerrofluidRender => "ferrofluid_render",
+        LivePass::GhostFibersDots | LivePass::GhostFibersDust => "ghost_fibers_dot",
+        LivePass::GhostFibersBright => "ghost_fibers_bright",
+        LivePass::GhostFibersDown => "ghost_fibers_down",
+        LivePass::GhostFibersUp => "ghost_fibers_up",
+        LivePass::GhostFibersComposite => "ghost_fibers_composite",
     }
 }
 
-/// The format of a pass's render target; the Plasma light passes follow the
+/// The format of a pass's render target; the HDR light passes follow the
 /// renderer's (test-selectable) light format.
-fn pass_format(pass: LivePass, plasma_light: MTLPixelFormat) -> MTLPixelFormat {
+fn pass_format(pass: LivePass, light: MTLPixelFormat) -> MTLPixelFormat {
     match pass {
         LivePass::SilkField => SILK_FIELD_FORMAT,
         LivePass::PlasmaCoarse => PLASMA_COARSE_FORMAT,
-        LivePass::PlasmaFine | LivePass::PlasmaDown | LivePass::PlasmaUp => plasma_light,
+        LivePass::PlasmaFine
+        | LivePass::PlasmaDown
+        | LivePass::PlasmaUp
+        | LivePass::BeamsField
+        | LivePass::GhostFibersBright
+        | LivePass::GhostFibersDown
+        | LivePass::GhostFibersUp => light,
+        LivePass::DitherWave => DITHER_WAVE_FORMAT,
+        LivePass::FerrofluidField | LivePass::FerrofluidBound => FERROFLUID_GRID_FORMAT,
+        LivePass::GhostFibersDots | LivePass::GhostFibersDust => GHOST_FIBERS_SCENE_FORMAT,
         LivePass::SilkComposite
         | LivePass::SideRays
         | LivePass::PlasmaComposite
         | LivePass::LiquidChrome
-        | LivePass::LineWaves => FRAME_FORMAT,
+        | LivePass::LineWaves
+        | LivePass::BeamsComposite
+        | LivePass::ColorBends
+        | LivePass::DitherComposite
+        | LivePass::FerrofluidRender
+        | LivePass::GhostFibersComposite => FRAME_FORMAT,
     }
+}
+
+/// Dither's pixel size in CSS pixels (`u[3].z`): its wave field has one texel
+/// per cell.
+fn dither_pixel_size(look: &LiveLook) -> f32 {
+    look.statics[1][2]
 }
 
 /// This tick's live frame, ready for the compose to draw as the background.
@@ -672,6 +1826,9 @@ pub enum DrawError {
     Resources,
 }
 
+/// A background's scratch textures. A clone is one retain per texture, so
+/// `draw` can hold the set while it borrows the renderer mutably.
+#[derive(Clone)]
 enum Scratch {
     None,
     Silk {
@@ -684,30 +1841,37 @@ enum Scratch {
         /// Levels 3, 2 and 1 of the up chain, in that order.
         up: Vec<Retained<MetalTexture>>,
     },
+    Beams {
+        /// The glint field, mipmapped.
+        field: Retained<MetalTexture>,
+    },
+    Dither {
+        /// One texel per cell.
+        wave: Retained<MetalTexture>,
+    },
+    Ferrofluid {
+        field: Retained<MetalTexture>,
+        bound: Retained<MetalTexture>,
+    },
+    GhostFibers {
+        scene: Retained<MetalTexture>,
+        /// The bright level 0, then the down levels 1–4.
+        chain: Vec<Retained<MetalTexture>>,
+        /// Levels 3, 2, 1 and 0 of the up chain, in that order.
+        up: Vec<Retained<MetalTexture>>,
+    },
 }
 
 /// The textures a background holds at one internal size: its live frame and
-/// its scratch. Rebuilt when the background or the size changes.
+/// its scratch. Rebuilt when the background, the look (Dither's cell and
+/// Ferrofluid's grid follow it) or the size changes.
 struct Targets {
     id: LiveBackgroundId,
+    look: &'static str,
     view: (u32, u32),
     frame: Retained<MetalTexture>,
     scratch: Scratch,
     bytes: u64,
-}
-
-/// The passes of one draw, with retained clones of the textures they touch.
-enum DrawPlan {
-    Silk {
-        field: Retained<MetalTexture>,
-    },
-    Plasma {
-        coarse: Retained<MetalTexture>,
-        fine: Retained<MetalTexture>,
-        down: Vec<Retained<MetalTexture>>,
-        up: Vec<Retained<MetalTexture>>,
-    },
-    Single(LivePass),
 }
 
 /// The previous tick's live command buffer, kept only to read its GPU time.
@@ -734,8 +1898,8 @@ pub struct LiveBackgroundMetalRenderer {
     reported_status: Option<LiveBackgroundStatus>,
     reported_resources: (u32, u64),
     resources_warned: bool,
-    /// `PLASMA_LIGHT_FORMAT`, unless a test compares the alternative.
-    plasma_light_format: MTLPixelFormat,
+    /// `LIGHT_FORMAT`, unless a test compares the alternative.
+    light_format: MTLPixelFormat,
     #[cfg(test)]
     injected_gpu_ms: Option<f64>,
 }
@@ -776,7 +1940,7 @@ impl LiveBackgroundMetalRenderer {
             reported_status: None,
             reported_resources: (0, 0),
             resources_warned: false,
-            plasma_light_format: PLASMA_LIGHT_FORMAT,
+            light_format: LIGHT_FORMAT,
             #[cfg(test)]
             injected_gpu_ms: None,
         })
@@ -865,46 +2029,40 @@ impl LiveBackgroundMetalRenderer {
     /// guard and status live in `render`). The returned texture is this
     /// renderer's live frame: the next `draw` overwrites it.
     pub fn draw(&mut self, draw: &LiveDraw<'_>) -> Result<LiveFrame, DrawError> {
+        let look = draw.look;
         let view = internal_size(draw.id, draw.output, draw.level);
         // Pipelines first: a background whose shader won't build allocates
         // nothing.
         for pass in super::glsl::passes(draw.id) {
-            self.pipeline(*pass)?;
+            self.pipeline(*pass, pass.kind(look))?;
         }
-        self.ensure_targets(draw.id, view)?;
+        self.ensure_targets(draw.id, look, view)?;
         let command_buffer = self.queue.commandBuffer().ok_or(DrawError::Resources)?;
         command_buffer.setLabel(Some(&NSString::from_str("videorc-live-background")));
         // Retained clones of the targets, so the passes below can borrow the
         // renderer mutably (a clone is one retain).
-        let (frame, plan) = {
+        let (frame, scratch) = {
             let targets = self.targets.as_ref().ok_or(DrawError::Resources)?;
-            let plan = match &targets.scratch {
-                Scratch::Silk { field } => DrawPlan::Silk {
-                    field: field.clone(),
-                },
-                Scratch::Plasma {
-                    coarse,
-                    fine,
-                    down,
-                    up,
-                } => DrawPlan::Plasma {
-                    coarse: coarse.clone(),
-                    fine: fine.clone(),
-                    down: down.clone(),
-                    up: up.clone(),
-                },
-                Scratch::None => DrawPlan::Single(match draw.id {
+            (targets.frame.clone(), targets.scratch.clone())
+        };
+        let (phase, dim) = (draw.phase, draw.dim);
+        match scratch {
+            Scratch::None => {
+                let pass = match draw.id {
                     LiveBackgroundId::SideRays => LivePass::SideRays,
                     LiveBackgroundId::LiquidChrome => LivePass::LiquidChrome,
+                    LiveBackgroundId::ColorBends => LivePass::ColorBends,
                     _ => LivePass::LineWaves,
-                }),
-            };
-            (targets.frame.clone(), plan)
-        };
-        let look = draw.look;
-        let (phase, dim) = (draw.phase, draw.dim);
-        match plan {
-            DrawPlan::Silk { field } => {
+                };
+                self.encode(
+                    &command_buffer,
+                    pass,
+                    &frame,
+                    &uniforms(look, view, view, phase, dim),
+                    &[],
+                )?;
+            }
+            Scratch::Silk { field } => {
                 let field_size = silk_field_size(view);
                 self.encode(
                     &command_buffer,
@@ -926,7 +2084,7 @@ impl LiveBackgroundMetalRenderer {
                     &[&field],
                 )?;
             }
-            DrawPlan::Plasma {
+            Scratch::Plasma {
                 coarse,
                 fine,
                 down,
@@ -978,13 +2136,116 @@ impl LiveBackgroundMetalRenderer {
                     &[&fine, &up[2]],
                 )?;
             }
-            DrawPlan::Single(pass) => {
+            Scratch::Beams { field } => {
+                let field_size = beams_field_size(view);
                 self.encode(
                     &command_buffer,
-                    pass,
+                    LivePass::BeamsField,
+                    &field,
+                    &uniforms(look, field_size, view, phase, dim),
+                    &[],
+                )?;
+                let blit = command_buffer
+                    .blitCommandEncoder()
+                    .ok_or(DrawError::Resources)?;
+                blit.generateMipmapsForTexture(&field);
+                blit.endEncoding();
+                self.encode(
+                    &command_buffer,
+                    LivePass::BeamsComposite,
                     &frame,
                     &uniforms(look, view, view, phase, dim),
+                    &[&field],
+                )?;
+            }
+            Scratch::Dither { wave } => {
+                let cells = dither_field_size(view, dither_pixel_size(look));
+                self.encode(
+                    &command_buffer,
+                    LivePass::DitherWave,
+                    &wave,
+                    &uniforms(look, cells, view, phase, dim),
                     &[],
+                )?;
+                self.encode(
+                    &command_buffer,
+                    LivePass::DitherComposite,
+                    &frame,
+                    &uniforms(look, view, view, phase, dim),
+                    &[&wave],
+                )?;
+            }
+            Scratch::Ferrofluid { field, bound } => {
+                let grid = ferrofluid_grid(&ferrofluid_look_camera(look), view);
+                self.encode(
+                    &command_buffer,
+                    LivePass::FerrofluidField,
+                    &field,
+                    &uniforms(look, grid.size, view, phase, dim),
+                    &[],
+                )?;
+                self.encode(
+                    &command_buffer,
+                    LivePass::FerrofluidBound,
+                    &bound,
+                    &uniforms(look, grid.bound, view, phase, dim),
+                    &[&field],
+                )?;
+                self.encode(
+                    &command_buffer,
+                    LivePass::FerrofluidRender,
+                    &frame,
+                    &uniforms(look, view, view, phase, dim),
+                    &[&field, &bound],
+                )?;
+            }
+            Scratch::GhostFibers { scene, chain, up } => {
+                let sizes = ghost_fibers_bloom_sizes(view);
+                let full = uniforms(look, view, view, phase, dim);
+                // The dots clear the scene and the dust adds to it: the
+                // instance counts are the look's.
+                for pass in [LivePass::GhostFibersDots, LivePass::GhostFibersDust] {
+                    self.encode_instanced(&command_buffer, pass, pass.kind(look), &scene, &full)?;
+                }
+                self.encode(
+                    &command_buffer,
+                    LivePass::GhostFibersBright,
+                    &chain[0],
+                    &uniforms(look, sizes[0], view, phase, dim),
+                    &[&scene],
+                )?;
+                for level in 1..chain.len() {
+                    self.encode(
+                        &command_buffer,
+                        LivePass::GhostFibersDown,
+                        &chain[level],
+                        &uniforms(look, sizes[level], view, phase, dim),
+                        &[&chain[level - 1]],
+                    )?;
+                }
+                // up[0] is level 3 (from chain[4]), up[1] level 2, up[2]
+                // level 1, up[3] level 0; each adds the matching chain level.
+                for (index, target) in up.iter().enumerate() {
+                    let level = 3 - index;
+                    let from = if index == 0 {
+                        &chain[4]
+                    } else {
+                        &up[index - 1]
+                    };
+                    self.encode(
+                        &command_buffer,
+                        LivePass::GhostFibersUp,
+                        target,
+                        &uniforms(look, sizes[level], view, phase, dim),
+                        &[from, &chain[level]],
+                    )?;
+                }
+                self.encode(
+                    &command_buffer,
+                    LivePass::GhostFibersComposite,
+                    &frame,
+                    &full,
+                    &[&scene, &up[3]],
                 )?;
             }
         }
@@ -1099,7 +2360,14 @@ impl LiveBackgroundMetalRenderer {
         (seconds > 0.0).then_some(seconds * 1000.0)
     }
 
-    fn pipeline(&mut self, pass: LivePass) -> Result<Retained<MetalPipeline>, DrawError> {
+    /// The pass's pipeline, built on first use: its vertex and fragment
+    /// functions, its target format and, for an additive instanced pass,
+    /// `ONE, ONE` blending on both colour and alpha (WebGL's `blendFunc`).
+    fn pipeline(
+        &mut self,
+        pass: LivePass,
+        kind: PassKind,
+    ) -> Result<Retained<MetalPipeline>, DrawError> {
         if let Some(pipeline) = self.pipelines.get(&pass) {
             return Ok(pipeline.clone());
         }
@@ -1130,8 +2398,10 @@ impl LiveBackgroundMetalRenderer {
             }
         };
         let function = pass_function(pass);
-        let format = pass_format(pass, self.plasma_light_format);
-        let Some(vertex) = library.newFunctionWithName(&NSString::from_str("live_vertex")) else {
+        let format = pass_format(pass, self.light_format);
+        let Some(vertex) =
+            library.newFunctionWithName(&NSString::from_str(pass_vertex_function(pass)))
+        else {
             return self.fail_compile(pass, "the vertex function is missing");
         };
         let Some(fragment) = library.newFunctionWithName(&NSString::from_str(function)) else {
@@ -1142,6 +2412,19 @@ impl LiveBackgroundMetalRenderer {
         descriptor.setFragmentFunction(Some(&fragment));
         let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
         attachment.setPixelFormat(format);
+        if let PassKind::Instanced {
+            blend: PassBlend::Additive,
+            ..
+        } = kind
+        {
+            attachment.setBlendingEnabled(true);
+            attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+            attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+            attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
+            attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+            attachment.setDestinationRGBBlendFactor(MTLBlendFactor::One);
+            attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::One);
+        }
         match self
             .device
             .newRenderPipelineStateWithDescriptor_error(&descriptor)
@@ -1170,17 +2453,21 @@ impl LiveBackgroundMetalRenderer {
         Err(DrawError::ShaderCompileFailed)
     }
 
-    fn ensure_targets(&mut self, id: LiveBackgroundId, view: (u32, u32)) -> Result<(), DrawError> {
-        if self
-            .targets
-            .as_ref()
-            .is_some_and(|targets| targets.id == id && targets.view == view)
-        {
+    fn ensure_targets(
+        &mut self,
+        id: LiveBackgroundId,
+        look: &LiveLook,
+        view: (u32, u32),
+    ) -> Result<(), DrawError> {
+        if self.targets.as_ref().is_some_and(|targets| {
+            targets.id == id && targets.look == look.id && targets.view == view
+        }) {
             return Ok(());
         }
         self.targets = None;
         let frame = self.texture(FRAME_FORMAT, view, false)?;
         let mut bytes = frame.allocatedSize() as u64;
+        let light = self.light_format;
         let scratch = match id {
             LiveBackgroundId::Silk => {
                 let field = self.texture(SILK_FIELD_FORMAT, silk_field_size(view), true)?;
@@ -1189,7 +2476,6 @@ impl LiveBackgroundMetalRenderer {
             }
             LiveBackgroundId::PlasmaWave => {
                 let sizes = plasma_sizes(view);
-                let light = self.plasma_light_format;
                 let coarse = self.texture(PLASMA_COARSE_FORMAT, sizes.coarse, false)?;
                 let fine = self.texture(light, sizes.fine, false)?;
                 let mut down = Vec::with_capacity(5);
@@ -1213,12 +2499,51 @@ impl LiveBackgroundMetalRenderer {
                     up,
                 }
             }
+            LiveBackgroundId::Beams => {
+                let field = self.texture(light, beams_field_size(view), true)?;
+                bytes += field.allocatedSize() as u64;
+                Scratch::Beams { field }
+            }
+            LiveBackgroundId::Dither => {
+                let cells = dither_field_size(view, dither_pixel_size(look));
+                let wave = self.texture(DITHER_WAVE_FORMAT, cells, false)?;
+                bytes += wave.allocatedSize() as u64;
+                Scratch::Dither { wave }
+            }
+            LiveBackgroundId::Ferrofluid => {
+                let grid = ferrofluid_grid(&ferrofluid_look_camera(look), view);
+                let field = self.texture(FERROFLUID_GRID_FORMAT, grid.size, false)?;
+                let bound = self.texture(FERROFLUID_GRID_FORMAT, grid.bound, false)?;
+                bytes += field.allocatedSize() as u64 + bound.allocatedSize() as u64;
+                Scratch::Ferrofluid { field, bound }
+            }
+            LiveBackgroundId::GhostFibers => {
+                let sizes = ghost_fibers_bloom_sizes(view);
+                let scene = self.texture(GHOST_FIBERS_SCENE_FORMAT, view, false)?;
+                let mut chain = Vec::with_capacity(sizes.len());
+                for size in sizes {
+                    chain.push(self.texture(light, size, false)?);
+                }
+                let mut up = Vec::with_capacity(sizes.len() - 1);
+                for level in (0..sizes.len() - 1).rev() {
+                    up.push(self.texture(light, sizes[level], false)?);
+                }
+                bytes += scene.allocatedSize() as u64;
+                bytes += chain
+                    .iter()
+                    .chain(up.iter())
+                    .map(|texture| texture.allocatedSize() as u64)
+                    .sum::<u64>();
+                Scratch::GhostFibers { scene, chain, up }
+            }
             LiveBackgroundId::SideRays
             | LiveBackgroundId::LiquidChrome
-            | LiveBackgroundId::LineWaves => Scratch::None,
+            | LiveBackgroundId::LineWaves
+            | LiveBackgroundId::ColorBends => Scratch::None,
         };
         self.targets = Some(Targets {
             id,
+            look: look.id,
             view,
             frame,
             scratch,
@@ -1250,7 +2575,7 @@ impl LiveBackgroundMetalRenderer {
             .ok_or(DrawError::Resources)
     }
 
-    /// One full-screen pass into `target`.
+    /// One full-screen pass into `target`, which it covers.
     fn encode(
         &mut self,
         command_buffer: &MetalCommandBuffer,
@@ -1259,15 +2584,8 @@ impl LiveBackgroundMetalRenderer {
         uniforms: &Uniforms,
         textures: &[&MetalTexture],
     ) -> Result<(), DrawError> {
-        let pipeline = self.pipeline(pass)?;
-        let descriptor = MTLRenderPassDescriptor::new();
-        let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-        attachment.setTexture(Some(target));
-        attachment.setLoadAction(MTLLoadAction::DontCare);
-        attachment.setStoreAction(MTLStoreAction::Store);
-        let encoder = command_buffer
-            .renderCommandEncoderWithDescriptor(&descriptor)
-            .ok_or(DrawError::Resources)?;
+        let pipeline = self.pipeline(pass, PassKind::FullScreen)?;
+        let encoder = self.encoder(command_buffer, target, MTLLoadAction::DontCare)?;
         encoder.setRenderPipelineState(&pipeline);
         let uniforms_ptr =
             NonNull::new(uniforms.as_ptr() as *mut c_void).ok_or(DrawError::Resources)?;
@@ -1285,6 +2603,91 @@ impl LiveBackgroundMetalRenderer {
         }
         encoder.endEncoding();
         Ok(())
+    }
+
+    /// One instanced pass (plan 194 N2): `instances` strips of `vertices`
+    /// into `target`, which the first pass of a scene clears to transparent
+    /// black and the next ones add to. The vertex function derives every
+    /// position from the ids and the same uniforms the fragments read.
+    fn encode_instanced(
+        &mut self,
+        command_buffer: &MetalCommandBuffer,
+        pass: LivePass,
+        kind: PassKind,
+        target: &MetalTexture,
+        uniforms: &Uniforms,
+    ) -> Result<(), DrawError> {
+        let PassKind::Instanced {
+            vertices,
+            instances,
+            ..
+        } = kind
+        else {
+            return Err(DrawError::Resources);
+        };
+        let clears = pass.clears_target();
+        if instances == 0 && !clears {
+            // A look without dust draws nothing here; the scene stays.
+            return Ok(());
+        }
+        let pipeline = self.pipeline(pass, kind)?;
+        let load = if clears {
+            MTLLoadAction::Clear
+        } else {
+            MTLLoadAction::Load
+        };
+        let encoder = self.encoder(command_buffer, target, load)?;
+        if instances > 0 {
+            encoder.setRenderPipelineState(&pipeline);
+            let uniforms_ptr =
+                NonNull::new(uniforms.as_ptr() as *mut c_void).ok_or(DrawError::Resources)?;
+            unsafe {
+                encoder.setVertexBytes_length_atIndex(
+                    uniforms_ptr,
+                    std::mem::size_of::<Uniforms>(),
+                    0,
+                );
+                encoder.setFragmentBytes_length_atIndex(
+                    uniforms_ptr,
+                    std::mem::size_of::<Uniforms>(),
+                    0,
+                );
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::TriangleStrip,
+                    0,
+                    vertices as usize,
+                    instances as usize,
+                );
+            }
+        }
+        encoder.endEncoding();
+        Ok(())
+    }
+
+    /// A render encoder on `target`: `Clear` to transparent black, `Load`
+    /// what it holds, or `DontCare` for a pass that covers it.
+    fn encoder(
+        &self,
+        command_buffer: &MetalCommandBuffer,
+        target: &MetalTexture,
+        load: MTLLoadAction,
+    ) -> Result<Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>, DrawError> {
+        let descriptor = MTLRenderPassDescriptor::new();
+        let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        attachment.setTexture(Some(target));
+        attachment.setLoadAction(load);
+        if load == MTLLoadAction::Clear {
+            attachment.setClearColor(MTLClearColor {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 0.0,
+            });
+        }
+        attachment.setStoreAction(MTLStoreAction::Store);
+        command_buffer
+            .renderCommandEncoderWithDescriptor(&descriptor)
+            .ok_or(DrawError::Resources)
     }
 
     /// Wait for the last `draw` and return its GPU time in ms (tests and the
@@ -1342,12 +2745,12 @@ impl LiveBackgroundMetalRenderer {
         self.injected_gpu_ms = ms;
     }
 
-    /// Tests compare Plasma Wave's light format; a change rebuilds its
-    /// pipelines and scratch.
+    /// Tests compare the HDR light format; a change rebuilds the pipelines
+    /// and scratch.
     #[cfg(test)]
-    pub(crate) fn set_plasma_light_format(&mut self, format: MTLPixelFormat) {
-        if self.plasma_light_format != format {
-            self.plasma_light_format = format;
+    pub(crate) fn set_light_format(&mut self, format: MTLPixelFormat) {
+        if self.light_format != format {
+            self.light_format = format;
             self.drop_resources();
         }
     }
@@ -1360,8 +2763,9 @@ mod tests {
     use base64::Engine as _;
 
     use super::*;
+    use crate::live_background::glsl::passes;
     use crate::live_background::runtime::{LiveBackgroundTick, sync};
-    use crate::live_background::{ALL_LIVE_BACKGROUNDS, css_id, look_or_first, looks};
+    use crate::live_background::{ALL_LIVE_BACKGROUNDS, BASE_COLOR, css_id, look_or_first, looks};
     use crate::protocol::{EffectiveSceneBackground, LiveBackgroundMotion, LiveBackgroundSpec};
 
     const GOLDEN: &str = concat!(
@@ -1431,7 +2835,8 @@ mod tests {
         frames: Vec<GoldenFrame>,
     }
 
-    /// The fixture: 30 grids rendered from the GLSL in WebGL2.
+    /// The fixture: the 60 grids rendered from the GLSL in WebGL2 (three
+    /// looks at two phases for each of the ten backgrounds).
     fn load_golden() -> Golden {
         let fixture: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(GOLDEN).expect("golden fixture"))
@@ -1466,7 +2871,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        assert_eq!(frames.len(), 30);
+        assert_eq!(frames.len(), 60);
         Golden { size, grid, frames }
     }
 
@@ -1532,37 +2937,42 @@ mod tests {
         assert!(failures.is_empty(), "golden grids off: {failures:?}");
     }
 
-    /// The choice of Plasma Wave's light format, measured: the WebGL
-    /// reference renders in `RGBA16F`; Videorc's `RG11B10Float` halves the
-    /// bytes. Both must match the goldens; the numbers go in "As built".
+    /// The choice of the HDR light format, measured per background that
+    /// uses it (Plasma Wave's trace and chain, Beams' field, Ghost Fibers'
+    /// bloom): the WebGL reference renders in `RGBA16F`; Videorc's
+    /// `RG11B10Float` halves the bytes. Both must match the goldens; the
+    /// numbers go in "As built".
     #[test]
-    fn plasma_light_formats_both_match_the_goldens() {
+    fn light_formats_both_match_the_goldens() {
         let Some((mut renderer, _board)) = renderer() else {
             return;
         };
         let golden = load_golden();
-        for (name, format) in [
-            ("RG11B10Float", MTLPixelFormat::RG11B10Float),
-            ("RGBA16Float", MTLPixelFormat::RGBA16Float),
+        for id in [
+            LiveBackgroundId::PlasmaWave,
+            LiveBackgroundId::Beams,
+            LiveBackgroundId::GhostFibers,
         ] {
-            renderer.set_plasma_light_format(format);
-            let (mut worst_mean, mut worst_max) = (0.0_f64, 0_u8);
-            for frame in golden
-                .frames
-                .iter()
-                .filter(|frame| frame.id == LiveBackgroundId::PlasmaWave)
-            {
-                let (mean, max) = golden_error(&mut renderer, &golden, frame);
-                worst_mean = worst_mean.max(mean);
-                worst_max = worst_max.max(max);
+            for (name, format) in [
+                ("RG11B10Float", MTLPixelFormat::RG11B10Float),
+                ("RGBA16Float", MTLPixelFormat::RGBA16Float),
+            ] {
+                renderer.set_light_format(format);
+                let (mut worst_mean, mut worst_max) = (0.0_f64, 0_u8);
+                for frame in golden.frames.iter().filter(|frame| frame.id == id) {
+                    let (mean, max) = golden_error(&mut renderer, &golden, frame);
+                    worst_mean = worst_mean.max(mean);
+                    worst_max = worst_max.max(max);
+                }
+                let (_, bytes) = renderer.resources();
+                eprintln!(
+                    "{} light {name}: worst mean {worst_mean:.3}, worst max cell {worst_max}, {bytes} scratch bytes at 640x360",
+                    css_id(id)
+                );
+                assert!(worst_mean <= 2.0 && worst_max <= 10, "{id:?} {name}");
             }
-            let (_, bytes) = renderer.resources();
-            eprintln!(
-                "plasma light {name}: worst mean {worst_mean:.3}, worst max cell {worst_max}, {bytes} scratch bytes at 640x360"
-            );
-            assert!(worst_mean <= 2.0 && worst_max <= 10, "{name}");
         }
-        renderer.set_plasma_light_format(PLASMA_LIGHT_FORMAT);
+        renderer.set_light_format(LIGHT_FORMAT);
     }
 
     fn spec(id: LiveBackgroundId, look: &str) -> LiveBackgroundSpec {
@@ -1760,45 +3170,262 @@ mod tests {
         );
     }
 
-    /// The live frame's GPU time per background at 1080p and 4K (median of
-    /// 60 frames), for the plan's "As built". Informational: this machine is
-    /// shared, so the numbers are not asserted.
+    /// The plan 194 five.
+    const NEW_FIVE: [(LiveBackgroundId, &str); 5] = [
+        (LiveBackgroundId::Beams, "studio"),
+        (LiveBackgroundId::ColorBends, "default"),
+        (LiveBackgroundId::Dither, "classic"),
+        (LiveBackgroundId::Ferrofluid, "studio"),
+        (LiveBackgroundId::GhostFibers, "violet"),
+    ];
+
+    /// Plan 194 S3, the plan 190 set for the five: two draws two seconds
+    /// apart differ (Calm halves the rate), and two at the same phase are
+    /// byte-identical, instanced dots included.
+    #[test]
+    fn the_new_five_move_with_the_phase_and_are_deterministic() {
+        let Some((mut renderer, board)) = renderer() else {
+            return;
+        };
+        for (id, look) in NEW_FIVE {
+            let spec = spec(id, look);
+            let start = Instant::now();
+            let input = frame_input(&spec, &board, LiveBackgroundTick::unmeasured(start));
+            let read = |renderer: &mut LiveBackgroundMetalRenderer, at: Instant| {
+                let mut input = input.clone();
+                input.tick = LiveBackgroundTick::unmeasured(at);
+                let frame = renderer.render(&input, (320, 180), None).unwrap();
+                assert_eq!(frame.rendering, LiveBackgroundRendering::Shader, "{id:?}");
+                renderer.read_frame_bgra(&frame).unwrap()
+            };
+            let first = read(&mut renderer, start);
+            let again = read(&mut renderer, start);
+            let later = read(&mut renderer, start + Duration::from_secs(2));
+            assert_eq!(first, again, "{id:?} is not deterministic");
+            let changed = first
+                .iter()
+                .zip(later.iter())
+                .filter(|(a, b)| a.abs_diff(**b) > 2)
+                .count();
+            eprintln!(
+                "{}: {changed} of {} bytes moved in two seconds",
+                css_id(id),
+                first.len()
+            );
+            assert!(
+                changed > first.len() / 20,
+                "{id:?}: {changed} of {} bytes",
+                first.len()
+            );
+        }
+        renderer.release();
+    }
+
+    /// A forced still draws nothing and holds nothing for any of the five.
+    #[test]
+    fn a_forced_still_builds_no_pipeline_for_the_new_five() {
+        let Some((mut renderer, board)) = renderer() else {
+            return;
+        };
+        for (id, look) in NEW_FIVE {
+            let now = Instant::now();
+            let input = frame_input(&spec(id, look), &board, LiveBackgroundTick::unmeasured(now));
+            assert!(
+                renderer
+                    .render(&input, (640, 360), Some(LiveBackgroundStillReason::Forced))
+                    .is_none()
+            );
+            assert!(!renderer.holds_resources(), "{id:?}");
+            let (status, programs, scratch) = board.snapshot();
+            assert_eq!(
+                status.map(|status| status.reason),
+                Some(Some(LiveBackgroundStillReason::Forced))
+            );
+            assert_eq!((programs, scratch), (0, 0), "{id:?}");
+        }
+    }
+
+    /// Each of the five builds exactly its passes' pipelines and holds its
+    /// own scratch beside the live frame (Color Bends none); Dither renders
+    /// 4K at full size, Ferrofluid at 1440 × 810 and the other soft three at
+    /// 1080p; the guard's Half level
+    /// halves the instanced one too; and a release frees everything.
+    #[test]
+    fn the_new_scratch_follows_the_background_and_release_frees_everything() {
+        let Some((mut renderer, board)) = renderer() else {
+            return;
+        };
+        let now = Instant::now();
+        let mut programs_so_far = 0;
+        for (id, look) in NEW_FIVE {
+            let input = frame_input(&spec(id, look), &board, LiveBackgroundTick::unmeasured(now));
+            let frame = renderer
+                .render(&input, (1920, 1080), None)
+                .expect("renders");
+            // Ferrofluid renders at most 810 on its short side.
+            let expected = internal_size(id, (1920, 1080), GuardLevel::Full);
+            assert_eq!((frame.width, frame.height), expected, "{id:?}");
+            assert_eq!(frame.rendering, LiveBackgroundRendering::Shader, "{id:?}");
+            programs_so_far += passes(id).len() as u32;
+            let (programs, bytes) = renderer.resources();
+            assert_eq!(
+                programs, programs_so_far,
+                "{id:?}: the pipelines stay cached"
+            );
+            let frame_bytes = frame_bytes(&renderer);
+            eprintln!("{} scratch at 1080p: {bytes} bytes", css_id(id));
+            match id {
+                LiveBackgroundId::ColorBends => {
+                    assert_eq!(bytes, frame_bytes, "only the live frame")
+                }
+                // The scene (16 MB of RGBA16F) and its two bloom chains.
+                LiveBackgroundId::GhostFibers => {
+                    assert!(bytes > frame_bytes + 16 * 1024 * 1024, "{bytes}");
+                    assert!(bytes < frame_bytes + 40 * 1024 * 1024, "{bytes}");
+                }
+                _ => assert!(bytes > frame_bytes, "{id:?}: {bytes}"),
+            }
+            assert_eq!(board.snapshot().2, bytes);
+            let frame = renderer.render(&input, (3840, 2160), None).unwrap();
+            let expected = match id {
+                LiveBackgroundId::Dither => (3840, 2160),
+                LiveBackgroundId::Ferrofluid => (1440, 810),
+                _ => (1920, 1080),
+            };
+            assert_eq!((frame.width, frame.height), expected, "{id:?} at 4K");
+        }
+        let violet = &looks(LiveBackgroundId::GhostFibers)[0];
+        let half = renderer
+            .draw(&LiveDraw {
+                id: LiveBackgroundId::GhostFibers,
+                look: violet,
+                phase: violet.poster_phase,
+                dim: 0.0,
+                output: (1920, 1080),
+                level: GuardLevel::Half,
+            })
+            .expect("renders at half");
+        assert_eq!((half.width, half.height), (960, 540));
+        assert_eq!(half.rendering, LiveBackgroundRendering::Half);
+        renderer.release();
+        assert_eq!(renderer.resources(), (0, 0));
+        assert!(!renderer.holds_resources());
+        assert_eq!(board.snapshot().1, 0);
+        assert_eq!(board.snapshot().2, 0);
+    }
+
+    /// Plan 193 with an instanced background: on a record-and-stream split
+    /// the recording leg renders Ghost Fibers at its canvas and the stream
+    /// leg draws that very texture at the same tick (`frame_at`), nothing at
+    /// another instant, and the next tick's frame replaces it. The frame it
+    /// shares has the dots in it, not a cleared scene.
+    #[test]
+    fn ghost_fibers_shares_its_frame_with_the_stream_leg_of_a_split() {
+        let Some((mut renderer, board)) = renderer() else {
+            return;
+        };
+        let spec = spec(LiveBackgroundId::GhostFibers, "violet");
+        let start = Instant::now();
+        let interval = Duration::from_nanos(16_666_667);
+        let mut input = frame_input(
+            &spec,
+            &board,
+            LiveBackgroundTick::new(start, interval, false),
+        );
+        let recording = renderer
+            .render(&input, (1920, 1080), None)
+            .expect("the recording leg renders");
+        let shared = renderer.frame_at(start).expect("this tick's frame");
+        assert!(std::ptr::eq(&*shared.texture, &*recording.texture));
+        assert_eq!((shared.width, shared.height), (1920, 1080));
+        assert_eq!(shared.rendering, LiveBackgroundRendering::Shader);
+        assert!(renderer.frame_at(start + Duration::from_nanos(1)).is_none());
+        assert!(renderer.frame_at(start - interval).is_none());
+        let bgra = renderer.read_frame_bgra(&shared).expect("readback");
+        let base = (BASE_COLOR[2] * 255.0).round() as u8;
+        let lit = bgra
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] > base + 8 || pixel[1] > base + 8 || pixel[2] > base + 8)
+            .count();
+        eprintln!("ghost fibers: {lit} of {} pixels lit", bgra.len() / 4);
+        assert!(lit > bgra.len() / 4 / 50, "the dots drew: {lit} lit pixels");
+        let next = start + interval;
+        input.tick = LiveBackgroundTick::new(next, interval, false);
+        let later = renderer
+            .render(&input, (1920, 1080), None)
+            .expect("the next tick renders");
+        assert!(renderer.frame_at(start).is_none(), "no stale frame");
+        let shared = renderer.frame_at(next).expect("the next tick's frame");
+        assert!(std::ptr::eq(&*shared.texture, &*later.texture));
+        drop((recording, later, shared));
+        renderer.release();
+        assert!(renderer.frame_at(next).is_none());
+    }
+
+    /// The live frame's GPU time for every look of every background at
+    /// 1080p, 1080 × 1920, 4K and the guard's Half level at 1080p (median
+    /// and p95 of 60 frames from `GPUEndTime - GPUStartTime`), for the
+    /// plan's "As built", with the host's load average before and after.
+    /// Informational: this machine is shared, so the numbers are not
+    /// asserted.
     #[test]
     fn live_frame_gpu_times() {
         let Some((mut renderer, _board)) = renderer() else {
             return;
         };
+        let load = || {
+            std::process::Command::new("uptime")
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|line| line.trim().to_string())
+                .unwrap_or_default()
+        };
+        eprintln!("host before: {}", load());
         for id in ALL_LIVE_BACKGROUNDS {
-            let look = &looks(id)[0];
-            for output in [(1920_u32, 1080_u32), (3840, 2160)] {
-                let mut times = Vec::new();
-                for frame in 0..70_u32 {
-                    let phase = look.poster_phase + f64::from(frame) / 60.0 * look.rate;
-                    let live = renderer
-                        .draw(&LiveDraw {
-                            id,
-                            look,
-                            phase,
-                            dim: 0.0,
-                            output,
-                            level: GuardLevel::Full,
-                        })
-                        .expect("renders");
-                    let ms = renderer.wait_last_draw().expect("timed");
-                    if frame >= 10 {
-                        times.push(ms);
+            for look in looks(id) {
+                for (output, level) in [
+                    ((1920_u32, 1080_u32), GuardLevel::Full),
+                    ((1080, 1920), GuardLevel::Full),
+                    ((3840, 2160), GuardLevel::Full),
+                    ((1920, 1080), GuardLevel::Half),
+                ] {
+                    let mut times = Vec::new();
+                    let mut rendered = (0, 0);
+                    for frame in 0..70_u32 {
+                        let phase = look.poster_phase + f64::from(frame) / 60.0 * look.rate;
+                        let live = renderer
+                            .draw(&LiveDraw {
+                                id,
+                                look,
+                                phase,
+                                dim: 0.0,
+                                output,
+                                level,
+                            })
+                            .expect("renders");
+                        let ms = renderer.wait_last_draw().expect("timed");
+                        if frame >= 10 {
+                            times.push(ms);
+                        }
+                        rendered = (live.width, live.height);
                     }
-                    let _ = live;
+                    times.sort_by(f64::total_cmp);
+                    let median = times[times.len() / 2];
+                    let p95 = times[(times.len() as f64 * 0.95) as usize - 1];
+                    let (_, bytes) = renderer.resources();
+                    eprintln!(
+                        "live frame {}/{} at {}x{} {level:?} (renders {}x{}): median {median:.2} ms, p95 {p95:.2} ms, {bytes} scratch bytes",
+                        css_id(id),
+                        look.id,
+                        output.0,
+                        output.1,
+                        rendered.0,
+                        rendered.1
+                    );
                 }
-                times.sort_by(f64::total_cmp);
-                let median = times[times.len() / 2];
-                let p95 = times[(times.len() as f64 * 0.95) as usize - 1];
-                let (_, bytes) = renderer.resources();
-                eprintln!(
-                    "live frame {:?} at {}x{}: median {median:.2} ms, p95 {p95:.2} ms, {bytes} scratch bytes",
-                    id, output.0, output.1
-                );
             }
         }
+        eprintln!("host after: {}", load());
     }
 }

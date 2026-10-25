@@ -6,7 +6,7 @@
 // into `u` (layout in live_background/mod.rs).
 precision highp float;
 
-uniform vec4 u[9];
+uniform vec4 u[16];
 out vec4 outColor;
 
 float sq(float x) {

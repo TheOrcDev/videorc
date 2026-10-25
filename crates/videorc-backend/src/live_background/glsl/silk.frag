@@ -8,7 +8,7 @@
 // default pass composites the silk with the field's mip chain bound to t0.
 precision highp float;
 
-uniform vec4 u[9];
+uniform vec4 u[16];
 uniform sampler2D t0;
 out vec4 outColor;
 

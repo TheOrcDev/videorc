@@ -17,6 +17,14 @@
 //!
 //! EGL and GLES are loaded with dlopen, only the first time a live background
 //! composes; a machine without them shows the poster (`no-gpu`).
+//!
+//! Plan 194 S5: the instanced pass kind (`PassKind::Instanced`, Ghost Fibers'
+//! dots and dust) is `glDrawArraysInstanced` of a triangle strip with
+//! additive blending into a cleared scene, from the pass's own vertex shader
+//! (`ghost_fibers.vert`). The new scratch: Beams' mipmapped half-float
+//! field, Dither's cell field (fetched by texel), Ferrofluid's grid and
+//! bound, Ghost Fibers' scene and bloom chain. The half-float targets need a
+//! colour-buffer-float extension, as Plasma Wave's do.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
@@ -29,11 +37,14 @@ use std::time::{Duration, Instant};
 
 use glow::HasContext;
 
-use super::glsl::{LivePass, VERTEX, fragment_source, passes};
+use super::glsl::{LivePass, PassBlend, PassKind, VERTEX, fragment_source, passes, vertex_source};
 use super::guard::{GuardLevel, LiveBackgroundGuard};
-use super::looks::{LiveLook, uniforms};
+use super::looks::{LiveLook, UNIFORM_VEC4_COUNT, Uniforms, ferrofluid_look_camera, uniforms};
 use super::runtime::{CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundFrameInput};
-use super::sizes::{internal_size, plasma_sizes, silk_field_size};
+use super::sizes::{
+    beams_field_size, dither_field_size, ferrofluid_grid, ghost_fibers_bloom_sizes, internal_size,
+    plasma_sizes, silk_field_size,
+};
 use crate::linux_vaapi::{ProbeQuarantine, QuarantineEntry, RenderNodeCandidate};
 use crate::protocol::{
     LiveBackgroundId, LiveBackgroundRendering, LiveBackgroundStatus, LiveBackgroundStillReason,
@@ -52,7 +63,7 @@ const READBACK_TIMEOUT_NS: i32 = 250_000_000;
 /// swizzled so the RGBA readback bytes are BGRA.
 const PACK_FRAGMENT: &str = "#version 300 es
 precision highp float;
-uniform vec4 u[9];
+uniform vec4 u[16];
 uniform sampler2D t0;
 out vec4 outColor;
 void main() {
@@ -353,6 +364,12 @@ impl Drop for LiveBackgroundGlRenderer {
     fn drop(&mut self) {
         self.stop_worker();
     }
+}
+
+/// The backgrounds this renderer can draw: all ten since plan 194 S5 (the
+/// GLSL runs as it is; the scratch and the instanced pass are here).
+pub fn ported(_id: LiveBackgroundId) -> bool {
+    true
 }
 
 /// The background tag a frame's sequence carries in its top byte.
@@ -702,11 +719,53 @@ struct Program {
     t1: Option<glow::UniformLocation>,
 }
 
+/// A target's storage and sampling: RGBA8 or RGBA16F, with or without a mip
+/// chain, sampled linearly or fetched by texel (nearest).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TargetKind {
-    Byte,
-    Mipmapped,
-    Float,
+struct TargetKind {
+    float: bool,
+    mipmapped: bool,
+    nearest: bool,
+}
+
+impl TargetKind {
+    /// The live frame, the pack target.
+    const BYTE: Self = Self {
+        float: false,
+        mipmapped: false,
+        nearest: false,
+    };
+    /// Dither's cells.
+    const BYTE_NEAREST: Self = Self {
+        float: false,
+        mipmapped: false,
+        nearest: true,
+    };
+    /// Silk's field.
+    const MIPMAPPED: Self = Self {
+        float: false,
+        mipmapped: true,
+        nearest: false,
+    };
+    /// Plasma Wave's trace and chain, Ferrofluid's grid, Ghost Fibers' scene
+    /// and chain.
+    const FLOAT: Self = Self {
+        float: true,
+        mipmapped: false,
+        nearest: false,
+    };
+    /// Ferrofluid's bound.
+    const FLOAT_NEAREST: Self = Self {
+        float: true,
+        mipmapped: false,
+        nearest: true,
+    };
+    /// Beams' field.
+    const MIPMAPPED_FLOAT: Self = Self {
+        float: true,
+        mipmapped: true,
+        nearest: false,
+    };
 }
 
 struct Target {
@@ -759,11 +818,13 @@ impl GlState {
         id: LiveBackgroundId,
     ) -> Result<&Program, Failure> {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.programs.entry(key) {
-            let source = match key {
-                ProgramKey::Pass(pass) => fragment_source(pass).into_owned(),
-                ProgramKey::Pack => PACK_FRAGMENT.to_string(),
+            // The full-screen triangle, or an instanced pass's own vertex
+            // shader.
+            let (vertex, fragment) = match key {
+                ProgramKey::Pass(pass) => (vertex_source(pass), fragment_source(pass)),
+                ProgramKey::Pack => (VERTEX.into(), PACK_FRAGMENT.into()),
             };
-            let program = unsafe { link_program(gl, &source) }.map_err(|detail| {
+            let program = unsafe { link_program(gl, &vertex, &fragment) }.map_err(|detail| {
                 Failure::background(LiveBackgroundStillReason::ShaderCompileFailed, id, detail)
             })?;
             let entry = unsafe {
@@ -797,7 +858,7 @@ impl GlState {
         if let Some(old) = self.targets.remove(key) {
             unsafe { delete_target(gl, old) };
         }
-        if kind == TargetKind::Float && !self.float_targets {
+        if kind.float && !self.float_targets {
             return Err(Failure::background(
                 LiveBackgroundStillReason::NoGpu,
                 id,
@@ -816,9 +877,10 @@ impl GlState {
                 .create_texture()
                 .map_err(|error| failed("texture", error))?;
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            let (internal, ty, bytes_per_pixel) = match kind {
-                TargetKind::Float => (glow::RGBA16F, glow::HALF_FLOAT, 8u64),
-                _ => (glow::RGBA8, glow::UNSIGNED_BYTE, 4u64),
+            let (internal, ty, bytes_per_pixel) = if kind.float {
+                (glow::RGBA16F, glow::HALF_FLOAT, 8u64)
+            } else {
+                (glow::RGBA8, glow::UNSIGNED_BYTE, 4u64)
             };
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -831,10 +893,12 @@ impl GlState {
                 ty,
                 glow::PixelUnpackData::Slice(None),
             );
-            let min_filter = if kind == TargetKind::Mipmapped {
-                glow::LINEAR_MIPMAP_LINEAR
+            let (min_filter, mag_filter) = if kind.mipmapped {
+                (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR)
+            } else if kind.nearest {
+                (glow::NEAREST, glow::NEAREST)
             } else {
-                glow::LINEAR
+                (glow::LINEAR, glow::LINEAR)
             };
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -844,7 +908,7 @@ impl GlState {
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
+                mag_filter as i32,
             );
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -874,11 +938,7 @@ impl GlState {
                 framebuffer,
                 size,
                 kind,
-                bytes: if kind == TargetKind::Mipmapped {
-                    base * 4 / 3
-                } else {
-                    base
-                },
+                bytes: if kind.mipmapped { base * 4 / 3 } else { base },
             };
             if status != glow::FRAMEBUFFER_COMPLETE {
                 delete_target(gl, target);
@@ -889,14 +949,18 @@ impl GlState {
         Ok(())
     }
 
+    /// One pass into `destination`: the full-screen triangle, or `kind`'s
+    /// instanced quads (an additive pass blends `ONE, ONE`; the first pass
+    /// into a scene clears it first, `LivePass::clears_target`).
     #[allow(clippy::too_many_arguments)]
     unsafe fn pass(
         &mut self,
         gl: &glow::Context,
         key: ProgramKey,
+        kind: PassKind,
         id: LiveBackgroundId,
         destination: &'static str,
-        uniform_values: &[[f32; 4]; 9],
+        uniform_values: &Uniforms,
         t0: Option<&'static str>,
         t1: Option<&'static str>,
     ) -> Result<(), Failure> {
@@ -904,6 +968,7 @@ impl GlState {
             let program = unsafe { self.program(gl, key, id) }?;
             (program.program, program.u, program.t0, program.t1)
         };
+        let clears = matches!(key, ProgramKey::Pass(pass) if pass.clears_target());
         let target = &self.targets[destination];
         let flat: Vec<f32> = uniform_values.iter().flatten().copied().collect();
         unsafe {
@@ -921,7 +986,30 @@ impl GlState {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.targets[name].texture));
                 gl.uniform_1_i32(l1.as_ref(), 1);
             }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            if clears {
+                gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            }
+            match kind {
+                PassKind::FullScreen => gl.draw_arrays(glow::TRIANGLES, 0, 3),
+                PassKind::Instanced {
+                    vertices,
+                    instances,
+                    blend,
+                } => {
+                    if blend == PassBlend::Additive {
+                        gl.enable(glow::BLEND);
+                        gl.blend_func(glow::ONE, glow::ONE);
+                    }
+                    gl.draw_arrays_instanced(
+                        glow::TRIANGLE_STRIP,
+                        0,
+                        vertices as i32,
+                        instances as i32,
+                    );
+                    gl.disable(glow::BLEND);
+                }
+            }
         }
         Ok(())
     }
@@ -934,9 +1022,17 @@ impl GlState {
         reuse: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, Failure> {
         let id = request.id;
+        if !ported(id) {
+            return Err(Failure::background(
+                LiveBackgroundStillReason::ShaderCompileFailed,
+                id,
+                "not ported to GLES",
+            ));
+        }
         let view = request.view;
         let look = request.look;
         let packed = |target: (u32, u32)| uniforms(look, target, view, request.phase, request.dim);
+        const FULL: PassKind = PassKind::FullScreen;
         if self.target_id != Some(id) {
             // Another background: drop the old one's scratch.
             let keep = ["frame", "pack"];
@@ -962,21 +1058,31 @@ impl GlState {
             self.program(gl, ProgramKey::Pack, id)?;
             gl.bind_vertex_array(Some(self.vao));
             gl.disable(glow::BLEND);
-            self.target(gl, "frame", view, TargetKind::Byte, id)?;
-            self.target(gl, "pack", view, TargetKind::Byte, id)?;
+            self.target(gl, "frame", view, TargetKind::BYTE, id)?;
+            self.target(gl, "pack", view, TargetKind::BYTE, id)?;
         }
         match id {
             LiveBackgroundId::Silk => unsafe {
                 let field = silk_field_size(view);
-                self.target(gl, "silk-field", field, TargetKind::Mipmapped, id)?;
+                self.target(gl, "silk-field", field, TargetKind::MIPMAPPED, id)?;
                 let field_pass = ProgramKey::Pass(LivePass::SilkField);
-                self.pass(gl, field_pass, id, "silk-field", &packed(field), None, None)?;
+                self.pass(
+                    gl,
+                    field_pass,
+                    FULL,
+                    id,
+                    "silk-field",
+                    &packed(field),
+                    None,
+                    None,
+                )?;
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.targets["silk-field"].texture));
                 gl.generate_mipmap(glow::TEXTURE_2D);
                 let composite = ProgramKey::Pass(LivePass::SilkComposite);
                 self.pass(
                     gl,
                     composite,
+                    FULL,
                     id,
                     "frame",
                     &packed(view),
@@ -994,18 +1100,19 @@ impl GlState {
                     "plasma-down-4",
                 ];
                 const UP: [&str; 4] = ["", "plasma-up-1", "plasma-up-2", "plasma-up-3"];
-                self.target(gl, "plasma-coarse", sizes.coarse, TargetKind::Float, id)?;
-                self.target(gl, "plasma-fine", sizes.fine, TargetKind::Float, id)?;
+                self.target(gl, "plasma-coarse", sizes.coarse, TargetKind::FLOAT, id)?;
+                self.target(gl, "plasma-fine", sizes.fine, TargetKind::FLOAT, id)?;
                 for (level, key) in DOWN.iter().enumerate() {
-                    self.target(gl, key, sizes.down[level], TargetKind::Float, id)?;
+                    self.target(gl, key, sizes.down[level], TargetKind::FLOAT, id)?;
                 }
                 for (level, key) in UP.iter().enumerate().skip(1) {
-                    self.target(gl, key, sizes.down[level], TargetKind::Float, id)?;
+                    self.target(gl, key, sizes.down[level], TargetKind::FLOAT, id)?;
                 }
                 let coarse = ProgramKey::Pass(LivePass::PlasmaCoarse);
                 self.pass(
                     gl,
                     coarse,
+                    FULL,
                     id,
                     "plasma-coarse",
                     &packed(sizes.coarse),
@@ -1016,6 +1123,7 @@ impl GlState {
                 self.pass(
                     gl,
                     fine,
+                    FULL,
                     id,
                     "plasma-fine",
                     &packed(sizes.fine),
@@ -1028,6 +1136,7 @@ impl GlState {
                     self.pass(
                         gl,
                         down,
+                        FULL,
                         id,
                         key,
                         &packed(sizes.down[level]),
@@ -1042,6 +1151,7 @@ impl GlState {
                     self.pass(
                         gl,
                         up,
+                        FULL,
                         id,
                         UP[level],
                         &packed(sizes.down[level]),
@@ -1053,6 +1163,7 @@ impl GlState {
                 self.pass(
                     gl,
                     composite,
+                    FULL,
                     id,
                     "frame",
                     &packed(view),
@@ -1060,17 +1171,217 @@ impl GlState {
                     Some("plasma-up-1"),
                 )?;
             },
+            LiveBackgroundId::Beams => unsafe {
+                let field = beams_field_size(view);
+                self.target(gl, "beams-field", field, TargetKind::MIPMAPPED_FLOAT, id)?;
+                let field_pass = ProgramKey::Pass(LivePass::BeamsField);
+                self.pass(
+                    gl,
+                    field_pass,
+                    FULL,
+                    id,
+                    "beams-field",
+                    &packed(field),
+                    None,
+                    None,
+                )?;
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.targets["beams-field"].texture));
+                gl.generate_mipmap(glow::TEXTURE_2D);
+                let composite = ProgramKey::Pass(LivePass::BeamsComposite);
+                self.pass(
+                    gl,
+                    composite,
+                    FULL,
+                    id,
+                    "frame",
+                    &packed(view),
+                    Some("beams-field"),
+                    None,
+                )?;
+            },
+            LiveBackgroundId::Dither => unsafe {
+                // One texel per cell; the cell comes from the look's pixel
+                // size (`u[3].z`), as the shader derives it.
+                let cells = dither_field_size(view, look.statics[1][2]);
+                self.target(gl, "dither-field", cells, TargetKind::BYTE_NEAREST, id)?;
+                let wave = ProgramKey::Pass(LivePass::DitherWave);
+                self.pass(
+                    gl,
+                    wave,
+                    FULL,
+                    id,
+                    "dither-field",
+                    &packed(cells),
+                    None,
+                    None,
+                )?;
+                let composite = ProgramKey::Pass(LivePass::DitherComposite);
+                self.pass(
+                    gl,
+                    composite,
+                    FULL,
+                    id,
+                    "frame",
+                    &packed(view),
+                    Some("dither-field"),
+                    None,
+                )?;
+            },
+            LiveBackgroundId::Ferrofluid => unsafe {
+                let grid = ferrofluid_grid(&ferrofluid_look_camera(look), view);
+                self.target(gl, "ferrofluid-field", grid.size, TargetKind::FLOAT, id)?;
+                self.target(
+                    gl,
+                    "ferrofluid-bound",
+                    grid.bound,
+                    TargetKind::FLOAT_NEAREST,
+                    id,
+                )?;
+                let field = ProgramKey::Pass(LivePass::FerrofluidField);
+                self.pass(
+                    gl,
+                    field,
+                    FULL,
+                    id,
+                    "ferrofluid-field",
+                    &packed(grid.size),
+                    None,
+                    None,
+                )?;
+                let bound = ProgramKey::Pass(LivePass::FerrofluidBound);
+                self.pass(
+                    gl,
+                    bound,
+                    FULL,
+                    id,
+                    "ferrofluid-bound",
+                    &packed(grid.bound),
+                    Some("ferrofluid-field"),
+                    None,
+                )?;
+                let render = ProgramKey::Pass(LivePass::FerrofluidRender);
+                self.pass(
+                    gl,
+                    render,
+                    FULL,
+                    id,
+                    "frame",
+                    &packed(view),
+                    Some("ferrofluid-field"),
+                    Some("ferrofluid-bound"),
+                )?;
+            },
+            LiveBackgroundId::GhostFibers => unsafe {
+                // The bright level and four down levels, then the up chain
+                // back to level 0 (each up level adds the matching down
+                // level, as Plasma's does).
+                const DOWN: [&str; 5] = [
+                    "ghost-bloom-0",
+                    "ghost-bloom-1",
+                    "ghost-bloom-2",
+                    "ghost-bloom-3",
+                    "ghost-bloom-4",
+                ];
+                const UP: [&str; 4] = ["ghost-up-0", "ghost-up-1", "ghost-up-2", "ghost-up-3"];
+                let sizes = ghost_fibers_bloom_sizes(view);
+                self.target(gl, "ghost-scene", view, TargetKind::FLOAT, id)?;
+                for (level, key) in DOWN.iter().enumerate() {
+                    self.target(gl, key, sizes[level], TargetKind::FLOAT, id)?;
+                }
+                for (level, key) in UP.iter().enumerate() {
+                    self.target(gl, key, sizes[level], TargetKind::FLOAT, id)?;
+                }
+                // The dots clear the scene and add into it; the dust adds
+                // after them (a look with none skips the draw).
+                let dots = LivePass::GhostFibersDots;
+                let scene_uniforms = packed(view);
+                self.pass(
+                    gl,
+                    ProgramKey::Pass(dots),
+                    dots.kind(look),
+                    id,
+                    "ghost-scene",
+                    &scene_uniforms,
+                    None,
+                    None,
+                )?;
+                let dust = LivePass::GhostFibersDust;
+                if let PassKind::Instanced { instances, .. } = dust.kind(look)
+                    && instances > 0
+                {
+                    self.pass(
+                        gl,
+                        ProgramKey::Pass(dust),
+                        dust.kind(look),
+                        id,
+                        "ghost-scene",
+                        &scene_uniforms,
+                        None,
+                        None,
+                    )?;
+                }
+                let bright = ProgramKey::Pass(LivePass::GhostFibersBright);
+                self.pass(
+                    gl,
+                    bright,
+                    FULL,
+                    id,
+                    DOWN[0],
+                    &packed(sizes[0]),
+                    Some("ghost-scene"),
+                    None,
+                )?;
+                let down = ProgramKey::Pass(LivePass::GhostFibersDown);
+                for level in 1..DOWN.len() {
+                    self.pass(
+                        gl,
+                        down,
+                        FULL,
+                        id,
+                        DOWN[level],
+                        &packed(sizes[level]),
+                        Some(DOWN[level - 1]),
+                        None,
+                    )?;
+                }
+                let up = ProgramKey::Pass(LivePass::GhostFibersUp);
+                for level in (0..UP.len()).rev() {
+                    let from = if level == 3 { DOWN[4] } else { UP[level + 1] };
+                    self.pass(
+                        gl,
+                        up,
+                        FULL,
+                        id,
+                        UP[level],
+                        &packed(sizes[level]),
+                        Some(from),
+                        Some(DOWN[level]),
+                    )?;
+                }
+                let composite = ProgramKey::Pass(LivePass::GhostFibersComposite);
+                self.pass(
+                    gl,
+                    composite,
+                    FULL,
+                    id,
+                    "frame",
+                    &scene_uniforms,
+                    Some("ghost-scene"),
+                    Some(UP[0]),
+                )?;
+            },
             _ => unsafe {
                 let pass = ProgramKey::Pass(passes(id)[0]);
-                self.pass(gl, pass, id, "frame", &packed(view), None, None)?;
+                self.pass(gl, pass, FULL, id, "frame", &packed(view), None, None)?;
             },
         }
         unsafe {
-            let mut pack_uniforms = [[0.0f32; 4]; 9];
+            let mut pack_uniforms: Uniforms = [[0.0f32; 4]; UNIFORM_VEC4_COUNT];
             pack_uniforms[0] = [view.0 as f32, view.1 as f32, 0.0, 0.0];
             self.pass(
                 gl,
                 ProgramKey::Pack,
+                FULL,
                 id,
                 "pack",
                 &pack_uniforms,
@@ -1174,7 +1485,11 @@ unsafe fn delete_target(gl: &glow::Context, target: Target) {
     }
 }
 
-unsafe fn link_program(gl: &glow::Context, fragment: &str) -> Result<glow::Program, String> {
+unsafe fn link_program(
+    gl: &glow::Context,
+    vertex: &str,
+    fragment: &str,
+) -> Result<glow::Program, String> {
     unsafe {
         let compile = |kind: u32, source: &str| -> Result<glow::Shader, String> {
             let shader = gl.create_shader(kind)?;
@@ -1188,7 +1503,7 @@ unsafe fn link_program(gl: &glow::Context, fragment: &str) -> Result<glow::Progr
                 Err(log)
             }
         };
-        let vertex = compile(glow::VERTEX_SHADER, VERTEX)?;
+        let vertex = compile(glow::VERTEX_SHADER, vertex)?;
         let fragment = match compile(glow::FRAGMENT_SHADER, fragment) {
             Ok(shader) => shader,
             Err(log) => {
@@ -1336,8 +1651,28 @@ mod tests {
         );
     }
 
-    /// The GLSL through real GLES against the golden grids, when this host has
-    /// EGL (Linux CI may only have Mesa's llvmpipe:
+    #[test]
+    fn every_background_is_ported_and_only_ghost_fibers_draws_instanced() {
+        for id in super::super::looks::ALL_LIVE_BACKGROUNDS {
+            assert!(ported(id), "{id:?}");
+        }
+        let violet = &super::super::looks::looks(LiveBackgroundId::GhostFibers)[0];
+        assert!(matches!(
+            LivePass::GhostFibersDots.kind(violet),
+            PassKind::Instanced {
+                vertices: 4,
+                blend: PassBlend::Additive,
+                ..
+            }
+        ));
+        // The instanced passes link their own vertex shader; every other pass
+        // the full-screen triangle.
+        assert!(vertex_source(LivePass::GhostFibersDots).contains("gl_InstanceID"));
+        assert_eq!(vertex_source(LivePass::GhostFibersBright), VERTEX);
+    }
+
+    /// The GLSL of all ten backgrounds through real GLES against the golden
+    /// grids, when this host has EGL (Linux CI may only have Mesa's llvmpipe:
     /// `VIDEORC_LIVE_BACKGROUND_GL_ALLOW_SOFTWARE=1`). Skips otherwise.
     #[cfg(target_os = "linux")]
     #[test]

@@ -686,7 +686,8 @@ pub struct EffectiveSceneBackground {
 
 pub const DEFAULT_BACKGROUND_VISIBILITY_PERCENT: f64 = 20.0;
 
-/// The five live backgrounds (plan 190), from React Bits.
+/// The ten live backgrounds, from React Bits: five from plan 190 and five
+/// more from plan 194.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum LiveBackgroundId {
@@ -695,6 +696,11 @@ pub enum LiveBackgroundId {
     PlasmaWave,
     LiquidChrome,
     LineWaves,
+    Beams,
+    ColorBends,
+    Dither,
+    Ferrofluid,
+    GhostFibers,
 }
 
 /// Calm runs at half the React Bits speed, Normal at the React Bits speed.
@@ -6841,6 +6847,65 @@ mod tests {
         assert!(json.contains("\"fit\":\"fit\""));
         let restored: Scene = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, scene);
+    }
+
+    /// Plan 194: every live background id (the plan 190 five and the five
+    /// more) is its catalogue's kebab-case wire id and survives a scene
+    /// background round trip; an unknown id is refused, so the apply fails
+    /// on the existing error path.
+    #[test]
+    fn live_background_ids_round_trip_on_the_wire() {
+        use crate::live_background::{ALL_LIVE_BACKGROUNDS, css_id, looks};
+        let expected = [
+            "silk",
+            "side-rays",
+            "plasma-wave",
+            "liquid-chrome",
+            "line-waves",
+            "beams",
+            "color-bends",
+            "dither",
+            "ferrofluid",
+            "ghost-fibers",
+        ];
+        assert_eq!(ALL_LIVE_BACKGROUNDS.len(), expected.len());
+        for (id, wire) in ALL_LIVE_BACKGROUNDS.into_iter().zip(expected) {
+            assert_eq!(serde_json::to_value(id).unwrap(), serde_json::json!(wire));
+            assert_eq!(css_id(id), wire);
+            let look = looks(id)[0].id;
+            let background = EffectiveSceneBackground {
+                asset_id: format!("live-{wire}-{look}"),
+                managed_asset_path: format!("/bundled/live-{wire}-{look}.webp"),
+                fit: BackgroundFit::Fill,
+                scale: 100.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur_px: 0.0,
+                dim_percent: 10.0,
+                saturation_percent: 100.0,
+                vignette_percent: 0.0,
+                visibility_percent: 20.0,
+                live: Some(LiveBackgroundSpec {
+                    id,
+                    look: look.to_string(),
+                    motion: LiveBackgroundMotion::Normal,
+                }),
+            };
+            let json = serde_json::to_string(&background).unwrap();
+            assert!(
+                json.contains(&format!("\"live\":{{\"id\":\"{wire}\",\"look\":\"{look}\"")),
+                "{json}"
+            );
+            let restored: EffectiveSceneBackground = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, background);
+        }
+        let unknown = r#"{"id":"lava-lamp","look":"default","motion":"calm"}"#;
+        assert!(serde_json::from_str::<LiveBackgroundSpec>(unknown).is_err());
+        // Motion defaults to Calm when a saved spec omits it.
+        let calm: LiveBackgroundSpec =
+            serde_json::from_str(r#"{"id":"ghost-fibers","look":"violet"}"#).unwrap();
+        assert_eq!(calm.id, LiveBackgroundId::GhostFibers);
+        assert_eq!(calm.motion, LiveBackgroundMotion::Calm);
     }
 
     #[test]

@@ -64,6 +64,52 @@ export const LIVE_BACKGROUND_CATALOG: readonly LiveBackgroundEntry[] = [
       { id: 'gold', name: 'Gold' },
       { id: 'aurora', name: 'Aurora' }
     ]
+  },
+  // Plan 194 (N4): the five more, after the first five.
+  {
+    id: 'beams',
+    name: 'Beams',
+    looks: [
+      { id: 'studio', name: 'Studio' },
+      { id: 'chrome', name: 'Chrome' },
+      { id: 'ember', name: 'Ember' }
+    ]
+  },
+  {
+    id: 'color-bends',
+    name: 'Color Bends',
+    looks: [
+      { id: 'default', name: 'Default' },
+      { id: 'ember', name: 'Ember' },
+      { id: 'ocean', name: 'Ocean' }
+    ]
+  },
+  {
+    id: 'dither',
+    name: 'Dither',
+    looks: [
+      { id: 'classic', name: 'Classic' },
+      { id: 'amber', name: 'Amber' },
+      { id: 'blueprint', name: 'Blueprint' }
+    ]
+  },
+  {
+    id: 'ferrofluid',
+    name: 'Ferrofluid',
+    looks: [
+      { id: 'studio', name: 'Studio' },
+      { id: 'ember', name: 'Ember' },
+      { id: 'frost', name: 'Frost' }
+    ]
+  },
+  {
+    id: 'ghost-fibers',
+    name: 'Ghost Fibers',
+    looks: [
+      { id: 'violet', name: 'Violet' },
+      { id: 'fiber', name: 'Fiber Optic' },
+      { id: 'ember', name: 'Ember' }
+    ]
   }
 ]
 

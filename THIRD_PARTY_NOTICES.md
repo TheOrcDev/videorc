@@ -6,9 +6,10 @@ terms.
 
 ## React Bits
 
-The five live backgrounds (Silk, Side Rays, Plasma Wave, Liquid Chrome and
-Line Waves) are ported from React Bits by David Haz, https://reactbits.dev
-and https://github.com/DavidHDev/react-bits.
+The ten live backgrounds (Silk, Side Rays, Plasma Wave, Liquid Chrome, Line
+Waves, Beams, Color Bends, Dither, Ferrofluid and Ghost Fibers) are ported
+from React Bits by David Haz, https://reactbits.dev and
+https://github.com/DavidHDev/react-bits.
 
 - Files:
   - `crates/videorc-backend/src/live_background/glsl/` and its Metal and

@@ -1,8 +1,24 @@
-// Live backgrounds in Assets (plan 190 S8): names, looks, thumbnails and the
-// words for a still frame. Lazy: only the Assets page imports this module, so
-// the catalogue and the fifteen thumbnails stay out of the eager bundle. The
-// eager registry (`background-assets.ts`) knows ids and default looks only.
+// Live backgrounds in Assets (plans 190 S8 and 194 S6): names, looks,
+// thumbnails and the words for a still frame. Lazy: only the Assets page
+// imports this module, so the catalogue and the thirty thumbnails stay out of
+// the eager bundle. The eager registry (`background-assets.ts`) knows ids and
+// default looks only.
 
+import beamsChrome from '../assets/backgrounds/live-thumbs/live-beams-chrome.webp'
+import beamsEmber from '../assets/backgrounds/live-thumbs/live-beams-ember.webp'
+import beamsStudio from '../assets/backgrounds/live-thumbs/live-beams-studio.webp'
+import colorBendsDefault from '../assets/backgrounds/live-thumbs/live-color-bends-default.webp'
+import colorBendsEmber from '../assets/backgrounds/live-thumbs/live-color-bends-ember.webp'
+import colorBendsOcean from '../assets/backgrounds/live-thumbs/live-color-bends-ocean.webp'
+import ditherAmber from '../assets/backgrounds/live-thumbs/live-dither-amber.webp'
+import ditherBlueprint from '../assets/backgrounds/live-thumbs/live-dither-blueprint.webp'
+import ditherClassic from '../assets/backgrounds/live-thumbs/live-dither-classic.webp'
+import ferrofluidEmber from '../assets/backgrounds/live-thumbs/live-ferrofluid-ember.webp'
+import ferrofluidFrost from '../assets/backgrounds/live-thumbs/live-ferrofluid-frost.webp'
+import ferrofluidStudio from '../assets/backgrounds/live-thumbs/live-ferrofluid-studio.webp'
+import ghostFibersEmber from '../assets/backgrounds/live-thumbs/live-ghost-fibers-ember.webp'
+import ghostFibersFiber from '../assets/backgrounds/live-thumbs/live-ghost-fibers-fiber.webp'
+import ghostFibersViolet from '../assets/backgrounds/live-thumbs/live-ghost-fibers-violet.webp'
 import lineWavesAurora from '../assets/backgrounds/live-thumbs/live-line-waves-aurora.webp'
 import lineWavesGold from '../assets/backgrounds/live-thumbs/live-line-waves-gold.webp'
 import lineWavesSilk from '../assets/backgrounds/live-thumbs/live-line-waves-silk.webp'
@@ -54,8 +70,34 @@ export const LIVE_BACKGROUND_THUMBNAILS: Readonly<Record<string, string>> = {
   'live-liquid-chrome-mercury': liquidChromeMercury,
   'live-line-waves-silk': lineWavesSilk,
   'live-line-waves-gold': lineWavesGold,
-  'live-line-waves-aurora': lineWavesAurora
+  'live-line-waves-aurora': lineWavesAurora,
+  'live-beams-studio': beamsStudio,
+  'live-beams-chrome': beamsChrome,
+  'live-beams-ember': beamsEmber,
+  'live-color-bends-default': colorBendsDefault,
+  'live-color-bends-ember': colorBendsEmber,
+  'live-color-bends-ocean': colorBendsOcean,
+  'live-dither-classic': ditherClassic,
+  'live-dither-amber': ditherAmber,
+  'live-dither-blueprint': ditherBlueprint,
+  'live-ferrofluid-studio': ferrofluidStudio,
+  'live-ferrofluid-ember': ferrofluidEmber,
+  'live-ferrofluid-frost': ferrofluidFrost,
+  'live-ghost-fibers-violet': ghostFibersViolet,
+  'live-ghost-fibers-fiber': ghostFibersFiber,
+  'live-ghost-fibers-ember': ghostFibersEmber
 }
+
+/**
+ * The live backgrounds Assets offers: those with a bundled thumbnail for
+ * every look, in catalogue order. All ten have them (plan 194 S6); a
+ * background added to the catalogue without its pictures stays out of the
+ * Live group, so a tile without a picture is never shown.
+ */
+export const LIVE_BACKGROUND_OFFERED: readonly LiveBackgroundEntry[] =
+  LIVE_BACKGROUND_CATALOG.filter((entry) =>
+    entry.looks.every((look) => livePosterAssetId(entry.id, look.id) in LIVE_BACKGROUND_THUMBNAILS)
+  )
 
 /**
  * The look this build shows for a stored look id: the look itself, or the
