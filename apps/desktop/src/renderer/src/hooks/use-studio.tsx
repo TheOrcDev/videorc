@@ -42,6 +42,7 @@ import {
   resolveSavedBackground,
   sameSceneVisual,
   sceneSourceProblems,
+  sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
   type SceneVisual,
   type SavedScene
@@ -75,7 +76,11 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
-import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
+import {
+  connectionBlockedReason,
+  sceneSourceOffBlockedReason,
+  START_BLOCKED_COPY
+} from '@/lib/start-blocked-copy'
 import { copyText } from '@/lib/copy-text'
 import { platformLabel } from '@/lib/platform-copy'
 import {
@@ -12990,6 +12995,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return START_BLOCKED_COPY.noOutput
       }
       const config = captureConfigForIntent(captureConfig, intent)
+      const sourceOff = sceneSourceOffBlockedReason(
+        sceneSourcesTurnedOff(
+          { layout: config.layout, sources: visualSources(config.sources), background: null },
+          deviceList.devices
+        )
+      )
+      if (sourceOff) {
+        return sourceOff
+      }
       const recordingProfileGate = intent.record
         ? videoProfileEntitlementGate({ entitlements, kind: 'recording', video: config.video })
         : { allowed: true as const }
@@ -13047,6 +13061,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       captureConfig,
       currentStreamOutputTopologyRequestKey,
+      deviceList.devices,
       entitlements,
       health,
       transportSessionActive,

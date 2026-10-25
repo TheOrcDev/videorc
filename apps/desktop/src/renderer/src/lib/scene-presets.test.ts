@@ -11,6 +11,7 @@ import {
   sceneNameError,
   sceneSourceGaps,
   sceneSourceProblems,
+  sceneSourcesTurnedOff,
   snapshotBackground,
   sourceVisibilityFromScene
 } from './scene-presets'
@@ -20,6 +21,7 @@ import {
   liveSceneBackground
 } from './background-assets'
 import { applySlot } from './background-library'
+import { sceneSourceOffBlockedReason } from './start-blocked-copy'
 
 const visual = () =>
   normalizeSceneVisual({
@@ -358,6 +360,43 @@ describe('scene gallery reason line (plan 174 S3.3, B-20)', () => {
     ).toBe(
       "Your camera isn't available. Choose another in Sources to use Camera only. No screen is chosen. Choose one in Sources to use Screen only."
     )
+  })
+
+  it('blocks a start when the scene shows a source turned off on purpose (retest 150)', () => {
+    // Screen None while Screen + camera stays the active scene.
+    const noScreen = visual()
+    noScreen.layout.layoutPreset = 'screen-camera'
+    noScreen.sources.screenId = undefined
+    noScreen.sources.captureOff = true
+    expect(sceneSourcesTurnedOff(noScreen, [cam])).toEqual({ screen: true, camera: false })
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(noScreen, [cam]))).toBe(
+      'This scene shows a screen, but Screen is set to None. Choose a screen in Sources, or pick a scene without one.'
+    )
+    // Camera Off while Camera only stays the active scene.
+    const noCamera = visual()
+    noCamera.layout.layoutPreset = 'camera-only'
+    noCamera.sources.cameraId = undefined
+    noCamera.sources.cameraOff = true
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(noCamera, [screen]))).toBe(
+      'This scene shows a camera, but Camera is off. Turn it on in Sources, or pick a scene without one.'
+    )
+    const both = {
+      ...noScreen,
+      sources: { ...noScreen.sources, cameraId: undefined, cameraOff: true }
+    }
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(both, []))).toContain('both are off')
+    // A scene without the turned-off source starts.
+    const cameraOnly = {
+      ...noScreen,
+      layout: { ...noScreen.layout, layoutPreset: 'camera-only' as const }
+    }
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(cameraOnly, [cam]))).toBeNull()
+    // Never chosen, or chosen and gone, is not "turned off": no new block.
+    const neverChosen = visual()
+    neverChosen.sources.screenId = undefined
+    expect(sceneSourcesTurnedOff(neverChosen, [cam])).toEqual({ screen: false, camera: false })
+    expect(sceneSourcesTurnedOff(visual(), [])).toEqual({ screen: false, camera: false })
+    expect(sceneSourceOffBlockedReason({ screen: false, camera: false })).toBeNull()
   })
 
   it('never says a camera turned off is unavailable', () => {

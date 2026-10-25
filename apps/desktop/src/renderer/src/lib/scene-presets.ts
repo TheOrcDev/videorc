@@ -313,6 +313,25 @@ export function sceneSourceGaps(visual: SceneVisual, devices: readonly Device[])
   return gaps
 }
 
+/**
+ * Which sources the scene shows that the streamer turned off on purpose
+ * (Screen None, Camera Off). A start would wait for frames that never come
+ * (retest 150): the backend refused it with "preview source(s) produced no
+ * frames". A chosen-but-missing source is not this: it can come back.
+ */
+export function sceneSourcesTurnedOff(
+  visual: SceneVisual,
+  devices: readonly Device[]
+): { screen: boolean; camera: boolean } {
+  const gaps = sceneSourceGaps(visual, devices)
+  const off = (source: SceneSourceGap['source']) =>
+    gaps.some((gap) => gap.source === source && gap.state === 'off')
+  return {
+    screen: visual.sources.captureOff === true && off('screen'),
+    camera: visual.sources.cameraOff === true && off('camera')
+  }
+}
+
 export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
   return sceneSourceGaps(visual, devices).map(({ source }) =>
     source === 'camera'
