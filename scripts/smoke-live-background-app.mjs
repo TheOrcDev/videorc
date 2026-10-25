@@ -7,7 +7,9 @@
 // stream cases (`<id>:<record>+stream<stream>`): the stream goes to a local
 // RTMP listener and the received stream is checked like the recording. On
 // macOS the stream is its own compositor leg, which drew the poster before
-// plan 193; its ring must move as much as the recording's. Each artifact:
+// plan 193; its ring must move as much as the recording's. Plan 194 adds one
+// recording per new background and record-and-stream cases for Ghost Fibers
+// and Dither. Each artifact:
 // - the background ring (the stage margin around the screen) moves;
 // - it never freezes for more than half a second;
 // - the stage (the synthetic screen) is not the background;
@@ -55,7 +57,17 @@ const CASES = (
     // lines drawn from a 4K frame into the 1080p stream.
     'silk:1080p30+stream1080p30',
     'liquid-chrome:2160p30+stream1080p30',
-    'line-waves:2160p30+stream1080p30'
+    'line-waves:2160p30+stream1080p30',
+    // Plan 194: one recording each; Dither at 4K (it renders at full size),
+    // and two splits: Ghost Fibers' instanced dots and Dither's per-pixel
+    // cells drawn from a 4K frame into the 1080p stream.
+    'beams:1080p30',
+    'color-bends:1080p30',
+    'dither:2160p30',
+    'ferrofluid:1080p30',
+    'ghost-fibers:1080p60',
+    'ghost-fibers:2160p30+stream1080p30',
+    'dither:2160p30+stream1080p30'
   ].join(',')
 )
   .split(',')
@@ -72,7 +84,12 @@ const CASES = (
           silk: 'satin',
           'plasma-wave': 'plasma',
           'liquid-chrome': 'polished',
-          'line-waves': 'silk'
+          'line-waves': 'silk',
+          beams: 'studio',
+          'color-bends': 'default',
+          dither: 'classic',
+          ferrofluid: 'studio',
+          'ghost-fibers': 'violet'
         }[id] ?? null,
       width: widthFor(height),
       height,
