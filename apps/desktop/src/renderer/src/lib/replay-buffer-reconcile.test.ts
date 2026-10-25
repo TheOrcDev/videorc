@@ -4,6 +4,7 @@ import {
   REPLAY_START_RETRY_LIMIT,
   replayBufferReconcileAction,
   replayBufferShouldRestartForSources,
+  replayShouldRearmAfterError,
   replayStartRetryDelayMs,
   type ReplayReconcileInput
 } from './replay-buffer-reconcile'
@@ -52,8 +53,32 @@ describe('replayBufferReconcileAction (plan 181 S4)', () => {
     )
   })
 
-  it('never acts on an error state: the event handler turns the switch off and says why', () => {
-    expect(replayBufferReconcileAction({ ...idle, replayState: 'error' })).toBeNull()
+  it('restarts a ring that died with its session only once something arms it again', () => {
+    // The event handler disarms on the error, so the dead session is not retried in a loop.
+    expect(replayBufferReconcileAction({ ...idle, armed: false, replayState: 'error' })).toBeNull()
+    // The switch, a source change or a session's end armed it again: start as from off.
+    expect(replayBufferReconcileAction({ ...idle, replayState: 'error' })).toBe('start')
+    // The ring's own session ends 'failed', not 'idle': that is over too.
+    expect(
+      replayBufferReconcileAction({
+        ...idle,
+        replayState: 'error',
+        recordingState: 'failed',
+        recordingReplayOnly: true
+      })
+    ).toBe('start')
+    expect(
+      replayBufferReconcileAction({ ...idle, replayState: 'error', recordingState: 'recording' })
+    ).toBeNull()
+  })
+
+  it('re-arms after an error only while the switch is on and nothing refused it', () => {
+    const dead = { armed: false, replayState: 'error' as const, switchOn: true, blocked: false }
+    expect(replayShouldRearmAfterError(dead)).toBe(true)
+    expect(replayShouldRearmAfterError({ ...dead, armed: true })).toBe(false)
+    expect(replayShouldRearmAfterError({ ...dead, replayState: 'off' })).toBe(false)
+    expect(replayShouldRearmAfterError({ ...dead, switchOn: false })).toBe(false)
+    expect(replayShouldRearmAfterError({ ...dead, blocked: true })).toBe(false)
   })
 
   it('stops the buffer-only session when the switch goes off', () => {
