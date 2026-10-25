@@ -22,7 +22,8 @@
   React Bits' settled target (N1), so it stays a pure function of the phase.
   Ghost Fibers draws instanced quads with additive blending, so every
   renderer gains an instanced pass kind (N2), and the uniform block widens.
-  S1 is a hard cost gate on the M4 before any port. **PR OPEN** 2026-10-25:
+  S1 is a hard cost gate on the M4 before any port. **DRAFT PR #810**
+  2026-10-25:
   all nine slices done. Owner calls: A (ship the two if Metal fits) and
   Ferrofluid at three quarters (at most 810 on its short side). Owed: Windows
   CI (the first fxc compile and WARP goldens), Linux GLES goldens, a
