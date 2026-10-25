@@ -10,13 +10,14 @@ import { MicLevelMeter } from './mic-level-meter'
 // The smokes and the perf probe find the meter by this attribute.
 const hook = { 'data-videorc-mic-visualizer': '' }
 
-function render(meter: MeterInput): string {
+function render(meter: MeterInput, scale?: boolean): string {
   return renderToStaticMarkup(
     createElement(MicLevelMeter, {
       ...hook,
       'aria-label': 'Microphone level',
       className: 'min-w-0 flex-1',
-      meter
+      meter,
+      scale
     })
   )
 }
@@ -93,5 +94,30 @@ describe('MicLevelMeter on the LCD (plan 196)', () => {
     expect(markup).toContain('data-slot="lcd-meter-scale"')
     expect(markup).toContain('data-slot="lcd-meter-bracket"')
     expect(markup).toMatch(/data-slot="lcd-meter-clip"[^>]*>Clip</)
+  })
+
+  it('drops the dB numbers and the bracket with the scale off, and keeps the CLIP flag', () => {
+    const markup = render({ kind: 'value', peakDb: -12 }, false)
+    expect(markup).not.toContain('data-slot="lcd-meter-scale"')
+    expect(markup).not.toContain('data-slot="lcd-meter-bracket"')
+    expect(markup).toMatch(/data-slot="lcd-meter-value"[^>]*>−12.0</)
+    expect(markup).toMatch(/data-slot="lcd-meter-clip"[^>]*>Clip</)
+  })
+
+  it("sits on the app's glass: a glass-chip bezel, and a see-through screen in dark", () => {
+    const bezel = /<div[^>]*data-slot="lcd-display"[^>]*>/.exec(render(INPUTS[0]!))?.[0] ?? ''
+    for (const token of [
+      '[--lcd-display-bezel:var(--chip-fill-top)]',
+      'dark:[--lcd-display-bezel:var(--chip-fill-top)]',
+      'dark:[--lcd-display-bezel-edge:var(--chip-fill-bottom)]',
+      'dark:[--lcd-display-bezel-ring:var(--chip-rim)]',
+      'dark:[--lcd-display-glass:color-mix(in_oklab,var(--glass-solid)_35%,transparent)]'
+    ]) {
+      expect(bezel).toContain(token)
+    }
+    // The screen's own opaque dark values are replaced, not stacked under ours.
+    expect(bezel).not.toContain('dark:[--lcd-display-glass:oklch(')
+    expect(bezel).not.toContain('dark:[--lcd-display-bezel:oklch(')
+    expect(bezel).not.toContain('[--lcd-display-recess:inset_0_2px_10px')
   })
 })
