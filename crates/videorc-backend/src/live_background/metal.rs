@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -642,6 +643,9 @@ fn pass_format(pass: LivePass, plasma_light: MTLPixelFormat) -> MTLPixelFormat {
 }
 
 /// This tick's live frame, ready for the compose to draw as the background.
+/// A clone is one retain of the same texture (plan 193: the stream leg draws
+/// the frame the recording leg rendered).
+#[derive(Clone)]
 pub struct LiveFrame {
     pub texture: Retained<MetalTexture>,
     pub width: u32,
@@ -720,6 +724,11 @@ pub struct LiveBackgroundMetalRenderer {
     compile_failed: bool,
     pipelines: HashMap<LivePass, Retained<MetalPipeline>>,
     targets: Option<Targets>,
+    /// Plan 193: the frame `render` drew this tick, stamped with the tick's
+    /// instant, for a leg that draws it too (`frame_at`). Cleared at the top
+    /// of every `render` and whenever the targets go, so a tick that drew
+    /// nothing shares nothing.
+    last_frame: Option<(Instant, LiveFrame)>,
     guard: LiveBackgroundGuard,
     pending: Option<PendingCommandBuffer>,
     reported_status: Option<LiveBackgroundStatus>,
@@ -761,6 +770,7 @@ impl LiveBackgroundMetalRenderer {
             compile_failed: false,
             pipelines: HashMap::new(),
             targets: None,
+            last_frame: None,
             guard: LiveBackgroundGuard::new(),
             pending: None,
             reported_status: None,
@@ -790,6 +800,8 @@ impl LiveBackgroundMetalRenderer {
         preflight: Option<LiveBackgroundStillReason>,
     ) -> Option<LiveFrame> {
         let tick = input.tick;
+        // Plan 193: nothing to share until this tick's draw succeeds.
+        self.last_frame = None;
         let gpu_ms = self.take_last_gpu_ms();
         self.guard.follow(input.spec.id);
         self.guard
@@ -822,6 +834,7 @@ impl LiveBackgroundMetalRenderer {
         match self.draw(&draw) {
             Ok(frame) => {
                 self.report_status(input.status(frame.rendering, None, p95));
+                self.last_frame = Some((tick.at, frame.clone()));
                 Some(frame)
             }
             Err(DrawError::ShaderCompileFailed) => {
@@ -989,12 +1002,24 @@ impl LiveBackgroundMetalRenderer {
         })
     }
 
+    /// Plan 193: the frame `render` drew at `at`, for a leg that draws it too
+    /// (the stream leg of a record-and-stream session draws the recording
+    /// leg's). `None` at any other instant, and after a tick that drew
+    /// nothing: a shared frame is never a stale one.
+    pub fn frame_at(&self, at: Instant) -> Option<LiveFrame> {
+        self.last_frame
+            .as_ref()
+            .filter(|(drawn_at, _)| *drawn_at == at)
+            .map(|(_, frame)| frame.clone())
+    }
+
     /// The live background went away: free every texture and pipeline and
     /// report 0/0. The guard keeps its level for that background.
     pub fn release(&mut self) {
         if self.holds_resources() {
             self.drop_resources();
         }
+        self.last_frame = None;
         self.pending = None;
         self.reported_status = None;
     }
@@ -1030,6 +1055,7 @@ impl LiveBackgroundMetalRenderer {
 
     fn drop_targets(&mut self) {
         self.targets = None;
+        self.last_frame = None;
         self.report_resources();
     }
 

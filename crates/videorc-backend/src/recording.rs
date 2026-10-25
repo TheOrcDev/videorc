@@ -7886,7 +7886,8 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-movflags".to_string(),
         "+faststart".to_string(),
     ];
-    append_media_foundation_h264_color_metadata_args(&mut args);
+    args.extend(h264_bt709_color_tag_args());
+    args.extend(h264_bt709_vui_rewrite_bsf_args());
     if let Some(trim_seconds) = trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
@@ -16831,8 +16832,72 @@ static WINDOWS_NATIVE_ENCODED_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<std::collections::HashMap<WindowsNativeEncodedProbeKey, Option<String>>>,
 > = std::sync::OnceLock::new();
 
+/// Successful hardware probes, kept for the process lifetime.
+///
+/// Each probe builds a throwaway hardware MFT, encodes a few frames, and
+/// destroys it. Re-probing on every recording start churned the NVIDIA async
+/// H.264 MFT (18 nvEncodeAPI64.dll load/unload cycles in 13 minutes), and its
+/// teardown races the MFT's own RTWorkQ work item: three minidumps on
+/// 2026-10-23 (0.9.147) crash on `nvEncMFTH264x.dll` -> `RTWorkQ.dll` ->
+/// `mfplat.dll` (null+0x24 write) 0.3-0.8 s after a record-start probe, with
+/// `probe_hardware_encoder`'s encoder drop in flight in the first one. The
+/// race is inside the driver, so the fix is to stop re-creating and destroying
+/// the MFT when nothing it depends on has changed. The key carries the GPU
+/// driver identity, so a driver update re-probes; failures keep using the
+/// existing TTL'd rejection cache.
+#[cfg(target_os = "windows")]
+type WindowsNativeEncodedProbeSuccessKey = (String, String, &'static str, u32, u32, u32, u32);
+
+#[cfg(target_os = "windows")]
+static WINDOWS_NATIVE_ENCODED_PROBE_SUCCESSES: std::sync::OnceLock<
+    StdMutex<
+        std::collections::HashMap<
+            WindowsNativeEncodedProbeSuccessKey,
+            crate::windows_media_foundation_encoder::MediaFoundationProbe,
+        >,
+    >,
+> = std::sync::OnceLock::new();
+
 #[cfg(target_os = "windows")]
 async fn probe_windows_native_encoded_bridge(
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+    topology: &'static str,
+    graphics_adapter_driver_identity: &str,
+) -> Result<crate::windows_media_foundation_encoder::MediaFoundationProbe> {
+    let success_key: WindowsNativeEncodedProbeSuccessKey = (
+        graphics_adapter_driver_identity.to_string(),
+        ffmpeg_path.to_string(),
+        topology,
+        video.width,
+        video.height,
+        video.fps,
+        video.bitrate_kbps,
+    );
+    let successes = WINDOWS_NATIVE_ENCODED_PROBE_SUCCESSES
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+    if let Some(probe) = successes
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&success_key).cloned())
+    {
+        return Ok(probe);
+    }
+    let probe = probe_windows_native_encoded_bridge_uncached(
+        ffmpeg_path,
+        video,
+        topology,
+        graphics_adapter_driver_identity,
+    )
+    .await?;
+    if let Ok(mut cache) = successes.lock() {
+        cache.insert(success_key, probe.clone());
+    }
+    Ok(probe)
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_windows_native_encoded_bridge_uncached(
     ffmpeg_path: &str,
     video: &VideoSettings,
     topology: &'static str,
@@ -18473,6 +18538,8 @@ struct ReplayOutput {
 enum ReplayVideoCodec {
     Copy {
         video_output: EncoderBridgeVideoOutput,
+        /// The copied FIFO's encoder rate.
+        fps: u32,
     },
     Encode {
         /// `[v_main]` when the ring is the only output, `[v_replay]` when
@@ -18492,7 +18559,7 @@ fn append_replay_segment_output(
     replay: &ReplayOutput,
 ) {
     match video {
-        ReplayVideoCodec::Copy { video_output } => {
+        ReplayVideoCodec::Copy { video_output, fps } => {
             args.extend([
                 "-map".to_string(),
                 format!("{}:v", input_layout.video_input_index),
@@ -18503,7 +18570,7 @@ fn append_replay_segment_output(
                 video_output,
                 EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
             ) {
-                append_media_foundation_h264_color_metadata_args(args);
+                append_media_foundation_h264_copy_metadata_args(args, fps);
             }
         }
         ReplayVideoCodec::Encode {
@@ -18818,7 +18885,10 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                     video_output,
                     EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
                 ) {
-                    append_media_foundation_h264_color_metadata_args(&mut args);
+                    append_media_foundation_h264_copy_metadata_args(
+                        &mut args,
+                        params.output.video.fps,
+                    );
                 }
             }
         }
@@ -18845,6 +18915,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &params.audio,
                 true,
                 video_output,
+                params.output.video.fps,
                 path,
             );
             for target in stream_targets {
@@ -18855,6 +18926,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                     target,
                     false,
                     video_output,
+                    params.output.video.fps,
                 );
             }
         }
@@ -18875,6 +18947,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                     target,
                     false,
                     video_output,
+                    params.output.video.fps,
                 );
             }
         }
@@ -18919,7 +18992,10 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-                ReplayVideoCodec::Copy { video_output }
+                ReplayVideoCodec::Copy {
+                    video_output,
+                    fps: params.output.video.fps,
+                }
             }
         };
         append_replay_segment_output(&mut args, &input_layout, &params.audio, video, replay);
@@ -19047,7 +19123,7 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
             recording_video_output,
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
         ) {
-            append_media_foundation_h264_color_metadata_args(&mut args);
+            append_media_foundation_h264_copy_metadata_args(&mut args, params.output.video.fps);
         }
         append_audio_encoding_with_video_clock(&mut args, &input_layout, &params.audio, true, true);
         args.push(ffmpeg_file_path(output_path));
@@ -19061,6 +19137,7 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
             &params.audio,
             ReplayVideoCodec::Copy {
                 video_output: recording_video_output,
+                fps: params.output.video.fps,
             },
             replay,
         );
@@ -19082,15 +19159,15 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
         // vertical destinations consume the simulcast encode, horizontal ones
         // the primary. Profile equality is a trap here (a 1080×1920 recording
         // and an identical vertical stream profile would tie).
-        let video_input_index = if simulcast_mode {
+        let (video_input_index, video_fps) = if simulcast_mode {
             match target.output_orientation {
                 crate::streaming::StreamOutputOrientation::Vertical => {
                     uses_companion_stream_input = true;
-                    stream_video_input_index
+                    (stream_video_input_index, stream_video.fps)
                 }
                 crate::streaming::StreamOutputOrientation::Horizontal => {
                     uses_recording_stream_input = true;
-                    recording_video_input_index
+                    (recording_video_input_index, params.output.video.fps)
                 }
             }
         } else {
@@ -19100,10 +19177,10 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
             // first would silently send the clean recording pixels to RTMP.
             if same_video_profile(target_video, &stream_video) {
                 uses_companion_stream_input = true;
-                stream_video_input_index
+                (stream_video_input_index, stream_video.fps)
             } else if same_video_profile(target_video, &params.output.video) {
                 uses_recording_stream_input = true;
-                recording_video_input_index
+                (recording_video_input_index, params.output.video.fps)
             } else {
                 bail!(
                     "Target {} resolves to unsupported mixed stream profile {}x{}@{} {}kbps",
@@ -19115,12 +19192,12 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
                 );
             }
         };
-        stream_routes.push((target, video_input_index));
+        stream_routes.push((target, video_input_index, video_fps));
     }
     let mixed_stream_inputs = uses_recording_stream_input && uses_companion_stream_input;
 
     if mixed_stream_inputs {
-        for (target, video_input_index) in stream_routes {
+        for (target, video_input_index, video_fps) in stream_routes {
             let stream_input_layout = InputLayout {
                 video_input_index,
                 camera_input_index: None,
@@ -19136,6 +19213,7 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
                 target,
                 true,
                 recording_video_output,
+                video_fps,
             );
         }
         return Ok(args);
@@ -19153,6 +19231,7 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
             target,
             true,
             recording_video_output,
+            stream_video.fps,
         );
     }
 
@@ -19364,9 +19443,17 @@ fn append_bridge_copy_file_output(
     audio: &AudioSettings,
     streaming_audio: bool,
     video_output: EncoderBridgeVideoOutput,
+    fps: u32,
     path: &Path,
 ) {
-    append_bridge_copy_output_args(args, input_layout, audio, streaming_audio, video_output);
+    append_bridge_copy_output_args(
+        args,
+        input_layout,
+        audio,
+        streaming_audio,
+        video_output,
+        fps,
+    );
     args.push(ffmpeg_file_path(path));
 }
 
@@ -19377,6 +19464,7 @@ fn append_bridge_copy_flv_output(
     target: &StreamTarget,
     advance_audio: bool,
     video_output: EncoderBridgeVideoOutput,
+    fps: u32,
 ) {
     let stream_audio;
     let audio = if advance_audio {
@@ -19385,7 +19473,7 @@ fn append_bridge_copy_flv_output(
     } else {
         audio
     };
-    append_bridge_copy_output_args(args, input_layout, audio, true, video_output);
+    append_bridge_copy_output_args(args, input_layout, audio, true, video_output, fps);
     // FLV's H264 codec tag, explicitly: the mpegts input carries tag [27]
     // (stream_type) through -c:v copy, wrapper muxers clone it verbatim into
     // the inner flv muxer, and "-tag:v 0" is a no-op for copy (0 = keep).
@@ -19427,12 +19515,14 @@ fn append_bridge_copy_flv_output(
     ]);
 }
 
+/// `fps` is the encoder rate of the FIFO that `input_layout` maps.
 fn append_bridge_copy_output_args(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
     streaming_audio: bool,
     video_output: EncoderBridgeVideoOutput,
+    fps: u32,
 ) {
     args.extend([
         "-map".to_string(),
@@ -19444,12 +19534,21 @@ fn append_bridge_copy_output_args(
         video_output,
         EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
-        append_media_foundation_h264_color_metadata_args(args);
+        append_media_foundation_h264_copy_metadata_args(args, fps);
     }
     append_audio_encoding_with_video_clock(args, input_layout, audio, streaming_audio, true);
 }
 
-fn append_media_foundation_h264_color_metadata_args(args: &mut Vec<String>) {
+/// Output metadata for a stream copy of the Media Foundation MPEG-TS FIFO.
+///
+/// The FIFO is opened with minimal probing, too little for FFmpeg to estimate
+/// a frame rate, so it falls back to H.264's field-rate `tbr`: twice the SPS
+/// rate. Copied as-is, that guess becomes the container's declared rate
+/// (Matroska `DefaultDuration`, FLV `framerate`) and a 30fps take reads back
+/// as 60p. `-r` on a stream copy only declares the rate; packet timestamps
+/// pass through untouched, so frame skips stay real gaps.
+fn append_media_foundation_h264_copy_metadata_args(args: &mut Vec<String>, fps: u32) {
+    args.extend(["-r".to_string(), fps.max(1).to_string()]);
     args.extend(h264_bt709_color_tag_args());
     args.extend(h264_bt709_vui_rewrite_bsf_args());
 }
@@ -20397,6 +20496,8 @@ fn source_switch_output_options_are_known(options: &[String]) -> bool {
             "-color_trc",
             "-color_range",
             "-bsf:v",
+            // Media Foundation copies declare their video rate; audio is untouched.
+            "-r",
         ]
         .contains(&option.as_str())
             || option.starts_with("-metadata:s:a:")
@@ -33996,6 +34097,143 @@ mod tests {
         );
     }
 
+    /// `(mapped video, declared -r)` for every output that declares a rate.
+    fn declared_rates_by_video_map(args: &[String]) -> Vec<(&str, &str)> {
+        let mut video_map = None;
+        let mut rates = Vec::new();
+        for pair in args.windows(2) {
+            match pair[0].as_str() {
+                "-map" if pair[1].ends_with(":v") || pair[1].ends_with(":v:0") => {
+                    video_map = Some(pair[1].as_str());
+                }
+                "-r" => rates.push((video_map.expect("-r follows a video map"), pair[1].as_str())),
+                _ => {}
+            }
+        }
+        rates
+    }
+
+    /// Minimal MPEG-TS probing cannot estimate a rate, so FFmpeg's guess is
+    /// H.264's field-rate tbr (2x the SPS rate) and a stream copy wrote it as
+    /// the Matroska DefaultDuration: every 30fps D3D11 take read back as 60p
+    /// and 60fps as 120p. Each Media Foundation copy output must declare the
+    /// encoder rate of the FIFO it maps instead.
+    #[test]
+    fn media_foundation_copy_outputs_declare_the_encoder_rate_not_the_probe_guess() {
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let fifo_path = Path::new("/tmp/videorc-bridge-input.ts");
+        for fps in [30, 60] {
+            let mut params = base_params(true, false);
+            params.output.video.fps = fps;
+            let fps_arg = fps.to_string();
+            let args = bridge_recording_ffmpeg_args(
+                &capture,
+                &params,
+                Some(Path::new("/tmp/videorc-bridge-rate.mkv")),
+                fifo_path,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            )
+            .unwrap();
+            // The test tone opens before the video FIFO, so the video is input 1.
+            assert_eq!(
+                declared_rates_by_video_map(&args),
+                vec![("1:v", fps_arg.as_str())],
+                "record-only {fps}fps: {args:?}"
+            );
+            assert_eq!(
+                input_arg_value(&args, &fifo_path.display().to_string(), "-r"),
+                None,
+                "an input -r would replace the encoder PTS with a synthetic CFR clock"
+            );
+
+            let video_toolbox_args = bridge_recording_ffmpeg_args(
+                &capture,
+                &params,
+                Some(Path::new("/tmp/videorc-bridge-rate.mkv")),
+                fifo_path,
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            )
+            .unwrap();
+            assert_eq!(arg_value(&video_toolbox_args, "-r"), None);
+        }
+
+        // Record + stream fan-out: the file and every FLV leg copy one FIFO.
+        let mut params = base_params(true, true);
+        params.output.video.fps = 60;
+        let streaming = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "yt",
+            ),
+            (StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw"),
+        ]);
+        params.streaming = Some(streaming.clone());
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+            &capture,
+            &params,
+            Some(Path::new("/tmp/videorc-bridge-rate-fanout.mkv")),
+            &targets,
+            fifo_path,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            &ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::WindowsHardware),
+            Some(&ReplayOutput {
+                dir: PathBuf::from("/tmp/videorc-ring"),
+                seconds: 30,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            declared_rates_by_video_map(&args),
+            vec![("1:v", "60"); 4],
+            "file, two FLV legs and the replay ring: {args:?}"
+        );
+
+        // Split output: the recording leg and the companion stream leg are
+        // separate FIFOs at their own rates.
+        let mut params = base_params(true, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 12_000,
+        };
+        let mut streaming =
+            streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw")]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6_000;
+        params.streaming = Some(streaming.clone());
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        let stream_output = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        )
+        .unwrap()
+        .expect("1080p30 companion stream output");
+        let args = bridge_compositor_split_output_ffmpeg_args(
+            &capture,
+            &params,
+            Some(Path::new("/tmp/videorc-bridge-rate-split.mkv")),
+            &targets,
+            Path::new("/tmp/videorc-bridge-rate-recording.ts"),
+            Path::new("/tmp/videorc-bridge-rate-stream.ts"),
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            stream_output,
+        )
+        .unwrap();
+        assert_eq!(
+            declared_rates_by_video_map(&args),
+            vec![("1:v", "60"), ("2:v", "30")],
+            "{args:?}"
+        );
+    }
+
     #[test]
     fn bridge_recording_h264_mpegts_opens_native_audio_before_video_fifo() {
         let params = base_params(true, false);
@@ -42087,69 +42325,90 @@ mod tests {
             let capture = bus_capture(VideoInput::TestPattern);
             let output = Path::new("/tmp/timing-record.mkv");
             let fifo = Path::new("/tmp/timing-record.ts");
-            let video = EncoderBridgeVideoOutput::VideoToolboxH264MpegTs;
             let timing = |role, output_index, filter_shift_ms| SourceSwitchOutputAudioTiming {
                 role,
                 output_index,
                 input_offset_ms: 0,
                 filter_shift_ms,
             };
-            let record_params = params_with_offset(true, false, 0);
-            let record_args =
-                bridge_recording_ffmpeg_args(&capture, &record_params, Some(output), fifo, video)
-                    .unwrap();
-            assert_eq!(
-                inspect_source_switch_output_audio_timing(
-                    &record_args,
+            // Media Foundation copies also carry color tags, the VUI rewrite
+            // and a declared `-r`; none of them may hide the audio timing.
+            for video in [
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            ] {
+                let record_params = params_with_offset(true, false, 0);
+                let record_args = bridge_recording_ffmpeg_args(
                     &capture,
+                    &record_params,
                     Some(output),
-                    &[]
-                ),
-                Some(vec![timing("local", 0, 0)])
-            );
-
-            let targets = vec![build_stream_url(&base_params(false, true).output.rtmp).unwrap()];
-            // Stream-only and same-profile combined both use neutral copy
-            // fanout. Mode flags therefore cannot establish an audio advance.
-            for local in [None, Some(output)] {
-                let params = params_with_offset(local.is_some(), true, 0);
-                let args =
-                    bridge_compositor_ffmpeg_args(&capture, &params, local, &targets, fifo, video)
-                        .unwrap();
-                let expected = if local.is_some() {
-                    vec![timing("local", 0, 0), timing("stream", 1, 0)]
-                } else {
-                    vec![timing("stream", 0, 0)]
-                };
+                    fifo,
+                    video,
+                )
+                .unwrap();
                 assert_eq!(
-                    inspect_source_switch_output_audio_timing(&args, &capture, local, &targets),
-                    Some(expected)
+                    inspect_source_switch_output_audio_timing(
+                        &record_args,
+                        &capture,
+                        Some(output),
+                        &[]
+                    ),
+                    Some(vec![timing("local", 0, 0)]),
+                    "{video:?}"
+                );
+
+                let targets =
+                    vec![build_stream_url(&base_params(false, true).output.rtmp).unwrap()];
+                // Stream-only and same-profile combined both use neutral copy
+                // fanout. Mode flags therefore cannot establish an audio advance.
+                for local in [None, Some(output)] {
+                    let params = params_with_offset(local.is_some(), true, 0);
+                    let args = bridge_compositor_ffmpeg_args(
+                        &capture, &params, local, &targets, fifo, video,
+                    )
+                    .unwrap();
+                    let expected = if local.is_some() {
+                        vec![timing("local", 0, 0), timing("stream", 1, 0)]
+                    } else {
+                        vec![timing("stream", 0, 0)]
+                    };
+                    assert_eq!(
+                        inspect_source_switch_output_audio_timing(&args, &capture, local, &targets),
+                        Some(expected),
+                        "{video:?}"
+                    );
+                }
+
+                let (params, targets) = simulcast_split_params(true);
+                let stream_output = recording_compositor_stream_output(&params, video)
+                    .unwrap()
+                    .expect("actual split topology");
+                let args = bridge_compositor_split_output_ffmpeg_args(
+                    &capture,
+                    &params,
+                    Some(output),
+                    &targets,
+                    fifo,
+                    Path::new("/tmp/timing-stream.ts"),
+                    video,
+                    stream_output,
+                )
+                .unwrap();
+                assert_eq!(
+                    inspect_source_switch_output_audio_timing(
+                        &args,
+                        &capture,
+                        Some(output),
+                        &targets
+                    ),
+                    Some(vec![
+                        timing("local", 0, 0),
+                        timing("stream", 1, -130),
+                        timing("stream", 2, -130)
+                    ]),
+                    "{video:?}"
                 );
             }
-
-            let (params, targets) = simulcast_split_params(true);
-            let stream_output = recording_compositor_stream_output(&params, video)
-                .unwrap()
-                .expect("actual split topology");
-            let args = bridge_compositor_split_output_ffmpeg_args(
-                &capture,
-                &params,
-                Some(output),
-                &targets,
-                fifo,
-                Path::new("/tmp/timing-stream.ts"),
-                video,
-                stream_output,
-            )
-            .unwrap();
-            assert_eq!(
-                inspect_source_switch_output_audio_timing(&args, &capture, Some(output), &targets),
-                Some(vec![
-                    timing("local", 0, 0),
-                    timing("stream", 1, -130),
-                    timing("stream", 2, -130)
-                ])
-            );
         }
 
         #[cfg(debug_assertions)]

@@ -152,6 +152,10 @@ mod viewer_stats;
 mod warm_microphone;
 #[allow(dead_code)]
 mod windows_capture_owner;
+#[cfg(target_os = "windows")]
+mod windows_com_lifetime;
+#[cfg(target_os = "windows")]
+mod windows_crash_dump;
 #[allow(dead_code)]
 mod windows_d3d11_capture;
 #[allow(dead_code)]
@@ -448,6 +452,16 @@ async fn run_backend() -> Result<()> {
         // mid-recording. Logging must never be load-bearing.
         .with_writer(|| FailSilentStderr)
         .init();
+    // Must run before any capture/encoder/audio thread joins the MTA: keeps
+    // COM from unloading GraphicsCapture.dll (and the rest of the WinRT
+    // stack) under a live capture-internal thread when the last worker
+    // leaves the MTA. See windows_com_lifetime.rs.
+    #[cfg(target_os = "windows")]
+    windows_com_lifetime::install();
+    // Native faults never reach the panic hook; write our own minidump so a
+    // crash record always has a stack. See windows_crash_dump.rs.
+    #[cfg(target_os = "windows")]
+    windows_crash_dump::install();
     // F-021 root cause: SkyLight ASSERTS (SIGABRT, "CGS_REQUIRE_INIT
     // did_initialize") if a window-server call runs before this process's
     // CoreGraphics connection initializes — SCContentFilter's window init
@@ -13658,6 +13672,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Plan 164 S-D3: the same read tells the Buddy which tick contract the
     // web speaks (4 adds the persona). Signed out reads as unknown.
     let mut tick_version: Option<Option<u32>> = None;
+    // Plan 192 D4: and whether the greet route is on (the AI writes the
+    // greetings). Signed out reads as unknown; absent reads as off.
+    let mut greet_version: Option<Option<u32>> = None;
     // Plan 170 D9: the same read turns the account Buddy library on or off.
     let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
@@ -13674,6 +13691,13 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.tick))
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                greet_version = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.greet))
                     }
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
@@ -13708,6 +13732,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     }
     if let Some(tick) = tick_version {
         cohost::set_tick_capability(state, tick).await;
+    }
+    if let Some(greet) = greet_version {
+        cohost::set_greet_capability(state, greet).await;
     }
     if let Some(library) = buddy_library {
         cohost_library::set_capability(state, library).await;

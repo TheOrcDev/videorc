@@ -40,6 +40,7 @@ import {
  */
 export function BuddyChatControls({
   autoChat,
+  aiGreetings = false,
   name = null,
   picture = null,
   disabled = false,
@@ -47,6 +48,11 @@ export function BuddyChatControls({
   onOpenChatSettings
 }: {
   autoChat: CohostAutoChat
+  /**
+   * Buddy may write greetings with AI (plan 192 D3, D7): Premium and cloud AI
+   * allowed. With Greetings' own AI switch on, the chip says "· AI".
+   */
+  aiGreetings?: boolean
   /** The streamer's name for Buddy: the consent dialog asks in its name. */
   name?: string | null
   /**
@@ -130,12 +136,8 @@ export function BuddyChatControls({
             data-slot="buddy-behaviour-chips"
             role="group"
           >
-            {buddyBehaviourChips(autoChat).map((chip) => (
-              <Badge
-                key={chip.id}
-                asChild
-                variant={chip.empty ? 'warning' : chip.on ? 'success' : 'neutral'}
-              >
+            {buddyBehaviourChips(autoChat, { aiGreetings }).map((chip) => (
+              <Badge key={chip.id} asChild variant={chip.on ? 'success' : 'neutral'}>
                 <button
                   aria-label={chip.name}
                   data-behaviour={chip.id}

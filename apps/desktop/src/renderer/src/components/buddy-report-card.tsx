@@ -233,10 +233,19 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
                 {post.at ? <span className="tabular-nums">{post.at}</span> : null}
               </span>
             }
+            alias={
+              // Plan 192 S2.2: who wrote a greeting, only when the report says.
+              post.source ? (
+                <Badge data-testid="buddy-report-post-source" variant="outline">
+                  {post.source}
+                </Badge>
+              ) : undefined
+            }
             title={post.trigger}
           />
         )}
       />
+      <ReportGreetingSkips skips={view.greetingSkips} />
       {/* Plan 150: what needs you (questions, promises) beside what happened
           (moments, alerts), two columns at lg when both sides have rows. */}
       <div
@@ -404,6 +413,27 @@ function ReportCommands({ commands }: { commands: ShownReport['commands'] }): Re
         />
       </GroupedList>
     </div>
+  )
+}
+
+/**
+ * The greetings Buddy didn't post this stream, and why (plan 192 D7): one
+ * plain line under what it posted, only when it skipped any. A line, not a
+ * row, so no reason is ever cut off.
+ */
+function ReportGreetingSkips({
+  skips
+}: {
+  skips: ShownReport['greetingSkips']
+}): ReactElement | null {
+  if (!skips) return null
+  return (
+    <p
+      className="text-xs text-muted-foreground select-text"
+      data-slot="buddy-report-greeting-skips"
+    >
+      {skips.sentence}
+    </p>
   )
 }
 

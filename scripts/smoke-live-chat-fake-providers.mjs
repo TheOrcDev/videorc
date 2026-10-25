@@ -26,6 +26,24 @@ const SMOKE_TWITCH_GIF = {
   imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
 }
 
+// Every Activity kind a greeting line may be written for (plan 164 S-D1).
+const BUDDY_ACTIVITY_KINDS = [
+  'follow',
+  'sub',
+  'resub',
+  'sub-gift',
+  'community-sub-gift',
+  'membership',
+  'cheer',
+  'kicks',
+  'super-chat',
+  'super-sticker',
+  'raid',
+  'watch-streak',
+  'power-up',
+  'redemption'
+]
+
 let appProcess
 let stopping = false
 
@@ -352,6 +370,8 @@ try {
 
     // This smoke is intentionally off-stream. The backend must reject a highlight instead of
     // claiming that viewer-facing output changed; the artifact smoke proves the live path.
+    // Since Clips (plan 181) the dev app may hold a buffer-only capture session, so the refusal
+    // can name that session instead of the missing livestream; either is an explicit refusal.
     const onePixelPng =
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
     let highlightError
@@ -367,7 +387,10 @@ try {
     }
     if (
       !(highlightError instanceof Error) ||
-      highlightError.message !== 'Comment highlighting requires an active livestream.'
+      ![
+        'Comment highlighting requires an active livestream.',
+        'The comment belongs to a stale or different livestream session.'
+      ].includes(highlightError.message)
     ) {
       throw new Error(
         `Off-stream comment highlight was not rejected explicitly: ${String(highlightError)}`
@@ -631,11 +654,13 @@ try {
     }
 
     // Plan 164 Phase D: the Buddy's greetings post as the streamer through
-    // the same send path. In `auto` with three enabled templates, every
-    // fake activity row with a template earns exactly one send on the
-    // destination it came from (the throttle spaces them: 5 s apart per
-    // destination, so each platform's rows land one per gap), and with the
-    // mode `off` nothing is sent at all.
+    // the same send path. In `auto` with three enabled templates (every
+    // other kind and both welcomes switched off), every fake activity row
+    // with a template earns exactly one send on the destination it came from
+    // (the throttle spaces them: 5 s apart per destination, so each
+    // platform's rows land one per gap), and with the mode `off` nothing is
+    // sent at all. Plan 192: with no lines of the user's own, the built-in
+    // line and a chatter's welcome go out by themselves.
     await assertBuddyGreetings(ws)
 
     console.log(
@@ -672,9 +697,26 @@ async function assertBuddyGreetings(ws) {
       enabled: true
     }
   ]
+  // Plan 192 D1: a kind without a line of the user's own posts its built-in
+  // line, so the scenario switches every other kind off (a kind whose lines
+  // are all off is off) and both welcomes too.
+  const offLines = (keep) =>
+    BUDDY_ACTIVITY_KINDS.filter((kind) => !keep.includes(kind)).map((kind) => ({
+      id: `smoke-off-${kind}`,
+      kind,
+      text: 'off',
+      state: 'talk',
+      enabled: false
+    }))
+  const welcomesOff = { firstTime: { enabled: false }, returning: { enabled: false } }
   const autoChat = (mode) => ({
     mode,
-    greetings: { enabled: true, templates },
+    greetings: {
+      enabled: true,
+      ai: false,
+      templates: [...templates, ...offLines(['follow', 'raid', 'super-chat'])],
+      welcomes: welcomesOff
+    },
     answers: { enabled: false, cooldownSeconds: 20 },
     banter: { enabled: false, cooldownSeconds: 240 }
   })
@@ -810,7 +852,75 @@ async function assertBuddyGreetings(ws) {
     throw new Error(`Buddy proposed with the mode off: ${JSON.stringify(offState.utterances)}`)
   }
   await request(ws, timeoutMs, 'liveChat.stop', {})
+
+  await assertBuddyDefaults(ws, terminalSends)
   await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: settingsBefore.autoChat })
+}
+
+// Plan 192 D1/D2: no lines of the user's own. Kick's follow posts its
+// built-in line, the session's one chatter gets a welcome (first-time or
+// returning, by what this profile's earlier sessions saw), and the KICKs
+// row, whose only line is switched off, posts nothing and is counted.
+async function assertBuddyDefaults(ws, terminalSends) {
+  await request(ws, timeoutMs, 'cohost.settings.set', {
+    autoChat: {
+      mode: 'auto',
+      greetings: {
+        enabled: true,
+        ai: false,
+        templates: [
+          { id: 'smoke-off-kicks', kind: 'kicks', text: 'off', state: 'talk', enabled: false }
+        ],
+        welcomes: { firstTime: { enabled: true }, returning: { enabled: true } }
+      },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    }
+  })
+  const sessionId = `smoke-buddy-defaults-${Date.now()}`
+  const targetId = 'smoke-buddy-defaults-kick'
+  const operations = collectEvent(ws, 'liveChat.sendOperation')
+  await request(ws, timeoutMs, 'liveChat.start', {
+    sessionId,
+    platforms: ['kick'],
+    destinations: [{ platform: 'kick', targetId, read: 'ready', write: 'ready' }],
+    fakes: [{ platform: 'kick', targetId, count: 1, intervalMs: 60, events: true }]
+  })
+  await waitFor(
+    () => terminalSends(operations, sessionId).length >= 2,
+    Math.max(timeoutMs, 20_000),
+    'the built-in follow line and the welcome'
+  )
+  await new Promise((resolveWait) => setTimeout(resolveWait, 6_000))
+  const sends = terminalSends(operations, sessionId)
+  const texts = sends.map((operation) => operation.text)
+  const welcome = /^(Hi Test Viewer 0, welcome to the stream!|Welcome back, Test Viewer 0!)$/
+  if (
+    sends.length !== 2 ||
+    !texts.includes('Welcome, kick_fan! Thanks for the follow.') ||
+    !texts.some((text) => welcome.test(text)) ||
+    sends.some((operation) =>
+      operation.destinations.some(
+        (delivery) => delivery.destinationId !== targetId || delivery.phase !== 'sent'
+      )
+    )
+  ) {
+    throw new Error(`Buddy defaults sent the wrong greetings: ${JSON.stringify(texts)}`)
+  }
+  const gap = Math.abs(Date.parse(sends[1].createdAt) - Date.parse(sends[0].createdAt))
+  if (gap < 4_500) {
+    throw new Error(`Buddy defaults broke the 5 s gap on Kick: ${gap} ms`)
+  }
+  const report = (await request(ws, timeoutMs, 'cohost.report.get', { sessionId }))?.report
+  const posts = report?.posts ?? []
+  if (
+    posts.length !== 2 ||
+    posts.some((post) => post.source !== 'line' || post.trigger !== 'greeting') ||
+    (report?.greetings?.skipped?.noLine ?? 0) < 1
+  ) {
+    throw new Error(`The Buddy defaults report is wrong: ${JSON.stringify(report)}`)
+  }
+  await request(ws, timeoutMs, 'liveChat.stop', {})
 }
 
 function closeWebSocket(ws) {

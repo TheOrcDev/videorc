@@ -69,7 +69,7 @@ export const CLOUD_AI_USES: readonly string[] = [
   BUDDY_HEARS_YOU_USE,
   "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
   "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Buddy or your account.",
-  "Buddy replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
+  "Buddy posts in chat as you: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
   CLOUD_AI_CLEAN_CUT_USE
 ]
 

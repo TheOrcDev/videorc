@@ -942,8 +942,9 @@ describe('shared high-risk protocol fixture', () => {
       removeConfirm: 'countdown'
     })
     // Plan 164 S-A2: the persona and the automatic chat block ride the
-    // settings (defaults: the bundled pack, everything automatic off) and
-    // the patch (whole objects). Absent images are omitted, never null.
+    // settings (defaults: the bundled pack; posting Off, with Greetings, AI
+    // greetings, both welcomes and Answers on since plan 192) and the patch
+    // (whole objects). Absent images are omitted, never null.
     expect(fixtures.cohost.settings.persona).toStrictEqual({
       id: 'default',
       name: 'Buddy',
@@ -957,8 +958,16 @@ describe('shared high-risk protocol fixture', () => {
     })
     expect(fixtures.cohost.settings.autoChat).toStrictEqual({
       mode: 'off',
-      greetings: { enabled: false, templates: [] },
-      answers: { enabled: false, cooldownSeconds: 20 },
+      greetings: {
+        enabled: true,
+        templates: [],
+        ai: true,
+        welcomes: {
+          firstTime: { enabled: true, state: 'talk' },
+          returning: { enabled: true, state: 'talk' }
+        }
+      },
+      answers: { enabled: true, cooldownSeconds: 20 },
       banter: { enabled: false, cooldownSeconds: 240 }
     })
     expect(fixtures.cohost.settingsPatch.persona?.images).toStrictEqual({

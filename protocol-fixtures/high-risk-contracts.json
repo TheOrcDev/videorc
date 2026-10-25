@@ -600,7 +600,17 @@
               "enabled": true,
               "reaction": "proud"
             }
-          ]
+          ],
+          "ai": true,
+          "welcomes": {
+            "firstTime": { "enabled": true, "state": "talk" },
+            "returning": {
+              "enabled": true,
+              "text": "Yo {name}, back again!",
+              "state": "laugh",
+              "reaction": "wave"
+            }
+          }
         },
         "answers": { "enabled": true, "cooldownSeconds": 30 },
         "banter": { "enabled": false, "cooldownSeconds": 240 }
@@ -629,8 +639,16 @@
       },
       "autoChat": {
         "mode": "off",
-        "greetings": { "enabled": false, "templates": [] },
-        "answers": { "enabled": false, "cooldownSeconds": 20 },
+        "greetings": {
+          "enabled": true,
+          "templates": [],
+          "ai": true,
+          "welcomes": {
+            "firstTime": { "enabled": true, "state": "talk" },
+            "returning": { "enabled": true, "state": "talk" }
+          }
+        },
+        "answers": { "enabled": true, "cooldownSeconds": 20 },
         "banter": { "enabled": false, "cooldownSeconds": 240 }
       }
     },
@@ -995,9 +1013,38 @@
           "byVoice": 0,
           "byChat": 0,
           "onStream": 0,
-          "manual": 0
+          "manual": 0,
+          "skipped": { "noLine": 1, "held": 4, "youtubePaused": 2 }
         },
-        "recap": { "offered": 0, "drafted": 0, "dismissed": 0 }
+        "recap": { "offered": 0, "drafted": 0, "dismissed": 0 },
+        "posts": [
+          {
+            "id": "utt-1-fixture",
+            "at": "2026-08-22T10:05:00Z",
+            "trigger": "greeting",
+            "text": "Fresh blood! Viewer joins the horde.",
+            "destinations": ["twitch"],
+            "result": "sent",
+            "source": "ai"
+          },
+          {
+            "id": "utt-2-fixture",
+            "at": "2026-08-22T10:06:00Z",
+            "trigger": "greeting",
+            "text": "Welcome, Viewer! Thanks for the follow.",
+            "destinations": ["twitch"],
+            "result": "sent",
+            "source": "line"
+          },
+          {
+            "id": "utt-3-fixture",
+            "at": "2026-08-22T10:07:00Z",
+            "trigger": "manual",
+            "text": "hello",
+            "destinations": ["twitch"],
+            "result": "sent"
+          }
+        ]
       },
       "moments": [
         {

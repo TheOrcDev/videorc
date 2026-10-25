@@ -215,7 +215,8 @@ computer.
 | The official Buddies                             | Nothing                                |
 | Your Buddy library across the web and computers  | A Videorc account                      |
 | Buddy on stream and in the recording             | Nothing                                |
-| Greetings (your own templates, no AI)            | Nothing                                |
+| Greetings and welcomes (built-in or your lines)  | Nothing                                |
+| Greetings written by AI in Buddy's voice         | Premium + Cloud AI consent             |
 | The Say box in Stream Manager                    | Nothing                                |
 | Answers                                          | Premium + Cloud AI consent             |
 | Banter                                           | Premium + Cloud AI consent             |
@@ -292,23 +293,37 @@ Buddy server).
 
 ## The three behaviours
 
-- **Greetings** (free, no AI): your own templates for follows, subs, resubs,
-  gifted subs, community gifts, memberships, cheers, KICKs, Super Chats,
-  Super Stickers, raids, watch streaks, Power-ups and redemptions, written in
-  Buddy → Chat → Greetings. Each template has a state (talk, laugh,
-  think), an optional platform, and fields in braces: `{name}`, `{handle}`,
-  `{platform}`, `{months}`, `{streak}`, `{count}`, `{amount}`, `{reward}`
-  (the channel's points name or the reward title), `{names}` and `{others}`
-  (a burst). The editor shows a live preview against a sample event, a
-  warning when the text is over a platform's cap, and a warning for a brace
-  nothing fills (it is posted as written). An empty list offers a starter
-  set ("Welcome, {name}!", "{name} joined the ranks ({months} months)",
-  "{amount} from {name}, much obliged", "{name} brings {count} warriors.
-  Welcome!", "{name}, {streak} streams strong").
-- **Answers** (Premium + Cloud AI): when a viewer asks Buddy by name
-  (`@<name>` or the name in the message), the drafted reply becomes a
-  message, at most one per cooldown (default 20 s, 1 to 3,600). Questions
-  that do not name Buddy stay suggestions in the pane. Only while the
+- **Greetings** (free; on by default, plan 192): **welcomes** for a
+  chatter's first message ever in the channel ("Hi {name}, welcome to the
+  stream!") and a returning chatter's first message this stream ("Welcome
+  back, {name}!"), plus lines for follows, subs, resubs, gifted subs,
+  community gifts, memberships, cheers, KICKs, Super Chats, Super Stickers,
+  raids, watch streaks, Power-ups and redemptions. Every kind has a
+  built-in line (`protocol-fixtures/buddy-builtin-greetings.json`), so
+  Greetings works with no setup; an empty list never means silence. In
+  Buddy → Chat → Greetings a kind without your own line shows its built-in
+  line marked Default: editing it saves your line, switching it off saves a
+  switched-off line (a kind whose lines are all off posts nothing). Each
+  line has a state (talk, laugh, think), an optional platform, and fields in
+  braces: `{name}`, `{handle}`, `{platform}`, `{months}`, `{streak}`,
+  `{count}`, `{amount}`, `{reward}` (the channel's points name or the reward
+  title), `{names}` and `{others}` (a burst; in a burst `{name}` is the
+  names list too). Welcomes skip the streamer's own account, known bots
+  (Nightbot, StreamElements, ...), names with a link and old rows. The
+  editor shows a live preview against a sample event, a warning when the
+  text is over a platform's cap, and a warning for a brace nothing fills.
+- **Write greetings with AI** (Premium + Cloud AI, on by default): Buddy
+  writes each greeting itself in its own voice (`POST /api/ai/cohost/greet`,
+  3 s budget). The line is the example and the fallback: if the AI fails, is
+  slow or is not allowed, the line goes out instead. The first AI greeting
+  of a stream may add that viewers can ask Buddy by name. Reports tag each
+  greeting AI or Line.
+- **Answers** (Premium + Cloud AI, on by default since plan 192): when a
+  viewer asks Buddy by name (`@<name>` or the name in the message), the
+  drafted reply becomes a message. A question that doesn't name Buddy gets
+  a reply only when it has been open a minute, you haven't answered it, and
+  your notes answer it (`fromNotes`); otherwise it stays a suggestion in the
+  pane. At most one per cooldown (default 20 s, 1 to 3,600). Only while the
   web speaks tick contract v4.
 - **Banter** (Premium + Cloud AI, off by default): one short line when your
   microphone has been quiet for 20 s, never within a minute of a greeting or
@@ -340,18 +355,18 @@ failed (plan 161).
 
 Per destination, for every automatic send:
 
-| Rule            | Value                                                                                                                                                                     |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rate            | At most 6 automatic sends a minute, never two within 5 s                                                                                                                  |
-| Kind cooldown   | follow 10 s; sub, resub, gifted sub, community gift, membership 5 s; cheer, KICKs, Super Chat, Super Sticker 5 s; raid 60 s; watch streak 15 s; Power-up, redemption 10 s |
-| Collapse        | More than 3 same-kind events inside a cooldown become one message using `{names}` and `{others}` ("Ana, Bo, Cy and 4 others"); 2 or 3 go out one per cooldown             |
-| Community gifts | One greeting to the gifter; the individual gift rows inside it are skipped                                                                                                |
-| Dedupe          | One greeting per (destination, viewer, kind) a session                                                                                                                    |
-| Fresh only      | An Activity row older than 10 minutes on arrival (a reconnect replay) is never greeted                                                                                    |
-| YouTube         | Nothing while the quota breaker is open; automatic sends count against the same budget                                                                                    |
-| Failed legs     | Nothing to a destination whose stream has failed                                                                                                                          |
-| Answers         | One per `answers.cooldownSeconds` (default 20 s)                                                                                                                          |
-| Banter          | One per `banter.cooldownSeconds` (default 240 s), never within 60 s of a greeting or answer                                                                               |
+| Rule            | Value                                                                                                                                                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rate            | At most 6 automatic sends a minute, never two within 5 s                                                                                                                                                                  |
+| Kind cooldown   | first-time welcome 5 s; returning welcome 10 s; follow 10 s; sub, resub, gifted sub, community gift, membership 5 s; cheer, KICKs, Super Chat, Super Sticker 5 s; raid 60 s; watch streak 15 s; Power-up, redemption 10 s |
+| Collapse        | More than 3 same-kind events inside a cooldown become one message using `{names}` and `{others}` ("Ana, Bo, Cy and 4 others"); 2 or 3 go out one per cooldown                                                             |
+| Community gifts | One greeting to the gifter; the individual gift rows inside it are skipped                                                                                                                                                |
+| Dedupe          | One greeting per (destination, viewer, kind) a session                                                                                                                                                                    |
+| Fresh only      | An Activity row older than 10 minutes on arrival (a reconnect replay) is never greeted                                                                                                                                    |
+| YouTube         | Nothing while the quota breaker is open; automatic sends count against the same budget                                                                                                                                    |
+| Failed legs     | Nothing to a destination whose stream has failed                                                                                                                                                                          |
+| Answers         | One per `answers.cooldownSeconds` (default 20 s)                                                                                                                                                                          |
+| Banter          | One per `banter.cooldownSeconds` (default 240 s), never within 60 s of a greeting or answer                                                                                                                               |
 
 Suggest and Auto both go through the throttle; a Suggest card is the same
 utterance with `status: proposed`. Held greetings wait in a bucket and a
@@ -453,9 +468,9 @@ What Cloud AI covers (`CLOUD_AI_USES`, one list everywhere):
   Buddies you create (their pictures, name, personality and About you) are
   kept in your Videorc account so you can use them on any computer, until
   you delete them or your account.
-- Buddy replies in chat as you: with Answers or Banter on, its replies are
-  drafted by Videorc's cloud AI and posted on your own account, only in the
-  modes you turn on.
+- Buddy posts in chat as you: with Answers, Banter or AI greetings on, its
+  messages are drafted by Videorc's cloud AI and posted on your own account,
+  only in the modes you turn on.
 - Creating an Alive Buddy: your reference picture and its description go
   to Videorc's cloud AI. Its moves are kept on this computer, and in your
   Videorc account when the Buddy is in your library, until you remove them
@@ -517,8 +532,12 @@ The persona and its images (Phase A):
   uuid), `name`, `personality`, `bubbleStyle`, `images` (four optional
   relative paths `<personaId>/<state>.<ext>`, absent never null) and
   `source` (`default | uploaded | generated`). `autoChat` holds `mode`,
-  `greetings {enabled, templates[]}`, `answers {enabled, cooldownSeconds}`
-  and `banter {enabled, cooldownSeconds}`, all off by default. Both ride
+  `greetings {enabled, templates[], ai, welcomes {firstTime, returning}}`
+  (each welcome `{enabled, text?, state, reaction?}`; plan 192 keeps welcomes
+  out of `templates[]` so an older app never meets an unknown kind),
+  `answers {enabled, cooldownSeconds}` and `banter {enabled,
+cooldownSeconds}`. The mode is Off by default; Greetings (with AI and both
+  welcomes) and Answers are on, Banter is off. Both ride
   `cohost.settings.get/set` as whole objects; the backend refuses an
   out-of-bounds persona with `cohost-persona-invalid` and bad templates with
   `cohost-auto-chat-invalid` (`cohost.rs::validate_persona` /

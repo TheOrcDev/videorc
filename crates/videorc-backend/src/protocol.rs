@@ -5463,6 +5463,63 @@ pub struct CohostReportGreetings {
     /// The streamer pressed Greeted.
     #[serde(default)]
     pub manual: u64,
+    /// Plan 192 D7: automatic greetings the Buddy did not send, by reason.
+    /// Omitted while every count is zero (and on reports from before it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<CohostReportGreetingsSkipped>,
+}
+
+/// Plan 192 D7: why automatic greetings were not sent this session. Each key
+/// is omitted while zero; the lane writes the counts as they happen, like
+/// posts, so a session without a tick still gets them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGreetingsSkipped {
+    /// The kind's line is switched off.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub no_line: u64,
+    /// Automatic chat, or greetings, is off.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub mode_off: u64,
+    /// The row was older than the fresh window (a replay).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stale: u64,
+    /// The viewer already got this kind of greeting on this destination.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub deduped: u64,
+    /// Waited in a cooldown bucket (sent later, collapsed).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub held: u64,
+    /// No destination could take it, or the send failed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub destination_failed: u64,
+    /// YouTube calls were paused by the quota breaker (plan 094).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub youtube_paused: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl CohostReportGreetingsSkipped {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn merged_with(self, later: Self) -> Self {
+        Self {
+            no_line: self.no_line.saturating_add(later.no_line),
+            mode_off: self.mode_off.saturating_add(later.mode_off),
+            stale: self.stale.saturating_add(later.stale),
+            deduped: self.deduped.saturating_add(later.deduped),
+            held: self.held.saturating_add(later.held),
+            destination_failed: self
+                .destination_failed
+                .saturating_add(later.destination_failed),
+            youtube_paused: self.youtube_paused.saturating_add(later.youtube_paused),
+        }
+    }
 }
 
 /// One alert kind viewers raised, with the most distinct viewers who said it
@@ -5480,6 +5537,10 @@ pub struct CohostReportPost {
     #[serde(default)]
     pub destinations: Vec<crate::streaming::StreamPlatform>,
     pub result: CohostReportPostResult,
+    /// Plan 192 S2.2: who wrote a greeting, the AI or the line. Omitted on
+    /// manual, answer and banter posts and on rows from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CohostReportPostSource>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -5488,6 +5549,14 @@ pub enum CohostReportPostResult {
     Sent,
     Partial,
     Failed,
+}
+
+/// Plan 192 S2.2: where a greeting's words came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportPostSource {
+    Ai,
+    Line,
 }
 
 /// Posts kept per report, newest kept.
@@ -5718,6 +5787,11 @@ impl CohostSessionReport {
             .on_stream
             .saturating_add(later.greetings.on_stream);
         greetings.manual = greetings.manual.saturating_add(later.greetings.manual);
+        greetings.skipped = match (greetings.skipped.take(), later.greetings.skipped) {
+            (Some(base), Some(later)) => Some(base.merged_with(later)),
+            (base, later) => base.or(later),
+        }
+        .filter(|skipped| !skipped.is_empty());
 
         for alert in later.alerts {
             match self
@@ -5760,10 +5834,36 @@ impl CohostSessionReport {
     /// (greetings are free). `segments: 0` says so.
     pub fn post_only(session_id: &str, post: CohostReportPost) -> Self {
         Self {
+            posts: vec![post.clone()],
+            ..Self::empty(session_id, &post.at)
+        }
+    }
+
+    /// Plan 192 D7: a report that carries only greeting skip counts, to fold
+    /// into the session's report as they happen (like `post_only`).
+    pub fn greeting_skips_only(
+        session_id: &str,
+        skipped: CohostReportGreetingsSkipped,
+        at: &str,
+    ) -> Self {
+        Self {
+            greetings: CohostReportGreetings {
+                skipped: Some(skipped).filter(|skipped| !skipped.is_empty()),
+                ..CohostReportGreetings::default()
+            },
+            ..Self::empty(session_id, at)
+        }
+    }
+
+    /// A report with nothing in it, spanning one instant: what the merge
+    /// folds a partial write into (`segments` 0, so it never counts as a
+    /// Buddy session of its own).
+    fn empty(session_id: &str, at: &str) -> Self {
+        Self {
             version: COHOST_SESSION_REPORT_VERSION,
             session_id: session_id.to_string(),
-            started_at: post.at.clone(),
-            ended_at: post.at.clone(),
+            started_at: at.to_string(),
+            ended_at: at.to_string(),
             segments: 0,
             stream_title: None,
             messages_seen: 0,
@@ -5775,7 +5875,7 @@ impl CohostSessionReport {
             alerts: Vec::new(),
             recap: CohostReportRecap::default(),
             commands: None,
-            posts: vec![post],
+            posts: Vec::new(),
         }
     }
 }
@@ -5931,6 +6031,11 @@ pub struct AiCapabilitiesCohost {
     /// The newest tick prompt version the web accepts (4 adds the persona).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick: Option<u32>,
+    /// Plan 192 D4: the greet route (`/api/ai/cohost/greet`) version; 1
+    /// when it is on, 0 when switched off or Buddy is off for the user.
+    /// Older servers omit it: the AI never writes greetings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub greet: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AiCapabilitiesAvatar>,
     /// Pet creation (plan 168, Phase F): on, and this month's creations.
@@ -7586,6 +7691,85 @@ mod tests {
                 .get("condensedKeeps")
                 .is_none(),
             "omitted when empty"
+        );
+    }
+
+    /// Plan 192 D7 and S2.2: the report carries greeting skip counts and
+    /// who wrote each greeting; zero counts, the empty block and the source
+    /// of a manual post are omitted; rows from before parse.
+    #[test]
+    fn shared_high_risk_contract_fixture_report_carries_greeting_skips_and_post_sources() {
+        let report_wire = shared_high_risk_contract_fixture_value("/cohost/reportPayload/report");
+        let report = CohostSessionReport::from_stored_json(&report_wire.to_string()).unwrap();
+        assert_eq!(
+            report.greetings.skipped,
+            Some(CohostReportGreetingsSkipped {
+                no_line: 1,
+                held: 4,
+                youtube_paused: 2,
+                ..CohostReportGreetingsSkipped::default()
+            })
+        );
+        assert_eq!(report.posts.len(), 3);
+        assert_eq!(report.posts[0].source, Some(CohostReportPostSource::Ai));
+        assert_eq!(report.posts[1].source, Some(CohostReportPostSource::Line));
+        assert_eq!(report.posts[2].source, None);
+        assert_eq!(serde_json::to_value(&report).unwrap(), report_wire);
+
+        let at = "2026-08-22T10:00:00Z";
+        let empty = CohostSessionReport::greeting_skips_only(
+            "s",
+            CohostReportGreetingsSkipped::default(),
+            at,
+        );
+        assert_eq!(empty.greetings.skipped, None);
+        assert!(
+            serde_json::to_value(&empty).unwrap()["greetings"]
+                .get("skipped")
+                .is_none()
+        );
+        let one = CohostReportGreetingsSkipped {
+            deduped: 3,
+            ..CohostReportGreetingsSkipped::default()
+        };
+        assert_eq!(
+            serde_json::to_value(one).unwrap(),
+            serde_json::json!({ "deduped": 3 })
+        );
+        let merged = CohostSessionReport::greeting_skips_only("s", one, at).merged_with(
+            CohostSessionReport::greeting_skips_only(
+                "s",
+                CohostReportGreetingsSkipped {
+                    deduped: 1,
+                    stale: 2,
+                    ..CohostReportGreetingsSkipped::default()
+                },
+                at,
+            ),
+        );
+        assert_eq!(
+            merged.greetings.skipped,
+            Some(CohostReportGreetingsSkipped {
+                deduped: 4,
+                stale: 2,
+                ..CohostReportGreetingsSkipped::default()
+            })
+        );
+        assert_eq!(merged.segments, 0, "partial writes are not sessions");
+        let old_post: CohostReportPost = serde_json::from_value(serde_json::json!({
+            "id": "u",
+            "at": at,
+            "trigger": "greeting",
+            "text": "hi",
+            "result": "sent"
+        }))
+        .unwrap();
+        assert_eq!(old_post.source, None);
+        assert!(
+            serde_json::to_value(&old_post)
+                .unwrap()
+                .get("source")
+                .is_none()
         );
     }
 

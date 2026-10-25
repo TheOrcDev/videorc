@@ -58,11 +58,20 @@ export function cohostEnableRelayPatch(
   return patch
 }
 
-/** The stored `autoChat` when none has been loaded yet: everything off. */
+/**
+ * The stored `autoChat` when none has been loaded yet: Rust's defaults
+ * (plan 192). Posting stays Off; Greetings (with AI and both welcomes) and
+ * Answers are on, so the first Suggest or Auto has something to say.
+ */
 export const DEFAULT_COHOST_AUTO_CHAT: CohostAutoChat = {
   mode: 'off',
-  greetings: { enabled: false, templates: [] },
-  answers: { enabled: false, cooldownSeconds: 20 },
+  greetings: {
+    enabled: true,
+    templates: [],
+    ai: true,
+    welcomes: { firstTime: { enabled: true }, returning: { enabled: true } }
+  },
+  answers: { enabled: true, cooldownSeconds: 20 },
   banter: { enabled: false, cooldownSeconds: 240 }
 }
 

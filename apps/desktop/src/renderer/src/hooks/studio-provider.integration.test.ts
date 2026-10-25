@@ -7128,7 +7128,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).toHaveBeenCalledWith("Couldn't switch the screen", {
       id: expect.stringContaining('source-switch-'),
       description: 'The selected display is unavailable. Choose it again in Sources.',
-      duration: 8_000
+      duration: 8_000,
+      action: expect.objectContaining({ label: 'Copy' })
     })
     expect(toastSpies.success).not.toHaveBeenCalled()
   }, 10_000)
@@ -10058,7 +10059,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(openSystemPermissions).not.toHaveBeenCalled()
     expect(toastSpies.error).toHaveBeenCalledWith("Couldn't check Camera permission", {
       description: 'Try again before changing access.',
-      duration: 8_000
+      duration: 8_000,
+      action: expect.objectContaining({ label: 'Copy' })
     })
   })
 

@@ -1,5 +1,47 @@
 # Implementation Plans
 
+- 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
+  background moves on the stream. Owner report: live backgrounds animate in
+  Studio but sit still on the live stream. On macOS every record-and-stream
+  session streams from an auxiliary compositor leg, and plan 190 wired the
+  live background to the primary leg only (`live_background: None` on the
+  auxiliary inputs), so the stream drew the poster. The owner's 10-24
+  session proves it: its recording's ring moves on every frame, and the
+  stream leg's code never sees the shader. Fix (D1): the stream leg draws the
+  texture the recording rendered in the same tick, so no shader cost is
+  added and the two can't disagree. Windows gets a WARP test that pins its
+  stream target; Linux shares one frame already. The smoke gains
+  record-and-stream cases (it only recorded). D2: 4K60 stays the poster.
+  **DRAFT PR #794** 2026-10-24: built (owner took D1 and D2). The smoke
+  shows the stream ring moving like the recording's on every case. Owed: the
+  Windows CI run of the S3 tests, a quiet-host p95 run, owner by-eye on a
+  real stream.
+
+- 2026-10-24: [Plan 192](192-buddy-greets-and-talks-on-its-own.md), Buddy
+  greets and talks on its own. On the owner's 10-24 stream (0.9.150), Buddy
+  was in Auto and posted nothing by itself, only the owner's two Say lines.
+  There were five causes:
+  - Greetings had no lines, so they posted nothing.
+  - First-time chatters were never greeted automatically (only the "Say hi"
+    nudge to the streamer).
+  - Greetings never use AI (plan 164 D5).
+  - Answers and Banter were off. Answers reply only when a viewer types
+    Buddy's name; the "unanswered question" half of 164 D5 was never built.
+  - About 10% of ticks failed with 502.
+
+  The fix, in six phases:
+  - built-in lines for every kind;
+  - welcomes for first-time and returning chatters;
+  - a Premium `/api/ai/cohost/greet` route that writes each greeting in the
+    persona's voice, with the line as the fallback;
+  - Answers from the streamer notes after 60 s;
+  - a tick 502 diagnosis;
+  - smokes and a live acceptance.
+
+  **BUILT** 2026-10-24 (owner took every recommendation): web #93 and #92
+  merged; the desktop PR carries Phases 0–3 and the smoke. Owed: a live
+  acceptance stream and the next stream's tick failure rate.
+
 - 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
   owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
   Wave, Liquid Chrome, Line Waves) behind the screen and camera, free, on
@@ -15,11 +57,13 @@
   Plasma Wave. S1 is a hard cost gate on all three machines before any
   product code. S9 proves zero cost when off with an A/B against
   `origin/main`. Licence: the creator gave permission. D2–D6 answered.
-  **DRAFT PR #779** 2026-10-24: every slice built (S4 Windows and S5 Linux
-  on Opus, never run on their platforms; CI is their first compile). The
-  gates found and fixed a contract bug that retired main's present pump
-  whenever a live background showed. Owed: a quiet-host smoke run, the
-  Windows and ogre checks, S1 cost on both, owner by-eye in both themes.
+  **MERGED** 2026-10-24 as #779 `2b6114e0`; shipped in 0.9.149 (macOS) and
+  0.9.150 (all three). Every slice is built (S4 Windows and S5 Linux on
+  Opus, never run on their platforms). The gates found and fixed a contract
+  bug that retired main's present pump whenever a live background showed.
+  The macOS stream leg drew the poster: fixed by plan 193. Owed: a
+  quiet-host smoke run, the Windows and ogre checks, S1 cost on both, owner
+  by-eye in both themes.
 
 - 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
   owner asked for an inspection of leaks and waste that changes no feature,

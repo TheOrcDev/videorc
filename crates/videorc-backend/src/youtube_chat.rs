@@ -912,6 +912,7 @@ fn normalize_item(
         details: event_details(&item.snippet, message_type),
         reply: None,
         first_message: false,
+        first_in_session: false,
         author_affiliation: None,
         author_verified: None,
     })

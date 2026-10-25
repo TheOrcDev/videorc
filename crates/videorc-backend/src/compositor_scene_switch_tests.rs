@@ -51,6 +51,8 @@ fn inputs(snapshot: Option<&CompositorSceneSnapshot>) -> CompositorRenderInputs<
         buddy_leg: None,
         banners: &[],
         live_background: None,
+        shared_live_frame: None,
+        shared_live_output: None,
     }
 }
 

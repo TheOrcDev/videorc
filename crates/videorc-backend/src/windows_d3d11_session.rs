@@ -156,6 +156,27 @@ fn windows_d3d11_buddy_clock_seconds(output_sequence: u64, render_fps: u32) -> f
     output_sequence as f64 / f64::from(render_fps.max(1))
 }
 
+/// When the pump's next render tick is due: the first point after
+/// `started_at` on the wall-clock grid `due + k * interval`. Sleeping
+/// `interval - elapsed` after each tick added the sleep's overshoot to every
+/// period, so a 60fps pump ran near 58 Hz and the CFR encoder writer, which
+/// keeps wall time, found no new frame about every half second. A late tick
+/// skips the grid points it missed instead of bursting to catch up, like the
+/// Windows record compositor's `MissedTickBehavior::Skip`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_next_render_tick_due(
+    due: std::time::Instant,
+    started_at: std::time::Instant,
+    interval: std::time::Duration,
+) -> std::time::Instant {
+    let missed = started_at.saturating_duration_since(due).as_nanos() / interval.as_nanos().max(1);
+    u32::try_from(missed.saturating_add(1))
+        .ok()
+        .and_then(|steps| interval.checked_mul(steps))
+        .and_then(|step| due.checked_add(step))
+        .unwrap_or(started_at + interval)
+}
+
 /// The Buddy's pet as a D3D11 layer (plan 168 S-B4): the untransformed
 /// square (plus the draw's translation) normalized to the leg's output, the
 /// atlas cell as the crop, and the 2x2 turn about the pivot for `SceneVs`.
@@ -2180,8 +2201,15 @@ mod runtime {
         let mut last_capture_upload: Option<(u64, WindowsD3d11UploadPixels, u64)> = None;
         let mut camera_upload_revision = 0u64;
         let mut previous_tick_started: Option<Instant> = None;
+        // Due time of the coming tick; every pace below sleeps to the next one.
+        let mut next_tick_due = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             let frame_started_at = Instant::now();
+            next_tick_due = super::windows_d3d11_next_render_tick_due(
+                next_tick_due,
+                frame_started_at,
+                frame_interval,
+            );
             // Plan 190 S4: the live background's guard reads late ticks (a
             // gap of more than one and a half intervals).
             let live_missed_deadline =
@@ -2201,7 +2229,7 @@ mod runtime {
                 // A recovery bootstrap is a source of dimensions/readiness, not
                 // permission to publish an older binding through contention.
                 record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
-                pace_render_tick(frame_started_at, frame_interval);
+                pace_render_tick(next_tick_due);
                 continue;
             }
             if let Some(next) = fresh_committed {
@@ -2400,7 +2428,7 @@ mod runtime {
                 && capture_frame.is_none()
             {
                 record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
-                pace_render_tick(frame_started_at, frame_interval);
+                pace_render_tick(next_tick_due);
                 continue;
             }
             let tick_result = if new_capture_sequence.is_none()
@@ -2424,7 +2452,7 @@ mod runtime {
                 Ok(Some(tick)) => tick,
                 Ok(None) => {
                     record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
-                    pace_render_tick(frame_started_at, frame_interval);
+                    pace_render_tick(next_tick_due);
                     continue;
                 }
                 Err(error) => {
@@ -2435,7 +2463,7 @@ mod runtime {
             let camera_frame = latest_camera_frame(camera.as_ref(), &mut last_camera_frame);
             if !resuming && startup_tx.is_some() && plan.camera_required && camera_frame.is_none() {
                 record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
-                pace_render_tick(frame_started_at, frame_interval);
+                pace_render_tick(next_tick_due);
                 continue;
             }
             // Plan 168 S-B4 / S-C4: the Buddy's pet per leg on the pump's
@@ -2660,7 +2688,7 @@ mod runtime {
                             );
                     });
                     record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
-                    pace_render_tick(frame_started_at, frame_interval);
+                    pace_render_tick(next_tick_due);
                     continue;
                 }
                 Err(error) => {
@@ -2791,7 +2819,7 @@ mod runtime {
                 }));
             }
             record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
-            pace_render_tick(frame_started_at, frame_interval);
+            pace_render_tick(next_tick_due);
         }
         let _ = client.stop_capture();
         update_snapshot(&snapshot, |current| current.stopped = true);
@@ -2871,8 +2899,9 @@ mod runtime {
         })
     }
 
-    fn pace_render_tick(started_at: Instant, frame_interval: Duration) {
-        if let Some(remaining) = frame_interval.checked_sub(started_at.elapsed()) {
+    fn pace_render_tick(due: Instant) {
+        let remaining = due.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
             thread::sleep(remaining);
         }
     }
@@ -3482,6 +3511,183 @@ mod runtime {
                 .iter()
                 .all(|layer| layer.source_id == 20)
         );
+    }
+
+    /// Plan 193 S3: a record-and-stream session composing one scene puts
+    /// the primary leg's live background on every target, the AUXILIARY
+    /// (stream) one included, at its Full internal size; with a vertical
+    /// simulcast leg it stays off the auxiliary target (plan 190 D9).
+    #[cfg(test)]
+    #[test]
+    fn windows_live_plan_draws_the_live_background_on_the_stream_target() {
+        use crate::protocol::{
+            EffectiveSceneBackground, LiveBackgroundId, LiveBackgroundMotion, LiveBackgroundSpec,
+            SceneSource, SceneTransform, SourceSelection,
+        };
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11SceneOutputTarget, WindowsD3d11SceneOutputTargets,
+            WindowsD3d11SceneSourceKind,
+        };
+        let spec = LiveBackgroundSpec {
+            id: LiveBackgroundId::Silk,
+            look: "satin".to_string(),
+            motion: LiveBackgroundMotion::Calm,
+        };
+        let background = EffectiveSceneBackground {
+            asset_id: crate::live_background::poster_asset_id(spec.id, &spec.look),
+            managed_asset_path: String::new(),
+            fit: crate::protocol::BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: Some(spec.clone()),
+        };
+        let mut scene = crate::scene::default_scene();
+        scene.background = Some(background.clone());
+        let transform = SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        scene.sources.push(SceneSource {
+            id: "screen-slot".into(),
+            name: "Screen".into(),
+            kind: SceneSourceKind::Screen,
+            device_id: Some("screen:dxgi:00000000000003f1:2".into()),
+            transform: transform.clone(),
+            default_transform: transform,
+            visible: true,
+            locked: true,
+        });
+        let layout = crate::protocol::default_layout_settings();
+        let confirmed = SourceSelection {
+            screen_id: Some("screen:dxgi:00000000000003f1:2".into()),
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+        let now = std::time::Instant::now();
+        let mut runtime = None;
+        crate::live_background::runtime::sync(&mut runtime, Some(&spec), now);
+        let live_background = runtime.unwrap().frame_input(
+            &background,
+            &Arc::default(),
+            crate::live_background::LiveBackgroundTick::unmeasured(now),
+        );
+        let snapshot = |auxiliary: Option<crate::protocol::Scene>| {
+            let edit = crate::compositor::CompositorSourceEdit::test_from_scenes(
+                scene.clone(),
+                auxiliary,
+                layout.clone(),
+                confirmed.clone(),
+            );
+            WindowsLiveSnapshot {
+                render_edit: edit.clone(),
+                edit,
+                camera: None,
+                capture: None,
+                confirmed: confirmed.clone(),
+                source_revision: 1,
+                takeover: None,
+                takeover_active: false,
+                backgrounds: vec![None, None],
+                banners: Arc::new(crate::banners::BannerSet::default()),
+                live_background: Some(live_background.clone()),
+                live_background_budget_notice: false,
+            }
+        };
+        let primary = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary,
+            auxiliary: Some(primary),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let map = |current: &WindowsLiveSnapshot| {
+            build_scene_plan(
+                &plan,
+                9,
+                4,
+                None,
+                Some(&layout),
+                &[],
+                &[],
+                &[],
+                Some(current),
+                Some((1920, 1080)),
+            )
+            .unwrap()
+        };
+        let auxiliary =
+            WindowsD3d11SceneOutputTarget::Encoded(WindowsD3d11EncodedOutputRole::Auxiliary);
+        let primary_target =
+            WindowsD3d11SceneOutputTarget::Encoded(WindowsD3d11EncodedOutputRole::Primary);
+
+        // One scene, two outputs: the live layer and the screen are on ALL.
+        let one_leg = map(&snapshot(None));
+        assert_eq!(one_leg.encoded_outputs.len(), 2);
+        let live = one_leg
+            .layers
+            .iter()
+            .find(|layer| layer.source_id == 30)
+            .expect("the live background layer");
+        assert_eq!(
+            live.source_kind,
+            WindowsD3d11SceneSourceKind::BackgroundImage
+        );
+        assert_eq!(
+            (live.source_dimensions.width, live.source_dimensions.height),
+            crate::live_background::internal_size(
+                spec.id,
+                (1280, 720),
+                crate::live_background::GuardLevel::Full
+            ),
+            "the frame at its Full internal size"
+        );
+        assert_eq!(live.output_targets, WindowsD3d11SceneOutputTargets::ALL);
+        assert!(live.applies_to(auxiliary) && live.applies_to(primary_target));
+        assert!(live.applies_to(WindowsD3d11SceneOutputTarget::Preview));
+        let screen = one_leg
+            .layers
+            .iter()
+            .find(|layer| layer.source_kind == WindowsD3d11SceneSourceKind::Display)
+            .expect("the screen layer");
+        assert!(screen.applies_to(auxiliary) && screen.applies_to(primary_target));
+
+        // A vertical simulcast leg composes its own scene: the primary's live
+        // layer stays off the auxiliary target, and the vertical leg has no
+        // live layer of its own (its poster rides in `backgrounds[1]`).
+        let two_legs = map(&snapshot(Some(scene.clone())));
+        let live = two_legs
+            .layers
+            .iter()
+            .find(|layer| layer.source_id == 30)
+            .expect("the primary leg's live background layer");
+        assert!(live.applies_to(primary_target) && !live.applies_to(auxiliary));
+        assert!(two_legs.layers.iter().all(|layer| layer.source_id != 31));
     }
 
     /// Plan 164 S-C3: the Buddy rides its own per-target slot between the
@@ -4110,6 +4316,56 @@ mod tests {
         assert!(
             WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
             "captions draw at z 10"
+        );
+    }
+
+    /// Every sleep wakes a little late. Pacing each tick relative to its own
+    /// start added that overshoot to every period (the GTX 1650 run measured
+    /// 57.9 fps for a 60 fps pump, and the CFR writer recorded the shortfall
+    /// as skipped frames); the grid absorbs it.
+    #[test]
+    fn render_ticks_stay_on_the_wall_clock_grid_despite_sleep_overshoot() {
+        use std::time::{Duration, Instant};
+
+        let interval = Duration::from_secs_f64(1.0 / 60.0);
+        let overshoot = Duration::from_micros(600);
+        let origin = Instant::now();
+        let ten_seconds = origin + Duration::from_secs(10);
+        let ticks_within_ten_seconds = |next_start: &mut dyn FnMut(Instant) -> Instant| {
+            let mut started_at = origin;
+            let mut ticks = 0;
+            while started_at < ten_seconds {
+                ticks += 1;
+                started_at = next_start(started_at);
+            }
+            ticks
+        };
+
+        let relative =
+            ticks_within_ten_seconds(&mut |started_at| started_at + interval + overshoot);
+        assert_eq!(relative, 580, "the old pacing loses ~3% of a 60 fps pump");
+
+        let mut due = origin;
+        let grid = ticks_within_ten_seconds(&mut |started_at| {
+            due = windows_d3d11_next_render_tick_due(due, started_at, interval);
+            due + overshoot
+        });
+        assert_eq!(grid, 600);
+
+        // A slightly late tick keeps the grid; a stalled one skips the points
+        // it missed instead of bursting through them.
+        assert_eq!(
+            windows_d3d11_next_render_tick_due(origin, origin + overshoot, interval),
+            origin + interval
+        );
+        assert_eq!(
+            windows_d3d11_next_render_tick_due(origin, origin + interval * 5 / 2, interval),
+            origin + interval * 3
+        );
+        assert_eq!(
+            windows_d3d11_next_render_tick_due(origin + interval, origin, interval),
+            origin + interval * 2,
+            "an early start never moves the grid backwards"
         );
     }
 
