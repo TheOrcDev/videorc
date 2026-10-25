@@ -53,13 +53,15 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BUFFER_DESC, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_NEVER, D3D11_CULL_NONE,
     D3D11_FILL_SOLID, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_QUERY_DATA_TIMESTAMP_DISJOINT,
     D3D11_QUERY_DESC, D3D11_QUERY_TIMESTAMP, D3D11_QUERY_TIMESTAMP_DISJOINT, D3D11_RASTERIZER_DESC,
-    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_SAMPLER_DESC,
-    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_USAGE_IMMUTABLE, D3D11_VIEWPORT, ID3D11BlendState, ID3D11Buffer, ID3D11ClassLinkage,
-    ID3D11DepthStencilView, ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4,
-    ID3D11InputLayout, ID3D11PixelShader, ID3D11Query, ID3D11RasterizerState,
-    ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
-    ID3D11VertexShader,
+    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
+    D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
+    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
+    D3D11_SRV_DIMENSION_TEXTURE2D, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_TEX2D_SRV,
+    D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_IMMUTABLE,
+    D3D11_VIEWPORT, ID3D11BlendState, ID3D11Buffer, ID3D11ClassLinkage, ID3D11DepthStencilView,
+    ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11InputLayout, ID3D11PixelShader,
+    ID3D11Query, ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState,
+    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -110,6 +112,9 @@ const GHOST_BLOOM_FORMAT: DXGI_FORMAT = DXGI_FORMAT_R11G11B10_FLOAT;
 
 const VERTEX_ENTRY: &str = "LiveFullScreenVs";
 const PRESENT_ENTRY: &str = "LivePresentPs";
+/// Box-filters Beams' field mips; WARP's `GenerateMips` on RGBA16F does not
+/// match WebGL's `generateMipmap` (plan 194 S4 goldens).
+const BEAMS_MIP_ENTRY: &str = "BeamsMipPs";
 /// Timestamp query sets in flight at most; a composition finding none free
 /// goes unmeasured.
 const MAX_TIMERS: usize = 4;
@@ -547,6 +552,9 @@ impl LiveBackgroundD3d11Renderer {
             self.pixel_shader(pass_entry(*pass))?;
             self.vertex_shader(vertex_entry(*pass))?;
         }
+        if draw.id == LiveBackgroundId::Beams {
+            self.pixel_shader(BEAMS_MIP_ENTRY)?;
+        }
         if half {
             self.pixel_shader(PRESENT_ENTRY)?;
         }
@@ -608,8 +616,7 @@ impl LiveBackgroundD3d11Renderer {
                     &uniforms(look, field.size, view, phase, dim),
                     &[],
                 )?;
-                // SAFETY: as for Silk's field.
-                unsafe { self.context.GenerateMips(&field.srv) };
+                self.generate_field_mips(field)?;
                 self.encode(
                     LivePass::BeamsComposite,
                     look,
@@ -1301,6 +1308,70 @@ impl LiveBackgroundD3d11Renderer {
         self.draw_pass(shader, Geometry::of(pass, look), target, uniforms, textures)
     }
 
+    /// Box-filter Beams' field mip chain. WARP's `GenerateMips` on RGBA16F
+    /// does not match WebGL's `generateMipmap`; a bilinear sample at each
+    /// child pixel centre is the parent 2×2.
+    fn generate_field_mips(&self, field: &Target) -> Result<(), DrawError> {
+        let shader = self
+            .pixels
+            .get(BEAMS_MIP_ENTRY)
+            .ok_or(DrawError::ShaderCompileFailed)?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: the texture belongs to this device.
+        unsafe { field.texture.GetDesc(&mut desc) };
+        if desc.MipLevels <= 1 {
+            return Ok(());
+        }
+        let mut prev = (desc.Width, desc.Height);
+        for level in 1..desc.MipLevels {
+            let size = ((prev.0 / 2).max(1), (prev.1 / 2).max(1));
+            let rtv_desc = D3D11_RENDER_TARGET_VIEW_DESC {
+                Format: desc.Format,
+                ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_RTV { MipSlice: level },
+                },
+            };
+            let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                Format: desc.Format,
+                ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_SRV {
+                        MostDetailedMip: level - 1,
+                        MipLevels: 1,
+                    },
+                },
+            };
+            let mut rtv = None;
+            let mut srv = None;
+            // SAFETY: the texture is unbound (the field pass ended) and
+            // belongs to this device; each view covers one mip.
+            unsafe {
+                self.device
+                    .CreateRenderTargetView(&field.texture, Some(&rtv_desc), Some(&mut rtv))
+                    .map_err(|_| DrawError::Resources)?;
+                self.device
+                    .CreateShaderResourceView(&field.texture, Some(&srv_desc), Some(&mut srv))
+                    .map_err(|_| DrawError::Resources)?;
+            }
+            let rtv = rtv.ok_or(DrawError::Resources)?;
+            let srv = srv.ok_or(DrawError::Resources)?;
+            let mip = Target {
+                texture: field.texture.clone(),
+                rtv,
+                srv: field.srv.clone(),
+                size,
+                bytes: 0,
+            };
+            let mut constants: Uniforms = [[0.0; 4]; UNIFORM_VEC4_COUNT];
+            constants[0] = [size.0 as f32, size.1 as f32, 0.0, 0.0];
+            constants[1] = [prev.0 as f32, prev.1 as f32, 0.0, 0.0];
+            self.draw_pass(shader, Geometry::FULL_SCREEN, &mip, &constants, &[&srv])?;
+            prev = size;
+        }
+        Ok(())
+    }
+
     /// The present pass: `source` drawn into `target` through a uv rect.
     fn present(
         &self,
@@ -1541,6 +1612,7 @@ mod tests {
         }
         assert!(entries.contains(&("GhostFibersDotsVs", "vs_5_0")));
         assert!(entries.contains(&("GhostFibersDustVs", "vs_5_0")));
+        entries.push((BEAMS_MIP_ENTRY, "ps_5_0"));
         for (entry, target) in entries {
             let bytecode = compile(entry, target).unwrap_or_else(|error| panic!("{error}"));
             assert!(!bytecode.is_empty(), "{entry} has bytecode");

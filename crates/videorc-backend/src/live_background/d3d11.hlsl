@@ -808,6 +808,16 @@ float4 BeamsCompositePs(LiveVsOutput input) : SV_Target
     return float4((color + u[6].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);
 }
 
+// Box-filter one mip from t0 (the previous level). WARP's GenerateMips on
+// RGBA16F does not match WebGL's generateMipmap; this is the 2×2 box GLES
+// and the Metal blit use. u[0] is this mip's size; a bilinear sample at
+// the pixel centre lands on the parent 2×2.
+float4 BeamsMipPs(LiveVsOutput input) : SV_Target
+{
+    float2 uv = input.position.xy / u[0].xy;
+    return t0.SampleLevel(s0, uv, 0.0);
+}
+
 // ---------------------------------------------------------------- Color Bends (plan 194)
 
 float4 ColorBendsPs(LiveVsOutput input) : SV_Target
