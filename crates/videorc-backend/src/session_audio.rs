@@ -335,8 +335,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audio::{
-    AudioCaptureStats, AudioProcessingSettings, AudioProcessingSettingsHandle,
-    NativeAudioInputState, NativeAudioSource, process_interleaved_f32,
+    AudioCaptureStats, AudioProcessingSettings, AudioProcessingSettingsHandle, FoldPlan,
+    NativeAudioInputState, NativeAudioSource, VoiceFold, fold_interleaved_f32,
 };
 use crate::sound_mix::{SoundVoices, VoiceStart};
 
@@ -3607,6 +3607,7 @@ pub(crate) fn test_current_audio_on_epoch(
             let mixed = mix_chunk(
                 &mic.samples,
                 AudioProcessingSettings::default(),
+                FoldPlan::one_shot(&mic.samples, 2),
                 &sys.samples,
                 AudioProcessingSettings::default(),
                 None,
@@ -3923,20 +3924,22 @@ struct MixedSamples {
     limiter: PeakLimiter,
 }
 
-/// The mix (plan 069 decisions 3, 5, 7): the microphone keeps exactly today's
-/// fold, gain and mute (`process_interleaved_f32`); system audio keeps its
-/// stereo image and takes its own gain only; the soundboard (plan 189) is
-/// already at its gain and joins only while a sound plays, so the sum is
-/// unchanged without one; the sum passes the limiter.
+/// The mix (plan 069 decisions 3, 5, 7): the microphone keeps the
+/// microphone-only path's fold, gain and mute (`fold` is the chunk's
+/// [`FoldPlan`], plan 200 A1); system audio keeps its stereo image and takes
+/// its own gain only; the soundboard (plan 189) is already at its gain and
+/// joins only while a sound plays, so the sum is unchanged without one; the
+/// sum passes the limiter.
 fn mix_chunk(
     microphone_raw: &[f32],
     microphone: AudioProcessingSettings,
+    fold: FoldPlan,
     system_raw: &[f32],
     system: AudioProcessingSettings,
     sounds: Option<&[f32]>,
     mut limiter: PeakLimiter,
 ) -> MixedSamples {
-    let microphone_samples = process_interleaved_f32(microphone_raw, 2, microphone);
+    let microphone_samples = fold_interleaved_f32(microphone_raw, 2, microphone, fold, true);
     let system_gain = if system.muted {
         0.0
     } else {
@@ -5145,6 +5148,8 @@ fn run_bus_owned(
     // attached, every chunk takes the unchanged microphone-only write path.
     let mut system: Option<SourceSlot> = None;
     let mut limiter = PeakLimiter::default();
+    // Plan 200 A1: the microphone fold's level detector, across chunks.
+    let mut voice_fold = VoiceFold::default();
     // Plan 189: the soundboard's voices. Idle, they render nothing and the
     // chunk takes the same microphone-only path.
     let mut sound_voices = SoundVoices::new();
@@ -5744,6 +5749,12 @@ fn run_bus_owned(
                 silence_after_source_boundary(sounds_raw, start, source_end);
             }
         }
+        // A ramp-in starts a new or restored input: its fold decides from its
+        // own first chunk, not the previous device's channel levels.
+        if ramp_in {
+            voice_fold = VoiceFold::default();
+        }
+        let microphone_fold = voice_fold.plan(&raw.samples, 2);
         let mixing = system_raw.is_some() || sounds_raw.is_some() || !limiter.idle();
         let write_started = Instant::now();
         let mut deferred_health = Vec::new();
@@ -5813,6 +5824,7 @@ fn run_bus_owned(
                 &mut file,
                 &raw.samples,
                 settings,
+                microphone_fold,
                 system_samples,
                 system_settings,
                 sounds_raw.as_deref(),
@@ -5828,6 +5840,7 @@ fn run_bus_owned(
                 &mut file,
                 &raw.samples,
                 settings,
+                microphone_fold,
                 &write_stop,
                 draining,
                 Instant::now,
@@ -6074,10 +6087,14 @@ struct WrittenChunk {
 }
 
 /// The microphone-only write path, byte for byte the pre-mixer writer.
+/// `fold` is planned once per chunk, so a re-render under new controls folds
+/// the chunk the same way.
+#[allow(clippy::too_many_arguments)]
 fn write_chunk_with_clock(
     file: &mut impl Write,
     raw: &[f32],
     settings: &AudioProcessingSettingsHandle,
+    fold: FoldPlan,
     stop: &AtomicBool,
     draining: &AtomicBool,
     now: impl FnMut() -> Instant,
@@ -6086,7 +6103,7 @@ fn write_chunk_with_clock(
     write_rendered_chunk(
         file,
         raw.len(),
-        |_| process_interleaved_f32(raw, 2, settings.load()),
+        |_| fold_interleaved_f32(raw, 2, settings.load(), fold, true),
         stop,
         draining,
         now,
@@ -6114,6 +6131,7 @@ fn write_mixed_chunk_with_clock(
     file: &mut impl Write,
     microphone_raw: &[f32],
     microphone_settings: &AudioProcessingSettingsHandle,
+    microphone_fold: FoldPlan,
     system_raw: &[f32],
     system_settings: &AudioProcessingSettingsHandle,
     sounds_raw: Option<&[f32]>,
@@ -6135,6 +6153,7 @@ fn write_mixed_chunk_with_clock(
             let mixed = mix_chunk(
                 microphone_raw,
                 microphone_settings.load(),
+                microphone_fold,
                 system_raw,
                 system_settings.load(),
                 sounds_raw,
@@ -6649,6 +6668,7 @@ mod tests {
             &mut writer,
             &[0.25; 960],
             &settings,
+            FoldPlan::one_shot(&[0.25; 960], 2),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now,
@@ -6709,6 +6729,7 @@ mod tests {
             &mut writer,
             &[0.8; 960],
             &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
@@ -6725,6 +6746,7 @@ mod tests {
             &mut writer,
             &[0.8; 960],
             &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
@@ -6741,6 +6763,7 @@ mod tests {
             &mut writer,
             &[0.8; 960],
             &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
             &stop,
             &AtomicBool::new(false),
             || now.get(),
@@ -6788,6 +6811,7 @@ mod tests {
             &mut writer,
             &[0.25; 960],
             &settings,
+            FoldPlan::one_shot(&[0.25; 960], 2),
             &AtomicBool::new(false),
             &draining,
             || now,
@@ -6805,6 +6829,7 @@ mod tests {
             &mut next,
             &[0.75; 960],
             &settings,
+            FoldPlan::one_shot(&[0.75; 960], 2),
             &AtomicBool::new(false),
             &draining,
             || now,
@@ -9060,20 +9085,27 @@ mod mix_tests {
 
     const FIXTURE_FRAMES: usize = 480_000; // 10 s at 48 kHz.
     const FIXTURE_PACKET: usize = 512;
-    /// SHA-256 of the first 10 s the pre-S2 bus wrote for `fixture_sample`
-    /// at +3 dB (512-frame packets, 50 ms playout), captured on the pre-change
-    /// writer on macOS. The fixture uses `f32::sin`, whose last bits differ
-    /// between platform math libraries, so the pinned digest is checked on
-    /// macOS only. Every platform instead compares the real bus byte for byte
-    /// with `reference_writer_bytes`, the chunk-by-chunk writer path the
-    /// digest pins.
+    /// SHA-256 of the first 10 s the mic-only bus writes for `fixture_sample`
+    /// at +3 dB (512-frame packets, 50 ms playout), captured on macOS. The
+    /// fixture uses `f32::sin`, whose last bits differ between platform math
+    /// libraries, so the pinned digest is checked on macOS only. Every
+    /// platform instead compares the real bus byte for byte with
+    /// `reference_writer_bytes`, the chunk-by-chunk writer path the digest
+    /// pins.
+    ///
+    /// Re-pinned by plan 200 A1 (was `ed3f07a9…683fc7`, the pre-S2 writer):
+    /// the fold now decides per block with a ~150 ms level detector instead
+    /// of per sample. The fixture's 100 ms one-channel-silent stretches are
+    /// too short to move the detector 20 dB, so they are now averaged with
+    /// the silent channel (half level) instead of switching to the live
+    /// channel sample by sample, and samples under 1e-5 are no longer zeroed.
     #[cfg(target_os = "macos")]
     const MIC_ONLY_GOLDEN_SHA256: &str =
-        "ed3f07a9b312bf01561301c02406f6c9827df05af98b1b720f19e59eee683fc7";
+        "02d599b49331235580213b9bcaef730d5b95d5285cfeae102dd69a60de1683c9";
 
     /// Deterministic stereo fixture addressed by absolute sample position:
-    /// different L/R tones, with one-channel-silent stretches every second so
-    /// every `centered_voice_sample` branch and the +3 dB clamp are exercised.
+    /// different L/R tones, with one-channel-silent and both-silent stretches
+    /// every second, and the +3 dB gain pushing the average past full scale.
     fn fixture_sample(position: usize) -> (f32, f32) {
         let t = position as f32 / 48_000.0;
         let left = 0.6 * (std::f32::consts::TAU * 440.0 * t).sin();
@@ -9444,6 +9476,9 @@ mod mix_tests {
         let settings = AudioProcessingSettingsHandle::new(fixture_settings());
         let mut bytes = Vec::with_capacity(FIXTURE_FRAMES * 8);
         let stop = AtomicBool::new(false);
+        // Plan 200 A1: one fold across the stream, planned per chunk as the
+        // bus does.
+        let mut fold = VoiceFold::default();
         while timeline.cursor() < FIXTURE_FRAMES as u64 {
             // Deliver every packet that starts within the next 100 ms.
             while next_packet * FIXTURE_PACKET < timeline.cursor() as usize + 4_800 {
@@ -9459,6 +9494,7 @@ mod mix_tests {
                 &mut bytes,
                 &raw.samples,
                 &settings,
+                fold.plan(&raw.samples, 2),
                 &stop,
                 &AtomicBool::new(false),
                 || now,
@@ -11881,6 +11917,7 @@ mod mix_tests {
                 gain_db: -6.0,
                 muted: false,
             },
+            FoldPlan::one_shot(&stereo(0.2, 0.1, 480), 2),
             &stereo(0.3, -0.1, 480),
             AudioProcessingSettings {
                 gain_db: 6.0,
@@ -11893,7 +11930,7 @@ mod mix_tests {
         let system = crate::audio::db_to_gain(6.0);
         assert_eq!(
             mixed.microphone,
-            process_interleaved_f32(
+            crate::audio::process_interleaved_f32(
                 &stereo(0.2, 0.1, 480),
                 2,
                 AudioProcessingSettings {
@@ -11921,6 +11958,7 @@ mod mix_tests {
                 gain_db: 0.0,
                 muted: true,
             },
+            FoldPlan::one_shot(&stereo(0.4, 0.4, 480), 2),
             &stereo(0.3, 0.2, 480),
             AudioProcessingSettings::default(),
             None,
@@ -11931,6 +11969,7 @@ mod mix_tests {
         let silent_system = mix_chunk(
             &stereo(0.4, 0.4, 480),
             AudioProcessingSettings::default(),
+            FoldPlan::one_shot(&stereo(0.4, 0.4, 480), 2),
             &stereo(0.3, 0.2, 480),
             AudioProcessingSettings {
                 gain_db: 0.0,
