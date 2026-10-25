@@ -4,7 +4,8 @@
   "status": "OWNER_WAIVED",
   "releaseId": "0.11.0-alpha.1",
   "sourceCommit": "5dc911b17f97f464f0f1f67d95caeac1fd967043",
-  "candidateIdentity": "linux:0.11.0-alpha.1:5dc911b17f97f464f0f1f67d95caeac1fd967043a.1/5dc911b17f97f464f0f1f67d95caeac1fd967043",
+  "candidateIdentity": "linux:0.11.0-alpha.1:5dc911b17f97f464f0f1f67d95caeac1fd967043:sha256:b3e21489da50a3ce749422ce26d86139906d72088c617b078acb6d522cd54814",
+  "candidateStoragePrefix": "candidates/linux-alpha/0.11.0-alpha.1/5dc911b17f97f464f0f1f67d95caeac1fd967043",
   "artifact": {
     "filename": "Videorc-0.11.0-linux-x64.AppImage",
     "sha256": "b3e21489da50a3ce749422ce26d86139906d72088c617b078acb6d522cd54814"
