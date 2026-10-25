@@ -313,6 +313,98 @@ the PR.
 
 ## As built
 
+### S8: smokes, docs and gates (2026-10-25)
+
+- `smoke:live-background` gains seven cases:
+  - one recording each: Beams, Color Bends and Ferrofluid at 1080p30,
+    Dither at 2160p30 (it renders at full size) and Ghost Fibers at
+    1080p60;
+  - two record-and-stream splits: Ghost Fibers and Dither at 2160p30 with a
+    1080p30 stream.
+- `docs/live-backgrounds.md` and `THIRD_PARTY_NOTICES.md` cover the ten, the
+  instanced pass kind, Ferrofluid without a simulation, its 810 cap and the
+  new porting rules.
+- The probe runs the shared WebGL runner for all ten.
+  `scripts/live-backgrounds/probe-passes.js` is deleted.
+  `pnpm probe:live-background-cost -- --mode …` now works: the probe skips
+  pnpm's bare `--`.
+- The smoke learned three things about the new five:
+  - **A slow drift.** Beams drifts slowly over a dark ring at Calm: about
+    0.2 per 0.5 s, and 3.6 across the take. So a ring that fails the 0.5 s
+    and square checks may pass on its drift from the first sample to the
+    last (> 1.5).
+  - **A longer freeze window.** A slow background (ring motion under 2 per
+    0.5 s) is checked for freezes over 2 s, not 0.5 s. Color Bends changes
+    on every frame, by 0.03 to 0.16, which stays under freezedetect's floor
+    for half a second.
+  - **The right status.** A case waits for its own id in the status, not
+    only for `shader`: the previous case's background can still be
+    reporting.
+- Gates, 2026-10-25, on a host shared with a Unity batch build and a Blender
+  batch render (load 5 to 17):
+  - Rust fmt, clippy, the `live_background` tests (68), the GL check and the
+    release build all pass. Windows `xwin clippy` reports the same 124
+    errors as the base.
+  - `format:check`, `lint`, `typecheck`, `test:scripts` and the desktop tests
+    (5,366) pass. `check:renderer-assets` reads 394,719 against 395,000.
+  - `smoke:live-background-off-ab` against `b1ec0e6e`: **PASS**.
+  - `smoke:live-background`, with the budget skipped (the host's GPU was
+    shared). The plan 190/193 six pass. Beams, Color Bends, Dither 4K,
+    Ferrofluid, Ghost Fibers 1080p30, and the Dither and Ghost Fibers splits
+    pass (stream against recording square motion: 2.99 against 2.64, and
+    1.59 against 1.65). Ghost Fibers 1080p60 fell to its poster (`gpu-budget`,
+    p95 3.6 ms at load 7.8, against a quiet-host 1.1 to 1.5 ms); it is owed
+    on a quiet host.
+  - With `VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1`, Silk never reports
+    `still`. It fails the same way on `b1ec0e6e` (main), so it is not from
+    this plan; a follow-up is owed.
+
+### S7: Assets UI (2026-10-25)
+
+Commit `eb5de2ae`. The Live group shows ten tiles: the plan 190 five, then
+Beams, Color Bends, Dither, Ferrofluid and Ghost Fibers. The tile, Live tag,
+click-to-apply and Adjust style are the same as before.
+
+- `Gallery` gains `rowsOfFive`. Each track is at least a fifth of the row,
+  so a row never takes a sixth tile. Tiles may shrink to 11 rem, so five fit
+  the default 1180 px window (178 px tiles, no name cut off). Narrower panes
+  wrap like the default gallery: three a row at the 960 minimum (3/3/3/1).
+- The Images group uses the same grid, so both groups line up.
+- Measured in the dev app, both themes:
+  - 960: 3/3/3/1 (232 px tiles);
+  - 1180, 1440 and 1728: 5/5 (178, 230 and 288 px).
+
+  Nothing blank, nothing cut off. Screenshots are in the PR.
+- By eye:
+  - Ferrofluid's tile is nearly black, by design; the spikes read.
+  - Color Bends' Live tag in dark sits over a bright band. It is legible,
+    but the lowest-contrast tag of the ten (the same tag recipe as plan 190).
+
+### S6: posters, thumbnails and the catalogue (2026-10-25)
+
+Commit `d961d38e`. The probe rendered the 15 new looks at their poster
+phases; the shipped 15 are untouched.
+
+- Posters (1672 × 941) are 14.8 to 70.8 KB; the largest is Ghost Fibers
+  Ember. Thumbnails (384 × 216) are 3.0 to 19.8 KB; the largest is Dither
+  Classic.
+- Encoding: plan 190's lossy WebP (0.92 posters, 0.86 thumbnails) for 12 of
+  the 15. Dither is three or four flat colours: lossy WebP put its posters at
+  174 to 650 KB, and lossless puts them at 15 to 30 KB, pixel-exact.
+  `probe-main.cjs` `webpWithin` keeps the smaller of lossy and lossless, and
+  steps an over-limit lossy file down until it fits. Dither's thumbnails land
+  at quality 0.38 to 0.78; their halftone reads coarser than the stage's
+  2 px cells. `cost-probe.mjs` fails a file over 250,000 / 20,000 bytes.
+- The catalogue already held S2's names and looks. `lib/live-backgrounds.ts`
+  imports the 15 new thumbnails in the lazy Assets chunk, so
+  `LIVE_BACKGROUND_OFFERED` is all ten. Main's `livePosterManifest()`
+  already covered the ten; a catalogue test proves every poster file is
+  bundled.
+- `check:renderer-assets`: S6 and S7 moved the eager gzip from 394,452 to
+  394,469 bytes (chunk hash names only; raw size unchanged). After the rebase
+  onto `b1ec0e6e` (plan 196's LCD meter), it reads 394,719 against the
+  395,000 ceiling: 281 bytes of headroom.
+
 ### Ferrofluid at three quarters (owner call, 2026-10-25)
 
 S3's STOP went back to the owner, who chose three quarters over half size,

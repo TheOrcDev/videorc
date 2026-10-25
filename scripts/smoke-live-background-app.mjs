@@ -208,7 +208,14 @@ try {
     await waitFor(
       async () => {
         seen = await status()
-        if (seen.liveBackground?.rendering === expected) return true
+        // The previous case's background can still be reporting for a moment
+        // (plan 194's cases run back to back): wait for this one's id too.
+        if (
+          seen.liveBackground?.rendering === expected &&
+          seen.liveBackground?.id === testCase.id
+        ) {
+          return true
+        }
         // Until the preview first shows the app's own committed scene, main's
         // first-frame watchdog re-commits that scene over this smoke's
         // (`resync-scene`), and the compositor loses the live background.
@@ -398,11 +405,20 @@ try {
       // Line Waves' thin lines average away in the 16 × 16 thumbnail (about
       // 1 per 0.5 s); the finer square still sees them (about 3.7 per 0.2 s).
       const fine = motion > 1 ? null : squareMotion(path)
-      assert(
-        motion > 1 || fine > 1,
-        `${path}: the live background ring does not move (motion ${motion}, square ${fine})`
+      // Plan 194: Beams drifts slowly over a dark ring at Calm (about 0.2 per
+      // 0.5 s), but across the take the ring still changes (about 3 in 5 s).
+      const drift = motion > 1 || fine > 1 ? null : ringDrift(path)
+      console.log(
+        `${label}: ring square ${fine?.toFixed(2)}, drift across the take ${drift?.toFixed(2)}`
       )
-      const freezes = freezeStarts(path, RING)
+      assert(
+        motion > 1 || fine > 1 || drift > 1.5,
+        `${path}: the live background ring does not move (motion ${motion}, square ${fine}, drift ${drift})`
+      )
+      // A slow background (Beams, Color Bends: every frame changes, by 0.03
+      // to 0.2) stays under freezedetect's noise floor for half a second; a
+      // stall still shows over two.
+      const freezes = freezeStarts(path, RING, motion < 2 ? 2 : 0.5)
       assert.equal(freezes.length, 0, `${path}: the ring froze at ${freezes.join(', ')} s`)
     }
     // The stage shows the synthetic screen, never the background.
@@ -613,6 +629,12 @@ function squareMotion(path) {
   return steps.reduce((sum, value) => sum + value, 0) / steps.length
 }
 
+/** Plan 194: how far the ring moves from the take's first sample to its last (64 × 64). */
+function ringDrift(path) {
+  const frames = grayTimeline(path, RING, { size: 64, fps: 2 })
+  return meanAbsDiff(frames[0], frames.at(-1))
+}
+
 /** A grey thumbnail of a rect (16×16, every 0.5 s unless told otherwise). */
 function grayTimeline(path, rect, { size = 16, fps = 2 } = {}) {
   const result = spawnSync(
@@ -648,8 +670,8 @@ function meanAbsDiff(a, b) {
   return sum / a.length
 }
 
-/** freezedetect over the ring: any freeze longer than half a second. */
-function freezeStarts(path, rect) {
+/** freezedetect over the ring: any freeze longer than `seconds` (half a second). */
+function freezeStarts(path, rect, seconds = 0.5) {
   const result = spawnSync(
     ffmpegPath,
     [
@@ -657,7 +679,7 @@ function freezeStarts(path, rect) {
       '-i',
       path,
       '-vf',
-      `crop=iw*${rect.w}:ih*${rect.h}:iw*${rect.x}:ih*${rect.y},freezedetect=n=0.002:d=0.5`,
+      `crop=iw*${rect.w}:ih*${rect.h}:iw*${rect.x}:ih*${rect.y},freezedetect=n=0.002:d=${seconds}`,
       '-map',
       '0:v',
       '-f',
