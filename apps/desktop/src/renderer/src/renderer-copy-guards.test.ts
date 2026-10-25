@@ -91,7 +91,8 @@ const COPY_RULES: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: 'Customize', pattern: /\bCustomize\b/ },
   { id: 'Command Palette', pattern: /\bCommand Palette\b/i },
   { id: 'receive-only', pattern: /\breceive-only\b/i },
-  { id: '...', pattern: /\.\.\./ }
+  { id: '...', pattern: /\.\.\./ },
+  { id: 'session source transactions', pattern: /session source transac(?:tions)/i }
 ]
 
 /** JSX attributes a reader sees or hears; any other attribute's string is code. */

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   REPLAY_START_RETRY_LIMIT,
   replayBufferReconcileAction,
+  replayBufferShouldRestartForSources,
   replayShouldRearmAfterError,
   replayStartRetryDelayMs,
   type ReplayReconcileInput
@@ -107,6 +108,33 @@ describe('replayBufferReconcileAction (plan 181 S4)', () => {
       })
     ).toBeNull()
     expect(replayBufferReconcileAction({ ...idle, armed: false })).toBeNull()
+  })
+
+  it('restarts a buffer-only session when sources change, never a recording', () => {
+    expect(
+      replayBufferShouldRestartForSources({
+        recordingReplayOnly: true,
+        recordingState: 'recording'
+      })
+    ).toBe(true)
+    expect(
+      replayBufferShouldRestartForSources({
+        recordingReplayOnly: true,
+        recordingState: 'starting'
+      })
+    ).toBe(true)
+    expect(
+      replayBufferShouldRestartForSources({
+        recordingReplayOnly: false,
+        recordingState: 'recording'
+      })
+    ).toBe(false)
+    expect(
+      replayBufferShouldRestartForSources({
+        recordingReplayOnly: true,
+        recordingState: 'idle'
+      })
+    ).toBe(false)
   })
 
   it('backs off between failed starts', () => {

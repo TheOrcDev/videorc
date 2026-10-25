@@ -450,6 +450,25 @@ describe('live source selection authority', () => {
     expect(on.microphoneOff).toBeUndefined()
   })
 
+  it('ignores mid-session source refusals while only the buffer-only session runs', async () => {
+    const { instance, get } = controller()
+    instance.setSession('session-a', 'recording', true)
+    get.mockResolvedValue(
+      snapshot({
+        capabilities: ['capture', 'camera', 'microphone'].map((kind) => ({
+          kind: kind as 'capture' | 'camera' | 'microphone',
+          supported: false,
+          reason: 'Changing this source during a session is not available on Linux yet.'
+        }))
+      })
+    )
+    await instance.refresh()
+    expect(get).not.toHaveBeenCalled()
+    expect(instance.reason('capture')).toBeNull()
+    expect(instance.reason('camera')).toBeNull()
+    expect(instance.reason('microphone')).toBeNull()
+  })
+
   it('keeps a live camera Off through confirmation and ends it once a camera is confirmed', () => {
     // Plan 080 S4: the backend confirms devices only; Off is renderer intent.
     const off = confirmedSourceSelection(

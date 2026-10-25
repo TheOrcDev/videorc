@@ -16,6 +16,7 @@ import {
   clipMarkedToast
 } from '../../../shared/clip-marks'
 import {
+  idleEndsSessionThatRan,
   sessionActivity,
   sessionIsLive,
   sessionIsReplayOnly,
@@ -42,6 +43,7 @@ import {
   resolveSavedBackground,
   sameSceneVisual,
   sceneSourceProblems,
+  sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
   type SceneVisual,
   type SavedScene
@@ -75,7 +77,11 @@ import {
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
-import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
+import {
+  connectionBlockedReason,
+  sceneSourceOffBlockedReason,
+  START_BLOCKED_COPY
+} from '@/lib/start-blocked-copy'
 import { copyText } from '@/lib/copy-text'
 import { platformLabel } from '@/lib/platform-copy'
 import {
@@ -4442,7 +4448,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   useEffect(() => () => sourceSelectionController.dispose(), [sourceSelectionController])
   const allowCaptureNone =
-    !['recording', 'streaming'].includes(recording.state) ||
+    !sessionOwnsTransport(recording) ||
     sourceSelectionState.snapshot?.capabilities.some(
       (capability) => capability.kind === 'capture' && capability.allowsNone === true
     ) === true
@@ -4456,7 +4462,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // An idle microphone is not part of the scene, so a scene change cannot race it.
       if (
         layoutSwitchPending &&
-        (kind !== 'microphone' || isActiveRecordingState(recordingRef.current.state))
+        (kind !== 'microphone' || sessionOwnsTransport(recordingRef.current))
       )
         return 'The scene is changing.'
       if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current)
@@ -5582,7 +5588,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       sourceStatusUnknownRef.current = false
       setSourceStatusKnown(true)
-      sourceSelectionController.setSession(status.sessionId, status.state)
+      sourceSelectionController.setSession(
+        status.sessionId,
+        status.state,
+        sessionIsReplayOnly(status)
+      )
       void sourceSelectionController.refresh()
       setRecording(status)
       syncFramePollingSuppressionRef.current?.()
@@ -7322,11 +7332,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // artifact, so they must not claim that a recording was saved; nor
         // does a buffer-only session (plan 181) ending for the switch or the
         // handover into a real session.
-        if (
-          status.state === 'idle' &&
-          !previouslyReplayOnly &&
-          ['recording', 'streaming', 'stopping'].includes(previousState ?? '')
-        ) {
+        const ranToIdle = idleEndsSessionThatRan(previousState, status.state)
+        if (ranToIdle && !previouslyReplayOnly) {
           const finishedActivity = lastSessionActivityRef.current
           const finishedSessionId =
             status.sessionId ?? lastRecordingSessionIdRef.current ?? undefined
@@ -7364,12 +7371,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         // Plan 181: a session ended or began; the switch decides what the
         // ring does next (re-arm after a recording, stop after the switch).
-        // A session that ended cleanly is proof a start can work: the
-        // failed-start count begins again, and a ring that died with its own
-        // session comes back after the next recording or livestream.
+        // A session that ran and ended is proof a start can work: the
+        // failed-start count begins again. A refused start's Idle is not
+        // (plan 198), or the give-up limit never trips. A ring that died
+        // with its own session comes back after the next recording or livestream.
         if (isActiveRecordingState(status.state))
           replayLastSessionRingOnlyRef.current = status.replayOnly === true
-        if (status.state === 'idle') replayFailedStartsRef.current = 0
+        if (ranToIdle) replayFailedStartsRef.current = 0
         if (
           (status.state === 'idle' || status.state === 'failed') &&
           !replayLastSessionRingOnlyRef.current
@@ -7476,7 +7484,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               return
             const shownKey = runtime.showSessionHealthEvent(
               event,
-              qualityToastSessionsRef.current.has(qualityDedupeKey)
+              qualityToastSessionsRef.current.has(qualityDedupeKey),
+              recordingRef.current
             )
             if (shownKey) qualityToastSessionsRef.current.add(shownKey)
           })
@@ -10130,13 +10139,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         return
       }
-      if (!isActiveRecordingState(recordingRef.current.state)) {
+      if (!sessionOwnsTransport(recordingRef.current)) {
         // Pickers build `sources` from a render-time snapshot; merge only the
         // picked kind so a concurrent confirmation or reconcile is not undone.
-        setCaptureConfig((current) => ({
-          ...current,
-          sources: mergeSourceKind(current.sources, sources, sourceKind)
-        }))
+        // A buffer-only Clips session is idle here: persist, then the source
+        // effect stops the ring and reconcile re-arms it with the new pick.
+        setCaptureConfig((current) => {
+          const next = {
+            ...current,
+            sources: mergeSourceKind(current.sources, sources, sourceKind)
+          }
+          captureConfigRef.current = next
+          return next
+        })
         if (sceneEditMode && sourceKind !== 'microphone') {
           await loadScene({
             sources: mergeSourceKind(captureConfigRef.current.sources, sources, sourceKind),
@@ -12993,6 +13008,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return START_BLOCKED_COPY.noOutput
       }
       const config = captureConfigForIntent(captureConfig, intent)
+      const sourceOff = sceneSourceOffBlockedReason(
+        sceneSourcesTurnedOff(
+          { layout: config.layout, sources: visualSources(config.sources), background: null },
+          deviceList.devices
+        )
+      )
+      if (sourceOff) {
+        return sourceOff
+      }
       const recordingProfileGate = intent.record
         ? videoProfileEntitlementGate({ entitlements, kind: 'recording', video: config.video })
         : { allowed: true as const }
@@ -13050,6 +13074,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       captureConfig,
       currentStreamOutputTopologyRequestKey,
+      deviceList.devices,
       entitlements,
       health,
       transportSessionActive,
@@ -15600,19 +15625,43 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const reconcileReplayBufferRef = useRef(reconcileReplayBuffer)
   reconcileReplayBufferRef.current = reconcileReplayBuffer
   // The ring waits for Sources (a blocked start keeps the switch on): once
-  // the record block clears, or a source changes, it tries again from a
-  // clean count.
+  // the record block clears, it tries again from a clean count.
   useEffect(() => {
     replayFailedStartsRef.current = 0
     rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
-  }, [
-    recordBlockedReason,
+  }, [recordBlockedReason, scheduleReplayReconcile])
+  // A source change while only the buffer-only session runs is an idle
+  // change: stop the ring (it restarts empty) and re-arm with the new
+  // sources, including the microphone Linux cannot swap mid-session.
+  const replaySources = [
     captureConfig.sources.screenId,
     captureConfig.sources.windowId,
     captureConfig.sources.cameraId,
-    scheduleReplayReconcile
-  ])
+    captureConfig.sources.microphoneId,
+    captureConfig.sources.cameraOff === true ? 'camera-off' : '',
+    captureConfig.sources.captureOff === true ? 'capture-off' : '',
+    captureConfig.sources.microphoneOff === true ? 'microphone-off' : ''
+  ].join('|')
+  const replaySourcesRef = useRef(replaySources)
+  useEffect(() => {
+    if (replaySourcesRef.current === replaySources) return
+    replaySourcesRef.current = replaySources
+    replayFailedStartsRef.current = 0
+    rearmReplayAfterErrorRef.current()
+    void import('@/lib/replay-buffer-reconcile').then(({ replayBufferShouldRestartForSources }) => {
+      if (
+        replayBufferShouldRestartForSources({
+          recordingReplayOnly: sessionIsReplayOnly(recordingRef.current),
+          recordingState: recordingRef.current.state
+        })
+      ) {
+        void stopReplayBuffer().then(() => scheduleReplayReconcile())
+        return
+      }
+      scheduleReplayReconcile()
+    })
+  }, [replaySources, scheduleReplayReconcile, stopReplayBuffer])
   // Settings that shape the session restart a buffer-only ring: the Output
   // quality, the canvas orientation and the ring's length. A recording or
   // livestream keeps its shape (those pages lock meanwhile); the re-armed

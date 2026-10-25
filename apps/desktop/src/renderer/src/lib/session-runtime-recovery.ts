@@ -15,7 +15,7 @@ import {
   type SessionRuntimeActivity,
   type SessionRuntimeNotice
 } from '@/lib/session-runtime-notice'
-import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
+import { sessionActivity, sessionIsLive, sessionIsReplayOnly } from '../../../shared/capture-state'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
@@ -30,6 +30,10 @@ import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { discordFailureToast } from '@/lib/discord-announce'
 import { openHealthToastAction } from '@/lib/health-door'
+import {
+  separateFileFailedToast,
+  separateFileRoleFromMessage
+} from '@/lib/separate-source-recordings-view'
 import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
 import {
   youtubeBroadcastToast,
@@ -231,7 +235,13 @@ export function microphoneLossPresentation({
   const audioIssues = [...previousIssues, { code: event.code, message: event.message }]
 
   // Go Live reports `recording` with a stream URL: still a live session.
-  const activity: SessionRuntimeActivity = active ? sessionActivity(recording) : lastActivity
+  // A buffer-only Clips session is not a recording: its loss copy must not
+  // say "recording continues with silence".
+  const activity: SessionRuntimeActivity = sessionIsReplayOnly(recording)
+    ? 'clips'
+    : active
+      ? sessionActivity(recording)
+      : lastActivity
   return {
     dedupeKey,
     activity,
@@ -307,6 +317,26 @@ export function showBackendError(
         : {})
     })
   }
+}
+
+/**
+ * Plan 198 (D1): a take's Screen or Camera file stopped. One warning per file
+ * per take, the reason in plain words, and the door to Health for the rest.
+ */
+export function showSeparateFileFailed(
+  event: HealthEvent,
+  recording: Pick<RecordingStatus, 'sessionId' | 'state'>
+): void {
+  const takeRunning =
+    recording.sessionId === event.sessionId &&
+    (recording.state === 'recording' || recording.state === 'streaming')
+  const copy = separateFileFailedToast(event.message, takeRunning)
+  const role = separateFileRoleFromMessage(event.message) ?? 'file'
+  notifyOnce(`separate-file:${event.sessionId ?? 'take'}:${role}`, 'warning', copy.title, {
+    description: copy.description,
+    action: openHealthToastAction(),
+    duration: TOAST_WITH_DESCRIPTION_MS
+  })
 }
 
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
@@ -423,8 +453,13 @@ export function showSessionFinished({
 
 export function showSessionHealthEvent(
   event: HealthEvent,
-  qualityToastAlreadyShown: boolean
+  qualityToastAlreadyShown: boolean,
+  recording?: Pick<RecordingStatus, 'sessionId' | 'state'>
 ): string | null {
+  if (event.code === 'separate-source-recordings-role-failed') {
+    showSeparateFileFailed(event, recording ?? { state: 'idle' })
+    return null
+  }
   const startupToast = recordingStartupHealthToast(event)
   if (startupToast) {
     const show = startupToast.variant === 'warning' ? toast.warning : toast.error
