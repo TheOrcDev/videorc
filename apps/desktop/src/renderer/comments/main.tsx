@@ -53,12 +53,8 @@ import {
   MarkerRemovedError
 } from '@/lib/marker-command'
 import type { CreateMarkerParams, MarkerContext } from '../../shared/session-markers'
-import {
-  clipMarkSavedClip,
-  clipMarkedToast,
-  clipSavingToast,
-  type ClipMarkedToast
-} from '../../shared/clip-marks'
+import { clipMarkSavedClip, clipMarkedToast, type ClipMarkedToast } from '../../shared/clip-marks'
+import { clipSavingToast, type ClipLength } from '../../shared/clip-lengths'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
@@ -124,13 +120,17 @@ function CommentsWindowApp(): ReactElement {
   // The one Clip action (plan 181 R4): the status bar's button and /clip
   // both relay through the main window, which owns the backend socket. The
   // reply's words are the toast (button) or the composer's notice (/clip).
-  const saveClip = (): Promise<ClipMarkedToast> => {
-    const seconds = markerContext?.clip?.seconds
+  // Plan 199: `seconds` is the length asked for (none is the 30-second
+  // clip), and the toast names that length, never the ring's.
+  const saveClip = (seconds?: ClipLength): Promise<ClipMarkedToast> => {
+    const asked = seconds ?? markerContext?.clip?.seconds
     return (
-      window.videorc?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() }) ??
-      Promise.reject(new Error("The Stream Manager can't reach Videorc right now."))
+      window.videorc?.markClipFromCommentsWindow?.({
+        requestId: crypto.randomUUID(),
+        ...(seconds ? { seconds } : {})
+      }) ?? Promise.reject(new Error("The Stream Manager can't reach Videorc right now."))
     ).then((event) =>
-      clipMarkSavedClip(event) ? clipSavingToast(event, seconds) : clipMarkedToast(event)
+      clipMarkSavedClip(event) ? clipSavingToast(event, asked) : clipMarkedToast(event)
     )
   }
   const markerRetry = useRef<CreateMarkerParams | null>(null)
@@ -834,8 +834,8 @@ function CommentsWindowApp(): ReactElement {
               : undefined
           }
           onHighlight={live ? requestHighlight : undefined}
-          onMarkClip={() => {
-            void saveClip()
+          onMarkClip={(seconds) => {
+            void saveClip(seconds)
               .then((copy) => {
                 ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
                   id: 'clip-marked',
@@ -846,7 +846,7 @@ function CommentsWindowApp(): ReactElement {
                 toastUserError(error, { action: 'save', object: 'the clip' }, { id: 'clip-marked' })
               )
           }}
-          onClip={() => saveClip().then((copy) => copy.title)}
+          onClip={(seconds) => saveClip(seconds).then((copy) => copy.title)}
           banners={banners}
           onBanner={runBanner}
           sounds={sounds}

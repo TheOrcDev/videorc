@@ -5991,8 +5991,8 @@ impl Database {
     pub fn insert_clip_mark(&self, mark: &crate::protocol::ClipMark) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO clip_marks (id, session_id, at_seconds, source, phrase, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO clip_marks (id, session_id, at_seconds, source, phrase, created_at, lookback_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 mark.id,
                 mark.session_id,
@@ -6000,6 +6000,7 @@ impl Database {
                 clip_mark_source_label(mark.source),
                 mark.phrase,
                 mark.created_at,
+                mark.lookback_seconds,
             ],
         )?;
         Ok(())
@@ -6009,7 +6010,7 @@ impl Database {
     pub fn list_clip_marks(&self, session_id: &str) -> Result<Vec<crate::protocol::ClipMark>> {
         let conn = self.lock()?;
         let mut statement = conn.prepare(
-            "SELECT id, session_id, at_seconds, source, phrase, created_at
+            "SELECT id, session_id, at_seconds, source, phrase, created_at, lookback_seconds
              FROM clip_marks WHERE session_id = ?1 AND mark_kind = 'clip'
              ORDER BY at_seconds ASC, created_at ASC, id ASC",
         )?;
@@ -6026,6 +6027,7 @@ impl Database {
                 },
                 phrase: row.get(4)?,
                 created_at: row.get(5)?,
+                lookback_seconds: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -7978,6 +7980,9 @@ impl Database {
             ("create_payload_hash", "create_payload_hash TEXT"),
             ("revision", "revision INTEGER NOT NULL DEFAULT 0"),
             ("deleted_at", "deleted_at TEXT"),
+            // Plan 199 D8: a clip mark's press length (30 or 60). NULL is
+            // every mark made before it, which reads as 30 s.
+            ("lookback_seconds", "lookback_seconds INTEGER"),
         ] {
             ensure_column(&conn, "clip_marks", column, definition)?;
         }
@@ -11021,6 +11026,7 @@ mod tests {
             source,
             phrase: (source == ClipMarkSource::Voice).then(|| "clip that".to_string()),
             created_at: "2026-09-27T10:00:00Z".to_string(),
+            lookback_seconds: None,
         };
         database
             .insert_clip_mark(&mark("m-2", "s-1", 754.2, ClipMarkSource::Manual))
@@ -11031,6 +11037,13 @@ mod tests {
         database
             .insert_clip_mark(&mark("m-3", "s-2", 5.0, ClipMarkSource::Voice))
             .unwrap();
+        // Plan 199 D8: a 1-min press keeps its length.
+        database
+            .insert_clip_mark(&ClipMark {
+                lookback_seconds: Some(60),
+                ..mark("m-5", "s-1", 900.0, ClipMarkSource::Manual)
+            })
+            .unwrap();
 
         let marks = database.list_clip_marks("s-1").unwrap();
         assert_eq!(
@@ -11038,12 +11051,16 @@ mod tests {
                 .iter()
                 .map(|mark| mark.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["m-1", "m-2"]
+            vec!["m-1", "m-2", "m-5"]
         );
         assert_eq!(marks[0].source, ClipMarkSource::Voice);
         assert_eq!(marks[0].phrase.as_deref(), Some("clip that"));
         assert_eq!(marks[1].source, ClipMarkSource::Manual);
         assert_eq!(marks[1].phrase, None);
+        // A NULL length (every mark made before plan 199) reads as None.
+        assert_eq!(marks[0].lookback_seconds, None);
+        assert_eq!(marks[1].lookback_seconds, None);
+        assert_eq!(marks[2].lookback_seconds, Some(60));
         assert!(database.list_clip_marks("missing").unwrap().is_empty());
 
         // A mark needs its session row; deleting the session takes its marks.

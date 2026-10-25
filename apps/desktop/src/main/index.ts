@@ -20,6 +20,7 @@ import {
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { commandModifierHeld, normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
+import { parseClipLength } from '../shared/clip-lengths'
 import { WINDOW_NAMES } from '../shared/window-names'
 import type {
   Banner,
@@ -15824,7 +15825,16 @@ app.whenReady().then(async () => {
         return Promise.reject(new Error('Only the Chat window can mark clips from here.'))
       }
       const requestId = commentsCommandRequestId(value)
-      const command: ClipMarkCommand = { requestId }
+      // Plan 199: the clip's length rides along (30 or 60; absent is 30 s).
+      // Anything else is refused here with the backend's own sentence.
+      let seconds: ClipMarkCommand['seconds']
+      try {
+        seconds = parseClipLength((value as { seconds?: unknown }).seconds)
+      } catch (error) {
+        return Promise.reject(error)
+      }
+      const command: ClipMarkCommand =
+        seconds === undefined ? { requestId } : { requestId, seconds }
       return commentsCommandBroker.request(requestId, () => {
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
         sendElectronEvent(mainWindow.webContents, 'comments-window:clip-mark-request', command)

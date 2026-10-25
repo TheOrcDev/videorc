@@ -122,8 +122,13 @@ pub enum RemoteIntent {
     /// Save a clip (plan 068 D6; plan 181, the owner's redesign R4): the
     /// last N seconds whenever the ring holds frames, and a mark in the
     /// recording while one runs. Idempotent by time: the backend stamps the
-    /// capture clock, never a toggle.
-    ClipMark,
+    /// capture clock, never a toggle. Plan 199: `seconds` is 30 or 60; none
+    /// is today's 30-second clip, so `{"kind":"clipMark"}` still parses.
+    #[serde(rename_all = "camelCase")]
+    ClipMark {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seconds: Option<u32>,
+    },
 }
 
 /// Live-chat message ids are `{platform}:{providerMessageId}`; anything far
@@ -158,7 +163,7 @@ impl RemoteIntent {
             Self::SoundPlay { .. } | Self::SoundStop { .. } => "sound",
             Self::WindowFront { .. } => "window",
             Self::CommentHighlight { .. } | Self::CommentHighlightClear => "highlight",
-            Self::ClipMark => "clip",
+            Self::ClipMark { .. } => "clip",
         }
     }
 
@@ -224,6 +229,11 @@ impl RemoteIntent {
                     || message_id.len() > REMOTE_MESSAGE_ID_MAX_BYTES =>
             {
                 Err("commentHighlight needs a valid messageId.".to_string())
+            }
+            Self::ClipMark {
+                seconds: Some(seconds),
+            } if !crate::replay_buffer::CLIP_LENGTHS.contains(seconds) => {
+                Err(crate::replay_buffer::INVALID_CLIP_LENGTH_MESSAGE.to_string())
             }
             _ => Ok(()),
         }
@@ -405,13 +415,41 @@ mod tests {
             serde_json::from_str::<RemoteIntent>(r#"{"kind":"commentHighlightClear"}"#).unwrap(),
             RemoteIntent::CommentHighlightClear
         );
+        // Plan 199: no length is today's 30-second clip, and it never rides
+        // the wire as null.
         let intent = serde_json::from_str::<RemoteIntent>(r#"{"kind":"clipMark"}"#).unwrap();
-        assert_eq!(intent, RemoteIntent::ClipMark);
+        assert_eq!(intent, RemoteIntent::ClipMark { seconds: None });
         assert!(intent.validate().is_ok());
         assert_eq!(intent.debounce_kind(), "clip");
         assert_eq!(
             serde_json::to_value(&intent).unwrap(),
             serde_json::json!({ "kind": "clipMark" })
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteIntent>(r#"{"kind":"clipMark","seconds":null}"#).unwrap(),
+            RemoteIntent::ClipMark { seconds: None }
+        );
+        let long =
+            serde_json::from_str::<RemoteIntent>(r#"{"kind":"clipMark","seconds":60}"#).unwrap();
+        assert_eq!(long, RemoteIntent::ClipMark { seconds: Some(60) });
+        assert!(long.validate().is_ok());
+        assert_eq!(
+            long.debounce_kind(),
+            "clip",
+            "both lengths share one bucket"
+        );
+        assert_eq!(
+            serde_json::to_value(&long).unwrap(),
+            serde_json::json!({ "kind": "clipMark", "seconds": 60 })
+        );
+        assert!(
+            RemoteIntent::ClipMark { seconds: Some(30) }
+                .validate()
+                .is_ok()
+        );
+        assert_eq!(
+            RemoteIntent::ClipMark { seconds: Some(45) }.validate(),
+            Err("A clip is 30 seconds or 1 minute.".to_string())
         );
         // Plan 181 (owner redesign R4): one action saves the clip, so the
         // separate replaySave intent is gone from the wire.

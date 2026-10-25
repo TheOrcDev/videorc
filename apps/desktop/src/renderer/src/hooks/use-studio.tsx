@@ -11,6 +11,8 @@ import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { acceleratorLabel } from '../../../shared/accelerator-format'
 import {
+  DEFAULT_CLIP_SECONDS,
+  LONG_CLIP_SECONDS,
   clipMarkKeptSomething,
   clipMarkSavedClip,
   clipMarkedToast
@@ -344,6 +346,7 @@ import type {
   CompositorFrameReady,
   CompositorStatus,
   DiagnosticStats,
+  ClipLength,
   ClipMarkCommand,
   ClipMarkedEvent,
   ReplaySaveFailedEvent,
@@ -1566,8 +1569,9 @@ export type StudioContextValue = {
   cancelNoiseCleanup: (jobId: string) => Promise<NoiseCleanupJob>
   sessionStorageTotals: SessionStorageTotals | null
   /** Mark the current moment for a clip (plan 068 D6). The `clip.marked`
-   * event, not the reply, carries the toast so every source reads the same. */
-  markClip: () => Promise<ClipMarkedEvent | null>
+   * event, not the reply, carries the toast so every source reads the same.
+   * Plan 199: `seconds` is 30 or 60; none is today's 30-second clip. */
+  markClip: (seconds?: ClipLength) => Promise<ClipMarkedEvent | null>
   assessRecording: (path: string) => Promise<FileAssessment>
   repairRecording: (path: string) => Promise<GateStatus>
   restoreRecording: (path: string) => Promise<boolean>
@@ -3162,7 +3166,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!isActiveRecordingState(recordingRef.current.state)) {
           throw new Error("No session is running, so there's nothing to mark.")
         }
-        return client.request<ClipMarkedEvent>('clip.mark')
+        // Plan 199: main checked the length (30, 60 or none).
+        const { seconds } = command
+        return client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
       })()
         .then(async (event) => {
           await window.videorc?.pushClipMarkResult?.({
@@ -4047,11 +4053,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     ).__videorcSmokeSetReplayBuffer = (armed, seconds) => {
       // The Output switch's own path (explicit, so the software encoder
-      // guard never applies to a smoke), with the length when given.
+      // guard never applies to a smoke), with a shorter ring when given
+      // (plan 199: the product's ring is always the minute).
       const patch = {
         enabled: armed,
         explicit: true,
-        ...(typeof seconds === 'number' ? { seconds } : {})
+        ...(typeof seconds === 'number' ? { smokeRingSeconds: seconds } : {})
       }
       setCaptureConfig((current) => ({
         ...current,
@@ -4126,6 +4133,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // a mark while a session runs; the window shows the button on either.
     const clipAvailable = replayState.state === 'on' || isActiveRecordingState(recording.state)
     const clipShortcut = settings.globalShortcuts?.clipMark
+    const longClipShortcut = settings.globalShortcuts?.clipMarkLong
     const clipOff = clipAvailable
       ? undefined
       : replayBlockedReason
@@ -4146,9 +4154,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           : undefined,
       clip: {
         available: clipAvailable,
-        seconds: replayState.seconds,
+        // Plan 199: the two clip lengths, never the ring's (the minute).
+        seconds: DEFAULT_CLIP_SECONDS,
+        longSeconds: LONG_CLIP_SECONDS,
         ...(clipShortcut
           ? { shortcutLabel: acceleratorLabel(clipShortcut, runtimeInfo?.platform) }
+          : {}),
+        ...(longClipShortcut
+          ? { longShortcutLabel: acceleratorLabel(longClipShortcut, runtimeInfo?.platform) }
           : {}),
         ...(clipOff ? { off: clipOff } : {})
       }
@@ -4163,10 +4176,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     recording.state,
     recording.replayOnly,
     replayBlockedReason,
-    replayState.seconds,
     replayState.state,
     runtimeInfo?.platform,
     settings.globalShortcuts?.clipMark,
+    settings.globalShortcuts?.clipMarkLong,
     markerVoice,
     lastVoiceMarker
   ])
@@ -15482,29 +15495,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // that" all land here. The backend saves the last seconds whenever the
   // ring holds frames and keeps a mark while a recording runs; with neither,
   // the toast says which switch to turn on.
-  const markClip = useCallback(async (): Promise<ClipMarkedEvent | null> => {
-    if (!client) {
-      toastOffline({ action: 'save', object: 'the clip' })
-      return null
-    }
-    const ring = replayStateRef.current
-    if (ring.state !== 'on' && !isActiveRecordingState(recordingRef.current.state)) {
-      void import('@/lib/replay-buffer').then((replay) =>
-        replay.showNothingToClip({
-          state: ring.state,
-          enabled: captureConfigRef.current.replayBuffer.enabled,
-          blockedReason: replayBlockedReasonRef.current
-        })
-      )
-      return null
-    }
-    try {
-      return await client.request<ClipMarkedEvent>('clip.mark')
-    } catch (error) {
-      reportError(error, { action: 'save', object: 'the clip' })
-      return null
-    }
-  }, [client, reportError])
+  // Plan 199: `seconds` is 30 or 60; with none the request carries no
+  // params, exactly as before, and saves 30 s.
+  const markClip = useCallback(
+    async (seconds?: ClipLength): Promise<ClipMarkedEvent | null> => {
+      if (!client) {
+        toastOffline({ action: 'save', object: 'the clip' })
+        return null
+      }
+      const ring = replayStateRef.current
+      if (ring.state !== 'on' && !isActiveRecordingState(recordingRef.current.state)) {
+        void import('@/lib/replay-buffer').then((replay) =>
+          replay.showNothingToClip({
+            state: ring.state,
+            enabled: captureConfigRef.current.replayBuffer.enabled,
+            blockedReason: replayBlockedReasonRef.current
+          })
+        )
+        return null
+      }
+      try {
+        return await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
+      } catch (error) {
+        reportError(error, { action: 'save', object: 'the clip' })
+        return null
+      }
+    },
+    [client, reportError]
+  )
 
   // ── Replay buffer (plan 181) ────────────────────────────────────────
   // The backend owns the ring and hands over on Record/Go Live; the renderer
@@ -15663,16 +15681,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [replaySources, scheduleReplayReconcile, stopReplayBuffer])
   // Settings that shape the session restart a buffer-only ring: the Output
-  // quality, the canvas orientation and the ring's length. A recording or
-  // livestream keeps its shape (those pages lock meanwhile); the re-armed
-  // ring picks the new one up.
+  // quality, the canvas orientation and a smoke's shorter ring (plan 199:
+  // otherwise the ring is always the minute). A recording or livestream
+  // keeps its shape (those pages lock meanwhile); the re-armed ring picks
+  // the new one up.
   const replayShape = [
     captureConfig.video.width,
     captureConfig.video.height,
     captureConfig.video.fps,
     captureConfig.video.bitrateKbps,
     layoutPresetOrientation(captureConfig.layout.layoutPreset),
-    captureConfig.replayBuffer.seconds
+    captureConfig.replayBuffer.smokeRingSeconds
   ].join('|')
   const replayShapeRef = useRef(replayShape)
   useEffect(() => {
@@ -16490,9 +16509,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       },
       banners: bannerListRef.current ?? NO_BANNERS,
-      markClip: async () => {
+      markClip: async (seconds) => {
         try {
-          const event = await client.request<ClipMarkedEvent>('clip.mark')
+          const event = await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
           // Plan 181 R4: a saved clip is a success for a deck key, mark or not.
           return clipMarkKeptSomething(event)
             ? { ok: true }
@@ -16724,8 +16743,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }))
       },
-      markClip: () => {
-        void markClip()
+      markClip: (seconds) => {
+        void markClip(seconds)
       },
       systemAudio: [systemAudioStatus, systemAudioShown],
       setSystemAudioEnabled

@@ -27,12 +27,13 @@ import {
   type SoundRelayAction,
   type SoundboardSummary
 } from '../../../../shared/sound-commands'
-import type { ClipContext, MarkerContext, SessionMarker } from '@/lib/backend'
-import { clipLengthWords } from '../../../../shared/clip-marks'
+import type { ClipContext, ClipLength, MarkerContext, SessionMarker } from '@/lib/backend'
+import { clipLastWords } from '../../../../shared/clip-lengths'
 
-/** "30 seconds" for the composer's clip words. */
-function clipSeconds(clip: ClipContext | undefined): string {
-  return clipLengthWords(clip?.seconds)
+/** What follows "the last" in the composer's clip words: "30 seconds" for
+ * `/clip`, "minute" for `/clip 60` (plan 199). */
+function clipSeconds(clip: ClipContext | undefined, long = false): string {
+  return clipLastWords(long ? (clip?.longSeconds ?? 60) : clip?.seconds)
 }
 
 /** Why `/clip` keeps nothing right now, in the window's own words. */
@@ -201,8 +202,9 @@ export function ChatPane({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
-  /** `/clip` (plan 181 R4): the Clip button's action, answered with its words. */
-  onClip?: () => Promise<string>
+  /** `/clip` (plan 181 R4): the Clip button's action, answered with its words.
+   * Plan 199: `/clip` asks for 30 s, `/clip 60` for the minute. */
+  onClip?: (seconds: ClipLength) => Promise<string>
   /** Plan 186 S7: the banners `/banner` reads, and its show or hide. */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => Promise<boolean>
@@ -686,6 +688,8 @@ export function ChatPane({
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
   { value: '/marker', hint: ' [title] · Save a timeline point' },
   { value: '/clip', hint: ' · Save the last seconds as a clip' },
+  // Plan 199 D6: the 1-minute clip.
+  { value: '/clip 60', hint: ' · Save the last minute as a clip' },
   { value: '/banner', hint: ' [name] · Show or hide a banner' },
   { value: '/sound', hint: ' [name] · Play a sound' },
   { value: '/help', hint: ' · Command help' }
@@ -721,7 +725,7 @@ export function Composer({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
-  onClip?: () => Promise<string>
+  onClip?: (seconds: ClipLength) => Promise<string>
   /**
    * Plan 186 S7: `/banner <name>` shows or hides one of these, `/banner off`
    * hides them all. Resolves false when it didn't happen; the window has
@@ -862,7 +866,7 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -876,8 +880,9 @@ export function Composer({
       const submitted = draft
       localPendingRef.current = true
       setLocalPending(true)
-      setNotice(`Saving the last ${clipSeconds(clipContext)} as a clip…`)
-      void onClip()
+      // Plan 199: the notice names the length asked for.
+      setNotice(`Saving the last ${clipSeconds(clipContext, command.seconds === 60)} as a clip…`)
+      void onClip(command.seconds)
         .then((outcome) => {
           setNotice(outcome)
           if (draftRef.current === submitted) setDraft('')

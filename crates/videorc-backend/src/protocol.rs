@@ -1303,6 +1303,29 @@ pub struct ReplaySaveAccepted {
     /// press while one is queued is absorbed into the same queued save.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queued: bool,
+    /// The length this save will take (plan 199): the press's 30 or 60 s,
+    /// clamped to the ring, or the longer of the two when the press joined a
+    /// queued save.
+    pub seconds: u32,
+}
+
+/// `replay.save` params (plan 199). Absent or `null` params mean `{}`, and
+/// no `seconds` is today's 30-second clip.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveParams {
+    /// 30 or 60; anything else is refused with `invalid-clip-length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
+}
+
+/// `clip.mark` params (plan 199): the same shape as [`ReplaySaveParams`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMarkParams {
+    /// 30 or 60; anything else is refused with `invalid-clip-length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
 }
 
 /// `replay.saved`: the MP4 is on disk, probed and in Library.
@@ -1314,7 +1337,8 @@ pub struct ReplaySavedEvent {
     /// The Library row.
     pub replay_session_id: String,
     pub path: String,
-    /// The requested length.
+    /// The requested length: the press's 30 or 60 s (plan 199), clamped to
+    /// the ring.
     pub seconds: u32,
     /// What the file actually holds: shorter than `seconds` while the buffer
     /// was still filling.
@@ -5975,6 +5999,11 @@ pub struct ClipMark {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrase: Option<String>,
     pub created_at: String,
+    /// How far back the moment reaches (plan 199 D8): the press's clip
+    /// length, 30 or 60. `None` for every mark made before plan 199, which
+    /// reads as 30 s. Omitted, never null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_seconds: Option<u32>,
 }
 
 /// `clip.marked` event and the `clip.mark` reply: where the mark landed and
@@ -7419,6 +7448,40 @@ mod tests {
             let accepted: ReplaySaveAccepted = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(serde_json::to_value(accepted).unwrap(), wire, "{pointer}");
         }
+        // Plan 199: the accepted save names its length, always.
+        let accepted: ReplaySaveAccepted = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/replay/saveAcceptedMinimal"),
+        )
+        .unwrap();
+        assert_eq!(accepted.seconds, 30);
+        assert!(
+            serde_json::from_value::<ReplaySaveAccepted>(serde_json::json!({
+                "saveId": "save-fixture",
+                "sessionId": "replay-session-fixture"
+            }))
+            .is_err(),
+            "seconds is required on the accepted save"
+        );
+        // Plan 199: `replay.save` and `clip.mark` take an optional length;
+        // no length never rides the wire as null.
+        for (pointer, seconds) in [
+            ("/replay/saveParams", None),
+            ("/replay/saveParamsLong", Some(60)),
+        ] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let params: ReplaySaveParams = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(params.seconds, seconds, "{pointer}");
+            assert_eq!(serde_json::to_value(params).unwrap(), wire, "{pointer}");
+        }
+        for (pointer, seconds) in [
+            ("/clip/markParams", None),
+            ("/clip/markParamsLong", Some(60)),
+        ] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let params: ClipMarkParams = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(params.seconds, seconds, "{pointer}");
+            assert_eq!(serde_json::to_value(params).unwrap(), wire, "{pointer}");
+        }
         let saved_wire = shared_high_risk_contract_fixture_value("/replay/savedEvent");
         let saved: ReplaySavedEvent = serde_json::from_value(saved_wire.clone()).unwrap();
         assert_eq!(saved.source, Some(ClipMarkSource::Manual));
@@ -7594,6 +7657,11 @@ mod tests {
         assert_eq!(marks[0].source, ClipMarkSource::Voice);
         assert_eq!(marks[0].phrase.as_deref(), Some("clip that"));
         assert_eq!(marks[1].phrase, None);
+        // Plan 199 D8: a mark made before the plan has no length on the
+        // wire; a 1-min press carries its 60.
+        assert_eq!(marks[0].lookback_seconds, None);
+        assert_eq!(marks[1].lookback_seconds, None);
+        assert_eq!(marks[2].lookback_seconds, Some(60));
         assert_eq!(serde_json::to_value(marks).unwrap(), marks_wire);
     }
 

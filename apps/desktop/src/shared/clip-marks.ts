@@ -1,5 +1,19 @@
-import type { ClipMarkedEvent } from './backend'
+import type { ClipLength, ClipMarkedEvent } from './backend'
 import { formatTimecode } from './timecode'
+
+export type { ClipLength } from './backend'
+
+// Plan 199: only the two lengths live here, because this module sits in the
+// eager renderer chunk (Studio imports it for the clip.marked toast). The
+// Stream-Manager-only words (`clipLengthWords`, `clipSavingToast`) and the
+// length checks (`isClipLength`, `parseClipLength`, the refusal) are in
+// `shared/clip-lengths.ts`, which no eager module imports.
+
+/** Plan 199: a press that names no length saves today's 30 s. Mirrors
+ * `replay_buffer::DEFAULT_CLIP_SECONDS`. */
+export const DEFAULT_CLIP_SECONDS = 30 satisfies ClipLength
+/** Plan 199: the 1-minute clip. Mirrors `replay_buffer::LONG_CLIP_SECONDS`. */
+export const LONG_CLIP_SECONDS = 60 satisfies ClipLength
 
 /** Recording-file time as the one timecode: m:ss, or h:mm:ss from one hour (plan 068 D6, plan 174 S1.4). */
 export function formatClipMarkClock(atSeconds: number): string {
@@ -24,36 +38,9 @@ export function clipMarkSavedClip(event: Pick<ClipMarkedEvent, 'reason'>): boole
   return event.reason === CLIP_MARK_CLIP_SAVED_REASON
 }
 
-/** The ring's length in words: "30 seconds", "1 minute", "2 minutes". */
-export function clipLengthWords(seconds: number | undefined): string {
-  if (!seconds) return 'seconds'
-  if (seconds < 60) return `${seconds} seconds`
-  const minutes = seconds / 60
-  return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} minute${minutes === 1 ? '' : 's'}`
-}
-
 /** The press kept something: a clip, a mark, or both. */
 export function clipMarkKeptSomething(event: Pick<ClipMarkedEvent, 'saved' | 'reason'>): boolean {
   return event.saved || clipMarkSavedClip(event)
-}
-
-/**
- * The Stream Manager's toast for a press the ring took (its own window never
- * hears replay.saved, which is the main window's "Clip saved"). `seconds` is
- * the ring's length, for the words; `saved` says a recording kept the mark.
- */
-export function clipSavingToast(
-  event: Pick<ClipMarkedEvent, 'saved'>,
-  seconds: number | undefined
-): ClipMarkedToast {
-  const last = seconds ? `the last ${formatClipMarkClock(seconds)}` : 'the last seconds'
-  return {
-    kind: 'success',
-    title: `Saving ${last} as a clip`,
-    description: event.saved
-      ? `It's in Library, and this moment is marked in your recording.`
-      : "It's in Library in a moment."
-  }
 }
 
 /**

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Scene } from './backend'
-import { defaultCaptureConfig, videoPresets, type CaptureConfig } from './capture'
+import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
+import {
+  REPLAY_RING_SECONDS,
+  defaultCaptureConfig,
+  normalizeReplayBufferSettings,
+  videoPresets,
+  type CaptureConfig
+} from './capture'
 import { buildStartSessionParams } from './session-params'
 
 const scene: Scene = {
@@ -23,7 +30,7 @@ describe('buildStartSessionParams', () => {
     const base = {
       captureConfig: {
         ...defaultCaptureConfig,
-        replayBuffer: { seconds: 60, enabled: true, explicit: false }
+        replayBuffer: { enabled: true, explicit: false }
       },
       scene: null,
       settings: { outputDirectory: '', keepOriginalRecording: false }
@@ -40,12 +47,34 @@ describe('buildStartSessionParams', () => {
       ...base,
       captureConfig: {
         ...base.captureConfig,
-        replayBuffer: { seconds: 60, enabled: true, explicit: true }
+        replayBuffer: { enabled: true, explicit: true }
       }
     }
     expect(buildStartSessionParams({ ...chosen, replayArmed: true }).replay).toEqual({
       seconds: 60
     })
+  })
+
+  it('always keeps the 1-minute ring, which only a smoke shortens (plan 199)', () => {
+    expect(REPLAY_RING_SECONDS).toBe(LONG_CLIP_SECONDS)
+    const ring = (replayBuffer: CaptureConfig['replayBuffer']) =>
+      buildStartSessionParams({
+        captureConfig: { ...defaultCaptureConfig, replayBuffer },
+        scene: null,
+        settings: { outputDirectory: '', keepOriginalRecording: false },
+        replayArmed: true
+      }).replay?.seconds
+    expect(ring({ enabled: true, explicit: true })).toBe(60)
+    expect(ring({ enabled: true, explicit: true, smokeRingSeconds: 15 })).toBe(15)
+    // A stored Length (the removed setting) never reaches the wire.
+    const legacy = normalizeReplayBufferSettings({ seconds: 300, enabled: true, explicit: true })
+    expect(legacy).toEqual({ enabled: true, explicit: true })
+    expect(ring(legacy)).toBe(60)
+    expect(normalizeReplayBufferSettings({ smokeRingSeconds: 15 })).toEqual({
+      enabled: true,
+      explicit: false
+    })
+    expect(defaultCaptureConfig.replayBuffer).toEqual({ enabled: true, explicit: false })
   })
 
   it('never forwards renderer-owned filesystem or executable paths', () => {

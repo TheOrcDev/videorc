@@ -98,6 +98,52 @@ describe('executeRemoteIntent', () => {
     expect(off.requests[0]?.params).toMatchObject({ intentId: 'rs-off', ok: false })
   })
 
+  it('passes the clip length through, and refuses one nobody offers (plan 199)', async () => {
+    // No length is today's 30-second clip: nothing extra is passed.
+    const plain = remoteIntentContext({ replayOn: true })
+    await executeRemoteIntent({ intentId: 'clip-30', intent: { kind: 'clipMark' } }, plain.context)
+    expect(plain.context.markClip).toHaveBeenCalledWith(undefined)
+
+    const long = remoteIntentContext({ replayOn: true })
+    await executeRemoteIntent(
+      { intentId: 'clip-60', intent: { kind: 'clipMark', seconds: 60 } },
+      long.context
+    )
+    expect(long.context.markClip).toHaveBeenCalledWith(60)
+    expect(long.requests).toEqual([
+      { method: 'remote.intent.ack', params: { intentId: 'clip-60', ok: true } }
+    ])
+
+    const short = remoteIntentContext({ replayOn: true })
+    await executeRemoteIntent(
+      { intentId: 'clip-30n', intent: { kind: 'clipMark', seconds: 30 } },
+      short.context
+    )
+    expect(short.context.markClip).toHaveBeenCalledWith(30)
+
+    const nulled = remoteIntentContext({ replayOn: true })
+    await executeRemoteIntent(
+      { intentId: 'clip-null', intent: { kind: 'clipMark', seconds: null } },
+      nulled.context
+    )
+    expect(nulled.context.markClip).toHaveBeenCalledWith(undefined)
+
+    for (const seconds of [45, '60', 0, 120]) {
+      const odd = remoteIntentContext({ replayOn: true })
+      await executeRemoteIntent(
+        { intentId: 'clip-odd', intent: { kind: 'clipMark', seconds } },
+        odd.context
+      )
+      expect(odd.context.markClip).not.toHaveBeenCalled()
+      expect(odd.requests).toEqual([
+        {
+          method: 'remote.intent.ack',
+          params: { intentId: 'clip-odd', ok: false, message: 'A clip is 30 seconds or 1 minute.' }
+        }
+      ])
+    }
+  })
+
   it('marks a clip only while a session runs and relays the refusal reason (plan 068 D6)', async () => {
     const idle = remoteIntentContext()
     await executeRemoteIntent({ intentId: 'clip-idle', intent: { kind: 'clipMark' } }, idle.context)

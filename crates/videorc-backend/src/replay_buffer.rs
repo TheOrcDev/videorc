@@ -23,11 +23,29 @@ pub const SEGMENT_LIST_FILE: &str = "segments.csv";
 /// Segment file names: `seg-000012.ts`.
 pub const SEGMENT_FILE_PREFIX: &str = "seg-";
 pub const SEGMENT_FILE_SUFFIX: &str = ".ts";
-/// The shortest and longest buffer a session accepts (the UI offers 15 s to
-/// 5 min; the wire clamps anything else here).
+/// The shortest and longest buffer a session accepts (the renderer keeps a
+/// fixed 1-min ring since plan 199; the wire clamps anything else here, and
+/// smokes may ask for a shorter ring).
 pub const MIN_SECONDS: u32 = 5;
 pub const MAX_SECONDS: u32 = 600;
-pub const DEFAULT_SECONDS: u32 = 30;
+/// The ring's length when no session reports one (`replay.status` while
+/// off). Plan 199: the ring always keeps the longest clip.
+pub const DEFAULT_SECONDS: u32 = LONG_CLIP_SECONDS;
+/// A press that names no length saves this many seconds, exactly as before
+/// plan 199. Mirrored in `shared/clip-marks.ts` (`DEFAULT_CLIP_SECONDS`).
+pub const DEFAULT_CLIP_SECONDS: u32 = 30;
+/// The 1-minute clip (plan 199). Mirrored in `shared/clip-marks.ts`
+/// (`LONG_CLIP_SECONDS`).
+pub const LONG_CLIP_SECONDS: u32 = 60;
+/// The two lengths a clip press may ask for (plan 199): today's 30-second
+/// clip and the 1-minute clip. Mirrored in `shared/clip-marks.ts`
+/// (`CLIP_LENGTHS`).
+pub const CLIP_LENGTHS: [u32; 2] = [DEFAULT_CLIP_SECONDS, LONG_CLIP_SECONDS];
+/// The refusal code for a length that is not in [`CLIP_LENGTHS`]. Mirrored in
+/// `shared/clip-marks.ts`.
+pub const INVALID_CLIP_LENGTH_CODE: &str = "invalid-clip-length";
+/// What the refusal says. Mirrored in `shared/clip-marks.ts`.
+pub const INVALID_CLIP_LENGTH_MESSAGE: &str = "A clip is 30 seconds or 1 minute.";
 /// A saved replay may run this much past its target length: the start is
 /// keyframe-aligned (D3), so up to one segment is added, plus a little slack
 /// for the muxer's own cut point.
@@ -110,6 +128,23 @@ pub fn parse_segment_list(text: &str) -> Vec<Segment> {
 /// Clamp a requested length to what a session accepts.
 pub fn clamp_seconds(seconds: u32) -> u32 {
     seconds.clamp(MIN_SECONDS, MAX_SECONDS)
+}
+
+/// The length a press asked for (plan 199): no length is today's 30 s, and
+/// anything outside [`CLIP_LENGTHS`] is refused before any work starts.
+pub fn requested_clip_seconds(requested: Option<u32>) -> Result<u32, SaveRefusal> {
+    match requested {
+        None => Ok(DEFAULT_CLIP_SECONDS),
+        Some(seconds) if CLIP_LENGTHS.contains(&seconds) => Ok(seconds),
+        Some(_) => Err(SaveRefusal::invalid_length()),
+    }
+}
+
+/// How many seconds a press saves from a ring of `ring_seconds`: the
+/// requested length, clamped to what the ring keeps (a smoke's 15-s ring
+/// saves 15 s, and the event says so).
+pub fn clip_seconds(requested: Option<u32>, ring_seconds: u32) -> Result<u32, SaveRefusal> {
+    requested_clip_seconds(requested).map(|seconds| seconds.min(clamp_seconds(ring_seconds)))
 }
 
 /// How many complete segments the list keeps: enough to cover N seconds
@@ -393,9 +428,18 @@ pub struct ReplayRuntime {
     prune_task: Option<JoinHandle<()>>,
     /// A save is running on its own task.
     pub save_in_progress: bool,
-    /// One more save is waiting behind the running one (plan 181 S3): its
-    /// accepted id and what asked for it.
-    pub queued_save: Option<(String, Option<ClipMarkSource>)>,
+    /// One more save is waiting behind the running one (plan 181 S3).
+    pub queued_save: Option<QueuedSave>,
+}
+
+/// The save waiting behind the running one: its accepted id, what asked for
+/// it, and its length (plan 199: a press that joins it raises the length to
+/// the longer of the two, so nobody loses footage).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedSave {
+    pub save_id: String,
+    pub source: Option<ClipMarkSource>,
+    pub seconds: u32,
 }
 
 impl Drop for ReplayRuntime {
@@ -863,6 +907,13 @@ impl SaveRefusal {
             message: "Clips are still starting. Try again in a moment.".to_string(),
         }
     }
+
+    fn invalid_length() -> Self {
+        Self {
+            code: INVALID_CLIP_LENGTH_CODE,
+            message: INVALID_CLIP_LENGTH_MESSAGE.to_string(),
+        }
+    }
 }
 
 /// The `session.start` error code for a buffer-only start the renderer did
@@ -901,12 +952,17 @@ pub fn auto_start_refusal(backend: crate::protocol::EncodeBackend) -> Option<Aut
 }
 
 /// `replay.save`: answers at once. A running save takes the next press as
-/// one queued save; a third press while one is queued joins it.
+/// one queued save; a third press while one is queued joins it. `seconds` is
+/// the press's length (plan 199): `None` is today's 30 s, anything outside
+/// [`CLIP_LENGTHS`] is refused, and the result is clamped to the ring.
 pub fn request_save(
     state: &AppState,
     source: Option<ClipMarkSource>,
+    seconds: Option<u32>,
 ) -> Result<ReplaySaveAccepted, SaveRefusal> {
-    let (session_id, save_id, queued) = {
+    // A length nobody offers is refused whatever the ring is doing.
+    requested_clip_seconds(seconds)?;
+    let (session_id, save_id, queued, seconds) = {
         let mut registry = lock(state);
         let Some(runtime) = registry.active.as_mut() else {
             return Err(SaveRefusal::off());
@@ -916,38 +972,68 @@ pub fn request_save(
             ReplayBufferState::Starting => return Err(SaveRefusal::starting()),
             ReplayBufferState::Off | ReplayBufferState::Error => return Err(SaveRefusal::off()),
         }
+        let seconds = clip_seconds(seconds, runtime.seconds)?;
         let session_id = runtime.session_id.clone();
         if runtime.save_in_progress {
-            if let Some((queued_id, _)) = runtime.queued_save.as_ref() {
-                (session_id, queued_id.clone(), true)
-            } else {
-                let save_id = uuid::Uuid::new_v4().to_string();
-                runtime.queued_save = Some((save_id.clone(), source));
-                (session_id, save_id, true)
-            }
+            let queued = join_queued_save(&mut runtime.queued_save, source, seconds);
+            (session_id, queued.save_id, true, queued.seconds)
         } else {
             let save_id = uuid::Uuid::new_v4().to_string();
             runtime.save_in_progress = true;
             runtime.queued_save = None;
             let task_state = state.clone();
-            let task_id = save_id.clone();
-            tokio::spawn(async move { run_saves(task_state, task_id, source).await });
-            (session_id, save_id, false)
+            let first = QueuedSave {
+                save_id: save_id.clone(),
+                source,
+                seconds,
+            };
+            tokio::spawn(async move { run_saves(task_state, first).await });
+            (session_id, save_id, false, seconds)
         }
     };
     Ok(ReplaySaveAccepted {
         save_id,
         session_id,
         queued,
+        seconds,
     })
 }
 
+/// A press while a save runs: the first one queues a save, every later one
+/// joins it and raises its length to the longer of the two. Returns the
+/// queued save as it now stands (its id and length are the press's answer).
+fn join_queued_save(
+    queued_save: &mut Option<QueuedSave>,
+    source: Option<ClipMarkSource>,
+    seconds: u32,
+) -> QueuedSave {
+    if let Some(queued) = queued_save.as_mut() {
+        queued.seconds = queued.seconds.max(seconds);
+        return queued.clone();
+    }
+    queued_save
+        .insert(QueuedSave {
+            save_id: uuid::Uuid::new_v4().to_string(),
+            source,
+            seconds,
+        })
+        .clone()
+}
+
 /// One save, then the queued one if a press landed meanwhile.
-async fn run_saves(state: AppState, first_save_id: String, first_source: Option<ClipMarkSource>) {
-    let mut next = Some((first_save_id, first_source));
-    while let Some((save_id, source)) = next.take() {
-        let outcome =
-            tokio::time::timeout(SAVE_TIMEOUT, perform_save(&state, &save_id, source)).await;
+async fn run_saves(state: AppState, first: QueuedSave) {
+    let mut next = Some(first);
+    while let Some(QueuedSave {
+        save_id,
+        source,
+        seconds,
+    }) = next.take()
+    {
+        let outcome = tokio::time::timeout(
+            SAVE_TIMEOUT,
+            perform_save(&state, &save_id, source, seconds),
+        )
+        .await;
         match outcome {
             Ok(Ok(event)) => state.emit_event("replay.saved", event),
             Ok(Err(failure)) => {
@@ -978,6 +1064,8 @@ async fn run_saves(state: AppState, first_save_id: String, first_source: Option<
 /// save never holds the lock across I/O.
 struct SaveSnapshot {
     session_id: String,
+    /// The press's length (plan 199), not the ring's: what the save selects
+    /// and what `replay.saved` reports.
     seconds: u32,
     dir: PathBuf,
     recordings_dir: PathBuf,
@@ -987,7 +1075,7 @@ struct SaveSnapshot {
     output: OutputSettings,
 }
 
-fn save_snapshot(state: &AppState) -> Option<SaveSnapshot> {
+fn save_snapshot(state: &AppState, seconds: u32) -> Option<SaveSnapshot> {
     let registry = lock(state);
     let runtime = registry.active.as_ref()?;
     if runtime.state != ReplayBufferState::On {
@@ -995,7 +1083,7 @@ fn save_snapshot(state: &AppState) -> Option<SaveSnapshot> {
     }
     Some(SaveSnapshot {
         session_id: runtime.session_id.clone(),
-        seconds: runtime.seconds,
+        seconds,
         dir: runtime.dir.clone(),
         recordings_dir: runtime.recordings_dir.clone(),
         ffmpeg_path: runtime.ffmpeg_path.clone(),
@@ -1167,8 +1255,9 @@ async fn perform_save(
     state: &AppState,
     save_id: &str,
     source: Option<ClipMarkSource>,
+    seconds: u32,
 ) -> Result<ReplaySavedEvent, ReplaySaveFailedEvent> {
-    let Some(snapshot) = save_snapshot(state) else {
+    let Some(snapshot) = save_snapshot(state, seconds) else {
         return Err(failure(save_id, None, "off", "Clips are off."));
     };
     let session_id = snapshot.session_id.clone();
@@ -1611,7 +1700,7 @@ mod runtime_tests {
     #[test]
     fn save_is_refused_while_off_or_starting() {
         let state = test_state();
-        let refused = request_save(&state, None).unwrap_err();
+        let refused = request_save(&state, None, None).unwrap_err();
         assert_eq!(refused.code, "replay-off");
         let params = replay_only_params();
         let recordings = std::env::temp_dir().join("videorc-replay-recordings-test");
@@ -1627,11 +1716,85 @@ mod runtime_tests {
         )
         .unwrap();
         assert_eq!(
-            request_save(&state, None).unwrap_err().code,
+            request_save(&state, None, None).unwrap_err().code,
             "replay-starting"
         );
         drop(guard);
-        assert_eq!(request_save(&state, None).unwrap_err().code, "replay-off");
+        assert_eq!(
+            request_save(&state, None, None).unwrap_err().code,
+            "replay-off"
+        );
+    }
+
+    /// Plan 199: a press names its length, a press that joins a queued save
+    /// raises it to the longer of the two, and a short ring clamps it.
+    #[test]
+    fn a_press_chooses_its_length_and_a_joining_press_takes_the_longer() {
+        let state = test_state();
+        // A length nobody offers is refused whatever the ring is doing.
+        assert_eq!(
+            request_save(&state, None, Some(45)).unwrap_err().code,
+            "invalid-clip-length"
+        );
+        let recordings = std::env::temp_dir().join("videorc-replay-recordings-test");
+        let ring = |session_id: &'static str, seconds: u32| {
+            let mut params = replay_only_params();
+            params.replay = Some(crate::protocol::ReplayParams {
+                seconds,
+                auto: false,
+            });
+            let guard = prepare(
+                &state,
+                RingRequest {
+                    session_id,
+                    params: &params,
+                    replay_only: true,
+                    recordings_dir: &recordings,
+                    ffmpeg_path: "ffmpeg",
+                },
+            )
+            .unwrap();
+            // A save already runs (its task is not spawned here), so every
+            // press below queues or joins.
+            let mut registry = lock(&state);
+            let runtime = registry.active.as_mut().unwrap();
+            runtime.state = ReplayBufferState::On;
+            runtime.save_in_progress = true;
+            drop(registry);
+            guard
+        };
+
+        let guard = ring("session-lengths", 60);
+        assert_eq!(guard.seconds, 60);
+        let queued = request_save(&state, Some(ClipMarkSource::Manual), None).unwrap();
+        assert!(queued.queued);
+        assert_eq!(queued.seconds, 30, "no length is today's 30 s");
+        let joined = request_save(&state, Some(ClipMarkSource::Voice), Some(60)).unwrap();
+        assert_eq!(joined.save_id, queued.save_id);
+        assert_eq!(joined.seconds, 60, "the join raises the length");
+        assert_eq!(serde_json::to_value(&joined).unwrap()["seconds"], 60);
+        let shorter = request_save(&state, None, Some(30)).unwrap();
+        assert_eq!(shorter.save_id, queued.save_id);
+        assert_eq!(shorter.seconds, 60, "a shorter join never shortens it");
+        assert_eq!(
+            lock(&state).active.as_ref().unwrap().queued_save,
+            Some(QueuedSave {
+                save_id: queued.save_id.clone(),
+                source: Some(ClipMarkSource::Manual),
+                seconds: 60,
+            })
+        );
+        assert_eq!(
+            request_save(&state, None, Some(45)).unwrap_err().code,
+            "invalid-clip-length"
+        );
+        drop(guard);
+
+        // A smoke's 15-s ring saves 15 s for either length, and says so.
+        let guard = ring("session-short-ring", 15);
+        assert_eq!(request_save(&state, None, None).unwrap().seconds, 15);
+        assert_eq!(request_save(&state, None, Some(60)).unwrap().seconds, 15);
+        drop(guard);
     }
 
     fn replay_only_params() -> StartSessionParams {
@@ -1721,12 +1884,12 @@ mod runtime_tests {
         assert!(report.segment_files <= max_segment_files(30), "{report:?}");
         attach(&state, guard);
 
-        let accepted = request_save(&state, None).unwrap();
+        let accepted = request_save(&state, None, None).unwrap();
         assert!(!accepted.queued);
         // A second press while the first runs queues one more; a third joins it.
-        let queued = request_save(&state, None).unwrap();
+        let queued = request_save(&state, None, None).unwrap();
         assert!(queued.queued);
-        let joined = request_save(&state, None).unwrap();
+        let joined = request_save(&state, None, None).unwrap();
         assert_eq!(joined.save_id, queued.save_id);
 
         let mut saved = Vec::new();
@@ -1923,6 +2086,53 @@ mod pure_tests {
         assert_eq!(selection.segments.len(), 15);
         assert!(selection.covered_seconds >= 30.0);
         assert!(selection.covered_seconds <= duration_window(30).1);
+    }
+
+    /// Plan 199: one 1-min ring serves both clip lengths.
+    #[test]
+    fn a_one_minute_ring_serves_both_clip_lengths() {
+        assert_eq!(keep_count(60), 32);
+        assert_eq!(max_segment_files(60), 33);
+        let listed = (0..32)
+            .map(|index| segment(index, f64::from(index) * 2.0, f64::from(index) * 2.0 + 2.0))
+            .collect::<Vec<_>>();
+        let short = select_segments(&listed, 30);
+        assert!(short.complete);
+        assert_eq!(short.segments.len(), 15);
+        assert_eq!(short.covered_seconds, 30.0);
+        let long = select_segments(&listed, 60);
+        assert!(long.complete);
+        assert_eq!(long.segments.len(), 30);
+        assert_eq!(long.covered_seconds, 60.0);
+        // Both end on the newest complete segment.
+        assert_eq!(
+            short.segments.last().and_then(Segment::index),
+            long.segments.last().and_then(Segment::index)
+        );
+        assert_eq!(duration_window(60), (60.0, 62.5));
+        // D3: the disk bound and the arming check follow the minute.
+        assert_eq!(estimated_disk_bytes(60, 8000), 33 * 2 * 1_024_000);
+        assert_eq!(required_free_bytes(60, 8000), 4 * 60 * 1_024_000);
+    }
+
+    #[test]
+    fn a_press_asks_for_30_or_60_seconds_clamped_to_the_ring() {
+        assert_eq!(clip_seconds(None, 60), Ok(30));
+        assert_eq!(clip_seconds(Some(30), 60), Ok(30));
+        assert_eq!(clip_seconds(Some(60), 60), Ok(60));
+        let refused = clip_seconds(Some(45), 60).unwrap_err();
+        assert_eq!(refused.code, "invalid-clip-length");
+        assert_eq!(refused.message, "A clip is 30 seconds or 1 minute.");
+        assert!(clip_seconds(Some(0), 60).is_err());
+        assert!(clip_seconds(Some(120), 600).is_err());
+        // A smoke's 15-s ring clamps both lengths.
+        assert_eq!(clip_seconds(None, 15), Ok(15));
+        assert_eq!(clip_seconds(Some(30), 15), Ok(15));
+        assert_eq!(clip_seconds(Some(60), 15), Ok(15));
+        assert_eq!(requested_clip_seconds(None), Ok(DEFAULT_CLIP_SECONDS));
+        // The ring's fallback length keeps the longest clip.
+        assert_eq!(Some(&DEFAULT_SECONDS), CLIP_LENGTHS.iter().max());
+        assert!(CLIP_LENGTHS.contains(&DEFAULT_CLIP_SECONDS));
     }
 
     #[test]

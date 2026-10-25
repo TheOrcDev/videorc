@@ -59,16 +59,19 @@ _Avoid_: session (in copy), take, capture
 
 **Clips**:
 The Output section and its one switch, "Keep the last seconds" (plan 181,
-the owner's redesign): whenever Videorc is open it keeps the last N seconds
-of the program ready, writing nothing permanent. The status bar reads
-"Clip · 0:30"; the ring is never "Recording" or "On air".
+the owner's redesign): whenever Videorc is open it keeps the last minute of
+the program ready (plan 199), writing nothing permanent. The status bar
+reads "Clip · 1:00"; the ring is never "Recording" or "On air".
 _Avoid_: Replay buffer, instant replay, replay cache, buffer (alone)
 
 **Clip** (the action):
-The one action that saves the last seconds as a clip: the Stream Manager's
-Clip button, the Save a clip key, ⌘K "Save clip", a deck key, `/clip`, the
-spoken "clip that". While a recording runs the moment is also kept as a
-mark in the recording and its report.
+The one action that saves the last seconds as a clip, at one of two lengths
+(plan 199): the last 30 seconds (the Stream Manager's "Clip 30 s", the Save
+a 30-second clip key, ⌘K "Save a 30-second clip", a deck key, `/clip`, the
+spoken "clip that") or the last minute ("1 min", the Save a 1-minute clip
+key, ⌘K "Save a 1-minute clip", `/clip 60`, the spoken "clip the last
+minute" or "long clip"). While a recording runs the moment is also kept as a
+mark in the recording and its report, spanning the length asked for.
 _Avoid_: Mark clip, Save replay, Capture replay
 
 **Clip** (the file):

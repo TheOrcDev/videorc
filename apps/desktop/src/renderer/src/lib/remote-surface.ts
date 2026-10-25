@@ -9,6 +9,11 @@ import {
   type BannerRelayAction,
   type BannerSummary
 } from '../../../shared/banner-commands'
+import {
+  INVALID_CLIP_LENGTH_MESSAGE,
+  isClipLength,
+  type ClipLength
+} from '../../../shared/clip-lengths'
 
 /** The state projection deck keys render. Minimal by design and the ONLY
  * payload remote sockets receive — never widen it with tokens/paths/URLs. */
@@ -177,8 +182,9 @@ export interface RemoteIntentContext {
   clearCommentHighlight: () => Promise<RemoteIntentOutcome>
   /** Save a clip (plan 068 D6; plan 181 R4): the last seconds whenever the
    * ring holds frames, and a mark while recording. The backend stamps the
-   * capture clock; `ok: false` carries why nothing was kept. */
-  markClip: () => Promise<RemoteIntentOutcome>
+   * capture clock; `ok: false` carries why nothing was kept. Plan 199:
+   * `seconds` is 30 or 60; absent is today's 30 s. */
+  markClip: (seconds?: ClipLength) => Promise<RemoteIntentOutcome>
   /** Plan 181: the ring holds frames right now. */
   replayOn: boolean
   /** Plan 186 S7: the banner list the remotes are shown. `bannerShow` and
@@ -512,10 +518,15 @@ export async function executeRemoteIntent(
         return void (await ack(outcome.ok, outcome.message))
       }
       case 'clipMark': {
+        // Plan 199: 30 or 60 seconds, or no length (today's 30 s). Any other
+        // length is refused with the backend's own sentence.
+        const seconds = intent.seconds ?? undefined
+        if (seconds !== undefined && !isClipLength(seconds))
+          return void (await ack(false, INVALID_CLIP_LENGTH_MESSAGE))
         // Plan 181 R4: the ring holding frames is enough for a clip.
         if (!context.sessionActive && !context.replayOn)
           return void (await ack(false, REMOTE_INTENT_COPY.clipsOff))
-        const outcome = await context.markClip()
+        const outcome = await context.markClip(seconds)
         return void (await ack(outcome.ok, outcome.message))
       }
       default:

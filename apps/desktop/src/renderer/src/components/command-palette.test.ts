@@ -217,28 +217,32 @@ describe('CommandPalette session actions (plan 174 S0.1, S2.2)', () => {
     expect(values()).not.toContain('Mute microphone')
   })
 
-  it('offers Save clip while recording or live (plan 181 R4: one clip action)', async () => {
+  it('offers both clip lengths while recording or live (plan 181 R4, plan 199)', async () => {
     await render()
-    expect(values()).not.toContain('Save clip')
+    expect(values()).not.toContain('Save a 30-second clip')
+    expect(values()).not.toContain('Save a 1-minute clip')
     mocked.recording = { state: 'recording', sessionId: 'rec' }
     await render()
-    await act(async () => item('Save clip').click())
-    expect(mocked.core.markClip).toHaveBeenCalledOnce()
+    expect(values()).toContain('Save a 1-minute clip')
+    await act(async () => item('Save a 30-second clip').click())
+    // No length is today's 30-second clip.
+    expect(mocked.core.markClip).toHaveBeenCalledExactlyOnceWith()
   })
 
-  it('offers Save clip while the ring holds frames with nothing recording (plan 181)', async () => {
+  it('offers both clip lengths while the ring holds frames with nothing recording (plan 181, plan 199)', async () => {
     await render()
-    expect(values()).not.toContain('Save clip')
+    expect(values()).not.toContain('Save a 30-second clip')
     expect(values()).not.toContain('Save replay')
     mocked.replay = {
       ...mocked.replay,
-      state: { state: 'on', seconds: 30, bufferedSeconds: 12, sessionId: 'ring' }
+      state: { state: 'on', seconds: 60, bufferedSeconds: 12, sessionId: 'ring' }
     }
     await render()
-    await act(async () => item('Save clip').click())
-    expect(mocked.core.markClip).toHaveBeenCalledOnce()
+    expect(values()).toContain('Save a 30-second clip')
+    await act(async () => item('Save a 1-minute clip').click())
+    expect(mocked.core.markClip).toHaveBeenCalledExactlyOnceWith(60)
     expect(values()).not.toContain('Save replay')
-    mocked.replay = { ...mocked.replay, state: { state: 'off', seconds: 30, bufferedSeconds: 0 } }
+    mocked.replay = { ...mocked.replay, state: { state: 'off', seconds: 60, bufferedSeconds: 0 } }
   })
 })
 

@@ -1261,6 +1261,8 @@
       "reason": "recording-off"
     },
     "listParams": { "sessionId": "session-fixture" },
+    "markParams": {},
+    "markParamsLong": { "seconds": 60 },
     "marks": [
       {
         "id": "mark-fixture-1",
@@ -1276,6 +1278,15 @@
         "atSeconds": 754.2,
         "source": "manual",
         "createdAt": "2026-09-27T10:12:34Z"
+      },
+      {
+        "id": "mark-fixture-3",
+        "sessionId": "session-fixture",
+        "atSeconds": 900.5,
+        "source": "voice",
+        "phrase": "clip the last minute",
+        "createdAt": "2026-09-27T10:15:00Z",
+        "lookbackSeconds": 60
       }
     ]
   },
@@ -2072,9 +2083,16 @@
     "saveAccepted": {
       "saveId": "save-fixture",
       "sessionId": "replay-session-fixture",
-      "queued": true
+      "queued": true,
+      "seconds": 60
     },
-    "saveAcceptedMinimal": { "saveId": "save-fixture", "sessionId": "replay-session-fixture" },
+    "saveAcceptedMinimal": {
+      "saveId": "save-fixture",
+      "sessionId": "replay-session-fixture",
+      "seconds": 30
+    },
+    "saveParams": {},
+    "saveParamsLong": { "seconds": 60 },
     "savedEvent": {
       "saveId": "save-fixture",
       "sessionId": "replay-session-fixture",

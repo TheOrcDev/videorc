@@ -4,11 +4,17 @@ import {
   type GlobalShortcutAction
 } from '../../../shared/global-shortcuts'
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
+import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { toast } from '@/lib/toast'
 import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 
-import type { DeviceStatus, GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
+import type {
+  ClipLength,
+  DeviceStatus,
+  GlobalShortcutsConfig,
+  GlobalShortcutsResult
+} from '@/lib/backend'
 import { openSettingsTab } from '@/lib/settings-tabs'
 import { systemAudioTarget } from '@/lib/system-audio'
 
@@ -27,8 +33,9 @@ export interface GlobalShortcutContext {
   stopSession: () => Promise<unknown>
   toggleMicrophoneMute: () => void
   /** Save a clip (plan 068 D6; plan 181 R4): the last seconds whenever the
-   * ring holds frames, and a mark in the recording while one runs. */
-  markClip?: () => void
+   * ring holds frames, and a mark in the recording while one runs. Plan 199:
+   * `seconds` is 30 or 60; none is the 30-second clip. */
+  markClip?: (seconds?: ClipLength) => void
   /** Plan 069 S6: the system-audio device status and the state the Studio
    * shows (the session's confirmed mix, else the request). */
   systemAudio?: readonly [status: DeviceStatus | undefined, shown: boolean]
@@ -59,6 +66,7 @@ export function executeGlobalShortcut(
   if (action === 'mic-toggle') context.toggleMicrophoneMute()
   if (action === 'system-audio-toggle') toggleSystemAudio(context)
   if (action === 'clip-mark') context.markClip?.()
+  if (action === 'clip-mark-long') context.markClip?.(LONG_CLIP_SECONDS)
 }
 
 function toggleSystemAudio(context: GlobalShortcutContext): void {
@@ -90,7 +98,8 @@ const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
   'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
   'mic-toggle': 'Mute / unmute microphone',
   'system-audio-toggle': 'Turn system audio on or off',
-  'clip-mark': 'Save a clip',
+  'clip-mark': 'Save a 30-second clip',
+  'clip-mark-long': 'Save a 1-minute clip',
   'layout-next': 'Next scene',
   'layout-previous': 'Previous scene'
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CLIP_COMMAND_LENGTH_ERROR,
   classifyComposerDraft,
   createMarkerParamsSchema,
   markerLabel,
@@ -12,6 +13,31 @@ import {
   validateBackendRpcResult
 } from './backend-rpc-contract'
 import { roleCanInvokeChannel } from './renderer-security-policy'
+
+describe('the /clip command (plan 199 D6)', () => {
+  it('saves 30 s by default, the minute with 60, and names the lengths for anything else', () => {
+    for (const draft of ['/clip', ' /CLIP ', '/clip 30', '/Clip   30 ']) {
+      expect(classifyComposerDraft(draft), draft).toEqual({ kind: 'clip', seconds: 30 })
+    }
+    for (const draft of ['/clip 60', '/CLIP 60 ']) {
+      expect(classifyComposerDraft(draft), draft).toEqual({ kind: 'clip', seconds: 60 })
+    }
+    for (const draft of ['/clip 45', '/clip 1m', '/clip long', '/clip 060', '/clip 60 now']) {
+      expect(classifyComposerDraft(draft), draft).toEqual({
+        kind: 'error',
+        message: CLIP_COMMAND_LENGTH_ERROR
+      })
+    }
+    expect(CLIP_COMMAND_LENGTH_ERROR).toBe('A clip is 30 seconds or 1 minute: /clip or /clip 60.')
+    // Not the command: a longer word, or an escaped slash.
+    expect(classifyComposerDraft('/clipboard')).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('/clipboard')).not.toEqual({
+      kind: 'error',
+      message: CLIP_COMMAND_LENGTH_ERROR
+    })
+    expect(classifyComposerDraft('//clip 60')).toEqual({ kind: 'chat', text: '/clip 60' })
+  })
+})
 
 describe('named marker trust boundaries', () => {
   it('classifies local commands before provider send and escapes one slash', () => {

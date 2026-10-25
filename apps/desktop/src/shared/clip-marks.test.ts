@@ -1,13 +1,24 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  CLIP_LENGTHS,
+  INVALID_CLIP_LENGTH_CODE,
+  INVALID_CLIP_LENGTH_MESSAGE,
+  clipLastWords,
+  clipLengthLabel,
+  clipLengthWords,
+  clipSavingToast,
+  isClipLength,
+  parseClipLength
+} from './clip-lengths'
+import {
   CLIP_MARK_CLIP_SAVED_REASON,
   CLIP_MARK_IN_REPORT,
-  clipLengthWords,
+  DEFAULT_CLIP_SECONDS,
+  LONG_CLIP_SECONDS,
   clipMarkKeptSomething,
   clipMarkSavedClip,
   clipMarkedToast,
-  clipSavingToast,
   formatClipMarkClock
 } from './clip-marks'
 
@@ -27,6 +38,13 @@ describe('clip mark clock', () => {
     expect(clipLengthWords(120)).toBe('2 minutes')
     expect(clipLengthWords(90)).toBe('1.5 minutes')
     expect(clipLengthWords(undefined)).toBe('seconds')
+  })
+
+  it('names the two clip lengths on buttons and after "the last" (plan 199 D4)', () => {
+    expect(clipLengthLabel(30)).toBe('30 s')
+    expect(clipLengthLabel(60)).toBe('1 min')
+    expect(clipLastWords(30)).toBe('30 seconds')
+    expect(clipLastWords(60)).toBe('minute')
   })
 })
 
@@ -100,5 +118,29 @@ describe('clip marked toast', () => {
       title: 'Clips are off, and nothing is recording.',
       description: 'Turn on Keep the last seconds on the Output page, or start a recording.'
     })
+  })
+})
+
+describe('clip lengths (plan 199)', () => {
+  it('mirrors the backend: 30 s by default, 1 min beside it, nothing else', () => {
+    expect(DEFAULT_CLIP_SECONDS).toBe(30)
+    expect(LONG_CLIP_SECONDS).toBe(60)
+    expect(CLIP_LENGTHS).toEqual([30, 60])
+    expect(INVALID_CLIP_LENGTH_CODE).toBe('invalid-clip-length')
+    expect(INVALID_CLIP_LENGTH_MESSAGE).toBe('A clip is 30 seconds or 1 minute.')
+    for (const value of CLIP_LENGTHS) expect(isClipLength(value)).toBe(true)
+    for (const value of [0, 15, 45, 120, '30', null, undefined, 30.5]) {
+      expect(isClipLength(value)).toBe(false)
+    }
+  })
+
+  it('reads a relayed length: none is the 30-second clip, an odd one is refused in words', () => {
+    expect(parseClipLength(undefined)).toBeUndefined()
+    expect(parseClipLength(null)).toBeUndefined()
+    expect(parseClipLength(30)).toBe(30)
+    expect(parseClipLength(60)).toBe(60)
+    for (const value of [45, '60', 0, {}]) {
+      expect(() => parseClipLength(value)).toThrow('A clip is 30 seconds or 1 minute.')
+    }
   })
 })

@@ -7,7 +7,10 @@ import {
   globalShortcutLabel,
   GlobalShortcutsRegistrar
 } from './global-shortcuts'
-import { withGlobalShortcut } from '../../../shared/global-shortcut-bindings'
+import {
+  isGlobalShortcutConfigKey,
+  withGlobalShortcut
+} from '../../../shared/global-shortcut-bindings'
 import {
   GLOBAL_SHORTCUT_ACTIONS,
   globalShortcutEntries,
@@ -33,10 +36,16 @@ describe('global layout shortcuts', () => {
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
     executeGlobalShortcut('clip-mark', context)
     expect(context.markClip).toHaveBeenCalledOnce()
+    // Plan 199: the existing key stays the 30-second clip (no length).
+    expect(context.markClip).toHaveBeenLastCalledWith()
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
+    // Plan 199 D5: the second key saves the minute.
+    executeGlobalShortcut('clip-mark-long', context)
+    expect(context.markClip).toHaveBeenCalledTimes(2)
+    expect(context.markClip).toHaveBeenLastCalledWith(60)
     // Plan 181 (redesign R4): one clip action; a replay-save key never registers.
     executeGlobalShortcut('replay-save' as GlobalShortcutAction, context)
-    expect(context.markClip).toHaveBeenCalledOnce()
+    expect(context.markClip).toHaveBeenCalledTimes(2)
     expect(globalShortcutEntries({}).some(([id]) => (id as string) === 'replay-save')).toBe(false)
     executeGlobalShortcut('invalid' as GlobalShortcutAction, context)
     expect(context.toggleMicrophoneMute).not.toHaveBeenCalled()
@@ -77,10 +86,24 @@ describe('global layout shortcuts', () => {
     expect(active.startLivestream).toHaveBeenCalledOnce()
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
-    expect(globalShortcutEntries({})).toHaveLength(17)
+    expect(globalShortcutEntries({})).toHaveLength(18)
     // Plan 068 D6 / plan 181 R4: Save a clip ships unbound.
     expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark')?.[1]).toBeUndefined()
     expect(withGlobalShortcut({}, 'clip-mark', 'Cmd+Shift+K').clipMark).toBe('Cmd+Shift+K')
+    // Plan 199 D5: the 1-minute clip ships unbound too, with its own key.
+    expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark-long')?.[1]).toBeUndefined()
+    expect(withGlobalShortcut({}, 'clip-mark-long', 'Cmd+Shift+M').clipMarkLong).toBe('Cmd+Shift+M')
+    expect(
+      globalShortcutEntries({ clipMark: 'Alt+C', clipMarkLong: 'Alt+M' }).filter(([id]) =>
+        id.startsWith('clip-mark')
+      )
+    ).toEqual([
+      ['clip-mark', 'Alt+C'],
+      ['clip-mark-long', 'Alt+M']
+    ])
+    expect(isGlobalShortcutConfigKey('clipMarkLong')).toBe(true)
+    expect(globalShortcutLabel('clip-mark')).toBe('Save a 30-second clip')
+    expect(globalShortcutLabel('clip-mark-long')).toBe('Save a 1-minute clip')
     // Plan 069 S6: System audio ships unbound too.
     expect(
       globalShortcutEntries({}).find(([id]) => id === 'system-audio-toggle')?.[1]

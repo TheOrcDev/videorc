@@ -26,6 +26,8 @@ const GLOBAL_ACTION_ROWS = [
   'mic-toggle',
   'system-audio-toggle',
   'clip-mark',
+  // Plan 199: the 1-minute clip, unbound by default like the 30-second one.
+  'clip-mark-long',
   'layout-next',
   'layout-previous'
 ] as const satisfies readonly GlobalShortcutAction[]

@@ -6,6 +6,7 @@ export const GLOBAL_SHORTCUT_ACTIONS = [
   'mic-toggle',
   'system-audio-toggle',
   'clip-mark',
+  'clip-mark-long',
   'layout-next',
   'layout-previous',
   ...LAYOUT_PRESET_VALUES.map((id) => `layout:${id}` as const)
@@ -23,6 +24,7 @@ export function globalShortcutEntries(
     ['mic-toggle', config.micToggle],
     ['system-audio-toggle', config.systemAudioToggle],
     ['clip-mark', config.clipMark],
+    ['clip-mark-long', config.clipMarkLong],
     ['layout-next', config.layoutNext],
     ['layout-previous', config.layoutPrevious],
     ...LAYOUT_PRESET_VALUES.map((id): [GlobalShortcutAction, string | undefined] => [
