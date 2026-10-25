@@ -25,6 +25,17 @@ const toastSpies = vi.hoisted(() => ({
   warning: vi.fn()
 }))
 vi.mock('sonner', () => ({ toast: toastSpies }))
+// A toast whose two slots are its own (Open in Library, Show in folder)
+// carries Copy after its description (lib/toast.ts).
+const describedWithCopy = (words: string): unknown =>
+  expect.objectContaining({
+    props: expect.objectContaining({
+      children: expect.arrayContaining([
+        words,
+        expect.objectContaining({ props: expect.objectContaining({ children: 'Copy' }) })
+      ])
+    })
+  })
 // The highlight card is painted on an OffscreenCanvas, which the node test
 // environment lacks. Only the painter (and the card pair it paints, whose
 // vertical card exists exactly when a vertical canvas is passed) is stubbed;
@@ -4204,7 +4215,7 @@ describe('real StudioProvider lifecycle', () => {
       'Recording stopped unexpectedly',
       expect.objectContaining({
         id: 'recording-stopped-unexpectedly',
-        description: failedStatus.message,
+        description: describedWithCopy(failedStatus.message),
         duration: Infinity,
         action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
@@ -4328,7 +4339,7 @@ describe('real StudioProvider lifecycle', () => {
       'Recording stopped unexpectedly',
       expect.objectContaining({
         id: 'recording-stopped-unexpectedly',
-        description: failedStatus.message
+        description: describedWithCopy(failedStatus.message)
       })
     )
   })
@@ -4446,7 +4457,7 @@ describe('real StudioProvider lifecycle', () => {
       'Recording stopped unexpectedly',
       expect.objectContaining({
         id: 'recording-stopped-unexpectedly',
-        description: failureEvent.message,
+        description: describedWithCopy(failureEvent.message),
         duration: Infinity,
         action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
@@ -4539,7 +4550,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).toHaveBeenCalledWith(
       'Livestream stopped unexpectedly',
       expect.objectContaining({
-        description: failedSnapshotEvent.message,
+        description: describedWithCopy(failedSnapshotEvent.message),
         action: expect.objectContaining({ label: 'Open in Library' }),
         cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
