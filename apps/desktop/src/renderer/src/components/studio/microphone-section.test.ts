@@ -134,22 +134,18 @@ describe('Microphone section (plan 092)', () => {
     expect(switching.indexOf('Preparing')).toBeLessThan(switching.indexOf('role="meter"'))
   })
 
-  it('spans the picker with the LCD screen, which prints its own level (plan 196)', () => {
+  it('spans the picker with the meter alone: no readout beside it', () => {
     for (const meter of [
       { kind: 'value', peakDb: -12 } as const,
       { kind: 'source', source: createFrameEmitter<MeterFrame>() } as const
     ]) {
       const markup = render(meter)
-      // The screen takes the whole row, which is the picker's width.
-      expect(markup).toMatch(/class="[^"]*\bflex-1\b[^"]*"[^>]*data-slot="lcd-display"/)
-      expect(markup).toMatch(/<div[^>]*data-slot="lcd-meter"[^>]*data-videorc-mic-visualizer=""/)
-      // The readout is the screen's own, in digits, with no unit beside it.
-      expect(markup).toContain('data-slot="lcd-meter-value"')
       expect(markup).not.toContain('data-slot="db-readout"')
       expect(markup).not.toContain(' dB<')
-      // No dB numbers under the segments in Studio (owner 2026-10-25); the CLIP flag stays.
-      expect(markup).not.toContain('data-slot="lcd-meter-scale"')
-      expect(markup).toContain('data-slot="lcd-meter-clip"')
+      // The meter takes the whole row, which is the picker's width; the LCD
+      // screen is Retro LCD's (plan 197).
+      expect(markup).toMatch(/class="[^"]*\bflex-1\b[^"]*"[^>]*data-slot="level-meter"/)
+      expect(markup).not.toContain('data-slot="lcd-display"')
     }
   })
 

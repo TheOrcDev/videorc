@@ -14,6 +14,7 @@ import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SourceControlRow, SourceFacts, SourceItem } from '@/components/sources/source-item'
+import { StudioLookContext } from '@/components/lcd-panel'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -208,131 +209,134 @@ export function SourcesAudioMixer(): ReactElement {
   })
 
   return (
-    <PanelSection
-      description="What your recording and stream hear, after gain. Nothing is processed automatically."
-      title="Audio"
-    >
-      {/* No MixerTitle: the section's own heading names it, and a second one
+    // Retro LCD (plan 197) draws every level here on the LCD screen.
+    <StudioLookContext.Provider value={settings.retroLcdStudio === true ? 'lcd' : 'default'}>
+      <PanelSection
+        description="What your recording and stream hear, after gain. Nothing is processed automatically."
+        title="Audio"
+      >
+        {/* No MixerTitle: the section's own heading names it, and a second one
           would announce it twice. */}
-      <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
-        <MixerChannels className="gap-0" scrollable={false}>
-          <GroupedList>
-            <MixerRow>
-              <MicrophoneChannel
-                calibration={
-                  import.meta.env.DEV ? (
-                    <SyncCalibration
-                      audio={audio}
-                      message={syncMessage}
-                      setAudio={setAudio}
-                      setMessage={setSyncMessage}
-                    />
-                  ) : null
-                }
-                gainDb={audio.microphoneGainDb}
-                // Only a CoreAudio input can be kept warm (warm-microphone-gate):
-                // on Linux and Windows the switch did nothing (Linux plan 0019).
-                keepReady={
-                  isCoreAudioMicrophoneId(captureConfig.sources.microphoneId)
-                    ? {
-                        checked: settings.keepMicrophoneWarm !== false,
-                        description: keepMicrophoneReadyHint(platform),
-                        onCheckedChange: (keepMicrophoneWarm) =>
-                          setSettings((current) => ({ ...current, keepMicrophoneWarm }))
-                      }
-                    : undefined
-                }
-                meter={microphone.meter}
-                microphoneSelected={Boolean(selectedMicrophone)}
-                monitorState={microphone.monitorState}
-                muteShortcut={settings.globalShortcuts?.micToggle}
-                platform={platform}
-                muted={audio.microphoneMuted}
-                picker={
-                  <DevicePicker
-                    description={<SourceSwitchStatus kind="microphone" />}
-                    devices={microphones}
-                    disabled={Boolean(sourceSwitchReason('microphone'))}
-                    discoveryPending={wsStatus !== 'connected'}
-                    kind="microphone"
-                    label="Microphone"
-                    labelHidden
-                    noneLabel="Off"
-                    selectedDevice={selectedMicrophone}
-                    selectedName={captureConfig.sources.microphoneName}
-                    statusInTrigger={false}
-                    value={microphoneId}
-                    onChange={(nextId) =>
-                      void switchSourceDeviceLive(
-                        'microphone',
-                        buildMicrophoneSources(captureConfig.sources, microphones, nextId)
-                      )
-                    }
-                  />
-                }
-                sessionActive={isSessionActive}
-                status={microphoneStatus({
-                  selected: Boolean(microphoneId),
-                  switching: sourceDeviceSwitchPending === 'microphone',
-                  device: selectedDeviceStatus(deviceList.devices, microphoneId),
-                  muted: audio.microphoneMuted,
-                  sessionActive: isSessionActive
-                })}
-                syncOffsetMs={audio.microphoneSyncOffsetMs}
-                syncUserSet={audio.microphoneSyncOffsetUserSet === true}
-                unavailableReason={microphone.unavailableReason}
-                onGainChange={(microphoneGainDb) =>
-                  setAudio((current) => ({ ...current, microphoneGainDb }))
-                }
-                onMutedChange={(microphoneMuted) =>
-                  setAudio((current) => ({ ...current, microphoneMuted }))
-                }
-                onSyncChange={(offsetMs, reason) => {
-                  setAudio((current) => applySyncChange(current, offsetMs, reason))
-                  if (reason === 'reset') setSyncMessage('Microphone sync is back to 0 ms.')
-                }}
-              />
-            </MixerRow>
-            {systemAudio.visible ? (
+        <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
+          <MixerChannels className="gap-0" scrollable={false}>
+            <GroupedList>
               <MixerRow>
-                <SystemAudioSettings
-                  echoGuard={audio.systemAudioEchoGuard !== false}
-                  gainDb={audio.systemAudioGainDb}
-                  macOS={platform === 'darwin'}
-                  meter={systemAudioMeterInput({
-                    sessionActive: isSessionActive,
-                    mixed: systemAudio.meter,
-                    backendLevelsLive,
-                    source: backendLevelSources.systemAudio
-                  })}
-                  sessionActive={isSessionActive}
+                <MicrophoneChannel
+                  calibration={
+                    import.meta.env.DEV ? (
+                      <SyncCalibration
+                        audio={audio}
+                        message={syncMessage}
+                        setAudio={setAudio}
+                        setMessage={setSyncMessage}
+                      />
+                    ) : null
+                  }
+                  gainDb={audio.microphoneGainDb}
+                  // Only a CoreAudio input can be kept warm (warm-microphone-gate):
+                  // on Linux and Windows the switch did nothing (Linux plan 0019).
+                  keepReady={
+                    isCoreAudioMicrophoneId(captureConfig.sources.microphoneId)
+                      ? {
+                          checked: settings.keepMicrophoneWarm !== false,
+                          description: keepMicrophoneReadyHint(platform),
+                          onCheckedChange: (keepMicrophoneWarm) =>
+                            setSettings((current) => ({ ...current, keepMicrophoneWarm }))
+                        }
+                      : undefined
+                  }
+                  meter={microphone.meter}
+                  microphoneSelected={Boolean(selectedMicrophone)}
+                  monitorState={microphone.monitorState}
+                  muteShortcut={settings.globalShortcuts?.micToggle}
                   platform={platform}
-                  toggleShortcut={settings.globalShortcuts?.systemAudioToggle}
-                  view={systemAudio}
-                  onEchoGuardChange={(systemAudioEchoGuard) =>
-                    setAudio((current) => ({ ...current, systemAudioEchoGuard }))
+                  muted={audio.microphoneMuted}
+                  picker={
+                    <DevicePicker
+                      description={<SourceSwitchStatus kind="microphone" />}
+                      devices={microphones}
+                      disabled={Boolean(sourceSwitchReason('microphone'))}
+                      discoveryPending={wsStatus !== 'connected'}
+                      kind="microphone"
+                      label="Microphone"
+                      labelHidden
+                      noneLabel="Off"
+                      selectedDevice={selectedMicrophone}
+                      selectedName={captureConfig.sources.microphoneName}
+                      statusInTrigger={false}
+                      value={microphoneId}
+                      onChange={(nextId) =>
+                        void switchSourceDeviceLive(
+                          'microphone',
+                          buildMicrophoneSources(captureConfig.sources, microphones, nextId)
+                        )
+                      }
+                    />
                   }
-                  onEnabledChange={(systemAudioEnabled) =>
-                    setAudio((current) => ({ ...current, systemAudioEnabled }))
+                  sessionActive={isSessionActive}
+                  status={microphoneStatus({
+                    selected: Boolean(microphoneId),
+                    switching: sourceDeviceSwitchPending === 'microphone',
+                    device: selectedDeviceStatus(deviceList.devices, microphoneId),
+                    muted: audio.microphoneMuted,
+                    sessionActive: isSessionActive
+                  })}
+                  syncOffsetMs={audio.microphoneSyncOffsetMs}
+                  syncUserSet={audio.microphoneSyncOffsetUserSet === true}
+                  unavailableReason={microphone.unavailableReason}
+                  onGainChange={(microphoneGainDb) =>
+                    setAudio((current) => ({ ...current, microphoneGainDb }))
                   }
-                  onGainChange={(systemAudioGainDb) =>
-                    setAudio((current) => ({ ...current, systemAudioGainDb }))
+                  onMutedChange={(microphoneMuted) =>
+                    setAudio((current) => ({ ...current, microphoneMuted }))
                   }
-                  onOpenPermissions={() => openSettings('permissions')}
-                  onResume={requestSystemAudioResume}
+                  onSyncChange={(offsetMs, reason) => {
+                    setAudio((current) => applySyncChange(current, offsetMs, reason))
+                    if (reason === 'reset') setSyncMessage('Microphone sync is back to 0 ms.')
+                  }}
                 />
               </MixerRow>
-            ) : null}
-            <MixerRow>
-              <SoundsSourceRow
-                backendLevelsLive={backendLevelsLive}
-                sessionActive={isSessionActive}
-              />
-            </MixerRow>
-          </GroupedList>
-        </MixerChannels>
-      </Mixer>
-    </PanelSection>
+              {systemAudio.visible ? (
+                <MixerRow>
+                  <SystemAudioSettings
+                    echoGuard={audio.systemAudioEchoGuard !== false}
+                    gainDb={audio.systemAudioGainDb}
+                    macOS={platform === 'darwin'}
+                    meter={systemAudioMeterInput({
+                      sessionActive: isSessionActive,
+                      mixed: systemAudio.meter,
+                      backendLevelsLive,
+                      source: backendLevelSources.systemAudio
+                    })}
+                    sessionActive={isSessionActive}
+                    platform={platform}
+                    toggleShortcut={settings.globalShortcuts?.systemAudioToggle}
+                    view={systemAudio}
+                    onEchoGuardChange={(systemAudioEchoGuard) =>
+                      setAudio((current) => ({ ...current, systemAudioEchoGuard }))
+                    }
+                    onEnabledChange={(systemAudioEnabled) =>
+                      setAudio((current) => ({ ...current, systemAudioEnabled }))
+                    }
+                    onGainChange={(systemAudioGainDb) =>
+                      setAudio((current) => ({ ...current, systemAudioGainDb }))
+                    }
+                    onOpenPermissions={() => openSettings('permissions')}
+                    onResume={requestSystemAudioResume}
+                  />
+                </MixerRow>
+              ) : null}
+              <MixerRow>
+                <SoundsSourceRow
+                  backendLevelsLive={backendLevelsLive}
+                  sessionActive={isSessionActive}
+                />
+              </MixerRow>
+            </GroupedList>
+          </MixerChannels>
+        </Mixer>
+      </PanelSection>
+    </StudioLookContext.Provider>
   )
 }
 

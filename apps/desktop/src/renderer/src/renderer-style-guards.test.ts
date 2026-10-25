@@ -615,7 +615,10 @@ function pressedButtonGroups(path: string, source: string): string[] {
   const found: string[] = []
   const visit = (node: ts.Node, inMap: boolean): void => {
     const parts = jsxParts(file, node)
-    if (parts && inMap && parts.attributes.has('aria-pressed')) {
+    // LcdPanelPressRow is a pressed button too: it sets aria-pressed inside (plan 197).
+    const pressed =
+      parts && (parts.attributes.has('aria-pressed') || parts.tag === 'LcdPanelPressRow')
+    if (parts && inMap && pressed) {
       const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
       found.push(`${path}:${line + 1}: <${parts.tag} aria-pressed>`)
     }
@@ -712,13 +715,22 @@ describe('guardrails consolidated (plan 174 S4.1)', SOURCE_SCAN_TIMEOUT, () => {
 
   it('never hand-rolls a choice from pressed buttons in a list (S1.7)', () => {
     // The Studio's takeovers: any number of them, one on at a time, each a
-    // button with its own disabled reason. A ToggleGroup would need the
-    // reasons rebuilt; a follow-up, not a mechanical swap.
-    const allowed = 'src/components/studio/session-panel.tsx'
+    // button (or, with Retro LCD, a row on the Takeover screen; plan 197)
+    // with its own disabled reason. A ToggleGroup would need the reasons
+    // rebuilt; a follow-up, not a mechanical swap.
+    const allowed = [
+      'src/components/studio/session-panel.tsx',
+      'src/components/studio/retro-lcd-studio.tsx'
+    ]
     const found = parsed(pressedButtonGroups)
-    expect(found.filter((line) => !line.startsWith(`${allowed}:`))).toEqual([])
-    // The exception stays real, so it cannot outlive its reason.
-    expect(found.some((line) => line.startsWith(`${allowed}:`))).toBe(true)
+    expect(found.filter((line) => !allowed.some((path) => line.startsWith(`${path}:`)))).toEqual([])
+    // Each exception stays real, so it cannot outlive its reason.
+    for (const path of allowed) {
+      expect(
+        found.some((line) => line.startsWith(`${path}:`)),
+        path
+      ).toBe(true)
+    }
   })
 
   it('sizes controls in components/ui, never per call site (J1-11)', () => {

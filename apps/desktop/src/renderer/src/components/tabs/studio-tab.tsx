@@ -3,6 +3,13 @@ import { lazy, Suspense, useEffect, useEffectEvent, type ReactElement } from 're
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { QuickSettings } from '@/components/studio/quick-settings'
+import {
+  RetroQuickSettings,
+  RetroSessionPanel,
+  RetroSessionStatus,
+  RetroSessionTransport,
+  RetroTakeoverSection
+} from '@/components/studio/retro-lcd-studio'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import {
   SessionPanel,
@@ -52,6 +59,11 @@ const MicrophoneSection = lazy(async () => ({
 
 export function StudioTab(): ReactElement {
   const studio = useStudioCore()
+  // Settings → General → Retro LCD (plan 197): the inspector on LCD screens.
+  const retro = studio.settings.retroLcdStudio === true
+  const Transport = retro ? RetroSessionTransport : SessionTransport
+  const StatusPill = retro ? RetroSessionStatus : SessionStatusPill
+  const InspectorSession = retro ? RetroSessionPanel : SessionPanel
   const { recording } = useStudioRecordingState()
   const {
     canStop,
@@ -147,13 +159,14 @@ export function StudioTab(): ReactElement {
   const sessionStatus = (
     <span className="flex items-center gap-1.5">
       <SessionMicSliver
+        ink={retro}
         deviceName={studio.selectedMicrophone?.name}
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
       {/* "Not ready" only when nothing can start (B-17): one working button
           is a ready Studio. */}
-      <SessionStatusPill
+      <StatusPill
         recording={recording}
         startBlocked={Boolean(recordBlockedReason && liveStreamBlockedReason)}
         wsStatus={wsStatus}
@@ -193,7 +206,7 @@ export function StudioTab(): ReactElement {
           {/* Record, Go Live…, and the clock sit at the top of the
               inspector, right above Session (owner call, 2026-09-23); Space
               still records. */}
-          <SessionTransport
+          <Transport
             active={active}
             blockedJump={
               banner?.jumpTo && banner.jumpLabel
@@ -217,7 +230,7 @@ export function StudioTab(): ReactElement {
         </div>
 
         <aside aria-label="Session inspector" className={STUDIO_INSPECTOR}>
-          <SessionPanel
+          <InspectorSession
             active={active}
             live={sessionIsLive(recording)}
             runtimeNotice={sessionRuntimeNotice}
@@ -229,14 +242,14 @@ export function StudioTab(): ReactElement {
           />
           {/* The microphone and its live level, between Session and Inputs
               (owner call, 2026-10-02): a check that runs all the time. */}
-          <Suspense fallback={<MicrophoneSectionFallback />}>
+          <Suspense fallback={<MicrophoneSectionFallback retro={retro} />}>
             <MicrophoneSection />
           </Suspense>
           {/* Sources (Screen, Camera, System audio) and Captions: compact
               mirrors editing the same captureConfig, each with a way to its
               page. Output is the Session row above (plan 174 S3.3, B-15). */}
-          <QuickSettings />
-          <TakeoverSection />
+          {retro ? <RetroQuickSettings /> : <QuickSettings />}
+          {retro ? <RetroTakeoverSection /> : <TakeoverSection />}
         </aside>
       </div>
     </div>
@@ -253,12 +266,22 @@ function StudioDashboardBottomRowFallback(): ReactElement {
   )
 }
 
-/** The Microphone section's height while its chunk loads: the picker and the LCD screen. */
-function MicrophoneSectionFallback(): ReactElement {
+/**
+ * The Microphone section's height while its chunk loads: the picker and the
+ * level bar, or with Retro LCD one screen holding both (about 150 px).
+ */
+function MicrophoneSectionFallback({ retro }: { retro: boolean }): ReactElement {
+  if (retro) {
+    return (
+      <PanelSection>
+        <Skeleton className="h-36 rounded-row" />
+      </PanelSection>
+    )
+  }
   return (
     <PanelSection title="Microphone">
       <Skeleton className="h-control rounded-chip" />
-      <Skeleton className="h-24 rounded-row" />
+      <Skeleton className="h-4 rounded-chip" />
     </PanelSection>
   )
 }

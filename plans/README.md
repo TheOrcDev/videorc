@@ -15,6 +15,15 @@
   Windows hardware; D1 (land #769) and D2 (Quick Sync default) are owner
   calls.
 
+- 2026-10-25: [Plan 197](197-retro-lcd-studio.md), Retro LCD. Owner asked for
+  the whole Studio in audiocn's LCD-display style, every dropdown included,
+  then, on seeing it, for it to be an option. Settings → General → Retro LCD
+  (off by default) draws each Studio inspector section on one LCD screen
+  (titles, rows, the transport's keys, LCD dropdowns through `DevicePicker
+  trigger="lcd"`) and every level meter as plan 196's LCD meter. Off, the
+  Studio is main's and the meters are the segmented bar again. **BUILT**
+  2026-10-25 on `feat/studio-lcd-style`; owner's by-eye owed.
+
 - 2026-10-25: [Plan 196](196-lcd-level-meter.md), The LCD meter for every
   audio level. Owner request: the Studio microphone meter and the meters on
   Sources become audiocn's LCD meter. `MicLevelMeter` stays the one meter

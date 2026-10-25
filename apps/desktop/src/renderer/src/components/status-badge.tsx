@@ -6,7 +6,8 @@ import { cn } from '@/lib/utils'
 
 export type StatusTone = 'good' | 'warn' | 'error' | 'live' | 'neutral'
 
-const toneClass: Record<StatusTone, string> = {
+/** The tone utilities that set `--chip-tone`; the Studio's LCD status uses them too (plan 197). */
+export const STATUS_TONE_CLASS: Record<StatusTone, string> = {
   good: 'tone-success',
   warn: 'tone-warning',
   error: 'tone-destructive',
@@ -41,7 +42,7 @@ export function StatusBadge({
       className={cn(
         'inline-flex h-[22px] w-fit shrink-0 items-center gap-1.5 overflow-hidden rounded-full border px-2.5 text-xs leading-none font-medium whitespace-nowrap',
         emphasis ? 'glass-chip-tinted' : 'glass-chip text-foreground',
-        toneClass[tone]
+        STATUS_TONE_CLASS[tone]
       )}
     >
       {LeadingIcon ? (

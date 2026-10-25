@@ -45,31 +45,19 @@ export function QuickSettings(): ReactElement {
     switchSourceDeviceLive,
     sourceSwitchReason,
     allowCaptureNone,
-    deviceList,
     selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
     captionsStatus,
-    wsStatus,
-    systemAudioConfirmed,
-    systemAudioIssue,
-    runtimeInfo
-  } = useStudioCore()
-  const { openSettings, openStudioPanel } = useWorkspaceNav()
-  const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
-    requested: captureConfig.audio.systemAudioEnabled,
-    sessionActive: isSessionActive,
-    confirmed: systemAudioConfirmed,
-    issue: systemAudioIssue
-  })
-  // Q6 (plan 022): before the backend reports devices, selects say "Finding
-  // devices…" instead of rendering blank.
-  const discoveryPending = wsStatus !== 'connected'
-
-  const captureDevices = capturePickerDevices(deviceList.devices)
-  const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
+    runtimeInfo,
+    openSettings,
+    openStudioPanel,
+    systemAudio,
+    discoveryPending,
+    captureDevices,
+    cameras,
+    selectedCaptureId
+  } = useStudioSources()
 
   return (
     <>
@@ -267,4 +255,61 @@ function InspectorRow({
       ) : null}
     </div>
   )
+}
+
+/**
+ * What the Studio's Sources rows show and act with: the same state for the
+ * inspector's rows and the Retro LCD screen (plan 197).
+ */
+export function useStudioSources() {
+  const {
+    captureConfig,
+    setCaptureConfig,
+    switchSourceDeviceLive,
+    sourceSwitchReason,
+    allowCaptureNone,
+    deviceList,
+    selectedCaptureDevice,
+    selectedCamera,
+    isSessionActive,
+    captionsStatus,
+    wsStatus,
+    systemAudioConfirmed,
+    systemAudioIssue,
+    runtimeInfo
+  } = useStudioCore()
+  const { openSettings, openStudioPanel } = useWorkspaceNav()
+  const systemAudio = systemAudioSwitchView({
+    device: systemAudioDevice(deviceList),
+    requested: captureConfig.audio.systemAudioEnabled,
+    sessionActive: isSessionActive,
+    confirmed: systemAudioConfirmed,
+    issue: systemAudioIssue
+  })
+  // Q6 (plan 022): before the backend reports devices, selects say "Finding
+  // devices…" instead of rendering blank.
+  const discoveryPending = wsStatus !== 'connected'
+
+  const captureDevices = capturePickerDevices(deviceList.devices)
+  const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
+  const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
+  return {
+    captureConfig,
+    setCaptureConfig,
+    switchSourceDeviceLive,
+    sourceSwitchReason,
+    allowCaptureNone,
+    selectedCaptureDevice,
+    selectedCamera,
+    isSessionActive,
+    captionsStatus,
+    runtimeInfo,
+    openSettings,
+    openStudioPanel,
+    systemAudio,
+    discoveryPending,
+    captureDevices,
+    cameras,
+    selectedCaptureId
+  }
 }

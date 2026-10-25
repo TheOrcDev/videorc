@@ -64,8 +64,12 @@ describe('audiocn LCD (plan 196)', () => {
     }))
   )
 
-  it('renders LcdDisplay only inside MicLevelMeter', () => {
-    expect(screens.map(({ path }) => path)).toEqual(['components/studio/mic-level-meter.tsx'])
+  it('renders LcdDisplay only in the meter and the Studio screen kit (plan 197)', () => {
+    expect(screens.map(({ path }) => path).sort()).toEqual([
+      'components/lcd-panel.tsx',
+      'components/lcd-panel.tsx',
+      'components/studio/mic-level-meter.tsx'
+    ])
   })
 
   it('never picks a hardware ink or pins an appearance', () => {
