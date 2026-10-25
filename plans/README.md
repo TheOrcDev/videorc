@@ -1,5 +1,17 @@
 # Implementation Plans
 
+- 2026-10-25: [Plan 199](199-one-minute-clips.md), A 1-minute clip beside
+  the 30-second clip. Owner request: "Let's also add a 60-second clip." The
+  ring always keeps 1 min, and each press says 30 or 60. There is a second
+  global key (unbound), two Stream Manager buttons, two ⌘K items,
+  `/clip 60`, "clip the last minute" by voice, and the optional `seconds` on
+  `clip.mark`, `replay.save` and the remote `clipMark`. A 1-min mark spans
+  the minute in Buddy's report. The Length setting goes away (D2). Disk use
+  roughly doubles, and CPU does not change. Slices S0–S6. **EXECUTING**
+  2026-10-25 on `plan-199-clip-length`, with D1–D9 at the recommendations
+  (owner: "Execute the entire plan and create a PR"). Rebases onto plan
+  198 when that lands.
+
 - 2026-10-25: [Plan 198](198-separate-recordings-screen-file-and-clips.md),
   The Screen file dies at Record, and Clips loops after the take. Owner's
   first 0.11.0 take with Separate source recordings left Combined + Camera
