@@ -52,6 +52,7 @@ import type {
   CohostPromise,
   CohostQuestion,
   CohostSayHi,
+  ClipLength,
   CohostState,
   CohostUtteranceState,
   CohostWindowBuddy,
@@ -286,7 +287,7 @@ export interface StreamManagerProps {
   onUndoMarker?: (marker: import('@/lib/backend').SessionMarker) => Promise<void>
   onMarkClip?: () => void
   /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */
-  onClip?: () => Promise<string>
+  onClip?: (seconds: ClipLength) => Promise<string>
   /**
    * Banners (plan 186 S7): the list Studio pushed (null until it loads) and
    * one show or hide, relayed to Studio. The status bar's Banners menu and

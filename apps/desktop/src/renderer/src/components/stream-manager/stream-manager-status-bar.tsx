@@ -34,7 +34,7 @@ import type {
   CommentHighlightAnchor,
   LiveChatProviderState
 } from '@/lib/backend'
-import { clipLengthWords } from '../../../../shared/clip-marks'
+import { clipLengthWords } from '../../../../shared/clip-lengths'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { chatStateLabel } from '@/lib/state-labels'

@@ -27,8 +27,8 @@ import {
   type SoundRelayAction,
   type SoundboardSummary
 } from '../../../../shared/sound-commands'
-import type { ClipContext, MarkerContext, SessionMarker } from '@/lib/backend'
-import { clipLengthWords } from '../../../../shared/clip-marks'
+import type { ClipContext, ClipLength, MarkerContext, SessionMarker } from '@/lib/backend'
+import { clipLengthWords } from '../../../../shared/clip-lengths'
 
 /** "30 seconds" for the composer's clip words. */
 function clipSeconds(clip: ClipContext | undefined): string {
@@ -201,8 +201,9 @@ export function ChatPane({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
-  /** `/clip` (plan 181 R4): the Clip button's action, answered with its words. */
-  onClip?: () => Promise<string>
+  /** `/clip` (plan 181 R4): the Clip button's action, answered with its words.
+   * Plan 199: `/clip` asks for 30 s, `/clip 60` for the minute. */
+  onClip?: (seconds: ClipLength) => Promise<string>
   /** Plan 186 S7: the banners `/banner` reads, and its show or hide. */
   banners?: readonly BannerSummary[] | null
   onBanner?: (action: BannerRelayAction) => Promise<boolean>
@@ -721,7 +722,7 @@ export function Composer({
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
   onUndoMarker?: (marker: SessionMarker) => Promise<void>
-  onClip?: () => Promise<string>
+  onClip?: (seconds: ClipLength) => Promise<string>
   /**
    * Plan 186 S7: `/banner <name>` shows or hides one of these, `/banner off`
    * hides them all. Resolves false when it didn't happen; the window has
@@ -876,8 +877,9 @@ export function Composer({
       const submitted = draft
       localPendingRef.current = true
       setLocalPending(true)
+      // plan 199 S5: the notice names the asked length ("Saving the last 1:00 as a clip…").
       setNotice(`Saving the last ${clipSeconds(clipContext)} as a clip…`)
-      void onClip()
+      void onClip(command.seconds)
         .then((outcome) => {
           setNotice(outcome)
           if (draftRef.current === submitted) setDraft('')

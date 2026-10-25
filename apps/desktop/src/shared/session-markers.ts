@@ -13,6 +13,7 @@ import {
   RuntimeSchemaError
 } from './runtime-schema'
 import { formatTimecode } from './timecode'
+import { DEFAULT_CLIP_SECONDS, LONG_CLIP_SECONDS, type ClipLength } from './clip-marks'
 import {
   classifyBannerCommand,
   type BannerRelayAction,
@@ -247,8 +248,9 @@ export const markerRelayResolutionSchema = unionSchema([
 export type ComposerCommand =
   | { kind: 'chat'; text: string }
   | { kind: 'marker'; label?: string }
-  /** Plan 181 R4: save the last seconds as a clip (the Clip button's action). */
-  | { kind: 'clip' }
+  /** Plan 181 R4: save the last seconds as a clip (the Clip button's action).
+   * Plan 199 D6: `/clip` (or `/clip 30`) is 30 s, `/clip 60` the minute. */
+  | { kind: 'clip'; seconds: ClipLength }
   /** Plan 186: show or hide a banner; never posts to chat. */
   | { kind: 'banner'; action: BannerRelayAction }
   /** Plan 189: press a sound or stop them all; never posts to chat. */
@@ -269,7 +271,8 @@ export function classifyComposerDraft(
   if (!text.startsWith('/')) return { kind: 'chat', text }
   if (text.startsWith('//')) return { kind: 'chat', text: text.slice(1) }
   if (/^\/help\s*$/i.test(text)) return { kind: 'help' }
-  if (/^\/clip\s*$/i.test(text)) return { kind: 'clip' }
+  const clip = /^\/clip(?:\s+([\s\S]*))?$/i.exec(text)
+  if (clip) return classifyClipCommand(clip[1]?.trim() ?? '')
   const match = /^\/marker(?: +([\s\S]*))?$/i.exec(text)
   if (match) {
     try {
@@ -288,6 +291,17 @@ export function classifyComposerDraft(
       'Unknown command. Use /marker [title], /clip, /banner [name], /sound [name], or /help. To send a literal slash, start with //.'
   }
 }
+/** Plan 199 D6: what `/clip` says when it is given a length nobody offers. */
+export const CLIP_COMMAND_LENGTH_ERROR = 'A clip is 30 seconds or 1 minute: /clip or /clip 60.'
+
+function classifyClipCommand(length: string): ComposerCommand {
+  if (length === '' || length === String(DEFAULT_CLIP_SECONDS)) {
+    return { kind: 'clip', seconds: DEFAULT_CLIP_SECONDS }
+  }
+  if (length === String(LONG_CLIP_SECONDS)) return { kind: 'clip', seconds: LONG_CLIP_SECONDS }
+  return { kind: 'error', message: CLIP_COMMAND_LENGTH_ERROR }
+}
+
 /** A marker's place in the recording as the one timecode: "2:05", "1:02:05" (plan 174 S1.4). */
 export function markerTime(seconds: number): string {
   return formatTimecode(seconds * 1000)

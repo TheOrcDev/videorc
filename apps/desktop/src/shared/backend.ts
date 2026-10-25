@@ -4647,8 +4647,12 @@ export interface GlobalShortcutsConfig {
   /** Turn system audio on/off (plan 069 S6). Unbound by default. */
   systemAudioToggle?: string
   /** Save a clip: the last seconds, and a mark while recording (plan 068
-   * D6; plan 181, redesign R4). Unbound by default. */
+   * D6; plan 181, redesign R4). Unbound by default. Plan 199: the
+   * 30-second clip, as it always was. */
   clipMark?: string
+  /** Plan 199 D5: save a 1-minute clip. Unbound by default, so it never
+   * steals a game's key. */
+  clipMarkLong?: string
 }
 
 export interface GlobalShortcutsResult {

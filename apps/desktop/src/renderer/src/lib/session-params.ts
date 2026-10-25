@@ -5,6 +5,7 @@ import {
   captionSessionOutputReadiness
 } from './captions-preflight'
 import {
+  REPLAY_RING_SECONDS,
   buildSimulcastParams,
   providerStreamOutputPlanOptions,
   separateSourceRecordingsForSession,
@@ -91,10 +92,11 @@ export function buildStartSessionParams(input: {
     simulcast: buildSimulcastParams(captureConfig),
     // `auto` (redesign R2): a ring the user never asked for, which the
     // backend keeps off a software encoder path; a chosen one runs anywhere.
+    // Plan 199: the ring always keeps the minute; only a smoke shortens it.
     ...(replayArmed
       ? {
           replay: {
-            seconds: captureConfig.replayBuffer.seconds,
+            seconds: captureConfig.replayBuffer.smokeRingSeconds ?? REPLAY_RING_SECONDS,
             ...(captureConfig.replayBuffer.explicit ? {} : { auto: true })
           }
         }

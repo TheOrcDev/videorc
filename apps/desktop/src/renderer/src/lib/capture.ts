@@ -149,31 +149,29 @@ export type CaptureConfig = {
 }
 
 /**
- * Clips (plan 181, the owner's redesign R2): the ring keeps the last
- * `seconds` whenever Videorc is open. `enabled` is the one switch on the
- * Output page, on by default; `explicit` says the user set it, so a default
- * that the backend refuses (a software encoder path) stays off and says
- * why, while a choice runs anywhere.
+ * Clips (plan 181, the owner's redesign R2): the ring keeps the last minute
+ * whenever Videorc is open (plan 199: [`REPLAY_RING_SECONDS`], no setting).
+ * `enabled` is the one switch on the Output page, on by default; `explicit`
+ * says the user set it, so a default that the backend refuses (a software
+ * encoder path) stays off and says why, while a choice runs anywhere.
  */
 export type ReplayBufferSettings = {
-  seconds: number
   enabled: boolean
   explicit: boolean
+  /** Smokes only (`__videorcSmokeSetReplayBuffer`): a shorter ring for an
+   * investigative run. Nothing in the UI sets it, and the normalizer drops
+   * it, so it never survives a reload. */
+  smokeRingSeconds?: number
 }
 
-export const REPLAY_BUFFER_DEFAULT_SECONDS = 30
-/** The lengths the Output page offers, in seconds (plan 181). */
-export const REPLAY_BUFFER_LENGTH_OPTIONS = [15, 30, 60, 120, 300] as const
+/** Plan 199 D2: the ring always keeps the 1-minute clip
+ * (`LONG_CLIP_SECONDS`), so both clip lengths work at any moment. */
+export const REPLAY_RING_SECONDS = 60
 
+/** Plan 199: a stored `seconds` (the removed Length setting) is dropped. */
 export function normalizeReplayBufferSettings(value: unknown): ReplayBufferSettings {
   const loaded = (value ?? {}) as Partial<ReplayBufferSettings>
-  const seconds =
-    typeof loaded.seconds === 'number' &&
-    (REPLAY_BUFFER_LENGTH_OPTIONS as readonly number[]).includes(loaded.seconds)
-      ? loaded.seconds
-      : REPLAY_BUFFER_DEFAULT_SECONDS
   return {
-    seconds,
     enabled: typeof loaded.enabled === 'boolean' ? loaded.enabled : true,
     explicit: typeof loaded.explicit === 'boolean' ? loaded.explicit : false
   }
@@ -1434,7 +1432,7 @@ export const defaultCaptureConfig: CaptureConfig = {
   streamKey: '',
   streaming: defaultStreamingSettings(),
   captions: defaultCaptionsCaptureSettings(),
-  replayBuffer: { seconds: REPLAY_BUFFER_DEFAULT_SECONDS, enabled: true, explicit: false }
+  replayBuffer: { enabled: true, explicit: false }
 }
 
 export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {

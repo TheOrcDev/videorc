@@ -13,7 +13,7 @@ import {
   INVALID_CLIP_LENGTH_MESSAGE,
   isClipLength,
   type ClipLength
-} from '../../../shared/clip-marks'
+} from '../../../shared/clip-lengths'
 
 /** The state projection deck keys render. Minimal by design and the ONLY
  * payload remote sockets receive — never widen it with tokens/paths/URLs. */

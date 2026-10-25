@@ -20,7 +20,7 @@ import {
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { commandModifierHeld, normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
-import { parseClipLength } from '../shared/clip-marks'
+import { parseClipLength } from '../shared/clip-lengths'
 import { WINDOW_NAMES } from '../shared/window-names'
 import type {
   Banner,

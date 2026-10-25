@@ -35,20 +35,14 @@ import {
 } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { SegmentedControl } from '@/components/ui/segmented-control'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
+import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
 import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
 import { useStudioCore, useStudioReplay } from '@/hooks/use-studio'
 import type { DirectoryFacts, VideoPreset, VideoSettings } from '@/lib/backend'
 import {
-  REPLAY_BUFFER_LENGTH_OPTIONS,
+  REPLAY_RING_SECONDS,
   layoutPresetOrientation,
   resolutionOptionsForOrientation,
   separateSourceRecordingsIneligibility,
@@ -94,27 +88,24 @@ export function RecordingTab(): ReactElement {
  * off and this section says why; the switch still turns it on.
  */
 function ClipsSection(): ReactElement {
-  const {
-    captureConfig,
-    setCaptureConfig,
-    settings,
-    setSettings,
-    runtimeInfo,
-    recordBlockedReason
-  } = useStudioCore()
+  const { captureConfig, settings, setSettings, runtimeInfo, recordBlockedReason } = useStudioCore()
   const clips = useStudioReplay()
-  const { seconds, enabled } = captureConfig.replayBuffer
+  const { enabled } = captureConfig.replayBuffer
   const blocked = clips.blockedReason
   const on = enabled && !blocked
   const running = clips.state.state === 'on' || clips.state.state === 'starting'
-  const estimate = formatBytes(estimatedReplayDiskBytes(seconds, captureConfig.video.bitrateKbps))
+  // Plan 199 D2: the ring always keeps the minute, so the disk use does too.
+  const estimate = formatBytes(
+    estimatedReplayDiskBytes(REPLAY_RING_SECONDS, captureConfig.video.bitrateKbps)
+  )
   const shortcutRegistration = useSyncExternalStore(
     globalShortcutRegistration.subscribe,
     globalShortcutRegistration.getSnapshot
   )
   return (
+    // plan 199 S5: the description names both clips (30 seconds or the whole minute).
     <PanelSection
-      description={`Videorc keeps the last ${replayLengthLabel(seconds)} of your screen and microphone while it is open, so one key saves them as a clip. While you record, the moment is also marked in the recording.`}
+      description={`Videorc keeps the last ${replayLengthLabel(REPLAY_RING_SECONDS)} of your screen and microphone while it is open, so one key saves them as a clip. While you record, the moment is also marked in the recording.`}
       icon={ClipIcon}
       title={CLIPS_LABEL}
     >
@@ -140,32 +131,7 @@ function ClipsSection(): ReactElement {
             onCheckedChange={(checked) => clips.setEnabled(checked)}
           />
         </SettingsRow>
-        <SettingsRow
-          data-testid="output-clips-length"
-          description="How much is kept. A clip runs this long, plus up to two seconds."
-          label="Length"
-        >
-          <Select
-            value={String(seconds)}
-            onValueChange={(value) =>
-              setCaptureConfig((current) => ({
-                ...current,
-                replayBuffer: { ...current.replayBuffer, seconds: Number(value) }
-              }))
-            }
-          >
-            <SelectTrigger className="w-32 shrink-0" id="clips-length">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {REPLAY_BUFFER_LENGTH_OPTIONS.map((option) => (
-                <SelectItem key={option} value={String(option)}>
-                  {replayLengthLabel(option)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </SettingsRow>
+        {/* Plan 199 D2: the Length row is gone; the two clip lengths are fixed. */}
         <SettingsRow
           data-testid="output-clips-disk"
           description={`At ${formatVideoQuality(captureConfig.video)}, however long it runs.`}
@@ -173,6 +139,7 @@ function ClipsSection(): ReactElement {
         >
           <span className="text-sm tabular-nums text-muted-foreground">about {estimate}</span>
         </SettingsRow>
+        {/* plan 199 S5: a second recorder for 'clip-mark-long' ("Save a 1-minute clip"). */}
         <ShortcutRecorderField
           id="global-shortcut-clip-mark"
           label={globalShortcutLabel('clip-mark')}

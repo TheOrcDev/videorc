@@ -2,20 +2,21 @@ import { describe, expect, it } from 'vitest'
 
 import {
   CLIP_LENGTHS,
+  INVALID_CLIP_LENGTH_CODE,
+  INVALID_CLIP_LENGTH_MESSAGE,
+  clipLengthWords,
+  clipSavingToast,
+  isClipLength,
+  parseClipLength
+} from './clip-lengths'
+import {
   CLIP_MARK_CLIP_SAVED_REASON,
   CLIP_MARK_IN_REPORT,
   DEFAULT_CLIP_SECONDS,
-  INVALID_CLIP_LENGTH_CODE,
-  INVALID_CLIP_LENGTH_MESSAGE,
   LONG_CLIP_SECONDS,
-  clipMarkParams,
-  isClipLength,
-  parseClipLength,
-  clipLengthWords,
   clipMarkKeptSomething,
   clipMarkSavedClip,
   clipMarkedToast,
-  clipSavingToast,
   formatClipMarkClock
 } from './clip-marks'
 
@@ -132,11 +133,5 @@ describe('clip lengths (plan 199)', () => {
     for (const value of [45, '60', 0, {}]) {
       expect(() => parseClipLength(value)).toThrow('A clip is 30 seconds or 1 minute.')
     }
-  })
-
-  it('sends no params for a press without a length, exactly as before', () => {
-    expect(clipMarkParams()).toBeUndefined()
-    expect(clipMarkParams(30)).toEqual({ seconds: 30 })
-    expect(clipMarkParams(60)).toEqual({ seconds: 60 })
   })
 })
