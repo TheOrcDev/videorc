@@ -114,6 +114,7 @@ import {
   useStudioCore,
   useStudioDiagnostics,
   useStudioRecording,
+  useStudioReplay,
   useStudioShell,
   type StudioCoreContextValue,
   type StudioRecordingContextValue
@@ -410,7 +411,9 @@ class StudioBackend {
   sourceOperation: SourceSwitchOperation | null = null
   sourceFailure: string | null = null
   recordingState: RecordingStatus['state'] = 'idle'
+  recordingReplayOnly = false
   recordingSessionId: string | undefined
+  sourceCapabilities: SessionSources['capabilities'] | null = null
   chatTotals: SessionChatTotals | null = null
   recordingStatusOverride: RecordingStatus | undefined
   accountSnapshot: VideorcAccountSnapshot = { status: 'signed-out' }
@@ -614,7 +617,7 @@ class StudioBackend {
       health: [],
       pending: null,
       lastOperation: this.sourceOperation,
-      capabilities: [
+      capabilities: this.sourceCapabilities ?? [
         { kind: 'camera', supported: true, reason: null },
         { kind: 'capture', supported: true, reason: null },
         { kind: 'microphone', supported: true, reason: null }
@@ -712,6 +715,7 @@ class StudioBackend {
         return {
           state: this.recordingState,
           ...(this.recordingSessionId ? { sessionId: this.recordingSessionId } : {}),
+          ...(this.recordingReplayOnly ? { replayOnly: true } : {}),
           message: 'Ready.'
         }
       case 'stream.output.topology.probe':
@@ -1492,20 +1496,29 @@ class StudioBackend {
           microphoneMuted: params.microphoneMuted,
           ...(this.audioProcessingReasonCode ? { reasonCode: this.audioProcessingReasonCode } : {})
         }
-      case 'session.start':
+      case 'session.start': {
         if (this.sessionStartError) {
           throw new Error(this.sessionStartError)
         }
         this.recordingState = 'recording'
+        this.recordingSessionId = 'session-1'
         this.confirmedSources = { ...(params.sources as SourceSelection) }
+        const output = params.output as
+          | { recordEnabled?: boolean; streamEnabled?: boolean }
+          | undefined
+        this.recordingReplayOnly =
+          params.replay != null && !output?.recordEnabled && !output?.streamEnabled
         return {
           state: 'recording',
           sessionId: 'session-1',
           startedAt: now,
-          message: 'Recording.'
+          message: this.recordingReplayOnly ? 'Ready.' : 'Recording.',
+          ...(this.recordingReplayOnly ? { replayOnly: true } : {})
         }
+      }
       case 'session.stop':
         this.recordingState = 'idle'
+        this.recordingReplayOnly = false
         return {
           state: 'idle',
           sessionId: 'session-1',
@@ -1676,6 +1689,7 @@ type StudioObservation = {
   core: StudioCoreContextValue
   diagnostics: ReturnType<typeof useStudioDiagnostics>
   recording: StudioRecordingContextValue
+  replay: ReturnType<typeof useStudioReplay>
 }
 
 /** A mixer-like consumer: reads frames (which retains analyser demand) and reports lifecycle. */
@@ -1694,9 +1708,10 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   const core = useStudioCore()
   const diagnostics = useStudioDiagnostics()
   const recording = useStudioRecording()
+  const replay = useStudioReplay()
   useEffect(
-    () => observe({ audio, banners, captions, chat, core, diagnostics, recording }),
-    [audio, banners, captions, chat, core, diagnostics, observe, recording]
+    () => observe({ audio, banners, captions, chat, core, diagnostics, recording, replay }),
+    [audio, banners, captions, chat, core, diagnostics, observe, recording, replay]
   )
   return null
 }
@@ -7206,6 +7221,91 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(latest()?.core.captureConfig.sources.cameraId).toBe('camera:1')
     expect(latest()?.core.captureConfig.sources.cameraOff).toBeUndefined()
+  }, 15_000)
+
+  it('keeps source pickers enabled on a buffer-only session and re-arms with the new microphone', async () => {
+    const backend = new StudioBackend()
+    backend.sourceCapabilities = [
+      {
+        kind: 'capture',
+        supported: false,
+        reason: "Changing the screen during a session isn't available on Linux yet."
+      },
+      {
+        kind: 'camera',
+        supported: false,
+        reason: "Changing the camera during a session isn't available on Linux yet."
+      },
+      {
+        kind: 'microphone',
+        supported: false,
+        reason: 'Live microphone replacement is not available on Linux yet.'
+      }
+    ]
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        { id: 'mic:2', name: 'Microphone 2', kind: 'microphone', status: 'available' }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+    expect(latest()?.core.sourceSwitchReason('capture')).toBeNull()
+    expect(latest()?.core.sourceSwitchReason('camera')).toBeNull()
+    expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
+
+    const microphones = latest()!.core.deviceList.devices.filter(
+      (device) => device.kind === 'microphone'
+    )
+    const startsBefore = backend.sentCommands.filter(
+      (command) => command.method === 'session.start'
+    ).length
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'microphone',
+        buildMicrophoneSources(latest()!.core.captureConfig.sources, microphones, 'mic:2')
+      )
+    })
+    await waitForObservation(() => latest()?.core.captureConfig.sources.microphoneId === 'mic:2')
+    expect(backend.sentCommands.some((command) => command.method === 'session.source.switch')).toBe(
+      false
+    )
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.stop')
+    )
+    await waitForObservation(() => {
+      const starts = backend.sentCommands.filter((command) => command.method === 'session.start')
+      const rearm = starts.at(-1)
+      return (
+        starts.length > startsBefore &&
+        (rearm?.params as { sources?: { microphoneId?: string } } | undefined)?.sources
+          ?.microphoneId === 'mic:2'
+      )
+    })
+    expect(latest()?.recording.recording.replayOnly).toBe(true)
+    expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
   }, 15_000)
 
   it('records a live camera Off as intent that survives confirmation', async () => {

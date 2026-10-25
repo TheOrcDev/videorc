@@ -66,3 +66,12 @@ export function replayBufferReconcileAction(input: ReplayReconcileInput): Replay
   // decides whether it comes back afterwards.
   return null
 }
+
+/** A source change while only the buffer-only session runs is an idle
+ * change: stop the ring so reconcile re-arms it with the new sources. */
+export function replayBufferShouldRestartForSources(input: {
+  recordingReplayOnly: boolean
+  recordingState: string
+}): boolean {
+  return input.recordingReplayOnly && ACTIVE.has(input.recordingState)
+}
