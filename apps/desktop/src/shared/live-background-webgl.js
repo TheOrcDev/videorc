@@ -1,5 +1,5 @@
 /*
- * Live background WebGL2 runner (plan 190).
+ * Live background WebGL2 runner (plans 190 and 194).
  *
  * Plain JavaScript on purpose: the Electron preview surface inlines this file
  * as text (Windows idle preview, Linux preview), and the S1 cost probe loads
@@ -7,6 +7,12 @@
  * `live-backgrounds.render.generated.json` with the same uniform packing and
  * size rules as the backend renderers (crates/videorc-backend/src/
  * live_background/), so a preview matches the recording.
+ *
+ * Plan 194 S5: the instanced pass kind (Ghost Fibers' dots and dust) is
+ * `drawArraysInstanced` of a triangle strip from the pass's own vertex shader,
+ * blended additively into a cleared scene; the new scratch is Beams'
+ * mipmapped half-float field, Dither's cell field (fetched by texel),
+ * Ferrofluid's grid and bound, and Ghost Fibers' scene and bloom chain.
  *
  * The shaders are ported from React Bits by David Haz (https://reactbits.dev)
  * and used in Videorc with the author's permission.
@@ -18,6 +24,9 @@
  */
 ;(function (root) {
   'use strict'
+
+  /** tan(19°): half of React Bits' Ferrofluid field of view (ferrofluid.frag). */
+  var FERROFLUID_TAN_HALF = Math.tan((19 * Math.PI) / 180)
 
   /** The block every shader declares: `uniform vec4 u[N]` (`looks::UNIFORM_VEC4_COUNT`). */
   function uniformVec4Count(render) {
@@ -37,17 +46,18 @@
     )
   }
 
-  /**
-   * The backgrounds this runner draws. The plan 194 five need scratch and,
-   * for Ghost Fibers, an instanced pass this runner does not have yet (S5);
-   * the preview shows their poster (`shader-compile-failed`) until then.
-   */
+  /** The backgrounds this runner draws: all ten since plan 194 S5. */
   var RUNNABLE = {
     silk: true,
     'side-rays': true,
     'plasma-wave': true,
     'liquid-chrome': true,
-    'line-waves': true
+    'line-waves': true,
+    beams: true,
+    'color-bends': true,
+    dither: true,
+    ferrofluid: true,
+    'ghost-fibers': true
   }
 
   function roundHalfUp(value) {
@@ -89,6 +99,94 @@
     return { coarse: coarse, fine: fine, down: down }
   }
 
+  /** Mirrors `sizes::beams_field_size`. */
+  function beamsFieldSize(render, view) {
+    var width = Math.max(1, view[0])
+    var height = Math.max(1, view[1])
+    var scale = render.beamsFieldScale
+    if (width * height * scale * scale > render.beamsMaxFieldPixels) {
+      scale = Math.sqrt(render.beamsMaxFieldPixels / (width * height))
+    }
+    return [Math.max(1, roundHalfUp(width * scale)), Math.max(1, roundHalfUp(height * scale))]
+  }
+
+  /** Mirrors `sizes::dither_cell`. */
+  function ditherCell(view, pixelSize) {
+    var pixelScale = Math.max(1, Math.min(view[0], view[1])) / 1080
+    return Math.max(1, roundHalfUp(pixelSize * pixelScale))
+  }
+
+  /** Mirrors `sizes::dither_field_size`. */
+  function ditherFieldSize(view, pixelSize) {
+    var cell = ditherCell(view, pixelSize)
+    return [
+      Math.max(1, Math.ceil(Math.max(1, view[0]) / cell)),
+      Math.max(1, Math.ceil(Math.max(1, view[1]) / cell))
+    ]
+  }
+
+  /**
+   * Mirrors `sizes::ferrofluid_grid` for a look's packed camera (`u[4]` and
+   * `u[5]`: statics rows 2 and 3).
+   */
+  function ferrofluidGrid(render, look, view) {
+    var cameraY = look.statics[2][0]
+    var cameraZ = look.statics[2][1]
+    var far = look.statics[2][2]
+    var forward = [look.statics[3][0], look.statics[3][1]]
+    var upward = [look.statics[3][2], look.statics[3][3]]
+    var aspect = Math.max(1, view[0]) / Math.max(1, view[1])
+    var ground = function (x, y) {
+      var dx = x * aspect * FERROFLUID_TAN_HALF
+      var sy = y * FERROFLUID_TAN_HALF
+      var dy = forward[0] + sy * upward[0]
+      var dz = forward[1] + sy * upward[1]
+      var length = Math.max(Math.hypot(dx, dy, dz), 1e-12)
+      dx /= length
+      dy /= length
+      dz /= length
+      var t = dz < -0.004 ? Math.min(-cameraZ / dz, far) : far
+      return [dx * t, cameraY + dy * t]
+    }
+    var corners = [ground(-1, -1), ground(1, -1), ground(-1, 1), ground(1, 1), ground(0, 1)]
+    var minX = Infinity
+    var maxX = -Infinity
+    var minY = Infinity
+    var maxY = -Infinity
+    corners.forEach(function (corner) {
+      minX = Math.min(minX, corner[0])
+      maxX = Math.max(maxX, corner[0])
+      minY = Math.min(minY, corner[1])
+      maxY = Math.max(maxY, corner[1])
+    })
+    minX -= 3
+    maxX += 3
+    minY -= 3
+    maxY += 3
+    var cell = render.ferrofluidCell
+    var boundCell = render.ferrofluidBoundCell
+    var width = Math.ceil((maxX - minX) / cell) + 2
+    var height = Math.ceil((maxY - minY) / cell) + 2
+    return {
+      origin: [minX, minY],
+      size: [width, height],
+      bound: [Math.ceil((width * cell) / boundCell), Math.ceil((height * cell) / boundCell)]
+    }
+  }
+
+  /** Mirrors `sizes::ghost_fibers_bloom_sizes`: five levels from half size. */
+  function ghostFibersBloomSizes(view) {
+    var levels = []
+    for (var index = 0; index < 5; index += 1) {
+      var divisor = Math.pow(2, index + 1)
+      levels.push([
+        Math.max(1, roundHalfUp(Math.max(1, view[0]) / divisor)),
+        Math.max(1, roundHalfUp(Math.max(1, view[1]) / divisor))
+      ])
+    }
+    return levels
+  }
+
   function findBackground(render, id) {
     for (var index = 0; index < render.backgrounds.length; index += 1) {
       if (render.backgrounds[index].id === id) return render.backgrounds[index]
@@ -101,6 +199,14 @@
       if (background.looks[index].id === lookId) return background.looks[index]
     }
     return background.looks[0]
+  }
+
+  /** The generated pass entry (its kind, blend, clear and vertex shader). */
+  function findPass(background, key) {
+    for (var index = 0; index < background.passes.length; index += 1) {
+      if (background.passes[index].key === key) return background.passes[index]
+    }
+    throw new Error('live background ' + background.id + ' has no pass ' + key)
   }
 
   /** Mirrors `looks::uniforms`: two shared vec4s then the look's statics, flattened. */
@@ -141,9 +247,10 @@
       return shader
     }
 
-    function program(key, fragment) {
+    /** `vertexSource` is an instanced pass's own; the rest get the full-screen triangle. */
+    function program(key, fragment, vertexSource) {
       if (programs[key]) return programs[key]
-      var vertex = compile(gl.VERTEX_SHADER, render.vertex)
+      var vertex = compile(gl.VERTEX_SHADER, vertexSource || render.vertex)
       var fragmentShader = compile(gl.FRAGMENT_SHADER, fragment)
       var linked = gl.createProgram()
       gl.attachShader(linked, vertex)
@@ -166,13 +273,21 @@
       return programs[key]
     }
 
-    function target(key, size, kind) {
+    /**
+     * A render target the passes also sample. `kind`: 'byte' (RGBA8), 'float'
+     * (RGBA16F), 'mipmapped' (RGBA8 with a mip chain) or 'mipmapped-float';
+     * `filter`: 'linear' (the default) or 'nearest' for a field fetched by
+     * texel.
+     */
+    function target(key, size, kind, filter) {
       var existing = targets[key]
       if (existing && existing.width === size[0] && existing.height === size[1]) return existing
       if (existing) releaseTarget(key)
       var texture = gl.createTexture()
       gl.bindTexture(gl.TEXTURE_2D, texture)
-      var half = kind === 'float'
+      var half = kind === 'float' || kind === 'mipmapped-float'
+      var mipmapped = kind === 'mipmapped' || kind === 'mipmapped-float'
+      var nearest = filter === 'nearest'
       if (half && !floatTargets) {
         throw new Error('live background needs EXT_color_buffer_float')
       }
@@ -190,15 +305,15 @@
       gl.texParameteri(
         gl.TEXTURE_2D,
         gl.TEXTURE_MIN_FILTER,
-        kind === 'mipmapped' ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR
+        mipmapped ? gl.LINEAR_MIPMAP_LINEAR : nearest ? gl.NEAREST : gl.LINEAR
       )
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, nearest ? gl.NEAREST : gl.LINEAR)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
       var framebuffer = gl.createFramebuffer()
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
-      var levels = kind === 'mipmapped' ? 1 + Math.floor(Math.log2(Math.max(size[0], size[1]))) : 1
+      var levels = mipmapped ? 1 + Math.floor(Math.log2(Math.max(size[0], size[1]))) : 1
       targets[key] = {
         texture: texture,
         framebuffer: framebuffer,
@@ -217,7 +332,13 @@
       delete targets[key]
     }
 
-    function pass(entry, destination, size, uniforms, t0, t1) {
+    /**
+     * One pass into `destination` (null: the canvas). `geometry` is the
+     * generated pass entry of an instanced pass with its instance count
+     * (`{ vertices, instances, blend, clears }`); without one the pass is the
+     * full-screen triangle.
+     */
+    function pass(entry, destination, size, uniforms, t0, t1, geometry) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, destination ? destination.framebuffer : null)
       gl.viewport(0, 0, size[0], size[1])
       gl.useProgram(entry.program)
@@ -232,7 +353,34 @@
         gl.bindTexture(gl.TEXTURE_2D, t1.texture)
         gl.uniform1i(entry.t1, 1)
       }
-      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      if (!geometry) {
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+        return
+      }
+      if (geometry.clears) {
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+      }
+      if (geometry.blend === 'additive') {
+        gl.enable(gl.BLEND)
+        gl.blendFunc(gl.ONE, gl.ONE)
+      }
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, geometry.vertices, geometry.instances)
+      gl.disable(gl.BLEND)
+    }
+
+    /** An instanced pass's program and geometry for a look. */
+    function instanced(background, key, instances) {
+      var entry = findPass(background, key)
+      return {
+        program: program(background.id + ':' + key, background.shaders[key], entry.vertexShader),
+        geometry: {
+          vertices: entry.vertices,
+          instances: instances,
+          blend: entry.blend,
+          clears: entry.clears
+        }
+      }
     }
 
     /**
@@ -243,9 +391,7 @@
       var background = findBackground(render, options.id)
       if (!background) throw new Error('unknown live background ' + options.id)
       if (!RUNNABLE[background.id]) {
-        throw new Error(
-          'live background ' + background.id + ' has no WebGL runner yet (plan 194 S5)'
-        )
+        throw new Error('live background ' + background.id + ' has no WebGL runner')
       }
       var look = findLook(background, options.look)
       var output = [options.width, options.height]
@@ -328,6 +474,126 @@
           fine,
           up[1]
         )
+      } else if (background.id === 'beams') {
+        var beamsSize = beamsFieldSize(render, view)
+        var beamsField = target('beams-field', beamsSize, 'mipmapped-float')
+        pass(
+          program(key + 'field', shaders.field),
+          beamsField,
+          beamsSize,
+          packUniforms(look, beamsSize, view, phase, dim)
+        )
+        gl.bindTexture(gl.TEXTURE_2D, beamsField.texture)
+        gl.generateMipmap(gl.TEXTURE_2D)
+        pass(
+          program(key + 'composite', shaders.composite),
+          frame,
+          view,
+          packUniforms(look, view, view, phase, dim),
+          beamsField
+        )
+      } else if (background.id === 'dither') {
+        // One texel per cell; the cell comes from the look's pixel size
+        // (`u[3].z`), as the shader derives it.
+        var cells = ditherFieldSize(view, look.statics[1][2])
+        var wave = target('dither-field', cells, 'byte', 'nearest')
+        pass(
+          program(key + 'wave', shaders.wave),
+          wave,
+          cells,
+          packUniforms(look, cells, view, phase, dim)
+        )
+        pass(
+          program(key + 'composite', shaders.composite),
+          frame,
+          view,
+          packUniforms(look, view, view, phase, dim),
+          wave
+        )
+      } else if (background.id === 'ferrofluid') {
+        var grid = ferrofluidGrid(render, look, view)
+        var state = target('ferrofluid-field', grid.size, 'float')
+        var bound = target('ferrofluid-bound', grid.bound, 'float', 'nearest')
+        pass(
+          program(key + 'field', shaders.field),
+          state,
+          grid.size,
+          packUniforms(look, grid.size, view, phase, dim)
+        )
+        pass(
+          program(key + 'bound', shaders.bound),
+          bound,
+          grid.bound,
+          packUniforms(look, grid.bound, view, phase, dim),
+          state
+        )
+        pass(
+          program(key + 'render', shaders.render),
+          frame,
+          view,
+          packUniforms(look, view, view, phase, dim),
+          state,
+          bound
+        )
+      } else if (background.id === 'ghost-fibers') {
+        // The dots clear the scene and add into it; the dust adds after them
+        // (a look with none skips the draw).
+        var sceneUniforms = packUniforms(look, view, view, phase, dim)
+        var scene = target('ghost-scene', view, 'float')
+        var dots = instanced(background, 'dots', look.instances.dots)
+        pass(dots.program, scene, view, sceneUniforms, null, null, dots.geometry)
+        if (look.instances.dust > 0) {
+          var dust = instanced(background, 'dust', look.instances.dust)
+          pass(dust.program, scene, view, sceneUniforms, null, null, dust.geometry)
+        }
+        // The bright level and four down levels, then the up chain back to
+        // level 0: each up level adds the matching down level (React Bits
+        // blends in place; separate targets give the same sum).
+        var bloomSizes = ghostFibersBloomSizes(view)
+        var chain = []
+        for (var bloomLevel = 0; bloomLevel < bloomSizes.length; bloomLevel += 1) {
+          chain.push(target('ghost-bloom-' + bloomLevel, bloomSizes[bloomLevel], 'float'))
+        }
+        pass(
+          program(key + 'bright', shaders.bright),
+          chain[0],
+          bloomSizes[0],
+          packUniforms(look, bloomSizes[0], view, phase, dim),
+          scene
+        )
+        for (var downLevel = 1; downLevel < bloomSizes.length; downLevel += 1) {
+          pass(
+            program(key + 'down', shaders.down),
+            chain[downLevel],
+            bloomSizes[downLevel],
+            packUniforms(look, bloomSizes[downLevel], view, phase, dim),
+            chain[downLevel - 1]
+          )
+        }
+        var risen = []
+        for (var risenLevel = bloomSizes.length - 2; risenLevel >= 0; risenLevel -= 1) {
+          var risenFrom =
+            risenLevel === bloomSizes.length - 2
+              ? chain[bloomSizes.length - 1]
+              : risen[risenLevel + 1]
+          risen[risenLevel] = target('ghost-up-' + risenLevel, bloomSizes[risenLevel], 'float')
+          pass(
+            program(key + 'up', shaders.up),
+            risen[risenLevel],
+            bloomSizes[risenLevel],
+            packUniforms(look, bloomSizes[risenLevel], view, phase, dim),
+            risenFrom,
+            chain[risenLevel]
+          )
+        }
+        pass(
+          program(key + 'composite', shaders.composite),
+          frame,
+          view,
+          sceneUniforms,
+          scene,
+          risen[0]
+        )
       } else {
         pass(
           program(key + 'main', shaders.main),
@@ -352,7 +618,11 @@
         var keep =
           name === 'frame' ||
           (id === 'silk' && name.indexOf('silk-') === 0) ||
-          (id === 'plasma-wave' && name.indexOf('plasma-') === 0)
+          (id === 'plasma-wave' && name.indexOf('plasma-') === 0) ||
+          (id === 'beams' && name.indexOf('beams-') === 0) ||
+          (id === 'dither' && name.indexOf('dither-') === 0) ||
+          (id === 'ferrofluid' && name.indexOf('ferrofluid-') === 0) ||
+          (id === 'ghost-fibers' && name.indexOf('ghost-') === 0)
         if (!keep) releaseTarget(name)
       })
     }
@@ -386,6 +656,11 @@
     internalSize: internalSize,
     silkFieldSize: silkFieldSize,
     plasmaSizes: plasmaSizes,
+    beamsFieldSize: beamsFieldSize,
+    ditherCell: ditherCell,
+    ditherFieldSize: ditherFieldSize,
+    ferrofluidGrid: ferrofluidGrid,
+    ghostFibersBloomSizes: ghostFibersBloomSizes,
     packUniforms: packUniforms,
     runnable: function (id) {
       return Boolean(RUNNABLE[id])
