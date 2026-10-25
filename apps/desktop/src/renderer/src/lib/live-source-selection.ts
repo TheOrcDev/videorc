@@ -73,12 +73,24 @@ export class LiveSourceSelectionController {
     this.state = { snapshot: null, pending: null, checking: false, error: null }
   }
 
-  setSession(sessionId: string | null | undefined, state: RecordingState): void {
-    const identity = ['recording', 'streaming', 'starting'].includes(state)
+  setSession(
+    sessionId: string | null | undefined,
+    state: RecordingState,
+    replayOnly = false
+  ): void {
+    // A buffer-only Clips session (plan 181) is a real backend capture, but
+    // the pickers treat it as idle: Linux mid-session refusals describe a
+    // session the streamer does not see. A source change persists and the
+    // ring re-arms.
+    const effectiveState = replayOnly ? 'idle' : state
+    const identity = ['recording', 'streaming', 'starting'].includes(effectiveState)
       ? (sessionId ?? null)
       : null
-    if (identity === this.sessionId && state === this.sessionState) return
-    if (identity !== this.sessionId || !['recording', 'streaming', 'starting'].includes(state)) {
+    if (identity === this.sessionId && effectiveState === this.sessionState) return
+    if (
+      identity !== this.sessionId ||
+      !['recording', 'streaming', 'starting'].includes(effectiveState)
+    ) {
       this.clearProofTimer()
       this.proofRequest = null
       this.proofReads = 0
@@ -92,7 +104,7 @@ export class LiveSourceSelectionController {
       this.attempts = 0
       this.publish({ snapshot: null, pending: null, checking: false, error: null })
     }
-    this.sessionState = state
+    this.sessionState = effectiveState
   }
 
   reason(kind: SessionSourceKind): string | null {

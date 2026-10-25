@@ -1,5 +1,17 @@
 # Implementation Plans
 
+- 2026-10-25: [Plan 198](198-separate-recordings-screen-file-and-clips.md),
+  The Screen file dies at Record, and Clips loops after the take. Owner's
+  first 0.11.0 take with Separate source recordings left Combined + Camera
+  only: a capture-recovery latch from an hour earlier failed the Screen role
+  12 ms in. Clips buffer-only starts arm the ISO legs and are refused, and the
+  give-up limit never trips (62 refusals in 40 s). Plus a false "restart
+  Videorc" leak warning. Slices S1 latch scoped to the take, S2 Clips never
+  arms ISO, S3 Clips failure count, S4 leak snapshot, S5 toast + honest
+  Library row, S6 acceptance. **BUILT** 2026-10-25 on
+  `fix/198-screen-iso-startup`; owner's packaged take and by-eye owed;
+  hotfix candidate (0.11.1).
+
 - 2026-10-25: [Plan 195](195-windows-slow-microphone-breaks-recording-start.md),
   A slow Windows microphone makes Record fail. Tester bundle (0.9.150, Iris
   Xe, Cirrus Logic mic): the capture worker's fixed 2 s readiness never
@@ -14,6 +26,15 @@
   `fix/195-windows-slow-mic-recording-start`: S1–S5 done; S0/W3/W4 need
   Windows hardware; D1 (land #769) and D2 (Quick Sync default) are owner
   calls.
+
+- 2026-10-25: [Plan 197](197-retro-lcd-studio.md), Retro LCD. Owner asked for
+  the whole Studio in audiocn's LCD-display style, every dropdown included,
+  then, on seeing it, for it to be an option. Settings → General → Retro LCD
+  (off by default) draws each Studio inspector section on one LCD screen
+  (titles, rows, the transport's keys, LCD dropdowns through `DevicePicker
+trigger="lcd"`) and every level meter as plan 196's LCD meter. Off, the
+  Studio is main's and the meters are the segmented bar again. **BUILT**
+  2026-10-25 on `feat/studio-lcd-style`; owner's by-eye owed.
 
 - 2026-10-25: [Plan 196](196-lcd-level-meter.md), The LCD meter for every
   audio level. Owner request: the Studio microphone meter and the meters on

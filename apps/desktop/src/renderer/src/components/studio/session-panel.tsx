@@ -11,6 +11,7 @@ import {
 } from '@/components/icons'
 import { useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
+import { LCD_STATUS_DOT, LcdPanelNavRow, type StudioLook } from '@/components/lcd-panel'
 import { CohostPresenceDot } from '@/components/cohost-status'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow, NavigableRowHintLines } from '@/components/navigable-row'
@@ -56,6 +57,7 @@ import {
   type SessionStatusView
 } from '@/lib/studio-session-view'
 import { connectionBlockedReason } from '@/lib/state-labels'
+import { cn } from '@/lib/utils'
 
 /**
  * The session transport (plan 050 S12): status, clock, and Record / Go Live… /
@@ -191,7 +193,7 @@ export function SessionTransport({
   )
 }
 
-type BlockedJump = {
+export type BlockedJump = {
   label: string
   to: Parameters<ReturnType<typeof useWorkspaceNav>['setActive']>[0]
   /** With `to: 'settings'`, the Settings tab to open (plan 064). */
@@ -235,7 +237,7 @@ function BlockedReasonLine({
 }
 
 /** The pill's leading icon per state (plan 174 B-17): record, on air, trouble. */
-const SESSION_STATUS_ICONS: Record<SessionStatusGlyph, AppIcon> = {
+export const SESSION_STATUS_ICONS: Record<SessionStatusGlyph, AppIcon> = {
   record: RecordIcon,
   live: LivestreamIcon,
   alert: AlertIcon
@@ -282,12 +284,15 @@ export function SessionStatusPill({
 }
 
 /** Ticks from the session's start: running statuses carry no duration. */
-function SessionClock(): ReactElement {
+export function SessionClock({ className }: { className?: string }): ReactElement {
   const { recording } = useStudioRecording()
   const elapsedMs = useSessionElapsedMs(recording.startedAt)
   return (
     <span
-      className="min-w-11 text-right text-sm font-medium text-foreground tabular-nums"
+      className={cn(
+        'min-w-11 text-right text-sm font-medium text-foreground tabular-nums',
+        className
+      )}
       data-slot="session-clock"
     >
       {sessionClockLabel(elapsedMs ?? recording.durationMs)}
@@ -302,16 +307,7 @@ function SessionClock(): ReactElement {
  * intentionally absent until F1 (disk-free space) lands; no fake number.
  * Navigable rows deep-link to the page that owns the setting.
  */
-export function SessionPanel({
-  active,
-  live = false,
-  startRequestPending,
-  startFailure = null,
-  runtimeNotice = null,
-  onRetryStart,
-  onDismissStartFailure,
-  onDismissRuntimeNotice
-}: {
+export type SessionPanelProps = {
   active: boolean
   /** On air (plan 174 S3.2): the live dashboard rows exist only then. */
   live?: boolean
@@ -325,24 +321,12 @@ export function SessionPanel({
   onRetryStart?: () => void
   onDismissStartFailure?: () => void
   onDismissRuntimeNotice?: () => void
-}): ReactElement {
-  const { captureConfig, streamSharedEncodeFallbackVideo } = useStudioCore()
-  const { openStudioPanel, setActive } = useWorkspaceNav()
-  // Release test 146, plan 0004: on air this is what the session encodes, not
-  // the saved recording setting (a shared encode records at the stream's size).
-  const outputSummary = sessionOutputSummary({
-    live,
-    recordEnabled: captureConfig.recordEnabled,
-    saved: captureConfig.video,
-    sharedFallback: streamSharedEncodeFallbackVideo,
-    streamVideo: live
-      ? (streamOutputVideosForTargets(
-          captureConfig.video,
-          captureConfig.streaming,
-          providerStreamOutputPlanOptions(captureConfig)
-        )[0]?.video ?? null)
-      : null
-  })
+}
+
+export function SessionPanel({ live = false, ...notices }: SessionPanelProps): ReactElement {
+  const { captureConfig } = useStudioCore()
+  const { openStudioPanel } = useWorkspaceNav()
+  const outputSummary = useSessionOutputSummary(live)
 
   return (
     <PanelSection title="Session">
@@ -370,6 +354,46 @@ export function SessionPanel({
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
       </GroupedList>
+      <SessionNotices {...notices} />
+    </PanelSection>
+  )
+}
+
+/**
+ * The Output row's value. Release test 146, plan 0004: on air this is what
+ * the session encodes, not the saved recording setting (a shared encode
+ * records at the stream's size).
+ */
+export function useSessionOutputSummary(live: boolean): string {
+  const { captureConfig, streamSharedEncodeFallbackVideo } = useStudioCore()
+  return sessionOutputSummary({
+    live,
+    recordEnabled: captureConfig.recordEnabled,
+    saved: captureConfig.video,
+    sharedFallback: streamSharedEncodeFallbackVideo,
+    streamVideo: live
+      ? (streamOutputVideosForTargets(
+          captureConfig.video,
+          captureConfig.streaming,
+          providerStreamOutputPlanOptions(captureConfig)
+        )[0]?.video ?? null)
+      : null
+  })
+}
+
+/** The last refused start and a mid-session notice, under the Session facts. */
+export function SessionNotices({
+  active,
+  startRequestPending,
+  startFailure = null,
+  runtimeNotice = null,
+  onRetryStart,
+  onDismissStartFailure,
+  onDismissRuntimeNotice
+}: Omit<SessionPanelProps, 'live'>): ReactElement {
+  const { setActive } = useWorkspaceNav()
+  return (
+    <>
       {/* A refused start is the ONE place destructive red is allowed on chrome:
           it is status, it persists, and it carries the backend's reason
           verbatim (the toast can be missed mid-stream; this line cannot). */}
@@ -415,9 +439,39 @@ export function SessionPanel({
           }
         />
       ) : null}
-    </PanelSection>
+    </>
   )
 }
+
+/**
+ * A session fact that goes to its page: the inspector's `NavigableRow`, or the
+ * same fact on a Retro LCD screen (plan 197). The icon and indent are the
+ * inspector's alone.
+ */
+function FactRow({
+  look,
+  icon,
+  className,
+  ...props
+}: {
+  look: StudioLook
+  icon?: AppIcon
+  className?: string
+  label: string
+  value: ReactNode
+  hint?: ReactNode
+  onNavigate: () => void
+}): ReactElement {
+  return look === 'lcd' ? (
+    <LcdPanelNavRow {...props} />
+  ) : (
+    <NavigableRow className={className} icon={icon} {...props} />
+  )
+}
+
+/** A status dot's words: the row's text, or lit on the screen. */
+const dotClassName = (look: StudioLook): string =>
+  look === 'lcd' ? LCD_STATUS_DOT : 'text-sm text-foreground'
 
 /**
  * The destinations while on air (plan 174 S3.2, B-4): one quiet "3 of 3 on
@@ -425,7 +479,11 @@ export function SessionPanel({
  * ("Twitch · Stopped"), each a door to the Livestream page. Nothing until the
  * backend has reported the session's legs: never an unmeasured zero.
  */
-function LiveDestinationRows(): ReactElement | null {
+export function LiveDestinationRows({
+  look = 'default'
+}: {
+  look?: StudioLook
+}): ReactElement | null {
   const { streamTargets } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
   const view = liveDestinationsView(streamTargets)
@@ -434,13 +492,14 @@ function LiveDestinationRows(): ReactElement | null {
   }
   return (
     <>
-      <NavigableRow
+      <FactRow
+        look={look}
         icon={LivestreamIcon}
         label="Destinations"
         value={
           <span data-testid="session-destinations-summary">
             <StatusDot
-              className="text-sm text-foreground"
+              className={dotClassName(look)}
               label={view.summary}
               tone={view.kind === 'quiet' ? 'live' : 'warn'}
             />
@@ -450,14 +509,15 @@ function LiveDestinationRows(): ReactElement | null {
       />
       {view.kind === 'problems'
         ? view.problems.map((problem) => (
-            <NavigableRow
+            <FactRow
+              look={look}
               key={problem.targetId}
               className="pl-9.5"
               label={problem.label}
               value={
                 <span data-testid="session-destination-problem">
                   <StatusDot
-                    className="text-sm text-foreground"
+                    className={dotClassName(look)}
                     label={problem.word}
                     tone={problem.tone}
                   />
@@ -476,7 +536,7 @@ function LiveDestinationRows(): ReactElement | null {
  * 174 S3.2, B-4): "Healthy" quietly, the earliest failing stage in a few
  * words when not. It opens Health, where the numbers behind it live.
  */
-function LiveStreamHealthRow(): ReactElement {
+export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const { streamTargets } = useStudioCore()
   const { diagnosticStats, streamHealth } = useStudioDiagnostics()
   const { setActive } = useWorkspaceNav()
@@ -484,12 +544,13 @@ function LiveStreamHealthRow(): ReactElement {
     classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets)
   )
   return (
-    <NavigableRow
+    <FactRow
+      look={look}
       icon={AlertIcon}
       label="Stream"
       value={
         <span data-testid="session-stream-health">
-          <StatusDot className="text-sm text-foreground" label={fact.label} tone={fact.tone} />
+          <StatusDot className={dotClassName(look)} label={fact.label} tone={fact.tone} />
         </span>
       }
       onNavigate={() => setActive('diagnostics')}
@@ -504,7 +565,7 @@ function LiveStreamHealthRow(): ReactElement {
  * viewers report through Buddy ("Chat says: no audio · 3 viewers") shows here
  * too (plan 174 S3.2, F-7): a problem the streamer cannot see is news.
  */
-function CohostSessionRow(): ReactElement {
+export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const { cohostState } = useStudioChat()
   const { openCommentsWindow } = useStudioShell()
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -520,14 +581,15 @@ function CohostSessionRow(): ReactElement {
   const hintLines = [...alertLabels, ...view.tooltipLines]
 
   return (
-    <NavigableRow
+    <FactRow
+      look={look}
       icon={BuddyIcon}
       label="Buddy"
       hint={hintLines.length > 0 ? <NavigableRowHintLines lines={hintLines} /> : undefined}
       value={
         alertLabels.length > 0 ? (
           <span data-testid="session-buddy-alert">
-            <StatusDot className="text-sm text-foreground" label={alertLabels[0]} tone="warn" />
+            <StatusDot className={dotClassName(look)} label={alertLabels[0]} tone="warn" />
           </span>
         ) : (
           <span className="flex min-w-0 items-center gap-1.5">
@@ -547,11 +609,9 @@ function CohostSessionRow(): ReactElement {
  * works mid-session; a takeover replaces the output regardless of scene.
  */
 export function TakeoverSection(): ReactElement {
-  const { activateScreen, activeScreen, clearActiveScreen, screens, wsStatus } = useStudioCore()
+  const { activateScreen, activeScreen, clearActiveScreen, ready, disconnectedReason, hint } =
+    useTakeovers()
   const { setActive } = useWorkspaceNav()
-  const ready = screens.filter((screen) => screen.status !== 'missing')
-  // Plan 174 B-22: the streamer's words for a dropped connection, never "Backend socket".
-  const disconnectedReason = connectionBlockedReason(wsStatus)
   const disconnected = disconnectedReason !== null
 
   return (
@@ -602,15 +662,28 @@ export function TakeoverSection(): ReactElement {
               strings can never reflow the content below (the active-takeover
               copy is longer than the idle hint and used to push everything
               down when it wrapped). */}
-          <span className="block min-h-8 text-xs text-muted-foreground">
-            {disconnected
-              ? `${disconnectedReason} Takeovers work once Videorc is connected.`
-              : activeScreen
-                ? `${activeScreen.name} is covering the output. Click it to return.`
-                : 'Click a takeover to cover the output. Works while you’re recording or live.'}
-          </span>
+          <span className="block min-h-8 text-xs text-muted-foreground">{hint}</span>
         </>
       )}
     </PanelSection>
   )
+}
+
+/**
+ * The takeovers that can go on air, the one on air, and the line that says
+ * what a click does: shared by the inspector's buttons and the Retro LCD
+ * screen's rows (plan 197).
+ */
+export function useTakeovers() {
+  const { activateScreen, activeScreen, clearActiveScreen, screens, wsStatus } = useStudioCore()
+  const ready = screens.filter((screen) => screen.status !== 'missing')
+  // Plan 174 B-22: the streamer's words for a dropped connection, never "Backend socket".
+  const disconnectedReason = connectionBlockedReason(wsStatus)
+  const hint =
+    disconnectedReason !== null
+      ? `${disconnectedReason} Takeovers work once Videorc is connected.`
+      : activeScreen
+        ? `${activeScreen.name} is covering the output. Click it to return.`
+        : 'Click a takeover to cover the output. Works while you’re recording or live.'
+  return { activateScreen, activeScreen, clearActiveScreen, ready, disconnectedReason, hint }
 }

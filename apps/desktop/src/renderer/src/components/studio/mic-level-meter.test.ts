@@ -5,17 +5,21 @@ import { describe, expect, it } from 'vitest'
 import { createFrameEmitter } from '@/lib/audio/frame-source'
 import type { MeterFrame } from '@/lib/audio/types'
 import type { MeterInput } from '@/lib/mic-meter-input'
+import { StudioLookContext } from '@/components/lcd-panel'
+
 import { MicLevelMeter } from './mic-level-meter'
 
 // The smokes and the perf probe find the meter by this attribute.
 const hook = { 'data-videorc-mic-visualizer': '' }
 
+// The LCD screen is Retro LCD's (plan 197); these cases draw it.
 function render(meter: MeterInput, scale?: boolean): string {
   return renderToStaticMarkup(
     createElement(MicLevelMeter, {
       ...hook,
       'aria-label': 'Microphone level',
       className: 'min-w-0 flex-1',
+      look: 'lcd',
       meter,
       scale
     })
@@ -27,7 +31,7 @@ const INPUTS: MeterInput[] = [
   { kind: 'source', source: createFrameEmitter<MeterFrame>() }
 ]
 
-describe('MicLevelMeter on the LCD (plan 196)', () => {
+describe('MicLevelMeter on the LCD (plans 196 and 197)', () => {
   it("draws one meter on an LCD screen in Videorc's ink, for a source and for a reading", () => {
     for (const meter of INPUTS) {
       const markup = render(meter)
@@ -119,5 +123,29 @@ describe('MicLevelMeter on the LCD (plan 196)', () => {
     expect(bezel).not.toContain('dark:[--lcd-display-glass:oklch(')
     expect(bezel).not.toContain('dark:[--lcd-display-bezel:oklch(')
     expect(bezel).not.toContain('[--lcd-display-recess:inset_0_2px_10px')
+  })
+})
+
+describe('MicLevelMeter, Retro LCD off (plan 197)', () => {
+  it('draws the segmented bar unless the look, or the page, says lcd', () => {
+    for (const meter of INPUTS) {
+      const bar = renderToStaticMarkup(
+        createElement(MicLevelMeter, { ...hook, 'aria-label': 'Microphone level', meter })
+      )
+      expect(bar.match(/role="meter"/g), meter.kind).toHaveLength(1)
+      expect(bar).toMatch(
+        /data-slot="level-meter"[^>]*data-variant="segmented"|data-variant="segmented"[^>]*data-slot="level-meter"/
+      )
+      expect(bar).toContain('data-videorc-mic-visualizer=""')
+      expect(bar).not.toContain('data-slot="lcd-display"')
+      const page = renderToStaticMarkup(
+        createElement(
+          StudioLookContext.Provider,
+          { value: 'lcd' },
+          createElement(MicLevelMeter, { ...hook, 'aria-label': 'Microphone level', meter })
+        )
+      )
+      expect(page).toContain('data-slot="lcd-display"')
+    }
   })
 })

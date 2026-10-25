@@ -7,11 +7,30 @@ import {
   isActiveRecordingState,
   livestreamOnAirFromPayload,
   recordingStateFromPayload,
+  idleEndsSessionThatRan,
   sessionActivity,
   sessionIsReplayOnly,
   sessionOwnsTransport,
   type MainCaptureState
 } from './capture-state'
+
+// Plan 198: 0.11.0 refused a Clips start 62 times in 40 s because every
+// refusal's Idle reset the failed-start count and the give-up never tripped.
+describe('idleEndsSessionThatRan', () => {
+  it('counts an Idle after a session that recorded or streamed', () => {
+    expect(idleEndsSessionThatRan('recording', 'idle')).toBe(true)
+    expect(idleEndsSessionThatRan('streaming', 'idle')).toBe(true)
+    expect(idleEndsSessionThatRan('stopping', 'idle')).toBe(true)
+  })
+
+  it('never counts a refused start, a failure, or a non-Idle status', () => {
+    expect(idleEndsSessionThatRan('starting', 'idle')).toBe(false)
+    expect(idleEndsSessionThatRan('failed', 'idle')).toBe(false)
+    expect(idleEndsSessionThatRan('idle', 'idle')).toBe(false)
+    expect(idleEndsSessionThatRan(undefined, 'idle')).toBe(false)
+    expect(idleEndsSessionThatRan('recording', 'stopping')).toBe(false)
+  })
+})
 
 // Plan 174 S3.1 (D2): main asks before a quit or a window close ends a
 // livestream, so it reads "on air" straight from the status payload.

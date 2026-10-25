@@ -67,6 +67,18 @@ export function GeneralSettings(): ReactElement {
                 onValueChange={setTheme}
               />
             </SettingsRow>
+            <SettingsRow
+              description="Draws the Studio's controls on LCD screens, like a hardware recorder."
+              label="Retro LCD"
+            >
+              <Switch
+                checked={settings.retroLcdStudio === true}
+                id="retro-lcd-studio"
+                onCheckedChange={(checked) =>
+                  setSettings((current) => ({ ...current, retroLcdStudio: checked }))
+                }
+              />
+            </SettingsRow>
             {/* "Animate scene changes" changes what viewers see, so its one home
                 is the Scene page (plan 174 S3.9, D17); this row points there. */}
             <NavigableRow

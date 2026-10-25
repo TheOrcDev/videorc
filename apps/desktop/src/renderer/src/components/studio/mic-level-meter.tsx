@@ -1,5 +1,6 @@
-import type { ComponentProps, CSSProperties, ReactElement } from 'react'
+import { useContext, type ComponentProps, type CSSProperties, type ReactElement } from 'react'
 
+import { LCD_ON_GLASS, StudioLookContext, type StudioLook } from '@/components/lcd-panel'
 import { LcdDisplay } from '@/components/ui/lcd-display'
 import {
   LcdMeter,
@@ -12,7 +13,7 @@ import {
   LcdMeterTrack,
   LcdMeterValue
 } from '@/components/ui/lcd-meter'
-import { useLevelMeter } from '@/components/ui/level-meter'
+import { LevelMeter, useLevelMeter } from '@/components/ui/level-meter'
 import type { MeterZone, MeterZoneName, Taper } from '@/lib/audio/types'
 import type { MeterInput } from '@/lib/mic-meter-input'
 import { cn } from '@/lib/utils'
@@ -24,26 +25,11 @@ type MicLevelMeterProps = Omit<
   meter: MeterInput
   /** The screen's place in the caller's layout (it lands on the bezel). */
   className?: string
-  /** Print the dB numbers and the clip bracket under the segments. Default true. */
+  /** On the LCD, print the dB numbers and the clip bracket under the segments. Default true. */
   scale?: boolean
+  /** The segmented bar, or the LCD screen (Retro LCD). Default: the page's look. */
+  look?: StudioLook
 }
-
-/**
- * The screen on Videorc's glass. The bezel is a glass chip in both themes (the
- * chip tokens: fill, rim, top highlight, drop). In dark the screen lets the
- * window glass through instead of an opaque black well, with a softer recess
- * and fainter scanlines. Each base variable is set again under `dark:` so it
- * replaces the screen's own dark value.
- */
-const ON_GLASS = [
-  '[--lcd-display-bezel:var(--chip-fill-top)] dark:[--lcd-display-bezel:var(--chip-fill-top)]',
-  '[--lcd-display-bezel-edge:var(--chip-fill-bottom)] dark:[--lcd-display-bezel-edge:var(--chip-fill-bottom)]',
-  '[--lcd-display-bezel-ring:var(--chip-rim)] dark:[--lcd-display-bezel-ring:var(--chip-rim)]',
-  '[--lcd-display-bezel-shadow:inset_0_1px_0_var(--chip-highlight),0_1px_2px_var(--chip-drop)] dark:[--lcd-display-bezel-shadow:inset_0_1px_0_var(--chip-highlight),0_1px_2px_var(--chip-drop)]',
-  'dark:[--lcd-display-glass:color-mix(in_oklab,var(--glass-solid)_35%,transparent)]',
-  'dark:[--lcd-display-recess:inset_0_1px_3px_var(--chip-drop),inset_0_0_0_1px_var(--chip-drop)]',
-  'dark:[--lcd-display-scanline:color-mix(in_oklab,var(--chip-drop)_30%,transparent)]'
-].join(' ')
 
 /**
  * The colours of the segmented meter the LCD replaced: the screen's own ink
@@ -111,33 +97,69 @@ function ZonedRows({ scale }: { scale: boolean }): ReactElement {
 }
 
 /**
- * One microphone, System audio or Sounds level, whatever drives it (plans 092,
- * 093 and 196), on audiocn's LCD screen: segments, a held peak, the level in
- * digits, a printed scale (unless `scale` is off) and a CLIP flag. The ink
- * is Videorc's `--primary` and the screen follows the theme, on the app's
- * glass (`ON_GLASS`); the segments turn amber and red where the old meter
- * did. A live source moves with `peak` ballistics; a plain reading arrives
- * once a second at most, so `vu` ballistics glide between readings. Shared by
- * the Studio Microphone section and the Sources rows, so they never drift
- * apart.
+ * The meter alone, for a screen that holds other rows too: the Studio's
+ * Microphone screen puts it under the microphone's dropdown (plan 197). It
+ * takes the screen's size and ink.
  */
-export function MicLevelMeter({
+export function MicLcdMeter({
   meter,
-  className,
   scale = true,
   ...props
+}: Omit<MicLevelMeterProps, 'className'>): ReactElement {
+  return meter.kind === 'source' ? (
+    <LcdMeter ballistics="peak" source={meter.source} {...props}>
+      <ZonedRows scale={scale} />
+    </LcdMeter>
+  ) : (
+    <LcdMeter ballistics="vu" peakDb={meter.peakDb} {...props}>
+      <ZonedRows scale={scale} />
+    </LcdMeter>
+  )
+}
+
+/**
+ * One microphone, System audio or Sounds level, whatever drives it (plans 092
+ * and 093): a live source moves with `peak` ballistics; a plain reading
+ * arrives once a second at most, so `vu` ballistics glide between readings.
+ * Shared by the Studio Microphone section and the Sources rows, so the two
+ * never drift apart. It is the segmented bar, or with Retro LCD (plan 197;
+ * `look`, or the page's `StudioLookContext`) audiocn's LCD screen on the
+ * app's glass (plan 196): segments that turn amber and red where the bar
+ * does, a held peak, the level in digits, a printed scale (unless `scale` is
+ * off) and a CLIP flag.
+ */
+export function MicLevelMeter({
+  className,
+  look,
+  scale,
+  ...props
 }: MicLevelMeterProps): ReactElement {
-  return (
-    <LcdDisplay className={cn(ON_GLASS, className)}>
-      {meter.kind === 'source' ? (
-        <LcdMeter ballistics="peak" source={meter.source} {...props}>
-          <ZonedRows scale={scale} />
-        </LcdMeter>
-      ) : (
-        <LcdMeter ballistics="vu" peakDb={meter.peakDb} {...props}>
-          <ZonedRows scale={scale} />
-        </LcdMeter>
-      )}
-    </LcdDisplay>
+  const pageLook = useContext(StudioLookContext)
+  if ((look ?? pageLook) === 'lcd') {
+    return (
+      <LcdDisplay className={cn(LCD_ON_GLASS, className)}>
+        <MicLcdMeter scale={scale} {...props} />
+      </LcdDisplay>
+    )
+  }
+  const { meter, ...rest } = props
+  return meter.kind === 'source' ? (
+    <LevelMeter
+      ballistics="peak"
+      className={className}
+      orientation="horizontal"
+      source={meter.source}
+      variant="segmented"
+      {...rest}
+    />
+  ) : (
+    <LevelMeter
+      ballistics="vu"
+      className={className}
+      orientation="horizontal"
+      peakDb={meter.peakDb}
+      variant="segmented"
+      {...rest}
+    />
   )
 }

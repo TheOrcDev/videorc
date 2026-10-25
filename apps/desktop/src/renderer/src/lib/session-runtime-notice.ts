@@ -6,16 +6,16 @@ import type { SessionActivity } from '../../../shared/capture-state'
  * whether a file was being saved. Go Live's record+stream gets both (plan 174
  * B-6).
  */
-export type SessionRuntimeActivity = SessionActivity
+export type SessionRuntimeActivity = SessionActivity | 'clips'
 
 /** Viewers were watching: the notice speaks of the livestream. */
 export function activityIsLive(activity: SessionRuntimeActivity): boolean {
-  return activity !== 'recording'
+  return activity !== 'recording' && activity !== 'clips'
 }
 
 /** A local file was being saved: the notice can open it in the Library or reveal it. */
 export function activitySavesRecording(activity: SessionRuntimeActivity): boolean {
-  return activity !== 'live-stream'
+  return activity !== 'live-stream' && activity !== 'clips'
 }
 
 export type SessionRuntimeNotice =
@@ -61,6 +61,12 @@ export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string 
           ? 'System audio lost'
           : "Microphone audio couldn't be recorded"
     return notice.phase === 'ended' ? `${subject}: saved session has missing audio` : subject
+  }
+
+  if (notice.activity === 'clips') {
+    if (notice.phase === 'ended') return 'Microphone stopped: Clips contain silence'
+    if (notice.phase === 'ending') return 'Microphone stopped: Clips finishing with silence'
+    return 'Microphone stopped: Clips continue with silence'
   }
 
   if (notice.phase === 'ended') {

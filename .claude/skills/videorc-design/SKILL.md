@@ -88,6 +88,12 @@ for the owner, not a design choice.
   (2026-09-23).
 - **The Buddy mark is the real artwork**, never a redrawn glyph (2026-10-04;
   see [Icons](#icons)).
+- **Retro LCD is an option, off by default** (2026-10-25, plan 197). Settings
+  → General → Appearance → Retro LCD draws the Studio inspector on audiocn
+  LCD screens (`components/lcd-panel.tsx`, `studio/retro-lcd-studio.tsx`)
+  and every level meter as the LCD meter. Off, the Studio and its meters are
+  this skill's rows, buttons and the segmented bar. A Studio change lands in
+  both looks; neither replaces the other.
 
 ## The window family
 
@@ -856,7 +862,7 @@ Words, numbers and navigation
 | Views and page tabs          | `Tabs`                                                     |
 | Filter chips (multi-select)  | `ToggleGroup`                                              |
 | A boolean                    | `Switch`                                                   |
-| A screen, camera, microphone | `DevicePicker`                                             |
+| A screen, camera, microphone | `DevicePicker` (`trigger="lcd"` on a Retro LCD screen)     |
 | Buttons                      | `Button` ghost/outline/secondary; 28 px default            |
 | Why a control is disabled    | `DisabledReason`, or `SegmentedControl`'s `disabledReason` |
 | Locked controls              | `LockAlert` / `SessionLockAlert` / `OfflineAlert`          |
@@ -869,7 +875,7 @@ Words, numbers and navigation
 | Scroll regions               | `PaneBody` or `ScrollArea type="scroll"`                   |
 | Menus / popovers             | `DropdownMenu` / `Popover` on `glass-float`                |
 | Toasts                       | `toast` from `lib/toast.ts`; type colours the icon         |
-| Audio levels                 | audiocn LCD meter in `--primary` ink (`MicLevelMeter`)     |
+| Audio levels                 | `MicLevelMeter`: segmented bar; LCD meter with Retro LCD   |
 | Audio controls               | audiocn controls in Sources rows (`SourceItem`)            |
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
