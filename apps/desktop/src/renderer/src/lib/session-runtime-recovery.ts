@@ -15,7 +15,7 @@ import {
   type SessionRuntimeActivity,
   type SessionRuntimeNotice
 } from '@/lib/session-runtime-notice'
-import { sessionActivity, sessionIsLive } from '../../../shared/capture-state'
+import { sessionActivity, sessionIsLive, sessionIsReplayOnly } from '../../../shared/capture-state'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
@@ -231,7 +231,13 @@ export function microphoneLossPresentation({
   const audioIssues = [...previousIssues, { code: event.code, message: event.message }]
 
   // Go Live reports `recording` with a stream URL: still a live session.
-  const activity: SessionRuntimeActivity = active ? sessionActivity(recording) : lastActivity
+  // A buffer-only Clips session is not a recording: its loss copy must not
+  // say "recording continues with silence".
+  const activity: SessionRuntimeActivity = sessionIsReplayOnly(recording)
+    ? 'clips'
+    : active
+      ? sessionActivity(recording)
+      : lastActivity
   return {
     dedupeKey,
     activity,
