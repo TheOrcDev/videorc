@@ -63,6 +63,17 @@ float2 hermite2(float2 edge0, float2 edge1, float2 x)
 
 static const float LIVE_PI = 3.141592653589793;
 
+// WARP's `sin` range-reduces large arguments poorly (plan 194 S4). `sin` is
+// 2π-periodic, so folding first keeps the hash on the hardware's accurate
+// domain. Arguments of a few hundred to a few tens of thousands of radians
+// (Beams' lane hash and grain) stay exact in float32; Ghost Fibers' hash11
+// arguments reach 1e5–1e7 and are left on the native `sin` so Windows keeps
+// the same formula as the GLSL.
+float sinPeriod(float x)
+{
+    return sin(gmod(x, 2.0 * LIVE_PI));
+}
+
 float hash2(float2 p)
 {
     p = frac(p * float2(123.34, 456.21));
@@ -667,7 +678,7 @@ float beamsNoise(float3 P)
 
 float beamsLaneHash(float lane)
 {
-    return frac(sin(lane * 91.3458 + u[4].x * 17.17) * 47453.5453);
+    return frac(sinPeriod(lane * 91.3458 + u[4].x * 17.17) * 47453.5453);
 }
 
 float beamsLobe(float nh, float nl, float nv, float vh, float roughness)
@@ -738,7 +749,7 @@ float4 BeamsFieldPs(LiveVsOutput input) : SV_Target
 
 float beamsRandom(float2 st)
 {
-    return frac(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453123);
+    return frac(sinPeriod(dot(st, float2(12.9898, 78.233))) * 43758.5453123);
 }
 
 float beamsGrain(float2 st)

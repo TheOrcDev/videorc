@@ -310,8 +310,17 @@ fn check_or_write(file: &str, value: Value) {
         return;
     }
     let current = std::fs::read_to_string(&path).unwrap_or_default();
-    assert!(
-        current == text,
+    if current == text {
+        return;
+    }
+    // Pretty-print and key order can differ across serde_json / rustc while
+    // the values the desktop reads stay the same. Compare the parsed trees
+    // so a byte-level drift that is not a data change does not fail the
+    // gate; a real catalogue / shader / size miss still does.
+    let current_value: Value = serde_json::from_str(&current).unwrap_or(Value::Null);
+    assert_eq!(
+        current_value,
+        value,
         "{} is stale. Regenerate with VIDEORC_UPDATE_LIVE_BACKGROUND_JSON=1 cargo test -p videorc-backend live_background::export",
         path.display()
     );
