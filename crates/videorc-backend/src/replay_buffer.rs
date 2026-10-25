@@ -58,7 +58,9 @@ pub const SAVE_BOUNDARY_TIMEOUT_MS: u64 = 4_000;
 pub const REPLAYS_FOLDER_NAME: &str = "Clips";
 
 /// A complete segment as `segments.csv` lists it: `filename,start,end` with
-/// stream-time seconds.
+/// stream-time seconds. FFmpeg's `end` is the start of the segment's last
+/// frame, not the end of it, so `end - start` is one frame short of what the
+/// segment holds (plan 200 B1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
     pub file_name: String,
@@ -67,6 +69,7 @@ pub struct Segment {
 }
 
 impl Segment {
+    /// The listed span, `end - start`: one frame short of the segment.
     pub fn duration_seconds(&self) -> f64 {
         (self.end_seconds - self.start_seconds).max(0.0)
     }
@@ -195,37 +198,75 @@ impl Selection {
     }
 }
 
+/// One frame of the ring: `1 / fps`, or, when the rate is unknown, the
+/// median gap between a segment's listed end and the next segment's start
+/// (the list's end is the start of the last frame, so that gap is one
+/// frame). Zero when neither is known.
+pub fn frame_seconds(listed: &[Segment], fps: Option<u32>) -> f64 {
+    if let Some(fps) = fps.filter(|fps| *fps > 0) {
+        return 1.0 / f64::from(fps);
+    }
+    let mut gaps = listed
+        .windows(2)
+        .map(|pair| pair[1].start_seconds - pair[0].end_seconds)
+        .filter(|gap| gap.is_finite() && *gap >= 0.0)
+        .collect::<Vec<_>>();
+    if gaps.is_empty() {
+        return 0.0;
+    }
+    gaps.sort_by(f64::total_cmp);
+    gaps[gaps.len() / 2]
+}
+
+/// What `segments[index]` holds on the timeline (plan 200 B1): up to the
+/// next segment's start, and for the newest its listed span plus one frame.
+fn held_seconds(segments: &[Segment], index: usize, frame_seconds: f64) -> f64 {
+    let segment = &segments[index];
+    match segments.get(index + 1) {
+        Some(next) => (next.start_seconds - segment.start_seconds).max(0.0),
+        None => segment.duration_seconds() + frame_seconds,
+    }
+}
+
 /// Walks the list from the newest segment back until `seconds` are covered
 /// (D3: the start is the first keyframe at or before N seconds ago, so the
-/// result runs N to N + one segment).
-pub fn select_segments(listed: &[Segment], seconds: u32) -> Selection {
-    let target = f64::from(clamp_seconds(seconds));
-    let mut chosen = Vec::new();
+/// result runs N to N + one segment). Coverage counts what each segment
+/// holds ([`held_seconds`]); `fps` is the ring's frame rate when known.
+pub fn select_segments(listed: &[Segment], seconds: u32, fps: Option<u32>) -> Selection {
+    // The list carries microseconds; a sum that lands a rounding error under
+    // the target still covers it.
+    const COVERAGE_TOLERANCE_SECONDS: f64 = 1.0e-6;
+    let target = f64::from(clamp_seconds(seconds)) - COVERAGE_TOLERANCE_SECONDS;
+    let frame = frame_seconds(listed, fps);
+    let mut first = listed.len();
     let mut covered = 0.0;
-    for segment in listed.iter().rev() {
-        if covered >= target {
-            break;
-        }
-        covered += segment.duration_seconds();
-        chosen.push(segment.clone());
+    while first > 0 && covered < target {
+        first -= 1;
+        covered += held_seconds(listed, first, frame);
     }
-    chosen.reverse();
     Selection {
         complete: covered >= target,
         covered_seconds: covered,
-        segments: chosen,
+        segments: listed[first..].to_vec(),
     }
 }
 
 /// The ffconcat script for a selection: absolute paths, quoted the way the
-/// concat demuxer wants them (`'` becomes `'\''`).
+/// concat demuxer wants them (`'` becomes `'\''`). Plan 200 B1: each
+/// segment's `duration` is the gap to the next segment's start, so the next
+/// file starts right after this one's last frame; the listed span (one frame
+/// short) squashed that frame to one tick at every join. The last segment
+/// gets no `duration`, so the demuxer reads it from the file.
 pub fn concat_list(selection: &Selection, segment_dir: &Path) -> String {
     let mut script = String::from("ffconcat version 1.0\n");
-    for segment in &selection.segments {
+    for (index, segment) in selection.segments.iter().enumerate() {
         let path = segment_dir.join(&segment.file_name);
         let quoted = path.display().to_string().replace('\'', "'\\''");
         script.push_str(&format!("file '{quoted}'\n"));
-        script.push_str(&format!("duration {:.6}\n", segment.duration_seconds()));
+        if let Some(next) = selection.segments.get(index + 1) {
+            let duration = (next.start_seconds - segment.start_seconds).max(0.0);
+            script.push_str(&format!("duration {duration:.6}\n"));
+        }
     }
     script
 }
@@ -851,7 +892,10 @@ pub fn prune_tick(dir: &Path, seconds: u32) -> PruneReport {
             deleted.push(name);
         }
     }
-    let covered: f64 = listed.iter().map(Segment::duration_seconds).sum();
+    let frame = frame_seconds(&listed, None);
+    let covered: f64 = (0..listed.len())
+        .map(|index| held_seconds(&listed, index, frame))
+        .sum();
     let segment_files = names.len().saturating_sub(deleted.len());
     PruneReport {
         buffered_seconds: covered.min(f64::from(clamp_seconds(seconds))),
@@ -1262,7 +1306,7 @@ async fn perform_save(
     };
     let session_id = snapshot.session_id.clone();
     let listed = wait_for_boundary(&snapshot.dir).await;
-    let selection = select_segments(&listed, snapshot.seconds);
+    let selection = select_segments(&listed, snapshot.seconds, Some(snapshot.output.video.fps));
     if selection.is_empty() {
         return Err(failure(
             save_id,
@@ -1964,6 +2008,151 @@ mod runtime_tests {
         std::fs::remove_dir_all(&recordings).unwrap();
     }
 
+    /// Plan 200 B1, on real files: a 3-segment, 30 fps ring whose packets
+    /// carry the bridge's one-tick durations (so `segments.csv` lists each
+    /// end one frame short, as on the owner's Mac) saves into an MP4 with
+    /// every frame one frame long and the frame count matching the length.
+    /// The pre-fix list made the two joins' last frames one tick long.
+    #[test]
+    #[ignore = "spawns ffmpeg and ffprobe; run with --ignored"]
+    fn real_ffmpeg_clip_keeps_every_frame_at_segment_joins() {
+        let ffmpeg = crate::ffmpeg::resolve_ffmpeg_path(None);
+        let ffprobe = crate::ffmpeg::ffprobe_path_for(&ffmpeg);
+        let dir =
+            std::env::temp_dir().join(format!("videorc-replay-joins-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[String]| {
+            let output = std::process::Command::new(&ffmpeg)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("ffmpeg runs");
+            assert!(
+                output.status.success(),
+                "ffmpeg failed ({}): {}\n{args:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        // 6 s of program: 2 s keyframes, no B-frames, AAC.
+        let source = dir.join("source.ts");
+        let mut args = strings(&[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=30:duration=6",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000:duration=6",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            // The bundled macOS FFmpeg is LGPL (no libx264).
+            if cfg!(target_os = "macos") {
+                "h264_videotoolbox"
+            } else {
+                "libx264"
+            },
+            "-bf",
+            "0",
+            "-g",
+            "60",
+            "-force_key_frames",
+            "expr:gte(t,n_forced*2)",
+            "-pix_fmt",
+            "yuv420p",
+        ]);
+        args.extend(replay_audio_encoding_args(None, 1));
+        args.extend(strings(&["-f", "mpegts"]));
+        args.push(source.display().to_string());
+        run(&args);
+        // The ring, stream-copied like the bridge's ring. The bridge's
+        // packets reach the segment muxer with one-tick durations, so set
+        // that: it is what makes the list's end the last frame's start.
+        let mut args = strings(&["-hide_banner", "-loglevel", "error", "-i"]);
+        args.push(source.display().to_string());
+        args.extend(strings(&[
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-bsf:v",
+            "setts=duration=1",
+        ]));
+        args.extend(segment_muxer_args(&dir, 6));
+        run(&args);
+        let listed = read_listed(&dir);
+        assert_eq!(listed.len(), 3, "{listed:?}");
+        for pair in listed.windows(2) {
+            let gap = pair[1].start_seconds - pair[0].end_seconds;
+            assert!(gap > 0.03, "the list's end is one frame short: {listed:?}");
+        }
+        let selection = select_segments(&listed, 6, Some(30));
+        assert_eq!(selection.segments.len(), 3, "{selection:?}");
+        let list_path = dir.join("list.txt");
+        std::fs::write(&list_path, concat_list(&selection, &dir)).unwrap();
+        let clip = dir.join("clip.mp4");
+        run(&save_args(&list_path, &clip));
+
+        let output = std::process::Command::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=time_base,nb_frames,duration:packet=duration",
+                "-of",
+                "json",
+            ])
+            .arg(&clip)
+            .output()
+            .expect("ffprobe runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let probe: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let stream = &probe["streams"][0];
+        let time_base = stream["time_base"].as_str().unwrap();
+        let (numerator, denominator) = time_base.split_once('/').unwrap();
+        let ticks_per_second =
+            denominator.parse::<f64>().unwrap() / numerator.parse::<f64>().unwrap();
+        let frame_ticks = (ticks_per_second / 30.0).round() as i64;
+        let frames = stream["nb_frames"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        let duration = stream["duration"].as_str().unwrap().parse::<f64>().unwrap();
+        assert_eq!(frames, (duration * 30.0).round() as i64, "{probe}");
+        let durations = probe["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|packet| packet["duration"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(durations.len() as i64, frames);
+        assert!(
+            durations.iter().all(|ticks| *ticks == frame_ticks),
+            "every packet is one frame ({frame_ticks} ticks): {durations:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn rowless_sessions_are_remembered_briefly() {
         let state = test_state();
@@ -2057,7 +2246,7 @@ mod pure_tests {
         let listed = (0..17)
             .map(|index| segment(index, f64::from(index) * 2.0, f64::from(index) * 2.0 + 2.0))
             .collect::<Vec<_>>();
-        let selection = select_segments(&listed, 30);
+        let selection = select_segments(&listed, 30, None);
         assert!(selection.complete);
         assert_eq!(selection.segments.len(), 15);
         assert_eq!(selection.covered_seconds, 30.0);
@@ -2081,7 +2270,7 @@ mod pure_tests {
                 )
             })
             .collect::<Vec<_>>();
-        let selection = select_segments(&uneven, 30);
+        let selection = select_segments(&uneven, 30, None);
         assert!(selection.complete);
         assert_eq!(selection.segments.len(), 15);
         assert!(selection.covered_seconds >= 30.0);
@@ -2096,11 +2285,11 @@ mod pure_tests {
         let listed = (0..32)
             .map(|index| segment(index, f64::from(index) * 2.0, f64::from(index) * 2.0 + 2.0))
             .collect::<Vec<_>>();
-        let short = select_segments(&listed, 30);
+        let short = select_segments(&listed, 30, None);
         assert!(short.complete);
         assert_eq!(short.segments.len(), 15);
         assert_eq!(short.covered_seconds, 30.0);
-        let long = select_segments(&listed, 60);
+        let long = select_segments(&listed, 60, None);
         assert!(long.complete);
         assert_eq!(long.segments.len(), 30);
         assert_eq!(long.covered_seconds, 60.0);
@@ -2142,18 +2331,18 @@ mod pure_tests {
             segment(1, 2.0, 4.0),
             segment(2, 4.0, 6.0),
         ];
-        let selection = select_segments(&listed, 30);
+        let selection = select_segments(&listed, 30, None);
         assert!(!selection.complete);
         assert_eq!(selection.segments.len(), 3);
         assert_eq!(selection.covered_seconds, 6.0);
-        let empty = select_segments(&[], 30);
+        let empty = select_segments(&[], 30, None);
         assert!(empty.is_empty());
         assert!(!empty.complete);
     }
 
     #[test]
     fn concat_list_quotes_paths_and_carries_durations() {
-        let selection = select_segments(&[segment(7, 14.0, 16.0), segment(8, 16.0, 18.0)], 4);
+        let selection = select_segments(&[segment(7, 14.0, 16.0), segment(8, 16.0, 18.0)], 4, None);
         let dir = Path::new("/tmp/it's a ring");
         let script = concat_list(&selection, dir);
         // `join` writes the platform's separator (a backslash on Windows).
@@ -2161,11 +2350,87 @@ mod pure_tests {
         assert_eq!(
             script,
             format!(
-                "ffconcat version 1.0\nfile '{}'\nduration 2.000000\nfile '{}'\nduration 2.000000\n",
+                "ffconcat version 1.0\nfile '{}'\nduration 2.000000\nfile '{}'\n",
                 quoted("seg-000007.ts"),
                 quoted("seg-000008.ts")
             )
         );
+    }
+
+    /// Plan 200 B1: FFmpeg lists the start of a segment's last frame (plus
+    /// one tick) as its end, as in the owner's `seg-000203.ts,406.021333,
+    /// 407.988011`. The listed span as `duration` squashed one frame to one
+    /// tick at every join; the start gap keeps it.
+    fn one_frame_short_ring() -> Vec<Segment> {
+        (0..3)
+            .map(|index| {
+                let start = 406.021333 + 2.0 * f64::from(index);
+                segment(
+                    203 + index,
+                    start,
+                    start + 2.0 - 1.0 / 30.0 + 1.0 / 90_000.0,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn concat_durations_are_the_start_gaps_and_the_last_segment_has_none() {
+        let listed = one_frame_short_ring();
+        let selection = select_segments(&listed, 6, Some(30));
+        assert_eq!(selection.segments, listed);
+        let dir = Path::new("/ring");
+        let script = concat_list(&selection, dir);
+        let file = |index: u32| {
+            format!(
+                "file '{}'",
+                dir.join(format!("seg-{index:06}.ts")).display()
+            )
+        };
+        assert_eq!(
+            script.lines().collect::<Vec<_>>(),
+            vec![
+                "ffconcat version 1.0".to_string(),
+                file(203),
+                "duration 2.000000".to_string(),
+                file(204),
+                "duration 2.000000".to_string(),
+                file(205),
+            ]
+        );
+    }
+
+    #[test]
+    fn coverage_counts_the_frame_the_list_leaves_out() {
+        // 15 segments of 2 s, each listed one frame short.
+        let listed = (0..15)
+            .map(|index| {
+                let start = 2.0 * f64::from(index);
+                segment(index, start, start + 2.0 - 1.0 / 30.0)
+            })
+            .collect::<Vec<_>>();
+        let selection = select_segments(&listed, 30, Some(30));
+        assert!(selection.complete, "{selection:?}");
+        assert_eq!(selection.segments.len(), 15);
+        assert!((selection.covered_seconds - 30.0).abs() < 1.0e-9);
+        // Without the rate, the median end-to-next-start gap is the frame.
+        let unknown_rate = select_segments(&listed, 30, None);
+        assert_eq!(unknown_rate.segments.len(), 15);
+        assert!((unknown_rate.covered_seconds - 30.0).abs() < 1.0e-9);
+        // The old listed-span sum read 29.5 s here and pulled in a 16th
+        // segment when one was there.
+        let spans: f64 = listed.iter().map(Segment::duration_seconds).sum();
+        assert!((spans - 29.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn frame_seconds_prefers_the_rate_then_the_listed_gap() {
+        let listed = one_frame_short_ring();
+        assert!((frame_seconds(&listed, Some(60)) - 1.0 / 60.0).abs() < 1.0e-12);
+        assert!((frame_seconds(&listed, Some(0)) - frame_seconds(&listed, None)).abs() < 1.0e-12);
+        assert!((frame_seconds(&listed, None) - (1.0 / 30.0 - 1.0 / 90_000.0)).abs() < 1.0e-6);
+        assert_eq!(frame_seconds(&listed[..1], None), 0.0);
+        assert_eq!(frame_seconds(&[], None), 0.0);
     }
 
     #[test]
