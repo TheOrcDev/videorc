@@ -85,6 +85,12 @@ interface StageItemFacts {
   off: boolean
   /** A resize keeps the rect's aspect, Shift or not: a banner's rect is its image. */
   aspectLocked: boolean
+  /** Unselected, the item takes the pointer on its whole rect, not only on
+   * its label chip: a banner's picture is on the canvas, so a press on it
+   * grabs it. An overlay item is a mostly empty zone over the sources, and a
+   * banner that fills the canvas is a frame: both leave the sources under
+   * them to the pointer (`bannerFillsCanvas`). */
+  grabsBody: boolean
 }
 
 /** An item the stage draws after the sources: an overlay item or a banner. */
@@ -119,9 +125,36 @@ export function overlayStageItems(
       rect: overlayRectToStage(layout[item][orientation]),
       badge: off ? 'off' : overlayItemOutputBadge(layout[item]),
       off,
-      aspectLocked: false
+      aspectLocked: false,
+      grabsBody: false
     }
   })
+}
+
+/** A banner this much of the canvas is a frame around the picture, not a
+ * thing on it: taking the pointer on its whole rect would hide every source. */
+const BANNER_FRAME_COVERAGE = 0.9
+
+/** The banner's rect covers (nearly) the whole canvas. */
+export function bannerFillsCanvas(rect: StageRect): boolean {
+  return rect.width * rect.height >= BANNER_FRAME_COVERAGE
+}
+
+/**
+ * The other items a dragged item snaps to. An overlay item snaps to every
+ * other item; a banner only to the other banners: the highlight card, the
+ * captions and the Buddy are zones that are empty most of the time (and
+ * unpainted on the live picture), so their edges were magnets nobody could
+ * see, in the way of every banner drag across the canvas.
+ */
+export function stageItemSnapPeers(
+  entry: OverlayStageItem,
+  items: readonly OverlayStageItem[]
+): OverlayStageItem[] {
+  return items.filter(
+    (other) =>
+      other.stageId !== entry.stageId && (entry.kind === 'overlay' || other.kind === 'banner')
+  )
 }
 
 /**
@@ -142,17 +175,19 @@ export function bannerStageItems(
     .filter((banner) => banner.shown || banner.id === selectedId)
     .map((banner) => {
       const off = overlayItemOff(banner)
+      const rect = overlayRectToStage(
+        bannerFitRect(banner, banner[orientation], canvasAspect, orientation)
+      )
       return {
         kind: 'banner',
         id: banner.id,
         stageId: bannerStageId(banner.id),
         label: banner.name,
-        rect: overlayRectToStage(
-          bannerFitRect(banner, banner[orientation], canvasAspect, orientation)
-        ),
+        rect,
         badge: !banner.shown ? 'hidden' : off ? 'off' : overlayItemOutputBadge(banner),
         off: !banner.shown || off,
-        aspectLocked: true
+        aspectLocked: true,
+        grabsBody: !bannerFillsCanvas(rect)
       }
     })
 }
