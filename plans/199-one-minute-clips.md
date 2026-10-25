@@ -701,22 +701,39 @@ S1–S4, wrote S5 (UI) and S6, and ran the gates.
   reads `clip_marks.rs`'s phrase table with a regex. The plan did not name
   it. It failed on the new row shape and now matches `Some(("phrase", 30))`.
 
-### Gates (2026-10-25, this Mac, dev build, bundled FFmpeg 8.1.1)
+### Rebase
+
+The first gate run was on `f16a0b8a`. Main then took plan 198 (#828), #817,
+#819 and #827, and the branch was rebased onto `ba69eb94`:
+
+- **`plans/README.md`** conflicted; both entries are kept.
+- **`smoke-replay-buffer-app.mjs`** conflicted with #827, which waits a whole
+  window after a clip's analysis so the next clip never holds the
+  analyzer's CPU load. The 30-s and 1-min presses now go back to back
+  *before* either clip is analyzed (the second queues behind the first
+  save). The remote 1-min save waits `LONG_CLIP_SECONDS + 2` s after the
+  analyses.
+- **Eager budget.** #817 raised the gzip ceiling to 400,000, so the trim
+  this section once warned about is not needed.
+
+Every gate below ran again on the rebased tree.
+
+### Gates (2026-10-25, this Mac, dev build, bundled FFmpeg 8.1.1, rebased on `ba69eb94`)
 
 | Gate | Result |
 | --- | --- |
-| `cargo test -p videorc-backend -- replay clip_marks moments remote_control shared_high_risk_contract_fixture` | pass: 110, 1 ignored |
+| `cargo test -p videorc-backend -- replay clip_marks moments remote_control shared_high_risk_contract_fixture` | pass: 111, 1 ignored (110 before the rebase) |
 | `cargo test … real_ffmpeg_ring_saves -- --include-ignored` (bundled FFmpeg) | pass |
 | `cargo clippy -p videorc-backend -- -D warnings` | pass |
 | `cargo fmt --check --all` | pass |
 | `pnpm typecheck` / `pnpm lint` / `pnpm format:check` | pass (lint: only the pre-existing `exhaustive-deps` warning in `use-studio.tsx`) |
-| `pnpm --filter @videorc/desktop test` | pass: 523 files, 5,423 tests, 1 skipped |
-| `pnpm test:scripts` | pass: 2,552 (after the live-lab phrase fix) |
-| `pnpm build` + `pnpm check:renderer-assets` | pass. Eager JS is 1,965,591 raw / 394,859 gzip. Main at `f16a0b8a` is 1,965,629 / 394,848, so this branch adds **+11 gzip bytes** under the 395,000 ceiling. Main itself has only 152 bytes of headroom, and plan 198 (#828) reports 4. Whichever lands second needs a small eager trim. |
-| `pnpm smoke:replay-buffer` | **pass**. The ring came up at launch keeping 60 s and was full after 61.4 s. The disk bound held at 33 files (bound 33) over 91 samples. Clips, each H.264 1080p + AAC, analyzer pass, with a "Clip" Library row: 30.00 s (`clip.mark` with no length); 60.00 s (`clip.mark { seconds: 60 }`); 60.00 s (remote `clipMark { seconds: 60 }`); 60.00 s mid-recording, with a mark at 66.0 s holding `lookbackSeconds: 60`. `seconds: 45` was refused with the sentence and wrote nothing. Record handed over in 130 ms; the 75.27 s recording passed the analyzer; the ring re-armed after Stop. |
-
-| `pnpm smoke:remote-control` | pass |
-| `VIDEORC_SMOKE_REPLAY_SECONDS=15 pnpm smoke:multistream` | pass: with no length, the press clamped to the 15-s ring and saved a 16.00 s clip mid-stream (event `seconds` 15). Three legs got 1,203,085 bytes each and passed their quality gates; the recording finalized and passed; the dead leg was isolated. The host warned of a load of 26 on 10 cores and 7.5 GB of swap. |
+| `pnpm --filter @videorc/desktop test` | pass: 524 files, 5,441 tests, 1 skipped |
+| `pnpm test:scripts` | pass: 2,553, 1 skipped (the first run found the live-lab phrase check, fixed in `e900fd39`) |
+| `pnpm build` + `pnpm check:renderer-assets` | pass. Eager JS is 1,969,865 raw / 395,971 gzip. Main at `ba69eb94` is 1,969,902 / 395,968, so this branch adds **+3 gzip bytes** under the 400,000 ceiling. (Against `f16a0b8a` it was +11 under 395,000.) |
+| `pnpm smoke:replay-buffer` | **pass**, both runs. The ring came up at launch keeping 60 s and was full after 61.4 s. The disk bound held at 33 files (bound 33) over 91 samples. Clips, each H.264 1080p + AAC, analyzer pass, with a "Clip" Library row: 30.00 s (`clip.mark` with no length); 60.00 s (`clip.mark { seconds: 60 }`); 60.00 s (remote `clipMark { seconds: 60 }`); 60.00 s mid-recording, with a mark at 66.0 s holding `lookbackSeconds: 60`. `seconds: 45` was refused with the sentence and wrote nothing. Record handed over in 132 ms; the 76.63 s recording passed the analyzer; the ring re-armed after Stop. |
+| `pnpm smoke:remote-control` | pass, both runs |
+| `VIDEORC_SMOKE_REPLAY_SECONDS=15 pnpm smoke:multistream` | pass, both runs. With no length, the press clamps to the 15-s ring and saves a 16.00 s clip mid-stream (event `seconds` 15). Three legs passed their quality gates; the recording finalized and passed; the dead leg was isolated. The host warned of a load of 26 on 10 cores and 7.5 GB of swap. |
+| `pnpm smoke:recording-studio` | RESULT_PENDING |
 
 ### Owed
 
@@ -730,5 +747,4 @@ S1–S4, wrote S5 (UI) and S6, and ran the gates.
 - Voice "clip the last minute" with captions or Buddy listening, on a real
   take.
 - Windows and Linux runtime. CI covers compile and unit tests only.
-- The rebase onto plan 198 (#828), with the eager trim if the budget
-  needs it.
+- Release notes: the Length setting is gone, and the ring keeps a minute.
