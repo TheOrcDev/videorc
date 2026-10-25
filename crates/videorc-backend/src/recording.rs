@@ -1065,8 +1065,7 @@ fn ffmpeg_output_startup_deadline(microphone: Option<&MicrophoneInput>) -> Durat
     match microphone {
         Some(MicrophoneInput::WindowsDshow { .. } | MicrophoneInput::LinuxPulse { .. }) => {
             FFMPEG_OUTPUT_STARTUP_TIMEOUT.max(
-                Duration::from_secs(8)
-                    + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET,
+                Duration::from_secs(8) + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET,
             )
         }
         _ => FFMPEG_OUTPUT_STARTUP_TIMEOUT,
@@ -7933,7 +7932,11 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-movflags".to_string(),
         "+faststart".to_string(),
     ];
-    append_media_foundation_h264_color_metadata_args(&mut args);
+    // #792 dropped the Media Foundation helper that took a frame rate; MP4
+    // export is a remux of an MKV that already declares its rate, so stamp
+    // BT.709 / video-range with the shared tag + VUI rewrite helpers.
+    args.extend(h264_bt709_color_tag_args());
+    args.extend(h264_bt709_vui_rewrite_bsf_args());
     if let Some(trim_seconds) = trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
@@ -12547,12 +12550,19 @@ fn should_finalize_recording_session(
     // instead of unconditionally marooning it as recovery media. That only
     // holds when FFmpeg exited on its own: once Videorc escalated to TERM/KILL
     // the muxer never flushed, so the MKV stays recovery media and the exit is
-    // reported as `recording-stop-forced`. A recording bridge failure remains
-    // terminal because it means the video producer did not finish its contract.
-    if recording_bridge_terminal_failure.is_some()
-        || (!ffmpeg_exit_success && (!stop_intent_preceded_exit || stop_escalated))
-    {
+    // reported as `recording-stop-forced`.
+    // macOS VideoToolbox and Linux keep main's contract: any non-zero FFmpeg
+    // exit stays recovery media. A recording bridge failure remains terminal
+    // because it means the video producer did not finish its contract.
+    if recording_bridge_terminal_failure.is_some() {
         return false;
+    }
+    if !ffmpeg_exit_success {
+        let windows_nonzero_after_own_stop =
+            cfg!(target_os = "windows") && stop_intent_preceded_exit && !stop_escalated;
+        if !windows_nonzero_after_own_stop {
+            return false;
+        }
     }
     // A dead STREAM output ends FFmpeg without a user stop, but the RECORDING
     // data is intact and the muxer flushed cleanly (exit 0) — finalize it.
@@ -37039,10 +37049,9 @@ mod tests {
             .checked_sub(dshow_deadline + Duration::from_millis(1))
             .unwrap();
         let (_pending_sender, pending) = oneshot::channel();
-        let error =
-            wait_for_ffmpeg_output_startup(pending, expired_start, dshow_deadline)
-                .await
-                .unwrap_err();
+        let error = wait_for_ffmpeg_output_startup(pending, expired_start, dshow_deadline)
+            .await
+            .unwrap_err();
         assert!(
             error.to_string().contains(&format!(
                 "within {}ms of process spawn",
@@ -38712,9 +38721,15 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true, false, false, None, None
         ));
+        #[cfg(target_os = "windows")]
         assert!(
             should_finalize_recording_session(false, true, false, None, None),
             "a stopped Windows graph may have a non-zero exit while its MKV remains exportable"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            !should_finalize_recording_session(false, true, false, None, None),
+            "a non-zero/forced FFmpeg exit after stop must remain failed"
         );
         assert!(should_finalize_recording_session(
             true, true, false, None, None
