@@ -226,6 +226,34 @@ describe('error toasts offer Copy', () => {
     expect(sonner.warning).toHaveBeenCalledWith('Degraded')
   })
 
+  it('still offers Copy when the toast’s two slots are its own', async () => {
+    const library = { label: 'Open in Library', onClick: vi.fn() }
+    const folder = { label: 'Show in folder', onClick: vi.fn() }
+    toast.error('Recording stopped unexpectedly', {
+      id: 'recording-stopped',
+      description: 'Encoder bridge stopped.',
+      action: library,
+      cancel: folder,
+      duration: Infinity
+    })
+    const [, options] = sonner.error.mock.calls[0] as [string, Record<string, unknown>]
+    expect(options).toMatchObject({ action: library, cancel: folder, id: 'recording-stopped' })
+    // The description keeps its words and gains the Copy button.
+    const description = options.description as {
+      props: { children: [string, string, { props: Record<string, unknown> }] }
+    }
+    const [words, , button] = description.props.children
+    expect(words).toBe('Encoder bridge stopped.')
+    expect(button.props.children).toBe(COPY_ERROR_LABEL)
+    ;(button.props.onClick as () => void)()
+    await vi.waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        'Recording stopped unexpectedly\nEncoder bridge stopped.'
+      )
+    )
+    expect(sonner.dismiss).toHaveBeenCalledWith('recording-stopped')
+  })
+
   it('says so when the clipboard refuses', async () => {
     writeText.mockRejectedValue(new Error('denied'))
     toast.error('Recording failed')

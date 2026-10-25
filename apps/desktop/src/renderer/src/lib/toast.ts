@@ -1,3 +1,4 @@
+import { createElement, Fragment } from 'react'
 import { toast as sonner, type ExternalToast } from 'sonner'
 
 import { stripIpcPrefix } from '@/lib/ipc-error-message'
@@ -141,6 +142,35 @@ function copyErrorToast(text: string): void {
   })()
 }
 
+let copyToastSequence = 0
+
+/**
+ * A toast whose two slots are its own (Recording stopped unexpectedly: Open
+ * in Library and Show in folder) still offers Copy: a text button after the
+ * description. Clicking it closes the toast, like the slot's Copy does.
+ */
+function withCopyInDescription(options: ExternalToast, copied: string): ExternalToast {
+  copyToastSequence += 1
+  const id = options.id ?? `videorc-copyable-error-${copyToastSequence}`
+  const button = createElement(
+    'button',
+    {
+      type: 'button',
+      'data-videorc-toast-copy': '',
+      className:
+        'ml-1 cursor-default font-medium text-foreground underline decoration-muted-foreground/50 underline-offset-2',
+      onClick: () => {
+        copyErrorToast(copied)
+        sonner.dismiss(id)
+      }
+    },
+    COPY_ERROR_LABEL
+  )
+  const words =
+    typeof options.description === 'function' ? options.description() : options.description
+  return { ...options, id, description: createElement(Fragment, null, words, ' ', button) }
+}
+
 function guardOptions(
   title: ToastTitle,
   options: ExternalToast | undefined,
@@ -190,6 +220,7 @@ function guardOptions(
       const copy = { label: COPY_ERROR_LABEL, onClick: () => copyErrorToast(copied) }
       if (!nextOptions?.action) nextOptions = { ...nextOptions, action: copy }
       else if (!nextOptions.cancel) nextOptions = { ...nextOptions, cancel: copy }
+      else nextOptions = withCopyInDescription(nextOptions, copied)
     }
   }
   return { title: nextTitle, options: nextOptions }
