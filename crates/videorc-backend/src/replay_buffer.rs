@@ -30,14 +30,17 @@ pub const MIN_SECONDS: u32 = 5;
 pub const MAX_SECONDS: u32 = 600;
 /// The ring's length when no session reports one (`replay.status` while
 /// off). Plan 199: the ring always keeps the longest clip.
-pub const DEFAULT_SECONDS: u32 = 60;
-/// The two lengths a clip press may ask for (plan 199): today's 30-second
-/// clip and the 1-minute clip. Mirrored in `shared/clip-marks.ts`
-/// (`CLIP_LENGTHS`).
-pub const CLIP_LENGTHS: [u32; 2] = [30, 60];
+pub const DEFAULT_SECONDS: u32 = LONG_CLIP_SECONDS;
 /// A press that names no length saves this many seconds, exactly as before
 /// plan 199. Mirrored in `shared/clip-marks.ts` (`DEFAULT_CLIP_SECONDS`).
 pub const DEFAULT_CLIP_SECONDS: u32 = 30;
+/// The 1-minute clip (plan 199). Mirrored in `shared/clip-marks.ts`
+/// (`LONG_CLIP_SECONDS`).
+pub const LONG_CLIP_SECONDS: u32 = 60;
+/// The two lengths a clip press may ask for (plan 199): today's 30-second
+/// clip and the 1-minute clip. Mirrored in `shared/clip-marks.ts`
+/// (`CLIP_LENGTHS`).
+pub const CLIP_LENGTHS: [u32; 2] = [DEFAULT_CLIP_SECONDS, LONG_CLIP_SECONDS];
 /// The refusal code for a length that is not in [`CLIP_LENGTHS`]. Mirrored in
 /// `shared/clip-marks.ts`.
 pub const INVALID_CLIP_LENGTH_CODE: &str = "invalid-clip-length";

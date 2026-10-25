@@ -5999,6 +5999,11 @@ pub struct ClipMark {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrase: Option<String>,
     pub created_at: String,
+    /// How far back the moment reaches (plan 199 D8): the press's clip
+    /// length, 30 or 60. `None` for every mark made before plan 199, which
+    /// reads as 30 s. Omitted, never null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_seconds: Option<u32>,
 }
 
 /// `clip.marked` event and the `clip.mark` reply: where the mark landed and
@@ -7652,6 +7657,11 @@ mod tests {
         assert_eq!(marks[0].source, ClipMarkSource::Voice);
         assert_eq!(marks[0].phrase.as_deref(), Some("clip that"));
         assert_eq!(marks[1].phrase, None);
+        // Plan 199 D8: a mark made before the plan has no length on the
+        // wire; a 1-min press carries its 60.
+        assert_eq!(marks[0].lookback_seconds, None);
+        assert_eq!(marks[1].lookback_seconds, None);
+        assert_eq!(marks[2].lookback_seconds, Some(60));
         assert_eq!(serde_json::to_value(marks).unwrap(), marks_wire);
     }
 

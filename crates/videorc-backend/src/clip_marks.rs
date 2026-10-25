@@ -18,24 +18,43 @@ use chrono::Utc;
 
 use crate::captions::CaptionSegment;
 use crate::protocol::{ClipMark, ClipMarkSource, ClipMarkedEvent};
+use crate::replay_buffer::{DEFAULT_CLIP_SECONDS, LONG_CLIP_SECONDS};
 use crate::state::AppState;
 
-/// English phrases that place a mark, as normalized words.
-pub const CLIP_PHRASES: &[&[&str]] = &[
-    &["clip", "that"],
-    &["clip", "it"],
-    &["clip", "this"],
-    &["thats", "a", "clip"],
-    &["make", "a", "clip"],
+/// English phrases that place a mark, as normalized words, and the clip
+/// length each one saves (plan 199 D7: "clip the last minute" and "long
+/// clip" save the minute; every older phrase stays today's 30 s).
+pub const CLIP_PHRASES: &[(&[&str], u32)] = &[
+    (&["clip", "that"], DEFAULT_CLIP_SECONDS),
+    (&["clip", "it"], DEFAULT_CLIP_SECONDS),
+    (&["clip", "this"], DEFAULT_CLIP_SECONDS),
+    (&["thats", "a", "clip"], DEFAULT_CLIP_SECONDS),
+    (&["make", "a", "clip"], DEFAULT_CLIP_SECONDS),
+    (&["clip", "the", "last", "minute"], LONG_CLIP_SECONDS),
+    (&["long", "clip"], LONG_CLIP_SECONDS),
 ];
 
 /// A voice match within this many seconds of the previous mark (voice or
 /// manual) is the same moment said twice.
 pub const CLIP_MARK_DEDUPE_SECONDS: f64 = 10.0;
 
-/// The longest phrase has three words, so two carried words complete any
-/// phrase that started in the previous final.
-const TAIL_WORDS: usize = 2;
+/// The words in the longest phrase of [`CLIP_PHRASES`].
+const fn longest_phrase_words() -> usize {
+    let mut longest = 0;
+    let mut index = 0;
+    while index < CLIP_PHRASES.len() {
+        if CLIP_PHRASES[index].0.len() > longest {
+            longest = CLIP_PHRASES[index].0.len();
+        }
+        index += 1;
+    }
+    longest
+}
+
+/// One word fewer than the longest phrase (four words since plan 199), so
+/// the carried words complete any phrase that started in the previous final.
+/// Derived from the table, so a longer phrase can never outgrow the tail.
+const TAIL_WORDS: usize = longest_phrase_words() - 1;
 
 /// Carried words older than this, or ahead of this final, are not its sentence.
 const TAIL_MAX_AGE_SECONDS: f64 = 6.0;
@@ -80,6 +99,8 @@ pub struct PhraseMatch {
     /// The phrase as spoken, normalized ("clip that").
     pub phrase: String,
     pub at_seconds: f64,
+    /// The clip length the phrase saves (plan 199): 30 or 60.
+    pub seconds: u32,
 }
 
 /// Lowercase ASCII letters and digits only: "That's," → "thats", "Clip!" →
@@ -126,7 +147,7 @@ pub fn timed_words(text: &str, segments: &[CaptionSegment], offset_seconds: f64)
 pub fn find_clip_phrase(tail: &[TimedWord], words: &[TimedWord]) -> Option<PhraseMatch> {
     let all: Vec<&TimedWord> = tail.iter().chain(words.iter()).collect();
     for start in 0..all.len() {
-        for phrase in CLIP_PHRASES {
+        for (phrase, seconds) in CLIP_PHRASES {
             let end = start + phrase.len();
             if end > all.len() || end <= tail.len() {
                 continue;
@@ -139,6 +160,7 @@ pub fn find_clip_phrase(tail: &[TimedWord], words: &[TimedWord]) -> Option<Phras
                 return Some(PhraseMatch {
                     phrase: phrase.join(" "),
                     at_seconds: all[start].at_seconds,
+                    seconds: *seconds,
                 });
             }
         }
@@ -414,7 +436,7 @@ pub(crate) fn note_transcript_final(
             Some(found.at_seconds),
             ClipMarkSource::Voice,
             Some(found.phrase.clone()),
-            crate::replay_buffer::DEFAULT_CLIP_SECONDS,
+            found.seconds,
         )
         .await
         {
@@ -505,6 +527,9 @@ async fn record_mark(
             source,
             phrase,
             created_at: Utc::now().to_rfc3339(),
+            // Plan 199 D8: the mark remembers its press's length, so the
+            // report and Clean cut span the minute for a 1-min press.
+            lookback_seconds: Some(seconds),
         })?;
         true
     } else {
@@ -604,13 +629,21 @@ mod tests {
 
     #[test]
     fn phrase_table() {
-        let cases: &[(&str, Option<&str>)] = &[
-            ("okay clip that", Some("clip that")),
-            ("Clip it.", Some("clip it")),
-            ("please clip this one", Some("clip this")),
-            ("That's a clip!", Some("thats a clip")),
-            ("thats a clip", Some("thats a clip")),
-            ("we should make a clip of that", Some("make a clip")),
+        let cases: &[(&str, Option<(&str, u32)>)] = &[
+            ("okay clip that", Some(("clip that", 30))),
+            ("Clip it.", Some(("clip it", 30))),
+            ("please clip this one", Some(("clip this", 30))),
+            ("That's a clip!", Some(("thats a clip", 30))),
+            ("thats a clip", Some(("thats a clip", 30))),
+            ("we should make a clip of that", Some(("make a clip", 30))),
+            // Plan 199 D7: the minute. Earliest start wins, so "long clip
+            // that" is one 1-min match, not a 30-s "clip that".
+            ("okay long clip that", Some(("long clip", 60))),
+            ("Clip the last minute!", Some(("clip the last minute", 60))),
+            ("that was a long clip", Some(("long clip", 60))),
+            ("clip the last bit", None),
+            ("the last minute was wild", None),
+            ("a long clipboard", None),
             ("look at the eclipse that was cool", None),
             ("copy it to the clipboard that helps", None),
             ("I clipped it yesterday", None),
@@ -620,11 +653,105 @@ mod tests {
         for (text, expected) in cases {
             let found = find_clip_phrase(&[], &timed_words(text, &[], 100.0));
             assert_eq!(
-                found.as_ref().map(|found| found.phrase.as_str()),
+                found
+                    .as_ref()
+                    .map(|found| (found.phrase.as_str(), found.seconds)),
                 *expected,
                 "text: {text:?}"
             );
         }
+    }
+
+    /// Plan 199: the tail is one word shorter than the longest phrase, and
+    /// every phrase saves one of the clip lengths.
+    #[test]
+    fn the_tail_follows_the_longest_phrase_and_every_length_is_offered() {
+        let longest = CLIP_PHRASES
+            .iter()
+            .map(|(phrase, _)| phrase.len())
+            .max()
+            .unwrap();
+        assert_eq!(longest, 4, "clip the last minute");
+        assert_eq!(TAIL_WORDS, longest - 1);
+        for (phrase, seconds) in CLIP_PHRASES {
+            assert!(
+                crate::replay_buffer::CLIP_LENGTHS.contains(seconds),
+                "{phrase:?} saves {seconds} s"
+            );
+        }
+    }
+
+    /// Plan 199: the four-word phrase split across two finals still matches
+    /// once, at its first word, as the minute.
+    #[test]
+    fn the_minute_phrase_split_across_finals_matches_once() {
+        let mut detector = detector_for_recording();
+        assert!(
+            detector
+                .note_final(
+                    "recording",
+                    "okay clip the last",
+                    &[segment("okay", 0.2), segment("clip the last", 1.5)],
+                    50.0
+                )
+                .is_none()
+        );
+        let found = detector
+            .note_final("recording", "minute please", &[], 53.0)
+            .expect("boundary match");
+        assert_eq!(found.phrase, "clip the last minute");
+        assert_eq!(found.seconds, 60);
+        assert_eq!(found.at_seconds, 51.5);
+        assert!(
+            detector
+                .note_final("recording", "okay", &[], 55.0)
+                .is_none()
+        );
+        // "long" | "clip" across finals is the minute too.
+        let mut detector = detector_for_recording();
+        assert!(
+            detector
+                .note_final("recording", "that was long", &[], 10.0)
+                .is_none()
+        );
+        let found = detector
+            .note_final("recording", "clip that", &[], 12.0)
+            .expect("boundary match");
+        assert_eq!((found.phrase.as_str(), found.seconds), ("long clip", 60));
+        // The "clip that" inside the same words is the same press.
+        assert!(
+            detector
+                .note_final("recording", "right", &[], 14.0)
+                .is_none()
+        );
+    }
+
+    /// Plan 199: the 10-s dedupe swallows a second phrase of either length.
+    #[test]
+    fn the_dedupe_swallows_a_second_phrase_of_either_length() {
+        let mut detector = detector_for_recording();
+        assert_eq!(
+            detector
+                .note_final("recording", "clip that", &[], 100.0)
+                .map(|found| found.seconds),
+            Some(30)
+        );
+        assert!(
+            detector
+                .note_final("recording", "long clip", &[], 104.0)
+                .is_none()
+        );
+        assert_eq!(
+            detector
+                .note_final("recording", "long clip", &[], 120.0)
+                .map(|found| found.seconds),
+            Some(60)
+        );
+        assert!(
+            detector
+                .note_final("recording", "clip it", &[], 125.0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -949,7 +1076,10 @@ mod tests {
         assert_eq!(reply.reason.as_deref(), Some(CLIP_SAVED_REASON));
         let outcome = wait_for_save_outcome(&mut events).await;
         assert_eq!(outcome.event, "replay.saveFailed");
-        assert_eq!(list_marks(&state, "ring-rec").unwrap().len(), 1);
+        let marks = list_marks(&state, "ring-rec").unwrap();
+        assert_eq!(marks.len(), 1);
+        // No length is today's 30 s, and the mark says so (plan 199).
+        assert_eq!(marks[0].lookback_seconds, Some(30));
         state.recording.lock().await.take();
         crate::replay_buffer::retire(
             &state,
@@ -1003,7 +1133,8 @@ mod tests {
             find_clip_phrase(&[word("make", 9.0), word("a", 9.3)], &[word("clip", 12.0)]),
             Some(PhraseMatch {
                 phrase: "make a clip".to_string(),
-                at_seconds: 9.0
+                at_seconds: 9.0,
+                seconds: 30,
             })
         );
         // A phrase entirely inside the tail was already reported.
@@ -1079,6 +1210,27 @@ mod tests {
         assert_eq!(marks.len(), 1);
         assert_eq!(marks[0].at_seconds, 1_804.5);
         assert_eq!(marks[0].phrase.as_deref(), Some("clip that"));
+        assert_eq!(marks[0].lookback_seconds, Some(30));
+        assert_eq!(events.try_recv().unwrap().event, "clip.marked");
+
+        // Plan 199 D8: a 1-min phrase keeps a mark that remembers the minute.
+        record_mark(
+            &state,
+            Some(MarkTarget {
+                session_id: "stream-a".to_string(),
+                records_to_file: true,
+            }),
+            Some(1_900.0),
+            ClipMarkSource::Voice,
+            Some("long clip".to_string()),
+            60,
+        )
+        .await
+        .unwrap();
+        let marks = list_marks(&state, "stream-a").unwrap();
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks[1].phrase.as_deref(), Some("long clip"));
+        assert_eq!(marks[1].lookback_seconds, Some(60));
         assert_eq!(events.try_recv().unwrap().event, "clip.marked");
 
         // A stream-only capture still keeps nothing, and says why.
