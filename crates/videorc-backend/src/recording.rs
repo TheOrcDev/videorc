@@ -29584,13 +29584,26 @@ mod tests {
         if failure_case.as_deref() == Some("bridge") {
             assert_eq!(camera_diagnostics["sourceIsoMuxerExitCode"], 0, "a failed encoder with clean muxer EOF stays failed");
         }
-        let intervals = if let Some(role) = remove_role.as_deref() {
+        let mut intervals = if let Some(role) = remove_role.as_deref() {
             let row = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")).unwrap();
             let diagnostics: serde_json::Value = serde_json::from_str(&row.diagnostics_json).unwrap();
             assert_eq!(diagnostics["sourceIsoOutcome"], "source-removed");
             serde_json::json!({role: {"outcome": "source-removed", "startSeconds": 0,
                 "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap() / 1000.0}})
         } else { serde_json::json!({}) };
+        // Plan 200 D1: a file shed so Combined keeps up (a slow 4K take) ends
+        // early by design; the take gate judges it on its explicit end.
+        for role in ["screen", "camera"] {
+            let Ok(row) = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")) else {
+                continue;
+            };
+            let diagnostics: serde_json::Value =
+                serde_json::from_str(&row.diagnostics_json).unwrap_or_default();
+            if diagnostics["sourceIsoOutcome"] == "shed" {
+                intervals[role] = serde_json::json!({"outcome": "shed", "startSeconds": 0,
+                    "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap_or(0.0) / 1000.0});
+            }
+        }
         std::fs::write(directory.join("runtime-take.json"), serde_json::to_vec_pretty(&serde_json::json!({
             "combinedPath": status.output_path, "sessionId": session_id,
             "video": params.output.video, "layout": params.layout, "audio": params.audio, "offsetMs": params.audio.microphone_sync_offset_ms,
