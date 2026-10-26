@@ -1373,6 +1373,22 @@ pub(crate) fn microphone_sample_rate_warning(
     ))
 }
 
+/// Plan 200 A3: why the 48 kHz client format was refused. On a device that
+/// runs at another rate the plain-words rate warning leads; CoreAudio's own
+/// error always follows, so a permission or busy-device cause stays visible
+/// (and `permission_or_unavailable` still reads it).
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn stream_format_failure_message(
+    device_name: &str,
+    rate_warning: Option<&str>,
+    underlying: &str,
+) -> String {
+    match rate_warning {
+        Some(warning) => format!("{warning} ({underlying})"),
+        None => format!("Could not set CoreAudio stream format for {device_name}: {underlying}"),
+    }
+}
+
 /// `44100.0` → `44.1 kHz`, `96000.0` → `96 kHz`.
 fn kilohertz_label(rate: f64) -> String {
     let label = format!("{:.2}", rate / 1_000.0);
@@ -1504,8 +1520,6 @@ fn start_platform_audio_source(
             "{warning}"
         );
     }
-    // A device the 48 kHz client format is refused on says why in plain words.
-    let open_failure = |fallback: String| rate_warning.clone().unwrap_or(fallback);
 
     let stream_format = StreamFormat {
         sample_rate: f64::from(NATIVE_AUDIO_SAMPLE_RATE),
@@ -1513,11 +1527,15 @@ fn start_platform_audio_source(
         flags: LinearPcmFlags::IS_FLOAT | LinearPcmFlags::IS_PACKED,
         channels: u32::from(NATIVE_AUDIO_CHANNELS),
     };
+    // A device the 48 kHz client format is refused on says why in plain
+    // words, and keeps CoreAudio's own error beside it.
     audio_unit
         .set_stream_format(stream_format, Scope::Output, Element::Input)
-        .with_context(|| {
-            open_failure(format!(
-                "Could not set CoreAudio stream format for {device_name}"
+        .map_err(|error| {
+            anyhow::anyhow!(stream_format_failure_message(
+                &device_name,
+                rate_warning.as_deref(),
+                &error.to_string(),
             ))
         })?;
 
@@ -1582,11 +1600,9 @@ fn start_platform_audio_source(
             format!("Could not register CoreAudio input callback for {device_name}")
         })?;
 
-    audio_unit.start().with_context(|| {
-        open_failure(format!(
-            "Could not start CoreAudio input device {device_name}"
-        ))
-    })?;
+    audio_unit
+        .start()
+        .with_context(|| format!("Could not start CoreAudio input device {device_name}"))?;
 
     Ok(NativeAudioSource {
         device_id,
@@ -2655,6 +2671,36 @@ mod tests {
         assert_eq!(
             permission_or_unavailable(&warning),
             AudioMeterStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_refused_client_format_keeps_the_underlying_error() {
+        let warning = microphone_sample_rate_warning("Shure MV7", 44_100.0).unwrap();
+        let refused = stream_format_failure_message(
+            "Shure MV7",
+            Some(&warning),
+            "kAudioUnitErr_FormatNotSupported",
+        );
+        assert_eq!(
+            refused,
+            format!("{warning} (kAudioUnitErr_FormatNotSupported)")
+        );
+        // A permission cause under a rate warning still reads as permission.
+        let denied = stream_format_failure_message(
+            "Shure MV7",
+            Some(&warning),
+            "Microphone permission denied",
+        );
+        assert!(denied.starts_with(&warning));
+        assert_eq!(
+            permission_or_unavailable(&denied),
+            AudioMeterStatus::PermissionRequired
+        );
+        // At 48 kHz there is no warning: the plain failure and its cause.
+        assert_eq!(
+            stream_format_failure_message("Mic", None, "busy"),
+            "Could not set CoreAudio stream format for Mic: busy"
         );
     }
 
