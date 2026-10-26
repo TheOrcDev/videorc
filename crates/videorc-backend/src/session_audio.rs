@@ -3886,6 +3886,9 @@ impl Default for PeakLimiter {
     }
 }
 impl PeakLimiter {
+    /// Unity gain. The bus no longer branches on it (plan 200 A2: the
+    /// limiter runs on every path); tests read it.
+    #[cfg(test)]
     fn idle(&self) -> bool {
         self.gain >= 1.0
     }
