@@ -2055,6 +2055,10 @@ pub struct PerformanceCheckRunParams {
     pub ceiling_width: u32,
     pub ceiling_height: u32,
     pub ceiling_fps: u32,
+    /// Plan 200 D4: the next take would also write the Screen and Camera
+    /// files, so the check counts their encoders in its budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub separate_source_recordings: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

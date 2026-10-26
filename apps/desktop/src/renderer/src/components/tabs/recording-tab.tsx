@@ -44,6 +44,7 @@ import {
   REPLAY_RING_SECONDS,
   layoutPresetOrientation,
   resolutionOptionsForOrientation,
+  separateSourceRecordingsEncoderNotice,
   separateSourceRecordingsIneligibility,
   separateSourceRecordingsIneligibilityCopy,
   separateSourceRecordingsSupported,
@@ -213,6 +214,12 @@ function LocalRecordingSection(): ReactElement {
     : captureConfig.separateSourceRecordings.enabled
       ? separateSourceRecordingsIneligibility(captureConfig, runtimeInfo?.platform)
       : null
+  // Plan 200 D4: at 4K or 60 fps the separate files triple the encoder work;
+  // say what happens if the Mac falls behind before Record is pressed.
+  const separateEncoderNotice = separateSourceRecordingsEncoderNotice(
+    captureConfig,
+    runtimeInfo?.platform
+  )
   const profileGate = videoProfileEntitlementGate({ entitlements, kind: 'recording', video })
   const profileEntitlementMessage = profileGate.allowed ? null : profileGate.reason
   const checkLine = performanceCheckLine({
@@ -270,6 +277,20 @@ function LocalRecordingSection(): ReactElement {
                     weight="fill"
                   />
                   {separateSourceRecordingsIneligibilityCopy(separateIneligibility)}
+                </span>
+              ) : null}
+              {separateEncoderNotice ? (
+                // The tone rides on the icon; the words stay monochrome (plan 174 S1.8).
+                <span
+                  className="mt-1 flex items-start gap-1.5 text-foreground"
+                  data-testid="output-separate-source-recordings-encoder-notice"
+                >
+                  <WarningIcon
+                    aria-hidden
+                    className="mt-0.5 size-3.5 shrink-0 text-warning"
+                    weight="fill"
+                  />
+                  {separateEncoderNotice}
                 </span>
               ) : null}
             </>

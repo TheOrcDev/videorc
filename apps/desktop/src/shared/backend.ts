@@ -2105,6 +2105,8 @@ export interface PerformanceCheckRunParams {
   ceilingWidth: number
   ceilingHeight: number
   ceilingFps: number
+  /** Plan 200 D4: the next take also writes the Screen and Camera files. */
+  separateSourceRecordings?: boolean
 }
 
 export type PerformanceCheckRungVerdict = 'passed' | 'failed' | 'skipped'

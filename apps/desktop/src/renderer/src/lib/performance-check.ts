@@ -36,22 +36,27 @@ const dominates = (a: VideoSettings, b: VideoSettings): boolean =>
  * The largest output worth testing: whatever is selected, or the display's
  * native size when that is larger (capped at 4K). A 1080p laptop never spends
  * time on 4K rungs; a 1440p selection on that laptop still gets its verdict.
+ * When the next take also writes the Screen and Camera files, the check is
+ * told so and counts their encoders (plan 200 D4).
  */
 export function performanceCheckCeiling(
   selected: VideoSettings,
-  display?: { width: number; height: number }
+  display?: { width: number; height: number },
+  separateSourceRecordings = false
 ): PerformanceCheckRunParams {
   const ceilingFps = Math.max(30, selected.fps)
+  const separate = separateSourceRecordings ? { separateSourceRecordings: true } : {}
   if (!display || pixels(display) <= pixels(selected)) {
-    return { ceilingWidth: selected.width, ceilingHeight: selected.height, ceilingFps }
+    return { ceilingWidth: selected.width, ceilingHeight: selected.height, ceilingFps, ...separate }
   }
   if (pixels(display) > MAX_CEILING_PIXELS) {
-    return { ceilingWidth: 3840, ceilingHeight: 2160, ceilingFps }
+    return { ceilingWidth: 3840, ceilingHeight: 2160, ceilingFps, ...separate }
   }
   return {
     ceilingWidth: Math.round(display.width),
     ceilingHeight: Math.round(display.height),
-    ceilingFps
+    ceilingFps,
+    ...separate
   }
 }
 

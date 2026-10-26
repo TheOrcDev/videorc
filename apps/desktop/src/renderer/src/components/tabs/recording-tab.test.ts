@@ -61,15 +61,18 @@ function Harness({
   surface,
   video,
   recordEnabled,
-  initialSettings
+  initialSettings,
+  configPatch
 }: {
   surface: () => ReactElement
   video: VideoSettings
   recordEnabled: boolean
   initialSettings: SettingsState
+  configPatch?: Partial<CaptureConfig>
 }) {
   const [config, setConfig] = useState<CaptureConfig>({
     ...defaultCaptureConfig,
+    ...configPatch,
     video,
     recordEnabled
   })
@@ -124,11 +127,21 @@ function Harness({
 async function render(
   surface: () => ReactElement,
   video: VideoSettings = videoPresets['tutorial-1080p30'],
-  { recordEnabled = true, settings = defaultSettings } = {}
+  {
+    recordEnabled = true,
+    settings = defaultSettings,
+    config
+  }: { recordEnabled?: boolean; settings?: SettingsState; config?: Partial<CaptureConfig> } = {}
 ): Promise<void> {
   await act(async () =>
     root.render(
-      createElement(Harness, { surface, video, recordEnabled, initialSettings: settings })
+      createElement(Harness, {
+        surface,
+        video,
+        recordEnabled,
+        initialSettings: settings,
+        configPatch: config
+      })
     )
   )
 }
@@ -180,6 +193,35 @@ const renderOutputPage = (
   video?: VideoSettings,
   options?: { recordEnabled?: boolean; settings?: SettingsState }
 ): Promise<void> => render(() => createElement(RecordingTab), video, options)
+
+describe('separate files encoder notice (plan 200 D4)', () => {
+  const separateFiles: Partial<CaptureConfig> = {
+    separateSourceRecordings: { enabled: true, keepCombined: true },
+    sources: { screenId: 'screen:1', cameraId: 'camera:1', testPattern: false }
+  }
+  const notice = (): HTMLElement | null =>
+    document.querySelector('[data-testid="output-separate-source-recordings-encoder-notice"]')
+
+  it('says at 4K what the separate files cost before Record', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['record-4k30'], {
+      config: separateFiles
+    })
+    expect(notice()?.textContent).toBe(
+      'Separate files at 4K · 30 fps use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.'
+    )
+  })
+
+  it('stays quiet at 1080p30 and with the switch off', async () => {
+    await render(() => createElement(RecordingTab), videoPresets['tutorial-1080p30'], {
+      config: separateFiles
+    })
+    expect(notice()).toBeNull()
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await render(() => createElement(RecordingTab), videoPresets['record-4k30'])
+    expect(notice()).toBeNull()
+  })
+})
 
 describe('Output page typed fields (plan 174, D-1)', () => {
   it('typing 2560 into Width gives 2560×1080, committed once on blur', async () => {
