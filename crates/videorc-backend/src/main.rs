@@ -43,6 +43,7 @@ mod compositor_synthetic;
 mod devices;
 mod diagnostics;
 mod discord_announce;
+mod disk_space;
 mod echo_guard;
 mod editor_chrome;
 mod encoder_bridge;

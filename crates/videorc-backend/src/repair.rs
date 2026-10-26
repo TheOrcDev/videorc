@@ -1346,6 +1346,18 @@ where
     }
 
     let backup = backup_path_for(original).ok_or(SafeReplaceError::InvalidPath)?;
+    // Plan 200 C5: the backup is a full copy beside the recording. Without
+    // room for it, leave the recording as it is.
+    if let (Ok(metadata), Some(available)) = (
+        fs::metadata(original),
+        original
+            .parent()
+            .and_then(crate::disk_space::available_bytes),
+    ) && let Err(reason) = crate::disk_space::check_backup_space(metadata.len(), available)
+    {
+        let _ = fs::remove_file(repaired_temp);
+        return Err(SafeReplaceError::Io(reason));
+    }
     if let Some(backup_dir) = backup.parent() {
         fs::create_dir_all(backup_dir).map_err(|error| SafeReplaceError::Io(error.to_string()))?;
     }

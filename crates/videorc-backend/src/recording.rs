@@ -3924,9 +3924,20 @@ async fn start_session_with_timeline(
         let disk_state = state.clone();
         let disk_session_id = session_id.clone();
         let disk_output_dir = output_dir.clone();
+        // Plan 200 C5: the notice counts minutes, from the bitrate of every
+        // file this take writes.
+        let disk_video_kbps = params.output.video.bitrate_kbps;
+        let disk_separate_files = crate::source_iso::armed_plan(&params.output)
+            .map_or(0, |plan| plan.iso_roles().count());
         tokio::spawn(async move {
-            let _ =
-                emit_disk_space_health_event(&disk_state, &disk_session_id, &disk_output_dir).await;
+            let _ = emit_disk_space_health_event(
+                &disk_state,
+                &disk_session_id,
+                &disk_output_dir,
+                disk_video_kbps,
+                disk_separate_files,
+            )
+            .await;
         });
     }
 
@@ -7551,6 +7562,7 @@ where
             "ISO capture ownership could not be verified; refusing to adopt its current path"
         );
     }
+    ensure_mp4_export_disk_space(&input)?;
     let mut recovery_path = None;
     let published = export_recording_to_mp4_with_exporter(
         &state,
@@ -11163,22 +11175,27 @@ async fn finalize_recording_media(
                 queued.elapsed().as_millis()
             ),
         );
-        export_completed_recording_to_mp4_tracked(
-            state,
-            &session_id,
-            &ffmpeg_path,
-            &input_mkv,
-            Mp4ExportFinalizationContext {
-                ended_at: &ended_at,
-                duration_ms: wall_duration_ms,
-                diagnostics: &final_diagnostics,
-                output_ownership: output_ownership.clone(),
-                keep_original_media,
-            },
-            &mut finalization_recovery_path,
-            control,
-        )
-        .await
+        match ensure_mp4_export_disk_space(&input_mkv) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                export_completed_recording_to_mp4_tracked(
+                    state,
+                    &session_id,
+                    &ffmpeg_path,
+                    &input_mkv,
+                    Mp4ExportFinalizationContext {
+                        ended_at: &ended_at,
+                        duration_ms: wall_duration_ms,
+                        diagnostics: &final_diagnostics,
+                        output_ownership: output_ownership.clone(),
+                        keep_original_media,
+                    },
+                    &mut finalization_recovery_path,
+                    control,
+                )
+                .await
+            }
+        }
     };
     mark_stop_timeline(state, RecordingStopPhase::Mp4Export);
     let (published_mp4, export_error) = match export_result {
@@ -11350,6 +11367,15 @@ async fn finalize_recording_media(
         file_size_bytes,
         error: None,
     })
+}
+
+/// Plan 200 C5: an export needs room for a second copy of the MKV. Without
+/// it the job fails before FFmpeg starts and the MKV stays the recording.
+fn ensure_mp4_export_disk_space(input_mkv: &Path) -> Result<()> {
+    let Some(output_dir) = input_mkv.parent() else {
+        return Ok(());
+    };
+    crate::disk_space::ensure_export_space(input_mkv, output_dir)
 }
 
 /// Rows left in `finalizing` by a backend exit mid-export: re-run the job.
@@ -24813,38 +24839,24 @@ async fn emit_disk_space_health_event(
     state: &AppState,
     session_id: &str,
     output_dir: &Path,
+    video_kbps: u32,
+    separate_files: usize,
 ) -> Result<()> {
-    let output = Command::new("df")
-        .args(["-Pk", &output_dir.display().to_string()])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-
-    let Ok(output) = output else {
+    let directory = output_dir.to_path_buf();
+    let Ok(Some(available)) =
+        tokio::task::spawn_blocking(move || crate::disk_space::available_bytes(&directory)).await
+    else {
         return Ok(());
     };
-
-    if !output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(line) = stdout.lines().nth(1) else {
-        return Ok(());
-    };
-    let columns = line.split_whitespace().collect::<Vec<_>>();
-    let Some(available_kb) = columns.get(3).and_then(|value| value.parse::<u64>().ok()) else {
-        return Ok(());
-    };
-
-    if available_kb < 1_048_576 {
+    if let Some(message) =
+        crate::disk_space::record_space_notice(available, video_kbps, separate_files)
+    {
         emit_health_event(
             state,
             Some(session_id),
             HealthLevel::Warn,
             "disk-space-low",
-            "Less than 1 GB is available in the selected recording location.",
+            &message,
         )?;
     }
 
