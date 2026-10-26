@@ -7872,8 +7872,9 @@ struct Mp4ExportOptions {
     /// Plan 200 C3: the take start, UTC, RFC 3339, whole seconds (the MP4
     /// `mvhd` creation time has no finer unit).
     creation_time: Option<String>,
-    /// Plan 200 C3: `HH:MM:SS:FF`, the local time of day at the take start.
-    timecode: Option<String>,
+    /// Plan 200 C3: `HH:MM:SS:FF`, the local time of day at the take start,
+    /// and the frame rate it counts in.
+    timecode: Option<(String, u32)>,
     /// Plan 200 C3: an ffmetadata file with the take's markers as chapters,
     /// in the private staging folder.
     chapters_path: Option<PathBuf>,
@@ -7907,7 +7908,10 @@ impl Mp4ExportOptions {
                 .and_then(|take| take.started_at)
                 .zip(mp4_export_take_fps(probe, take))
                 .map(|(started_at, fps)| {
-                    mp4_export_timecode(started_at.with_timezone(&chrono::Local).time(), fps)
+                    (
+                        mp4_export_timecode(started_at.with_timezone(&chrono::Local).time(), fps),
+                        fps,
+                    )
                 }),
             chapters_path: None,
         }
@@ -8400,8 +8404,18 @@ fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> V
             format!("creation_time={creation_time}"),
         ]);
     }
-    if let Some(timecode) = options.timecode.as_deref() {
-        args.extend(["-timecode".to_string(), timecode.to_string()]);
+    if let Some((timecode, fps)) = options.timecode.as_ref() {
+        // The `tmcd` track takes the video stream's frame rate. A stream copy
+        // of a capture MKV with no duration in its header reports a bogus
+        // average rate (30000/1), and the MP4 trailer then fails with "fps
+        // 30000 is too large" (recording-matrix smoke, 2026-10-26). State the
+        // rate; with `-c:v copy` this changes no packet.
+        args.extend([
+            "-r:v".to_string(),
+            fps.to_string(),
+            "-timecode".to_string(),
+            timecode.clone(),
+        ]);
     }
     if let Some(trim_seconds) = options.trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
@@ -40742,8 +40756,8 @@ mod tests {
             Some("2026-10-26T09:15:30Z")
         );
         let local = started_at.with_timezone(&chrono::Local).time();
-        assert_eq!(options.timecode, Some(mp4_export_timecode(local, 30)));
-        assert!(options.timecode.as_deref().unwrap().ends_with(":15"));
+        assert_eq!(options.timecode, Some((mp4_export_timecode(local, 30), 30)));
+        assert!(options.timecode.as_ref().unwrap().0.ends_with(":15"));
         options.chapters_path = Some(PathBuf::from("/tmp/videorc-test/chapters.ffmetadata"));
         let args = mp4_export_args(
             Path::new("/tmp/videorc-test.mkv"),
@@ -40754,7 +40768,15 @@ mod tests {
             arg_value(&args, "-metadata"),
             Some("creation_time=2026-10-26T09:15:30Z")
         );
-        assert_eq!(arg_value(&args, "-timecode"), options.timecode.as_deref());
+        assert_eq!(
+            arg_value(&args, "-timecode"),
+            options
+                .timecode
+                .as_ref()
+                .map(|(timecode, _)| timecode.as_str())
+        );
+        // The tmcd track's rate is stated, never guessed from the copy.
+        assert_eq!(arg_value(&args, "-r:v"), Some("30"));
         assert_eq!(arg_value(&args, "-f"), Some("ffmetadata"));
         assert_eq!(arg_value(&args, "-map_chapters"), Some("1"));
         assert_eq!(arg_value(&args, "-map"), Some("0"));
