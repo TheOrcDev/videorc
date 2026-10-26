@@ -3769,17 +3769,15 @@ async fn start_session_with_timeline(
     // open the microphone and wait on preview sources. When either failed,
     // the start never reached the guard below, so the renderer retried it
     // as a plain failure and kept reopening the microphone (2026-10-25 Iris
-    // Xe tester). The probes are cached, so the later check repeats this
-    // decision for free.
+    // Xe tester). It asks for the path the session will take: the legacy
+    // raw path when the request rules the bridge out, else the bridge. The
+    // probes are cached, so the later check repeats this decision for free.
     if replay_auto_start_requested(replay_only, &params) {
         let encoder_output_topology = encoder_output_topology_plan_from_session(&params)?;
         let decision = resolve_windows_encoded_bridge_decision(
             &ffmpeg_path,
             &encoder_output_topology,
-            recording_encoder_bridge_video_output(
-                params.output.record_enabled,
-                params.output.stream_enabled,
-            ),
+            requested_session_video_output(&params, !compositor_encoder_bridge_ruled_out(&params)),
         )
         .await?;
         if let Some(refusal) =
@@ -4274,14 +4272,8 @@ async fn start_session_with_timeline(
         }
         None => None,
     };
-    let requested_encoder_bridge_video_output = if use_encoder_bridge {
-        recording_encoder_bridge_video_output(
-            params.output.record_enabled,
-            params.output.stream_enabled,
-        )
-    } else {
-        EncoderBridgeVideoOutput::RawYuv420p
-    };
+    let requested_encoder_bridge_video_output =
+        requested_session_video_output(&params, use_encoder_bridge);
     let encoder_output_topology = encoder_output_topology_plan_from_session(&params)?;
     let windows_encoded_bridge_decision = resolve_windows_encoded_bridge_decision(
         &ffmpeg_path,
@@ -4295,7 +4287,7 @@ async fn start_session_with_timeline(
     // second encode. The decision above is the one the session would use;
     // nothing has been spawned yet, so the typed refusal costs nothing. A
     // start the user chose (`auto: false`) runs anywhere. The early check
-    // assumed the bridge; this one holds whichever path the session took.
+    // already decided this from the request; this one stays the authority.
     if replay_auto_start_requested(replay_only, &params)
         && let Some(refusal) = crate::replay_buffer::auto_start_refusal(
             windows_encoded_bridge_decision.effective_encode_backend,
@@ -15579,28 +15571,49 @@ fn windows_d3d11_screen_preflight_candidate(
         && windows_d3d11_display_camera_layout(&params.layout.layout_preset).is_some()
 }
 
-async fn should_use_compositor_encoder_bridge(
-    state: &AppState,
-    params: &StartSessionParams,
-    active_screen: Option<&crate::protocol::StreamScreen>,
-) -> Result<bool> {
+/// The legacy-path choices `should_use_compositor_encoder_bridge` makes from
+/// the request alone, before it waits on any source. Past them the session
+/// either takes the bridge or refuses to start, never the legacy path.
+fn compositor_encoder_bridge_ruled_out(params: &StartSessionParams) -> bool {
     if !params.output.record_enabled && !params.output.stream_enabled {
-        return Ok(false);
+        return true;
     }
     if compositor_encoder_bridge_disabled(
         params.output.record_enabled,
         params.output.stream_enabled,
     ) {
         // Explicit developer env override — the only sanctioned legacy escape hatch.
-        return Ok(false);
+        return true;
     }
-    let requested_fps = requested_compositor_bridge_fps(params);
-    if requested_fps > 30
+    // The bridge cap: record-only runs to 1440p60; livestreaming runs to
+    // 1080p60 across every encoded role. Profiles outside those measured
+    // envelopes retain the legacy path, and the session log says so.
+    requested_compositor_bridge_fps(params) > 30
         && !(record_only_bridge_60fps_eligible(params) || streaming_bridge_60fps_eligible(params))
-    {
-        // The bridge cap: record-only runs to 1440p60; livestreaming runs to
-        // 1080p60 across every encoded role. Profiles outside those measured
-        // envelopes retain the legacy path, and the session log says so.
+}
+
+/// The video output the encoder bridge is asked for, or the raw legacy
+/// path's when the request alone rules the bridge out.
+fn requested_session_video_output(
+    params: &StartSessionParams,
+    use_encoder_bridge: bool,
+) -> EncoderBridgeVideoOutput {
+    if use_encoder_bridge {
+        recording_encoder_bridge_video_output(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        )
+    } else {
+        EncoderBridgeVideoOutput::RawYuv420p
+    }
+}
+
+async fn should_use_compositor_encoder_bridge(
+    state: &AppState,
+    params: &StartSessionParams,
+    active_screen: Option<&crate::protocol::StreamScreen>,
+) -> Result<bool> {
+    if compositor_encoder_bridge_ruled_out(params) {
         return Ok(false);
     }
     let scene = params.scene.clone().unwrap_or_else(|| {
@@ -37148,6 +37161,26 @@ mod tests {
         assert!(
             !replay_auto_start_requested(true, &params),
             "a ring the user turned on runs anywhere"
+        );
+    }
+
+    #[test]
+    fn early_replay_guard_asks_for_the_raw_path_when_the_request_rules_the_bridge_out() {
+        let record_30 = base_params(true, false);
+        assert!(!compositor_encoder_bridge_ruled_out(&record_30));
+        assert_eq!(
+            requested_session_video_output(&record_30, true),
+            recording_encoder_bridge_video_output(true, false)
+        );
+
+        let no_output = base_params(false, false);
+        assert!(compositor_encoder_bridge_ruled_out(&no_output));
+        assert_eq!(
+            requested_session_video_output(
+                &no_output,
+                !compositor_encoder_bridge_ruled_out(&no_output)
+            ),
+            EncoderBridgeVideoOutput::RawYuv420p
         );
     }
 
