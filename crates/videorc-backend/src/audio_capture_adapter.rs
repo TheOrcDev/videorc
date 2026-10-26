@@ -73,6 +73,18 @@ const MAX_ANCHORS: usize = 64;
 /// driver that hands over 500 ms buffers is judged by when the audio was
 /// handed over, not by how old its first sample is).
 const MAX_CAPTURE_AGE: Duration = Duration::from_millis(100);
+/// The Pulse worker (Linux) stamps packets on a busy desktop: FFmpeg's demuxer,
+/// pipes and reader threads add tens of ms under load. The session bus gives it
+/// `SYSTEM_AUDIO_PLAYOUT_DELAY` (150 ms) to arrive, so the worker must not drop
+/// what the bus would still place (retest 150: 37 s of a 12-minute take lost).
+const PULSE_MAX_CAPTURE_AGE: Duration = Duration::from_millis(250);
+
+fn max_capture_age(protocol: CaptureProtocol) -> Duration {
+    match protocol {
+        CaptureProtocol::Pulse => PULSE_MAX_CAPTURE_AGE,
+        CaptureProtocol::AvFoundation | CaptureProtocol::DirectShow => MAX_CAPTURE_AGE,
+    }
+}
 /// The largest PCM record the worker may describe: one second at 48 kHz.
 /// Big-buffer DirectShow drivers deliver 500 ms packets (plan 195 W2); the
 /// 20 ms the worker asks for is a request, not a contract.
@@ -1507,7 +1519,7 @@ fn assemble_pcm(
         if captured_at > Instant::now() {
             thread::sleep(captured_at.saturating_duration_since(Instant::now()));
         }
-        if captured_at.elapsed() > MAX_CAPTURE_AGE {
+        if captured_at.elapsed() > max_capture_age(protocol) {
             stats.record_dropped_frames(packet.frames as u64);
             continue;
         }
