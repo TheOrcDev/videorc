@@ -1529,6 +1529,38 @@ fn spawn_ffmpeg_output_startup_watchdog(
     });
 }
 
+/// Which session consumers may take over the live preview run in place
+/// (instant-record P4.1). macOS arms its VideoToolbox consumer. On Linux the
+/// preview run and the raw-YUV encoder consumer share the same CPU compositor,
+/// so arming there skips a full run restart and lets the startup barrier
+/// accept the run's own frame history (retest 151: the restart and the full
+/// barrier cost ~230 ms of every Record).
+const fn compositor_consumer_arms_in_place(consumer: CompositorFrameConsumer) -> bool {
+    match consumer {
+        CompositorFrameConsumer::VideoToolboxEncoder => cfg!(target_os = "macos"),
+        CompositorFrameConsumer::RawYuvEncoder => cfg!(target_os = "linux"),
+        _ => false,
+    }
+}
+
+/// Instant record (P4): on the VideoToolbox bridge the first frame is already
+/// in the encoder once the bridge is ready, so `Recording` does not wait for
+/// FFmpeg's first output clock (~700 ms of MPEG-TS probing). On Linux the
+/// raw-YUV bridge is ready only once FFmpeg's reader has taken a complete first
+/// frame, so the same holds there; waiting for the first progress report cost
+/// a fixed ~510 ms of every Record (one 500 ms `-stats_period`, retest 151).
+/// For both the proof becomes a watchdog that fails the session if FFmpeg never
+/// reports progress. Windows keeps the synchronous proof: its raw-pipe and
+/// Media Foundation outputs can spend seconds on a software first frame.
+const fn defers_ffmpeg_output_startup_proof(output: EncoderBridgeVideoOutput) -> bool {
+    match output {
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => true,
+        EncoderBridgeVideoOutput::RawYuv420p => cfg!(target_os = "linux"),
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => false,
+    }
+}
+
 /// `deadline` is absolute from `started_at` (the process spawn); see
 /// [`ffmpeg_output_startup_deadline`] for its value per input topology.
 async fn wait_for_ffmpeg_output_startup(
@@ -5125,15 +5157,14 @@ async fn start_session_with_timeline(
             } else {
                 CompositorFrameConsumer::VideoToolboxEncoder
             };
-            // Instant record (P4.1): a single-output VideoToolbox session arms
-            // the live preview compositor in place — same run id, frame store
-            // and frame history — instead of stopping it and building a new
-            // run. Any refusal falls back to the restart path below, so the
-            // Record button is never a dead click.
-            let armed_in_place = if cfg!(target_os = "macos")
-                && encoder_bridge_stream_output.is_none()
+            // Instant record (P4.1): a single-output session arms the live
+            // preview compositor in place — same run id, frame store and frame
+            // history — instead of stopping it and building a new run. Any
+            // refusal falls back to the restart path below, so the Record
+            // button is never a dead click.
+            let armed_in_place = if encoder_bridge_stream_output.is_none()
                 && source_iso_plan.is_none()
-                && compositor_frame_consumer == CompositorFrameConsumer::VideoToolboxEncoder
+                && compositor_consumer_arms_in_place(compositor_frame_consumer)
                 && !recording_compositor_arm_disabled()
             {
                 match arm_compositor_for_capture(
@@ -6257,18 +6288,8 @@ async fn start_session_with_timeline(
     } else {
         (None, None)
     };
-    // Instant record (P4): on the VideoToolbox bridge the first frame is already
-    // in the encoder once the bridge is ready, so `Recording` no longer waits
-    // for FFmpeg's first output clock (~700 ms of MPEG-TS probing). That proof
-    // becomes a watchdog which fails the session if FFmpeg never reports
-    // progress. Other bridge outputs (raw YUV, Windows Media Foundation) keep
-    // the synchronous proof.
-    let defer_ffmpeg_output_startup = use_encoder_bridge
-        && matches!(
-            encoder_bridge_video_output,
-            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-                | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
-        );
+    let defer_ffmpeg_output_startup =
+        use_encoder_bridge && defers_ffmpeg_output_startup_proof(encoder_bridge_video_output);
     let mut deferred_ffmpeg_output_startup = None;
     let ffmpeg_output_startup_result: Result<()> = match ffmpeg_output_startup_receiver.take() {
         Some(receiver) if defer_ffmpeg_output_startup => {
@@ -37826,6 +37847,44 @@ mod tests {
                 dshow_deadline.as_millis()
             )),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn only_platform_encoder_consumers_arm_the_preview_compositor_in_place() {
+        assert_eq!(
+            compositor_consumer_arms_in_place(CompositorFrameConsumer::VideoToolboxEncoder),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            compositor_consumer_arms_in_place(CompositorFrameConsumer::RawYuvEncoder),
+            cfg!(target_os = "linux")
+        );
+        assert!(!compositor_consumer_arms_in_place(
+            CompositorFrameConsumer::MediaFoundationEncoder
+        ));
+        assert!(!compositor_consumer_arms_in_place(
+            CompositorFrameConsumer::NativePreview
+        ));
+    }
+
+    #[test]
+    fn ffmpeg_output_progress_proof_is_a_watchdog_where_the_bridge_already_fed_a_frame() {
+        // VideoToolbox (P4a) and the Linux raw-YUV bridge publish `Recording`
+        // once the first frame is in FFmpeg; Windows keeps the synchronous
+        // proof for its software first frame (retest 151).
+        assert!(defers_ffmpeg_output_startup_proof(
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        ));
+        assert!(defers_ffmpeg_output_startup_proof(
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        ));
+        assert!(!defers_ffmpeg_output_startup_proof(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        ));
+        assert_eq!(
+            defers_ffmpeg_output_startup_proof(EncoderBridgeVideoOutput::RawYuv420p),
+            cfg!(target_os = "linux")
         );
     }
 
