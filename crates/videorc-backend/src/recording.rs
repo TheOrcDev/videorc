@@ -7842,7 +7842,8 @@ struct Mp4ExportOptions {
     copy_audio: bool,
     /// Snap every video packet to its own `1/fps` tick with `setts`.
     snap_fps: Option<u32>,
-    /// Plan 200 C3: the take start, UTC, RFC 3339.
+    /// Plan 200 C3: the take start, UTC, RFC 3339, whole seconds (the MP4
+    /// `mvhd` creation time has no finer unit).
     creation_time: Option<String>,
     /// Plan 200 C3: `HH:MM:SS:FF`, the local time of day at the take start.
     timecode: Option<String>,
@@ -7874,7 +7875,7 @@ impl Mp4ExportOptions {
             snap_fps: mp4_export_snap_fps(probe, take),
             creation_time: take
                 .and_then(|take| take.started_at)
-                .map(|started_at| started_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
+                .map(|started_at| started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
             timecode: take
                 .and_then(|take| take.started_at)
                 .zip(mp4_export_take_fps(probe, take))
@@ -40607,7 +40608,7 @@ mod tests {
             Mp4ExportOptions::plan(&probe_with_codecs("h264", "pcm_s16le"), Some(&take));
         assert_eq!(
             options.creation_time.as_deref(),
-            Some("2026-10-26T09:15:30.500000Z")
+            Some("2026-10-26T09:15:30Z")
         );
         let local = started_at.with_timezone(&chrono::Local).time();
         assert_eq!(options.timecode, Some(mp4_export_timecode(local, 30)));
@@ -40620,7 +40621,7 @@ mod tests {
         );
         assert_eq!(
             arg_value(&args, "-metadata"),
-            Some("creation_time=2026-10-26T09:15:30.500000Z")
+            Some("creation_time=2026-10-26T09:15:30Z")
         );
         assert_eq!(arg_value(&args, "-timecode"), options.timecode.as_deref());
         assert_eq!(arg_value(&args, "-f"), Some("ffmetadata"));
@@ -40931,8 +40932,24 @@ mod tests {
                     "csv=p=0",
                 ],
             );
-            let titles: Vec<&str> = chapters.lines().filter(|line| !line.is_empty()).collect();
-            assert_eq!(titles, ["Start", "Intro", "Marker 2"], "{role} chapters");
+            // `-show_chapters` prints every chapter field; the title is last.
+            let chapters: Vec<(&str, &str)> = chapters
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let fields: Vec<&str> = line.split(',').collect();
+                    (fields[3], fields[fields.len() - 1])
+                })
+                .collect();
+            assert_eq!(
+                chapters,
+                [
+                    ("0.000000", "Start"),
+                    ("1.000000", "Intro"),
+                    ("2.000000", "Marker 2")
+                ],
+                "{role} chapters"
+            );
 
             let streams = plan200_ffprobe(
                 &output,
@@ -40958,7 +40975,7 @@ mod tests {
                     ]
                 )
                 .trim(),
-                "2026-10-26T09:15:30.500000Z"
+                "2026-10-26T09:15:30.000000Z"
             );
             let timecode = plan200_ffprobe(
                 &output,
