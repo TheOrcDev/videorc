@@ -9,8 +9,10 @@
   record+stream audio re-encoded AAC→AAC; separate files at 4K can damage
   Combined; the Camera file is upscaled with nearest sampling. Groups A
   (sound), B (Clips), C (export and files), D (separate files and picture),
-  19 slices. **EXECUTING** 2026-10-26 on `plan-200-better-recordings`, D1–D7
-  at the recommendations (owner: "execute the entire plan and create a pr").
+  19 slices. **SHIPPED** 2026-10-26, D1–D7 at the recommendations. Open:
+  the 4K separate-source runtime case, an intermittent runtime timing case
+  and `1080p60:hard` in the recording matrix (see As built, slice E), and
+  the owner-run checks.
 - 2026-10-25: [Plan 199](199-one-minute-clips.md), A 1-minute clip beside
   the 30-second clip. Owner request: "Let's also add a 60-second clip." The
   ring always keeps 1 min, and each press says 30 or 60. There is a second

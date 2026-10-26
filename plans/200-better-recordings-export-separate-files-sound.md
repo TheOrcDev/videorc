@@ -18,8 +18,9 @@
 
 ## Status
 
-- **Status**: EXECUTING 2026-10-26. The owner said "execute the entire plan
-  and create a PR", so every owner decision below takes its recommendation.
+- **Status**: SHIPPED 2026-10-26 (merged to main at the owner's request with
+  the slice E reds below recorded). Every owner decision took its
+  recommendation; the owner-run checks under "Owed to the owner" are open.
 - **Priority**: P1. Owner request, 2026-10-25: "investigate how good our
   exporting of videos is with separate sources, sound, system audio etc.,
   investigate our performance, and create a plan to make it even better."
@@ -1015,4 +1016,55 @@ encoder_bridge:: metal_compositor:: compositor:: performance_check::` 48 +
 440 passed, 0 failed; vitest on the four touched renderer test files 76
 passed. Smokes (`smoke:separate-source-fixture`,
 `smoke:separate-source-runtime`) run with slice E on the merged branch.
+
+### Slice E: gates on the merged branch (2026-10-26)
+
+Merged tree: `plan-200-better-recordings` = C1-C3/C7/C8 + `plan-200-export-b`
+(C4-C6) + `plan-200-sound` (A, B) + `plan-200-iso` (D) + origin/main
+(`8510c06e`). The A/B and D branches were reviewed first; the review fixes
+are on those branches (A3 error wording, B2 flush off the runtime, one mic
+ingredient on both mix paths; D2 camera sized after it is live, D4 budget in
+the verdict, shed copy names no roles, shed intervals in the runtime
+manifest).
+
+- **Rust:** `cargo fmt --check --all` clean; `cargo clippy -p videorc-backend
+  -- -D warnings` clean; targeted `cargo test` (audio, session_audio,
+  replay_buffer, recording, recording_finalization, repair, repair_service,
+  storage, source_iso, compositor_source_iso_batch, metal_compositor,
+  performance_check, disk_space, noise_cleanup, encoder_bridge, compositor)
+  1,365 passed, 0 failed; ignored real-file tests (B1, C1, C3, publish) 4
+  passed.
+- **TS:** `pnpm typecheck`, `pnpm lint` (0 errors; one pre-existing
+  exhaustive-deps warning in caption code), `pnpm format:check`, `pnpm
+  test:scripts` (2,554 passed), `pnpm --filter @videorc/desktop test` (5,450
+  passed), `pnpm build`: all pass.
+- **Smokes:**
+  - `smoke:separate-source-fixture` PASS; `smoke:soundboard-fixture` PASS;
+    `smoke:replay-buffer` PASS; `smoke:record-latency` PASS.
+  - `smoke:recording-matrix`: first run 6/18. **C3 bug found:** with
+    `-timecode`, the MP4 muxer took the tmcd rate from the copied stream's
+    bogus 30000/1 average rate (capture MKVs have no duration in the header)
+    and the trailer failed ("fps 30000 is too large"), so 60 fps, 1440p and
+    4K takes stayed MKV. Fixed in `58f509d7` (`-r:v <fps>` beside
+    `-timecode`; no packet changes under `-c:v copy`). After the fix 17/18;
+    `1080p60:hard` failed once at 56.3 fps cadence (one 150 ms gap) at load
+    ~13. Not rerun in isolation; open.
+  - `smoke:separate-source-runtime`: the runtime smoke's normal-case path did
+    not pass shed intervals to the take gate and assumed full-length files;
+    fixed in `6b07e96d`. The **4K case** is red on both trees: on the plan's
+    base commit the 4K take ends `Failed` (finding F11); on this branch the
+    separate files shed at ~2 s and Combined completes, but Combined's
+    audio/video event alignment check fails at 4K on this machine (load
+    5-14). Non-4K cases: the base commit passed all of them once; this
+    branch had one intermittent timing failure in 3 of 5 runs (a different
+    case each time: combined/system, combined/microphone, camera video
+    event), and the last run passed the first 13 cases (including the one
+    that failed before) before it was stopped for the merge. Open: rerun on
+    an idle machine and compare with the base.
+- **Artifact proof** (recording-matrix MP4s): r_frame_rate 30/1 and 60/1,
+  every video packet duration equal (512 or 256 at 1/15360), a `tmcd` track
+  with the take's timecode, and `creation_time`. A record+stream take keeps
+  one real 267 ms gap as a gap. Chapters are proven by the C3 real-file test
+  (the smoke takes have no markers). AAC copy is proven by the arg-builder
+  tests only (the fixture audio is silent).
 
