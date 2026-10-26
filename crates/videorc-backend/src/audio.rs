@@ -331,6 +331,9 @@ pub struct AudioCaptureStats {
     // freezes them before FFmpeg finishes flushing. Tracking that exact window avoids
     // counting either startup or finalization latency as a microphone capture gap.
     recording_window: std::sync::Mutex<AudioCaptureWindow>,
+    // Plan 200 A3: the device-side sample rate read when the input opened
+    // (f64 bits; 0 = not read). Never reset: it describes the device.
+    device_sample_rate_bits: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -342,6 +345,18 @@ struct AudioCaptureWindow {
 impl AudioCaptureStats {
     pub fn captured_frames(&self) -> u64 {
         self.captured_frames.load(Ordering::Relaxed)
+    }
+
+    /// Plan 200 A3: the input device's own sample rate, when the open read it.
+    pub fn device_sample_rate(&self) -> Option<f64> {
+        let rate = f64::from_bits(self.device_sample_rate_bits.load(Ordering::Relaxed));
+        (rate.is_finite() && rate > 0.0).then_some(rate)
+    }
+
+    #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn record_device_sample_rate(&self, rate: f64) {
+        self.device_sample_rate_bits
+            .store(rate.to_bits(), Ordering::Relaxed);
     }
 
     pub fn dropped_frames(&self) -> u64 {
@@ -1334,6 +1349,37 @@ fn fake_pcm_frames(frame_count: usize, chunk_frames: usize, frequency_hz: f32) -
     frames
 }
 
+/// Plan 200 A3: the Health code for a microphone whose device runs at
+/// another rate than the 48 kHz Videorc records at.
+pub(crate) const MICROPHONE_SAMPLE_RATE_CODE: &str = "audio-input-sample-rate";
+
+/// Plan 200 A3: what Health says when a microphone's device runs at a rate
+/// other than 48 kHz, or `None` at 48 kHz (or an unreadable rate). The
+/// input asks for 48 kHz without resampling, so such a device is either
+/// refused or recorded at the wrong rate; the fix is the device's own rate.
+pub(crate) fn microphone_sample_rate_warning(
+    device_name: &str,
+    device_rate: f64,
+) -> Option<String> {
+    if !device_rate.is_finite()
+        || device_rate <= 0.0
+        || (device_rate - f64::from(NATIVE_AUDIO_SAMPLE_RATE)).abs() < 0.5
+    {
+        return None;
+    }
+    Some(format!(
+        "{device_name} runs at {}. Set it to 48 kHz in Audio MIDI Setup for the best recording.",
+        kilohertz_label(device_rate)
+    ))
+}
+
+/// `44100.0` → `44.1 kHz`, `96000.0` → `96 kHz`.
+fn kilohertz_label(rate: f64) -> String {
+    let label = format!("{:.2}", rate / 1_000.0);
+    let label = label.trim_end_matches('0').trim_end_matches('.');
+    format!("{label} kHz")
+}
+
 pub(crate) fn db_to_gain(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
@@ -1446,6 +1492,21 @@ fn start_platform_audio_source(
     let mut audio_unit = audio_unit_from_device_id(device_id, true)
         .with_context(|| format!("Could not open CoreAudio input device {device_name}"))?;
 
+    // Plan 200 A3: the client format below asks for 48 kHz and the input
+    // does not resample, so read the device's own rate first.
+    let device_rate = coreaudio_input_device_sample_rate(&audio_unit);
+    let rate_warning =
+        device_rate.and_then(|rate| microphone_sample_rate_warning(&device_name, rate));
+    if let Some(warning) = rate_warning.as_deref() {
+        tracing::warn!(
+            device = %device_name,
+            device_rate = device_rate.unwrap_or_default(),
+            "{warning}"
+        );
+    }
+    // A device the 48 kHz client format is refused on says why in plain words.
+    let open_failure = |fallback: String| rate_warning.clone().unwrap_or(fallback);
+
     let stream_format = StreamFormat {
         sample_rate: f64::from(NATIVE_AUDIO_SAMPLE_RATE),
         sample_format: SampleFormat::F32,
@@ -1454,10 +1515,17 @@ fn start_platform_audio_source(
     };
     audio_unit
         .set_stream_format(stream_format, Scope::Output, Element::Input)
-        .with_context(|| format!("Could not set CoreAudio stream format for {device_name}"))?;
+        .with_context(|| {
+            open_failure(format!(
+                "Could not set CoreAudio stream format for {device_name}"
+            ))
+        })?;
 
     let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
+    if let Some(rate) = device_rate {
+        stats.record_device_sample_rate(rate);
+    }
     let callback_stats = stats.clone();
     let processing_settings = AudioProcessingSettingsHandle::new(settings);
     let callback_processing_settings =
@@ -1514,9 +1582,11 @@ fn start_platform_audio_source(
             format!("Could not register CoreAudio input callback for {device_name}")
         })?;
 
-    audio_unit
-        .start()
-        .with_context(|| format!("Could not start CoreAudio input device {device_name}"))?;
+    audio_unit.start().with_context(|| {
+        open_failure(format!(
+            "Could not start CoreAudio input device {device_name}"
+        ))
+    })?;
 
     Ok(NativeAudioSource {
         device_id,
@@ -1532,6 +1602,31 @@ fn start_platform_audio_source(
         caption_contract_test_producer: None,
         audio_unit: Some(audio_unit),
     })
+}
+
+/// Plan 200 A3: the input device's current sample rate, read from the device
+/// side of the AUHAL (the input element's input scope carries the device's
+/// nominal format) through the existing AudioUnit binding. `None` when
+/// CoreAudio will not say.
+#[cfg(target_os = "macos")]
+fn coreaudio_input_device_sample_rate(
+    audio_unit: &coreaudio::audio_unit::AudioUnit,
+) -> Option<f64> {
+    use coreaudio::audio_unit::{Element, Scope};
+    /// `kAudioUnitProperty_SampleRate` (AudioUnitProperties.h), a Float64.
+    const AUDIO_UNIT_PROPERTY_SAMPLE_RATE: u32 = 2;
+    audio_unit
+        .stream_format(Scope::Input, Element::Input)
+        .map(|format| format.sample_rate)
+        .or_else(|_| {
+            audio_unit.get_property::<f64>(
+                AUDIO_UNIT_PROPERTY_SAMPLE_RATE,
+                Scope::Input,
+                Element::Input,
+            )
+        })
+        .ok()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2523,6 +2618,54 @@ mod tests {
             process_interleaved_f32(&[0.1, 0.2], 1, AudioProcessingSettings::default()),
             vec![0.1, 0.1, 0.2, 0.2]
         );
+    }
+
+    #[test]
+    fn a_microphone_off_48_khz_gets_a_plain_warning() {
+        assert_eq!(
+            microphone_sample_rate_warning("Shure MV7", 44_100.0).as_deref(),
+            Some(
+                "Shure MV7 runs at 44.1 kHz. Set it to 48 kHz in Audio MIDI Setup for the best recording."
+            )
+        );
+        assert_eq!(
+            microphone_sample_rate_warning("Scarlett 2i2 USB", 96_000.0).as_deref(),
+            Some(
+                "Scarlett 2i2 USB runs at 96 kHz. Set it to 48 kHz in Audio MIDI Setup for the best recording."
+            )
+        );
+        assert!(
+            microphone_sample_rate_warning("Old mic", 22_050.0)
+                .unwrap()
+                .contains("runs at 22.05 kHz.")
+        );
+        assert!(
+            microphone_sample_rate_warning("Interface", 88_200.0)
+                .unwrap()
+                .contains("runs at 88.2 kHz.")
+        );
+        for fine in [48_000.0, 48_000.2, 47_999.8] {
+            assert_eq!(microphone_sample_rate_warning("Mic", fine), None, "{fine}");
+        }
+        for unreadable in [0.0, -44_100.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(microphone_sample_rate_warning("Mic", unreadable), None);
+        }
+        // Never read as a permission problem (`permission_or_unavailable`).
+        let warning = microphone_sample_rate_warning("Mic", 44_100.0).unwrap();
+        assert_eq!(
+            permission_or_unavailable(&warning),
+            AudioMeterStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn capture_stats_carry_the_device_rate_once_read() {
+        let stats = AudioCaptureStats::default();
+        assert_eq!(stats.device_sample_rate(), None);
+        stats.record_device_sample_rate(44_100.0);
+        assert_eq!(stats.device_sample_rate(), Some(44_100.0));
+        stats.record_device_sample_rate(f64::NAN);
+        assert_eq!(stats.device_sample_rate(), None);
     }
 
     #[test]
