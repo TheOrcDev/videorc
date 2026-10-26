@@ -7503,12 +7503,13 @@ impl Mp4FinalizationFault {
 }
 
 pub async fn remux_session(state: AppState, params: RemuxSessionParams) -> Result<String> {
+    let take = load_mp4_export_take(&state, &params.session_id);
     remux_session_with_exporter(
         state,
         params,
         Mp4FinalizationFault::None,
         |ffmpeg_path, input, output| async move {
-            export_mp4_from_mkv(&ffmpeg_path, &input, &output).await
+            export_mp4_from_mkv(&ffmpeg_path, &input, &output, take).await
         },
     )
     .await
@@ -7613,57 +7614,221 @@ fn parse_mkv_duration_tag(tag: &str) -> Option<f64> {
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
-/// Probe the capture MKV's video/audio stream durations and return the
-/// duration to trim the MP4 export to — `None` when the tails already agree,
-/// when a stream is missing, or when the probe fails (export proceeds
-/// untrimmed; a failed probe must never block finalization).
-async fn mp4_export_trim_seconds(ffprobe_path: &str, input: &Path) -> Option<f64> {
-    let output = Command::new(ffprobe_path)
+/// Plan 200 C1: what the export reads from the capture MKV before FFmpeg
+/// runs. A failed probe leaves every field empty and the export proceeds as a
+/// plain remux; a probe must never block finalization.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Mp4ExportProbe {
+    /// The first video stream's `r_frame_rate` as `(numerator, denominator)`.
+    video_frame_rate: Option<(u64, u64)>,
+    video_seconds: Option<f64>,
+    audio_seconds: Option<f64>,
+    format_seconds: Option<f64>,
+}
+
+impl Mp4ExportProbe {
+    fn from_ffprobe_json(probe: &serde_json::Value) -> Self {
+        let mut parsed = Self {
+            format_seconds: probe
+                .get("format")
+                .and_then(|format| format.get("duration"))
+                .and_then(|duration| duration.as_str())
+                .and_then(|duration| duration.parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite() && *seconds > 0.0),
+            ..Self::default()
+        };
+        let streams = probe
+            .get("streams")
+            .and_then(|streams| streams.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut seen_video = false;
+        let mut seen_audio = false;
+        for stream in streams {
+            let seconds = stream
+                .get("duration")
+                .and_then(|duration| duration.as_str())
+                .and_then(|duration| duration.parse::<f64>().ok())
+                .or_else(|| {
+                    stream
+                        .get("tags")?
+                        .get("DURATION")?
+                        .as_str()
+                        .and_then(parse_mkv_duration_tag)
+                });
+            match stream.get("codec_type").and_then(|kind| kind.as_str()) {
+                Some("video") if !seen_video => {
+                    seen_video = true;
+                    parsed.video_seconds = seconds;
+                    parsed.video_frame_rate = stream
+                        .get("r_frame_rate")
+                        .and_then(|rate| rate.as_str())
+                        .and_then(parse_ffprobe_rational);
+                }
+                Some("audio") if !seen_audio => {
+                    seen_audio = true;
+                    parsed.audio_seconds = seconds;
+                }
+                _ => {}
+            }
+        }
+        parsed
+    }
+
+    /// The duration to trim the MP4 export to: `None` when the tails already
+    /// agree or a stream is missing.
+    fn trim_seconds(&self) -> Option<f64> {
+        let (video_seconds, audio_seconds) = (self.video_seconds?, self.audio_seconds?);
+        if (video_seconds - audio_seconds).abs() <= MP4_EXPORT_TAIL_TRIM_THRESHOLD_SECONDS {
+            return None;
+        }
+        let trim = video_seconds.min(audio_seconds);
+        (trim > 0.0).then_some(trim)
+    }
+
+    /// The length of the exported file, for progress and chapter ends.
+    fn exported_seconds(&self) -> Option<f64> {
+        self.trim_seconds()
+            .or(self.format_seconds)
+            .or_else(|| match (self.video_seconds, self.audio_seconds) {
+                (Some(video), Some(audio)) => Some(video.max(audio)),
+                (video, audio) => video.or(audio),
+            })
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+    }
+}
+
+/// `"30/1"` → `(30, 1)`; `"0/0"` and garbage → `None`.
+fn parse_ffprobe_rational(value: &str) -> Option<(u64, u64)> {
+    let (numerator, denominator) = value.trim().split_once('/')?;
+    let numerator = numerator.parse::<u64>().ok()?;
+    let denominator = denominator.parse::<u64>().ok()?;
+    (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+}
+
+/// Probe the capture MKV's streams. Empty on any failure.
+async fn probe_mp4_export_input(ffprobe_path: &str, input: &Path) -> Mp4ExportProbe {
+    let Ok(output) = Command::new(ffprobe_path)
         .args([
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,duration:stream_tags=DURATION",
+            "stream=codec_type,r_frame_rate,duration:stream_tags=DURATION:format=duration",
             "-of",
             "json",
         ])
         .arg(input)
         .output()
         .await
-        .ok()?;
+    else {
+        return Mp4ExportProbe::default();
+    };
     if !output.status.success() {
-        return None;
+        return Mp4ExportProbe::default();
     }
-    let probe: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let mut video_seconds = None;
-    let mut audio_seconds = None;
-    for stream in probe.get("streams")?.as_array()? {
-        let seconds = stream
-            .get("duration")
-            .and_then(|duration| duration.as_str())
-            .and_then(|duration| duration.parse::<f64>().ok())
-            .or_else(|| {
-                stream
-                    .get("tags")?
-                    .get("DURATION")?
-                    .as_str()
-                    .and_then(parse_mkv_duration_tag)
-            });
-        match stream.get("codec_type").and_then(|kind| kind.as_str()) {
-            Some("video") => video_seconds = video_seconds.or(seconds),
-            Some("audio") => audio_seconds = audio_seconds.or(seconds),
-            _ => {}
-        }
-    }
-    let (video_seconds, audio_seconds) = (video_seconds?, audio_seconds?);
-    if (video_seconds - audio_seconds).abs() <= MP4_EXPORT_TAIL_TRIM_THRESHOLD_SECONDS {
-        return None;
-    }
-    let trim = video_seconds.min(audio_seconds);
-    (trim > 0.0).then_some(trim)
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map(|probe| Mp4ExportProbe::from_ffprobe_json(&probe))
+        .unwrap_or_default()
 }
 
-async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> Result<()> {
+/// Plan 200 C1: the take facts an export stamps into the MP4. Present only
+/// for a Videorc capture; imports, duplicates and processed copies get a
+/// plain remux.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Mp4ExportTake {
+    /// The take's configured frame rate.
+    fps: Option<u32>,
+}
+
+fn load_mp4_export_take(state: &AppState, session_id: &str) -> Option<Mp4ExportTake> {
+    match state.database.mp4_export_take_row(session_id) {
+        Ok(Some(row)) if row.captured_by_videorc => Some(Mp4ExportTake { fps: row.fps }),
+        Ok(_) => None,
+        Err(error) => {
+            // The take facts improve the MP4; they never block it.
+            state.emit_log(
+                "warn",
+                format!("MP4 export for session {session_id} could not read its take: {error:#}"),
+            );
+            None
+        }
+    }
+}
+
+/// Plan 200 C1: the whole frame rate whose tick every exported frame snaps
+/// to, or `None` (imports, a non-integer rate, an unknown rate).
+fn mp4_export_snap_fps(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Option<u32> {
+    let take = take?;
+    let probed = match probe.video_frame_rate {
+        Some((numerator, denominator)) if numerator % denominator != 0 => return None,
+        Some((numerator, denominator)) => u32::try_from(numerator / denominator).ok(),
+        None => None,
+    };
+    take.fps
+        .or(probed)
+        .filter(|fps| (1..=MP4_EXPORT_MAX_SNAP_FPS).contains(fps))
+}
+
+const MP4_EXPORT_MAX_SNAP_FPS: u32 = 240;
+
+/// Plan 200 C1: everything `mp4_export_args` needs beyond the two paths.
+#[derive(Debug, Clone, PartialEq)]
+struct Mp4ExportOptions {
+    /// End the delivered file at the shorter stream.
+    trim_seconds: Option<f64>,
+    /// Snap every video packet to its own `1/fps` tick with `setts`.
+    snap_fps: Option<u32>,
+}
+
+impl Mp4ExportOptions {
+    /// Today's plain remux: no trim, no frame-time snap.
+    #[cfg(test)]
+    fn remux() -> Self {
+        Self {
+            trim_seconds: None,
+            snap_fps: None,
+        }
+    }
+
+    fn plan(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Self {
+        Self {
+            trim_seconds: probe.trim_seconds(),
+            snap_fps: mp4_export_snap_fps(probe, take),
+        }
+    }
+
+    /// Plan 200 C1: a capture with a real timing glitch (two frames inside one
+    /// tick) makes FFmpeg fail on non-monotonic DTS. The export then runs once
+    /// more without the snap.
+    fn without_frame_time_snap(&self) -> Option<Self> {
+        self.snap_fps.map(|_| Self {
+            snap_fps: None,
+            ..self.clone()
+        })
+    }
+}
+
+/// Remove a failed attempt's partial MP4 from the private staging folder so
+/// the retry's `-n` can create it again.
+async fn remove_failed_mp4_export_attempt(output: &Path) -> Result<()> {
+    match fs::remove_file(output).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "Could not remove the failed MP4 export attempt {}",
+                output.display()
+            )
+        }),
+    }
+}
+
+async fn export_mp4_from_mkv(
+    ffmpeg_path: &str,
+    input: &Path,
+    output: &Path,
+    take: Option<Mp4ExportTake>,
+) -> Result<()> {
     if output
         .try_exists()
         .with_context(|| format!("Could not inspect MP4 output {}", output.display()))?
@@ -7673,9 +7838,25 @@ async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> 
             output.display()
         );
     }
-    let trim_seconds = mp4_export_trim_seconds(&ffprobe_path_for(ffmpeg_path), input).await;
+    let probe = probe_mp4_export_input(&ffprobe_path_for(ffmpeg_path), input).await;
+    let options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    let first = run_mp4_export_ffmpeg(ffmpeg_path, mp4_export_args(input, output, &options)).await;
+    let Err(error) = first else {
+        return Ok(());
+    };
+    let Some(retry) = options.without_frame_time_snap() else {
+        return Err(error);
+    };
+    tracing::warn!(
+        "MP4 export with exact frame times failed; retrying without the frame-time snap: {error:#}"
+    );
+    remove_failed_mp4_export_attempt(output).await?;
+    run_mp4_export_ffmpeg(ffmpeg_path, mp4_export_args(input, output, &retry)).await
+}
+
+async fn run_mp4_export_ffmpeg(ffmpeg_path: &str, args: Vec<String>) -> Result<()> {
     let mut command = Command::new(ffmpeg_path);
-    command.args(mp4_export_args(input, output, trim_seconds));
+    command.args(args);
     let status = status_owned_tokio(&mut command)
         .await
         .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
@@ -7922,7 +8103,7 @@ async fn publish_staged_media_uniquely(staging: PathBuf, preferred: PathBuf) -> 
     .context("Could not join staged recording publish task")?
 }
 
-fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Vec<String> {
+fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> Vec<String> {
     let mut args = vec![
         "-n".to_string(),
         "-hide_banner".to_string(),
@@ -7948,13 +8129,25 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
     // export is a remux of an MKV that already declares its rate, so stamp
     // BT.709 / video-range with the shared tag + VUI rewrite helpers.
     args.extend(h264_bt709_color_tag_args());
-    args.extend(h264_bt709_vui_rewrite_bsf_args());
-    if let Some(trim_seconds) = trim_seconds {
+    let [bsf_flag, mut bsf_chain] = h264_bt709_vui_rewrite_bsf_args();
+    if let Some(fps) = options.snap_fps {
+        // Plan 200 C1: the MKV time base is 1/1000, so a stream copy leaves
+        // 33/34 ms frame durations that editors read as variable frame rate.
+        // Snap every packet to its own frame tick; real gaps stay gaps.
+        bsf_chain.push_str(&mp4_export_frame_time_snap_bsf(fps));
+    }
+    args.extend([bsf_flag, bsf_chain]);
+    if let Some(trim_seconds) = options.trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
     }
     args.push(ffmpeg_file_path(output));
     args
+}
+
+/// Appended to the `-bsf:v` chain: retime every packet onto `1/fps`.
+fn mp4_export_frame_time_snap_bsf(fps: u32) -> String {
+    format!(",setts=time_base=1/{fps}:prescale=1:ts=round(PTS)")
 }
 
 pub async fn create_preview_snapshot(
@@ -11530,14 +11723,10 @@ async fn export_mp4_from_mkv_tracked(
         );
     }
     let probe_started = Instant::now();
-    let trim_seconds = mp4_export_trim_seconds(&ffprobe_path_for(ffmpeg_path), input).await;
-    let total_seconds = match trim_seconds {
-        Some(trim) => Some(trim),
-        None => crate::session_ops::probe_duration_ms(ffmpeg_path, input)
-            .await
-            .map(|ms| ms as f64 / 1000.0),
-    }
-    .filter(|seconds| *seconds > 0.0);
+    let take = load_mp4_export_take(state, session_id);
+    let probe = probe_mp4_export_input(&ffprobe_path_for(ffmpeg_path), input).await;
+    let options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    let total_seconds = probe.exported_seconds();
     state.emit_log(
         "info",
         format!(
@@ -11545,71 +11734,120 @@ async fn export_mp4_from_mkv_tracked(
             probe_started.elapsed().as_millis()
         ),
     );
-    let export_started = Instant::now();
-    let mut command = Command::new(ffmpeg_path);
-    command
-        .args(["-nostats", "-progress", "pipe:1"])
-        .args(mp4_export_args(input, output, trim_seconds))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = spawn_owned_tokio(&mut command)
-        .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
-    if let Some(pid) = child.id() {
-        control.set_child_pid(pid);
-    }
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|stderr| tokio::spawn(read_mp4_stderr_tail(stderr)));
-    if let Some(stdout) = child.stdout.take() {
-        let mut lines = BufReader::new(stdout).lines();
-        let mut last_reported = 0_u8;
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Some(total_seconds) = total_seconds else {
-                continue;
-            };
-            if let Some(percent) = crate::noise_cleanup::parse_progress_line(&line, total_seconds)
-                && percent >= last_reported.saturating_add(FINALIZATION_PROGRESS_STEP_PERCENT)
-            {
-                last_reported = percent;
-                control.set_progress_percent(percent);
-                emit_finalization_event(
-                    state,
-                    session_id,
-                    crate::protocol::RecordingFinalizationState::Finalizing,
-                    FinalizationEventDetail {
-                        progress_percent: Some(percent),
-                        ..FinalizationEventDetail::default()
-                    },
-                );
-            }
-        }
-    }
-    let status = child
-        .wait()
-        .await
-        .with_context(|| format!("Could not wait for {ffmpeg_path} MP4 export"))?;
-    control.set_child_pid(0);
-    let stderr = match stderr_reader {
-        Some(reader) => reader.await.unwrap_or_default(),
-        None => String::new(),
+    let tracked = TrackedMp4Export {
+        state,
+        session_id,
+        ffmpeg_path,
+        control,
+        total_seconds,
     };
+    let first = tracked
+        .run(mp4_export_args(input, output, &options))
+        .await;
+    let Err(error) = first else {
+        return Ok(());
+    };
+    let Some(retry) = options.without_frame_time_snap() else {
+        return Err(error);
+    };
+    if control.is_cancelled() {
+        return Err(error);
+    }
     state.emit_log(
-        "info",
+        "warn",
         format!(
-            "MP4 finalization session={session_id} stage=ffmpeg elapsed_ms={} success={}",
-            export_started.elapsed().as_millis(),
-            status.success()
+            "MP4 export for session {session_id} with exact frame times failed; retrying once without the frame-time snap: {error:#}"
         ),
     );
-    if control.is_cancelled() {
-        bail!("MP4 export was cancelled");
+    remove_failed_mp4_export_attempt(output).await?;
+    tracked.run(mp4_export_args(input, output, &retry)).await
+}
+
+/// One FFmpeg MP4 export run whose child is tracked on the job control.
+struct TrackedMp4Export<'a> {
+    state: &'a AppState,
+    session_id: &'a str,
+    ffmpeg_path: &'a str,
+    control: &'a FinalizationJobControl,
+    total_seconds: Option<f64>,
+}
+
+impl TrackedMp4Export<'_> {
+    async fn run(&self, args: Vec<String>) -> Result<()> {
+        let Self {
+            state,
+            session_id,
+            ffmpeg_path,
+            control,
+            total_seconds,
+        } = *self;
+        let export_started = Instant::now();
+        let mut command = Command::new(ffmpeg_path);
+        command
+            .args(["-nostats", "-progress", "pipe:1"])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = spawn_owned_tokio(&mut command)
+            .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
+        if let Some(pid) = child.id() {
+            control.set_child_pid(pid);
+        }
+        let stderr_reader = child
+            .stderr
+            .take()
+            .map(|stderr| tokio::spawn(read_mp4_stderr_tail(stderr)));
+        if let Some(stdout) = child.stdout.take() {
+            let mut lines = BufReader::new(stdout).lines();
+            let mut last_reported = 0_u8;
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Some(total_seconds) = total_seconds else {
+                    continue;
+                };
+                if let Some(percent) =
+                    crate::noise_cleanup::parse_progress_line(&line, total_seconds)
+                    && percent >= last_reported.saturating_add(FINALIZATION_PROGRESS_STEP_PERCENT)
+                {
+                    last_reported = percent;
+                    control.set_progress_percent(percent);
+                    emit_finalization_event(
+                        state,
+                        session_id,
+                        crate::protocol::RecordingFinalizationState::Finalizing,
+                        FinalizationEventDetail {
+                            progress_percent: Some(percent),
+                            ..FinalizationEventDetail::default()
+                        },
+                    );
+                }
+            }
+        }
+        let status = child
+            .wait()
+            .await
+            .with_context(|| format!("Could not wait for {ffmpeg_path} MP4 export"))?;
+        control.set_child_pid(0);
+        let stderr = match stderr_reader {
+            Some(reader) => reader.await.unwrap_or_default(),
+            None => String::new(),
+        };
+        state.emit_log(
+            "info",
+            format!(
+                "MP4 finalization session={session_id} stage=ffmpeg elapsed_ms={} success={}",
+                export_started.elapsed().as_millis(),
+                status.success()
+            ),
+        );
+        if control.is_cancelled() {
+            bail!("MP4 export was cancelled");
+        }
+        if !status.success() {
+            bail!("FFmpeg MP4 export failed with {status}: {stderr}");
+        }
+        Ok(())
     }
-    if !status.success() {
-        bail!("FFmpeg MP4 export failed with {status}: {stderr}");
-    }
-    Ok(())
 }
 
 fn enqueue_post_recording_gate(
@@ -12216,6 +12454,7 @@ async fn export_completed_recording_to_mp4(
         diagnostics,
     )?;
     let ffmpeg_path = ffmpeg_path.to_string();
+    let take = load_mp4_export_take(state, session_id);
     export_recording_to_mp4_with_exporter(
         state,
         Mp4ExportRequest {
@@ -12230,7 +12469,7 @@ async fn export_completed_recording_to_mp4(
         },
         recovery_path,
         move |input, output| async move {
-            export_mp4_from_mkv(&ffmpeg_path, &input, &output).await
+            export_mp4_from_mkv(&ffmpeg_path, &input, &output, take).await
         },
     )
     .await
@@ -39698,7 +39937,7 @@ mod tests {
         let args = mp4_export_args(
             Path::new("/tmp/videorc-test.mkv"),
             Path::new("/tmp/videorc-test.mp4"),
-            None,
+            &Mp4ExportOptions::remux(),
         );
         assert!(!args.iter().any(|arg| arg == "-t"));
 
@@ -39706,7 +39945,10 @@ mod tests {
         let trimmed = mp4_export_args(
             Path::new("/tmp/videorc-test.mkv"),
             Path::new("/tmp/videorc-test.mp4"),
-            Some(6.336),
+            &Mp4ExportOptions {
+                trim_seconds: Some(6.336),
+                ..Mp4ExportOptions::remux()
+            },
         );
         assert_eq!(arg_value(&trimmed, "-t"), Some("6.336"));
         assert_eq!(
@@ -39733,7 +39975,7 @@ mod tests {
         let args = mp4_export_args(
             Path::new("/tmp/videorc-test.mkv"),
             Path::new("/tmp/videorc-test.mp4"),
-            None,
+            &Mp4ExportOptions::remux(),
         );
 
         assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
@@ -39748,13 +39990,122 @@ mod tests {
         );
     }
 
+    fn videorc_take(fps: Option<u32>) -> Mp4ExportTake {
+        Mp4ExportTake {
+            fps,
+            ..Mp4ExportTake::default()
+        }
+    }
+
+    fn probe_with_rate(rate: Option<(u64, u64)>) -> Mp4ExportProbe {
+        Mp4ExportProbe {
+            video_frame_rate: rate,
+            ..Mp4ExportProbe::default()
+        }
+    }
+
+    #[test]
+    fn mp4_export_snaps_frame_times_at_30_and_60_fps() {
+        for fps in [30, 60] {
+            let options = Mp4ExportOptions::plan(
+                &probe_with_rate(Some((u64::from(fps), 1))),
+                Some(&videorc_take(Some(fps))),
+            );
+            assert_eq!(options.snap_fps, Some(fps));
+            let args = mp4_export_args(
+                Path::new("/tmp/videorc-test.mkv"),
+                Path::new("/tmp/videorc-test.mp4"),
+                &options,
+            );
+            assert_eq!(
+                arg_value(&args, "-bsf:v"),
+                Some(
+                    format!(
+                        "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1,setts=time_base=1/{fps}:prescale=1:ts=round(PTS)"
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "-bsf:v").count(),
+                1,
+                "one bitstream filter chain, or FFmpeg keeps only the last"
+            );
+        }
+    }
+
+    #[test]
+    fn mp4_export_without_a_known_whole_frame_rate_does_not_snap() {
+        // No fps anywhere.
+        let options = Mp4ExportOptions::plan(&probe_with_rate(None), Some(&videorc_take(None)));
+        assert_eq!(options.snap_fps, None);
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &options,
+        );
+        assert!(!args.iter().any(|arg| arg.contains("setts")));
+
+        // A non-integer rate never snaps, even with a configured fps.
+        let ntsc = Mp4ExportOptions::plan(
+            &probe_with_rate(Some((30_000, 1_001))),
+            Some(&videorc_take(Some(30))),
+        );
+        assert_eq!(ntsc.snap_fps, None);
+
+        // An import (no Videorc take) never snaps.
+        let import = Mp4ExportOptions::plan(&probe_with_rate(Some((30, 1))), None);
+        assert_eq!(import.snap_fps, None);
+
+        // The configured rate wins; the probe fills in when it is absent.
+        assert_eq!(
+            Mp4ExportOptions::plan(&probe_with_rate(Some((30, 1))), Some(&videorc_take(None)))
+                .snap_fps,
+            Some(30)
+        );
+        assert_eq!(
+            Mp4ExportOptions::plan(&probe_with_rate(None), Some(&videorc_take(Some(60)))).snap_fps,
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn mp4_export_retry_drops_only_the_frame_time_snap() {
+        let options = Mp4ExportOptions {
+            trim_seconds: Some(4.0),
+            snap_fps: Some(30),
+            ..Mp4ExportOptions::remux()
+        };
+        let retry = options.without_frame_time_snap().unwrap();
+        assert_eq!(retry.snap_fps, None);
+        assert_eq!(retry.trim_seconds, Some(4.0));
+        assert!(retry.without_frame_time_snap().is_none());
+    }
+
+    #[test]
+    fn mp4_export_probe_reads_rate_durations_and_trim() {
+        let probe = Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({
+            "streams": [
+                {"codec_type": "video", "r_frame_rate": "30/1", "tags": {"DURATION": "00:00:06.400000000"}},
+                {"codec_type": "audio", "r_frame_rate": "0/0", "tags": {"DURATION": "00:00:06.336000000"}}
+            ],
+            "format": {"duration": "6.400000"}
+        }));
+        assert_eq!(probe.video_frame_rate, Some((30, 1)));
+        assert_eq!(probe.trim_seconds(), Some(6.336));
+        assert_eq!(probe.exported_seconds(), Some(6.336));
+        assert_eq!(parse_ffprobe_rational("0/0"), None);
+        assert_eq!(parse_ffprobe_rational("30000/1001"), Some((30_000, 1_001)));
+        assert_eq!(Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({})), Mp4ExportProbe::default());
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn mp4_export_normalizes_windows_verbatim_paths() {
         let args = mp4_export_args(
             Path::new(r"\\?\C:\recordings\capture.mkv"),
             Path::new(r"\\?\C:\recordings\.videorc-export.partial\export.mp4"),
-            None,
+            &Mp4ExportOptions::remux(),
         );
         assert_eq!(arg_value(&args, "-i"), Some(r"C:\recordings\capture.mkv"));
         assert_eq!(
@@ -39773,7 +40124,7 @@ mod tests {
         let preferred = directory.join("recording.mp4");
 
         let staging = prepare_mp4_export_staging(&preferred).unwrap();
-        let args = mp4_export_args(&directory.join("recording.mkv"), &staging.output_path, None);
+        let args = mp4_export_args(&directory.join("recording.mkv"), &staging.output_path, &Mp4ExportOptions::remux());
 
         assert!(staging.directory_path.is_dir());
         assert!(!staging.output_path.exists());
@@ -39821,6 +40172,130 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Plan 200 real-file fixtures live in their own unique temp folder.
+    fn plan200_fixture_directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir()
+            .join("p200")
+            .join(format!("{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// `true` when `ffmpeg` and `ffprobe` run; otherwise the real-file test
+    /// logs a skip line and returns.
+    fn plan200_ffmpeg_available(test: &str) -> bool {
+        let runs = |tool: &str| {
+            std::process::Command::new(tool)
+                .arg("-version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let available = runs("ffmpeg") && runs("ffprobe");
+        if !available {
+            eprintln!("{test}: skipped, ffmpeg/ffprobe are not on PATH");
+        }
+        available
+    }
+
+    /// A synthetic Videorc-like capture: H.264 without B-frames, PCM audio,
+    /// muxed into Matroska at its 1/1000 time base.
+    fn plan200_write_capture_mkv(path: &Path, seconds: &str, fps: u32) {
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size=320x180:rate={fps}"))
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                seconds,
+                "-c:v",
+                "libx264",
+                "-bf",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "pcm_s16le",
+                "-ac",
+                "2",
+            ])
+            .arg(path)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success(), "fixture FFmpeg failed");
+    }
+
+    fn plan200_ffprobe(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("ffprobe")
+            .args(["-v", "error"])
+            .args(args)
+            .arg(path)
+            .output()
+            .expect("ffprobe runs");
+        assert!(output.status.success(), "ffprobe failed on {}", path.display());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Plan 200 C1: a 1/1000 MKV exports to an MP4 whose every video packet
+    /// has the same duration (one 30 fps tick), so editors read constant
+    /// frame rate.
+    #[tokio::test]
+    #[ignore = "spawns ffmpeg/ffprobe and writes media; run with --ignored"]
+    async fn plan200_real_export_has_equal_frame_durations() {
+        if !plan200_ffmpeg_available("plan200_real_export_has_equal_frame_durations") {
+            return;
+        }
+        let directory = plan200_fixture_directory("c1-frame-times");
+        let input = directory.join("capture.mkv");
+        plan200_write_capture_mkv(&input, "3", 30);
+        assert_eq!(
+            plan200_ffprobe(
+                &input,
+                &["-select_streams", "v:0", "-show_entries", "stream=time_base", "-of", "csv=p=0"]
+            )
+            .trim(),
+            "1/1000"
+        );
+        let output = directory.join("export.mp4");
+        export_mp4_from_mkv(
+            "ffmpeg",
+            &input,
+            &output,
+            Some(Mp4ExportTake {
+                fps: Some(30),
+                ..Mp4ExportTake::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        let durations = plan200_ffprobe(
+            &output,
+            &["-select_streams", "v:0", "-show_entries", "packet=duration", "-of", "csv=p=0"],
+        );
+        let durations: Vec<&str> = durations.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(durations.len(), 90, "3 s at 30 fps");
+        assert!(
+            durations.iter().all(|duration| *duration == durations[0]),
+            "every packet has one duration, got {:?}",
+            durations.iter().collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(
+            plan200_ffprobe(
+                &output,
+                &["-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0"]
+            )
+            .trim(),
+            "30/1"
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     /// Exercises FFmpeg's actual `-n` behavior against the production argument
     /// builder. Ignored in default CI because the Rust test job deliberately
     /// has no FFmpeg dependency; run explicitly on recording-studio hosts.
@@ -39861,7 +40336,7 @@ mod tests {
 
         let staging = prepare_mp4_export_staging(&directory.join("recording.mp4")).unwrap();
         assert!(!staging.output_path.exists());
-        export_mp4_from_mkv("ffmpeg", &input, &staging.output_path)
+        export_mp4_from_mkv("ffmpeg", &input, &staging.output_path, None)
             .await
             .unwrap();
         assert!(std::fs::metadata(&staging.output_path).unwrap().len() > 0);
@@ -39869,7 +40344,7 @@ mod tests {
         let preexisting = directory.join("preexisting.mp4");
         std::fs::write(&preexisting, b"must survive").unwrap();
         assert!(
-            export_mp4_from_mkv("ffmpeg", &input, &preexisting)
+            export_mp4_from_mkv("ffmpeg", &input, &preexisting, None)
                 .await
                 .is_err()
         );

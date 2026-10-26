@@ -92,6 +92,20 @@ pub struct SessionTiming {
 
 const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
 
+/// Plan 200 C1/C3: the take facts an MP4 export stamps into the file.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Mp4ExportTakeRow {
+    /// RFC 3339 take start (Combined's, copied onto the separate files).
+    pub started_at: String,
+    /// False for imports, duplicates and processed copies: their timing
+    /// and start are not a Videorc capture's.
+    pub captured_by_videorc: bool,
+    /// The take's configured integer frame rate.
+    pub fps: Option<u32>,
+    /// Markers live on the Combined session; separate files read them there.
+    pub marker_session_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewSession {
     pub id: String,
@@ -2577,6 +2591,37 @@ impl Database {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Plan 200 C1/C3: what an MP4 export needs to know about the take behind
+    /// a session. `None` for a missing row. Separate files are rows of their
+    /// own (`<take_id>-<role>`) that copied `started_at` from Combined, so all
+    /// files of one take report the same start.
+    pub(crate) fn mp4_export_take_row(&self, session_id: &str) -> Result<Option<Mp4ExportTakeRow>> {
+        let row: Option<(String, String, String, Option<String>, bool)> = self
+            .lock()?
+            .query_row(
+                "SELECT started_at, mode, output_json, take_id,
+                        derived_from_session_id IS NOT NULL OR processing_kind IS NOT NULL
+                 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        let Some((started_at, mode, output_json, take_id, derived)) = row else {
+            return Ok(None);
+        };
+        let output: serde_json::Value = serde_json::from_str(&output_json)?;
+        Ok(Some(Mp4ExportTakeRow {
+            started_at,
+            captured_by_videorc: mode != "imported" && !derived,
+            fps: output
+                .get("video")
+                .and_then(|video| video.get("fps"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|fps| u32::try_from(fps).ok()),
+            marker_session_id: take_id.unwrap_or_else(|| session_id.to_string()),
+        }))
     }
 
     pub(crate) fn source_iso_recording_expectations(
