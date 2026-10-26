@@ -2612,6 +2612,21 @@ impl MediaFoundationD3d11H264Encoder {
                 }
             }
             self.drain_release_callbacks(&mut progress);
+            // Once the transform has drained and every submitted frame has its
+            // output, nothing more can come out. A surface it still references
+            // (NVIDIA keeps its last input) returns at teardown, where the
+            // runtime drops the encoder before that lease's ticket.
+            if self.ownership.transform_drain_completed() && self.submitted_pts.is_empty() {
+                let retained = self.ownership.close_drain_with_transform_retained()?;
+                if retained > 0 {
+                    tracing::info!(
+                        "{} still references {retained} input surface(s) after its drain; they return when the encoder is torn down",
+                        self.identity
+                    );
+                }
+                self.drained = true;
+                return Ok(progress);
+            }
             match self.ownership.drain_status(self.now_micros())? {
                 WindowsD3d11EncoderWaitStatus::Complete => {
                     ensure!(
