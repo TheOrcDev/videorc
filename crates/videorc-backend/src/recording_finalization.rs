@@ -545,8 +545,7 @@ mod tests {
                 .expect("every export gets the slot")
                 .unwrap();
         }
-        let order = order.lock().unwrap().clone();
-        order
+        order.lock().unwrap().clone()
     }
 
     #[tokio::test(flavor = "current_thread")]

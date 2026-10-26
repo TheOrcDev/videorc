@@ -12300,7 +12300,7 @@ mod mix_tests {
             PeakLimiter::default(),
         );
         assert_eq!(write.microphone, mixed.microphone);
-        assert!(write.microphone.iter().any(|sample| *sample == 1.0));
+        assert!(write.microphone.contains(&1.0));
         assert!(
             write
                 .written
