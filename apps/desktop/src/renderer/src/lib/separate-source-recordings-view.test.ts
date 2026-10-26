@@ -28,7 +28,8 @@ const BACKEND_REASONS = [
   'Could not persist published Screen path: database is locked',
   'Screen recording supervisor failed: task panicked',
   'Screen file was missing after Stop.',
-  'Interrupted separate recording ownership could not be verified; the current file was not adopted.'
+  'Interrupted separate recording ownership could not be verified; the current file was not adopted.',
+  'Recording was interrupted; partial media is available for recovery.'
 ]
 
 function row(
@@ -73,6 +74,26 @@ describe('separateFileStopped', () => {
     expect(stopped).toEqual({
       label: 'Stopped early',
       detail: "The camera stopped sending video and couldn't be restarted. The first 4:12 is kept.",
+      exportable: true
+    })
+  })
+
+  it('says an interrupted file stopped early and offers its export', () => {
+    const reason = 'Recording was interrupted; partial media is available for recovery.'
+    expect(
+      separateFileStopped(row({ finalizationError: reason, durationMs: undefined }))
+    ).toEqual({
+      label: 'Stopped early',
+      detail: 'Videorc closed before this file finished. What it recorded before then is kept.',
+      exportable: true
+    })
+    expect(
+      separateFileStopped(
+        row({ recordingRole: 'camera', finalizationError: reason, durationMs: 61_000 })
+      )
+    ).toEqual({
+      label: 'Stopped early',
+      detail: 'Videorc closed before this file finished. The first 1:01 is kept.',
       exportable: true
     })
   })

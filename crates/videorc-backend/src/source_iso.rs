@@ -249,6 +249,44 @@ pub fn recording_role_mkv_path(combined_mkv_path: &Path, role: RecordingRole) ->
     combined_mkv_path.with_file_name(format!("{stem}-{}.mkv", role.as_str()))
 }
 
+/// The private folder a separate file is captured in (`.videorc-iso-<uuid>`).
+const CAPTURE_DIRECTORY_PREFIX: &str = ".videorc-iso-";
+
+fn is_capture_directory(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.strip_prefix(CAPTURE_DIRECTORY_PREFIX)
+                .is_some_and(|rest| !rest.is_empty())
+        })
+}
+
+/// Plan 200 C6: where a separate file's MP4 is published. A file that
+/// stopped early is still in its private capture folder; its MP4 goes to the
+/// public recordings folder beside Combined, under its `-screen`/`-camera`
+/// name. Any other recording publishes beside its MKV, as before.
+pub fn public_mp4_output_path(input: &Path) -> PathBuf {
+    if let (Some(directory), Some(name)) = (input.parent(), input.file_name())
+        && is_capture_directory(directory)
+        && let Some(public) = directory.parent()
+    {
+        return public.join(name).with_extension("mp4");
+    }
+    input.with_extension("mp4")
+}
+
+/// Plan 200 C6: removes the private capture folder holding `path` once it is
+/// empty (after a publish, an export or a deletion). Never removes anything
+/// else: `remove_dir` refuses a folder that still holds a file.
+pub fn remove_empty_capture_directory(path: &Path) {
+    if let Some(directory) = path.parent()
+        && is_capture_directory(directory)
+    {
+        let _ = std::fs::remove_dir(directory);
+    }
+}
+
 fn iso_video_fifo_path(session_id: &str, role: RecordingRole) -> PathBuf {
     crate::fifo::transport_path(&format!(
         "videorc-iso-{}-encoder-bridge-{session_id}.h264",
@@ -2256,6 +2294,44 @@ mod tests {
         assert!(
             SourceIsoPlan::from_settings(&SeparateSourceRecordingsSettings::default()).is_none()
         );
+    }
+
+    #[test]
+    fn a_stopped_early_file_exports_beside_combined() {
+        let public = Path::new("/Movies/Videorc");
+        let hidden = public.join(".videorc-iso-1b2c").join("take-screen.mkv");
+        assert_eq!(
+            public_mp4_output_path(&hidden),
+            public.join("take-screen.mp4")
+        );
+        // A published separate file and an ordinary recording are unchanged.
+        assert_eq!(
+            public_mp4_output_path(&public.join("take-camera.mkv")),
+            public.join("take-camera.mp4")
+        );
+        assert_eq!(
+            public_mp4_output_path(&public.join(".videorc-iso-").join("take.mkv")),
+            public.join(".videorc-iso-").join("take.mp4")
+        );
+    }
+
+    #[test]
+    fn the_private_capture_folder_is_removed_only_when_empty() {
+        let root = std::env::temp_dir().join(format!("videorc-p200-iso-dir-{}", uuid::Uuid::new_v4()));
+        let hidden = root.join(".videorc-iso-test");
+        std::fs::create_dir_all(&hidden).unwrap();
+        let file = hidden.join("take-screen.mkv");
+        std::fs::write(&file, b"partial").unwrap();
+        remove_empty_capture_directory(&file);
+        assert!(file.exists(), "a folder that still holds the file stays");
+        std::fs::remove_file(&file).unwrap();
+        remove_empty_capture_directory(&file);
+        assert!(!hidden.exists(), "the empty private folder goes");
+        // Never any other folder, even an empty one.
+        let public_file = root.join("take.mkv");
+        remove_empty_capture_directory(&public_file);
+        assert!(root.exists());
+        std::fs::remove_dir(&root).unwrap();
     }
 
     #[test]

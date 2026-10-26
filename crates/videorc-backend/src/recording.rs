@@ -7545,7 +7545,7 @@ where
         bail!("Only MKV session outputs can be remuxed to MP4");
     }
 
-    let preferred_output = input.with_extension("mp4");
+    let preferred_output = crate::source_iso::public_mp4_output_path(&input);
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
     let mut base_finalization = state
         .database
@@ -7604,6 +7604,7 @@ where
     finalization.mp4_path = Some(published.path.display().to_string());
     persist_finalization_or_recovery_with_fault(&state, &finalization, &mut recovery_path, fault)
         .map_err(anyhow::Error::msg)?;
+    crate::source_iso::remove_empty_capture_directory(&input);
 
     state.emit_log("info", "Created MP4 copy for session.");
     Ok(published.path.display().to_string())
@@ -11310,6 +11311,11 @@ async fn finalize_recording_media(
             anyhow::anyhow!(message)
         })?;
     mark_stop_timeline(state, RecordingStopPhase::DbCommit);
+    // Plan 200 C6: an export that consumed the MKV of a separate file still
+    // in its private capture folder leaves that folder empty.
+    if published_mp4.is_some() {
+        crate::source_iso::remove_empty_capture_directory(&input_mkv);
+    }
     state.emit_log(
         "info",
         format!(
@@ -11847,7 +11853,12 @@ async fn run_quality_assessment(
     expectations: QualityExpectations,
     cancel_token: MaintenanceCancelToken,
 ) -> std::result::Result<GateStatus, String> {
-    tokio::task::spawn_blocking(move || {
+    // Plan 200 C6: a timeout that drops this future cancels the job (FFmpeg
+    // is killed), and the thread stays counted until it has exited.
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
+    let result = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let path = file_path.clone();
         let is_cancelled = || cancel_token.is_cancelled();
@@ -11878,8 +11889,9 @@ async fn run_quality_assessment(
             Ok(status)
         }
     })
-    .await
-    .map_err(|error| format!("quality assessment task failed: {error}"))?
+    .await;
+    cancel_on_drop.disarm();
+    result.map_err(|error| format!("quality assessment task failed: {error}"))?
 }
 
 fn record_running_quality_snapshot(job: &mut RepairJob, status: &GateStatus, now: String) {
@@ -11896,7 +11908,12 @@ async fn run_quality_gate(
     expectations: QualityExpectations,
     cancel_token: MaintenanceCancelToken,
 ) -> std::result::Result<GateStatus, String> {
-    tokio::task::spawn_blocking(move || {
+    // Plan 200 C6: a repair timeout kills the repair's FFmpeg; quit waits
+    // for the thread (and its temp cleanup) to finish.
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
+    let result = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let is_cancelled = || cancel_token.is_cancelled();
         let status = gate_recording_cancellable(
@@ -11915,8 +11932,9 @@ async fn run_quality_gate(
             Ok(status)
         }
     })
-    .await
-    .map_err(|error| format!("quality check task failed: {error}"))?
+    .await;
+    cancel_on_drop.disarm();
+    result.map_err(|error| format!("quality check task failed: {error}"))?
 }
 
 /// Emits the health event that matches a gate verdict (passed / repaired / not 100% /
@@ -12306,7 +12324,9 @@ where
         return Ok(None);
     }
 
-    let preferred_output = input.with_extension("mp4");
+    // Plan 200 C6: a stopped-early separate file publishes beside Combined,
+    // never into its private capture folder.
+    let preferred_output = crate::source_iso::public_mp4_output_path(input);
     let staging_plan = plan_mp4_export_staging(&preferred_output)?;
     let mut initial_intent = base_finalization.clone();
     initial_intent.mp4_path = Some(preferred_output.display().to_string());
@@ -30851,6 +30871,53 @@ mod tests {
             !mkv.exists(),
             "auto-finalization removes MKV only after recovery commit"
         );
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stopped_early_separate_file_exports_beside_combined() {
+        let session_id = format!("take-stopped-early-{}-screen", Uuid::new_v4());
+        let directory =
+            std::env::temp_dir().join(format!("videorc-p200-iso-export-{}", Uuid::new_v4()));
+        let hidden = directory.join(format!(".videorc-iso-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&hidden).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = hidden.join("take-screen.mkv");
+        std::fs::write(&mkv, b"stopped-early partial").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let published = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::None,
+            |_ffmpeg_path, _input, output| async move {
+                std::fs::write(output, b"exported partial mp4")?;
+                Ok(())
+            },
+        )
+        .await
+        .expect("the stopped-early file exports");
+
+        let expected = directory.join("take-screen.mp4");
+        assert_eq!(published, expected.display().to_string());
+        assert_eq!(std::fs::read(&expected).unwrap(), b"exported partial mp4");
+        assert!(
+            !hidden.join("take-screen.mp4").exists(),
+            "nothing is published into the private folder"
+        );
+        // Export MP4 keeps the MKV, so its folder stays until the row goes.
+        assert!(mkv.exists());
+        assert!(directory.read_dir().unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
         drop(state);
         std::fs::remove_dir_all(directory).unwrap();
     }

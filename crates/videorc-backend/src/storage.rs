@@ -1780,6 +1780,15 @@ impl Database {
         finalization: &SessionFinalization,
         clear_mp4_path_if_matches: Option<&str>,
     ) -> Result<()> {
+        // Plan 200 C6: the stored size is the published MP4's, not the MKV's.
+        // Stat before taking the connection (a slow volume never holds it).
+        let published_mp4_size = finalization
+            .mp4_path
+            .as_deref()
+            .filter(|path| clear_mp4_path_if_matches != Some(*path))
+            .and_then(|path| std::fs::metadata(path).ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len() as i64);
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let updated = transaction.execute(
@@ -1794,7 +1803,8 @@ impl Database {
                  diagnostics_json = CASE WHEN recording_role IN ('screen', 'camera')
                     THEN json_patch(COALESCE(diagnostics_json, '{}'), ?6) ELSE ?6 END,
                  finalization_state = COALESCE(?8, finalization_state),
-                 finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END
+                 finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END,
+                 file_size_bytes = COALESCE(?10, file_size_bytes)
              WHERE id = ?1",
             params![
                 finalization.session_id,
@@ -1806,6 +1816,7 @@ impl Database {
                 clear_mp4_path_if_matches,
                 finalization.finalization_state,
                 finalization.finalization_error,
+                published_mp4_size,
             ],
         )?;
         if updated != 1 {
@@ -2459,8 +2470,14 @@ impl Database {
         }
         let conn = self.lock()?;
         let updated = conn.execute(
+            // Plan 200 C6: an interrupted Screen/Camera row whose capture is
+            // bound to its owned file stays `completed` (its partial media is
+            // the recording, offered for Export MP4); unverified ones fail.
             "UPDATE sessions
-             SET status = 'failed',
+             SET status = CASE WHEN recording_role IN ('screen', 'camera')
+                        AND output_path IS NOT NULL
+                        AND json_extract(output_json, '$.sourceIsoOwnership') IS NOT NULL
+                    THEN 'completed' ELSE 'failed' END,
                  ended_at = COALESCE(ended_at, ?1),
                  finalization_state = CASE WHEN recording_role IN ('screen', 'camera') THEN 'failed' ELSE finalization_state END,
                  finalization_error = CASE WHEN recording_role IN ('screen', 'camera')
@@ -2470,6 +2487,39 @@ impl Database {
             params![Utc::now().to_rfc3339()],
         )?;
         Ok(updated)
+    }
+
+    /// Plan 200 C6: the distinct folders holding media of sessions started at
+    /// or after `since` (RFC 3339), for the startup repair-temp sweep.
+    pub fn session_media_directories_since(&self, since: &str) -> Result<Vec<PathBuf>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT output_path, mp4_path FROM sessions
+             WHERE started_at >= ?1 AND (output_path IS NOT NULL OR mp4_path IS NOT NULL)",
+        )?;
+        let rows = statement
+            .query_map(params![since], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut seen = HashSet::new();
+        let mut directories = Vec::new();
+        for path in rows
+            .into_iter()
+            .flat_map(|(output, mp4)| [output, mp4])
+            .flatten()
+        {
+            if let Some(parent) = Path::new(&path).parent()
+                && !parent.as_os_str().is_empty()
+                && seen.insert(parent.to_path_buf())
+            {
+                directories.push(parent.to_path_buf());
+            }
+        }
+        Ok(directories)
     }
 
     pub fn session_recording_path(&self, session_id: &str) -> Result<Option<String>> {
@@ -5562,7 +5612,24 @@ impl Database {
                 continue;
             };
             let expected_capture = self.source_iso_recovery_ownership(session_id)?;
-            *path_records = distinct_nonempty_paths([mp4_path.clone(), output_path.clone()])
+            let mut media_paths = distinct_nonempty_paths([mp4_path.clone(), output_path.clone()]);
+            // Plan 200 C6: a repair's backup goes with its recording (and only
+            // then; orphaned backups are never deleted automatically, D6).
+            let backups = media_paths
+                .iter()
+                .filter_map(|path| crate::repair::backup_path_for(Path::new(path)))
+                .filter(|backup| {
+                    std::fs::symlink_metadata(backup)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                })
+                .map(|backup| backup.display().to_string())
+                .collect::<Vec<_>>();
+            for backup in backups {
+                if !media_paths.contains(&backup) {
+                    media_paths.push(backup);
+                }
+            }
+            *path_records = media_paths
                 .into_iter()
                 .enumerate()
                 .map(|(index, path)| {
@@ -5786,6 +5853,10 @@ impl Database {
             .with_context(|| format!("Delete operation {operation_id} was not found."))?
         };
         let expected_records = parse_session_deletion_path_records(&paths_json)?;
+        let expected_paths_for_cleanup = expected_records
+            .iter()
+            .map(|record| record.original_path.clone())
+            .collect::<Vec<_>>();
         let expected = expected_records
             .iter()
             .flat_map(|record| {
@@ -5867,6 +5938,13 @@ impl Database {
             false
         };
         transaction.commit()?;
+        if deleted {
+            // Plan 200 C6: a separate file's private capture folder goes with
+            // its row once nothing is left in it.
+            for record in &expected_paths_for_cleanup {
+                crate::source_iso::remove_empty_capture_directory(Path::new(record));
+            }
+        }
         Ok(SessionDeletionCompletion {
             session_id,
             deleted,
@@ -11408,6 +11486,19 @@ mod tests {
             database
                 .verify_source_iso_capture_ownership("take-publish-screen", recovered)
                 .unwrap();
+            if !already_failed {
+                // Plan 200 C6: owned partial media is offered for Export MP4.
+                let status: String = database
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT status FROM sessions WHERE id = 'take-publish-screen'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(status, "completed");
+            }
             std::fs::rename(recovered, dir.join("original.mkv")).unwrap();
             std::fs::write(recovered, b"foreign replacement").unwrap();
             assert!(
@@ -15021,6 +15112,146 @@ mod tests {
                 .unwrap(),
             replacement_ownership.object_identity
         );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_recording_also_deletes_its_repair_backup() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let mp4 = directory.join("recording.mp4");
+        std::fs::write(&mp4, b"repaired recording").unwrap();
+        let backup = crate::repair::backup_path_for(&mp4).unwrap();
+        std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, b"original before repair").unwrap();
+        // Another recording's backup in the same folder is not touched.
+        let other_backup = backup.with_file_name("other.mp4");
+        std::fs::write(&other_backup, b"someone else's backup").unwrap();
+        let mut session = sample_session("delete-backup");
+        session.output_path = Some(mp4.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session(
+                "delete-backup",
+                "completed",
+                None,
+                Some(mp4.display().to_string()),
+                None,
+            )
+            .unwrap();
+
+        let operations = database
+            .prepare_session_deletions(&["delete-backup".to_string()])
+            .unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0].paths.len(),
+            2,
+            "the recording and its backup: {:?}",
+            operations[0].paths
+        );
+        assert!(!mp4.exists());
+        assert!(!backup.exists(), "the backup is quarantined with the recording");
+        let quarantined_backup = operations[0]
+            .paths
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.parent() == backup.parent())
+            .expect("the backup's quarantine sits in the backup folder");
+        assert_eq!(
+            std::fs::read(&quarantined_backup).unwrap(),
+            b"original before repair"
+        );
+        // Electron moves both to the Trash.
+        for path in &operations[0].paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        let completion = database
+            .complete_session_deletion(&operations[0].operation_id, &[])
+            .unwrap();
+        assert!(completion.deleted);
+        assert_eq!(
+            std::fs::read(&other_backup).unwrap(),
+            b"someone else's backup"
+        );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_stopped_early_separate_file_removes_its_empty_private_folder() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let hidden = directory.join(".videorc-iso-delete-test");
+        std::fs::create_dir(&hidden).unwrap();
+        let mkv = hidden.join("take-camera.mkv");
+        std::fs::write(&mkv, b"stopped early").unwrap();
+        let mut session = sample_session("delete-iso-folder");
+        session.output_path = Some(mkv.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session("delete-iso-folder", "completed", None, None, None)
+            .unwrap();
+
+        let operations = database
+            .prepare_session_deletions(&["delete-iso-folder".to_string()])
+            .unwrap();
+        for path in &operations[0].paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        assert!(hidden.exists(), "the folder waits for the row");
+        let completion = database
+            .complete_session_deletion(&operations[0].operation_id, &[])
+            .unwrap();
+        assert!(completion.deleted);
+        assert!(!hidden.exists(), "the empty private folder goes with the row");
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_stored_size_is_the_published_mp4s_after_an_export() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let mkv = directory.join("take.mkv");
+        let mp4 = directory.join("take.mp4");
+        std::fs::write(&mkv, vec![0_u8; 4096]).unwrap();
+        std::fs::write(&mp4, vec![0_u8; 1500]).unwrap();
+        let mut session = sample_session("size-after-export");
+        session.output_path = Some(mkv.display().to_string());
+        database.create_session(&session).unwrap();
+        // The Library listed the MKV while it exported.
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET file_size_bytes = 4096 WHERE id = 'size-after-export'",
+                [],
+            )
+            .unwrap();
+        let finalization = SessionFinalization::new(
+            "size-after-export",
+            "completed",
+            Some("2026-10-26T10:00:00Z".to_string()),
+            Some(mp4.display().to_string()),
+            Some(1_000),
+            &crate::diagnostics::idle_diagnostics(),
+        )
+        .unwrap();
+        database
+            .finalize_session_with_diagnostics(&finalization)
+            .unwrap();
+        let stored: Option<i64> = database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT file_size_bytes FROM sessions WHERE id = 'size-after-export'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, Some(1500));
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }
