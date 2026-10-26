@@ -5058,9 +5058,16 @@ export interface FileAssessment {
 
 /** The verdict after running the repair gate on one recording. */
 export type GateStatus =
-  | { status: 'ready'; path: string }
+  /** `sampled`: plan 200 C8 quick check of a long recording (sampled windows). */
+  | { status: 'ready'; path: string; sampled?: boolean }
   | { status: 'repaired'; path: string; interpolated: boolean }
-  | { status: 'not-hundred-percent'; path: string; reasons: string[] }
+  | {
+      status: 'not-hundred-percent'
+      path: string
+      reasons: string[]
+      /** Plan 200 C8: a quick check, reported and never repaired automatically. */
+      sampled?: boolean
+    }
   | { status: 'failed'; path: string; reason: string }
 
 /** Live per-file progress emitted on the `repair.status` event during a repair. */

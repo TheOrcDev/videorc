@@ -413,8 +413,9 @@ fn redact_quality_status(
     };
 
     match status {
-        GateStatus::Ready { path } => GateStatus::Ready {
+        GateStatus::Ready { path, sampled } => GateStatus::Ready {
             path: redact_path(path),
+            sampled,
         },
         GateStatus::Repaired { path, interpolated } => GateStatus::Repaired {
             path: redact_path(path),
@@ -424,10 +425,12 @@ fn redact_quality_status(
             path,
             reasons,
             needs_attention,
+            sampled,
         } => GateStatus::NotHundredPercent {
             path: redact_path(path),
             reasons,
             needs_attention,
+            sampled,
         },
         GateStatus::Failed { path, reason } => GateStatus::Failed {
             path: redact_path(path),
@@ -729,6 +732,7 @@ mod tests {
                 path: r"C:\Users\orcdev\Videos\Videorc\Recordings\final.mp4".to_string(),
                 reasons: vec!["missing audio stream".to_string()],
                 needs_attention: true,
+                sampled: false,
             }),
             final_diagnostics: None,
             layout: crate::protocol::default_layout_settings(),

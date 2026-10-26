@@ -111,8 +111,8 @@ use crate::recording_timeline::{
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
-    RepairJob, analyze_recording_cancellable, gate_recording_cancellable, has_user_impacting_issue,
-    issue_reasons,
+    RepairJob, assess_recording_after_capture_cancellable, gate_recording_cancellable,
+    has_user_impacting_issue, issue_reasons,
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::scene_geometry::{
@@ -12184,24 +12184,20 @@ fn enqueue_post_recording_gate(
         .and_then(|result| result);
 
         let should_attempt_repair = match fast_assessment {
-            Ok(status @ GateStatus::Ready { .. }) | Ok(status @ GateStatus::Failed { .. }) => {
-                job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                let _ = state.database.upsert_repair_job(&job);
-                emit_gate_health(&state, Some(&session_id), &status);
-                return;
-            }
-            Ok(status @ GateStatus::NotHundredPercent { .. }) => {
-                record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
-                let _ = state.database.upsert_repair_job(&job);
-                emit_gate_health(&state, Some(&session_id), &status);
-                true
-            }
-            Ok(status @ GateStatus::Repaired { .. }) => {
-                job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                let _ = state.database.upsert_repair_job(&job);
-                emit_gate_health(&state, Some(&session_id), &status);
-                return;
-            }
+            Ok(status) => match post_recording_gate_step(&status) {
+                PostRecordingGateStep::Complete => {
+                    job.complete_with_gate(&status, Utc::now().to_rfc3339());
+                    let _ = state.database.upsert_repair_job(&job);
+                    emit_gate_health(&state, Some(&session_id), &status);
+                    return;
+                }
+                PostRecordingGateStep::AttemptRepair => {
+                    record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
+                    let _ = state.database.upsert_repair_job(&job);
+                    emit_gate_health(&state, Some(&session_id), &status);
+                    true
+                }
+            },
             Err(error) if error.contains(MAINTENANCE_CANCELLED) => {
                 job.defer(
                     "quality check deferred because capture started".to_string(),
@@ -12296,7 +12292,9 @@ async fn run_quality_assessment(
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let path = file_path.clone();
         let is_cancelled = || cancel_token.is_cancelled();
-        let status = match analyze_recording_cancellable(
+        // Plan 200 C8: a recording over 20 minutes gets the sampled quick
+        // check instead of a full decode.
+        let status = match assess_recording_after_capture_cancellable(
             &ffmpeg_path,
             &ffprobe_path,
             &file_path,
@@ -12304,13 +12302,15 @@ async fn run_quality_assessment(
             &expectations,
             &is_cancelled,
         ) {
-            Ok((_, report)) if report.verdict == QualityVerdict::Clean => {
-                GateStatus::Ready { path }
-            }
+            Ok((_, report)) if report.verdict == QualityVerdict::Clean => GateStatus::Ready {
+                path,
+                sampled: report.sampled,
+            },
             Ok((_, report)) => GateStatus::NotHundredPercent {
                 path,
                 reasons: issue_reasons(&report.issues),
                 needs_attention: has_user_impacting_issue(&report.issues),
+                sampled: report.sampled,
             },
             Err(reason) if reason.contains(MAINTENANCE_CANCELLED) => {
                 return Err(MAINTENANCE_CANCELLED.to_string());
@@ -12325,6 +12325,30 @@ async fn run_quality_assessment(
     })
     .await
     .map_err(|error| format!("quality assessment task failed: {error}"))?
+}
+
+/// What the post-recording gate does after its fast assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostRecordingGateStep {
+    /// Store the verdict and stop.
+    Complete,
+    /// Store a running snapshot and attempt the backup-safe repair.
+    AttemptRepair,
+}
+
+/// Only a full check that found issues tries an automatic repair. Plan 200
+/// C8: the quick check of a long recording never auto-repairs; its report is
+/// shown instead.
+fn post_recording_gate_step(status: &GateStatus) -> PostRecordingGateStep {
+    match status {
+        GateStatus::NotHundredPercent { sampled: false, .. } => {
+            PostRecordingGateStep::AttemptRepair
+        }
+        GateStatus::Ready { .. }
+        | GateStatus::Repaired { .. }
+        | GateStatus::NotHundredPercent { sampled: true, .. }
+        | GateStatus::Failed { .. } => PostRecordingGateStep::Complete,
+    }
 }
 
 fn record_running_quality_snapshot(job: &mut RepairJob, status: &GateStatus, now: String) {
@@ -12373,13 +12397,19 @@ async fn run_quality_gate(
 /// records for the Library row, session log, and Diagnostics.
 fn emit_gate_health(state: &AppState, session_id: Option<&str>, status: &GateStatus) {
     match status {
-        GateStatus::Ready { .. } => {
+        GateStatus::Ready { sampled, .. } => {
+            let message = if *sampled {
+                // Plan 200 C8.
+                "Quick check (long recording): the sampled parts passed the automated quality check."
+            } else {
+                "Recording passed the automated quality check."
+            };
             let _ = emit_health_event(
                 state,
                 session_id,
                 HealthLevel::Info,
                 "recording-quality-passed",
-                "Recording passed the automated quality check.",
+                message,
             );
         }
         GateStatus::Repaired { interpolated, .. } => {
@@ -12399,12 +12429,21 @@ fn emit_gate_health(state: &AppState, session_id: Option<&str>, status: &GateSta
         GateStatus::NotHundredPercent {
             reasons,
             needs_attention,
+            sampled,
             ..
         } => {
-            let message = format!(
-                "Recording could not be brought to 100%: {}",
-                reasons.join("; ")
-            );
+            let message = if *sampled {
+                // Plan 200 C8: reported, never repaired automatically.
+                format!(
+                    "Quick check (long recording) found issues in the sampled parts: {}. It wasn't repaired automatically; choose Check quality in the Library for the details.",
+                    reasons.join("; ")
+                )
+            } else {
+                format!(
+                    "Recording could not be brought to 100%: {}",
+                    reasons.join("; ")
+                )
+            };
             let level = if *needs_attention {
                 HealthLevel::Warn
             } else {
@@ -12540,24 +12579,24 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
             .and_then(|result| result);
 
             let should_attempt_repair = match fast_assessment {
-                Ok(status @ GateStatus::Ready { .. }) | Ok(status @ GateStatus::Failed { .. }) => {
-                    job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                    let _ = state.database.upsert_repair_job(&job);
-                    emit_gate_health(&state, None, &status);
-                    return;
-                }
-                Ok(status @ GateStatus::NotHundredPercent { .. }) => {
-                    record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
-                    let _ = state.database.upsert_repair_job(&job);
-                    emit_gate_health(&state, None, &status);
-                    true
-                }
-                Ok(status @ GateStatus::Repaired { .. }) => {
-                    job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                    let _ = state.database.upsert_repair_job(&job);
-                    emit_gate_health(&state, None, &status);
-                    return;
-                }
+                Ok(status) => match post_recording_gate_step(&status) {
+                    PostRecordingGateStep::Complete => {
+                        job.complete_with_gate(&status, Utc::now().to_rfc3339());
+                        let _ = state.database.upsert_repair_job(&job);
+                        emit_gate_health(&state, None, &status);
+                        return;
+                    }
+                    PostRecordingGateStep::AttemptRepair => {
+                        record_running_quality_snapshot(
+                            &mut job,
+                            &status,
+                            Utc::now().to_rfc3339(),
+                        );
+                        let _ = state.database.upsert_repair_job(&job);
+                        emit_gate_health(&state, None, &status);
+                        true
+                    }
+                },
                 Err(error) if error.contains(MAINTENANCE_CANCELLED) => {
                     job.defer(
                         "repair job deferred because capture started".to_string(),
@@ -40166,6 +40205,45 @@ mod tests {
         assert_eq!(arg_value(&args, "-flush_packets"), Some("1"));
         assert!(args.iter().any(|arg| arg == "videorc"));
         assert!(args.iter().any(|arg| arg == "pipe:1"));
+    }
+
+    #[test]
+    fn post_recording_gate_never_auto_repairs_a_quick_check() {
+        let not_100 = |sampled| GateStatus::NotHundredPercent {
+            path: "/m/a.mp4".to_string(),
+            reasons: vec!["Frozen video segment detected.".to_string()],
+            needs_attention: true,
+            sampled,
+        };
+        // A full check with issues tries the backup-safe repair.
+        assert_eq!(
+            post_recording_gate_step(&not_100(false)),
+            PostRecordingGateStep::AttemptRepair
+        );
+        // Plan 200 C8: above 20 min the sampled report is shown, never repaired.
+        assert_eq!(
+            post_recording_gate_step(&not_100(true)),
+            PostRecordingGateStep::Complete
+        );
+        for status in [
+            GateStatus::Ready {
+                path: "/m/a.mp4".to_string(),
+                sampled: true,
+            },
+            GateStatus::Ready {
+                path: "/m/a.mp4".to_string(),
+                sampled: false,
+            },
+            GateStatus::Failed {
+                path: "/m/a.mp4".to_string(),
+                reason: "probe failed".to_string(),
+            },
+        ] {
+            assert_eq!(
+                post_recording_gate_step(&status),
+                PostRecordingGateStep::Complete
+            );
+        }
     }
 
     #[test]

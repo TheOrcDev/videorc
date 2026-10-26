@@ -77,7 +77,7 @@ fn gate_status_label(status: &GateStatus) -> &'static str {
 
 fn gate_status_path(status: &GateStatus) -> &str {
     match status {
-        GateStatus::Ready { path }
+        GateStatus::Ready { path, .. }
         | GateStatus::Repaired { path, .. }
         | GateStatus::NotHundredPercent { path, .. }
         | GateStatus::Failed { path, .. } => path,
@@ -248,7 +248,8 @@ mod tests {
     fn gate_status_labels_match_renderer_statuses() {
         assert_eq!(
             gate_status_label(&GateStatus::Ready {
-                path: "/m/a.mp4".to_string()
+                path: "/m/a.mp4".to_string(),
+                sampled: false,
             }),
             "ready"
         );
@@ -264,6 +265,7 @@ mod tests {
                 path: "/m/a.mp4".to_string(),
                 reasons: vec!["bad".to_string()],
                 needs_attention: false,
+                sampled: false,
             }),
             "not-100"
         );

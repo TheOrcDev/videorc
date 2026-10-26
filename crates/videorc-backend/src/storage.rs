@@ -11968,7 +11968,13 @@ mod tests {
                 &expectations,
                 "t0".to_string(),
             );
-            repair.complete_with_gate(&GateStatus::Ready { path: output_path }, "t1".to_string());
+            repair.complete_with_gate(
+                &GateStatus::Ready {
+                    path: output_path,
+                    sampled: false,
+                },
+                "t1".to_string(),
+            );
             database.upsert_repair_job(&repair).unwrap();
         }
         assert!(matches!(
@@ -15392,6 +15398,7 @@ mod tests {
         older_output_job.complete_with_gate(
             &GateStatus::Ready {
                 path: "/tmp/videorc-test.mkv".to_string(),
+                sampled: false,
             },
             "t1".to_string(),
         );
@@ -15406,6 +15413,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Frozen video segment detected.".to_string()],
                 needs_attention: false,
+                sampled: false,
             },
             "t2".to_string(),
         );
@@ -15419,6 +15427,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Frozen video segment detected.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
@@ -15435,6 +15444,7 @@ mod tests {
             path: "/tmp/videorc-test.mp4".to_string(),
             reasons: vec!["Only 8fps observed while live.".to_string()],
             needs_attention: false,
+            sampled: false,
         })
         .ok();
         database.upsert_repair_job(&running_fast_gate).unwrap();
@@ -15446,6 +15456,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Only 8fps observed while live.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
@@ -15475,6 +15486,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Only 8fps observed while live.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
@@ -15596,6 +15608,7 @@ mod tests {
                     path: "/tmp/videorc-test.mp4".to_string(),
                     reasons: vec!["Only 8fps observed while live.".to_string()],
                     needs_attention: false,
+                    sampled: false,
                 }),
                 "legacy fallback for {label}"
             );
@@ -15636,6 +15649,7 @@ mod tests {
                 path: "/tmp/videorc-test.mp4".to_string(),
                 reasons: vec!["Only 8fps observed while live.".to_string()],
                 needs_attention: false,
+                sampled: false,
             })
         );
         let page = database.list_session_items_page(None, 1).unwrap();
