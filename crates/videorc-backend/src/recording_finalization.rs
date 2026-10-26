@@ -311,7 +311,10 @@ impl RecordingFinalizationRegistry {
 
     /// The Combined export of `take_id` will not run (or has run).
     pub fn withdraw_primary_export(&self, take_id: &str) {
-        let removed = self.lock_export_slot().pending_primary_takes.remove(take_id);
+        let removed = self
+            .lock_export_slot()
+            .pending_primary_takes
+            .remove(take_id);
         if removed {
             self.export_changed.notify_waiters();
         }
@@ -622,9 +625,7 @@ mod tests {
         let waiter = |ticket, class: ExportClass, waited: u64| ExportWaiter {
             ticket,
             class,
-            queued_at: now
-                .checked_sub(Duration::from_secs(waited))
-                .unwrap_or(now),
+            queued_at: now.checked_sub(Duration::from_secs(waited)).unwrap_or(now),
         };
         let separate = || ExportClass::SeparateFile {
             take_id: "take-e".to_string(),
@@ -646,7 +647,10 @@ mod tests {
             waiter(1, separate(), 60),
             waiter(2, ExportClass::Primary, 1),
         ];
-        assert_eq!(next_export_ticket(&waiters, &pending, now, max_wait), Some(1));
+        assert_eq!(
+            next_export_ticket(&waiters, &pending, now, max_wait),
+            Some(1)
+        );
         // Nothing to serve while only a held-back separate file waits.
         let waiters = vec![waiter(1, separate(), 1)];
         assert_eq!(next_export_ticket(&waiters, &pending, now, max_wait), None);

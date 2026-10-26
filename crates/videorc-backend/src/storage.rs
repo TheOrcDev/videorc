@@ -15152,7 +15152,10 @@ mod tests {
             operations[0].paths
         );
         assert!(!mp4.exists());
-        assert!(!backup.exists(), "the backup is quarantined with the recording");
+        assert!(
+            !backup.exists(),
+            "the backup is quarantined with the recording"
+        );
         let quarantined_backup = operations[0]
             .paths
             .iter()
@@ -15205,7 +15208,10 @@ mod tests {
             .complete_session_deletion(&operations[0].operation_id, &[])
             .unwrap();
         assert!(completion.deleted);
-        assert!(!hidden.exists(), "the empty private folder goes with the row");
+        assert!(
+            !hidden.exists(),
+            "the empty private folder goes with the row"
+        );
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }

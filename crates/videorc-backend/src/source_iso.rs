@@ -2317,7 +2317,8 @@ mod tests {
 
     #[test]
     fn the_private_capture_folder_is_removed_only_when_empty() {
-        let root = std::env::temp_dir().join(format!("videorc-p200-iso-dir-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("videorc-p200-iso-dir-{}", uuid::Uuid::new_v4()));
         let hidden = root.join(".videorc-iso-test");
         std::fs::create_dir_all(&hidden).unwrap();
         let file = hidden.join("take-screen.mkv");

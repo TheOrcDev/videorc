@@ -160,7 +160,10 @@ mod tests {
             "Not enough disk space to finish the MP4 (needs 20.4 GB, 20.4 GB free). Your recording is safe as MKV; free some space and use Export MP4."
         );
         let message = check_export_space(input, 6_000_000_000).unwrap_err();
-        assert!(message.contains("(needs 20.4 GB, 6.0 GB free)"), "{message}");
+        assert!(
+            message.contains("(needs 20.4 GB, 6.0 GB free)"),
+            "{message}"
+        );
         assert!(check_backup_space(GIB, GIB).is_err());
         assert!(check_backup_space(GIB, 2 * GIB).is_ok());
     }
