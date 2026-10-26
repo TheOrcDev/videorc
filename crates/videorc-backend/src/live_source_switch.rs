@@ -529,6 +529,7 @@ impl SourceSwitchCoordinator {
 
     /// Admission is synchronous under the session coordinator mutex. Duplicate
     /// requests return the existing operation, including after response loss.
+    #[cfg(test)]
     pub fn admit(&mut self, request: &SourceSwitchParams) -> Result<Admission, SwitchError> {
         self.admit_with(request, false)
     }
