@@ -76,6 +76,13 @@ describe('ActivityPane', () => {
   it('renders no Auto-show switch without a handler', () => {
     expect(markup).not.toContain('data-testid="activity-auto-show"')
   })
+
+  it('shows one All chip: the platform filter leads, kind chips toggle off', () => {
+    expect(markup.match(/>All</g)).toHaveLength(1)
+    expect(markup.indexOf('aria-label="Show activity from"')).toBeLessThan(
+      markup.indexOf('aria-label="Filter activity"')
+    )
+  })
 })
 
 // Plan 156: the one switch that auto-shows celebrations on stream.
