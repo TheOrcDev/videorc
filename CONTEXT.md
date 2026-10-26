@@ -216,9 +216,10 @@ action that fixes it ("Twitch: reconnect to send").
 _Avoid_: re-auth, re-authorize
 
 **Discord announcement**:
-The one message Videorc posts to the streamer's Discord channel when they go
-live, through the webhook they pasted in Livestream → Setup → Discord. It
-links each live destination and becomes "Was live" at the stop (plan 187).
+The one message Videorc posts to each of the streamer's Discord channels when
+they go live, through the webhooks they pasted in Livestream → Setup → Discord
+(one per server). It links each live destination and becomes "Was live" at
+the stop (plan 187).
 _Avoid_: notification, alert, ping (a ping is only the @here or @everyone it
 carries)
 

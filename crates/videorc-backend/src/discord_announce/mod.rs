@@ -1,21 +1,25 @@
 //! Discord go-live announcement (plan 187, issue #634). Free, and automatic
 //! once a webhook is set: when the first ticked destination is confirmed live,
-//! one message goes to the streamer's Discord channel, sent under their name
-//! and avatar, with a link button per live platform. It gains buttons as more
-//! destinations come up and turns into "Was live · 1h 42m" at the stop.
-//! Reconnects and restarts within [`machine::RESTART_WINDOW`] never ping again;
-//! unlisted and private YouTube streams are never announced.
+//! one message goes to each of the streamer's Discord channels, sent under
+//! their name and avatar, with a link button per live platform. It gains
+//! buttons as more destinations come up and turns into "Was live · 1h 42m" at
+//! the stop. Reconnects and restarts within [`machine::RESTART_WINDOW`] never
+//! ping again; unlisted and private YouTube streams are never announced.
 //!
-//! The backend owns everything. The webhook URL lives only in the secrets
-//! file (`discord.webhook.url`); the renderer sees a masked hint. Settings and
-//! the last message live in `app_settings`. The go-live hooks only `try_send`
-//! a fact to the announcer task, so Go Live never waits on Discord.
+//! The backend owns everything. A streamer connects up to [`MAX_WEBHOOKS`]
+//! webhooks (one per server); every server gets the same post, and each
+//! webhook keeps its own secret, its own last message and its own failure.
+//! The webhook URLs live only in the secrets file (`discord.webhook.url.{id}`,
+//! or plan 187's single `discord.webhook.url` until it is re-saved); the
+//! renderer sees a masked hint. Settings and the last messages live in
+//! `app_settings`. The go-live hooks only `try_send` a fact to the announcer
+//! task, so Go Live never waits on Discord.
 
 pub mod client;
 pub mod links;
 pub mod machine;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -23,7 +27,7 @@ use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast, mpsc};
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 use self::client::{
     DiscordPing, LinkButton, MessageView, Mood, RetryPolicy, SendError, Sender, Thumbnail,
@@ -37,14 +41,20 @@ use crate::streaming::{
     StreamPrivacy, StreamTargetSettings, StreamTargetsSnapshot, StreamingSettings,
 };
 
+/// Plan 187's single-webhook secret. Still read for a webhook saved before
+/// there were several; every save since writes [`webhook_secret_ref`].
 pub const WEBHOOK_SECRET_REF: &str = "discord.webhook.url";
 pub const SETTINGS_KEY: &str = "discord.announce";
 pub const LAST_MESSAGE_KEY: &str = "discord.announce.lastMessage";
 pub const CHANGED_EVENT: &str = "discord.announce.changed";
+/// One per server is the point; ten is more servers than anyone streams to.
+pub const MAX_WEBHOOKS: usize = 10;
 const FACT_CHANNEL_CAPACITY: usize = 32;
 const HEARTBEAT: TimeDelta = TimeDelta::seconds(60);
 /// Leave startup alone before fixing a message a crash left "live".
 const RECOVERY_DELAY: Duration = Duration::from_secs(30);
+/// At most one still sending its "Was live" edits and the next.
+const MAX_SESSIONS: usize = 2;
 const MAX_TARGET_IDS: usize = 64;
 const MAX_ID_LEN: usize = 128;
 /// "Send test message" answers while the user waits: short retries only.
@@ -58,7 +68,8 @@ const TEST_POST_POLICY: RetryPolicy = RetryPolicy {
 // Settings and wire types
 // ---------------------------------------------------------------------------
 
-/// What Discord said about the saved webhook when it was verified.
+/// What Discord said about a saved webhook when it was verified, plus what
+/// has happened to it since.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct WebhookMeta {
@@ -74,6 +85,9 @@ struct WebhookMeta {
     /// embed text from then on.
     #[serde(default)]
     components_refused: bool,
+    /// The last post that failed through this webhook, until one succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<AnnounceError>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,9 +120,14 @@ struct StoredSettings {
     excluded_target_ids: Vec<String>,
     #[serde(default)]
     link_overrides: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Every connected webhook, in the order they were connected.
+    #[serde(default)]
+    webhooks: Vec<WebhookMeta>,
+    /// Plan 187 kept one webhook and its failure here. Read once, folded into
+    /// `webhooks` by [`StoredSettings::fold_legacy`], and never written again.
+    #[serde(default, skip_serializing)]
     webhook: Option<WebhookMeta>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     last_error: Option<AnnounceError>,
 }
 
@@ -125,14 +144,63 @@ impl Default for StoredSettings {
             post_as: PostAs::Automatic,
             excluded_target_ids: Vec::new(),
             link_overrides: BTreeMap::new(),
+            webhooks: Vec::new(),
             webhook: None,
             last_error: None,
         }
     }
 }
 
-/// The message posted for the latest announced session. Kept so a quick
-/// restart can revive it and a crash can be tidied up at the next launch.
+impl StoredSettings {
+    /// A row written before there were several webhooks keeps working: its
+    /// one webhook leads the list, carrying the failure that was global.
+    fn fold_legacy(mut self) -> Self {
+        if let Some(mut meta) = self.webhook.take()
+            && !self.webhooks.iter().any(|saved| saved.id == meta.id)
+        {
+            meta.last_error = self.last_error.take();
+            self.webhooks.insert(0, meta);
+        }
+        self.last_error = None;
+        self
+    }
+
+    fn webhook(&self, id: &str) -> Option<&WebhookMeta> {
+        self.webhooks.iter().find(|meta| meta.id == id)
+    }
+
+    fn webhook_mut(&mut self, id: &str) -> Option<&mut WebhookMeta> {
+        self.webhooks.iter_mut().find(|meta| meta.id == id)
+    }
+
+    /// Adds a verified webhook. A re-paste of a saved one replaces it in
+    /// place (same Discord id); a new one goes last, within the cap.
+    fn upsert_webhook(&mut self, meta: WebhookMeta) -> Result<(), RpcError> {
+        if let Some(saved) = self.webhook_mut(&meta.id) {
+            *saved = meta;
+            return Ok(());
+        }
+        if self.webhooks.len() >= MAX_WEBHOOKS {
+            return Err(RpcError::new(
+                "discord-too-many-webhooks",
+                format!(
+                    "You can connect up to {MAX_WEBHOOKS} webhooks. Remove one to add another."
+                ),
+            ));
+        }
+        self.webhooks.push(meta);
+        Ok(())
+    }
+
+    fn remove_webhook(&mut self, id: &str) -> Option<WebhookMeta> {
+        let index = self.webhooks.iter().position(|meta| meta.id == id)?;
+        Some(self.webhooks.remove(index))
+    }
+}
+
+/// The message posted for a webhook's latest announced session. Kept so a
+/// quick restart can revive it and a crash can be tidied up at the next
+/// launch. One per webhook.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct LastMessage {
@@ -171,16 +239,29 @@ pub struct LastPost {
     pub state: LastPostState,
 }
 
+/// One saved webhook as the renderer sees it. The id is Discord's snowflake
+/// for the webhook, how the RPCs name it; the token never travels.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscordWebhookSnapshot {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `…/a1B2`: the masked tail of the token.
+    pub hint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_post: Option<LastPost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<AnnounceError>,
+}
+
 /// `discord.announce.get` and the `discord.announce.changed` event. Never
-/// carries the webhook URL.
+/// carries a webhook URL.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscordAnnounceSnapshot {
-    pub webhook_present: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_name: Option<String>,
+    /// The webhooks whose secret is present, in the order they were connected.
+    pub webhooks: Vec<DiscordWebhookSnapshot>,
     pub enabled: bool,
     pub ping: DiscordPing,
     pub branding: bool,
@@ -188,10 +269,6 @@ pub struct DiscordAnnounceSnapshot {
     pub excluded_target_ids: Vec<String>,
     pub link_overrides: BTreeMap<String, String>,
     pub identities: Vec<PostAsIdentity>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_post: Option<LastPost>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_error: Option<AnnounceError>,
 }
 
 /// One typed link change: a link sets it, none removes it.
@@ -227,12 +304,27 @@ pub struct SaveWebhookParams {
     pub url: String,
 }
 
-/// `discord.links.preview` and `discord.webhook.sendTest`: the configured
-/// destinations, as the Livestream page has them.
+/// `discord.webhook.remove`: which saved webhook goes.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveWebhookParams {
+    pub webhook_id: String,
+}
+
+/// `discord.links.preview`: the configured destinations, as the Livestream
+/// page has them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TargetsParams {
     pub targets: Vec<LinkTarget>,
+}
+
+/// `discord.webhook.sendTest`: the destinations, and which webhook to test.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestParams {
+    pub targets: Vec<LinkTarget>,
+    pub webhook_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -286,6 +378,10 @@ impl RpcError {
             }
         }
     }
+
+    fn no_webhook() -> Self {
+        Self::new("discord-no-webhook", "Paste a Discord webhook URL first.")
+    }
 }
 
 fn settings_unavailable(error: impl std::fmt::Display) -> RpcError {
@@ -322,6 +418,9 @@ pub struct DiscordAnnounceRuntime {
     facts: std::sync::OnceLock<mpsc::Sender<HookFact>>,
     /// Serializes every read-modify-write of the settings row.
     settings_lock: Mutex<()>,
+    /// Serializes every read-modify-write of the last-messages row: the
+    /// announcer loop and the startup recovery both write it.
+    messages_lock: std::sync::Mutex<()>,
 }
 
 fn send_fact(state: &AppState, fact: HookFact) {
@@ -425,37 +524,150 @@ fn load_settings(state: &AppState) -> StoredSettings {
             None
         })
         .unwrap_or_default()
+        .fold_legacy()
 }
 
 fn save_settings(state: &AppState, settings: &StoredSettings) -> anyhow::Result<()> {
     state.database.save_setting(SETTINGS_KEY, settings)
 }
 
-fn load_last_message(state: &AppState) -> Option<LastMessage> {
-    state
-        .database
-        .load_setting::<LastMessage>(LAST_MESSAGE_KEY)
-        .ok()
-        .flatten()
+/// The last-messages row: one message per webhook. Plan 187 wrote one object
+/// (and `null` after a removal); both still read.
+fn parse_last_messages(value: serde_json::Value) -> Vec<LastMessage> {
+    let parsed = match value {
+        serde_json::Value::Array(_) => serde_json::from_value::<Vec<LastMessage>>(value),
+        serde_json::Value::Object(_) => {
+            serde_json::from_value::<LastMessage>(value).map(|message| vec![message])
+        }
+        _ => return Vec::new(),
+    };
+    parsed.unwrap_or_else(|error| {
+        tracing::warn!("[discord] the last messages are unreadable, forgetting them: {error}");
+        Vec::new()
+    })
 }
 
-fn save_last_message(state: &AppState, message: Option<&LastMessage>) {
-    let result = match message {
-        Some(message) => state.database.save_setting(LAST_MESSAGE_KEY, message),
-        None => state
-            .database
-            .save_setting(LAST_MESSAGE_KEY, &serde_json::Value::Null),
-    };
-    if let Err(error) = result {
-        tracing::warn!("[discord] could not save the last message: {error}");
+fn load_last_messages(state: &AppState) -> Vec<LastMessage> {
+    state
+        .database
+        .load_setting::<serde_json::Value>(LAST_MESSAGE_KEY)
+        .unwrap_or_else(|error| {
+            tracing::warn!("[discord] the last messages are unreadable: {error}");
+            None
+        })
+        .map(parse_last_messages)
+        .unwrap_or_default()
+}
+
+fn save_last_messages(state: &AppState, messages: &[LastMessage]) {
+    if let Err(error) = state.database.save_setting(LAST_MESSAGE_KEY, &messages) {
+        tracing::warn!("[discord] could not save the last messages: {error}");
     }
 }
 
-fn stored_webhook() -> Option<WebhookUrl> {
-    crate::secrets::try_get_secret(WEBHOOK_SECRET_REF)
-        .ok()
-        .flatten()
+/// Applies `change` to the last messages under their lock and saves.
+fn update_last_messages(state: &AppState, change: impl FnOnce(&mut Vec<LastMessage>)) {
+    let _guard = state
+        .discord_announce
+        .messages_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut messages = load_last_messages(state);
+    change(&mut messages);
+    save_last_messages(state, &messages);
+}
+
+/// Remembers `message` as its webhook's latest.
+fn put_last_message(messages: &mut Vec<LastMessage>, message: LastMessage) {
+    match messages
+        .iter_mut()
+        .find(|saved| saved.webhook_id == message.webhook_id)
+    {
+        Some(saved) => *saved = message,
+        None => messages.push(message),
+    }
+}
+
+fn forget_last_message(messages: &mut Vec<LastMessage>, webhook_id: &str) {
+    messages.retain(|message| message.webhook_id != webhook_id);
+}
+
+/// Where one webhook's URL lives in the secrets file.
+fn webhook_secret_ref(id: &str) -> String {
+    format!("{WEBHOOK_SECRET_REF}.{id}")
+}
+
+/// A saved webhook's URL: its own secret, or plan 187's single secret while
+/// that still holds this webhook. Nothing is copied or dropped on a read, so
+/// an upgrade loses no webhook.
+fn resolve_webhook_url(id: &str, read: impl Fn(&str) -> Option<String>) -> Option<WebhookUrl> {
+    let parse = |raw: String| WebhookUrl::parse(&raw).ok().filter(|url| url.id() == id);
+    read(&webhook_secret_ref(id))
+        .and_then(parse)
+        .or_else(|| read(WEBHOOK_SECRET_REF).and_then(parse))
+}
+
+/// What saving `webhook` writes: its own ref, and the single secret goes once
+/// it held this same webhook (the URL now lives under the new ref).
+fn secret_writes_for_save(
+    webhook: &WebhookUrl,
+    legacy_id: Option<&str>,
+) -> (String, Vec<&'static str>) {
+    let removals = (legacy_id == Some(webhook.id()))
+        .then_some(WEBHOOK_SECRET_REF)
+        .into_iter()
+        .collect();
+    (webhook_secret_ref(webhook.id()), removals)
+}
+
+/// What removing webhook `id` deletes: its own ref, and the single secret
+/// when that is the one holding it.
+fn secret_refs_for_remove(id: &str, legacy_id: Option<&str>) -> Vec<String> {
+    let mut refs = vec![webhook_secret_ref(id)];
+    if legacy_id == Some(id) {
+        refs.push(WEBHOOK_SECRET_REF.to_string());
+    }
+    refs
+}
+
+fn read_secret(secret_ref: &str) -> Option<String> {
+    crate::secrets::try_get_secret(secret_ref).ok().flatten()
+}
+
+fn stored_webhook(id: &str) -> Option<WebhookUrl> {
+    resolve_webhook_url(id, read_secret)
+}
+
+/// Which webhook plan 187's single secret holds, if it is still there.
+fn legacy_secret_id() -> Option<String> {
+    read_secret(WEBHOOK_SECRET_REF)
         .and_then(|raw| WebhookUrl::parse(&raw).ok())
+        .map(|url| url.id().to_string())
+}
+
+fn store_webhook_secret(webhook: &WebhookUrl) -> anyhow::Result<()> {
+    let legacy_id = legacy_secret_id();
+    let (secret_ref, removals) = secret_writes_for_save(webhook, legacy_id.as_deref());
+    crate::secrets::update_secrets(
+        &[(secret_ref.as_str(), &webhook.to_secret_string())],
+        &removals,
+    )
+}
+
+fn delete_webhook_secret(id: &str) -> anyhow::Result<()> {
+    let legacy_id = legacy_secret_id();
+    let refs = secret_refs_for_remove(id, legacy_id.as_deref());
+    let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
+    crate::secrets::delete_secrets(&refs)
+}
+
+/// The saved webhooks whose secret is present, each with its URL.
+fn saved_webhooks(settings: &StoredSettings) -> Vec<(WebhookMeta, WebhookUrl)> {
+    settings
+        .webhooks
+        .iter()
+        .filter_map(|meta| stored_webhook(&meta.id).map(|url| (meta.clone(), url)))
+        .collect()
 }
 
 /// Applies `change` to the settings under the lock, saves, and announces
@@ -475,13 +687,12 @@ async fn modify_settings<T>(
     Ok(value)
 }
 
-fn message_url(meta: Option<&WebhookMeta>, message: &LastMessage) -> Option<String> {
-    let meta = meta?;
+/// "View in Discord": the message's link, once its server is known.
+fn message_url(meta: &WebhookMeta, channel_id: Option<&str>, message_id: &str) -> Option<String> {
     let guild = meta.guild_id.as_deref()?;
-    let channel = message.channel_id.as_deref().unwrap_or(&meta.channel_id);
+    let channel = channel_id.unwrap_or(&meta.channel_id);
     Some(format!(
-        "https://discord.com/channels/{guild}/{channel}/{}",
-        message.message_id
+        "https://discord.com/channels/{guild}/{channel}/{message_id}"
     ))
 }
 
@@ -493,31 +704,34 @@ pub async fn snapshot(state: &AppState) -> DiscordAnnounceSnapshot {
     let settings = load_settings(state);
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
     let videorc = videorc_account(state).await;
-    let webhook_present = stored_webhook().is_some();
-    let last_post = load_last_message(state)
-        .filter(|message| {
-            settings
-                .webhook
-                .as_ref()
-                .is_some_and(|meta| meta.id == message.webhook_id)
+    let messages = load_last_messages(state);
+    let webhooks = saved_webhooks(&settings)
+        .into_iter()
+        .map(|(meta, _)| DiscordWebhookSnapshot {
+            last_post: messages
+                .iter()
+                .find(|message| message.webhook_id == meta.id)
+                .map(|message| LastPost {
+                    at: message.posted_at.to_rfc3339(),
+                    message_url: message_url(
+                        &meta,
+                        message.channel_id.as_deref(),
+                        &message.message_id,
+                    ),
+                    state: if message.live {
+                        LastPostState::Live
+                    } else {
+                        LastPostState::Ended
+                    },
+                }),
+            id: meta.id,
+            name: meta.name,
+            hint: meta.hint,
+            last_error: meta.last_error,
         })
-        .map(|message| LastPost {
-            at: message.posted_at.to_rfc3339(),
-            message_url: message_url(settings.webhook.as_ref(), &message),
-            state: if message.live {
-                LastPostState::Live
-            } else {
-                LastPostState::Ended
-            },
-        });
+        .collect();
     DiscordAnnounceSnapshot {
-        webhook_present,
-        webhook_hint: webhook_present
-            .then(|| settings.webhook.as_ref().map(|meta| meta.hint.clone()))
-            .flatten(),
-        webhook_name: webhook_present
-            .then(|| settings.webhook.as_ref().and_then(|meta| meta.name.clone()))
-            .flatten(),
+        webhooks,
         enabled: settings.enabled,
         ping: settings.ping,
         branding: settings.branding,
@@ -525,8 +739,6 @@ pub async fn snapshot(state: &AppState) -> DiscordAnnounceSnapshot {
         excluded_target_ids: settings.excluded_target_ids,
         link_overrides: settings.link_overrides,
         identities: links::identities(&accounts, videorc.as_ref()),
-        last_post,
-        last_error: settings.last_error,
     }
 }
 
@@ -603,6 +815,8 @@ pub async fn update(
     Ok(snapshot(state).await)
 }
 
+/// Verifies a pasted webhook with Discord and adds it. The same webhook
+/// pasted again replaces the saved one (a fresh token after a reset).
 pub async fn save_webhook(
     state: &AppState,
     params: SaveWebhookParams,
@@ -614,38 +828,51 @@ pub async fn save_webhook(
     let info = client::verify(&client, &client::api_origin(), &webhook)
         .await
         .map_err(RpcError::from_send)?;
-    crate::secrets::put_secret(WEBHOOK_SECRET_REF, &webhook.to_secret_string())
-        .map_err(settings_unavailable)?;
+    let meta = WebhookMeta {
+        id: webhook.id().to_string(),
+        name: info
+            .name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()),
+        channel_id: info.channel_id,
+        guild_id: info.guild_id,
+        hint: webhook.hint(),
+        verified_at: Utc::now().to_rfc3339(),
+        components_refused: false,
+        last_error: None,
+    };
     modify_settings(state, |settings| {
-        settings.webhook = Some(WebhookMeta {
-            id: webhook.id().to_string(),
-            name: info
-                .name
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty()),
-            channel_id: info.channel_id,
-            guild_id: info.guild_id,
-            hint: webhook.hint(),
-            verified_at: Utc::now().to_rfc3339(),
-            components_refused: false,
-        });
-        settings.last_error = None;
-        Ok(())
+        settings.upsert_webhook(meta)?;
+        // Under the settings lock, after the cap check and before the settings
+        // land: a refused paste never writes a secret.
+        store_webhook_secret(&webhook).map_err(settings_unavailable)
     })
     .await?;
     state.emit_log("info", "Discord webhook connected.");
     Ok(snapshot(state).await)
 }
 
-pub async fn remove_webhook(state: &AppState) -> Result<DiscordAnnounceSnapshot, RpcError> {
-    crate::secrets::delete_secret(WEBHOOK_SECRET_REF).map_err(settings_unavailable)?;
+/// Removes one webhook: its secret, its settings and its remembered message.
+/// The others keep posting.
+pub async fn remove_webhook(
+    state: &AppState,
+    params: RemoveWebhookParams,
+) -> Result<DiscordAnnounceSnapshot, RpcError> {
+    let webhook_id = params.webhook_id;
+    if !valid_id(&webhook_id) {
+        return Err(RpcError::new("invalid-params", "Unknown webhook."));
+    }
     modify_settings(state, |settings| {
-        settings.webhook = None;
-        settings.last_error = None;
-        Ok(())
+        if settings.remove_webhook(&webhook_id).is_none() {
+            return Err(RpcError::new(
+                "discord-no-webhook",
+                "That webhook was already removed.",
+            ));
+        }
+        delete_webhook_secret(&webhook_id).map_err(settings_unavailable)
     })
     .await?;
-    save_last_message(state, None);
+    update_last_messages(state, |messages| forget_last_message(messages, &webhook_id));
     emit_snapshot(state).await;
     Ok(snapshot(state).await)
 }
@@ -700,20 +927,27 @@ fn test_link(
     }
 }
 
-/// "Send test message": the real title, sender, thumbnail and links, a test
-/// label, and never a ping.
-pub async fn send_test(state: &AppState, params: TargetsParams) -> Result<TestResult, RpcError> {
-    let webhook = stored_webhook()
-        .ok_or_else(|| RpcError::new("discord-no-webhook", "Paste a Discord webhook URL first."))?;
-    let preview = preview_links(state, params.clone()).await?;
+/// "Send test message" to one webhook: the real title, sender, thumbnail
+/// and links, a test label, and never a ping.
+pub async fn send_test(state: &AppState, params: TestParams) -> Result<TestResult, RpcError> {
+    let settings = load_settings(state);
+    let meta = settings
+        .webhook(&params.webhook_id)
+        .cloned()
+        .ok_or_else(RpcError::no_webhook)?;
+    let webhook = stored_webhook(&meta.id).ok_or_else(RpcError::no_webhook)?;
+    let targets = TargetsParams {
+        targets: params.targets,
+    };
+    let preview = preview_links(state, targets.clone()).await?;
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
     let link_buttons: Vec<LinkButton> = preview
         .links
         .iter()
-        .filter(|row| !state_excludes(state, &row.target_id))
+        .filter(|row| !settings.excluded_target_ids.contains(&row.target_id))
         .filter_map(|row| {
             let url = row.link.clone().or_else(|| {
-                params
+                targets
                     .targets
                     .iter()
                     .find(|target| target.id == row.target_id)
@@ -725,7 +959,6 @@ pub async fn send_test(state: &AppState, params: TargetsParams) -> Result<TestRe
             })
         })
         .collect();
-    let settings = load_settings(state);
     let draft = state.database.stream_metadata_draft().ok();
     let title = draft
         .as_ref()
@@ -734,10 +967,7 @@ pub async fn send_test(state: &AppState, params: TargetsParams) -> Result<TestRe
     let thumbnail = draft
         .as_ref()
         .and_then(|draft| load_thumbnail(state, draft.thumbnail_asset_id.as_deref()));
-    let components = !settings
-        .webhook
-        .as_ref()
-        .is_some_and(|meta| meta.components_refused);
+    let components = !meta.components_refused;
     let view = |components: bool| MessageView {
         title: &title,
         links: &link_buttons,
@@ -768,7 +998,7 @@ pub async fn send_test(state: &AppState, params: TargetsParams) -> Result<TestRe
     .await;
     let posted = match first {
         Err(SendError::ComponentsRefused) if components => {
-            mark_components_refused(state).await;
+            mark_components_refused(state, &meta.id).await;
             client::execute(
                 &client,
                 &origin,
@@ -783,27 +1013,14 @@ pub async fn send_test(state: &AppState, params: TargetsParams) -> Result<TestRe
         other => other,
     }
     .map_err(RpcError::from_send)?;
-    let message_url = settings.webhook.as_ref().and_then(|meta| {
-        let guild = meta.guild_id.as_deref()?;
-        let channel = posted.channel_id.as_deref().unwrap_or(&meta.channel_id);
-        Some(format!(
-            "https://discord.com/channels/{guild}/{channel}/{}",
-            posted.message_id
-        ))
-    });
-    Ok(TestResult { message_url })
+    Ok(TestResult {
+        message_url: message_url(&meta, posted.channel_id.as_deref(), &posted.message_id),
+    })
 }
 
-fn state_excludes(state: &AppState, target_id: &str) -> bool {
-    load_settings(state)
-        .excluded_target_ids
-        .iter()
-        .any(|id| id == target_id)
-}
-
-async fn mark_components_refused(state: &AppState) {
+async fn mark_components_refused(state: &AppState, webhook_id: &str) {
     let _ = modify_settings(state, |settings| {
-        if let Some(meta) = settings.webhook.as_mut() {
+        if let Some(meta) = settings.webhook_mut(webhook_id) {
             meta.components_refused = true;
         }
         Ok(())
@@ -834,11 +1051,13 @@ fn load_thumbnail(state: &AppState, asset_id: Option<&str>) -> Option<Thumbnail>
 // The announcer
 // ---------------------------------------------------------------------------
 
-/// What a session's posts say and where they go, fixed at Go Live.
+/// What a session's posts say and where they go, fixed at Go Live. One per
+/// webhook: every server gets the same post, through its own webhook.
 #[derive(Debug, Clone)]
 struct SessionContext {
     webhook: WebhookUrl,
     webhook_id: String,
+    webhook_name: Option<String>,
     sender: Option<Sender>,
     ping: DiscordPing,
     branding: bool,
@@ -850,6 +1069,8 @@ struct SessionContext {
     posted_at: Option<DateTime<Utc>>,
 }
 
+/// One session's announcement through one webhook: its own state machine,
+/// fed the same facts as its siblings.
 struct Active {
     machine: AnnounceSession,
     context: SessionContext,
@@ -858,10 +1079,12 @@ struct Active {
     last_heartbeat: DateTime<Utc>,
 }
 
+/// A request on its way to Discord: which session and webhook it serves.
+#[derive(Debug, Clone)]
 struct InFlight {
     session_id: String,
+    webhook_id: String,
     request: Request,
-    handle: JoinHandle<RequestResult>,
 }
 
 #[derive(Debug)]
@@ -876,18 +1099,25 @@ async fn run_announcer(
     mut facts: mpsc::Receiver<HookFact>,
     client: reqwest::Client,
 ) {
-    // At most two: one still sending its "Was live" edit and the next.
+    // One per (session, webhook); at most MAX_SESSIONS sessions.
     let mut sessions: Vec<Active> = Vec::new();
     let mut early_targets: Option<StreamTargetsSnapshot> = None;
     let mut ended_ids: Vec<String> = Vec::new();
-    let mut in_flight: Option<InFlight> = None;
+    // At most one request per webhook at a time; webhooks run side by side.
+    let mut requests: JoinSet<RequestResult> = JoinSet::new();
+    let mut in_flight: HashMap<tokio::task::Id, InFlight> = HashMap::new();
     let mut recovery_at = Some(tokio::time::Instant::now() + RECOVERY_DELAY);
 
     loop {
         let now = Utc::now();
-        if in_flight.is_none() {
-            in_flight = next_request(&state, &client, &mut sessions, now);
-        }
+        start_due_requests(
+            &state,
+            &client,
+            &mut sessions,
+            &mut requests,
+            &mut in_flight,
+            now,
+        );
         sessions.retain(|active| !active.machine.is_finished());
 
         let deadline = sessions
@@ -921,13 +1151,18 @@ async fn run_announcer(
                 let Some(fact) = received else { return };
                 observe_fact(&state, fact, &mut sessions, &mut early_targets, &ended_ids).await;
             }
-            joined = async { (&mut in_flight.as_mut().expect("guarded").handle).await }, if in_flight.is_some() => {
-                let finished = in_flight.take().expect("guarded");
-                let result = joined.unwrap_or(RequestResult {
-                    outcome: Err(SendError::Unreachable),
-                    components_refused: false,
-                });
-                finish_request(&state, &mut sessions, finished, result).await;
+            joined = requests.join_next_with_id(), if !requests.is_empty() => {
+                let (id, result) = match joined {
+                    Some(Ok((id, result))) => (id, result),
+                    Some(Err(error)) => (error.id(), RequestResult {
+                        outcome: Err(SendError::Unreachable),
+                        components_refused: false,
+                    }),
+                    None => continue,
+                };
+                if let Some(finished) = in_flight.remove(&id) {
+                    finish_request(&state, &mut sessions, finished, result).await;
+                }
             }
             () = sleep_until(deadline) => {
                 let now = Utc::now();
@@ -938,7 +1173,7 @@ async fn run_announcer(
                         && now - active.last_heartbeat >= HEARTBEAT
                     {
                         active.last_heartbeat = now;
-                        heartbeat(&state, active.machine.session_id(), now);
+                        heartbeat(&state, &active.context.webhook_id, active.machine.session_id(), now);
                     }
                 }
                 if recovery_at.is_some_and(|at| at <= tokio::time::Instant::now()) {
@@ -947,7 +1182,7 @@ async fn run_announcer(
                         .iter()
                         .map(|active| active.machine.session_id().to_string())
                         .collect();
-                    tokio::spawn(recover_stale_message(state.clone(), client.clone(), live_ids));
+                    tokio::spawn(recover_stale_messages(state.clone(), client.clone(), live_ids));
                 }
             }
         }
@@ -974,12 +1209,16 @@ fn observe_event(
             let Ok(snapshot) = StreamTargetsSnapshot::deserialize(&event.payload) else {
                 return;
             };
-            match sessions
+            let mut seen = false;
+            for active in sessions
                 .iter_mut()
-                .find(|active| active.machine.session_id() == snapshot.session_id)
+                .filter(|active| active.machine.session_id() == snapshot.session_id)
             {
-                Some(active) => active.machine.observe_targets(&snapshot, now),
-                None => *early_targets = Some(snapshot),
+                active.machine.observe_targets(&snapshot, now);
+                seen = true;
+            }
+            if !seen {
+                *early_targets = Some(snapshot);
             }
         }
         "recording.status" => {
@@ -1004,11 +1243,25 @@ fn observe_event(
             }) {
                 active.machine.end(now);
                 active.stopped.store(true, Ordering::Release);
-                mark_ended(state, active.machine.session_id(), now);
+                mark_ended(
+                    state,
+                    &active.context.webhook_id,
+                    active.machine.session_id(),
+                    now,
+                );
             }
         }
         _ => {}
     }
+}
+
+/// The newest session still running, if any.
+fn newest_live_session(sessions: &[Active]) -> Option<String> {
+    sessions
+        .iter()
+        .rev()
+        .find(|active| active.machine.ended_at().is_none())
+        .map(|active| active.machine.session_id().to_string())
 }
 
 async fn observe_fact(
@@ -1032,29 +1285,31 @@ async fn observe_fact(
             {
                 return;
             }
-            let Some(mut active) = begin_session(state, &session_id, started_at, &targets).await
-            else {
+            let actives = begin_session(state, &session_id, started_at, &targets).await;
+            if actives.is_empty() {
                 return;
-            };
-            if let Some(snapshot) = early_targets
+            }
+            let early = early_targets
                 .take()
-                .filter(|snapshot| snapshot.session_id == session_id)
-            {
-                active.machine.observe_targets(&snapshot, now);
+                .filter(|snapshot| snapshot.session_id == session_id);
+            for mut active in actives {
+                if let Some(snapshot) = &early {
+                    active.machine.observe_targets(snapshot, now);
+                }
+                sessions.push(active);
             }
-            sessions.push(active);
-            if sessions.len() > 2 {
-                sessions.remove(0);
-            }
+            retain_newest_sessions(sessions, MAX_SESSIONS);
         }
         HookFact::YouTubeLive {
             broadcast_id,
             privacy,
         } => {
-            if let Some(active) = sessions
+            let Some(session_id) = newest_live_session(sessions) else {
+                return;
+            };
+            for active in sessions
                 .iter_mut()
-                .rev()
-                .find(|active| active.machine.ended_at().is_none())
+                .filter(|active| active.machine.session_id() == session_id)
             {
                 active
                     .machine
@@ -1065,38 +1320,51 @@ async fn observe_fact(
             session_id,
             share_url,
         } => {
-            let target = match session_id.as_deref() {
-                Some(id) => sessions
-                    .iter_mut()
-                    .find(|active| active.machine.session_id() == id),
-                None => sessions
-                    .iter_mut()
-                    .rev()
-                    .find(|active| active.machine.ended_at().is_none()),
+            let Some(session_id) = session_id.or_else(|| newest_live_session(sessions)) else {
+                return;
             };
-            if let Some(active) = target {
+            for active in sessions
+                .iter_mut()
+                .filter(|active| active.machine.session_id() == session_id)
+            {
                 active.machine.observe_x_published(&share_url, now);
             }
         }
     }
 }
 
-/// Builds a session's announcement at Go Live, or `None` when it posts
-/// nothing (off, no webhook, nothing ticked and linkable).
+/// Keeps the `keep` newest sessions (every webhook's machine for each), in
+/// the order they started.
+fn retain_newest_sessions(sessions: &mut Vec<Active>, keep: usize) {
+    let mut ids: Vec<String> = Vec::new();
+    for active in sessions.iter() {
+        if !ids.iter().any(|id| id == active.machine.session_id()) {
+            ids.push(active.machine.session_id().to_string());
+        }
+    }
+    if ids.len() <= keep {
+        return;
+    }
+    let dropped: Vec<String> = ids.drain(..ids.len() - keep).collect();
+    sessions.retain(|active| !dropped.iter().any(|id| id == active.machine.session_id()));
+}
+
+/// Builds a session's announcement at Go Live, one per saved webhook, or
+/// nothing when it posts nothing (off, no webhook, nothing ticked and
+/// linkable). The post is composed once; each webhook gets its own machine.
 async fn begin_session(
     state: &AppState,
     session_id: &str,
     started_at: DateTime<Utc>,
     targets: &[StreamTargetSettings],
-) -> Option<Active> {
+) -> Vec<Active> {
     let settings = load_settings(state);
     if !settings.enabled {
-        return None;
+        return Vec::new();
     }
-    let meta = settings.webhook.as_ref()?;
-    let webhook = stored_webhook()?;
-    if webhook.id() != meta.id {
-        return None;
+    let webhooks = saved_webhooks(&settings);
+    if webhooks.is_empty() {
+        return Vec::new();
     }
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
     let draft = state.database.stream_metadata_draft().ok();
@@ -1122,7 +1390,7 @@ async fn begin_session(
     );
     if plans.is_empty() {
         tracing::info!("[discord] nothing to announce for session {session_id}.");
-        return None;
+        return Vec::new();
     }
     let first = plans.first().and_then(|plan| {
         link_targets
@@ -1139,60 +1407,90 @@ async fn begin_session(
         .as_ref()
         .and_then(|draft| load_thumbnail(state, draft.thumbnail_asset_id.as_deref()));
     let now = Utc::now();
-    let reuse = load_last_message(state).filter(|message| {
-        message.webhook_id == meta.id
-            && message.session_id != session_id
-            && message
-                .ended_at
-                .is_some_and(|ended| now - ended <= machine::RESTART_WINDOW && now >= ended)
-    });
-    let context = SessionContext {
-        webhook,
-        webhook_id: meta.id.clone(),
-        sender,
-        ping: settings.ping,
-        branding: settings.branding,
-        title,
-        image_filename: reuse
-            .as_ref()
-            .and_then(|message| message.image_filename.clone()),
-        channel_id: reuse
-            .as_ref()
-            .and_then(|message| message.channel_id.clone()),
-        posted_at: reuse.as_ref().map(|message| message.posted_at),
-        thumbnail,
-    };
-    Some(Active {
-        machine: AnnounceSession::new(
-            session_id,
-            started_at,
-            plans,
-            reuse.map(|message| message.message_id),
-        ),
-        context,
-        stopped: Arc::new(AtomicBool::new(false)),
-        last_heartbeat: now,
-    })
+    let messages = load_last_messages(state);
+    webhooks
+        .into_iter()
+        .map(|(meta, webhook)| {
+            // The restart window: this webhook's last message, if its session
+            // ended moments ago, is edited back to live instead of a new post.
+            let reuse = messages.iter().find(|message| {
+                message.webhook_id == meta.id
+                    && message.session_id != session_id
+                    && message
+                        .ended_at
+                        .is_some_and(|ended| now - ended <= machine::RESTART_WINDOW && now >= ended)
+            });
+            let context = SessionContext {
+                webhook,
+                webhook_id: meta.id.clone(),
+                webhook_name: meta.name.clone(),
+                sender: sender.clone(),
+                ping: settings.ping,
+                branding: settings.branding,
+                title: title.clone(),
+                image_filename: reuse.and_then(|message| message.image_filename.clone()),
+                channel_id: reuse.and_then(|message| message.channel_id.clone()),
+                posted_at: reuse.map(|message| message.posted_at),
+                thumbnail: thumbnail.clone(),
+            };
+            Active {
+                machine: AnnounceSession::new(
+                    session_id,
+                    started_at,
+                    plans.clone(),
+                    reuse.map(|message| message.message_id.clone()),
+                ),
+                context,
+                stopped: Arc::new(AtomicBool::new(false)),
+                last_heartbeat: now,
+            }
+        })
+        .collect()
 }
 
 fn current_components(state: &AppState, webhook_id: &str) -> bool {
     !load_settings(state)
-        .webhook
-        .as_ref()
-        .is_some_and(|meta| meta.id == webhook_id && meta.components_refused)
+        .webhook(webhook_id)
+        .is_some_and(|meta| meta.components_refused)
 }
 
-/// Starts the next due request across the sessions, oldest session first.
-fn next_request(
+/// Starts every due request whose webhook has none in flight, oldest session
+/// first: an old session's "Was live" edit lands before a restart's revive
+/// edit on the same webhook, while a slow server never delays another.
+fn start_due_requests(
     state: &AppState,
     client: &reqwest::Client,
     sessions: &mut [Active],
+    requests: &mut JoinSet<RequestResult>,
+    in_flight: &mut HashMap<tokio::task::Id, InFlight>,
     now: DateTime<Utc>,
-) -> Option<InFlight> {
-    let active = sessions
-        .iter_mut()
-        .find(|active| active.machine.next_request(now).is_some())?;
-    let request = active.machine.next_request(now)?;
+) {
+    let mut busy: BTreeSet<String> = in_flight
+        .values()
+        .map(|entry| entry.webhook_id.clone())
+        .collect();
+    for active in sessions.iter_mut() {
+        if busy.contains(&active.context.webhook_id) {
+            continue;
+        }
+        let Some(request) = active.machine.next_request(now) else {
+            continue;
+        };
+        let (id, entry) = start_request(state, client, active, request, requests);
+        busy.insert(entry.webhook_id.clone());
+        in_flight.insert(id, entry);
+    }
+}
+
+/// Sends `request` through `active`'s webhook on its own task. Both bodies
+/// are built now, so a refusal of link buttons falls back at once.
+fn start_request(
+    state: &AppState,
+    client: &reqwest::Client,
+    active: &mut Active,
+    request: Request,
+    requests: &mut JoinSet<RequestResult>,
+) -> (tokio::task::Id, InFlight) {
     active.machine.started(&request);
     let links = active.machine.links();
     let context = active.context.clone();
@@ -1248,15 +1546,16 @@ fn next_request(
     };
     let session_id = active.machine.session_id().to_string();
     tracing::info!(
-        "[discord] {} for session {session_id}",
+        "[discord] {} for session {session_id} through webhook {}",
         match &request {
             Request::Post => "posting the go-live announcement",
             Request::Edit { ended: true, .. } => "marking the announcement ended",
             Request::Edit { revive: true, .. } => "reviving the previous announcement",
             Request::Edit { .. } => "adding destinations to the announcement",
-        }
+        },
+        webhook.hint()
     );
-    let handle = tokio::spawn(async move {
+    let handle = requests.spawn(async move {
         let send = |body: serde_json::Value| {
             let client = client.clone();
             let origin = origin.clone();
@@ -1302,11 +1601,23 @@ fn next_request(
             },
         }
     });
-    Some(InFlight {
-        session_id,
-        request,
-        handle,
-    })
+    (
+        handle.id(),
+        InFlight {
+            session_id,
+            webhook_id: context.webhook_id,
+            request,
+        },
+    )
+}
+
+/// "Discord (Stream alerts)": names the server in health copy when there are
+/// several.
+fn discord_label(name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!("Discord ({name})"),
+        None => "Discord".to_string(),
+    }
 }
 
 async fn finish_request(
@@ -1317,15 +1628,17 @@ async fn finish_request(
 ) {
     let now = Utc::now();
     if result.components_refused {
-        mark_components_refused(state).await;
+        mark_components_refused(state, &finished.webhook_id).await;
     }
-    let Some(active) = sessions
-        .iter_mut()
-        .find(|active| active.machine.session_id() == finished.session_id)
-    else {
+    let Some(active) = sessions.iter_mut().find(|active| {
+        active.machine.session_id() == finished.session_id
+            && active.context.webhook_id == finished.webhook_id
+    }) else {
         return;
     };
     let session_id = finished.session_id.clone();
+    let webhook_id = finished.webhook_id.clone();
+    let label = discord_label(active.context.webhook_name.as_deref());
     let outcome = match (&finished.request, result.outcome) {
         (Request::Post, Ok(Some(posted))) => {
             active.context.image_filename = active
@@ -1336,13 +1649,13 @@ async fn finish_request(
             active.context.channel_id = posted.channel_id.clone();
             active.context.posted_at = Some(now);
             record_message(state, active, &posted.message_id, true, now);
-            set_last_error(state, None).await;
+            set_last_error(state, &webhook_id, None).await;
             health(
                 state,
                 &session_id,
                 HealthLevel::Info,
                 "discord-announce-posted",
-                "Posted the go-live announcement to Discord.",
+                &format!("Posted the go-live announcement to {label}."),
             );
             Outcome::Posted {
                 message_id: posted.message_id,
@@ -1351,7 +1664,7 @@ async fn finish_request(
         (Request::Post, Err(SendError::Cancelled)) => Outcome::Failed,
         (Request::Post, outcome) => {
             let error = outcome.err().unwrap_or(SendError::Unreachable);
-            post_failed(state, &session_id, error).await;
+            post_failed(state, &webhook_id, &label, &session_id, error).await;
             Outcome::Failed
         }
         (
@@ -1365,13 +1678,15 @@ async fn finish_request(
             if *revive {
                 active.context.posted_at = Some(now);
                 record_message(state, active, message_id, true, now);
-                set_last_error(state, None).await;
+                set_last_error(state, &webhook_id, None).await;
                 health(
                     state,
                     &session_id,
                     HealthLevel::Info,
                     "discord-announce-revived",
-                    "Turned the previous Discord announcement back to live (restarted within 15 minutes).",
+                    &format!(
+                        "Turned the previous {label} announcement back to live (restarted within 15 minutes)."
+                    ),
                 );
             } else {
                 record_message(state, active, message_id, !*ended, now);
@@ -1379,13 +1694,13 @@ async fn finish_request(
             Outcome::Edited
         }
         (Request::Edit { .. }, Err(SendError::MessageGone)) => {
-            save_last_message(state, None);
+            update_last_messages(state, |messages| forget_last_message(messages, &webhook_id));
             emit_snapshot(state).await;
             Outcome::MessageGone
         }
         (Request::Edit { .. }, Err(error)) => {
             if error == SendError::WebhookGone {
-                set_last_error(state, Some(AnnounceErrorCode::WebhookDeleted)).await;
+                set_last_error(state, &webhook_id, Some(AnnounceErrorCode::WebhookDeleted)).await;
             }
             health(
                 state,
@@ -1393,7 +1708,7 @@ async fn finish_request(
                 HealthLevel::Warn,
                 "discord-announce-edit-failed",
                 &format!(
-                    "Couldn't update the Discord announcement: {}.",
+                    "Couldn't update the {label} announcement: {}.",
                     error.describe()
                 ),
             );
@@ -1403,7 +1718,8 @@ async fn finish_request(
     active.machine.finished(outcome, now);
 }
 
-/// Saves the session's message as the last one (and refreshes "Last post").
+/// Saves the session's message as its webhook's last one (and refreshes
+/// "Last post").
 fn record_message(
     state: &AppState,
     active: &Active,
@@ -1411,78 +1727,93 @@ fn record_message(
     live: bool,
     now: DateTime<Utc>,
 ) {
-    let previous = load_last_message(state).filter(|message| message.message_id == message_id);
-    let message = LastMessage {
-        webhook_id: active.context.webhook_id.clone(),
-        message_id: message_id.to_string(),
-        channel_id: active.context.channel_id.clone().or_else(|| {
-            previous
-                .as_ref()
-                .and_then(|message| message.channel_id.clone())
-        }),
-        session_id: active.machine.session_id().to_string(),
-        started_at: active.machine.started_at(),
-        last_seen_live_at: now,
-        ended_at: active.machine.ended_at(),
-        live,
-        posted_at: active
-            .context
-            .posted_at
-            .or_else(|| previous.as_ref().map(|message| message.posted_at))
-            .unwrap_or(now),
-        title: active.context.title.clone(),
-        links: active.machine.links(),
-        branding: active.context.branding,
-        image_filename: active.context.image_filename.clone(),
-    };
-    save_last_message(state, Some(&message));
+    update_last_messages(state, |messages| {
+        let previous = messages.iter().find(|message| {
+            message.webhook_id == active.context.webhook_id && message.message_id == message_id
+        });
+        let message = LastMessage {
+            webhook_id: active.context.webhook_id.clone(),
+            message_id: message_id.to_string(),
+            channel_id: active
+                .context
+                .channel_id
+                .clone()
+                .or_else(|| previous.and_then(|message| message.channel_id.clone())),
+            session_id: active.machine.session_id().to_string(),
+            started_at: active.machine.started_at(),
+            last_seen_live_at: now,
+            ended_at: active.machine.ended_at(),
+            live,
+            posted_at: active
+                .context
+                .posted_at
+                .or_else(|| previous.map(|message| message.posted_at))
+                .unwrap_or(now),
+            title: active.context.title.clone(),
+            links: active.machine.links(),
+            branding: active.context.branding,
+            image_filename: active.context.image_filename.clone(),
+        };
+        put_last_message(messages, message);
+    });
     let state = state.clone();
     tokio::spawn(async move { emit_snapshot(&state).await });
 }
 
 /// The session ended: remember when, for the restart window and recovery.
-fn mark_ended(state: &AppState, session_id: &str, now: DateTime<Utc>) {
-    if let Some(mut message) =
-        load_last_message(state).filter(|message| message.session_id == session_id)
-    {
-        message.ended_at.get_or_insert(now);
-        save_last_message(state, Some(&message));
-    }
+fn mark_ended(state: &AppState, webhook_id: &str, session_id: &str, now: DateTime<Utc>) {
+    update_last_messages(state, |messages| {
+        if let Some(message) = messages
+            .iter_mut()
+            .find(|message| message.webhook_id == webhook_id && message.session_id == session_id)
+        {
+            message.ended_at.get_or_insert(now);
+        }
+    });
 }
 
-fn heartbeat(state: &AppState, session_id: &str, now: DateTime<Utc>) {
-    if let Some(mut message) =
-        load_last_message(state).filter(|message| message.session_id == session_id && message.live)
-    {
-        message.last_seen_live_at = now;
-        save_last_message(state, Some(&message));
-    }
+fn heartbeat(state: &AppState, webhook_id: &str, session_id: &str, now: DateTime<Utc>) {
+    update_last_messages(state, |messages| {
+        if let Some(message) = messages.iter_mut().find(|message| {
+            message.webhook_id == webhook_id && message.session_id == session_id && message.live
+        }) {
+            message.last_seen_live_at = now;
+        }
+    });
 }
 
-async fn set_last_error(state: &AppState, code: Option<AnnounceErrorCode>) {
+async fn set_last_error(state: &AppState, webhook_id: &str, code: Option<AnnounceErrorCode>) {
     let _ = modify_settings(state, |settings| {
-        settings.last_error = code.map(|code| AnnounceError {
-            code,
-            at: Utc::now().to_rfc3339(),
-        });
+        if let Some(meta) = settings.webhook_mut(webhook_id) {
+            meta.last_error = code.map(|code| AnnounceError {
+                code,
+                at: Utc::now().to_rfc3339(),
+            });
+        }
         Ok(())
     })
     .await;
 }
 
-async fn post_failed(state: &AppState, session_id: &str, error: SendError) {
+async fn post_failed(
+    state: &AppState,
+    webhook_id: &str,
+    label: &str,
+    session_id: &str,
+    error: SendError,
+) {
     let code = match error {
         SendError::WebhookGone => AnnounceErrorCode::WebhookDeleted,
         SendError::Unreachable => AnnounceErrorCode::Unreachable,
         _ => AnnounceErrorCode::Rejected,
     };
-    set_last_error(state, Some(code)).await;
+    set_last_error(state, webhook_id, Some(code)).await;
     health(
         state,
         session_id,
         HealthLevel::Warn,
         "discord-announce-failed",
-        &format!("Couldn't post to Discord: {}.", error.describe()),
+        &format!("Couldn't post to {label}: {}.", error.describe()),
     );
 }
 
@@ -1494,29 +1825,52 @@ fn health(state: &AppState, session_id: &str, level: HealthLevel, code: &str, me
     }
 }
 
-/// At launch: a message still "Live now" whose session is not running (the
-/// app quit or crashed mid-stream) becomes "Was live".
-async fn recover_stale_message(state: AppState, client: reqwest::Client, live_ids: Vec<String>) {
-    let Some(mut message) = load_last_message(&state) else {
-        return;
-    };
-    if !message.live || live_ids.contains(&message.session_id) {
+/// At launch: every message still "Live now" whose session is not running
+/// (the app quit or crashed mid-stream) becomes "Was live", each through its
+/// own webhook.
+async fn recover_stale_messages(state: AppState, client: reqwest::Client, live_ids: Vec<String>) {
+    let stale: Vec<LastMessage> = load_last_messages(&state)
+        .into_iter()
+        .filter(|message| message.live && !live_ids.contains(&message.session_id))
+        .collect();
+    if stale.is_empty() {
         return;
     }
     let settings = load_settings(&state);
-    let Some(webhook) = stored_webhook().filter(|webhook| {
-        webhook.id() == message.webhook_id
-            && settings
-                .webhook
-                .as_ref()
-                .is_some_and(|meta| meta.id == message.webhook_id)
-    }) else {
-        save_last_message(&state, None);
-        return;
-    };
+    let mut tasks = JoinSet::new();
+    for message in stale {
+        let webhook = settings
+            .webhook(&message.webhook_id)
+            .and_then(|meta| stored_webhook(&meta.id).map(|url| (meta.clone(), url)));
+        match webhook {
+            Some((meta, webhook)) => {
+                tasks.spawn(recover_stale_message(
+                    state.clone(),
+                    client.clone(),
+                    meta,
+                    webhook,
+                    message,
+                ));
+            }
+            // The webhook is gone from Videorc: nothing left to tidy.
+            None => update_last_messages(&state, |messages| {
+                forget_last_message(messages, &message.webhook_id)
+            }),
+        }
+    }
+    while tasks.join_next().await.is_some() {}
+    emit_snapshot(&state).await;
+}
+
+async fn recover_stale_message(
+    state: AppState,
+    client: reqwest::Client,
+    meta: WebhookMeta,
+    webhook: WebhookUrl,
+    message: LastMessage,
+) {
     let ended = message.ended_at.unwrap_or(message.last_seen_live_at);
     let duration = (ended > message.started_at).then(|| ended - message.started_at);
-    let components = current_components(&state, &message.webhook_id);
     let body = client::message_body(
         &MessageView {
             title: &message.title,
@@ -1527,11 +1881,16 @@ async fn recover_stale_message(state: AppState, client: reqwest::Client, live_id
             started_at: message.started_at,
             sender: None,
             image_filename: message.image_filename.as_deref(),
-            components,
+            components: !meta.components_refused,
         },
         true,
     );
     let never = Arc::new(AtomicBool::new(false));
+    // Only this message: a newer one for the same webhook may have landed
+    // while the edit retried.
+    let is_this = |saved: &LastMessage| {
+        saved.webhook_id == message.webhook_id && saved.message_id == message.message_id
+    };
     match client::edit(
         &client,
         &client::api_origin(),
@@ -1544,18 +1903,26 @@ async fn recover_stale_message(state: AppState, client: reqwest::Client, live_id
     .await
     {
         Ok(()) => {
-            message.live = false;
-            message.ended_at = Some(ended);
-            save_last_message(&state, Some(&message));
-            tracing::info!("[discord] marked a stale go-live announcement as ended.");
+            update_last_messages(&state, |messages| {
+                if let Some(saved) = messages.iter_mut().find(|saved| is_this(saved)) {
+                    saved.live = false;
+                    saved.ended_at = Some(ended);
+                }
+            });
+            tracing::info!(
+                "[discord] marked a stale go-live announcement as ended (webhook {}).",
+                webhook.hint()
+            );
         }
-        Err(SendError::MessageGone | SendError::WebhookGone) => save_last_message(&state, None),
+        Err(SendError::MessageGone | SendError::WebhookGone) => {
+            update_last_messages(&state, |messages| messages.retain(|saved| !is_this(saved)));
+        }
         Err(error) => tracing::info!(
-            "[discord] could not tidy a stale announcement: {}",
+            "[discord] could not tidy a stale announcement (webhook {}): {}",
+            webhook.hint(),
             error.describe()
         ),
     }
-    emit_snapshot(&state).await;
 }
 
 #[cfg(test)]

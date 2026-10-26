@@ -137,7 +137,9 @@ import type {
   DiscordAnnounceUpdateParams,
   DiscordLinksPreview,
   DiscordTargetsParams,
+  DiscordTestParams,
   DiscordTestResult,
+  DiscordWebhookRemoveParams,
   DiscordWebhookSaveParams,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
@@ -381,8 +383,11 @@ export interface BackendRpcMethodMap {
     DiscordAnnounceSnapshot
   >
   'discord.webhook.save': BackendRpcDefinition<DiscordWebhookSaveParams, DiscordAnnounceSnapshot>
-  'discord.webhook.remove': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
-  'discord.webhook.sendTest': BackendRpcDefinition<DiscordTargetsParams, DiscordTestResult>
+  'discord.webhook.remove': BackendRpcDefinition<
+    DiscordWebhookRemoveParams,
+    DiscordAnnounceSnapshot
+  >
+  'discord.webhook.sendTest': BackendRpcDefinition<DiscordTestParams, DiscordTestResult>
   'discord.links.preview': BackendRpcDefinition<DiscordTargetsParams, DiscordLinksPreview>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
@@ -1090,6 +1095,7 @@ const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<Strea
 
 // --- Discord go-live announcement (plan 187) ---
 const DISCORD_MAX_TARGETS = 64
+const DISCORD_MAX_WEBHOOKS = 10
 const discordIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
 const discordShortText = stringSchema({ maxLength: 512 })
 const discordPingSchema = enumSchema(['none', 'here', 'everyone'])
@@ -1102,11 +1108,35 @@ const discordPostAsSchema = unionSchema([
   objectSchema({ kind: literalSchema('videorc') }, { allowUnknown: false }),
   objectSchema({ kind: literalSchema('webhook') }, { allowUnknown: false })
 ])
+const discordLastPostSchema = objectSchema(
+  {
+    at: discordShortText,
+    messageUrl: optionalSchema(discordShortText),
+    state: enumSchema(['live', 'ended'])
+  },
+  { allowUnknown: false }
+)
+const discordAnnounceErrorSchema = objectSchema(
+  {
+    code: enumSchema(['webhook-deleted', 'unreachable', 'rejected']),
+    at: discordShortText
+  },
+  { allowUnknown: false }
+)
+// One webhook: its Discord id and masked tail, never a URL or token.
+const discordWebhookSnapshotSchema = objectSchema(
+  {
+    id: discordIdSchema,
+    name: optionalSchema(discordShortText),
+    hint: discordShortText,
+    lastPost: optionalSchema(discordLastPostSchema),
+    lastError: optionalSchema(discordAnnounceErrorSchema)
+  },
+  { allowUnknown: false }
+)
 const discordAnnounceSnapshotSchema = objectSchema(
   {
-    webhookPresent: booleanSchema,
-    webhookHint: optionalSchema(discordShortText),
-    webhookName: optionalSchema(discordShortText),
+    webhooks: arraySchema(discordWebhookSnapshotSchema, { maxLength: DISCORD_MAX_WEBHOOKS }),
     enabled: booleanSchema,
     ping: discordPingSchema,
     branding: booleanSchema,
@@ -1124,25 +1154,6 @@ const discordAnnounceSnapshotSchema = objectSchema(
         { allowUnknown: false }
       ),
       { maxLength: 64 }
-    ),
-    lastPost: optionalSchema(
-      objectSchema(
-        {
-          at: discordShortText,
-          messageUrl: optionalSchema(discordShortText),
-          state: enumSchema(['live', 'ended'])
-        },
-        { allowUnknown: false }
-      )
-    ),
-    lastError: optionalSchema(
-      objectSchema(
-        {
-          code: enumSchema(['webhook-deleted', 'unreachable', 'rejected']),
-          at: discordShortText
-        },
-        { allowUnknown: false }
-      )
     )
   },
   { allowUnknown: false }
@@ -1169,26 +1180,33 @@ const discordWebhookSaveParamsSchema = objectSchema(
   { url: stringSchema({ minLength: 1, maxLength: 2048 }) },
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordWebhookSaveParams>
+const discordWebhookRemoveParamsSchema = objectSchema(
+  { webhookId: discordIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordWebhookRemoveParams>
+const discordLinkTargetsSchema = arraySchema(
+  objectSchema(
+    {
+      id: discordIdSchema,
+      platform: streamPlatformSchema,
+      label: discordShortText,
+      authMode: enumSchema(['manual-rtmp', 'oauth']),
+      accountId: optionalSchema(discordIdSchema),
+      outputOrientation: optionalSchema(enumSchema(['horizontal', 'vertical'])),
+      platformBroadcastId: optionalSchema(discordShortText)
+    },
+    { allowUnknown: false }
+  ),
+  { maxLength: DISCORD_MAX_TARGETS }
+)
 const discordTargetsParamsSchema = objectSchema(
-  {
-    targets: arraySchema(
-      objectSchema(
-        {
-          id: discordIdSchema,
-          platform: streamPlatformSchema,
-          label: discordShortText,
-          authMode: enumSchema(['manual-rtmp', 'oauth']),
-          accountId: optionalSchema(discordIdSchema),
-          outputOrientation: optionalSchema(enumSchema(['horizontal', 'vertical'])),
-          platformBroadcastId: optionalSchema(discordShortText)
-        },
-        { allowUnknown: false }
-      ),
-      { maxLength: DISCORD_MAX_TARGETS }
-    )
-  },
+  { targets: discordLinkTargetsSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordTargetsParams>
+const discordTestParamsSchema = objectSchema(
+  { targets: discordLinkTargetsSchema, webhookId: discordIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordTestParams>
 const discordLinksPreviewSchema = objectSchema(
   {
     links: arraySchema(
@@ -4668,9 +4686,12 @@ const runtimeContracts = {
     params: discordWebhookSaveParamsSchema,
     result: discordAnnounceSnapshotSchema
   },
-  'discord.webhook.remove': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
+  'discord.webhook.remove': {
+    params: discordWebhookRemoveParamsSchema,
+    result: discordAnnounceSnapshotSchema
+  },
   'discord.webhook.sendTest': {
-    params: discordTargetsParamsSchema,
+    params: discordTestParamsSchema,
     result: discordTestResultSchema
   },
   'discord.links.preview': {

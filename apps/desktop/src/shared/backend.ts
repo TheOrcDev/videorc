@@ -1950,14 +1950,29 @@ export interface DiscordLastPost {
   state: 'live' | 'ended'
 }
 
+/** How many webhooks (servers) a streamer can connect. */
+export const DISCORD_MAX_WEBHOOKS = 10
+
+/**
+ * One connected webhook. `id` is Discord's id for it, how the RPCs name it;
+ * the token never travels, only its masked tail.
+ */
+export interface DiscordWebhookSnapshot {
+  id: string
+  name?: string
+  /** `…/a1B2`, the last characters of the token. */
+  hint: string
+  lastPost?: DiscordLastPost
+  lastError?: DiscordAnnounceError
+}
+
 /**
  * `discord.announce.get` and the `discord.announce.changed` event. Never
- * carries the webhook URL: only whether one is saved and its masked tail.
+ * carries a webhook URL. The choices below apply to every webhook.
  */
 export interface DiscordAnnounceSnapshot {
-  webhookPresent: boolean
-  webhookHint?: string
-  webhookName?: string
+  /** In the order they were connected; only webhooks whose secret is saved. */
+  webhooks: DiscordWebhookSnapshot[]
   enabled: boolean
   ping: DiscordPing
   branding: boolean
@@ -1966,8 +1981,6 @@ export interface DiscordAnnounceSnapshot {
   /** Typed links by destination id. */
   linkOverrides: Record<string, string>
   identities: DiscordPostAsIdentity[]
-  lastPost?: DiscordLastPost
-  lastError?: DiscordAnnounceError
 }
 
 /** `discord.announce.update`. `linkOverride` without `link` removes it. */
@@ -1984,6 +1997,11 @@ export interface DiscordWebhookSaveParams {
   url: string
 }
 
+/** `discord.webhook.remove`: which saved webhook goes. */
+export interface DiscordWebhookRemoveParams {
+  webhookId: string
+}
+
 /** A configured destination, as `discord.links.preview` and the test read it. */
 export interface DiscordLinkTarget {
   id: string
@@ -1997,6 +2015,11 @@ export interface DiscordLinkTarget {
 
 export interface DiscordTargetsParams {
   targets: DiscordLinkTarget[]
+}
+
+/** `discord.webhook.sendTest`: the destinations, and which webhook to test. */
+export interface DiscordTestParams extends DiscordTargetsParams {
+  webhookId: string
 }
 
 /** Built from the account, typed by the streamer, made at Go Live, or none. */
