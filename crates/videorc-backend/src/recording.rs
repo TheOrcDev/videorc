@@ -10471,6 +10471,11 @@ async fn monitor_session(
     if let Some(finished) = source_iso_finished.take()
         && !performance_check_session
     {
+        // Plan 200 C4: the separate files queue first, but Combined exports
+        // first. Withdrawn below when this take gets no Combined job.
+        state
+            .recording_finalization
+            .expect_primary_export(&session_id);
         crate::source_iso::commit_finished_source_iso_roles(
             &state,
             &session_id,
@@ -11001,6 +11006,11 @@ async fn monitor_session(
         RecordingState::Failed => "failed",
         _ => "non-terminal",
     };
+    if pending_finalization_job.is_none() {
+        state
+            .recording_finalization
+            .withdraw_primary_export(&stop_timeline_session_id);
+    }
     state.capture_interruption.capture_finished();
     state.emit_event("recording.status", terminal_status);
     publish_stop_timeline(&state, &stop_timeline_session_id, terminal_outcome).await;
@@ -11145,7 +11155,7 @@ async fn finalize_recording_media(
     let mut finalization_recovery_path = None;
     let export_result = {
         let queued = Instant::now();
-        let _export_slot = state.recording_finalization.export_slot().await;
+        let _export_slot = state.recording_finalization.export_slot(&session_id).await;
         state.emit_log(
             "info",
             format!(
