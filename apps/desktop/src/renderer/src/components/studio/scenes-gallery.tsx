@@ -1,5 +1,6 @@
 import {
   galleryPresetIsActive,
+  orientationSwitchPreset,
   sceneGalleryReason,
   sceneSourceGaps,
   visualSources
@@ -109,7 +110,23 @@ export function ScenesGallery(): ReactElement {
     if (target === mode) {
       return
     }
-    applyCameraPreset({ layoutPreset: studioModeTogglePreset(target, captureConfig) })
+    const targetScenes = target === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
+    const usable = (layoutPreset: LayoutPreset): boolean =>
+      sceneSourceGaps(
+        {
+          layout: { ...captureConfig.layout, layoutPreset, arrangementMode: 'preset' },
+          sources: visualSources(captureConfig.sources),
+          background: null
+        },
+        deviceList.devices
+      ).length === 0
+    applyCameraPreset({
+      layoutPreset: orientationSwitchPreset(
+        studioModeTogglePreset(target, captureConfig),
+        targetScenes.map((scene) => scene.id),
+        usable
+      )
+    })
   }
 
   return (
