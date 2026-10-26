@@ -16,8 +16,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Change scope
+    uses: ./.github/workflows/ci-change-scope.yml
+
   rust:
     name: Rust (test + clippy + fmt)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_rust == 'true' }}
     runs-on: macos-15
     # Cold macOS builds can spend 38m compiling tests before the separate
     # dev build and process/memory sentinel. Keep time for every gate.
@@ -96,8 +102,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  rust-skip:
+    name: Rust (test + clippy + fmt)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_rust != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip hosted macOS Rust gates for an allow-listed docs or version-only change
+        run: |
+          echo "Skipped the hosted macOS Rust job for a ${{ needs.scope.outputs.kind }} change set."
+          echo "Ordinary code PRs still run the identical rust job on macos-15."
+
   js:
     name: JS (format + lint + tests)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -142,3 +162,15 @@ jobs:
 
       - name: Node logic tests
         run: pnpm test:scripts
+
+  js-skip:
+    name: JS (format + lint + tests)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip JS gates for an allow-listed docs-record change
+        run: |
+          echo "Skipped the JS job for a ${{ needs.scope.outputs.kind }} change set."
+          echo "Version-only release PRs still run JS. Ordinary code PRs still run the identical JS job."

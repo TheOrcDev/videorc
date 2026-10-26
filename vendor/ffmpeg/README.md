@@ -14,8 +14,17 @@ vendor/ffmpeg/current/
 That directory is intentionally ignored by git. Build it locally or in CI with:
 
 ```sh
+pnpm ffmpeg:status:macos   # prints whether the existing bundle can be reused
 pnpm ffmpeg:build:macos
 ```
+
+`pnpm ffmpeg:build:macos` already reuses `vendor/ffmpeg/current` when the
+binaries exist and pass the capture-clock check. It also reuses a previously
+downloaded tarball in `vendor/ffmpeg/_src`. On the owner's release Mac, keep
+those directories and `target/` between releases. Do not `cargo clean` and do
+not set `FFMPEG_REBUILD=1` unless the FFmpeg version, OpenSSL prefix, or
+AVFoundation clock patch changed. The first compile after a clean clone is
+cold; later releases on the same machine should skip the FFmpeg compile.
 
 The staged bundle includes:
 

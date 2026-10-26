@@ -41,6 +41,7 @@
     "changelog:email": "node scripts/changelog-email.mjs",
     "release:notify:discord": "node scripts/notify-discord-release.mjs",
     "ffmpeg:build:macos": "bash scripts/build-ffmpeg-macos.sh",
+    "ffmpeg:status:macos": "node scripts/ffmpeg-macos-reuse-status.mjs",
     "ffmpeg:fetch:windows": "node scripts/fetch-ffmpeg-windows.mjs",
     "ffmpeg:fetch:linux": "node scripts/fetch-ffmpeg-linux.mjs",
     "build:native-preview-addon": "node scripts/build-native-preview-addon.mjs",

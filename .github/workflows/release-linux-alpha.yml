@@ -126,12 +126,45 @@ jobs:
           EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
         run: node scripts/reuse-release-ci-gates.mjs --spec linux-rust
 
-      - name: Run Linux unit and clippy gates
+      - name: Run Linux clippy gate
         if: ${{ steps.reuse.outputs.reused != 'true' }}
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
         run: |
           set -euo pipefail
-          cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
-          cargo test -p videorc-backend
+          run_clippy() {
+            cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+          }
+          if run_clippy; then
+            exit 0
+          fi
+          status=$?
+          if [ "${status}" -ne 137 ] && [ "${status}" -ne 143 ]; then
+            exit "${status}"
+          fi
+          echo "clippy was killed (exit ${status}); retrying once with one rustc job"
+          CARGO_BUILD_JOBS=1 run_clippy
+
+      - name: Run Linux unit gate
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          set -euo pipefail
+          run_tests() {
+            cargo test -p videorc-backend
+          }
+          if run_tests; then
+            exit 0
+          fi
+          status=$?
+          if [ "${status}" -ne 137 ] && [ "${status}" -ne 143 ]; then
+            exit "${status}"
+          fi
+          echo "cargo test was killed (exit ${status}); retrying once with one rustc job"
+          CARGO_BUILD_JOBS=1 run_tests
 
       - name: Run script tests
         run: pnpm test:scripts

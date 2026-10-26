@@ -18,18 +18,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Change scope
+    uses: ./.github/workflows/ci-change-scope.yml
+
   gates:
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy == 'true' }}
     uses: ./.github/workflows/release-windows-gates.yml
     with:
       source_sha: ${{ github.sha }}
 
+  gates-skip:
+    name: gates / Windows release source gates
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip heavy Windows source gates for an allow-listed docs or version-only change
+        run: |
+          echo "Skipped Windows release source gates for a ${{ needs.scope.outputs.kind }} change set."
+          echo "The Windows alpha release workflow still runs its own protected-main source gates."
+          echo "Ordinary code PRs still run the full reusable Windows source-gate recipe."
+
   installer:
     name: Windows installer artifact
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Cache capture FFmpeg sources
+        # The capture worker compiles from the official tarball. A single
+        # ffmpeg.org timeout used to fail this whole job; the SHA-256 pin is
+        # still checked after restore, so a stale cache cannot ship.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            vendor/ffmpeg/_src
+            vendor/ffmpeg/_build/windows-download.zip
+          key: windows-ffmpeg-capture-src-${{ hashFiles('vendor/ffmpeg/windows-capture-pin.json', 'vendor/ffmpeg/windows-pin.json') }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -185,8 +217,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  installer-skip:
+    name: Windows installer artifact
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip Windows installer artifact for an allow-listed docs or version-only change
+        run: |
+          echo "Skipped the Windows installer artifact for a ${{ needs.scope.outputs.kind }} change set."
+          echo "Ordinary code PRs still build the unsigned installer on windows-latest."
+
   incident:
     name: Windows startup incident diagnostics
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 75
     steps:
@@ -286,3 +332,15 @@ jobs:
           path: ${{ runner.temp }}/incident-ffmpeg-control
           if-no-files-found: warn
           retention-days: 14
+
+  incident-skip:
+    name: Windows startup incident diagnostics
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip known-noisy Windows incident diagnostics for an allow-listed change
+        run: |
+          echo "Skipped Windows startup incident diagnostics for a ${{ needs.scope.outputs.kind }} change set."
+          echo "This job is already ignored by the release routine on ordinary code PRs."

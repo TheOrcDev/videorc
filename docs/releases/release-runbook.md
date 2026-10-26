@@ -12,6 +12,67 @@ default-deny **Alpha** track. Linux is a third, candidate-only **Alpha**
 track. Do not rename these artifacts, reuse the macOS or Windows storage
 keys, or treat a CI artifact as a public release.
 
+## Faster coordinated release
+
+0.13.0 spent about four hours from the version PR to all three platforms
+published. Most of that was idle CI and serialized platform work, not signing
+or notarization. Use this sequence:
+
+1. Open one version PR that only changes `apps/desktop/package.json` (the
+   version field), `changelog/*.md`, and optionally `docs/releases/*.md`.
+   CI classifies that as `version-release` and skips the heavy Windows source
+   gates, Windows installer, Linux Rust compile, and hosted macOS Rust job.
+   Wait for **JS (format + lint + tests)** and required review. Do not wait
+   for the checks listed under [Known-bad CI checks](#known-bad-ci-checks).
+2. The moment that PR lands on protected `main`, start these three in
+   parallel. Do not wait for macOS upload before dispatching Windows or Linux:
+   - local macOS build / notarize / validate / upload
+   - `gh workflow run release-windows-alpha.yml --ref main -f release_id=…`
+   - `gh workflow run release-linux-alpha.yml --ref main -f release_id=…`
+3. Watch with `gh run watch <id>` (or `gh run view --json status,conclusion`
+   every couple of minutes). Do not idle ten minutes between steps.
+4. As soon as a candidate identity exists, open its owner-waiver or
+   acceptance-record PR. A PR that only touches `docs/releases/**`,
+   `docs/acceptance/windows-alpha/**`, or `docs/acceptance/linux-alpha/**` is
+   `docs-record` and skips JS, Linux, Windows, and hosted macOS Rust.
+5. Promote Windows and finish the release record after the platform gates in
+   this runbook and [windows-alpha-runbook.md](windows-alpha-runbook.md).
+
+Ordinary code PRs still run the full macOS, Linux, and Windows gates. A
+package.json edit that is not exactly the version field, or any other path,
+is classified as `code` and keeps today's checks.
+
+### Known-bad CI checks
+
+The release routine ignores these. They fail on `main` independently of a
+version bump. Do not block a release on them, and do not "fix" them as part
+of cutting a release:
+
+| Check | Workflow | Why it is ignored |
+| ----- | -------- | ----------------- |
+| `Rust (test + clippy + fmt)` | `ci.yml` | Hosted macOS Metal goldens have failed since #810. The local signed macOS build and `pnpm release:validate:macos` are the real Mac gate. |
+| `Windows startup incident diagnostics` | `windows.yml` | Fails or times out on every PR. Not a release source or signing gate. |
+
+Windows source gates and the Windows installer artifact are real gates for
+**code** PRs. They are intentionally skipped on `version-release` and
+`docs-record` PRs because `release-windows-alpha.yml` re-runs its own
+protected-main source checks on the merge commit.
+
+### macOS FFmpeg and Rust reuse
+
+On the owner's release Mac, keep `vendor/ffmpeg/current`,
+`vendor/ffmpeg/_src`, and `target/` between releases. They are gitignored.
+
+```sh
+pnpm ffmpeg:status:macos
+# reusable bundle → pnpm ffmpeg:build:macos returns in seconds
+# missing/stale bundle → budget a source compile; do not set FFMPEG_REBUILD=1
+```
+
+`scripts/build-ffmpeg-macos.sh` already exits early when the current bundle
+passes the capture-clock check. Do not `cargo clean` before
+`pnpm package:backend:macos`. A clean clone is the only cold compile.
+
 ## Linux Alpha Is A Separate Candidate-Only Track
 
 Linux x64 AppImage builds stay private until a promote workflow, Ubuntu 24.04
@@ -188,7 +249,8 @@ git commit -am "Release: bump desktop to 0.9.1"
 
 # 2. Build + sign + notarize + staple, WITH the update feed, + write release.json.
 #    (dist:desktop:release = the signed build incl. the zip/latest-mac.yml feed,
-#    unlike dist:desktop:signed which is dmg-only.) Slow: rebuilds backend+ffmpeg.
+#    unlike dist:desktop:signed which is dmg-only.) Reuses vendor/ffmpeg/current
+#    and target/ when they are already valid; see "macOS FFmpeg and Rust reuse".
 export APPLE_ID=…  APPLE_APP_SPECIFIC_PASSWORD=…
 pnpm dist:desktop:release
 
