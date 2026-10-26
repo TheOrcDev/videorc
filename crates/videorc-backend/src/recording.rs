@@ -18974,6 +18974,7 @@ async fn run_windows_d3d11_session_monitor(
     > = None;
     let mut last_presenter = None;
     let mut last_placement_error = None;
+    let mut last_configure_error: Option<String> = None;
     let mut consecutive_snapshot_errors = 0_u8;
     'monitor: while !stop.load(Ordering::Acquire) {
         if !windows_d3d11_monitor_identity_is_current(&state, &stop, &session_id, generation).await
@@ -19149,6 +19150,17 @@ async fn run_windows_d3d11_session_monitor(
                             configured_placement = None;
                             last_presenter = None;
                             let reason = format!("windows-d3d11-preview-configure-failed: {error}");
+                            // The monitor retries every tick, so name each new
+                            // reason once instead of failing over silently.
+                            if last_configure_error.as_deref() != Some(reason.as_str()) {
+                                state.emit_log(
+                                    "warn",
+                                    format!(
+                                        "Windows D3D11 presenter for session {session_id} could not be configured; the Electron proof preview stays active: {reason}"
+                                    ),
+                                );
+                                last_configure_error = Some(reason.clone());
+                            }
                             if let Some(previous) = previous_placement {
                                 let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
                                     &state,
