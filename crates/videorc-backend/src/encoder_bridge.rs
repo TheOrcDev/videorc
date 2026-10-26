@@ -31,6 +31,7 @@ use crate::diagnostics::{
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::FrameHandle;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 #[cfg(target_os = "windows")]
 use crate::preview_camera::PreviewCameraFrameSource;
@@ -182,7 +183,9 @@ const fn windows_d3d11_primary_sequence_is_newer(
 }
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
+#[cfg(target_os = "macos")]
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
+#[cfg(target_os = "macos")]
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
 type CompositorFrameHandle = FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>;
@@ -2039,6 +2042,8 @@ pub(crate) fn test_source_iso_trace_ms(at: Instant) -> f64 {
 /// A compositor frame fed into the encoder FIFO on one tick.
 #[derive(Clone)]
 struct FedCompositorFrame {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // held to keep the ISO lease alive; only Metal reads it
     iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
     /// Retains the compositor's immutable allocation through FIFO delivery. Raw
     /// output writes these bytes directly instead of copying them into a second
@@ -2320,6 +2325,7 @@ impl EncoderBridgeDrainState {
         downstream_closed
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn pending_timeout_is_terminal(
         &self,
         pending_video_toolbox_frames: u64,
@@ -2350,6 +2356,7 @@ impl EncoderBridgeDrainState {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn record_video_toolbox_loop_error(
         &mut self,
         terminal_failure: &Arc<StdMutex<Option<String>>>,
@@ -3404,9 +3411,11 @@ struct SyntheticRecordingWriterParams {
     #[cfg(target_os = "windows")]
     d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
     video_output: EncoderBridgeVideoOutput,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     bitrate_kbps: Option<u32>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     mf_input_topology: crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     low_latency: bool,
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
@@ -3447,12 +3456,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         #[cfg(target_os = "windows")]
         d3d11_input,
         video_output,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         bitrate_kbps,
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            bitrate_kbps: _,
         #[cfg(target_os = "windows")]
         mf_input_topology,
         #[cfg(not(target_os = "windows"))]
             mf_input_topology: _,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         low_latency,
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            low_latency: _,
         diagnostics_tx,
         diagnostics_context,
         video_epoch,
@@ -3666,14 +3681,35 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut raw_video_copied_frames = 0_u64;
     let mut metal_target_copied_frames = 0_u64;
     let mut metal_target_handle_frames = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut zero_copy_frames = 0_u64;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_frames = 0_u64;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_bytes = 0_u64;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut video_toolbox_probe_errors = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut video_toolbox_output_frames = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut video_toolbox_output_bytes = 0_u64;
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )] // only native encoders write it
     let mut max_video_toolbox_output_encode_ms: Option<u64> = None;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut pending_video_toolbox_output_frames = 0_u64;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut pending_video_toolbox_fifo_frames = 0_u64;
     let mut pending_raw_fifo_frames = 0_u64;
     let mut pending_raw_fifo_started_at = VecDeque::<Instant>::new();
@@ -3760,6 +3796,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut video_toolbox_fifo_write_times_ms = Vec::with_capacity(128);
     let mut raw_video_fifo_write_times_ms = Vec::with_capacity(128);
     let mut video_toolbox_fifo_enqueue_times_ms = Vec::with_capacity(128);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] // only VideoToolbox writes it
     let mut max_video_toolbox_fifo_enqueue_ms: Option<f64> = None;
     let mut writer_loop_times_ms = Vec::with_capacity(128);
     let mut writer_sleep_times_ms = Vec::with_capacity(128);
@@ -3807,21 +3844,22 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // first loop tries to catch up the setup delay by immediately re-feeding
     // one compositor frame, creating a visible startup freeze.
     #[cfg(test)]
-    if start_barrier.is_some() && {
-        let role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE")
-            .unwrap_or_else(|_| "camera".into());
-        let path = fifo_path.to_string_lossy();
-        match role.as_str() {
-            "screen" => path.contains("iso-screen-"),
-            "combined" => !path.contains("iso-"),
-            _ => path.contains("iso-camera-"),
-        }
-    } {
-        if let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS") {
-            // Deliberate fault injection, not a readiness handshake.
-            if let Ok(delay) = delay.parse::<u64>() {
-                thread::sleep(Duration::from_millis(delay.min(1000)));
+    if start_barrier.is_some()
+        && {
+            let role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE")
+                .unwrap_or_else(|_| "camera".into());
+            let path = fifo_path.to_string_lossy();
+            match role.as_str() {
+                "screen" => path.contains("iso-screen-"),
+                "combined" => !path.contains("iso-"),
+                _ => path.contains("iso-camera-"),
             }
+        }
+        && let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS")
+    {
+        // Deliberate fault injection, not a readiness handshake.
+        if let Ok(delay) = delay.parse::<u64>() {
+            thread::sleep(Duration::from_millis(delay.min(1000)));
         }
     }
     let (clock_start, mut initial_frame) = if let Some(barrier) = start_barrier.as_ref() {
@@ -6601,6 +6639,7 @@ enum BoundedWriterJoinOutcome {
     Detached,
 }
 
+#[cfg(target_os = "macos")]
 fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) -> BoundedWriterJoinOutcome {
     const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
     bounded_writer_join_until(join, Instant::now() + WRITER_CLOSE_JOIN_GRACE)
@@ -7714,10 +7753,12 @@ fn oldest_pending_video_toolbox_frame_age(
         .map(|started_at| started_at.elapsed())
 }
 
+#[cfg(target_os = "macos")]
 fn encoder_bridge_video_toolbox_probe_enabled() -> bool {
     parse_video_toolbox_probe_enabled(std::env::var(VIDEOTOOLBOX_PROBE_ENV).ok().as_deref())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_video_toolbox_probe_enabled(value: Option<&str>) -> bool {
     let Some(value) = value else {
         return false;
@@ -9269,6 +9310,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)] // serializes the whole test against the global lifecycle registry
     async fn shutdown_batch_signals_both_bridges_and_shares_one_absolute_deadline() {
         let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -9403,6 +9445,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)] // serializes the whole test against the global lifecycle registry
     async fn encoder_bridge_lifecycle_start_admission_refuses_live_resource() {
         let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -10060,7 +10103,8 @@ mod tests {
                 ),
                 EncoderBridgePreEncodeAdmission::FailOutput
             );
-            for role in [EncoderBridgeOutputRole::Stream] {
+            {
+                let role = EncoderBridgeOutputRole::Stream;
                 let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
                     role,
                     ..Default::default()
@@ -11729,7 +11773,9 @@ mod tests {
         assert!(recording_queue_drop_watch_update(&mut watch, "s2", 2));
     }
 
-    use crate::compositor::{CompositorFrameExportHandle, CompositorPixelFormat};
+    #[cfg(target_os = "macos")]
+    use crate::compositor::CompositorFrameExportHandle;
+    use crate::compositor::CompositorPixelFormat;
     #[cfg(target_os = "macos")]
     use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor};
 
@@ -13258,12 +13304,8 @@ mod tests {
         let y_len = 32 * 24;
         let uv_len = 16 * 12;
         assert_eq!(bytes.len(), y_len + uv_len * 2);
-        assert!(bytes[..y_len].iter().any(|value| *value == 235));
-        assert!(
-            bytes[y_len..y_len + uv_len]
-                .iter()
-                .any(|value| *value == 60)
-        );
+        assert!(bytes[..y_len].contains(&235));
+        assert!(bytes[y_len..y_len + uv_len].contains(&60));
     }
 
     #[test]
@@ -13375,11 +13417,7 @@ mod tests {
         }
 
         let timeline = interval * frames as u32;
-        let drift = if timeline > wall {
-            timeline - wall
-        } else {
-            wall - timeline
-        };
+        let drift = timeline.abs_diff(wall);
         assert!(
             drift <= Duration::from_millis(100),
             "video timeline drifted {}ms from wall clock over 60s (frames {frames})",

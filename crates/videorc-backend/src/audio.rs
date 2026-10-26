@@ -1,7 +1,7 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs::File;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -358,6 +358,7 @@ impl AudioCaptureStats {
 
     /// Records one callback's raw peak and RMS into the standby level window.
     /// Lock-free, so the realtime callback may call it.
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn record_level_window(&self, peak: f32, rms: f32) {
         let micro = |value: f32| (value.clamp(0.0, 4.0) * 1_000_000.0) as u64;
         self.window_peak_micro
@@ -755,7 +756,7 @@ pub(crate) fn trim_audio_frame_before_epoch(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn attach_fifo_writer_with_stall_timeout(
     source: NativeAudioSource,
     fifo_path: PathBuf,
@@ -1612,6 +1613,7 @@ mod tests {
         assert_eq!(session.input_state(), expected);
     }
 
+    #[cfg(unix)]
     fn frame(samples: usize) -> AudioFrame {
         static CLOCK: OnceLock<Instant> = OnceLock::new();
         let now = Instant::now();
@@ -1635,6 +1637,7 @@ mod tests {
         wait_for_input_state(session, NativeAudioInputState::Live);
     }
 
+    #[cfg(unix)]
     fn frame_at(captured_at: Instant, samples: usize) -> AudioFrame {
         AudioFrame {
             timestamp_micros: 0,

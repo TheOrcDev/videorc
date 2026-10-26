@@ -884,7 +884,8 @@ mod tests {
     fn healthy_rung_passes_and_each_signal_fails_alone() {
         assert!(score_rung(&healthy(30)).is_empty());
 
-        let cases: Vec<(&str, Box<dyn Fn(&mut RungMeasurement)>)> = vec![
+        type Breaks = Box<dyn Fn(&mut RungMeasurement)>;
+        let cases: Vec<(&str, Breaks)> = vec![
             (
                 "encoder-below-realtime",
                 Box::new(|m| m.encoder_speed = Some(0.9)),

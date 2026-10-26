@@ -13,8 +13,10 @@
 //! `linux_portal_session` / `linux_pipewire_stream` behind
 //! `cfg(target_os = "linux")`.
 
+#[cfg(target_os = "linux")]
+use std::path::Path;
 #[cfg(any(test, target_os = "linux"))]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[cfg(any(test, target_os = "linux"))]
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,7 @@ use crate::source_status::SourceLifecycleStatus;
 
 pub const PORTAL_MONITOR_SOURCE_ID: &str = "screen:portal:monitor";
 pub const PORTAL_WINDOW_SOURCE_ID: &str = "window:portal:window";
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 const RESTORE_TOKENS_DIRECTORY_NAME: &str = "linux-portal";
 #[cfg(any(test, target_os = "linux"))]
 const RESTORE_TOKENS_FILE: &str = "restore-tokens.json";
@@ -135,6 +137,7 @@ impl RestoreTokenStore {
 
     /// Beside the database, like the VAAPI quarantine, so an isolated smoke
     /// never redeems or overwrites the owner's tokens.
+    #[cfg(target_os = "linux")]
     pub fn default_directory() -> PathBuf {
         let database = crate::storage::default_database_path();
         database

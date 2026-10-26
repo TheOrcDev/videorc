@@ -1763,9 +1763,13 @@ mod tests {
     #[test]
     fn portrait_profiles_are_named_by_their_short_side() {
         // 1080x1920 is a 1080p broadcast, not the 2160p its height selects.
-        assert_eq!(youtube_resolution(1920_u32.min(1080)), "1080p");
-        assert_eq!(youtube_resolution(1080_u32.min(1920)), "1080p");
-        assert_eq!(youtube_resolution(1280_u32.min(720)), "720p");
+        for (width, height, expected) in [
+            (1920_u32, 1080_u32, "1080p"),
+            (1080, 1920, "1080p"),
+            (1280, 720, "720p"),
+        ] {
+            assert_eq!(youtube_resolution(width.min(height)), expected);
+        }
     }
 
     #[tokio::test]
@@ -1928,11 +1932,10 @@ mod tests {
             assert_eq!(prepared.title, "YouTube title");
             assert_eq!(prepared.description, "YouTube description");
             assert_eq!(prepared.privacy, StreamPrivacy::Unlisted);
-            assert_eq!(
-                serde_json::to_string(&prepared)
+            assert!(
+                !serde_json::to_string(&prepared)
                     .unwrap()
-                    .contains("secret-stream-name"),
-                false
+                    .contains("secret-stream-name")
             );
             assert_eq!(
                 stored,

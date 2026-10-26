@@ -3908,11 +3908,13 @@ mod runtime {
                 ),
             ]
         );
-        assert!(
-            CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
-                && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
-                && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
-        );
+        const {
+            assert!(
+                CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
+                    && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
+                    && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
+            )
+        };
         let buddy_primary = &frames[2];
         assert_eq!(
             buddy_primary.output_targets,
@@ -4312,11 +4314,13 @@ mod tests {
         let zs: Vec<i32> = (0..6).map(windows_d3d11_banner_z_index).collect();
         assert_eq!(zs, vec![6, 7, 8, 9, 9, 9]);
         assert!(zs.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
-        assert!(
-            WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
-            "captions draw at z 10"
-        );
+        const {
+            assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
+            assert!(
+                WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
+                "captions draw at z 10"
+            );
+        }
     }
 
     /// Every sleep wakes a little late. Pacing each tick relative to its own

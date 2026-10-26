@@ -50,11 +50,10 @@ jobs:
 
       - name: Clippy
         # cfg(windows) code is invisible to the macOS clippy job; this is the
-        # only lint pass that sees the named-pipe/Job-Object/dshow arms. The
-        # unused-code lint family is allowed for now: macOS-only helpers are
-        # dead code under cfg(windows) (the known cross-check warning wall,
-        # docs/windows-port-plan.md) — burn that down, then drop the allows.
-        run: cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+        # only lint pass that sees the named-pipe/Job-Object/dshow arms. No
+        # lint allow list: code that only macOS or Linux uses is fenced with
+        # cfg at its definition, so a new unfenced helper fails here.
+        run: cargo clippy -p videorc-backend -- -D warnings
 
       - name: Preview bounds concurrency (25 stability passes)
         shell: pwsh

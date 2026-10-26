@@ -1745,7 +1745,7 @@ mod tests {
             &state,
             StreamPlatform::Youtube,
             Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
 
@@ -1806,7 +1806,7 @@ mod tests {
             &state,
             StreamPlatform::Youtube,
             Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let first = request_for(&target, ModerationSource::Manual);
@@ -1847,7 +1847,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
 
@@ -1937,7 +1937,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
@@ -1976,7 +1976,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
@@ -2024,7 +2024,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let pending = request(
@@ -2059,7 +2059,7 @@ mod tests {
             &state,
             StreamPlatform::Youtube,
             Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let pending = request(
@@ -2180,7 +2180,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let operation = request(&state, request_for(&target, ModerationSource::Manual))
@@ -2207,7 +2207,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[second.clone()],
+            std::slice::from_ref(&second),
         )
         .await;
         let operation = request(&state, request_for(&second, ModerationSource::Manual))
@@ -2232,7 +2232,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let operation = request(&state, request_for(&target, ModerationSource::Manual))
@@ -2268,7 +2268,13 @@ mod tests {
 
         // No credentials at all: the same honest hide, with no request.
         let second = message(StreamPlatform::Kick, 2);
-        seed(&state, StreamPlatform::Kick, None, &[second.clone()]).await;
+        seed(
+            &state,
+            StreamPlatform::Kick,
+            None,
+            std::slice::from_ref(&second),
+        )
+        .await;
         let operation = request(&state, request_for(&second, ModerationSource::Manual))
             .await
             .unwrap();
@@ -2573,7 +2579,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
@@ -2605,7 +2611,7 @@ mod tests {
             &state,
             StreamPlatform::Youtube,
             Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Timeout)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let operation = request(&state, request_for(&target, ModerationSource::Manual))
@@ -2627,7 +2633,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let operation = request(&state, request_for(&target, ModerationSource::Manual))
@@ -2649,7 +2655,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[second.clone()],
+            std::slice::from_ref(&second),
         )
         .await;
         let operation = request(&state, request_for(&second, ModerationSource::Manual))
@@ -2672,7 +2678,7 @@ mod tests {
             &state,
             StreamPlatform::Twitch,
             Some(twitch_sender(&base)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let operation = request(&state, request_for(&target, ModerationSource::Manual))
@@ -2709,7 +2715,7 @@ mod tests {
             &state,
             StreamPlatform::Youtube,
             Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Failed)),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let operation = request(&state, request_for(&target, ModerationSource::Manual))
@@ -2759,7 +2765,7 @@ mod tests {
                 send: FakeChatSendBehavior::Sent,
                 delete: FakeChatDeleteBehavior::MissingScope,
             }),
-            &[target.clone()],
+            std::slice::from_ref(&target),
         )
         .await;
         let operation = request(&state, request_for(&target, ModerationSource::Manual))

@@ -1489,6 +1489,13 @@ pub fn log_flags_in_effect(state: &AppState, session_id: &str) {
     }
 }
 
+/// Subscribe before waiting so an owner interval change wakes a quiet timer.
+pub fn subscribe_service_flags(
+    state: &AppState,
+) -> watch::Receiver<crate::service_flags::YouTubeServiceFlags> {
+    state.youtube_quota.flags.subscribe()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2389,11 +2396,4 @@ mod tests {
             .expect("resumed")
             .unwrap();
     }
-}
-
-/// Subscribe before waiting so an owner interval change wakes a quiet timer.
-pub fn subscribe_service_flags(
-    state: &AppState,
-) -> watch::Receiver<crate::service_flags::YouTubeServiceFlags> {
-    state.youtube_quota.flags.subscribe()
 }

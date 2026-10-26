@@ -2450,6 +2450,8 @@ impl From<CaptionOverlayPosition> for OverlayPlacement {
 #[derive(Debug, Clone)]
 pub struct CaptionOverlay {
     pub rgba: Arc<Vec<u8>>,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    // Metal and D3D11 upload it
     pub bgra: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
@@ -3466,10 +3468,10 @@ pub(crate) async fn install_listen_only_test_task(state: &AppState) {
     let task_stop = stop.clone();
     let task = tokio::spawn(async move {
         while !task_stop.load(Ordering::Acquire) {
-            match tokio::time::timeout(std::time::Duration::from_millis(10), receiver.recv()).await
+            if let Ok(None) =
+                tokio::time::timeout(std::time::Duration::from_millis(10), receiver.recv()).await
             {
-                Ok(None) => break,
-                Ok(Some(_)) | Err(_) => {}
+                break;
             }
         }
     });
@@ -9354,12 +9356,12 @@ mod tests {
 
     #[test]
     fn realtime_final_then_chunk_fallback_keeps_monotonic_unique_sequences() {
-        let mut sequence = CaptionSequence::default();
+        let sequence = CaptionSequence::default();
         let mut realtime_items = std::collections::HashMap::new();
 
         let first_item = realtime_item_entry(
             &mut realtime_items,
-            &mut sequence,
+            &sequence,
             "item-1",
             0.25,
             0,
@@ -9373,7 +9375,7 @@ mod tests {
         assert_eq!(
             realtime_item_entry(
                 &mut realtime_items,
-                &mut sequence,
+                &sequence,
                 "item-1",
                 0.5,
                 1,
@@ -9725,9 +9727,11 @@ mod tests {
 
     #[test]
     fn drained_artifact_keeps_its_epoch_style_and_generation_across_capture_start() {
-        let mut coordinator = CaptionsCoordinator::default();
-        coordinator.capture_epoch = 12;
-        coordinator.artifact_generation = 7;
+        let mut coordinator = CaptionsCoordinator {
+            capture_epoch: 12,
+            artifact_generation: 7,
+            ..Default::default()
+        };
         let frozen_style = CaptionStyleSnapshot {
             position: CaptionOverlayPosition::Top,
             text_size: CaptionTextSize::L,
@@ -11707,11 +11711,11 @@ mod tests {
                 if task_stop.load(Ordering::Acquire) {
                     break;
                 }
-                match tokio::time::timeout(std::time::Duration::from_millis(10), receiver.recv())
-                    .await
+                if let Ok(None) =
+                    tokio::time::timeout(std::time::Duration::from_millis(10), receiver.recv())
+                        .await
                 {
-                    Ok(None) => break,
-                    Ok(Some(_)) | Err(_) => {}
+                    break;
                 }
             }
         });

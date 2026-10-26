@@ -79,6 +79,7 @@ mod marker_voice;
 mod metal_compositor;
 mod metrics_journal;
 mod moments;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod mpeg_ts;
 mod native_preview_host;
 mod noise_cleanup;
@@ -16139,7 +16140,7 @@ mod tests {
         assert_eq!(event["payload"]["frameSceneRevision"], 21);
         assert_eq!(event["payload"]["framesRendered"], 101);
         assert!(
-            reliable_rx.len() > 0,
+            !reliable_rx.is_empty(),
             "telemetry must be serviced while reliable traffic remains queued"
         );
         let queue = transport.snapshot().reliable_response_queue;
@@ -19543,7 +19544,7 @@ mod tests {
             .send(ServerEvent::new("test.burst", json!({ "sequence": 1 })))
             .unwrap();
         timeout(Duration::from_secs(1), async {
-            while events_tx.len() != 0 {
+            while !events_tx.is_empty() {
                 tokio::task::yield_now().await;
             }
         })

@@ -87,7 +87,7 @@ fn test_trace_teardown(session_id: &str, role: RecordingRole, phase: &'static st
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn test_take_source_iso_teardown_trace() -> Vec<SourceIsoTeardownTiming> {
     std::mem::take(
         &mut *SOURCE_ISO_TEARDOWN_TRACE
@@ -949,7 +949,7 @@ impl SourceIsoRuntime {
         Vec::new()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn test_owned_pids(&self) -> &[u32] {
         &self.owned_pids
     }
@@ -1482,6 +1482,7 @@ pub struct SourceIsoStartGuard {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the macOS ISO runtime test reads it
 pub(crate) struct SourceIsoStartReceipt {
     pub pids: Vec<u32>,
     pub fifos: Vec<PathBuf>,
@@ -1495,7 +1496,7 @@ struct SourceIsoStartPause {
 #[cfg(test)]
 static SOURCE_ISO_START_PAUSE: std::sync::Mutex<Option<SourceIsoStartPause>> =
     std::sync::Mutex::new(None);
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn test_pause_next_source_iso_start(
     point: &str,
 ) -> tokio::sync::oneshot::Receiver<SourceIsoStartReceipt> {

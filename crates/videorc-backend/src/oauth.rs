@@ -3381,6 +3381,16 @@ fn percent_encode(value: &str) -> String {
 }
 
 #[cfg(test)]
+fn test_quota_state() -> crate::state::AppState {
+    crate::state::AppState::new(
+        "test".into(),
+        1234,
+        tokio::sync::broadcast::channel(64).0,
+        crate::storage::Database::open_in_memory_for_tests(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::extract::Form;
@@ -6136,14 +6146,4 @@ mod tests {
             base
         );
     }
-}
-
-#[cfg(test)]
-fn test_quota_state() -> crate::state::AppState {
-    crate::state::AppState::new(
-        "test".into(),
-        1234,
-        tokio::sync::broadcast::channel(64).0,
-        crate::storage::Database::open_in_memory_for_tests(),
-    )
 }

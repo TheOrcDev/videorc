@@ -130,7 +130,7 @@ jobs:
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
           set -euo pipefail
-          cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+          cargo clippy -p videorc-backend -- -D warnings
           cargo test -p videorc-backend
 
       - name: Run script tests

@@ -251,10 +251,6 @@ impl WindowsD3d11MediaRoleHandle {
         self.client.clone()
     }
 
-    pub(crate) fn generation(&self) -> u64 {
-        self.lease.as_ref().map_or(0, |lease| lease.generation)
-    }
-
     pub(crate) fn role(&self) -> WindowsD3d11MediaRole {
         self.lease
             .as_ref()

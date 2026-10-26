@@ -4,6 +4,7 @@
 /// This type deliberately lives in a platform-neutral module so Linux builds
 /// and the standalone macOS native-preview helper do not need to reach through
 /// the macOS-only Metal implementation to compile shared scene code.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only Metal draws it today; kept neutral (see above)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceMask {
     None,

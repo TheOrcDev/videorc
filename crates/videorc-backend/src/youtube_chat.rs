@@ -1458,6 +1458,16 @@ pub async fn run_youtube_chat_connector(
 }
 
 #[cfg(test)]
+fn test_quota_state() -> AppState {
+    AppState::new(
+        "test".into(),
+        1234,
+        tokio::sync::broadcast::channel(64).0,
+        crate::storage::Database::open_in_memory_for_tests(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
@@ -2919,14 +2929,4 @@ mod tests {
             ProviderDeleteOutcome::Failed(_)
         ));
     }
-}
-
-#[cfg(test)]
-fn test_quota_state() -> AppState {
-    AppState::new(
-        "test".into(),
-        1234,
-        tokio::sync::broadcast::channel(64).0,
-        crate::storage::Database::open_in_memory_for_tests(),
-    )
 }

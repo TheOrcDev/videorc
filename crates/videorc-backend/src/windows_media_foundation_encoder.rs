@@ -210,8 +210,10 @@ impl MediaFoundationEncoderConfig {
 
 #[derive(Debug, Clone)]
 pub struct MediaFoundationEncodedFrame {
+    #[allow(dead_code)] // part of the encoded-frame record; callers read pts and bytes
     pub frame_index: u64,
     pub pts_100ns: i64,
+    #[allow(dead_code)] // part of the encoded-frame record; callers read pts and bytes
     pub duration_100ns: i64,
     pub bytes: Vec<u8>,
 }
@@ -344,7 +346,9 @@ pub(crate) struct MediaFoundationD3d11EncoderDiagnostics {
     pub(crate) adapter_luid: u64,
     pub(crate) d3d11_aware: bool,
     pub(crate) dxgi_manager_bound: bool,
+    #[allow(dead_code)] // snapshotted with the rest; no status surface reports it yet
     pub(crate) callback_decode_failures: u64,
+    #[allow(dead_code)] // snapshotted with the rest; no status surface reports it yet
     pub(crate) callback_queue_failures: u64,
     pub(crate) ownership: WindowsD3d11EncoderDiagnostics,
 }
@@ -891,14 +895,6 @@ impl MediaFoundationH264Encoder {
         self.record_submitted_frame();
         output.extend(self.collect_available_events()?);
         Ok(output)
-    }
-
-    pub fn encode_d3d11_texture(
-        &mut self,
-        source_texture: &RetainedD3D11Texture,
-        frame_index: u64,
-    ) -> Result<Vec<MediaFoundationEncodedFrame>> {
-        self.encode_d3d11_texture_with_overlay(source_texture, None, frame_index)
     }
 
     pub fn encode_d3d11_texture_with_overlay(

@@ -3115,6 +3115,8 @@ struct GetSessionResponse {
 mod tests {
     use super::*;
 
+    type SeenCommands = std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+
     #[test]
     fn release_builds_pin_the_production_base_url() {
         assert_eq!(
@@ -4217,7 +4219,7 @@ mod tests {
         headers: Vec<(&'static str, &'static str)>,
         body: serde_json::Value,
         delay: std::time::Duration,
-        seen: std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, serde_json::Value)>>>,
+        seen: SeenCommands,
     ) -> VideorcApiClient {
         use axum::response::IntoResponse;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
