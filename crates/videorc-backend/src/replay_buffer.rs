@@ -896,6 +896,25 @@ fn sync_clip(path: &Path) -> std::io::Result<()> {
         .sync_all()
 }
 
+/// Which step of putting a saved clip in place failed (plan 200 B2).
+enum ClipCommitError {
+    Flush(std::io::Error),
+    Rename(std::io::Error),
+}
+
+/// Flushes the partial clip, renames it into place and flushes the Clips
+/// folder so the rename lasts (Unix; Windows renames have no portable folder
+/// flush). Blocking: the caller runs it on a blocking thread. A failed
+/// folder flush only warns: the clip itself is already on disk.
+fn commit_clip(partial: &Path, target: &Path) -> Result<(), ClipCommitError> {
+    sync_clip(partial).map_err(ClipCommitError::Flush)?;
+    std::fs::rename(partial, target).map_err(ClipCommitError::Rename)?;
+    if let Err(error) = crate::session_ops::sync_session_file_parent(target) {
+        tracing::warn!("Could not flush the Clips folder after saving a clip: {error}");
+    }
+    Ok(())
+}
+
 /// Why a ring went away.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetireOutcome {
@@ -1546,28 +1565,29 @@ async fn write_replay(
                 ));
             }
         };
-    if let Err(error) = sync_clip(&partial) {
+    // Plan 200 B2: flush, rename and flush the folder off the runtime: on
+    // macOS `sync_all` is `F_FULLFSYNC`, which can take a while on a slow or
+    // external disk.
+    let commit = {
+        let partial = partial.clone();
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || commit_clip(&partial, &target))
+            .await
+            .unwrap_or_else(|error| {
+                Err(ClipCommitError::Flush(std::io::Error::other(format!(
+                    "the flush task stopped: {error}"
+                ))))
+            })
+    };
+    if let Err(error) = commit {
         let _ = std::fs::remove_file(&partial);
-        return Err(failure(
-            save_id,
-            Some(session_id),
-            "io",
-            format!("Could not write the clip to disk: {error}"),
-        ));
-    }
-    if let Err(error) = std::fs::rename(&partial, &target) {
-        let _ = std::fs::remove_file(&partial);
-        return Err(failure(
-            save_id,
-            Some(session_id),
-            "io",
-            format!("Could not move the replay into place: {error}"),
-        ));
-    }
-    // The rename itself lasts once the folder is flushed (Unix; Windows
-    // renames have no portable folder flush).
-    if let Err(error) = crate::session_ops::sync_session_file_parent(&target) {
-        tracing::warn!("Could not flush the Clips folder after saving a clip: {error}");
+        let message = match error {
+            ClipCommitError::Flush(error) => format!("Could not write the clip to disk: {error}"),
+            ClipCommitError::Rename(error) => {
+                format!("Could not move the replay into place: {error}")
+            }
+        };
+        return Err(failure(save_id, Some(session_id), "io", message));
     }
     let file_size_bytes = std::fs::metadata(&target)
         .ok()
@@ -2623,6 +2643,25 @@ mod pure_tests {
         assert!(folder.is_dir(), "a folder is never touched");
         // A missing Clips folder is nothing to sweep.
         assert!(sweep_stale_partials(&dir.join("missing"), started, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_clip_flushes_then_renames_into_place() {
+        let dir =
+            std::env::temp_dir().join(format!("videorc-clip-commit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("Clip 2026-10-12 18-30-05.mp4");
+        let partial = partial_path(&target);
+        std::fs::write(&partial, b"mp4").unwrap();
+        assert!(commit_clip(&partial, &target).is_ok());
+        assert!(!partial.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"mp4");
+        // A missing partial fails at the flush, before any rename.
+        assert!(matches!(
+            commit_clip(&partial, &dir.join("Clip other.mp4")),
+            Err(ClipCommitError::Flush(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
