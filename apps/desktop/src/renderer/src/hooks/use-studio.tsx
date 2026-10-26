@@ -7906,7 +7906,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Plan 187: a go-live post that failed is news wherever the streamer
       // is (D13). Success stays quiet; Livestream shows "Last post".
       nextClient.on('discord.announce.changed', (snapshot) => {
-        if (!snapshot.lastError) return
+        if (!snapshot.webhooks.some((webhook) => webhook.lastError)) return
         void loadSessionRuntimeRecovery().then((runtime) => {
           if (generationIsCurrent()) runtime.showDiscordAnnounceFailure(snapshot)
         })

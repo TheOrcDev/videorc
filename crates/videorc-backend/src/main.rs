@@ -11784,10 +11784,18 @@ async fn handle_text_message_with_role(
             }
         }
         "discord.webhook.remove" => {
-            discord_rpc(command.id, discord_announce::remove_webhook(state).await)
+            match serde_json::from_value::<discord_announce::RemoveWebhookParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::remove_webhook(state, params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "discord.webhook.sendTest" => {
-            match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
+            match serde_json::from_value::<discord_announce::TestParams>(command.params) {
                 Ok(params) => {
                     discord_rpc(command.id, discord_announce::send_test(state, params).await)
                 }
