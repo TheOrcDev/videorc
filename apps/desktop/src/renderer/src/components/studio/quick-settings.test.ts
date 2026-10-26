@@ -20,6 +20,7 @@ function render(input: Partial<SystemAudioSwitchInput>): string {
     device: { status: 'available' },
     requested: false,
     sessionActive: false,
+    audioBusActive: false,
     confirmed: null,
     issue: null,
     ...input
@@ -49,7 +50,13 @@ describe('Studio Sources System audio row (plan 069)', () => {
   })
 
   it('keeps a lost source On with a short status and the full copy on hover', () => {
-    const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'lost' })
+    const markup = render({
+      requested: true,
+      sessionActive: true,
+      audioBusActive: true,
+      confirmed: false,
+      issue: 'lost'
+    })
     expect(markup).toContain('>Stopped<')
     // The full copy is the status's description, never a native title (S1.10).
     expect(markup).toContain('System audio stopped. Your recording or livestream keeps going.')
@@ -59,7 +66,13 @@ describe('Studio Sources System audio row (plan 069)', () => {
   })
 
   it('puts Resume where the status goes when the echo guard paused it (plan 076)', () => {
-    const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'echo' })
+    const markup = render({
+      requested: true,
+      sessionActive: true,
+      audioBusActive: true,
+      confirmed: false,
+      issue: 'echo'
+    })
     expect(markup).toContain('>Resume<')
     expect(markup).toContain('coming back as an echo')
     expect(markup).toContain('aria-checked="true"')
@@ -69,6 +82,7 @@ describe('Studio Sources System audio row (plan 069)', () => {
     const markup = render({
       requested: true,
       sessionActive: true,
+      audioBusActive: true,
       confirmed: false,
       issue: 'bypassed'
     })
@@ -103,6 +117,7 @@ describe('Studio Sources rows (plan 080 S4)', () => {
       selectedCamera: devices.find((device) => device.id === sources.cameraId),
       selectedMicrophone: undefined,
       isSessionActive: false,
+      audioBusActive: false,
       entitlements: null,
       captionsStatus: { state: 'idle' },
       captionsCommandPending: false,
@@ -117,6 +132,33 @@ describe('Studio Sources rows (plan 080 S4)', () => {
     [...markup.matchAll(/data-slot="inspector-row".*?<span[^>]*>([^<]+)<\/span>/g)].map(
       (match) => match[1] as string
     )
+
+  it('uses the running Clips bus for the System audio state while transport stays idle', () => {
+    renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, [
+      display,
+      camera,
+      {
+        id: 'system-audio:default',
+        name: 'System audio',
+        kind: 'system-audio',
+        status: 'available'
+      }
+    ])
+    mocked.core = {
+      ...mocked.core,
+      captureConfig: {
+        ...defaultCaptureConfig,
+        audio: { ...defaultCaptureConfig.audio, systemAudioEnabled: true }
+      },
+      audioBusActive: true,
+      systemAudioConfirmed: false,
+      systemAudioIssue: 'echo'
+    }
+    const markup = renderToStaticMarkup(createElement(QuickSettings))
+    expect(markup).toContain('>Resume<')
+    expect(markup).toContain('coming back as an echo')
+    expect(mocked.core.isSessionActive).toBe(false)
+  })
 
   it('gives screen and camera their own rows, in order', () => {
     const systemAudio: Device = {

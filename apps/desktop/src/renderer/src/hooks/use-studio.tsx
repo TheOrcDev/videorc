@@ -1580,6 +1580,8 @@ export type StudioContextValue = {
   outputEnabled: boolean
   streamReady: boolean
   isSessionActive: boolean
+  /** A recording, livestream or Clips ring has a running audio bus (plan 201). */
+  audioBusActive: boolean
   /** Whether the active session mixes system audio, from `recording.status`
    * `mixSources` (plan 069); null until the backend reports it. */
   systemAudioConfirmed: boolean | null
@@ -17210,6 +17212,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      audioBusActive: mixingSessionActive,
       systemAudioConfirmed,
       systemAudioIssue,
       startBlockedReason,
@@ -17445,6 +17448,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      mixingSessionActive,
       systemAudioConfirmed,
       systemAudioIssue,
       startBlockedReason,

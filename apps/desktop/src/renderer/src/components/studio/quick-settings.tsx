@@ -272,6 +272,7 @@ export function useStudioSources() {
     selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
+    audioBusActive,
     captionsStatus,
     wsStatus,
     systemAudioConfirmed,
@@ -283,6 +284,7 @@ export function useStudioSources() {
     device: systemAudioDevice(deviceList),
     requested: captureConfig.audio.systemAudioEnabled,
     sessionActive: isSessionActive,
+    audioBusActive,
     confirmed: systemAudioConfirmed,
     issue: systemAudioIssue
   })

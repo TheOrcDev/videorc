@@ -179,6 +179,7 @@ export function SourcesAudioMixer(): ReactElement {
     setCaptureConfig,
     selectedMicrophone,
     isSessionActive,
+    audioBusActive,
     sourceDeviceSwitchPending,
     sourceSwitchReason,
     switchSourceDeviceLive,
@@ -204,6 +205,7 @@ export function SourcesAudioMixer(): ReactElement {
     device: systemAudioDevice(deviceList),
     requested: audio.systemAudioEnabled,
     sessionActive: isSessionActive,
+    audioBusActive,
     confirmed: systemAudioConfirmed,
     issue: systemAudioIssue
   })
@@ -303,7 +305,7 @@ export function SourcesAudioMixer(): ReactElement {
                     gainDb={audio.systemAudioGainDb}
                     macOS={platform === 'darwin'}
                     meter={systemAudioMeterInput({
-                      sessionActive: isSessionActive,
+                      audioBusActive,
                       mixed: systemAudio.meter,
                       backendLevelsLive,
                       source: backendLevelSources.systemAudio
@@ -771,10 +773,10 @@ export function SystemAudioSettings({
         {view.checked ? (
           <>
             {meterHasNoReading(meter) ? (
-              // Plan 173: no dead meter. The level only exists while a session
-              // mixes System audio, so outside one the row says when it moves.
+              // No dead meter. The level exists while a recording, livestream
+              // or Clips ring mixes System audio; otherwise say when it moves.
               <p className="text-xs text-muted-foreground" data-videorc-system-audio-idle="">
-                Level shows while recording or live.
+                Level shows while you record, go live, or keep Clips on.
               </p>
             ) : (
               <div className="flex min-w-0" data-videorc-system-audio-visualizer="">

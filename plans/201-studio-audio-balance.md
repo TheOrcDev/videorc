@@ -490,3 +490,20 @@ If those files moved, re-check "Verified facts" before S0.
   and the owner's supplied route. No audio case ran, so no S0 data-path STOP
   was observed. The owner owes the granted macOS run; continuing to S1 under
   the explicit missing-grant exception.
+- S1 (2026-10-27): Exposed core `audioBusActive: mixingSessionActive` and
+  used it for the System audio switch and meter inputs on Sources and the
+  Studio mirror. `isSessionActive` keeps its transport meaning. Exported
+  `systemAudioIdleReason({ audioBusActive, clipsArmed, clipsState, checked })`
+  from `lib/system-audio.ts`, returning `'clips-off' | null`, and applied
+  the D6 copy to Sources' existing idle slot. Added helper, row and provider
+  ring/restart assertions. No processing effect, crates or remote projection
+  tests changed. Initial typecheck found a misplaced destructure and two
+  microphone-only test fields; quick-settings had 7 failures, reproduced
+  alone, so these were real wiring errors and were fixed. Final gates:
+  typecheck passed; lint passed with 0 errors and the existing
+  `captureConfig` effect dependency warning; format check passed; desktop
+  tests passed all 524 files (5470 passed, 1 skipped). Focused tests passed
+  75/75. Remote surface and phone projection tests passed unchanged. The
+  dev-app Sources idle meter check, like S0's native run, is owed by the owner
+  because this dev app has no Screen Recording grant. No product scope
+  deviations.

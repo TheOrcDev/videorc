@@ -36,6 +36,7 @@ function render(
     device: { status: 'available' },
     requested: false,
     sessionActive: false,
+    audioBusActive: false,
     confirmed: null,
     issue: null,
     ...input
@@ -77,7 +78,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   it('shows its level and the Level fader only while On', () => {
     const off = render({})
     expect(off).not.toContain('aria-label="System audio gain"')
-    expect(off).not.toContain('Level shows while recording or live.')
+    expect(off).not.toContain('Level shows while you record, go live, or keep Clips on.')
     const on = render({ requested: true })
     expect(on).toContain('aria-label="System audio gain"')
     expect(on).toContain('>−6.0 dB<')
@@ -86,7 +87,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
 
   it('says when the level moves instead of drawing a dead meter (plan 173)', () => {
     const idle = render({ requested: true })
-    expect(idle).toContain('Level shows while recording or live.')
+    expect(idle).toContain('Level shows while you record, go live, or keep Clips on.')
     expect(idle).not.toContain('data-videorc-system-audio-visualizer')
     expect(idle).not.toContain('aria-label="System audio level"')
     expect(idle).not.toContain('data-slot="lcd-display"')
@@ -95,7 +96,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   it('draws the meter once the bus level drives it', () => {
     const source = createFrameEmitter<MeterFrame>()
     const markup = render(
-      { requested: true, sessionActive: true, confirmed: true },
+      { requested: true, sessionActive: true, audioBusActive: true, confirmed: true },
       { meter: { kind: 'source', source } }
     )
     expect(markup).toContain('data-videorc-system-audio-visualizer=""')
@@ -103,7 +104,18 @@ describe('Sources System audio row (plans 069, 173)', () => {
     // The segmented bar; the LCD screen is Retro LCD's (plan 197).
     expect(markup).toMatch(/data-videorc-system-audio-visualizer=""[^]*data-slot="level-meter"/)
     expect(markup).not.toContain('data-slot="lcd-display"')
-    expect(markup).not.toContain('Level shows while recording or live.')
+    expect(markup).not.toContain('Level shows while you record, go live, or keep Clips on.')
+  })
+
+  it('draws the idle Clips meter without a recording or livestream', () => {
+    const source = createFrameEmitter<MeterFrame>()
+    const markup = render(
+      { requested: true, sessionActive: false, audioBusActive: true, confirmed: true },
+      { meter: { kind: 'source', source } }
+    )
+    expect(markup).toContain('data-videorc-system-audio-visualizer=""')
+    expect(markup).toContain('aria-label="System audio level"')
+    expect(markup).not.toContain('Level shows while you record, go live, or keep Clips on.')
   })
 
   it('opens More to the echo guard and the three facts', () => {
@@ -130,13 +142,25 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(idle).not.toContain('Mac')
     expect(idle).not.toContain('Screen Recording')
     const failed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'unavailable'
+      },
       { macOS: false }
     )
     expect(failed).toContain('System audio couldn&#x27;t start.')
     expect(failed).not.toContain('Open Permissions')
     const bypassed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'bypassed' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'bypassed'
+      },
       { macOS: false }
     )
     expect(bypassed).toContain(
@@ -179,7 +203,13 @@ describe('Sources System audio row (plans 069, 173)', () => {
 
   it('makes an issue a warning Alert, with its action (plan 174 S3.8)', () => {
     const failed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'unavailable'
+      },
       { macOS: true }
     )
     expect(failed).toMatch(/data-slot="alert"[^>]*data-variant="warning"/)
@@ -199,7 +229,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     const source = createFrameEmitter<MeterFrame>()
     expect(
       render(
-        { requested: true, sessionActive: true, confirmed: true },
+        { requested: true, sessionActive: true, audioBusActive: true, confirmed: true },
         { meter: { kind: 'source', source } }
       )
     ).toContain('>Receiving<')
