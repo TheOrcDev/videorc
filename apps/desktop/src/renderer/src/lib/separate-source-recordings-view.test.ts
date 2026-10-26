@@ -80,9 +80,7 @@ describe('separateFileStopped', () => {
 
   it('says an interrupted file stopped early and offers its export', () => {
     const reason = 'Recording was interrupted; partial media is available for recovery.'
-    expect(
-      separateFileStopped(row({ finalizationError: reason, durationMs: undefined }))
-    ).toEqual({
+    expect(separateFileStopped(row({ finalizationError: reason, durationMs: undefined }))).toEqual({
       label: 'Stopped early',
       detail: 'Videorc closed before this file finished. What it recorded before then is kept.',
       exportable: true
