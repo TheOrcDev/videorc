@@ -50,24 +50,24 @@ use windows::Win32::Media::MediaFoundation::{
     IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFShutdown,
     IMFTrackedSample, IMFTransform, METransformDrainComplete, METransformHaveOutput,
     METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE,
-    MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE,
-    MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES,
-    MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
-    MF2DBuffer_LockFlags_Write, MFCreate2DMediaBuffer, MFCreateAttributes,
-    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFCreateTrackedSample, MFMediaType_Video, MFNominalRange_16_235,
-    MFSTARTUP_FULL, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID,
-    MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
-    MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
-    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
-    eAVEncH264VProfile_High,
+    MF_E_UNSUPPORTED_D3D_TYPE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY,
+    MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING,
+    MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION,
+    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MF2DBuffer_LockFlags_Write,
+    MFCreate2DMediaBuffer, MFCreateAttributes, MFCreateDXGIDeviceManager,
+    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFCreateTrackedSample, MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown,
+    MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
+    MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -508,6 +508,31 @@ impl MediaFoundationH264Encoder {
     }
 
     fn create_after_startup(
+        config: MediaFoundationEncoderConfig,
+        source_texture: Option<&RetainedD3D11Texture>,
+        com_started: bool,
+        mf_started: bool,
+        diagnostic: Option<&crate::windows_mf_probe::ProbeAttempt>,
+    ) -> Result<Self> {
+        let activate = || {
+            Self::activate_after_startup(
+                config.clone(),
+                source_texture,
+                com_started,
+                mf_started,
+                diagnostic,
+            )
+        };
+        activate().or_else(|error| {
+            if retry_after_encoder_session_exhaustion(&error.to_string(), &config.profile_label()) {
+                activate()
+            } else {
+                Err(error)
+            }
+        })
+    }
+
+    fn activate_after_startup(
         config: MediaFoundationEncoderConfig,
         source_texture: Option<&RetainedD3D11Texture>,
         com_started: bool,
@@ -2165,6 +2190,38 @@ impl MediaFoundationD3d11H264Encoder {
         com_started: bool,
         mf_started: bool,
     ) -> Result<Self> {
+        let activate = || {
+            Self::activate_after_startup(
+                config.clone(),
+                authority_device.clone(),
+                adapter_luid,
+                generation,
+                role,
+                in_flight_capacity,
+                com_started,
+                mf_started,
+            )
+        };
+        activate().or_else(|error| {
+            if retry_after_encoder_session_exhaustion(&error.to_string(), &config.profile_label()) {
+                activate()
+            } else {
+                Err(error)
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn activate_after_startup(
+        config: MediaFoundationEncoderConfig,
+        authority_device: IUnknown,
+        adapter_luid: u64,
+        generation: u64,
+        role: WindowsD3d11EncoderRole,
+        in_flight_capacity: usize,
+        com_started: bool,
+        mf_started: bool,
+    ) -> Result<Self> {
         let profile = config.profile_label();
         let activations = enumerate_hardware_h264_activations(&profile)?;
         let mut failures = Vec::new();
@@ -2612,6 +2669,21 @@ impl MediaFoundationD3d11H264Encoder {
                 }
             }
             self.drain_release_callbacks(&mut progress);
+            // Once the transform has drained and every submitted frame has its
+            // output, nothing more can come out. A surface it still references
+            // (NVIDIA keeps its last input) returns at teardown, where the
+            // runtime drops the encoder before that lease's ticket.
+            if self.ownership.transform_drain_completed() && self.submitted_pts.is_empty() {
+                let retained = self.ownership.close_drain_with_transform_retained()?;
+                if retained > 0 {
+                    tracing::info!(
+                        "{} still references {retained} input surface(s) after its drain; they return when the encoder is torn down",
+                        self.identity
+                    );
+                }
+                self.drained = true;
+                return Ok(progress);
+            }
             match self.ownership.drain_status(self.now_micros())? {
                 WindowsD3d11EncoderWaitStatus::Complete => {
                     ensure!(
@@ -3155,8 +3227,15 @@ unsafe fn stop_async_transform_streaming(transform: &IMFTransform, drained: bool
 /// so a straggling driver work item runs against a live object.
 const RETIRED_TRANSFORM_GRACE: Duration = Duration::from_secs(15);
 
+/// Each retired MFT keeps its NVENC session open for the whole grace, and a
+/// consumer NVIDIA driver caps concurrent sessions (12 on the GTX 1650 SUPER
+/// dev box, driver 617), so back-to-back takes plus the replay ring exhaust
+/// it. When a new activation is refused for that reason, retired MFTs older
+/// than this are destroyed early: past every observed straggler (0.7-3.5 s).
+const RETIRED_TRANSFORM_PRESSURE_MIN_AGE: Duration = Duration::from_secs(5);
+
 struct RetiredTransform {
-    release_at: Instant,
+    retired_at: Instant,
     activation: IMFActivate,
     events: IMFMediaEventGenerator,
     transform: IMFTransform,
@@ -3186,38 +3265,127 @@ impl RetiredTransform {
     }
 }
 
-fn retire_transform(retired: RetiredTransform) {
-    static REAPER: std::sync::OnceLock<
-        Option<std::sync::Mutex<std::sync::mpsc::Sender<RetiredTransform>>>,
-    > = std::sync::OnceLock::new();
-    let sender = REAPER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel::<RetiredTransform>();
-        std::thread::Builder::new()
-            .name("videorc-mft-reaper".to_string())
-            .spawn(move || {
-                // Items arrive in release order (same grace for every item).
-                while let Ok(retired) = receiver.recv() {
-                    let now = Instant::now();
-                    if retired.release_at > now {
-                        std::thread::sleep(retired.release_at - now);
+/// Retired MFTs in retirement order (every item gets the same grace).
+struct RetiredTransformQueue {
+    items: std::sync::Mutex<VecDeque<RetiredTransform>>,
+    changed: std::sync::Condvar,
+}
+
+fn retired_transform_queue() -> Option<&'static RetiredTransformQueue> {
+    static QUEUE: std::sync::OnceLock<Option<RetiredTransformQueue>> = std::sync::OnceLock::new();
+    QUEUE
+        .get_or_init(|| {
+            std::thread::Builder::new()
+                .name("videorc-mft-reaper".to_string())
+                .spawn(|| {
+                    if let Some(queue) = retired_transform_queue() {
+                        reap_retired_transforms(queue);
                     }
+                })
+                .ok()
+                .map(|_| RetiredTransformQueue {
+                    items: std::sync::Mutex::new(VecDeque::new()),
+                    changed: std::sync::Condvar::new(),
+                })
+        })
+        .as_ref()
+}
+
+fn reap_retired_transforms(queue: &RetiredTransformQueue) {
+    let mut items = queue
+        .items
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        let release_at = items
+            .front()
+            .map(|retired| retired.retired_at + RETIRED_TRANSFORM_GRACE);
+        match release_at {
+            Some(release_at) if release_at <= Instant::now() => {
+                if let Some(retired) = items.pop_front() {
+                    drop(items);
                     retired.destroy();
+                    items = queue
+                        .items
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
-            })
-            .ok()
-            .map(|_| std::sync::Mutex::new(sender))
-    });
-    let unsent = match sender {
-        Some(sender) => match sender.lock() {
-            Ok(sender) => sender.send(retired).err().map(|error| error.0),
-            Err(_) => Some(retired),
-        },
-        None => Some(retired),
+            }
+            Some(release_at) => {
+                let wait = release_at.saturating_duration_since(Instant::now());
+                items = queue
+                    .changed
+                    .wait_timeout(items, wait)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .0;
+            }
+            None => {
+                items = queue
+                    .changed
+                    .wait(items)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+    }
+}
+
+fn retire_transform(retired: RetiredTransform) {
+    match retired_transform_queue() {
+        Some(queue) => {
+            queue
+                .items
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_back(retired);
+            queue.changed.notify_all();
+        }
+        // No reaper thread: fall back to immediate destruction.
+        None => retired.destroy(),
+    }
+}
+
+/// Destroys, on the calling thread, every retired MFT retired at least
+/// `RETIRED_TRANSFORM_PRESSURE_MIN_AGE` ago, so their encoder sessions are
+/// free for a new activation. Returns how many were destroyed.
+fn reap_retired_transforms_under_pressure() -> usize {
+    let Some(queue) = retired_transform_queue() else {
+        return 0;
     };
-    // No reaper thread: fall back to immediate destruction.
-    if let Some(retired) = unsent {
+    let now = Instant::now();
+    let reaped = {
+        let mut items = queue
+            .items
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut reaped = Vec::new();
+        while items.front().is_some_and(|retired| {
+            now.saturating_duration_since(retired.retired_at) >= RETIRED_TRANSFORM_PRESSURE_MIN_AGE
+        }) {
+            reaped.extend(items.pop_front());
+        }
+        reaped
+    };
+    let count = reaped.len();
+    for retired in reaped {
         retired.destroy();
     }
+    queue.changed.notify_all();
+    count
+}
+
+/// When every activation was refused because the GPU had no free encoder
+/// session, frees the sessions retired MFTs still hold and says whether a
+/// retry can succeed.
+fn retry_after_encoder_session_exhaustion(failure: &str, profile: &str) -> bool {
+    if !crate::windows_mf_rejections::is_encoder_session_exhaustion(failure) {
+        return false;
+    }
+    let reaped = reap_retired_transforms_under_pressure();
+    tracing::warn!(
+        "Media Foundation hardware H.264 activation for {profile} found no free GPU encoder session; released {reaped} retired encoder(s) early{}",
+        if reaped == 0 { "" } else { " and retrying" }
+    );
+    reaped > 0
 }
 
 impl Drop for MediaFoundationH264Encoder {
@@ -3225,7 +3393,7 @@ impl Drop for MediaFoundationH264Encoder {
         unsafe {
             stop_async_transform_streaming(&self.transform, self.drained);
             retire_transform(RetiredTransform {
-                release_at: Instant::now() + RETIRED_TRANSFORM_GRACE,
+                retired_at: Instant::now(),
                 activation: ManuallyDrop::take(&mut self.activation),
                 events: ManuallyDrop::take(&mut self.events),
                 transform: ManuallyDrop::take(&mut self.transform),
@@ -3973,6 +4141,10 @@ fn mf_hresult_annotation(hresult: windows::core::HRESULT) -> Option<&'static str
     if is_mf_stream_change(hresult) {
         Some(
             "encoder requested output-type renegotiation (MF_E_TRANSFORM_STREAM_CHANGE; common on Intel iGPU MFTs)",
+        )
+    } else if hresult == MF_E_UNSUPPORTED_D3D_TYPE {
+        Some(
+            "the encoder refused a new session (MF_E_UNSUPPORTED_D3D_TYPE; NVIDIA reports this when every GPU encoder session is in use)",
         )
     } else if hresult.0 as u32 == 0x8000FFFF {
         Some(

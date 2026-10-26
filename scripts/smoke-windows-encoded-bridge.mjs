@@ -1,7 +1,10 @@
 import { spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 
-import { parseWindowsEncodedBridgeArgs } from './lib/windows-encoded-bridge-profiles.mjs'
+import {
+  parseWindowsEncodedBridgeArgs,
+  windowsEncodedBridgeNativeScreenArgs
+} from './lib/windows-encoded-bridge-profiles.mjs'
 
 if (process.platform !== 'win32') {
   throw new Error('The packaged Windows encoded-bridge smoke must run on Windows.')
@@ -14,6 +17,7 @@ const baseOutput = resolve(
 const encodedBridgeArgs = process.argv.slice(2)
 const options = parseWindowsEncodedBridgeArgs(encodedBridgeArgs)
 const runCameraProfiles = encodedBridgeArgs.length === 0
+const nativeScreenArgs = windowsEncodedBridgeNativeScreenArgs(options)
 const cameraProfiles = [
   ['screen-camera-1080p30', 1920, 1080, 30, 6000],
   ['screen-camera-1080p60', 1920, 1080, 60, 9000]
@@ -21,7 +25,9 @@ const cameraProfiles = [
 
 for (const { id, width, height, fps, bitrateKbps } of options.profiles) {
   console.log(`Windows encoded bridge: ${id}`)
-  const result = spawnSync('pnpm', ['smoke:windows-native-screen'], {
+  const nativeScreenCommand = ['smoke:windows-native-screen']
+  if (nativeScreenArgs.length > 0) nativeScreenCommand.push('--', ...nativeScreenArgs)
+  const result = spawnSync('pnpm', nativeScreenCommand, {
     cwd: repoRoot,
     encoding: 'utf8',
     stdio: 'inherit',
