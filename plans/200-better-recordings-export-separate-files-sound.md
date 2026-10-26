@@ -592,6 +592,56 @@ Run in this order and record the results under "As built":
 
 ## As built
 
+### Groups A and B (branch `plan-200-sound`)
+
+- **A1 (per-block fold).** `VoiceFold` in `audio.rs` replaces
+  `centered_voice_sample`: per-block mean-square per channel, a ~150 ms
+  one-pole, average within 20 dB, the louder channel alone past 20 dB (back
+  under 12 dB), average when both are under -110 dBFS, and a linear
+  crossfade across the block on a mode change. The CoreAudio callback and the
+  session bus (both write paths, planned once per chunk, reset on a ramp-in)
+  keep a persistent fold; `process_interleaved_f32` is a one-shot fold.
+  **The STOP did not trigger:** the Windows/Linux capture worker only
+  normalizes to stereo in FFmpeg (`aformat=…:channel_layouts=stereo`); the
+  voice fold is the bus's, in Rust, so those platforms get `VoiceFold` too.
+  `MIC_ONLY_GOLDEN_SHA256` was re-pinned (its 100 ms one-channel-silent
+  stretches are now averaged rather than switched per sample), with the
+  reason in the comment.
+- **A2 (limiter on every path).** The mic-only writer folds without the
+  full-scale clamp and runs `PeakLimiter`, carrying its state across both
+  write paths; clipped samples count on every path. The mixed sum also takes
+  the unclamped microphone. The golden was re-pinned again: its +3 dB fixture
+  peaks near 1.06 and is now limited, not clamped. A mic under the ceiling is
+  byte-identical (unit test). Review follow-up: the Microphone ingredient
+  (taps / separate Mic file, mic meter, echo reference, captions) is the
+  clamped fold on both paths, so it no longer depends on whether system
+  audio is attached; only the Combined output is limited.
+- **A3 (non-48 kHz mic).** Deviation: the rate is read from the AUHAL's
+  input-element input-scope stream format (fallback
+  `kAudioUnitProperty_SampleRate`) through the existing safe coreaudio-rs
+  `AudioUnit` methods, not `kAudioDevicePropertyNominalSampleRate`; no new
+  `unsafe`, so the STOP did not trigger. The warning is logged with the
+  device name and raised as Health `audio-input-sample-rate` at session
+  start only (`prepare_native_audio_source`); a mid-session switch to such a
+  mic logs but adds no Health event. A refused 48 kHz client format reports
+  the warning followed by CoreAudio's own error in parentheses; a failed
+  `start()` keeps its own message (review follow-up: it was wrongly blamed on
+  the rate, hiding permission causes).
+- **B1 (frame-exact joins).** `concat_list` writes `duration = next.start -
+  this.start` and none for the last segment; `select_segments` and the ring
+  fill count coverage the same way, the newest segment as its listed span
+  plus one frame. Deviation: with no fps, one frame is the median gap between
+  a segment's listed end and the next start (the spec's "median start gap"
+  read literally would be ~2 s). The real-file test
+  `real_ffmpeg_clip_keeps_every_frame_at_segment_joins` is `#[ignore]`d.
+- **B2 (durable clips, `.partial` sweep).** The saved MP4 is `sync_all`ed,
+  renamed and its folder flushed (Unix) in `spawn_blocking` (review
+  follow-up; `F_FULLFSYNC` used to run on a runtime worker). On ring start the
+  Clips folder is swept once for regular files named `Clip ….mp4.partial`,
+  modified before the ring started and claimed by no running save.
+
+### Group C (branches `plan-200-better-recordings` and `plan-200-export-b`)
+
 Group C, slices C1, C2, C3, C7 and C8, below
 (branch `plan-200-better-recordings`, 2026-10-26). C4, C5 and C6 ran in a
 separate worktree (branch `plan-200-export-b`) and follow after C8.

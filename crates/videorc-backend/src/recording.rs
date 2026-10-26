@@ -15861,6 +15861,21 @@ async fn prepare_native_audio_source(
         Ok(source) => {
             let device_name = source.device_name();
             *fifo_path = Some(path.clone());
+            // Plan 200 A3: a device running at another rate than 48 kHz.
+            if let Some(warning) = source
+                .stats_handle()
+                .device_sample_rate()
+                .and_then(|rate| crate::audio::microphone_sample_rate_warning(&device_name, rate))
+            {
+                state.emit_log("warn", &warning);
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    crate::audio::MICROPHONE_SAMPLE_RATE_CODE,
+                    &warning,
+                );
+            }
             state.emit_log(
                 "info",
                 if taken_warm {
