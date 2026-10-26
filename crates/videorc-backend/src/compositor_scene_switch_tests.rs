@@ -855,6 +855,59 @@ async fn source_iso_artifact_fixture() {
                 > 10,
             "{mode}: camera publisher must advance changing content"
         );
+        // Plan 200 D1: once the separate files are shed, their legs stop
+        // rendering and the primary keeps publishing.
+        assert!(iso_stores.batches.shed_separate_files());
+        let [gpu, iso_screen_gpu, iso_camera_gpu] = gpus.as_mut_slice() else {
+            unreachable!()
+        };
+        publish_compositor_frame(
+            &state,
+            "source-iso-test",
+            91,
+            WIDTH,
+            HEIGHT,
+            &mut sources,
+            &mut cache,
+            gpu.as_mut(),
+            CompositorFrameConsumer::RawYuvEncoder,
+            None,
+            None,
+            Some(CompositorSourceIsoOutput {
+                width: WIDTH,
+                height: HEIGHT,
+                camera_width: CAMERA_WIDTH,
+                camera_height: CAMERA_HEIGHT,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+            }),
+            iso_screen_gpu.as_mut(),
+            iso_camera_gpu.as_mut(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            super::LiveBackgroundLeg::unmeasured(&mut None),
+        )
+        .await;
+        let latest_sequence =
+            |store: &CompositorFrameStore| store.lock().unwrap().latest().unwrap().sequence;
+        assert_eq!(
+            latest_sequence(&compositor_frame_store(&state).await),
+            91,
+            "{mode}: the primary keeps publishing"
+        );
+        assert_eq!(
+            latest_sequence(&iso_stores.screen),
+            90,
+            "{mode}: a shed Screen leg stops rendering"
+        );
+        assert_eq!(
+            latest_sequence(&iso_stores.camera),
+            90,
+            "{mode}: a shed Camera leg stops rendering"
+        );
     }
 }
 

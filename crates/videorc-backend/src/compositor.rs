@@ -9061,9 +9061,10 @@ async fn publish_compositor_frame(
             },
         ) in legs.into_iter().enumerate()
         {
-            #[cfg(not(test))]
-            let _ = leg_index;
-            if leg_snapshot.is_none() {
+            // A leg whose file ended (shed under encoder pressure, its source
+            // removed, or Stop) no longer renders: after a shed the GPU work
+            // goes back to the Combined recording (plan 200 D1).
+            if leg_snapshot.is_none() || !membership.active[leg_index + 1] {
                 continue;
             }
             let leg_camera_frame = camera_frame
