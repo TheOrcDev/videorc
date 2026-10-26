@@ -593,3 +593,117 @@ Run in this order and record the results under "As built":
 ## As built
 
 _To be filled by the executors._
+
+### C4. Combined exports first (branch `plan-200-export-b`)
+
+- `recording_finalization.rs`: the FIFO `export_slot` mutex is now a
+  class-aware slot (`ExportClass::Primary` / `SeparateFile { take_id }`, read
+  from the `<take_id>-screen|camera` session id). One export at a time. Order:
+  a separate file that has waited `SEPARATE_FILE_EXPORT_MAX_WAIT` (60 s) or
+  longer, then the oldest Combined/single-file export, then the oldest
+  separate file whose take has no pending Combined export. A dropped waiter
+  leaves the queue.
+- At Stop, `monitor_session` calls `expect_primary_export(take)` before
+  `commit_finished_source_iso_roles` queues the separate files (they are
+  spawned before the Combined job registers), so a separate file yields to
+  its Combined even on a free slot. The mark clears when the Combined export
+  leaves the slot, when the Combined job finishes without one
+  (`registry.finish`), or right before the terminal status when no Combined
+  job was created.
+- Tests: Camera, Screen, then Combined queued → Combined runs first; a free
+  slot waits for the take's expected Combined (another take's file is not held
+  back); a Combined job that ends without export releases its files; the pure
+  ordering function at 59 s / 60 s; a paused-clock test that a held-back file
+  waits no more than 60 s.
+
+### C5. Disk space is checked where it runs out
+
+- New `disk_space.rs`: required space = input × 1.05 + 512 MiB
+  (`required_copy_bytes`), decimal byte formatting, the plan's refusal copy
+  verbatim, and the minutes-left estimate: (video kbps + 1536 kbps PCM audio)
+  × (1 + separate files), doubled for the export peak.
+- Export (automatic and Export MP4): `ensure_mp4_export_disk_space` runs before
+  `export_completed_recording_to_mp4_tracked` in `finalize_recording_media`
+  (inside the export slot, before FFmpeg) and at the start of
+  `remux_session_with_exporter`. On refusal the job fails with the copy and the
+  MKV stays. `mp4_export_args` is untouched. A failed size or free-space
+  reading never blocks.
+- Repair backup: `safe_replace` refuses the backup copy without room
+  ("Not enough disk space to back up the original before the repair (needs X,
+  Y free). The recording was left unchanged.") and deletes the temp.
+- Record-time notice: `emit_disk_space_health_event` uses `statvfs`/
+  `GetDiskFreeSpaceExW` (`noise_cleanup::available_space`) instead of `df`,
+  and shows "About N minutes of recording[ with separate files] fit in the
+  selected recording location (X free)." under 20 minutes; under 1 GB it always
+  shows (same `disk-space-low` code).
+- Tests: required-space math, the refusal copy, minutes left with and without
+  separate files, the notice threshold and the 1 GB floor.
+
+### C6. Videorc cleans up after itself
+
+1. Startup sweep: `repair::sweep_repair_temps` deletes only regular files
+   whose name is exactly `.<stem>.videorc-repair.<video ext>`
+   (`is_repair_temp_name`), non-recursively, in the default recordings folder
+   and the parents of every `output_path`/`mp4_path` of sessions started in the
+   last 90 days (`Database::session_media_directories_since`).
+   `repair_service::sweep_leftover_repair_temps` holds the maintenance permit
+   while it runs and logs the count and bytes; `main.rs` runs it before
+   `resume_pending_repair_jobs`.
+2. `ffmpeg_work.rs`: a maintenance permit now has its own cancel flag;
+   `MaintenanceCancelToken::cancel_on_drop()` cancels the job when a `timeout`
+   drops the waiting future, so `run_output_cancellable` kills FFmpeg;
+   `worker()` counts the blocking thread until it exits, and no new
+   maintenance (or Library deletion) starts while one is counted.
+   `cancel_maintenance_for_shutdown` (called when shutdown preparation starts
+   and again in post-finalization cleanup) cancels running and later jobs;
+   cleanup waits up to 5 s for the workers. Wired into `run_quality_assessment`,
+   `run_quality_gate` and `repair_service` assess/repair. The quality-gate
+   timeout code itself (C8's area) is unchanged.
+3. `safe_replace` deletes the temp on every error path (invalid path, backup
+   space, backup folder, backup copy, rename), via `safe_replace_with` with an
+   injectable rename.
+4. Deleting a recording quarantines and trashes its `.videorc-backups/<name>`
+   copy with it (an extra path record, only when the backup exists). Orphaned
+   backups are still never deleted (D6).
+5. Export MP4 of a file still in `.videorc-iso-<uuid>/` publishes to
+   `source_iso::public_mp4_output_path`: the public folder beside Combined,
+   with its `-screen`/`-camera` name, through the same no-replace publish
+   (staging also moves to the public folder).
+6. `source_iso::remove_empty_capture_directory` removes the private folder
+   (only a `.videorc-iso-*` parent, only when empty) after an automatic export
+   that consumed the MKV, after Export MP4, and when the row's deletion
+   completes. The existing publish-time removal is unchanged.
+7. Crash recovery: `reconcile_orphaned_sessions` keeps an interrupted
+   Screen/Camera row `completed` when its capture ownership is bound
+   (`sourceIsoOwnership`), so the Library offers Export MP4; unverified rows
+   stay `failed`. `separate-source-recordings-view.ts` maps "partial media is
+   available for recovery" to "Stopped early" ("Videorc closed before this file
+   finished."), exportable when the length is unknown or at least 1 s.
+8. `finalize_session_with_diagnostics` stores the published MP4's size in
+   `file_size_bytes` (stat taken before the DB lock).
+- Tests: sweep (temp, MP4, MKV, a backup, a temp-named file inside
+  `.videorc-backups`, `.partial`, a temp-named folder: only the temp goes);
+  name filter; failing rename and failing backup leave no temp; delete takes
+  the backup and not another recording's; a stopped-early file's Export MP4
+  lands beside Combined (remux with a fake exporter); empty private folder
+  removal (and never a non-private folder); `file_size_bytes` after export;
+  timed-out/shutdown maintenance cancellation and the worker join; verified
+  interrupted row stays `completed`; the renderer view test.
+
+### C4–C6 gates run (worktree `videorc-wt-200-exportb`, before merge)
+
+- `cargo fmt --check --all`: pass.
+- `cargo check -p videorc-backend --tests`: pass (5 pre-existing dead-code
+  warnings in unrelated Linux/buddy files).
+- `cargo clippy -p videorc-backend -- -D warnings`: pass.
+- `cargo test -p videorc-backend -- recording_finalization:: disk_space::
+  repair:: repair_service:: storage:: source_iso:: ffmpeg_work::`: 263 passed,
+  3 ignored. `cargo test -p videorc-backend -- recording::`: 446 passed,
+  4 ignored. Both ran with `--config
+  'profile.dev.package.videorc-backend.debug=0'`: with full debuginfo the
+  opt-level-2 test build of the backend was SIGKILLed twice (memory pressure on
+  the shared machine).
+- `vitest run separate-source-recordings-view.test.ts`: 10 passed;
+  `pnpm typecheck`: pass; prettier: pass.
+- Not run here (slice E, on the merged branch): the smokes, and
+  `pnpm smoke:record-latency` for the finalization-slot change.
