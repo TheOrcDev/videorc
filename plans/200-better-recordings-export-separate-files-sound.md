@@ -592,4 +592,191 @@ Run in this order and record the results under "As built":
 
 ## As built
 
-_To be filled by the executors._
+_To be filled by the executors._ Group C, slices C1, C2, C3, C7 and C8, below
+(branch `plan-200-better-recordings`, 2026-10-26). C4, C5 and C6 ran in a
+separate worktree and report on their own.
+
+### C1. Exact frame times (shipped, `33842ca8`)
+
+- `mp4_export_args` now takes `Mp4ExportOptions`. For a Videorc capture with
+  H.264 and a whole frame rate it appends
+  `,setts=time_base=1/<fps>:prescale=1:ts=round(PTS)` to the single
+  `h264_metadata` `-bsf:v` chain (two `-bsf:v` flags would keep only the
+  last).
+- The fps is the take's configured `output.video.fps`, else the probe's whole
+  `r_frame_rate`. A non-integer probed rate (30000/1001) never snaps.
+- "Videorc capture" is a new read, `Database::mp4_export_take_row`: any row
+  that is not `mode = 'imported'` and has no `derived_from_session_id` or
+  `processing_kind`. So imports, duplicates and processed copies get the
+  plain remux.
+- The export probe, `probe_mp4_export_input`, replaces
+  `mp4_export_trim_seconds`. It reads `r_frame_rate`, stream durations and
+  the format duration. The tracked export now gets its progress total from
+  this probe and no longer runs a second `probe_duration_ms` ffprobe.
+- On an FFmpeg failure with the snap, both exporters log, delete the partial
+  `export.mp4` in the private staging folder, and retry once without
+  `setts`. The tracked exporter skips the retry after a cancel.
+- Tests:
+  - unit tests for 30 fps, 60 fps, no fps, non-integer rate, import and
+    retry options;
+  - a real-file test, `plan200_real_export_has_equal_frame_durations`: a 3 s
+    30 fps libx264 MKV at 1/1000 exports to 90 packets of one duration with
+    `r_frame_rate` 30/1. It passes.
+- The real-file test logs a skip line without ffmpeg/ffprobe on PATH.
+- Not proven: the retry path against a real non-monotonic-DTS capture.
+
+### C2. AAC copy, H.264-only tags (shipped, `b7395292`)
+
+- The probe also reads the video and audio `codec_name`.
+- AAC audio is exported with `-c:a copy`. Any other audio is encoded to AAC
+  256k, as before.
+- Video other than `h264` gets no colour tags, no `h264_metadata` and no
+  `setts`. A failed probe keeps the old assumption that the video is H.264.
+- Unit tests cover PCM+H.264, AAC+H.264 and AAC+HEVC.
+
+### C3. Creation time, timecode and chapters (shipped, `b6371e92`, `92b7295e`)
+
+- Every Videorc capture export adds:
+  - `-metadata creation_time=<take start, UTC>`;
+  - `-timecode HH:MM:SS:FF`.
+- Separate-file rows copy `started_at` from Combined, so all files of one
+  take get the same values.
+- **Deviation:** `creation_time` is written in whole seconds. The MP4
+  `mvhd` stores seconds only, so the real-file test read back `.000000Z` for
+  a `.5` start.
+- The timecode is the local time of day at the take start. Its frames come
+  from the sub-second at the take's fps and never carry into the seconds:
+  `23:59:59.999` gives `23:59:59:29` at 30 fps.
+- Markers become chapters:
+  - `Database::markers_for_export` (in `session_markers.rs`) reads the live
+    markers of the Combined session (`take_id`, else the session itself).
+  - `mp4_chapters_ffmetadata` writes `chapters.ffmetadata` beside
+    `export.mp4` in the private staging folder. The existing
+    `remove_dir_all` cleanup removes it with the staging folder.
+  - The export maps it with `-f ffmetadata -i … -map_chapters 1`.
+    `-map_metadata -1` is never used.
+  - A first chapter "Start" is added when the first marker is later than 0.
+  - A marker without a label is titled "Marker N".
+  - Markers at or past the end of the file are dropped. Two markers on the
+    same millisecond keep the first.
+  - `=`, `;`, `#`, `\` and newlines are escaped, and CR is dropped.
+  - No markers, or an unknown duration, means no chapters input at all.
+- C3 checklist (tmcd and chapter `text` data tracks):
+  - `repair.rs` analysis takes the first video stream and the audio
+    streams, and maps `0:v:0` and `0:a:0`. OK.
+  - `scripts/lib/recording-analyzer.mjs` and
+    `scripts/lib/startup-resolution-analyzer.mjs` select by `codec_type`,
+    `v:0` and `a:0`. OK.
+  - `separate-source-take-gates.mjs` counts video and audio streams by
+    `codec_type`, not all streams. OK.
+  - The record-latency smoke uses those analyzers. OK.
+  - `smoke-separate-source-runtime.mjs` maps `0:v:0` and `0:a:0`. OK.
+  - The poster step writes one frame to JPEG, so only video is selected.
+    OK.
+  - Caption burn-in uses a `filter_complex` and copies audio. OK.
+  - **Noise cleanup broke and is fixed.** `-map 0 -c copy` into MP4 failed
+    with "Could not find tag for codec none" on the tmcd track. It now adds
+    `-map -0:d`. Chapters still copy, and the muxer rebuilds tmcd from the
+    video's `timecode` tag. This was checked by hand with ffmpeg 8.1.1 for
+    MP4 and MKV outputs.
+  - No `scripts/lib` JS changed, so `pnpm test:scripts` was not needed.
+- Tests:
+  - timecode unit tests: 30 and 60 fps, sub-second frames, both midnight
+    edges and a leap second;
+  - an ffmetadata builder test: escaping, Start, "Marker N", out-of-range
+    markers and empty input;
+  - a chapters-file test: no file without markers, and the file sits in
+    the staging folder;
+  - an args test: inputs order, `-map_chapters 1`, no `-map_metadata`, and
+    no take metadata on imports;
+  - a real-file test,
+    `plan200_real_export_has_chapters_and_one_timecode_per_take`: two files
+    of one take with two markers each have the chapters Start, Intro and
+    Marker 2 at 0, 1 and 2 s, a `tmcd` track, the same `creation_time` and
+    the same timecode. It passes.
+
+### C7. A repair keeps the file whole (shipped, `d7429c20`)
+
+- `build_repair_args` adds:
+  - `-map 0 -map -0:d -map_chapters 0`;
+  - `-movflags +faststart` for `.mp4`, `.mov` and `.m4v` outputs (case
+    insensitive);
+  - BT.709 video-range tags after the encoder args on a CFR or
+    interpolation re-encode;
+  - AAC at 256k instead of 192k.
+- **Deviation:** `-map -0:d` is added. A plain `-map 0` copies the new
+  tmcd and chapter text data tracks, which the MP4 muxer rejects (the same
+  failure as noise cleanup).
+- A by-hand ffmpeg 8.1.1 check confirmed a re-encode with these args keeps
+  the chapters, rebuilds tmcd and tags BT.709/tv.
+- Unit tests cover copy (MP4 and MKV), CFR transcode and interpolate plans.
+- The ignored real repair tests (`gate_passes_a_clean_recording`,
+  `gate_repairs_a_one_sided_recording`,
+  `repairs_a_one_sided_recording_end_to_end`) pass.
+- Note: the repair temp error paths are C6, which was not done here.
+
+### C8. Quick check for long recordings (shipped, `d14aeccf`)
+
+- `repair::quick_check_windows(duration)` returns `None` at 20 minutes or
+  less, or for an unknown length. Above that it returns six windows:
+  - the first 60 s;
+  - the last 60 s;
+  - four 30 s windows centred at 1/5 to 4/5 of the span between them.
+- `assess_recording_after_capture_cancellable` probes the whole file once
+  (cheap) and runs the existing passes per window: astats, audio gaps,
+  freezedetect and framemd5.
+  - The FFmpeg passes use `-ss`/`-t` input options.
+  - The ffprobe audio-gap pass uses `-read_intervals start%+dur`.
+- Folding the windows into one report:
+  - Freezes are corroborated per window, then added together.
+  - Gap and repeat counts are summed, and their maximums kept.
+  - Audio is one-sided only when every window that names a silent channel
+    names the same one.
+  - The report is marked `QualityReport.sampled`.
+- The full path, `analyze_recording_cancellable`, now shares the same
+  `analyze_probed_recording` with one whole-file window and behaves as
+  before. Manual Check quality still runs the full check.
+- `GateStatus::Ready` and `NotHundredPercent` gained `sampled` (serde
+  default false, not serialized when false), so old rows and support bundles
+  read as before. Support-bundle redaction keeps the flag.
+- Both post-recording gate paths (after a take, and resumed at boot) now go
+  through `post_recording_gate_step`. A sampled `NotHundredPercent`
+  completes and is reported, never auto-repaired.
+- Copy:
+  - Health: "Quick check (long recording): the sampled parts passed …" or
+    "Quick check (long recording) found issues in the sampled parts: …".
+  - Library chip, problem states only (as before): a sampled
+    `not-hundred-percent` says "Quick check (long recording): some of the
+    sampled parts aren't 100%. Choose Check quality in its menu for a full
+    check."
+  - A clean quick check shows no chip, which matches the existing
+    "problem states only" chip rule.
+- Tests:
+  - window plan: 60 min gives 6 windows with exact centres; 21 min; exactly
+    20 min, 30 s, 0, NaN and ∞;
+  - `-ss`/`-t` args;
+  - the one-sided fold;
+  - GateStatus serde round trip and a legacy row;
+  - `post_recording_gate_never_auto_repairs_a_quick_check`;
+  - a renderer test in `library-view.test.ts`.
+- Not run: a real long-file quick check against a 20+ minute recording.
+
+### Group C verification (C1/C2/C3/C7/C8)
+
+All cargo commands ran through `/tmp/claude-501/plan200-cargo.sh`.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all`, then `cargo fmt --check --all` | pass |
+| `cargo check -p videorc-backend --tests` | pass. 5 dead-code warnings, all in files this group didn't touch (`buddy_motion.rs`, `linux_*`). |
+| `cargo clippy -p videorc-backend -- -D warnings` | pass (run before and after the last commit) |
+| `cargo test -p videorc-backend -- recording:: repair:: repair_service:: support_bundle:: noise_cleanup:: session_markers::` | 564 passed, 0 failed |
+| `cargo test -p videorc-backend -- mp4_export mp4_chapters quick_check sampled_gate post_recording_gate repair_args exact_container_args storage::` | 157 passed, 0 failed |
+| `cargo test -p videorc-backend -- --ignored plan200_real real_ffmpeg_export_creates_absent_child repair::tests::` | pass, with Homebrew ffmpeg 8.1.1 on PATH |
+| `vitest run src/renderer/src/lib/library-view.test.ts` | 25 passed |
+| prettier `--check` on the three TS files | pass |
+
+On the ignored real-file tests: the first run failed on two assertions in the
+new test itself, not in the export. One was the ffprobe chapter CSV shape and
+the other was creation-time precision. Both were fixed in `92b7295e`, and the
+rerun passes.
