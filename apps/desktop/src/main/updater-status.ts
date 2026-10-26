@@ -68,6 +68,15 @@ export function updateStatusFromEvent(event: UpdaterEvent): UpdateStatus {
   }
 }
 
+// electron-updater resolves a check with null, and emits no event, when it is
+// inactive: an AppImage run without the APPIMAGE variable (extracted, or
+// repackaged by a distro) or a snap. Nothing then moves the status off
+// 'checking', so Settings said "Checking for updates…" forever. A check that
+// resolved while still 'checking' settles as unsupported.
+export function settleStatusAfterCheck(status: UpdateStatus): UpdateStatus {
+  return status.phase === 'checking' ? updateStatusFromEvent({ type: 'unsupported' }) : status
+}
+
 // After a manual check resolves, start downloading immediately (one-click feel)
 // only when an update is actually available.
 export function shouldAutoDownload(status: UpdateStatus): boolean {
