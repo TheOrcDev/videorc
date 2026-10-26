@@ -7619,6 +7619,9 @@ fn parse_mkv_duration_tag(tag: &str) -> Option<f64> {
 /// plain remux; a probe must never block finalization.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Mp4ExportProbe {
+    /// Plan 200 C2: the first video and audio streams' `codec_name`.
+    video_codec: Option<String>,
+    audio_codec: Option<String>,
     /// The first video stream's `r_frame_rate` as `(numerator, denominator)`.
     video_frame_rate: Option<(u64, u64)>,
     video_seconds: Option<f64>,
@@ -7656,9 +7659,14 @@ impl Mp4ExportProbe {
                         .as_str()
                         .and_then(parse_mkv_duration_tag)
                 });
+            let codec = stream
+                .get("codec_name")
+                .and_then(|codec| codec.as_str())
+                .map(str::to_string);
             match stream.get("codec_type").and_then(|kind| kind.as_str()) {
                 Some("video") if !seen_video => {
                     seen_video = true;
+                    parsed.video_codec = codec;
                     parsed.video_seconds = seconds;
                     parsed.video_frame_rate = stream
                         .get("r_frame_rate")
@@ -7667,12 +7675,26 @@ impl Mp4ExportProbe {
                 }
                 Some("audio") if !seen_audio => {
                     seen_audio = true;
+                    parsed.audio_codec = codec;
                     parsed.audio_seconds = seconds;
                 }
                 _ => {}
             }
         }
         parsed
+    }
+
+    /// Plan 200 C2: H.264 gets the BT.709 tags and the VUI rewrite. A failed
+    /// probe keeps today's assumption (Videorc only records H.264);
+    /// `h264_metadata` would reject any other codec.
+    fn video_is_h264(&self) -> bool {
+        self.video_codec.as_deref().is_none_or(|codec| codec == "h264")
+    }
+
+    /// Plan 200 C2: AAC already (record+stream takes) is copied, never
+    /// encoded a second time.
+    fn audio_is_aac(&self) -> bool {
+        self.audio_codec.as_deref() == Some("aac")
     }
 
     /// The duration to trim the MP4 export to: `None` when the tails already
@@ -7713,7 +7735,7 @@ async fn probe_mp4_export_input(ffprobe_path: &str, input: &Path) -> Mp4ExportPr
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,r_frame_rate,duration:stream_tags=DURATION:format=duration",
+            "stream=codec_type,codec_name,r_frame_rate,duration:stream_tags=DURATION:format=duration",
             "-of",
             "json",
         ])
@@ -7759,6 +7781,9 @@ fn load_mp4_export_take(state: &AppState, session_id: &str) -> Option<Mp4ExportT
 /// to, or `None` (imports, a non-integer rate, an unknown rate).
 fn mp4_export_snap_fps(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Option<u32> {
     let take = take?;
+    if !probe.video_is_h264() {
+        return None;
+    }
     let probed = match probe.video_frame_rate {
         Some((numerator, denominator)) if numerator % denominator != 0 => return None,
         Some((numerator, denominator)) => u32::try_from(numerator / denominator).ok(),
@@ -7776,6 +7801,11 @@ const MP4_EXPORT_MAX_SNAP_FPS: u32 = 240;
 struct Mp4ExportOptions {
     /// End the delivered file at the shorter stream.
     trim_seconds: Option<f64>,
+    /// Plan 200 C2: tag BT.709 and rewrite the H.264 VUI. Off for any other
+    /// video codec (imports: HEVC, VP9, ...).
+    tag_h264_bt709: bool,
+    /// Plan 200 C2: the audio is AAC already; copy it.
+    copy_audio: bool,
     /// Snap every video packet to its own `1/fps` tick with `setts`.
     snap_fps: Option<u32>,
 }
@@ -7786,6 +7816,8 @@ impl Mp4ExportOptions {
     fn remux() -> Self {
         Self {
             trim_seconds: None,
+            tag_h264_bt709: true,
+            copy_audio: false,
             snap_fps: None,
         }
     }
@@ -7793,6 +7825,8 @@ impl Mp4ExportOptions {
     fn plan(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Self {
         Self {
             trim_seconds: probe.trim_seconds(),
+            tag_h264_bt709: probe.video_is_h264(),
+            copy_audio: probe.audio_is_aac(),
             snap_fps: mp4_export_snap_fps(probe, take),
         }
     }
@@ -8115,28 +8149,38 @@ fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> V
         "0".to_string(),
         "-c:v".to_string(),
         "copy".to_string(),
-        "-c:a".to_string(),
-        "aac".to_string(),
+    ];
+    if options.copy_audio {
+        // Plan 200 C2: record+stream takes already hold AAC; a second encode
+        // only loses quality.
+        args.extend(["-c:a".to_string(), "copy".to_string()]);
+    } else {
         // 256k stereo AAC: transparent for voice+music mixes; the capture
         // MKV's PCM is the lossless source when the keep-original setting is
         // on (recording-quality plan Q4).
-        "-b:a".to_string(),
-        "256k".to_string(),
-        "-movflags".to_string(),
-        "+faststart".to_string(),
-    ];
-    // #792 dropped the Media Foundation helper that took a frame rate; MP4
-    // export is a remux of an MKV that already declares its rate, so stamp
-    // BT.709 / video-range with the shared tag + VUI rewrite helpers.
-    args.extend(h264_bt709_color_tag_args());
-    let [bsf_flag, mut bsf_chain] = h264_bt709_vui_rewrite_bsf_args();
-    if let Some(fps) = options.snap_fps {
-        // Plan 200 C1: the MKV time base is 1/1000, so a stream copy leaves
-        // 33/34 ms frame durations that editors read as variable frame rate.
-        // Snap every packet to its own frame tick; real gaps stay gaps.
-        bsf_chain.push_str(&mp4_export_frame_time_snap_bsf(fps));
+        args.extend([
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "256k".to_string(),
+        ]);
     }
-    args.extend([bsf_flag, bsf_chain]);
+    args.extend(["-movflags".to_string(), "+faststart".to_string()]);
+    if options.tag_h264_bt709 {
+        // #792 dropped the Media Foundation helper that took a frame rate; MP4
+        // export is a remux of an MKV that already declares its rate, so stamp
+        // BT.709 / video-range with the shared tag + VUI rewrite helpers.
+        args.extend(h264_bt709_color_tag_args());
+        let [bsf_flag, mut bsf_chain] = h264_bt709_vui_rewrite_bsf_args();
+        if let Some(fps) = options.snap_fps {
+            // Plan 200 C1: the MKV time base is 1/1000, so a stream copy leaves
+            // 33/34 ms frame durations that editors read as variable frame
+            // rate. Snap every packet to its own frame tick; real gaps stay
+            // gaps.
+            bsf_chain.push_str(&mp4_export_frame_time_snap_bsf(fps));
+        }
+        args.extend([bsf_flag, bsf_chain]);
+    }
     if let Some(trim_seconds) = options.trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
@@ -40086,17 +40130,70 @@ mod tests {
     fn mp4_export_probe_reads_rate_durations_and_trim() {
         let probe = Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({
             "streams": [
-                {"codec_type": "video", "r_frame_rate": "30/1", "tags": {"DURATION": "00:00:06.400000000"}},
-                {"codec_type": "audio", "r_frame_rate": "0/0", "tags": {"DURATION": "00:00:06.336000000"}}
+                {"codec_type": "video", "codec_name": "h264", "r_frame_rate": "30/1", "tags": {"DURATION": "00:00:06.400000000"}},
+                {"codec_type": "audio", "codec_name": "aac", "r_frame_rate": "0/0", "tags": {"DURATION": "00:00:06.336000000"}}
             ],
             "format": {"duration": "6.400000"}
         }));
         assert_eq!(probe.video_frame_rate, Some((30, 1)));
+        assert_eq!(probe.video_codec.as_deref(), Some("h264"));
+        assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
         assert_eq!(probe.trim_seconds(), Some(6.336));
         assert_eq!(probe.exported_seconds(), Some(6.336));
         assert_eq!(parse_ffprobe_rational("0/0"), None);
         assert_eq!(parse_ffprobe_rational("30000/1001"), Some((30_000, 1_001)));
         assert_eq!(Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({})), Mp4ExportProbe::default());
+    }
+
+    fn probe_with_codecs(video: &str, audio: &str) -> Mp4ExportProbe {
+        Mp4ExportProbe {
+            video_codec: Some(video.to_string()),
+            audio_codec: Some(audio.to_string()),
+            video_frame_rate: Some((30, 1)),
+            ..Mp4ExportProbe::default()
+        }
+    }
+
+    fn plan_args(probe: &Mp4ExportProbe) -> Vec<String> {
+        mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &Mp4ExportOptions::plan(probe, Some(&videorc_take(Some(30)))),
+        )
+    }
+
+    #[test]
+    fn mp4_export_encodes_pcm_audio_and_tags_h264() {
+        let args = plan_args(&probe_with_codecs("h264", "pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        assert_eq!(arg_value(&args, "-b:a"), Some("256k"));
+        assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
+        assert!(arg_value(&args, "-bsf:v").is_some_and(|chain| chain.contains("setts")));
+    }
+
+    #[test]
+    fn mp4_export_copies_aac_audio_instead_of_encoding_it_again() {
+        let args = plan_args(&probe_with_codecs("h264", "aac"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("copy"));
+        assert_eq!(arg_value(&args, "-b:a"), None);
+        assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
+        assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
+        assert!(arg_value(&args, "-bsf:v").is_some_and(|chain| chain.starts_with("h264_metadata")));
+    }
+
+    #[test]
+    fn mp4_export_leaves_non_h264_video_untagged() {
+        let probe = probe_with_codecs("hevc", "aac");
+        let args = plan_args(&probe);
+        assert_eq!(arg_value(&args, "-c:a"), Some("copy"));
+        assert_eq!(arg_value(&args, "-bsf:v"), None);
+        assert_eq!(arg_value(&args, "-colorspace"), None);
+        assert_eq!(arg_value(&args, "-color_range"), None);
+        assert!(!args.iter().any(|arg| arg.contains("setts")));
+        assert_eq!(mp4_export_snap_fps(&probe, Some(&videorc_take(Some(30)))), None);
+        // A failed probe keeps today's H.264 assumption.
+        assert!(Mp4ExportProbe::default().video_is_h264());
+        assert!(!Mp4ExportProbe::default().audio_is_aac());
     }
 
     #[cfg(target_os = "windows")]
