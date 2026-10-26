@@ -20823,7 +20823,24 @@ fn session_audio_options(
             system_gain_db: audio.system_audio_gain_db,
             echo_guard: audio.system_audio_echo_guard,
         },
-        None => crate::session_audio::SessionAudioOptions::default(),
+        None => crate::session_audio::SessionAudioOptions {
+            playout_delay: default_session_playout_delay(),
+            ..crate::session_audio::SessionAudioOptions::default()
+        },
+    }
+}
+
+/// The bus's write deadline where no system audio is mixed. Linux's Pulse
+/// worker delivers PCM tens of ms late under load; at 50 ms the bus wrote
+/// silence for those samples and then discarded them as overlap (retest 150:
+/// 37 s of mic lost in a 12-minute 1080p take, 2 s in a 10-minute 720p one).
+/// The delay changes when bytes are written, never which bytes
+/// (`playout_delay_150ms_writes_the_same_bytes_as_50ms`).
+fn default_session_playout_delay() -> std::time::Duration {
+    if cfg!(target_os = "linux") {
+        crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
+    } else {
+        crate::session_audio::PLAYOUT_DELAY
     }
 }
 
@@ -42990,10 +43007,24 @@ mod tests {
             assert_eq!(capable.system_delay_frames, 0);
             assert_eq!(capable.system_gain_db, -9.0);
 
-            // Elsewhere the bus keeps its pre-mixer defaults exactly.
+            // Elsewhere the bus keeps its pre-mixer defaults, except Linux's
+            // longer deadline for the Pulse worker (retest 150).
+            let elsewhere = session_audio_options(&audio, false);
             assert_eq!(
-                session_audio_options(&audio, false),
+                crate::session_audio::SessionAudioOptions {
+                    playout_delay: crate::session_audio::SessionAudioOptions::default()
+                        .playout_delay,
+                    ..elsewhere
+                },
                 crate::session_audio::SessionAudioOptions::default()
+            );
+            assert_eq!(
+                elsewhere.playout_delay,
+                if cfg!(target_os = "linux") {
+                    crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
+                } else {
+                    crate::session_audio::PLAYOUT_DELAY
+                }
             );
 
             // A clamped offset splits from the clamped value.
