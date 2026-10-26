@@ -2114,6 +2114,59 @@ impl IsoBatchMember {
     fn retire(&self) {
         self.store.retire(self.role, None);
     }
+    /// Plan 200 D1: frames this member's file keeps after the separate files
+    /// were shed, or `None` while it records.
+    fn shed_frames(&self) -> Option<u64> {
+        self.store.shed_frames(self.role)
+    }
+}
+
+/// Plan 200 D1: a bridge lag above this, held for `ISO_SHED_LAG_HOLD`, sheds
+/// the separate files so Combined gets the encoder back. The measured case:
+/// three 4K30 hardware encodes ran at ~21 fps each and the bridge lag reached
+/// 877 ms (plan 158).
+const ISO_SHED_LAG: Duration = Duration::from_millis(250);
+/// One host hiccup that the schedule absorbs is not encoder pressure.
+const ISO_SHED_LAG_HOLD: Duration = Duration::from_millis(500);
+
+/// Watches one writer's schedule lag for the shed trigger.
+#[derive(Debug, Default)]
+struct IsoShedLagWatch {
+    over_since: Option<Instant>,
+}
+
+impl IsoShedLagWatch {
+    /// True once the lag stayed above `ISO_SHED_LAG` for `ISO_SHED_LAG_HOLD`.
+    fn observe(&mut self, lag: Duration, now: Instant) -> bool {
+        if lag <= ISO_SHED_LAG {
+            self.over_since = None;
+            return false;
+        }
+        let since = *self.over_since.get_or_insert(now);
+        now.saturating_duration_since(since) >= ISO_SHED_LAG_HOLD
+    }
+}
+
+/// Plan 200 D1: a shed separate file ends at its own last latched tick,
+/// through the same terminal drain as a local source removal. True when the
+/// boundary is installed (the member was shed and the take has an epoch).
+fn install_iso_shed_boundary(
+    member: Option<&IsoBatchMember>,
+    stop_at: Option<&IsoVideoStopBoundary>,
+    epoch: Option<Instant>,
+    fps: u32,
+) -> bool {
+    let (Some(member), Some(stop_at), Some(epoch)) = (member, stop_at, epoch) else {
+        return false;
+    };
+    let Some(frames) = member.shed_frames() else {
+        return false;
+    };
+    stop_at.request(
+        source_iso_batch::source_iso_frame_boundary(epoch, fps, frames),
+        None,
+    );
+    true
 }
 struct IsoBatchWriterGuard(Option<IsoBatchMember>);
 impl Drop for IsoBatchWriterGuard {
@@ -2411,6 +2464,21 @@ impl EncoderBridgeRecordingSession {
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.stop_signalled();
         }
+    }
+
+    /// Plan 200 D1: frames this separate file keeps after the separate files
+    /// were shed so Combined keeps up, or `None` while it records.
+    pub(crate) fn source_iso_shed_frames(&self) -> Option<u64> {
+        self.iso_member
+            .as_ref()
+            .and_then(IsoBatchMember::shed_frames)
+    }
+
+    /// Plan 200 D1: true for exactly one caller per take after a shed.
+    pub(crate) fn claim_source_iso_shed_report(&self) -> bool {
+        self.iso_member
+            .as_ref()
+            .is_some_and(|member| member.store.claim_shed_report())
     }
 
     /// ISO local output closes on the shared content-clock boundary. Abort and
@@ -3843,6 +3911,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut last_iso_frame: Option<HeldIsoCompositorFrame> = None;
     #[allow(unused_mut)]
     let mut last_submitted_video_end = 0_u64;
+    let mut iso_shed_lag = IsoShedLagWatch::default();
     let mut first_frame_wait_sequence =
         initial_bridge_wait_sequence(video_output, frame_store.as_ref());
     let mut consecutive_repeated_frames = 0_u64;
@@ -4090,6 +4159,14 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // encoder", not merely "the writer thread exists".
 
     while !stop.load(Ordering::Relaxed) {
+        // Plan 200 D1: a shed separate file drains to its own last tick, even
+        // while output pressure keeps it from selecting another frame.
+        install_iso_shed_boundary(
+            iso_member.as_ref(),
+            graceful_stop_at.as_deref(),
+            video_epoch.get().copied(),
+            target_fps,
+        );
         if let Some(boundary) = graceful_stop_at.as_ref().and_then(|at| at.boundary())
             && let Some(epoch) = video_epoch.get().copied()
         {
@@ -4126,6 +4203,22 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             max_deadline_lag_ms =
                 Some(max_deadline_lag_ms.map_or(lag_ms, |current| current.max(lag_ms)));
             late_deadline_ticks = late_deadline_ticks.saturating_add(1);
+        }
+        // Plan 200 D1: any batch member falling behind real time sheds the
+        // separate files (never after Stop, which owns its own drain).
+        if let Some(member) = iso_member.as_ref()
+            && graceful_stop_at
+                .as_ref()
+                .and_then(|at| at.boundary())
+                .is_none()
+            && iso_shed_lag.observe(tick_lag, now)
+            && member.store.shed_separate_files()
+        {
+            tracing::warn!(
+                role = member.role,
+                lag_ms = tick_lag.as_millis() as u64,
+                "separate source files shed so the Combined recording keeps up"
+            );
         }
         let tick_plan = plan_bridge_tick(tick_lag, frame_interval);
         if tick_plan.reanchor_skipped_intervals > 0 {
@@ -4445,10 +4538,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                 Err(_) if stop.load(Ordering::Acquire) => break,
                                 Err(_)
                                     if !member.active()
-                                        && graceful_stop_at
+                                        && (install_iso_shed_boundary(
+                                            Some(member),
+                                            graceful_stop_at.as_deref(),
+                                            video_epoch.get().copied(),
+                                            target_fps,
+                                        ) || graceful_stop_at
                                             .as_ref()
                                             .and_then(|at| at.boundary())
-                                            .is_some() =>
+                                            .is_some()) =>
                                 {
                                     graceful_stop_at
                                         .as_ref()
@@ -11026,6 +11124,125 @@ mod tests {
         assert_eq!(second.boundary(), Some(stopped));
         assert!(global.set(stopped + Duration::from_secs(1)).is_err());
         assert_eq!(second.boundary(), Some(stopped));
+    }
+
+    #[test]
+    fn source_iso_shed_lag_needs_a_held_lag_not_one_hiccup() {
+        let mut watch = IsoShedLagWatch::default();
+        let start = Instant::now();
+        // One 300 ms hiccup the schedule absorbs never sheds.
+        assert!(!watch.observe(Duration::from_millis(300), start));
+        assert!(!watch.observe(
+            Duration::from_millis(280),
+            start + Duration::from_millis(200)
+        ));
+        assert!(!watch.observe(
+            Duration::from_millis(40),
+            start + Duration::from_millis(400)
+        ));
+        assert!(!watch.observe(
+            Duration::from_millis(300),
+            start + Duration::from_millis(800)
+        ));
+        // Encoder pressure: the lag stays above 250 ms for the hold.
+        assert!(!watch.observe(
+            ISO_SHED_LAG + Duration::from_millis(1),
+            start + Duration::from_millis(1_000)
+        ));
+        assert!(watch.observe(
+            Duration::from_millis(900),
+            start + Duration::from_millis(800) + ISO_SHED_LAG_HOLD
+        ));
+        // Exactly 250 ms is not over the line.
+        let mut edge = IsoShedLagWatch::default();
+        assert!(!edge.observe(ISO_SHED_LAG, start));
+        assert!(!edge.observe(ISO_SHED_LAG, start + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn source_iso_shed_drains_a_separate_file_to_its_own_last_tick() {
+        let store = Arc::new(SourceIsoBatchStore::default());
+        let at = Instant::now();
+        let mut frames = crate::frame_store::FrameStore::new(1);
+        frames.publish_with_metadata(
+            7,
+            2,
+            2,
+            CompositorPixelFormat::yuv420p_cpu_buffer(),
+            CompositorFrameExportHandle::default().with_presentation_time(at),
+            at,
+            vec![0; 6],
+        );
+        let frame = frames.latest();
+        assert!(store.publish(store.membership(), 7, [frame.clone(), frame.clone(), frame]));
+        for role in [
+            source_iso_batch::COMBINED,
+            source_iso_batch::SCREEN,
+            source_iso_batch::CAMERA,
+        ] {
+            store.select(0, role, |_| true).unwrap();
+        }
+        let camera = IsoBatchMember {
+            store: store.clone(),
+            role: source_iso_batch::CAMERA,
+        };
+        let stop_at = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: Arc::new(OnceLock::new()),
+        };
+        let epoch = at;
+        // Recording: nothing to install.
+        assert!(!install_iso_shed_boundary(
+            Some(&camera),
+            Some(&stop_at),
+            Some(epoch),
+            30
+        ));
+        assert_eq!(stop_at.boundary(), None);
+        assert!(store.shed_separate_files());
+        assert!(!camera.active());
+        // No epoch yet, or no graceful boundary: never a shed install.
+        assert!(!install_iso_shed_boundary(
+            Some(&camera),
+            Some(&stop_at),
+            None,
+            30
+        ));
+        assert!(!install_iso_shed_boundary(
+            Some(&camera),
+            None,
+            Some(epoch),
+            30
+        ));
+        assert!(install_iso_shed_boundary(
+            Some(&camera),
+            Some(&stop_at),
+            Some(epoch),
+            30
+        ));
+        let boundary = stop_at.boundary().expect("shed boundary");
+        // Camera latched index 0, so its file keeps exactly one frame: the
+        // terminal check completes once that frame was submitted.
+        assert_eq!(
+            iso_terminal_video_tick(boundary, epoch, 30, 1, 1, Instant::now()),
+            IsoTerminalVideoTick::Complete
+        );
+        // Combined never installs a shed boundary.
+        let combined = IsoBatchMember {
+            store,
+            role: source_iso_batch::COMBINED,
+        };
+        let combined_stop = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: Arc::new(OnceLock::new()),
+        };
+        assert!(!install_iso_shed_boundary(
+            Some(&combined),
+            Some(&combined_stop),
+            Some(epoch),
+            30
+        ));
+        assert!(combined.active());
     }
 
     #[test]

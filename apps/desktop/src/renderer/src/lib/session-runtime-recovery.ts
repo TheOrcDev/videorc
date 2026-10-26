@@ -339,6 +339,30 @@ export function showSeparateFileFailed(
   })
 }
 
+/**
+ * Plan 200 D1: under encoder pressure the Screen and Camera files stop first
+ * so the Combined recording keeps up. One toast per take, not one per file:
+ * both files stop together, and each keeps what it recorded.
+ */
+export const SEPARATE_FILES_SHED_TOAST = {
+  title: 'Separate files stopped so the main recording keeps up',
+  description:
+    'Your Mac fell behind encoding three files at once. The Screen and Camera files keep what they recorded, and your Combined recording keeps going.'
+} as const
+
+export function showSeparateFilesShed(event: HealthEvent): void {
+  notifyOnce(
+    `separate-files-shed:${event.sessionId ?? 'take'}`,
+    'warning',
+    SEPARATE_FILES_SHED_TOAST.title,
+    {
+      description: SEPARATE_FILES_SHED_TOAST.description,
+      action: openHealthToastAction(),
+      duration: TOAST_WITH_DESCRIPTION_MS
+    }
+  )
+}
+
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
   // One toast per playback state: the backend re-checks on a timer.
   if (event.status === 'verified') {
@@ -458,6 +482,10 @@ export function showSessionHealthEvent(
 ): string | null {
   if (event.code === 'separate-source-recordings-role-failed') {
     showSeparateFileFailed(event, recording ?? { state: 'idle' })
+    return null
+  }
+  if (event.code === 'separate-source-recordings-shed') {
+    showSeparateFilesShed(event)
     return null
   }
   const startupToast = recordingStartupHealthToast(event)

@@ -47,6 +47,44 @@ pub const HEALTH_UNAVAILABLE: &str = "separate-source-recordings-unavailable";
 pub const HEALTH_STARTED: &str = "separate-source-recordings-started";
 pub const HEALTH_FINISHED: &str = "separate-source-recordings-finished";
 pub const HEALTH_ROLE_FAILED: &str = "separate-source-recordings-role-failed";
+/// Plan 200 D1: the separate files stopped so Combined keeps up. One event
+/// per take (the Studio's one toast); each file keeps what it recorded.
+pub const HEALTH_SHED: &str = "separate-source-recordings-shed";
+const HEALTH_SHED_MESSAGE: &str =
+    "Separate files stopped so the main recording keeps up. Each file keeps what it recorded.";
+
+/// Why a role ended before Stop without failing: its file closes cleanly at
+/// the boundary, publishes and exports like a full take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceIsoEarlyEnd {
+    /// Its selected source was turned off (plan 158).
+    SourceRemoved,
+    /// Plan 200 D1: shed under encoder pressure so Combined keeps up.
+    Shed,
+}
+
+impl SourceIsoEarlyEnd {
+    /// `sourceIsoOutcome` in the row's diagnostics and the session log code.
+    pub const fn outcome(self) -> &'static str {
+        match self {
+            Self::SourceRemoved => "source-removed",
+            Self::Shed => "shed",
+        }
+    }
+
+    fn reason(self, role: RecordingRole) -> String {
+        match self {
+            Self::SourceRemoved => format!(
+                "{} recording ended because its selected source was removed.",
+                role.title_suffix()
+            ),
+            Self::Shed => format!(
+                "{} recording stopped to keep the main recording smooth.",
+                role.title_suffix()
+            ),
+        }
+    }
+}
 
 /// How long the stop path waits for an ISO muxer to flush after its video
 /// FIFO hit EOF before it is killed and the file kept as recovery media.
@@ -488,6 +526,8 @@ pub struct FinishedSourceIsoRole {
     pub duration_ms: Option<i64>,
     pub fps: u32,
     pub end_reason: Option<String>,
+    /// Why `end_reason` is set (plan 200 D1).
+    pub early_end: Option<SourceIsoEarlyEnd>,
     pub expect_audio: bool,
     pub muxer_exit_code: Option<i32>,
     /// The supervisor already emitted `HEALTH_ROLE_FAILED` for `outcome`'s
@@ -1099,6 +1139,7 @@ async fn supervise_role(
 ) -> FinishedSourceIsoRole {
     let mut failure = None;
     let mut end_reason = None;
+    let mut early_end = None;
     let mut ended_at = None;
     // Plan 198: the recovery latch is process-global and outlives sessions.
     // An incident already latched when this take armed is not a failure of
@@ -1144,6 +1185,37 @@ async fn supervise_role(
                 "{} encoder failed: {error}",
                 writer.role.title_suffix()
             ));
+            break;
+        }
+        // Plan 200 D1: the separate files were shed so Combined keeps up.
+        // Checked before the muxer and the tap: a shed writer closes its
+        // FIFO at its own last tick, and that clean end is not a failure.
+        if let Some(boundary) = writer
+            .bridge
+            .as_ref()
+            .and_then(EncoderBridgeRecordingSession::source_iso_shed_frames)
+            .zip(epoch.get().copied())
+            .map(|(frames, origin)| {
+                crate::compositor::source_iso_batch::source_iso_frame_boundary(origin, fps, frames)
+            })
+            .filter(|boundary| stop_at.get().is_none_or(|stop_at| boundary <= stop_at))
+        {
+            if writer
+                .bridge
+                .as_ref()
+                .is_some_and(EncoderBridgeRecordingSession::claim_source_iso_shed_report)
+            {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    HEALTH_SHED,
+                    HEALTH_SHED_MESSAGE,
+                );
+            }
+            ended_at = Some(boundary);
+            early_end = Some(SourceIsoEarlyEnd::Shed);
+            end_reason = Some(SourceIsoEarlyEnd::Shed.reason(writer.role));
             break;
         }
         if let Some(error) =
@@ -1226,10 +1298,8 @@ async fn supervise_role(
             removed.filter(|removed_at| stop_at.get().is_none_or(|stop_at| removed_at <= stop_at))
         {
             ended_at = Some(boundary);
-            end_reason = Some(format!(
-                "{} recording ended because its selected source was removed.",
-                writer.role.title_suffix()
-            ));
+            early_end = Some(SourceIsoEarlyEnd::SourceRemoved);
+            end_reason = Some(SourceIsoEarlyEnd::SourceRemoved.reason(writer.role));
             break;
         }
         // A committed removal keeps its earlier boundary even when Stop was
@@ -1441,17 +1511,21 @@ async fn supervise_role(
     #[cfg(test)]
     test_trace_teardown(session_id, role, "after-publication");
     if let Some(reason) = end_reason.as_ref() {
-        let _ = crate::recording::emit_health_event(
-            state,
-            Some(session_id),
-            crate::protocol::HealthLevel::Warn,
-            "separate-source-recordings-source-removed",
-            reason,
-        );
+        let early_end = early_end.unwrap_or(SourceIsoEarlyEnd::SourceRemoved);
+        // A shed already raised the take's one notice (plan 200 D1).
+        if early_end == SourceIsoEarlyEnd::SourceRemoved {
+            let _ = crate::recording::emit_health_event(
+                state,
+                Some(session_id),
+                crate::protocol::HealthLevel::Warn,
+                "separate-source-recordings-source-removed",
+                reason,
+            );
+        }
         let _ = state.database.add_session_log(
             &format!("{session_id}-{}", role.as_str()),
             crate::protocol::HealthLevel::Warn,
-            "source-removed",
+            early_end.outcome(),
             reason,
             None,
         );
@@ -1463,6 +1537,7 @@ async fn supervise_role(
         duration_ms,
         fps,
         end_reason,
+        early_end,
         expect_audio: role_audio_tap(&taps, role).is_some(),
         muxer_exit_code,
         failure_reported,
@@ -1703,7 +1778,11 @@ pub fn commit_finished_source_iso_roles(
             json["sourceIsoMuxerExitCode"] = serde_json::json!(role.muxer_exit_code);
             if let Some(reason) = role.end_reason.as_ref() {
                 json["sourceIsoEndReason"] = serde_json::json!(reason);
-                json["sourceIsoOutcome"] = serde_json::json!("source-removed");
+                json["sourceIsoOutcome"] = serde_json::json!(
+                    role.early_end
+                        .unwrap_or(SourceIsoEarlyEnd::SourceRemoved)
+                        .outcome()
+                );
                 json["sourceIsoEndOffsetMs"] = serde_json::json!(wall_duration_ms);
             }
             finalization.diagnostics_json = json.to_string();
