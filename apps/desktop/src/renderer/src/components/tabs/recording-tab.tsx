@@ -256,9 +256,10 @@ function LocalRecordingSection(): ReactElement {
           description={
             <>
               <span className="block">
-                Also saves a Screen file with the system audio track and a Camera file with the
-                microphone track beside the Combined recording, at this recording size. A source
-                that is off records as silence. Streams and preview stay composed.
+                Also saves a Screen file with the system audio track at this recording size, and a
+                Camera file with the microphone track at the camera&apos;s own size, beside the
+                Combined recording. A source that is off records as silence. Streams and preview
+                stay composed.
               </span>
               {separateIneligibility ? (
                 // The tone rides on the icon; the words stay monochrome (plan 174 S1.8).

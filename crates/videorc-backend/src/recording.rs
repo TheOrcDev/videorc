@@ -5174,6 +5174,13 @@ async fn start_session_with_timeline(
                 false
             };
             if !armed_in_place {
+                // Plan 200 D2: the Camera file is the live camera's own size,
+                // fitted inside the canvas, fixed here for the whole take.
+                let source_iso_camera_format = if source_iso_plan.is_some() {
+                    crate::source_iso::live_camera_format(&state, &params.sources).await
+                } else {
+                    None
+                };
                 start_synthetic_compositor(
                     state.clone(),
                     CompositorStartParams {
@@ -5183,9 +5190,15 @@ async fn start_session_with_timeline(
                         frame_consumer: compositor_frame_consumer,
                         stream_output: encoder_bridge_stream_output,
                         source_iso_output: source_iso_plan.as_ref().map(|_| {
+                            let (camera_width, camera_height) = crate::source_iso::camera_leg_size(
+                                source_iso_camera_format,
+                                (params.output.video.width, params.output.video.height),
+                            );
                             crate::compositor::CompositorSourceIsoOutput {
                                 width: params.output.video.width,
                                 height: params.output.video.height,
+                                camera_width,
+                                camera_height,
                                 frame_consumer: compositor_frame_consumer,
                             }
                         }),

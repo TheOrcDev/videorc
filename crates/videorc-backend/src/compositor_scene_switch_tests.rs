@@ -647,11 +647,22 @@ async fn scene_switch_artifact_fixture() {
 /// publishers; every tick proves the Screen ISO carries no camera inset, the
 /// Camera ISO is the camera alone, and the primary still has both. The smoke
 /// encodes the dumped frames into a three-file take and gates it.
+///
+/// Plan 200 D2: the fixture camera is 4:3 (48x36) on the 16:9 canvas, so the
+/// Camera ISO is the camera's own size, edge to edge, never pillarboxed.
 #[tokio::test]
 async fn source_iso_artifact_fixture() {
     use std::io::Write;
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 36;
+    // Mirrored in scripts/smoke-separate-source-fixture.mjs (CAMERA_WIDTH/HEIGHT).
+    const CAMERA_WIDTH: u32 = 48;
+    const CAMERA_HEIGHT: u32 = 36;
+    assert_eq!(
+        crate::source_iso::camera_leg_size(Some((CAMERA_WIDTH, CAMERA_HEIGHT)), (WIDTH, HEIGHT)),
+        (CAMERA_WIDTH, CAMERA_HEIGHT),
+        "the fixture camera fits the canvas at its own size"
+    );
     let directory =
         std::env::var_os("VIDEORC_SOURCE_ISO_ARTIFACT_DIR").map(std::path::PathBuf::from);
     for metal in [false, true] {
@@ -690,7 +701,11 @@ async fn source_iso_artifact_fixture() {
             &state,
             "camera:fixture",
             &combined.layout,
-            &video(),
+            &crate::protocol::VideoSettings {
+                width: CAMERA_WIDTH,
+                height: CAMERA_HEIGHT,
+                ..video()
+            },
         )
         .await;
         install_screen(&state, "screen:fixture", 1, 1, [0, 255, 0, 255]).await;
@@ -698,6 +713,7 @@ async fn source_iso_artifact_fixture() {
             batches: Arc::new(crate::compositor::source_iso_batch::SourceIsoBatchStore::default()),
             screen: Arc::new(StdMutex::new(FrameStore::new(2))),
             camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+            camera_size: (CAMERA_WIDTH, CAMERA_HEIGHT),
         };
         {
             let mut compositor = state.compositor.lock().await;
@@ -716,6 +732,7 @@ async fn source_iso_artifact_fixture() {
             ]
         });
         let luma_at = |bytes: &[u8], x: u32, y: u32| bytes[(y * WIDTH + x) as usize];
+        let camera_luma_at = |bytes: &[u8], x: u32, y: u32| bytes[(y * CAMERA_WIDTH + x) as usize];
         let (inset_x, inset_y) = (55, 3);
         let (screen_x, screen_y) = (10, 30);
         let mut observed_source_luma = std::collections::HashSet::new();
@@ -753,6 +770,8 @@ async fn source_iso_artifact_fixture() {
                 Some(CompositorSourceIsoOutput {
                     width: WIDTH,
                     height: HEIGHT,
+                    camera_width: CAMERA_WIDTH,
+                    camera_height: CAMERA_HEIGHT,
                     frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 }),
                 iso_screen_gpu.as_mut(),
@@ -777,7 +796,11 @@ async fn source_iso_artifact_fixture() {
             let camera_iso = latest(&iso_stores.camera);
             assert_eq!(primary.len(), raw_yuv420p_len(WIDTH, HEIGHT));
             assert_eq!(screen_iso.len(), raw_yuv420p_len(WIDTH, HEIGHT));
-            assert_eq!(camera_iso.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+            // Plan 200 D2: the Camera ISO is the camera's own 4:3 size.
+            assert_eq!(
+                camera_iso.len(),
+                raw_yuv420p_len(CAMERA_WIDTH, CAMERA_HEIGHT)
+            );
             let screen_luma = luma_at(&primary, screen_x, screen_y);
             let camera_luma = luma_at(&primary, inset_x, inset_y);
             observed_source_luma.insert((screen_luma, camera_luma));
@@ -794,12 +817,20 @@ async fn source_iso_artifact_fixture() {
                 luma_at(&screen_iso, screen_x, screen_y).abs_diff(screen_luma) <= 2,
                 "{mode} tick {tick}: the Screen ISO lost the screen"
             );
-            // Camera ISO: the camera alone, full frame (same aspect as the canvas).
-            assert!(
-                luma_at(&camera_iso, inset_x, inset_y).abs_diff(camera_luma) <= 2
-                    && luma_at(&camera_iso, screen_x, screen_y).abs_diff(camera_luma) <= 2,
-                "{mode} tick {tick}: the Camera ISO is not the camera full-frame"
-            );
+            // Camera ISO: the camera alone, edge to edge at its own size: no
+            // pillarbox or letterbox on any side (plan 200 D2).
+            for (x, y) in [
+                (0, 0),
+                (CAMERA_WIDTH - 1, 0),
+                (0, CAMERA_HEIGHT - 1),
+                (CAMERA_WIDTH - 1, CAMERA_HEIGHT - 1),
+                (CAMERA_WIDTH / 2, CAMERA_HEIGHT / 2),
+            ] {
+                assert!(
+                    camera_luma_at(&camera_iso, x, y).abs_diff(camera_luma) <= 2,
+                    "{mode} tick {tick}: the Camera ISO is not the camera edge to edge at {x},{y}"
+                );
+            }
             if let Some([combined_file, screen_file, camera_file]) = files.as_mut() {
                 combined_file.write_all(&primary).unwrap();
                 screen_file.write_all(&screen_iso).unwrap();

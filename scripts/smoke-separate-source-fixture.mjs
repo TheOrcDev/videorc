@@ -16,6 +16,8 @@
 // routed PCM of its role, then proves:
 //
 //   - the take gate passes (role files present, canvas, audio titles, drift),
+//   - the Camera file is the fixture camera's own 4:3 size on the 16:9 canvas
+//     and reaches every edge: no pillarbox or letterbox (plan 200 D2),
 //   - each file's decoded audio carries its role's source and nothing else
 //     (Screen = system tone, Camera = microphone tone, Combined = both),
 //   - every decoded frame of every file matches the compositor reference
@@ -50,6 +52,10 @@ const ffmpeg = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobe = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const WIDTH = 64
 const HEIGHT = 36
+// Mirrors `source_iso_artifact_fixture` (plan 200 D2): the Camera file is the
+// fixture camera's own 4:3 size, not the 16:9 canvas.
+const CAMERA_WIDTH = 48
+const CAMERA_HEIGHT = 36
 const FPS = 30
 // Mirrors `source_iso_audio_artifact_fixture` in `session_audio.rs`.
 const MICROPHONE_HZ = 440
@@ -59,6 +65,12 @@ const EXPECTED_LEVELS = { microphone: 0.5, system: 0.3 }
 // both tones, past the system attach ramp.
 const ANALYSIS_FRAMES = { start: 48000, end: 96000 }
 const canvas = { width: WIDTH, height: HEIGHT, fps: FPS }
+const cameraVideo = { width: CAMERA_WIDTH, height: CAMERA_HEIGHT }
+/** The raster each role's frames were dumped at. */
+const roleSize = (role) =>
+  role === 'camera'
+    ? { width: CAMERA_WIDTH, height: CAMERA_HEIGHT }
+    : { width: WIDTH, height: HEIGHT }
 
 console.log(`Separate source fixture evidence: ${directory}`)
 await run(
@@ -90,7 +102,7 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
   }
 
   // 1. The take gate on the real files.
-  const take = evaluateTake(probeTake(paths), { video: canvas })
+  const take = evaluateTake(probeTake(paths), { video: canvas, cameraVideo })
   if (!take.pass) throw new Error(`${mode}: take gate failed: ${take.failures.join('; ')}`)
   console.log(`${mode}: take gate PASS (${TAKE_ROLES.length} roles)`)
 
@@ -129,8 +141,9 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
     const pixels = assertSceneSwitchPixels(
       readFileSync(join(directory, `${mode}-${role}.yuv`)),
       decoded.stdout,
-      { width: WIDTH, height: HEIGHT, label: paths[role] }
+      { ...roleSize(role), label: paths[role] }
     )
+    if (role === 'camera') assertEdgeToEdge(decoded.stdout, paths[role])
     // 4. Honest final-file analysis per role.
     const quality = await analyzeRecording(paths[role], {
       ffmpegPath: ffmpeg,
@@ -155,7 +168,7 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
   renameSync(paths.screen, swapped)
   renameSync(paths.camera, paths.screen)
   renameSync(swapped, paths.camera)
-  const swappedTake = evaluateTake(probeTake(paths), { video: canvas })
+  const swappedTake = evaluateTake(probeTake(paths), { video: canvas, cameraVideo })
   if (
     swappedTake.pass ||
     !swappedTake.failures.some((line) => /screen file carries the camera audio track/.test(line))
@@ -179,7 +192,11 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
   await encodeRole(mode, 'screen', 'camera', misrouted.screen)
   await encodeRole(mode, 'camera', 'screen', misrouted.camera)
   const isoRoles = ['screen', 'camera']
-  const misroutedTake = evaluateTake(probeTake(misrouted), { roles: isoRoles, video: canvas })
+  const misroutedTake = evaluateTake(probeTake(misrouted), {
+    roles: isoRoles,
+    video: canvas,
+    cameraVideo
+  })
   if (!misroutedTake.pass) {
     throw new Error(
       `${mode}: the misrouted fixture should pass the title gate: ${misroutedTake.failures.join('; ')}`
@@ -210,6 +227,32 @@ function audioPcm(role) {
   return join(directory, `audio-${role}.f32le`)
 }
 
+/**
+ * Plan 200 D2: the Camera file reaches every edge. A pillarbox or letterbox
+ * paints black corners; the fixture camera is one colour per frame, so each
+ * corner's luma must match the frame's centre.
+ */
+function assertEdgeToEdge(decoded, label) {
+  const { width, height } = roleSize('camera')
+  const frameBytes = width * height + 2 * Math.ceil(width / 2) * Math.ceil(height / 2)
+  for (let offset = 0; offset + frameBytes <= decoded.length; offset += frameBytes) {
+    const luma = (x, y) => decoded[offset + y * width + x]
+    const centre = luma(width >> 1, height >> 1)
+    for (const [x, y] of [
+      [0, 0],
+      [width - 1, 0],
+      [0, height - 1],
+      [width - 1, height - 1]
+    ]) {
+      if (Math.abs(luma(x, y) - centre) > 6) {
+        throw new Error(
+          `${label}: frame ${offset / frameBytes} corner ${x},${y} is ${luma(x, y)}, centre ${centre}: the Camera file is boxed`
+        )
+      }
+    }
+  }
+}
+
 /** Encodes `videoRole`'s frames with `audioRole`'s routed PCM, titled for `videoRole`. */
 function encodeRole(mode, videoRole, audioRole, output) {
   return run(ffmpeg, [
@@ -222,7 +265,7 @@ function encodeRole(mode, videoRole, audioRole, output) {
     '-pixel_format',
     'yuv420p',
     '-video_size',
-    `${WIDTH}x${HEIGHT}`,
+    `${roleSize(videoRole).width}x${roleSize(videoRole).height}`,
     '-framerate',
     String(FPS),
     '-color_range',

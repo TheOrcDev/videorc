@@ -556,14 +556,18 @@ pub struct CompositorStartParams {
     pub buddy_overlay_on_aux: bool,
 }
 
-/// Plan 157: the separate-source (ISO) legs. Both legs render at ONE raster
-/// (the recording profile canvas, fit/contain) and publish into their own
-/// frame stores, which the Screen/Camera encoder bridges read. Neither leg
-/// carries captions, highlight cards, backgrounds or scene geometry.
+/// Plan 157: the separate-source (ISO) legs. The Screen leg renders at the
+/// recording profile canvas (fit/contain); the Camera leg at the camera's own
+/// size fitted inside that canvas (plan 200 D2), or the canvas when the
+/// camera's format was unknown at arm time. Each publishes into its own frame
+/// store, which the Screen/Camera encoder bridges read. Neither leg carries
+/// captions, highlight cards, backgrounds or scene geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompositorSourceIsoOutput {
     pub width: u32,
     pub height: u32,
+    pub camera_width: u32,
+    pub camera_height: u32,
     pub frame_consumer: CompositorFrameConsumer,
 }
 
@@ -572,6 +576,9 @@ pub struct CompositorSourceIsoOutput {
 pub struct CompositorSourceIsoFrameStores {
     pub screen: CompositorFrameStore,
     pub camera: CompositorFrameStore,
+    /// The Camera leg's raster, fixed at arm time (plan 200 D2). The Camera
+    /// encoder reads it from here, so it always matches what the leg draws.
+    pub camera_size: (u32, u32),
     pub(crate) batches: Arc<source_iso_batch::SourceIsoBatchStore>,
 }
 
@@ -3080,10 +3087,11 @@ async fn start_synthetic_compositor_with_lifecycle(
     let source_iso_frame_stores =
         params
             .source_iso_output
-            .map(|_| CompositorSourceIsoFrameStores {
+            .map(|output| CompositorSourceIsoFrameStores {
                 batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
                 screen: Arc::new(StdMutex::new(FrameStore::new(2))),
                 camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+                camera_size: (output.camera_width, output.camera_height),
             });
     let render_dimensions = Arc::new(AtomicU64::new(pack_render_dimensions(
         status.width,
@@ -3970,6 +3978,7 @@ pub(crate) async fn test_install_source_iso_frame_stores(
     let stores = CompositorSourceIsoFrameStores {
         screen: Arc::new(StdMutex::new(FrameStore::new(2))),
         camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+        camera_size: (64, 36),
         batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
     };
     state.compositor.lock().await.source_iso_frame_stores = Some(stores.clone());
@@ -9007,6 +9016,20 @@ async fn publish_compositor_frame(
             iso_stores.screen.clone(),
             iso_stores.camera.clone(),
         ];
+        // Plan 200 D2: the Camera leg at the camera's own size fills it
+        // exactly (no bars from rounding to even). A camera whose format
+        // changed mid-take keeps the arm-time size and fits, as before.
+        let iso_camera_snapshot = iso_camera_snapshot.map(|mut leg| {
+            if let Some((frame, _)) = camera_frame.as_ref()
+                && source_iso_camera_fills(
+                    (frame.width, frame.height),
+                    (iso_output.camera_width, iso_output.camera_height),
+                )
+            {
+                leg.layout.camera_fit = crate::protocol::CameraFit::Fill;
+            }
+            leg
+        });
         // Screen leg: the Screen/Window source alone (image stand-ins apply,
         // they are screen-like). Camera leg: the camera alone. A committed
         // source removal is handled by the role supervisor; never publish
@@ -9017,12 +9040,14 @@ async fn publish_compositor_frame(
                 store: iso_stores.screen,
                 gpu: iso_screen_gpu,
                 image_source: active_image_source.as_ref(),
+                size: (iso_output.width, iso_output.height),
             },
             SourceIsoLeg {
                 snapshot: iso_camera_snapshot.as_ref(),
                 store: iso_stores.camera,
                 gpu: iso_camera_gpu,
                 image_source: None,
+                size: (iso_output.camera_width, iso_output.camera_height),
             },
         ];
         for (
@@ -9032,6 +9057,7 @@ async fn publish_compositor_frame(
                 store,
                 gpu,
                 image_source,
+                size: (leg_width, leg_height),
             },
         ) in legs.into_iter().enumerate()
         {
@@ -9067,8 +9093,8 @@ async fn publish_compositor_frame(
             );
             let inputs = CompositorRenderInputs {
                 sequence,
-                width: iso_output.width.max(1),
-                height: iso_output.height.max(1),
+                width: leg_width.max(1),
+                height: leg_height.max(1),
                 snapshot: leg_snapshot,
                 active_image_source: image_source,
                 background_image_source: None,
@@ -11527,6 +11553,22 @@ struct SourceIsoLeg<'a> {
     store: CompositorFrameStore,
     gpu: Option<&'a mut GpuCompositor>,
     image_source: Option<&'a CompositorImageSource>,
+    /// The leg's raster: the canvas for Screen, the arm-time camera size for
+    /// Camera (plan 200 D2).
+    size: (u32, u32),
+}
+
+/// Plan 200 D2: the Camera leg fills its raster when the camera's aspect is
+/// within 1% of it (the arm-time format, rounded to even). Beyond that the
+/// format changed mid-take, and the leg fits it with bars instead of
+/// cropping the picture.
+fn source_iso_camera_fills(camera: (u32, u32), leg: (u32, u32)) -> bool {
+    if camera.0 == 0 || camera.1 == 0 || leg.0 == 0 || leg.1 == 0 {
+        return false;
+    }
+    let camera_aspect = f64::from(camera.0) / f64::from(camera.1);
+    let leg_aspect = f64::from(leg.0) / f64::from(leg.1);
+    (camera_aspect / leg_aspect - 1.0).abs() <= 0.01
 }
 
 /// Plan 157: which single source an ISO leg isolates.
@@ -11925,6 +11967,7 @@ mod tests {
             let stores = CompositorSourceIsoFrameStores {
                 screen: Arc::new(StdMutex::new(FrameStore::new(2))),
                 camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+                camera_size: (64, 36),
                 batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
             };
             let mut cache = CompositorRenderCache {
@@ -12735,6 +12778,17 @@ mod tests {
             "{:?}",
             &bytes[..16]
         );
+    }
+
+    #[test]
+    fn source_iso_camera_leg_fills_its_own_format_and_fits_a_changed_one() {
+        // Plan 200 D2: the arm-time format (rounded to even) fills, no bars.
+        assert!(source_iso_camera_fills((1920, 1080), (1920, 1080)));
+        assert!(source_iso_camera_fills((1080, 1920), (606, 1080)));
+        assert!(source_iso_camera_fills((1279, 719), (1278, 718)));
+        // A camera that switched to 4:3 mid-take fits its 16:9 leg with bars.
+        assert!(!source_iso_camera_fills((1440, 1080), (1920, 1080)));
+        assert!(!source_iso_camera_fills((0, 0), (1920, 1080)));
     }
 
     #[cfg(target_os = "macos")]

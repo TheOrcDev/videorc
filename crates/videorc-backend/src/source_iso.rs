@@ -273,6 +273,61 @@ pub fn armed_plan(output: &OutputSettings) -> Option<SourceIsoPlan> {
     SourceIsoPlan::from_settings(&separate_settings(output))
 }
 
+/// Plan 200 D2: the Camera file's raster. The camera's own size, never
+/// larger than the canvas: a larger camera scales down to fit inside it with
+/// its aspect kept, and both sides round down to even (never an upscale).
+/// An unknown camera format keeps the canvas, the plan 157 behavior.
+pub fn camera_leg_size(camera: Option<(u32, u32)>, canvas: (u32, u32)) -> (u32, u32) {
+    // The epsilon keeps an exact fit (1080 / 3024 * 4032 = 1440) from losing
+    // two pixels to floating-point rounding.
+    let even_floor = |value: f64| ((value / 2.0 + 1e-6).floor() as u32 * 2).max(2);
+    let canvas_even = (canvas.0.max(2) & !1, canvas.1.max(2) & !1);
+    let Some((width, height)) = camera.filter(|(width, height)| *width > 0 && *height > 0) else {
+        return canvas;
+    };
+    let scale = (f64::from(canvas.0) / f64::from(width))
+        .min(f64::from(canvas.1) / f64::from(height))
+        .min(1.0);
+    (
+        even_floor(f64::from(width) * scale).min(canvas_even.0),
+        even_floor(f64::from(height) * scale).min(canvas_even.1),
+    )
+}
+
+/// The bitrate floor at 1080p30, scaled by pixel rate for other legs.
+const CAMERA_LEG_FLOOR_KBPS_AT_1080P30: u64 = 4_000;
+
+/// Plan 200 D2: the Camera file's bitrate is the canvas bitrate scaled by the
+/// leg's share of the canvas pixels, with a floor of 4 Mbps at 1080p30
+/// (scaled by pixel rate), never above the canvas bitrate.
+pub fn camera_leg_bitrate_kbps(
+    canvas_kbps: u32,
+    leg: (u32, u32),
+    canvas: (u32, u32),
+    fps: u32,
+) -> u32 {
+    let leg_pixels = u64::from(leg.0) * u64::from(leg.1);
+    let canvas_pixels = (u64::from(canvas.0) * u64::from(canvas.1)).max(1);
+    let scaled = u64::from(canvas_kbps) * leg_pixels / canvas_pixels;
+    let floor =
+        CAMERA_LEG_FLOOR_KBPS_AT_1080P30 * leg_pixels * u64::from(fps.max(1)) / (1920 * 1080 * 30);
+    u32::try_from(scaled.max(floor))
+        .unwrap_or(u32::MAX)
+        .min(canvas_kbps)
+}
+
+/// Plan 200 D2: the selected camera's current frame size, when it is live
+/// right now. Recording arms the Camera leg at this size.
+pub async fn live_camera_format(state: &AppState, sources: &SourceSelection) -> Option<(u32, u32)> {
+    let selected = sources.camera_id.as_deref()?;
+    let source = crate::preview_camera::preview_camera_frame_source(state).await?;
+    if source.source_key()?.id != selected {
+        return None;
+    }
+    let frame = crate::preview_camera::preview_camera_latest_frame_info(state).await?;
+    Some((frame.width, frame.height))
+}
+
 /// MKV path for one ISO role beside the Combined file. Combined keeps the
 /// legacy name (every startup/ownership check keys on it); the ISO files
 /// insert the role before the extension so the three sort together.
@@ -792,9 +847,32 @@ pub fn start_source_iso_writers(
                 RecordingRole::Camera => frame_stores.camera.clone(),
                 RecordingRole::Combined => unreachable!("iso_roles never yields Combined"),
             };
+            // Plan 200 D2: the Camera file is the camera's own size (the leg
+            // the compositor draws, fixed at arm time), at a bitrate scaled
+            // by its pixels. The Screen file stays on the canvas.
+            let role_video = match writer.role {
+                RecordingRole::Camera => {
+                    let (width, height) = frame_stores.camera_size;
+                    VideoSettings {
+                        width,
+                        height,
+                        bitrate_kbps: camera_leg_bitrate_kbps(
+                            bitrate_kbps,
+                            (width, height),
+                            (video.width, video.height),
+                            video.fps,
+                        ),
+                        ..video.clone()
+                    }
+                }
+                _ => VideoSettings {
+                    bitrate_kbps,
+                    ..video.clone()
+                },
+            };
             let diagnostics_context = crate::recording::encoder_bridge_diagnostics_context(
                 EncoderBridgeOutputRole::Recording,
-                Some(video),
+                Some(&role_video),
                 None,
                 video_output,
                 false,
@@ -803,8 +881,8 @@ pub fn start_source_iso_writers(
                 state.clone(),
                 session_id.to_string(),
                 video.fps,
-                video.width,
-                video.height,
+                role_video.width,
+                role_video.height,
                 writer.video_fifo.clone(),
                 Some(store),
                 None,
@@ -813,7 +891,7 @@ pub fn start_source_iso_writers(
                 #[cfg(target_os = "windows")]
                 None,
                 video_output,
-                Some(bitrate_kbps),
+                Some(role_video.bitrate_kbps),
                 Default::default(),
                 false,
                 diagnostics_context,
@@ -837,9 +915,12 @@ pub fn start_source_iso_writers(
                 .map(|writer| writer.role.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let (camera_width, camera_height) = frame_stores.camera_size;
             state.emit_log(
                 "info",
-                format!("Separate source recordings armed for session {session_id}: {roles}."),
+                format!(
+                    "Separate source recordings armed for session {session_id}: {roles}. Camera file {camera_width}x{camera_height}."
+                ),
             );
             Ok(guard)
         }
@@ -1965,6 +2046,7 @@ mod tests {
                         camera: Arc::new(std::sync::Mutex::new(
                             crate::frame_store::FrameStore::new(2),
                         )),
+                        camera_size: (params.output.video.width, params.output.video.height),
                     },
                     video_epoch: Arc::new(Default::default()),
                     bitrate_kbps: 8000,
@@ -2334,6 +2416,83 @@ mod tests {
         );
         assert!(
             SourceIsoPlan::from_settings(&SeparateSourceRecordingsSettings::default()).is_none()
+        );
+    }
+
+    #[test]
+    fn camera_file_is_the_cameras_own_size_inside_the_canvas() {
+        // Plan 200 D2: never an upscale, never larger than the canvas.
+        assert_eq!(
+            camera_leg_size(Some((1920, 1080)), (3840, 2160)),
+            (1920, 1080),
+            "1080p camera on a 4K canvas"
+        );
+        assert_eq!(
+            camera_leg_size(Some((3840, 2160)), (1920, 1080)),
+            (1920, 1080),
+            "4K camera capped at a 1080p canvas"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1280, 960)), (1920, 1080)),
+            (1280, 960),
+            "a 4:3 camera keeps its aspect: no pillarbox"
+        );
+        assert_eq!(
+            camera_leg_size(Some((4032, 3024)), (1920, 1080)),
+            (1440, 1080),
+            "a large 4:3 camera fits by height"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1080, 1920)), (1920, 1080)),
+            (606, 1080),
+            "a portrait camera fits by height, rounded down to even"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1279, 719)), (1920, 1080)),
+            (1278, 718),
+            "odd sizes round down to even, never up"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1080, 1920)), (1080, 1920)),
+            (1080, 1920),
+            "a vertical canvas"
+        );
+        // Unknown format at arm time: the canvas, as before plan 200.
+        assert_eq!(camera_leg_size(None, (2560, 1440)), (2560, 1440));
+        assert_eq!(camera_leg_size(Some((0, 0)), (2560, 1440)), (2560, 1440));
+    }
+
+    #[test]
+    fn camera_file_bitrate_follows_its_pixels_with_a_floor() {
+        // A 1080p camera on 4K30 at 30 Mbps: a quarter of the pixels.
+        assert_eq!(
+            camera_leg_bitrate_kbps(30_000, (1920, 1080), (3840, 2160), 30),
+            7_500
+        );
+        // The canvas size keeps the canvas bitrate.
+        assert_eq!(
+            camera_leg_bitrate_kbps(8_000, (2560, 1440), (2560, 1440), 30),
+            8_000
+        );
+        // A thin canvas bitrate meets the 4 Mbps floor at 1080p30.
+        assert_eq!(
+            camera_leg_bitrate_kbps(8_000, (1920, 1080), (3840, 2160), 30),
+            4_000
+        );
+        // The floor scales with pixel rate: 1080p60 floors at 8 Mbps.
+        assert_eq!(
+            camera_leg_bitrate_kbps(12_000, (1920, 1080), (3840, 2160), 60),
+            8_000
+        );
+        // Small cameras scale down with the canvas share.
+        assert_eq!(
+            camera_leg_bitrate_kbps(8_000, (640, 480), (2560, 1440), 30),
+            666
+        );
+        // Never above the canvas bitrate, floor or not.
+        assert_eq!(
+            camera_leg_bitrate_kbps(3_000, (1920, 1080), (1920, 1080), 30),
+            3_000
         );
     }
 
