@@ -7,6 +7,7 @@ import {
   normalizeSceneVisual,
   resolveSavedBackground,
   sameSceneVisual,
+  galleryPresetIsActive,
   sceneGalleryReason,
   sceneNameError,
   sceneSourceGaps,
@@ -397,6 +398,18 @@ describe('scene gallery reason line (plan 174 S3.3, B-20)', () => {
     expect(sceneSourcesTurnedOff(neverChosen, [cam])).toEqual({ screen: false, camera: false })
     expect(sceneSourcesTurnedOff(visual(), [])).toEqual({ screen: false, camera: false })
     expect(sceneSourceOffBlockedReason({ screen: false, camera: false })).toBeNull()
+  })
+
+  it('marks no preset card active while the layout is Freeform (retest 150)', () => {
+    const layout = { layoutPreset: 'camera-only' as const, arrangementMode: 'preset' as const }
+    expect(galleryPresetIsActive(layout, 'camera-only', null)).toBe(true)
+    expect(galleryPresetIsActive(layout, 'screen-only', null)).toBe(false)
+    // Freeform keeps the last preset's name underneath: no card is on air.
+    expect(
+      galleryPresetIsActive({ ...layout, arrangementMode: 'freeform' }, 'camera-only', null)
+    ).toBe(false)
+    // A saved scene applied: the saved row is the active one.
+    expect(galleryPresetIsActive(layout, 'camera-only', 'saved-1')).toBe(false)
   })
 
   it('never says a camera turned off is unavailable', () => {

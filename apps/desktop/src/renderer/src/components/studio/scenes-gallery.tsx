@@ -1,4 +1,9 @@
-import { sceneGalleryReason, sceneSourceGaps, visualSources } from '@/lib/scene-presets'
+import {
+  galleryPresetIsActive,
+  sceneGalleryReason,
+  sceneSourceGaps,
+  visualSources
+} from '@/lib/scene-presets'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { DisplayIcon, MobileIcon } from '@/components/icons'
 import { lazy, Suspense, type ReactElement } from 'react'
@@ -146,7 +151,7 @@ export function ScenesGallery(): ReactElement {
     >
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
         {cards.map(({ preset, gaps }) => {
-          const active = !activeSavedSceneId && activePreset === preset.id
+          const active = galleryPresetIsActive(captureConfig.layout, preset.id, activeSavedSceneId)
           const shortcut = settings.globalShortcuts?.layouts?.[preset.id]
           return (
             <SceneCard
