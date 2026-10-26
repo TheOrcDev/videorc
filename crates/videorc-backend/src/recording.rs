@@ -7760,11 +7760,37 @@ async fn probe_mp4_export_input(ffprobe_path: &str, input: &Path) -> Mp4ExportPr
 struct Mp4ExportTake {
     /// The take's configured frame rate.
     fps: Option<u32>,
+    /// Plan 200 C3: the take's start. All files of one take share it, so
+    /// they carry the same `creation_time` and timecode.
+    started_at: Option<DateTime<Utc>>,
+    /// Plan 200 C3: the take's markers as `(at_seconds, label)`, read from
+    /// the Combined session for every file of the take.
+    markers: Vec<(f64, Option<String>)>,
 }
 
 fn load_mp4_export_take(state: &AppState, session_id: &str) -> Option<Mp4ExportTake> {
     match state.database.mp4_export_take_row(session_id) {
-        Ok(Some(row)) if row.captured_by_videorc => Some(Mp4ExportTake { fps: row.fps }),
+        Ok(Some(row)) if row.captured_by_videorc => {
+            let markers = state
+                .database
+                .markers_for_export(&row.marker_session_id)
+                .unwrap_or_else(|error| {
+                    state.emit_log(
+                        "warn",
+                        format!(
+                            "MP4 export for session {session_id} could not read its markers; it has no chapters: {error:#}"
+                        ),
+                    );
+                    Vec::new()
+                });
+            Some(Mp4ExportTake {
+                fps: row.fps,
+                started_at: DateTime::parse_from_rfc3339(&row.started_at)
+                    .ok()
+                    .map(|started_at| started_at.with_timezone(&Utc)),
+                markers,
+            })
+        }
         Ok(_) => None,
         Err(error) => {
             // The take facts improve the MP4; they never block it.
@@ -7778,12 +7804,18 @@ fn load_mp4_export_take(state: &AppState, session_id: &str) -> Option<Mp4ExportT
 }
 
 /// Plan 200 C1: the whole frame rate whose tick every exported frame snaps
-/// to, or `None` (imports, a non-integer rate, an unknown rate).
+/// to, or `None` (imports, non-H.264, a non-integer rate, an unknown rate).
 fn mp4_export_snap_fps(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Option<u32> {
-    let take = take?;
     if !probe.video_is_h264() {
         return None;
     }
+    mp4_export_take_fps(probe, take)
+}
+
+/// The take's whole frame rate: its configured rate, else the probe's whole
+/// `r_frame_rate`. `None` for imports and non-integer rates.
+fn mp4_export_take_fps(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Option<u32> {
+    let take = take?;
     let probed = match probe.video_frame_rate {
         Some((numerator, denominator)) if numerator % denominator != 0 => return None,
         Some((numerator, denominator)) => u32::try_from(numerator / denominator).ok(),
@@ -7808,6 +7840,13 @@ struct Mp4ExportOptions {
     copy_audio: bool,
     /// Snap every video packet to its own `1/fps` tick with `setts`.
     snap_fps: Option<u32>,
+    /// Plan 200 C3: the take start, UTC, RFC 3339.
+    creation_time: Option<String>,
+    /// Plan 200 C3: `HH:MM:SS:FF`, the local time of day at the take start.
+    timecode: Option<String>,
+    /// Plan 200 C3: an ffmetadata file with the take's markers as chapters,
+    /// in the private staging folder.
+    chapters_path: Option<PathBuf>,
 }
 
 impl Mp4ExportOptions {
@@ -7819,6 +7858,9 @@ impl Mp4ExportOptions {
             tag_h264_bt709: true,
             copy_audio: false,
             snap_fps: None,
+            creation_time: None,
+            timecode: None,
+            chapters_path: None,
         }
     }
 
@@ -7828,6 +7870,16 @@ impl Mp4ExportOptions {
             tag_h264_bt709: probe.video_is_h264(),
             copy_audio: probe.audio_is_aac(),
             snap_fps: mp4_export_snap_fps(probe, take),
+            creation_time: take.and_then(|take| take.started_at).map(|started_at| {
+                started_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+            }),
+            timecode: take
+                .and_then(|take| take.started_at)
+                .zip(mp4_export_take_fps(probe, take))
+                .map(|(started_at, fps)| {
+                    mp4_export_timecode(started_at.with_timezone(&chrono::Local).time(), fps)
+                }),
+            chapters_path: None,
         }
     }
 
@@ -7840,6 +7892,121 @@ impl Mp4ExportOptions {
             ..self.clone()
         })
     }
+}
+
+/// Plan 200 C3: `HH:MM:SS:FF` for a time of day, the frames counted from the
+/// sub-second at `fps`. Frames never carry into the seconds, so the last
+/// instant before midnight is `23:59:59:<fps-1>`.
+fn mp4_export_timecode(time: chrono::NaiveTime, fps: u32) -> String {
+    use chrono::Timelike;
+    let fps = fps.max(1);
+    // A leap second reports 1_000_000_000.. nanoseconds; clamp it.
+    let nanos = u64::from(time.nanosecond().min(999_999_999));
+    let frame = (nanos * u64::from(fps) / 1_000_000_000).min(u64::from(fps - 1));
+    format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        time.hour(),
+        time.minute(),
+        time.second(),
+        frame
+    )
+}
+
+/// Plan 200 C3: escape an ffmetadata value (`=`, `;`, `#`, `\` and line
+/// breaks are special in that format).
+fn escape_ffmetadata_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '=' | ';' | '#' | '\\' | '\n') {
+            escaped.push('\\');
+        }
+        if character == '\r' {
+            // A bare CR would end the line on some readers; drop it.
+            continue;
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// Plan 200 C3: the take's markers as ffmetadata chapters for a file of
+/// `duration_seconds`. Each chapter starts at a marker and ends at the next
+/// one or at the end of the file; a "Start" chapter covers the time before a
+/// first marker later than 0. `None` when no marker lies inside the file.
+fn mp4_chapters_ffmetadata(
+    markers: &[(f64, Option<String>)],
+    duration_seconds: f64,
+) -> Option<String> {
+    let duration_ms = (duration_seconds * 1000.0).round();
+    if !duration_ms.is_finite() || duration_ms < 1.0 {
+        return None;
+    }
+    let duration_ms = duration_ms as u64;
+    let mut starts: Vec<(u64, String)> = Vec::new();
+    for (index, (at_seconds, label)) in markers.iter().enumerate() {
+        if !at_seconds.is_finite() || *at_seconds < 0.0 {
+            continue;
+        }
+        let start_ms = (at_seconds * 1000.0).round() as u64;
+        if start_ms >= duration_ms {
+            continue;
+        }
+        let title = label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Marker {}", index + 1));
+        starts.push((start_ms, title));
+    }
+    if starts.is_empty() {
+        return None;
+    }
+    starts.sort_by_key(|(start_ms, _)| *start_ms);
+    // Two markers on one millisecond would make an empty chapter; keep the first.
+    starts.dedup_by_key(|(start_ms, _)| *start_ms);
+    if starts[0].0 > 0 {
+        starts.insert(0, (0, "Start".to_string()));
+    }
+    let mut text = String::from(";FFMETADATA1\n");
+    for (index, (start_ms, title)) in starts.iter().enumerate() {
+        let end_ms = starts
+            .get(index + 1)
+            .map(|(next, _)| *next)
+            .unwrap_or(duration_ms);
+        text.push_str(&format!(
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\nEND={end_ms}\ntitle={}\n",
+            escape_ffmetadata_value(title)
+        ));
+    }
+    Some(text)
+}
+
+/// Plan 200 C3: write the take's chapters beside the staged MP4, inside the
+/// private staging folder, so they go away with it. `Ok(None)` when there is
+/// nothing to write.
+async fn write_mp4_export_chapters(
+    take: Option<&Mp4ExportTake>,
+    probe: &Mp4ExportProbe,
+    output: &Path,
+) -> Result<Option<PathBuf>> {
+    let Some(take) = take.filter(|take| !take.markers.is_empty()) else {
+        return Ok(None);
+    };
+    let duration_seconds = probe
+        .exported_seconds()
+        .context("the recording's duration is unknown")?;
+    let Some(text) = mp4_chapters_ffmetadata(&take.markers, duration_seconds) else {
+        return Ok(None);
+    };
+    let directory = output
+        .parent()
+        .with_context(|| format!("MP4 output {} has no parent folder", output.display()))?;
+    let path = directory.join("chapters.ffmetadata");
+    fs::write(&path, text)
+        .await
+        .with_context(|| format!("Could not write chapters {}", path.display()))?;
+    Ok(Some(path))
 }
 
 /// Remove a failed attempt's partial MP4 from the private staging folder so
@@ -7873,7 +8040,11 @@ async fn export_mp4_from_mkv(
         );
     }
     let probe = probe_mp4_export_input(&ffprobe_path_for(ffmpeg_path), input).await;
-    let options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    let mut options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    match write_mp4_export_chapters(take.as_ref(), &probe, output).await {
+        Ok(chapters_path) => options.chapters_path = chapters_path,
+        Err(error) => tracing::warn!("MP4 export has no chapters: {error:#}"),
+    }
     let first = run_mp4_export_ffmpeg(ffmpeg_path, mp4_export_args(input, output, &options)).await;
     let Err(error) = first else {
         return Ok(());
@@ -8145,11 +8316,22 @@ fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> V
         "warning".to_string(),
         "-i".to_string(),
         ffmpeg_file_path(input),
-        "-map".to_string(),
-        "0".to_string(),
-        "-c:v".to_string(),
-        "copy".to_string(),
     ];
+    if let Some(chapters) = options.chapters_path.as_deref() {
+        // Plan 200 C3: input 1 holds only chapters. Never `-map_metadata -1`:
+        // it dropped the chapter titles (2026-10-26).
+        args.extend([
+            "-f".to_string(),
+            "ffmetadata".to_string(),
+            "-i".to_string(),
+            ffmpeg_file_path(chapters),
+        ]);
+    }
+    args.extend(["-map".to_string(), "0".to_string()]);
+    if options.chapters_path.is_some() {
+        args.extend(["-map_chapters".to_string(), "1".to_string()]);
+    }
+    args.extend(["-c:v".to_string(), "copy".to_string()]);
     if options.copy_audio {
         // Plan 200 C2: record+stream takes already hold AAC; a second encode
         // only loses quality.
@@ -8180,6 +8362,16 @@ fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> V
             bsf_chain.push_str(&mp4_export_frame_time_snap_bsf(fps));
         }
         args.extend([bsf_flag, bsf_chain]);
+    }
+    if let Some(creation_time) = options.creation_time.as_deref() {
+        // Plan 200 C3: editors sync the files of one take on these.
+        args.extend([
+            "-metadata".to_string(),
+            format!("creation_time={creation_time}"),
+        ]);
+    }
+    if let Some(timecode) = options.timecode.as_deref() {
+        args.extend(["-timecode".to_string(), timecode.to_string()]);
     }
     if let Some(trim_seconds) = options.trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
@@ -11769,7 +11961,14 @@ async fn export_mp4_from_mkv_tracked(
     let probe_started = Instant::now();
     let take = load_mp4_export_take(state, session_id);
     let probe = probe_mp4_export_input(&ffprobe_path_for(ffmpeg_path), input).await;
-    let options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    let mut options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    match write_mp4_export_chapters(take.as_ref(), &probe, output).await {
+        Ok(chapters_path) => options.chapters_path = chapters_path,
+        Err(error) => state.emit_log(
+            "warn",
+            format!("MP4 export for session {session_id} has no chapters: {error:#}"),
+        ),
+    }
     let total_seconds = probe.exported_seconds();
     state.emit_log(
         "info",
@@ -40196,6 +40395,143 @@ mod tests {
         assert!(!Mp4ExportProbe::default().audio_is_aac());
     }
 
+    fn time_of_day(hour: u32, minute: u32, second: u32, nanos: u32) -> chrono::NaiveTime {
+        chrono::NaiveTime::from_hms_nano_opt(hour, minute, second, nanos).unwrap()
+    }
+
+    #[test]
+    fn mp4_export_timecode_counts_frames_from_the_sub_second() {
+        assert_eq!(mp4_export_timecode(time_of_day(10, 4, 5, 0), 30), "10:04:05:00");
+        assert_eq!(mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 30), "10:04:05:15");
+        assert_eq!(mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 60), "10:04:05:30");
+        assert_eq!(mp4_export_timecode(time_of_day(9, 0, 0, 999_999_999), 60), "09:00:00:59");
+        assert_eq!(mp4_export_timecode(time_of_day(9, 0, 0, 33_333_334), 30), "09:00:00:01");
+        // Midnight edges: the last instant of the day never rolls over.
+        assert_eq!(mp4_export_timecode(time_of_day(23, 59, 59, 999_999_999), 30), "23:59:59:29");
+        assert_eq!(mp4_export_timecode(time_of_day(0, 0, 0, 0), 30), "00:00:00:00");
+        // A leap second clamps to the last frame.
+        assert_eq!(mp4_export_timecode(time_of_day(23, 59, 59, 1_500_000_000), 30), "23:59:59:29");
+    }
+
+    #[test]
+    fn mp4_chapters_ffmetadata_titles_escapes_and_starts_with_start() {
+        let text = mp4_chapters_ffmetadata(
+            &[
+                (2.0, Some("a=b;c#d\\e\nf".to_string())),
+                (5.5, None),
+                (99.0, Some("past the end".to_string())),
+            ],
+            10.0,
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            ";FFMETADATA1\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Start\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=5500\ntitle=a\\=b\;c\\#d\\\\e\\\nf\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=5500\nEND=10000\ntitle=Marker 2\n"
+        );
+
+        // A marker at 0 needs no "Start" chapter.
+        let at_zero = mp4_chapters_ffmetadata(&[(0.0, Some("Intro".to_string()))], 3.0).unwrap();
+        assert_eq!(
+            at_zero,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=3000\ntitle=Intro\n"
+        );
+
+        // No markers, or none inside the file: no chapters input at all.
+        assert_eq!(mp4_chapters_ffmetadata(&[], 10.0), None);
+        assert_eq!(mp4_chapters_ffmetadata(&[(12.0, None)], 10.0), None);
+        assert_eq!(mp4_chapters_ffmetadata(&[(1.0, None)], 0.0), None);
+    }
+
+    #[tokio::test]
+    async fn mp4_export_writes_no_chapters_file_without_markers() {
+        let directory = std::env::temp_dir().join(format!("videorc-p200-chapters-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("export.mp4");
+        let probe = Mp4ExportProbe {
+            format_seconds: Some(10.0),
+            ..Mp4ExportProbe::default()
+        };
+        let take = Mp4ExportTake {
+            fps: Some(30),
+            started_at: None,
+            markers: Vec::new(),
+        };
+        assert_eq!(
+            write_mp4_export_chapters(Some(&take), &probe, &output).await.unwrap(),
+            None
+        );
+        assert_eq!(write_mp4_export_chapters(None, &probe, &output).await.unwrap(), None);
+        let with_markers = Mp4ExportTake {
+            markers: vec![(1.0, Some("One".to_string()))],
+            ..take
+        };
+        let path = write_mp4_export_chapters(Some(&with_markers), &probe, &output)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(path.parent(), Some(directory.as_path()));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("title=One"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn mp4_export_stamps_creation_time_timecode_and_chapters() {
+        let started_at = DateTime::parse_from_rfc3339("2026-10-26T09:15:30.5Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let take = Mp4ExportTake {
+            fps: Some(30),
+            started_at: Some(started_at),
+            markers: Vec::new(),
+        };
+        let mut options = Mp4ExportOptions::plan(&probe_with_codecs("h264", "pcm_s16le"), Some(&take));
+        assert_eq!(
+            options.creation_time.as_deref(),
+            Some("2026-10-26T09:15:30.500000Z")
+        );
+        let local = started_at.with_timezone(&chrono::Local).time();
+        assert_eq!(options.timecode, Some(mp4_export_timecode(local, 30)));
+        assert!(options.timecode.as_deref().unwrap().ends_with(":15"));
+        options.chapters_path = Some(PathBuf::from("/tmp/videorc-test/chapters.ffmetadata"));
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &options,
+        );
+        assert_eq!(
+            arg_value(&args, "-metadata"),
+            Some("creation_time=2026-10-26T09:15:30.500000Z")
+        );
+        assert_eq!(arg_value(&args, "-timecode"), options.timecode.as_deref());
+        assert_eq!(arg_value(&args, "-f"), Some("ffmetadata"));
+        assert_eq!(arg_value(&args, "-map_chapters"), Some("1"));
+        assert_eq!(arg_value(&args, "-map"), Some("0"));
+        assert!(!args.iter().any(|arg| arg == "-map_metadata"));
+        let inputs: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-i")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(
+            inputs,
+            ["/tmp/videorc-test.mkv", "/tmp/videorc-test/chapters.ffmetadata"]
+        );
+
+        // An import carries none of the take's metadata.
+        let import = Mp4ExportOptions::plan(&probe_with_codecs("h264", "aac"), None);
+        assert_eq!(import.creation_time, None);
+        assert_eq!(import.timecode, None);
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &import,
+        );
+        assert!(!args.iter().any(|arg| arg == "-timecode" || arg == "-metadata" || arg == "-map_chapters"));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn mp4_export_normalizes_windows_verbatim_paths() {
@@ -40389,6 +40725,72 @@ mod tests {
             .trim(),
             "30/1"
         );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Plan 200 C3: two files of one take, exported with the take's two
+    /// markers, carry "Start" plus two titled chapters, a `tmcd` track and
+    /// the same timecode and creation time.
+    #[tokio::test]
+    #[ignore = "spawns ffmpeg/ffprobe and writes media; run with --ignored"]
+    async fn plan200_real_export_has_chapters_and_one_timecode_per_take() {
+        if !plan200_ffmpeg_available("plan200_real_export_has_chapters_and_one_timecode_per_take")
+        {
+            return;
+        }
+        let directory = plan200_fixture_directory("c3-take-metadata");
+        let take = Mp4ExportTake {
+            fps: Some(30),
+            started_at: Some(
+                DateTime::parse_from_rfc3339("2026-10-26T09:15:30.5Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            markers: vec![(1.0, Some("Intro".to_string())), (2.0, None)],
+        };
+        let mut timecodes = Vec::new();
+        for role in ["combined", "camera"] {
+            let input = directory.join(format!("{role}.mkv"));
+            plan200_write_capture_mkv(&input, "3", 30);
+            // Each file exports from its own private staging folder.
+            let staging = directory.join(format!("{role}-staging"));
+            std::fs::create_dir_all(&staging).unwrap();
+            let output = staging.join("export.mp4");
+            export_mp4_from_mkv("ffmpeg", &input, &output, Some(take.clone()))
+                .await
+                .unwrap();
+
+            let chapters = plan200_ffprobe(
+                &output,
+                &["-show_chapters", "-show_entries", "chapter_tags=title", "-of", "csv=p=0"],
+            );
+            let titles: Vec<&str> = chapters.lines().filter(|line| !line.is_empty()).collect();
+            assert_eq!(titles, ["Start", "Intro", "Marker 2"], "{role} chapters");
+
+            let streams = plan200_ffprobe(
+                &output,
+                &["-show_entries", "stream=codec_type,codec_tag_string", "-of", "csv=p=0"],
+            );
+            assert!(streams.lines().any(|line| line.contains("tmcd")), "{role}: {streams}");
+            assert_eq!(
+                plan200_ffprobe(
+                    &output,
+                    &["-show_entries", "format_tags=creation_time", "-of", "csv=p=0"]
+                )
+                .trim(),
+                "2026-10-26T09:15:30.500000Z"
+            );
+            let timecode = plan200_ffprobe(
+                &output,
+                &["-select_streams", "v:0", "-show_entries", "stream_tags=timecode", "-of", "csv=p=0"],
+            )
+            .trim()
+            .to_string();
+            assert!(!timecode.is_empty(), "{role} has a timecode");
+            timecodes.push(timecode);
+        }
+        assert_eq!(timecodes[0], timecodes[1], "one take, one timecode");
 
         std::fs::remove_dir_all(directory).unwrap();
     }
