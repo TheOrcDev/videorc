@@ -4,8 +4,9 @@
 // Given the Combined file of a take recorded with "Separate source recordings"
 // on, this finds the Screen and Camera siblings beside it, probes all three,
 // runs the honest recording analyzer on each, and judges the take as a whole:
-// every role present, one video + one audio stream each on the recording
-// canvas, the audio track each role promises (System audio on Screen,
+// every role present, one video + one audio stream each (Combined and Screen
+// on the recording canvas, Camera at the camera's own size inside it, plan
+// 200 D2), the audio track each role promises (System audio on Screen,
 // Microphone on Camera, Mix on Combined; a swapped pairing fails), and no
 // duration drift between the files. Exits non-zero on any failure.
 //
@@ -13,8 +14,9 @@
 //
 // Options:
 //   --width <n> --height <n> --fps <n>
-//                        The recording canvas every file must match. Defaults
-//                        to the Combined file's own video stream.
+//                        The recording canvas Combined and Screen must match
+//                        and Camera must fit inside. Defaults to the
+//                        Combined file's own video stream.
 //   --roles <a,b,c>      Roles the session armed (default combined,screen,camera).
 //   --expectations file  JSON with committed source-removal intervals; default duration matching stays strict.
 //   --no-analyze         Skip the per-file analyzer passes (probe-only gates).

@@ -95,6 +95,87 @@ fn pixels(video: &VideoSettings) -> u64 {
     u64::from(video.width) * u64::from(video.height)
 }
 
+/// Plan 200 D4: the encoder work one take asks for. Hardware encoder
+/// throughput divides by pixel rate (plan 158: one 4K30 session reached
+/// 62 fps on an M4, three reached about 21 fps each), so the budget is the
+/// sum over every encoder the take runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EncoderBudget {
+    pub encoders: u32,
+    pub pixels_per_second: u64,
+}
+
+impl EncoderBudget {
+    /// How many single encodes of `video` this budget is worth.
+    pub fn load_factor(&self, video: &VideoSettings) -> f64 {
+        let single = pixels(video) * u64::from(video.fps.max(1));
+        self.pixels_per_second as f64 / single.max(1) as f64
+    }
+}
+
+/// The camera a check assumes for the Camera file when it knows none: a
+/// 1080p webcam, fitted inside the canvas like a real take (plan 200 D2).
+const ASSUMED_SEPARATE_FILE_CAMERA: (u32, u32) = (1920, 1080);
+
+/// Plan 200 D4: Combined, plus Screen (the canvas) and Camera (its own size
+/// inside the canvas) when separate files are on, plus a dedicated stream
+/// encoder when one runs.
+pub(crate) fn encoder_budget(
+    video: &VideoSettings,
+    separate_files: bool,
+    camera: Option<(u32, u32)>,
+    stream: Option<&VideoSettings>,
+) -> EncoderBudget {
+    let rate = |width: u32, height: u32, fps: u32| {
+        u64::from(width) * u64::from(height) * u64::from(fps.max(1))
+    };
+    let canvas = rate(video.width, video.height, video.fps);
+    let mut budget = EncoderBudget {
+        encoders: 1,
+        pixels_per_second: canvas,
+    };
+    if separate_files {
+        let (camera_width, camera_height) = crate::source_iso::camera_leg_size(
+            Some(camera.unwrap_or(ASSUMED_SEPARATE_FILE_CAMERA)),
+            (video.width, video.height),
+        );
+        budget.encoders += 2;
+        budget.pixels_per_second += canvas + rate(camera_width, camera_height, video.fps);
+    }
+    if let Some(stream) = stream {
+        budget.encoders += 1;
+        budget.pixels_per_second += rate(stream.width, stream.height, stream.fps);
+    }
+    budget
+}
+
+/// Plan 200 D4: a rung that passed alone but whose separate-files take would
+/// ask more of the encoder than this machine has shown it can do.
+pub(crate) const SEPARATE_FILES_OVER_BUDGET: &str = "separate-files-over-encoder-budget";
+
+fn pixel_rate(video: &VideoSettings) -> u64 {
+    pixels(video) * u64::from(video.fps.max(1))
+}
+
+/// Plan 200 D4: may a take at `video` with the separate files on pass? A
+/// benchmark take records one encode paced to real time, so its own speed
+/// never shows headroom (FFmpeg reports ~1.0x). The evidence is the ladder:
+/// the highest single-encode pixel rate the machine passed is its measured
+/// encoder throughput, and encoder fps at this rung is that rate divided by
+/// the rung's pixels. The rung fails when that fps divided by the take's load
+/// factor (Combined + Screen + Camera) is below the rung's fps.
+pub(crate) fn separate_files_over_encoder_budget(
+    video: &VideoSettings,
+    best_single_rate: Option<u64>,
+) -> bool {
+    let Some(best) = best_single_rate else {
+        return true;
+    };
+    let measured_encoder_fps = best as f64 / pixels(video).max(1) as f64;
+    let load = encoder_budget(video, true, None, None).load_factor(video);
+    measured_encoder_fps / load < f64::from(video.fps.max(1))
+}
+
 /// What one benchmark session measured. `None` means the pipeline never
 /// published that signal, which is itself a failure for the mandatory ones.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -512,6 +593,8 @@ async fn run_ladder(
     let mut passed = false;
     let mut any_started = false;
     let mut last_start_error = None;
+    // Plan 200 D4: the highest single-encode pixel rate this machine passed.
+    let mut best_single_rate = None;
     for (index, video) in ladder.into_iter().enumerate() {
         if state.performance_check.cancelled() {
             discard_benchmark_sessions(state, &directory).await;
@@ -568,6 +651,16 @@ async fn run_ladder(
         if forced_failure_above_height().is_some_and(|height| video.height > height) {
             reasons.push("forced-by-test-seam".to_string());
         }
+        if reasons.is_empty() {
+            let rate = pixel_rate(&video);
+            best_single_rate = Some(best_single_rate.map_or(rate, |best: u64| best.max(rate)));
+        }
+        if reasons.is_empty()
+            && params.separate_source_recordings
+            && separate_files_over_encoder_budget(&video, best_single_rate)
+        {
+            reasons.push(SEPARATE_FILES_OVER_BUDGET.to_string());
+        }
         skip_next = !reasons.is_empty() && should_fast_skip_next(&measurement);
         passed = reasons.is_empty();
         // One line per rung in the backend log: the support bundle then shows
@@ -588,6 +681,26 @@ async fn run_ladder(
                 format!(
                     "Performance check {}x{}@{} did not start: {error}",
                     video.width, video.height, video.fps
+                ),
+            );
+        }
+        if params.separate_source_recordings {
+            // Plan 200 D4: a benchmark take has no camera or screen, so it
+            // cannot arm the separate files. The verdict above held the rung
+            // to its budget against the best single encode measured; the
+            // support bundle shows both.
+            let budget = encoder_budget(&video, true, None, None);
+            state.emit_log(
+                "info",
+                format!(
+                    "Performance check {}x{}@{} with separate files: {} encoders, {:.0} Mpx/s ({:.2}x one encode); best single encode passed {:.0} Mpx/s.",
+                    video.width,
+                    video.height,
+                    video.fps,
+                    budget.encoders,
+                    budget.pixels_per_second as f64 / 1e6,
+                    budget.load_factor(&video),
+                    best_single_rate.unwrap_or(0) as f64 / 1e6
                 ),
             );
         }
@@ -657,6 +770,11 @@ fn benchmark_session_params(video: &VideoSettings, directory: &Path) -> StartSes
             output_directory: Some(directory.display().to_string()),
             ffmpeg_path: None,
             keep_original_mkv: false,
+            // A benchmark take records a test pattern: with no camera and no
+            // screen, start validation would refuse the separate files. The
+            // run params carry the switch, and the ladder holds each rung to
+            // the separate files' encoder budget
+            // (`separate_files_over_encoder_budget`).
             separate_source_recordings: None,
             video: video.clone(),
             rtmp: RtmpSettings {
@@ -860,6 +978,108 @@ mod tests {
             drain_after_stop_ms: None,
             reasons: Vec::new(),
         }
+    }
+
+    #[test]
+    fn run_params_carry_the_separate_source_recordings_switch() {
+        // Plan 200 D4: the renderer sends the switch the next take would use.
+        let on: PerformanceCheckRunParams = serde_json::from_value(serde_json::json!({
+            "ceilingWidth": 3840, "ceilingHeight": 2160, "ceilingFps": 30,
+            "separateSourceRecordings": true
+        }))
+        .unwrap();
+        assert!(on.separate_source_recordings);
+        // Older renderers omit it: off, and it is never written when off.
+        let off: PerformanceCheckRunParams = serde_json::from_value(serde_json::json!({
+            "ceilingWidth": 1920, "ceilingHeight": 1080, "ceilingFps": 30
+        }))
+        .unwrap();
+        assert!(!off.separate_source_recordings);
+        assert_eq!(
+            serde_json::to_value(&off).unwrap(),
+            serde_json::json!({ "ceilingWidth": 1920, "ceilingHeight": 1080, "ceilingFps": 30 })
+        );
+        assert_eq!(
+            serde_json::to_value(&on).unwrap()["separateSourceRecordings"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn a_rung_with_separate_files_passes_only_inside_the_measured_encoder_budget() {
+        // Plan 200 D4: encoder fps at a rung = the best single-encode pixel
+        // rate passed / the rung's pixels; it must cover fps x load factor.
+        let rung = |width, height, fps| VideoSettings {
+            preset: VideoPreset::Custom,
+            width,
+            height,
+            fps,
+            bitrate_kbps: 8_000,
+        };
+        let uhd30 = rung(3840, 2160, 30);
+        let best_uhd30 = Some(pixel_rate(&uhd30));
+        // 4K30 passing alone proves 30 fps at 4K, not the 2.25x a separate-
+        // files take needs (plan 158: three 4K30 encodes ran at ~21 fps).
+        assert!(separate_files_over_encoder_budget(&uhd30, best_uhd30));
+        // The same evidence covers 1080p30: 120 fps of 1080p / 3x = 40 >= 30.
+        assert!(!separate_files_over_encoder_budget(
+            &rung(1920, 1080, 30),
+            best_uhd30
+        ));
+        // 1440p30: 67.5 fps / 2.5625x = 26.3 < 30.
+        assert!(separate_files_over_encoder_budget(
+            &rung(2560, 1440, 30),
+            best_uhd30
+        ));
+        // 1080p60: 120 fps / 3x = 40 < 60.
+        assert!(separate_files_over_encoder_budget(
+            &rung(1920, 1080, 60),
+            best_uhd30
+        ));
+        // No single encode passed: nothing proves the budget.
+        assert!(separate_files_over_encoder_budget(
+            &rung(1280, 720, 30),
+            None
+        ));
+        assert_eq!(
+            SEPARATE_FILES_OVER_BUDGET,
+            "separate-files-over-encoder-budget"
+        );
+    }
+
+    #[test]
+    fn the_encoder_budget_counts_every_encoder_a_take_runs() {
+        let rung = |width, height, fps| VideoSettings {
+            preset: VideoPreset::Custom,
+            width,
+            height,
+            fps,
+            bitrate_kbps: 8_000,
+        };
+        let uhd = rung(3840, 2160, 30);
+        let single = encoder_budget(&uhd, false, None, None);
+        assert_eq!(single.encoders, 1);
+        assert_eq!(single.pixels_per_second, 3840 * 2160 * 30);
+        // Combined + Screen at 4K, Camera at its own 1080p (plan 200 D2).
+        let separate = encoder_budget(&uhd, true, None, None);
+        assert_eq!(separate.encoders, 3);
+        assert_eq!(
+            separate.pixels_per_second,
+            2 * 3840 * 2160 * 30 + 1920 * 1080 * 30
+        );
+        assert!((separate.load_factor(&uhd) - 2.25).abs() < 1e-9);
+        // A camera larger than the canvas is capped at it: three full encodes.
+        let fhd = rung(1920, 1080, 60);
+        let capped = encoder_budget(&fhd, true, Some((3840, 2160)), None);
+        assert!((capped.load_factor(&fhd) - 3.0).abs() < 1e-9);
+        // A dedicated stream encoder adds its own leg.
+        let stream = rung(1280, 720, 30);
+        let live = encoder_budget(&fhd, true, Some((1280, 720)), Some(&stream));
+        assert_eq!(live.encoders, 4);
+        assert_eq!(
+            live.pixels_per_second,
+            2 * 1920 * 1080 * 60 + 1280 * 720 * 60 + 1280 * 720 * 30
+        );
     }
 
     #[test]

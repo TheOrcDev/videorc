@@ -417,6 +417,10 @@ pub enum QualityVerdict {
 pub struct QualityReport {
     pub verdict: QualityVerdict,
     pub issues: Vec<QualityIssue>,
+    /// Plan 200 C8: the quick check of a long recording analyzed sampled
+    /// windows, not the whole file.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sampled: bool,
 }
 
 /// Classifies a probed recording against the objective gates. Frame pacing (VFR) and
@@ -436,6 +440,7 @@ pub fn classify_quality(
         return QualityReport {
             verdict: QualityVerdict::NeedsReview,
             issues: vec![QualityIssue::MissingVideo],
+            sampled: false,
         };
     };
 
@@ -495,7 +500,11 @@ pub fn classify_quality(
     } else {
         QualityVerdict::Clean
     };
-    QualityReport { verdict, issues }
+    QualityReport {
+        verdict,
+        issues,
+        sampled: false,
+    }
 }
 
 /// A/V skew in milliseconds, preferring stream start-time offset, falling back to a
@@ -579,6 +588,15 @@ pub fn analyze_audio_balance_cancellable(
     file_path: &str,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<ChannelLevel>, String> {
+    analyze_audio_balance_in(ffmpeg_path, file_path, None, is_cancelled)
+}
+
+fn analyze_audio_balance_in(
+    ffmpeg_path: &str,
+    file_path: &str,
+    window: Option<AnalysisWindow>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<ChannelLevel>, String> {
     let mut command = Command::new(ffmpeg_path);
     command.args([
         "-hide_banner",
@@ -587,6 +605,9 @@ pub fn analyze_audio_balance_cancellable(
         "1",
         "-filter_threads",
         "1",
+    ]);
+    command.args(ffmpeg_window_input_args(window));
+    command.args([
         "-i",
         file_path,
         "-map",
@@ -665,23 +686,30 @@ pub fn detect_freezes_cancellable(
     min_freeze_seconds: f64,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<FreezeSegment>, String> {
+    detect_freezes_in(
+        ffmpeg_path,
+        file_path,
+        noise_db,
+        min_freeze_seconds,
+        None,
+        is_cancelled,
+    )
+}
+
+fn detect_freezes_in(
+    ffmpeg_path: &str,
+    file_path: &str,
+    noise_db: f64,
+    min_freeze_seconds: f64,
+    window: Option<AnalysisWindow>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<FreezeSegment>, String> {
     let filter = format!("freezedetect=n={noise_db}dB:d={min_freeze_seconds}");
     let mut command = Command::new(ffmpeg_path);
+    command.args(["-hide_banner", "-threads", "1", "-filter_threads", "1"]);
+    command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-hide_banner",
-        "-threads",
-        "1",
-        "-filter_threads",
-        "1",
-        "-i",
-        file_path,
-        "-map",
-        "0:v:0",
-        "-vf",
-        &filter,
-        "-f",
-        "null",
-        "-",
+        "-i", file_path, "-map", "0:v:0", "-vf", &filter, "-f", "null", "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run freezedetect: {error}"))?;
@@ -822,20 +850,21 @@ pub fn detect_repeated_frames_cancellable(
     threshold: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<RepeatedFrameSummary, String> {
+    detect_repeated_frames_in(ffmpeg_path, file_path, threshold, None, is_cancelled)
+}
+
+fn detect_repeated_frames_in(
+    ffmpeg_path: &str,
+    file_path: &str,
+    threshold: usize,
+    window: Option<AnalysisWindow>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<RepeatedFrameSummary, String> {
     let mut command = Command::new(ffmpeg_path);
+    command.args(["-hide_banner", "-nostats", "-threads", "1"]);
+    command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-hide_banner",
-        "-nostats",
-        "-threads",
-        "1",
-        "-i",
-        file_path,
-        "-an",
-        "-map",
-        "0:v:0",
-        "-f",
-        "framemd5",
-        "-",
+        "-i", file_path, "-an", "-map", "0:v:0", "-f", "framemd5", "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run framemd5: {error}"))?;
@@ -909,6 +938,16 @@ pub fn detect_audio_gaps_cancellable(
     tolerance_ms: f64,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<AudioGapSummary, String> {
+    detect_audio_gaps_in(ffprobe_path, file_path, tolerance_ms, None, is_cancelled)
+}
+
+fn detect_audio_gaps_in(
+    ffprobe_path: &str,
+    file_path: &str,
+    tolerance_ms: f64,
+    window: Option<AnalysisWindow>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<AudioGapSummary, String> {
     let mut command = Command::new(ffprobe_path);
     command.args([
         "-v",
@@ -919,8 +958,14 @@ pub fn detect_audio_gaps_cancellable(
         "packet=pts_time,duration_time",
         "-of",
         "csv=p=0",
-        file_path,
     ]);
+    if let Some(window) = window {
+        command.args([
+            "-read_intervals".to_string(),
+            format!("{:.3}%+{:.3}", window.start, window.duration),
+        ]);
+    }
+    command.arg(file_path);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run ffprobe audio packet scan: {error}"))?;
     if !output.status.success() {
@@ -1219,6 +1264,12 @@ fn signed_av_offset_ms(probe: &MediaProbe) -> Option<f64> {
 /// Builds the FFmpeg command for a repair plan. Re-encodes target visually lossless
 /// via the plan's capability-probed encoder; audio repairs re-encode to AAC. Resync
 /// trims a late audio start or delays an early one.
+///
+/// Plan 200 C7: a repair keeps the file whole: every video and audio stream,
+/// the chapters, faststart for MP4/MOV, and BT.709 tags on a re-encode. The
+/// `tmcd` timecode and chapter `text` data tracks are not copied (the MP4
+/// muxer rejects them as data); it rebuilds both from the video's timecode
+/// tag and the chapters.
 pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<String> {
     let mut args = vec![
         "-y".to_string(),
@@ -1231,6 +1282,12 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
         "1".to_string(),
         "-i".to_string(),
         input.to_string(),
+        "-map".to_string(),
+        "0".to_string(),
+        "-map".to_string(),
+        "-0:d".to_string(),
+        "-map_chapters".to_string(),
+        "0".to_string(),
     ];
 
     let mut video_filters: Vec<String> = Vec::new();
@@ -1274,6 +1331,12 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
     if !video_filters.is_empty() {
         args.extend(["-vf".to_string(), video_filters.join(",")]);
         args.extend(plan.video_encoder.encode_args());
+        // Videorc records BT.709 video range; a re-encode must not lose the tags.
+        args.extend(
+            REPAIR_BT709_COLOR_TAG_ARGS
+                .iter()
+                .map(|arg| arg.to_string()),
+        );
     }
     if audio_copy {
         args.extend(["-c:a".to_string(), "copy".to_string()]);
@@ -1283,13 +1346,38 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
             audio_filters.join(","),
             "-c:a".to_string(),
             "aac".to_string(),
+            // The same 256k AAC as the MP4 export (plan 200 C7).
             "-b:a".to_string(),
-            "192k".to_string(),
+            "256k".to_string(),
         ]);
+    }
+    let faststart = Path::new(output)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "mov" | "m4v"
+            )
+        });
+    if faststart {
+        args.extend(["-movflags".to_string(), "+faststart".to_string()]);
     }
     args.push(output.to_string());
     args
 }
+
+/// The recording colorimetry tags (`recording.rs` `h264_bt709_color_tag_args`).
+const REPAIR_BT709_COLOR_TAG_ARGS: [&str; 8] = [
+    "-colorspace",
+    "bt709",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
+    "-color_range",
+    "tv",
+];
 
 // --- Safe backup-then-atomic-replace (slice 6) ---
 
@@ -1340,20 +1428,62 @@ pub fn safe_replace<V>(
 where
     V: FnOnce(&Path) -> Result<(), String>,
 {
-    if let Err(reason) = validate(repaired_temp) {
+    safe_replace_with(original, repaired_temp, validate, |from, to| {
+        fs::rename(from, to)
+    })
+}
+
+/// [`safe_replace`] with the final rename injectable, so a failing rename can
+/// be tested. Plan 200 C6: every path that does not install the temp deletes
+/// it (validation, backup space, backup folder, backup copy and rename).
+fn safe_replace_with<V, R>(
+    original: &Path,
+    repaired_temp: &Path,
+    validate: V,
+    rename: R,
+) -> Result<PathBuf, SafeReplaceError>
+where
+    V: FnOnce(&Path) -> Result<(), String>,
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let discard = |error: SafeReplaceError| {
         let _ = fs::remove_file(repaired_temp);
-        return Err(SafeReplaceError::ValidationFailed(reason));
+        error
+    };
+    if let Err(reason) = validate(repaired_temp) {
+        return Err(discard(SafeReplaceError::ValidationFailed(reason)));
     }
 
-    let backup = backup_path_for(original).ok_or(SafeReplaceError::InvalidPath)?;
-    if let Some(backup_dir) = backup.parent() {
-        fs::create_dir_all(backup_dir).map_err(|error| SafeReplaceError::Io(error.to_string()))?;
+    let Some(backup) = backup_path_for(original) else {
+        return Err(discard(SafeReplaceError::InvalidPath));
+    };
+    // Plan 200 C5: the backup is a full copy beside the recording. Without
+    // room for it, leave the recording as it is.
+    if let (Ok(metadata), Some(available)) = (
+        fs::metadata(original),
+        original
+            .parent()
+            .and_then(crate::disk_space::available_bytes),
+    ) && let Err(reason) = crate::disk_space::check_backup_space(metadata.len(), available)
+    {
+        return Err(discard(SafeReplaceError::Io(reason)));
     }
-    fs::copy(original, &backup)
-        .map_err(|error| SafeReplaceError::Io(format!("backup failed: {error}")))?;
+    if let Some(backup_dir) = backup.parent()
+        && let Err(error) = fs::create_dir_all(backup_dir)
+    {
+        return Err(discard(SafeReplaceError::Io(error.to_string())));
+    }
+    if let Err(error) = fs::copy(original, &backup) {
+        return Err(discard(SafeReplaceError::Io(format!(
+            "backup failed: {error}"
+        ))));
+    }
 
-    fs::rename(repaired_temp, original)
-        .map_err(|error| SafeReplaceError::Io(format!("replace failed: {error}")))?;
+    if let Err(error) = rename(repaired_temp, original) {
+        return Err(discard(SafeReplaceError::Io(format!(
+            "replace failed: {error}"
+        ))));
+    }
     Ok(backup)
 }
 
@@ -1514,50 +1644,36 @@ pub fn analyze_recording_cancellable(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(MediaProbe, QualityReport), String> {
     let probe = probe_media_cancellable(ffprobe_path, file_path, is_cancelled)?;
-    let base = classify_quality(&probe, thresholds, expectations);
+    analyze_probed_recording(
+        ffmpeg_path,
+        ffprobe_path,
+        file_path,
+        probe,
+        thresholds,
+        expectations,
+        None,
+        is_cancelled,
+    )
+}
 
-    let one_sided = if probe.audio.is_empty() {
-        None
-    } else {
-        let levels = match analyze_audio_balance_cancellable(ffmpeg_path, file_path, is_cancelled) {
-            Ok(levels) => levels,
-            Err(error) if error.contains(MAINTENANCE_CANCELLED) => return Err(error),
-            Err(_) => Vec::new(),
-        };
-        detect_one_sided_audio(&levels, thresholds.silence_db)
-    };
-    let audio_gaps = if probe.audio.is_empty() {
-        None
-    } else {
-        Some(detect_audio_gaps_cancellable(
-            ffprobe_path,
-            file_path,
-            thresholds.audio_gap_tolerance_ms,
-            is_cancelled,
-        )?)
-    };
-    let freezes = if probe.video.is_some() {
-        let segments = detect_freezes_cancellable(
-            ffmpeg_path,
-            file_path,
-            -60.0,
-            thresholds.min_freeze_seconds,
-            is_cancelled,
-        )?;
-        long_freezes(&segments, thresholds.min_freeze_seconds)
-    } else {
-        Vec::new()
-    };
-    let repeated_frames = if probe.video.is_some() {
-        Some(detect_repeated_frames_cancellable(
-            ffmpeg_path,
-            file_path,
-            thresholds.max_repeated_frame_run,
-            is_cancelled,
-        )?)
-    } else {
-        None
-    };
+/// The analysis passes over a probed file: the whole file (`windows` is
+/// `None`), or each sampled window, folded into one report marked `sampled`.
+#[allow(clippy::too_many_arguments)]
+fn analyze_probed_recording(
+    ffmpeg_path: &str,
+    ffprobe_path: &str,
+    file_path: &str,
+    probe: MediaProbe,
+    thresholds: &QualityThresholds,
+    expectations: &QualityExpectations,
+    windows: Option<&[AnalysisWindow]>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(MediaProbe, QualityReport), String> {
+    let base = classify_quality(&probe, thresholds, expectations);
+    let whole_file = [None];
+    let sampled: Vec<Option<AnalysisWindow>> = windows
+        .map(|windows| windows.iter().copied().map(Some).collect())
+        .unwrap_or_else(|| whole_file.to_vec());
 
     // A freezedetect hit only counts as a pipeline freeze when exact decoded-frame
     // repeats overlap it; the rest is still content (see corroborated_freezes).
@@ -1568,20 +1684,82 @@ pub fn analyze_recording_cancellable(
         .video
         .as_ref()
         .and_then(|video| video.avg_fps.or(video.nominal_fps));
-    let (corroborated, similarity_only) = if expectations.pipeline_reported_freezes {
-        (freezes.clone(), Vec::new())
+
+    let mut one_sided_per_window = Vec::new();
+    let mut audio_gaps: Option<AudioGapSummary> = None;
+    let mut repeated_frames: Option<RepeatedFrameSummary> = None;
+    let mut corroborated = Vec::new();
+    let mut similarity_only = Vec::new();
+    // Each window is analyzed on its own: freeze times and repeated-frame
+    // indices restart at the window's start, so they are corroborated per
+    // window before they are folded.
+    for window in sampled {
+        if !probe.audio.is_empty() {
+            let levels =
+                match analyze_audio_balance_in(ffmpeg_path, file_path, window, is_cancelled) {
+                    Ok(levels) => levels,
+                    Err(error) if error.contains(MAINTENANCE_CANCELLED) => return Err(error),
+                    Err(_) => Vec::new(),
+                };
+            one_sided_per_window.push(detect_one_sided_audio(&levels, thresholds.silence_db));
+            let gaps = detect_audio_gaps_in(
+                ffprobe_path,
+                file_path,
+                thresholds.audio_gap_tolerance_ms,
+                window,
+                is_cancelled,
+            )?;
+            audio_gaps = Some(match audio_gaps {
+                Some(total) => AudioGapSummary {
+                    count: total.count + gaps.count,
+                    max_gap_ms: total.max_gap_ms.max(gaps.max_gap_ms),
+                },
+                None => gaps,
+            });
+        }
+        if probe.video.is_some() {
+            let segments = detect_freezes_in(
+                ffmpeg_path,
+                file_path,
+                -60.0,
+                thresholds.min_freeze_seconds,
+                window,
+                is_cancelled,
+            )?;
+            let freezes = long_freezes(&segments, thresholds.min_freeze_seconds);
+            let repeats = detect_repeated_frames_in(
+                ffmpeg_path,
+                file_path,
+                thresholds.max_repeated_frame_run,
+                window,
+                is_cancelled,
+            )?;
+            let (window_corroborated, window_similarity_only) =
+                if expectations.pipeline_reported_freezes {
+                    (freezes, Vec::new())
+                } else {
+                    corroborated_freezes(&freezes, &repeats.burst_runs, container_fps)
+                };
+            corroborated.extend(window_corroborated);
+            similarity_only.extend(window_similarity_only);
+            repeated_frames = Some(match repeated_frames {
+                Some(mut total) => {
+                    total.max_run = total.max_run.max(repeats.max_run);
+                    total.bursts += repeats.bursts;
+                    total.burst_runs.extend(repeats.burst_runs);
+                    total
+                }
+                None => repeats,
+            });
+        }
+    }
+    let one_sided = if windows.is_some() {
+        sampled_one_sided_channel(&one_sided_per_window)
     } else {
-        corroborated_freezes(
-            &freezes,
-            repeated_frames
-                .as_ref()
-                .map(|summary| summary.burst_runs.as_slice())
-                .unwrap_or(&[]),
-            container_fps,
-        )
+        one_sided_per_window.into_iter().flatten().next()
     };
 
-    let report = combine_report(
+    let mut report = combine_report(
         base,
         one_sided,
         &corroborated,
@@ -1590,7 +1768,103 @@ pub fn analyze_recording_cancellable(
         audio_gaps,
         thresholds,
     );
+    report.sampled = windows.is_some();
     Ok((probe, report))
+}
+
+// --- Quick check for long recordings (plan 200 C8) ---
+
+/// Recordings longer than this get the sampled quick check after recording,
+/// not a full decode (which timed out at 900 s on 38-minute decodes).
+pub const QUICK_CHECK_MIN_DURATION_SECONDS: f64 = 20.0 * 60.0;
+/// The first and last windows of a quick check.
+const QUICK_CHECK_EDGE_SECONDS: f64 = 60.0;
+/// The evenly spaced middle windows of a quick check.
+const QUICK_CHECK_MIDDLE_SECONDS: f64 = 30.0;
+const QUICK_CHECK_MIDDLE_WINDOWS: usize = 4;
+
+/// One stretch of a file the analyzers read (`-ss`/`-t`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnalysisWindow {
+    pub start: f64,
+    pub duration: f64,
+}
+
+/// Input options that limit an FFmpeg read to one window.
+fn ffmpeg_window_input_args(window: Option<AnalysisWindow>) -> Vec<String> {
+    match window {
+        Some(window) => vec![
+            "-ss".to_string(),
+            format!("{:.3}", window.start),
+            "-t".to_string(),
+            format!("{:.3}", window.duration),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// Plan 200 C8: the windows a quick check reads, or `None` when the file is
+/// short enough (or of unknown length) for the full check. First 60 s, last
+/// 60 s, and four 30 s windows evenly spaced between them.
+pub fn quick_check_windows(duration_seconds: f64) -> Option<Vec<AnalysisWindow>> {
+    if !duration_seconds.is_finite() || duration_seconds <= QUICK_CHECK_MIN_DURATION_SECONDS {
+        return None;
+    }
+    let mut windows = vec![AnalysisWindow {
+        start: 0.0,
+        duration: QUICK_CHECK_EDGE_SECONDS,
+    }];
+    let middle_start = QUICK_CHECK_EDGE_SECONDS;
+    let middle_span = duration_seconds - 2.0 * QUICK_CHECK_EDGE_SECONDS;
+    for index in 1..=QUICK_CHECK_MIDDLE_WINDOWS {
+        let center =
+            middle_start + middle_span * index as f64 / (QUICK_CHECK_MIDDLE_WINDOWS + 1) as f64;
+        windows.push(AnalysisWindow {
+            start: center - QUICK_CHECK_MIDDLE_SECONDS / 2.0,
+            duration: QUICK_CHECK_MIDDLE_SECONDS,
+        });
+    }
+    windows.push(AnalysisWindow {
+        start: duration_seconds - QUICK_CHECK_EDGE_SECONDS,
+        duration: QUICK_CHECK_EDGE_SECONDS,
+    });
+    Some(windows)
+}
+
+/// The post-recording assessment: the full analysis for a short recording,
+/// the sampled quick check (report marked `sampled`) for a long one.
+pub fn assess_recording_after_capture_cancellable(
+    ffmpeg_path: &str,
+    ffprobe_path: &str,
+    file_path: &str,
+    thresholds: &QualityThresholds,
+    expectations: &QualityExpectations,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(MediaProbe, QualityReport), String> {
+    let probe = probe_media_cancellable(ffprobe_path, file_path, is_cancelled)?;
+    let windows = probe
+        .format_duration
+        .or_else(|| probe.video.as_ref().and_then(|video| video.duration))
+        .and_then(quick_check_windows);
+    analyze_probed_recording(
+        ffmpeg_path,
+        ffprobe_path,
+        file_path,
+        probe,
+        thresholds,
+        expectations,
+        windows.as_deref(),
+        is_cancelled,
+    )
+}
+
+/// Plan 200 C8: one channel is one-sided across a quick check when every
+/// window that heard a one-sided signal names the same channel. A window of
+/// silence names none and does not count against it.
+fn sampled_one_sided_channel(per_window: &[Option<usize>]) -> Option<usize> {
+    let mut named = per_window.iter().flatten();
+    let first = *named.next()?;
+    named.all(|channel| *channel == first).then_some(first)
 }
 
 /// One recording's assessment from a batch scan (no files are modified by scanning).
@@ -1662,6 +1936,71 @@ fn repair_temp_path(original: &Path) -> PathBuf {
     let mut temp = original.to_path_buf();
     temp.set_file_name(format!(".{stem}.videorc-repair.{ext}"));
     temp
+}
+
+/// Plan 200 C6: true only for the exact hidden name [`repair_temp_path`]
+/// writes, `.<stem>.videorc-repair.<ext>` with a video extension. Backups
+/// (`.videorc-backups/<name>`), MP4s, MKVs and `.partial` files never match.
+pub fn is_repair_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((stem, ext)) = rest.rsplit_once(".videorc-repair.") else {
+        return false;
+    };
+    !stem.is_empty()
+        && VIDEO_EXTENSIONS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(ext))
+}
+
+/// What a repair-temp sweep removed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RepairTempSweep {
+    pub removed: usize,
+    pub bytes: u64,
+    pub errors: Vec<String>,
+}
+
+/// Deletes leftover repair temps directly inside each folder (not in
+/// subfolders). Safe by construction: `safe_replace` keeps the original in
+/// place until the final rename, so a temp is never the only copy. Only
+/// regular files with the exact temp name are touched; symlinks never are.
+pub fn sweep_repair_temps(directories: &[PathBuf]) -> RepairTempSweep {
+    let mut sweep = RepairTempSweep::default();
+    let mut seen = std::collections::HashSet::new();
+    for directory in directories {
+        if !seen.insert(directory.clone()) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_repair_temp_name(name) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    sweep.removed += 1;
+                    sweep.bytes = sweep.bytes.saturating_add(metadata.len());
+                }
+                Err(error) => sweep.errors.push(format!("{}: {error}", path.display())),
+            }
+        }
+    }
+    sweep
 }
 
 /// Repairs one assessed recording, quality-gated: writes the repaired temp, re-analyzes
@@ -2001,7 +2340,12 @@ pub fn write_repair_reports(
 #[serde(tag = "status", rename_all = "kebab-case")]
 pub enum GateStatus {
     /// Passed every objective gate as-is.
-    Ready { path: String },
+    Ready {
+        path: String,
+        /// Plan 200 C8: a quick check of a long recording (sampled windows).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sampled: bool,
+    },
     /// Failed the gate but was repaired in place (backup kept) and now passes.
     Repaired { path: String, interpolated: bool },
     /// Could not be brought to 100%; the original visible file is kept, with reasons.
@@ -2012,6 +2356,10 @@ pub enum GateStatus {
         reasons: Vec<String>,
         #[serde(default)]
         needs_attention: bool,
+        /// Plan 200 C8: a quick check of a long recording (sampled windows).
+        /// It is reported, never repaired automatically.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sampled: bool,
     },
     /// The gate itself could not run (e.g. the file could not be probed).
     Failed { path: String, reason: String },
@@ -2065,7 +2413,10 @@ pub fn gate_recording_cancellable(
     };
 
     if report.verdict == QualityVerdict::Clean {
-        return GateStatus::Ready { path };
+        return GateStatus::Ready {
+            path,
+            sampled: false,
+        };
     }
 
     let encoder = probe_repair_encoder(ffmpeg_path);
@@ -2081,6 +2432,7 @@ pub fn gate_recording_cancellable(
             path,
             reasons,
             needs_attention: has_user_impacting_issue(&report.issues),
+            sampled: false,
         };
     };
 
@@ -2097,7 +2449,10 @@ pub fn gate_recording_cancellable(
         expectations,
         is_cancelled,
     ) {
-        RepairOutcome::AlreadyClean { path } => GateStatus::Ready { path },
+        RepairOutcome::AlreadyClean { path } => GateStatus::Ready {
+            path,
+            sampled: false,
+        },
         RepairOutcome::Repaired { path, interpolated } => {
             GateStatus::Repaired { path, interpolated }
         }
@@ -2108,6 +2463,7 @@ pub fn gate_recording_cancellable(
                 path,
                 reasons,
                 needs_attention: has_user_impacting_issue(&report.issues),
+                sampled: false,
             }
         }
         RepairOutcome::Failed { path, reason } => GateStatus::Failed { path, reason },
@@ -2504,6 +2860,7 @@ mod tests {
         let report = QualityReport {
             verdict: QualityVerdict::Repairable,
             issues: vec![QualityIssue::AvSkew { ms: 500.0 }],
+            sampled: false,
         };
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("\"verdict\":\"repairable\""));
@@ -2611,6 +2968,7 @@ mod tests {
         let base = QualityReport {
             verdict: QualityVerdict::Clean,
             issues: vec![],
+            sampled: false,
         };
         let freezes = [FreezeSegment {
             start: 0.5,
@@ -2635,6 +2993,7 @@ mod tests {
         let base = QualityReport {
             verdict: QualityVerdict::Clean,
             issues: vec![],
+            sampled: false,
         };
         let similarity_only = [FreezeSegment {
             start: 55.1,
@@ -2751,6 +3110,7 @@ mod tests {
         QualityReport {
             verdict: QualityVerdict::Repairable,
             issues,
+            sampled: false,
         }
     }
 
@@ -2843,6 +3203,7 @@ mod tests {
         let clean = QualityReport {
             verdict: QualityVerdict::Clean,
             issues: vec![],
+            sampled: false,
         };
         assert!(
             select_repair_plan(
@@ -2857,6 +3218,7 @@ mod tests {
         let missing = QualityReport {
             verdict: QualityVerdict::NeedsReview,
             issues: vec![QualityIssue::MissingVideo],
+            sampled: false,
         };
         assert!(
             select_repair_plan(
@@ -2874,6 +3236,7 @@ mod tests {
                 count: 1,
                 max_ms: 80.0,
             }],
+            sampled: false,
         };
         assert!(
             select_repair_plan(
@@ -2901,6 +3264,228 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-crf" && w[1] == "18"));
         assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "copy"));
         assert_eq!(args.last().unwrap(), "out.mp4");
+    }
+
+    fn repair_plan(video: VideoRepair, audio: AudioRepair) -> RepairPlan {
+        RepairPlan {
+            interpolated: video == VideoRepair::Interpolate,
+            video,
+            audio,
+            target_fps: 30.0,
+            video_encoder: RepairVideoEncoder::Libx264,
+        }
+    }
+
+    fn assert_repair_keeps_the_file_whole(args: &[String]) {
+        assert!(
+            args.windows(2).any(|w| w[0] == "-map" && w[1] == "0"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "-map" && w[1] == "-0:d"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-map_chapters" && w[1] == "0"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-movflags" && w[1] == "+faststart"),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|arg| arg == "-map_metadata"), "{args:?}");
+    }
+
+    #[test]
+    fn repair_args_for_copy_keep_streams_chapters_and_faststart() {
+        let args = build_repair_args(
+            "in.mp4",
+            ".in.videorc-repair.mp4",
+            &repair_plan(
+                VideoRepair::Copy,
+                AudioRepair::CenterChannel { source_channel: 1 },
+            ),
+        );
+        assert_repair_keeps_the_file_whole(&args);
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "copy"));
+        // A stream copy keeps the source's own colour tags.
+        assert!(!args.iter().any(|arg| arg == "-colorspace"));
+        assert!(args.windows(2).any(|w| w[0] == "-b:a" && w[1] == "256k"));
+        assert!(!args.iter().any(|arg| arg == "192k"));
+        assert_eq!(args.last().unwrap(), ".in.videorc-repair.mp4");
+
+        // MKV has no faststart.
+        let mkv = build_repair_args(
+            "in.mkv",
+            ".in.videorc-repair.mkv",
+            &repair_plan(VideoRepair::Copy, AudioRepair::Resync { offset_ms: 120.0 }),
+        );
+        assert!(!mkv.iter().any(|arg| arg == "-movflags"));
+        assert!(
+            mkv.windows(2)
+                .any(|w| w[0] == "-map_chapters" && w[1] == "0")
+        );
+    }
+
+    #[test]
+    fn repair_args_for_cfr_transcode_tag_bt709_and_keep_the_file_whole() {
+        let args = build_repair_args(
+            "in.mp4",
+            "out.MOV",
+            &repair_plan(VideoRepair::CfrTranscode, AudioRepair::Copy),
+        );
+        assert_repair_keeps_the_file_whole(&args);
+        assert!(args.windows(2).any(|w| w[0] == "-vf" && w[1] == "fps=30"));
+        for (flag, value) in [
+            ("-colorspace", "bt709"),
+            ("-color_primaries", "bt709"),
+            ("-color_trc", "bt709"),
+            ("-color_range", "tv"),
+        ] {
+            assert!(
+                args.windows(2).any(|w| w[0] == flag && w[1] == value),
+                "{flag}"
+            );
+        }
+        assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "copy"));
+    }
+
+    #[test]
+    fn repair_args_for_interpolation_tag_bt709_and_encode_aac_256k() {
+        let args = build_repair_args(
+            "in.mp4",
+            "out.mp4",
+            &repair_plan(
+                VideoRepair::Interpolate,
+                AudioRepair::CenterChannel { source_channel: 0 },
+            ),
+        );
+        assert_repair_keeps_the_file_whole(&args);
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("minterpolate=fps=30"))
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-color_range" && w[1] == "tv")
+        );
+        assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "aac"));
+        assert!(args.windows(2).any(|w| w[0] == "-b:a" && w[1] == "256k"));
+        // Inputs come before every output option.
+        let map_index = args.iter().position(|arg| arg == "-map").unwrap();
+        let input_index = args.iter().position(|arg| arg == "-i").unwrap();
+        assert!(input_index < map_index);
+    }
+
+    #[test]
+    fn quick_check_samples_six_windows_of_a_60_minute_recording() {
+        let windows = quick_check_windows(3600.0).unwrap();
+        assert_eq!(windows.len(), 6);
+        assert_eq!(
+            windows[0],
+            AnalysisWindow {
+                start: 0.0,
+                duration: 60.0
+            }
+        );
+        assert_eq!(
+            windows[5],
+            AnalysisWindow {
+                start: 3540.0,
+                duration: 60.0
+            }
+        );
+        // Four 30 s windows evenly spaced between the edges.
+        let middle: Vec<f64> = windows[1..5]
+            .iter()
+            .map(|window| {
+                assert_eq!(window.duration, 30.0);
+                window.start + window.duration / 2.0
+            })
+            .collect();
+        assert_eq!(middle, [756.0, 1452.0, 2148.0, 2844.0]);
+        for pair in windows.windows(2) {
+            assert!(
+                pair[0].start + pair[0].duration <= pair[1].start,
+                "{pair:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_check_starts_above_20_minutes() {
+        let windows = quick_check_windows(21.0 * 60.0).unwrap();
+        assert_eq!(windows.len(), 6);
+        assert_eq!(windows[5].start + windows[5].duration, 1260.0);
+        for pair in windows.windows(2) {
+            assert!(
+                pair[0].start + pair[0].duration <= pair[1].start,
+                "{pair:?}"
+            );
+        }
+        // Exactly 20 minutes, shorter, unknown: the full check.
+        assert_eq!(quick_check_windows(QUICK_CHECK_MIN_DURATION_SECONDS), None);
+        assert!(quick_check_windows(QUICK_CHECK_MIN_DURATION_SECONDS + 0.5).is_some());
+        assert_eq!(quick_check_windows(30.0), None);
+        assert_eq!(quick_check_windows(0.0), None);
+        assert_eq!(quick_check_windows(f64::NAN), None);
+        assert_eq!(quick_check_windows(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn quick_check_window_reads_with_ss_and_t() {
+        assert!(ffmpeg_window_input_args(None).is_empty());
+        assert_eq!(
+            ffmpeg_window_input_args(Some(AnalysisWindow {
+                start: 756.0,
+                duration: 30.0
+            })),
+            ["-ss", "756.000", "-t", "30.000"]
+        );
+    }
+
+    #[test]
+    fn quick_check_one_sided_audio_needs_agreeing_windows() {
+        assert_eq!(sampled_one_sided_channel(&[]), None);
+        assert_eq!(sampled_one_sided_channel(&[None, None]), None);
+        // Silent windows don't count against a one-sided channel.
+        assert_eq!(
+            sampled_one_sided_channel(&[Some(2), None, Some(2)]),
+            Some(2)
+        );
+        // Windows that disagree are not one-sided audio.
+        assert_eq!(sampled_one_sided_channel(&[Some(1), Some(2)]), None);
+    }
+
+    #[test]
+    fn sampled_gate_status_round_trips_and_old_rows_read_as_full() {
+        let sampled = GateStatus::NotHundredPercent {
+            path: "/m/a.mp4".to_string(),
+            reasons: vec!["bad".to_string()],
+            needs_attention: false,
+            sampled: true,
+        };
+        let json = serde_json::to_value(&sampled).unwrap();
+        assert_eq!(json["sampled"], true);
+        assert_eq!(serde_json::from_value::<GateStatus>(json).unwrap(), sampled);
+        let legacy: GateStatus =
+            serde_json::from_str(r#"{"status":"ready","path":"/m/a.mp4"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            GateStatus::Ready {
+                path: "/m/a.mp4".to_string(),
+                sampled: false
+            }
+        );
+        // A full check serializes exactly as before.
+        let full = serde_json::to_value(GateStatus::Ready {
+            path: "/m/a.mp4".to_string(),
+            sampled: false,
+        })
+        .unwrap();
+        assert!(full.get("sampled").is_none());
     }
 
     #[test]
@@ -3095,6 +3680,110 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_replace_rename_leaves_no_temp() {
+        let dir = scratch_dir("replace-rename-fails");
+        let original = dir.join("rec.mp4");
+        let temp = dir.join(".rec.videorc-repair.mp4");
+        fs::write(&original, b"ORIGINAL").unwrap();
+        fs::write(&temp, b"REPAIRED").unwrap();
+
+        let result = safe_replace_with(
+            &original,
+            &temp,
+            |_| Ok(()),
+            |_, _| Err(std::io::Error::other("injected rename failure")),
+        );
+        assert!(
+            matches!(&result, Err(SafeReplaceError::Io(reason)) if reason.contains("replace failed")),
+            "{result:?}"
+        );
+        assert!(!temp.exists(), "the temp is removed when the rename fails");
+        assert_eq!(fs::read(&original).unwrap(), b"ORIGINAL");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failing_backup_copy_leaves_no_temp() {
+        let dir = scratch_dir("replace-backup-fails");
+        // The original is gone, so the backup copy fails.
+        let original = dir.join("missing.mp4");
+        let temp = dir.join(".missing.videorc-repair.mp4");
+        fs::write(&temp, b"REPAIRED").unwrap();
+
+        let result = safe_replace(&original, &temp, |_| Ok(()));
+        assert!(
+            matches!(&result, Err(SafeReplaceError::Io(reason)) if reason.contains("backup failed")),
+            "{result:?}"
+        );
+        assert!(!temp.exists(), "the temp is removed when the backup fails");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_temp_names_match_exactly_what_a_repair_writes() {
+        for original in ["rec.mp4", "take 2.mkv", "a.b.mov", "clip.M4V"] {
+            let temp = repair_temp_path(Path::new(original));
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert!(is_repair_temp_name(name), "{name}");
+        }
+        for name in [
+            "rec.mp4",
+            "rec.mkv",
+            ".rec.mp4",
+            "rec.videorc-repair.mp4",
+            "..videorc-repair.mp4",
+            ".rec.videorc-repair.txt",
+            ".rec.videorc-repair.mp4.partial",
+            ".videorc-backups",
+            ".videorc-export-1234.partial",
+            "clip.mp4.partial",
+        ] {
+            assert!(!is_repair_temp_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_startup_sweep_deletes_only_repair_temps() {
+        let dir = scratch_dir("startup-sweep");
+        let temp = dir.join(".rec.videorc-repair.mp4");
+        let recording = dir.join("rec.mp4");
+        let mkv = dir.join("rec.mkv");
+        let backup = backup_path_for(&recording).unwrap();
+        let partial = dir.join("clip.mp4.partial");
+        let backup_named_like_a_temp = backup.with_file_name(".rec.videorc-repair.mp4");
+        fs::write(&temp, b"0123456789").unwrap();
+        fs::write(&recording, b"RECORDING").unwrap();
+        fs::write(&mkv, b"MKV").unwrap();
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::write(&backup, b"BACKUP").unwrap();
+        fs::write(&backup_named_like_a_temp, b"IN BACKUPS").unwrap();
+        fs::write(&partial, b"PARTIAL").unwrap();
+        // A folder with the temp name is never removed.
+        let folder_named_like_a_temp = dir.join(".dir.videorc-repair.mkv");
+        fs::create_dir(&folder_named_like_a_temp).unwrap();
+
+        let sweep = sweep_repair_temps(&[dir.clone(), dir.clone()]);
+        assert_eq!(sweep.removed, 1);
+        assert_eq!(sweep.bytes, 10);
+        assert!(sweep.errors.is_empty(), "{:?}", sweep.errors);
+        assert!(!temp.exists());
+        for kept in [
+            &recording,
+            &mkv,
+            &backup,
+            &backup_named_like_a_temp,
+            &partial,
+            &folder_named_like_a_temp,
+        ] {
+            assert!(kept.exists(), "{} must be kept", kept.display());
+        }
+        // A missing folder is skipped.
+        let missing = sweep_repair_temps(&[dir.join("missing")]);
+        assert_eq!(missing, RepairTempSweep::default());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn restore_brings_back_the_original() {
         let dir = scratch_dir("restore");
         let original = dir.join("rec.mp4");
@@ -3123,6 +3812,7 @@ mod tests {
         let base = QualityReport {
             verdict: QualityVerdict::Clean,
             issues: vec![],
+            sampled: false,
         };
         let freezes = [FreezeSegment {
             start: 5.0,
@@ -3149,6 +3839,7 @@ mod tests {
         let base = QualityReport {
             verdict: QualityVerdict::Clean,
             issues: vec![],
+            sampled: false,
         };
         let report = combine_report(base, None, &[], &[], None, None, &thresholds());
         assert_eq!(report.verdict, QualityVerdict::Clean);
@@ -3160,6 +3851,7 @@ mod tests {
         let base = QualityReport {
             verdict: QualityVerdict::Clean,
             issues: vec![],
+            sampled: false,
         };
         let report = combine_report(
             base,
@@ -3342,7 +4034,11 @@ mod tests {
     ) -> RecordingAssessment {
         RecordingAssessment {
             path: path.to_string(),
-            report: QualityReport { verdict, issues },
+            report: QualityReport {
+                verdict,
+                issues,
+                sampled: false,
+            },
             plan: None,
         }
     }

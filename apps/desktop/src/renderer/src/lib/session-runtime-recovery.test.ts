@@ -414,6 +414,30 @@ describe('session audio news (plan 076)', () => {
     expect(second.id).toBe(first.id)
   })
 
+  it('says once per take that the separate files stopped so the main recording keeps up', () => {
+    // Plan 200 D1: the still-recording separate files stop together; one
+    // toast, never one per file, and the copy names no roles.
+    const event = healthEvent('separate-source-recordings-shed')
+    expect(showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })).toBe(
+      null
+    )
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Separate files stopped so the main recording keeps up',
+      expect.objectContaining({
+        description:
+          'Your Mac fell behind encoding the separate files. The separate files keep what they recorded, and your Combined recording keeps going.',
+        action: expect.objectContaining({ label: 'Open Health' })
+      })
+    )
+    const [, first] = toastSpies.warning.mock.calls[0] as [string, { id: string }]
+    showSessionHealthEvent(event, false, { sessionId: 'live', state: 'recording' })
+    const [, second] = toastSpies.warning.mock.calls[1] as [string, { id: string }]
+    expect(second.id).toBe(first.id)
+    // The raw backend sentence never reaches the toast.
+    expect(JSON.stringify(toastSpies.warning.mock.calls)).not.toContain(event.message)
+    expect(JSON.stringify(toastSpies.warning.mock.calls)).not.toMatch(/three|Screen|Camera/)
+  })
+
   it('reports a stopped screen capture by severity, and its return', () => {
     showSessionHealthEvent(healthEvent('screen-capture-stopped'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(

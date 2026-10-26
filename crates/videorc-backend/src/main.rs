@@ -43,6 +43,7 @@ mod compositor_synthetic;
 mod devices;
 mod diagnostics;
 mod discord_announce;
+mod disk_space;
 mod echo_guard;
 mod editor_chrome;
 mod encoder_bridge;
@@ -726,8 +727,15 @@ async fn run_backend() -> Result<()> {
         }
     }
     tokio::spawn(resume_pending_oauth_completions(state.clone()));
-    // Resume interrupted repair jobs through the idle-only maintenance queue.
-    tokio::spawn(resume_pending_repair_jobs(state.clone()));
+    // Resume interrupted repair jobs through the idle-only maintenance queue,
+    // after the leftover repair temps are swept (plan 200 C6).
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            repair_service::sweep_leftover_repair_temps(&state).await;
+            resume_pending_repair_jobs(state).await;
+        }
+    });
     noise_cleanup::resume_interrupted(&state);
     clean_cut::resume_interrupted(&state);
     recording::resume_pending_recording_finalizations(&state);
@@ -739,6 +747,9 @@ async fn run_backend() -> Result<()> {
 
 async fn prepare_capture_finalization_for_process_shutdown(state: &AppState) -> Result<()> {
     state.request_process_shutdown();
+    // Plan 200 C6: a running repair or quality check is cancelled (its
+    // FFmpeg killed, its temp removed) instead of outliving the backend.
+    state.ffmpeg_work.cancel_maintenance_for_shutdown();
     // A start which reached admission before the latch either fails its final
     // pre-publication check or finishes publishing every process owner before
     // this guard is acquired. Recovery and native source-transition waits use
@@ -807,7 +818,24 @@ where
     )
 }
 
+/// A cancelled repair polls its FFmpeg every 50 ms; this only bounds a wedge.
+const PROCESS_SHUTDOWN_MAINTENANCE_JOIN: Duration = Duration::from_secs(5);
+
 async fn cleanup_process_owners_after_finalization(state: AppState) {
+    // Quit and quit-and-update wait for the cancelled repair to exit.
+    state.ffmpeg_work.cancel_maintenance_for_shutdown();
+    if tokio::time::timeout(
+        PROCESS_SHUTDOWN_MAINTENANCE_JOIN,
+        state.ffmpeg_work.wait_for_maintenance_workers(),
+    )
+    .await
+    .is_err()
+    {
+        state.emit_log(
+            "warn",
+            "A cancelled recording repair did not exit within the shutdown grace.",
+        );
+    }
     if let Some(path) = crate::remote_control::discovery_path(state.database.path()) {
         crate::remote_control::remove_discovery(&path);
     }

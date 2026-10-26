@@ -7,9 +7,11 @@ import {
   normalizeSceneVisual,
   resolveSavedBackground,
   sameSceneVisual,
+  galleryPresetIsActive,
   sceneGalleryReason,
   sceneNameError,
   sceneSourceGaps,
+  orientationSwitchPreset,
   sceneSourceProblems,
   sceneSourcesTurnedOff,
   snapshotBackground,
@@ -397,6 +399,55 @@ describe('scene gallery reason line (plan 174 S3.3, B-20)', () => {
     expect(sceneSourcesTurnedOff(neverChosen, [cam])).toEqual({ screen: false, camera: false })
     expect(sceneSourcesTurnedOff(visual(), [])).toEqual({ screen: false, camera: false })
     expect(sceneSourceOffBlockedReason({ screen: false, camera: false })).toBeNull()
+  })
+
+  it('marks no preset card active while the layout is Freeform (retest 150)', () => {
+    const layout = { layoutPreset: 'camera-only' as const, arrangementMode: 'preset' as const }
+    expect(galleryPresetIsActive(layout, 'camera-only', null)).toBe(true)
+    expect(galleryPresetIsActive(layout, 'screen-only', null)).toBe(false)
+    // Freeform keeps the last preset's name underneath: no card is on air.
+    expect(
+      galleryPresetIsActive({ ...layout, arrangementMode: 'freeform' }, 'camera-only', null)
+    ).toBe(false)
+    // A saved scene applied: the saved row is the active one.
+    expect(galleryPresetIsActive(layout, 'camera-only', 'saved-1')).toBe(false)
+  })
+
+  it('a scene refused for a source turned off says so, not "unavailable" (retest 150)', () => {
+    const noScreen = visual()
+    noScreen.layout.layoutPreset = 'screen-camera'
+    noScreen.sources.screenId = undefined
+    noScreen.sources.captureOff = true
+    expect(sceneSourceProblems(noScreen, [cam])).toEqual([
+      'No screen is chosen. Choose one in Sources to use this scene.'
+    ])
+    const noCamera = visual()
+    noCamera.layout.layoutPreset = 'camera-only'
+    noCamera.sources.cameraId = undefined
+    expect(sceneSourceProblems(noCamera, [screen])).toEqual([
+      'Camera is off. Turn it on in Sources to use this scene.'
+    ])
+  })
+
+  it('an orientation switch lands on a scene the sources can show (retest 150)', () => {
+    const vertical = [
+      'vertical-camera-top',
+      'vertical-screen-only',
+      'vertical-camera-only'
+    ] as const
+    const cameraOnly = (preset: string) => preset === 'vertical-camera-only'
+    // Screen None: the remembered screen scene would be refused.
+    expect(orientationSwitchPreset('vertical-camera-top', vertical, cameraOnly)).toBe(
+      'vertical-camera-only'
+    )
+    // The remembered scene wins whenever it works.
+    expect(orientationSwitchPreset('vertical-camera-top', vertical, () => true)).toBe(
+      'vertical-camera-top'
+    )
+    // Nothing works: keep the remembered one, its refusal says why.
+    expect(orientationSwitchPreset('vertical-camera-top', vertical, () => false)).toBe(
+      'vertical-camera-top'
+    )
   })
 
   it('never says a camera turned off is unavailable', () => {

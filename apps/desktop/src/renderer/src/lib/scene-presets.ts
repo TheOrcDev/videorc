@@ -332,12 +332,49 @@ export function sceneSourcesTurnedOff(
   }
 }
 
-export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
-  return sceneSourceGaps(visual, devices).map(({ source }) =>
-    source === 'camera'
-      ? 'Camera unavailable. Choose a replacement in Sources.'
-      : 'Screen or window unavailable. Choose a replacement in Sources.'
+/**
+ * Whether a Studio gallery card is the scene on air: its preset, with no saved
+ * scene applied and the layout not in Freeform (Freeform keeps the last
+ * preset's name underneath, but arranges sources its own way; the Scene page
+ * already shows Freeform as the choice).
+ */
+export function galleryPresetIsActive(
+  layout: Pick<SceneVisual['layout'], 'layoutPreset' | 'arrangementMode'>,
+  presetId: string,
+  activeSavedSceneId: string | null | undefined
+): boolean {
+  return (
+    !activeSavedSceneId && layout.arrangementMode !== 'freeform' && layout.layoutPreset === presetId
   )
+}
+
+export function sceneSourceProblems(visual: SceneVisual, devices: readonly Device[]): string[] {
+  // A source turned off on purpose (Screen None, Camera Off) is not
+  // "unavailable", and there is nothing to replace (retest 150).
+  return sceneSourceGaps(visual, devices).map(({ source, state }) =>
+    source === 'camera'
+      ? state === 'off'
+        ? 'Camera is off. Turn it on in Sources to use this scene.'
+        : 'Camera unavailable. Choose a replacement in Sources.'
+      : state === 'off'
+        ? 'No screen is chosen. Choose one in Sources to use this scene.'
+        : 'Screen or window unavailable. Choose a replacement in Sources.'
+  )
+}
+
+/**
+ * Where a Studio orientation switch lands (retest 150): the scene last used in
+ * that orientation when the current sources can show it, otherwise the first
+ * of that orientation's scenes they can (Screen None lands on Camera only),
+ * otherwise the remembered one, whose refusal then says what is missing.
+ */
+export function orientationSwitchPreset<P extends string>(
+  remembered: P,
+  candidates: readonly P[],
+  usable: (preset: P) => boolean
+): P {
+  if (usable(remembered)) return remembered
+  return candidates.find(usable) ?? remembered
 }
 
 const SCENE_LIST = new Intl.ListFormat('en-US', { style: 'long', type: 'conjunction' })

@@ -967,6 +967,12 @@ pub fn build_ffmpeg_args(
         input.display().to_string(),
         "-map".to_string(),
         "0".to_string(),
+        // Plan 200 C3: Videorc MP4s carry a `tmcd` timecode track and a
+        // chapter `text` track. Copying those data streams fails the MP4
+        // header; the muxer rebuilds both from the video's timecode tag and
+        // the chapters, which still copy.
+        "-map".to_string(),
+        "-0:d".to_string(),
         "-map_metadata".to_string(),
         "0".to_string(),
         "-c".to_string(),
@@ -1678,6 +1684,8 @@ mod tests {
         assert!(mp4.windows(2).any(|pair| pair == ["-b:a", "192k"]));
         assert!(mp4.windows(2).any(|pair| pair == ["-af", SPEECH_V1_FILTER]));
         assert!(mp4.windows(2).any(|pair| pair == ["-progress", "pipe:1"]));
+        // Plan 200 C3: data tracks (timecode, chapter text) are not copied.
+        assert!(mp4.windows(2).any(|pair| pair == ["-map", "-0:d"]));
         assert!(
             !mp4.iter()
                 .any(|arg| arg == "-vf" || arg == "-filter_complex")

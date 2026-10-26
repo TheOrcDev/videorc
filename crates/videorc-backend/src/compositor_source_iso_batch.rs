@@ -1,9 +1,13 @@
 //! Bounded, leased snapshots for the three local outputs of an ISO take.
 //! Compositor publication never waits for readers. Readers latch a completed
 //! compositor tick by CFR index; a slow reader cannot pin unbounded history.
+//!
+//! Plan 200 D1: Combined is never the output that fails. When any member
+//! falls behind, the Screen and Camera members shed first (each ends at its
+//! own last latched tick) and Combined continues alone.
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::{CompositorFrameExportHandle, CompositorPixelFormat};
 use crate::frame_store::FrameHandle;
@@ -14,6 +18,18 @@ pub(crate) const SCREEN: usize = 1;
 pub(crate) const CAMERA: usize = 2;
 const MEMBERS: usize = 3;
 const INDEXED_BATCHES: u64 = 2;
+/// The separate files, which shed before Combined (plan 200 D1).
+const SEPARATE_MEMBERS: [usize; 2] = [SCREEN, CAMERA];
+pub(crate) const FELL_BEHIND: &str = "ISO output fell behind the bounded completed-frame history";
+pub(crate) const LEFT_BATCH: &str = "ISO output left the completed-frame batch";
+
+/// The content-clock instant a shed role's file ends at: the end of its
+/// `frames`-th CFR frame from the take's epoch. Integer nanoseconds, so the
+/// writer's terminal check (`ceil(elapsed * fps)`) lands on `frames` exactly.
+pub(crate) fn source_iso_frame_boundary(epoch: Instant, fps: u32, frames: u64) -> Instant {
+    let nanos = u128::from(frames) * 1_000_000_000 / u128::from(fps.max(1));
+    epoch + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
 
 pub(crate) struct SourceIsoLeasedFrame {
     pub frame: Handle,
@@ -68,6 +84,55 @@ struct BatchState {
     latest: Option<SourceIsoCompletedBatch>,
     indexed: VecDeque<(u64, SourceIsoCompletedBatch)>,
     highest_index: Option<u64>,
+    /// The highest CFR index each member latched (plan 200 D1).
+    last_index: [Option<u64>; MEMBERS],
+    /// Frames a shed member's file keeps: its last latched index plus one.
+    shed_frames: [Option<u64>; MEMBERS],
+    /// The take's one shed notice has been claimed.
+    shed_reported: bool,
+}
+
+impl BatchState {
+    /// Plan 200 D1: retire every still-active separate member at its own last
+    /// latched tick and rebase the history on Combined, which continues alone
+    /// (or as the only member left). Leases move into `retired` so the caller
+    /// drops them outside the lock. False when no separate member was active.
+    fn shed_separate_members(&mut self, retired: &mut Vec<Arc<SourceIsoLeasedFrame>>) -> bool {
+        let mut shed = false;
+        for role in SEPARATE_MEMBERS {
+            if self.membership.active[role] {
+                self.membership.active[role] = false;
+                self.shed_frames[role] = Some(self.last_index[role].map_or(0, |index| index + 1));
+                shed = true;
+            }
+        }
+        if !shed {
+            return false;
+        }
+        self.membership.generation += 1;
+        let generation = self.membership.generation;
+        if let Some(batch) = self.latest.as_mut() {
+            for role in SEPARATE_MEMBERS {
+                retired.extend(batch.frames[role].take());
+            }
+            batch.generation = generation;
+        }
+        // Older latched ticks were fixed for the slowest member; Combined's
+        // later indices read the newest completed tick instead of an older
+        // latched one, so its content never steps backwards.
+        retired.extend(
+            self.indexed
+                .drain(..)
+                .flat_map(|(_, batch)| batch.frames.into_iter().flatten()),
+        );
+        self.highest_index = self.last_index[COMBINED];
+        true
+    }
+
+    fn behind(&self, index: u64) -> bool {
+        self.highest_index
+            .is_some_and(|highest| index < highest.saturating_sub(INDEXED_BATCHES - 1))
+    }
 }
 
 #[derive(Debug)]
@@ -86,6 +151,9 @@ impl Default for SourceIsoBatchStore {
                 latest: None,
                 indexed: VecDeque::new(),
                 highest_index: None,
+                last_index: [None; MEMBERS],
+                shed_frames: [None; MEMBERS],
+                shed_reported: false,
             }),
         }
     }
@@ -147,19 +215,34 @@ impl SourceIsoBatchStore {
         eligible: impl FnOnce([Option<SourceIsoFrameTiming>; MEMBERS]) -> bool,
     ) -> Result<Option<Arc<SourceIsoLeasedFrame>>, &'static str> {
         let mut retired = Vec::new();
+        // Declared before the guard so shed leases drop after it unlocks.
+        let mut shed_leases = Vec::new();
         let selected = {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if !state.membership.active[role] {
-                return Err("ISO output left the completed-frame batch");
+                return Err(LEFT_BATCH);
             }
-            if state
-                .highest_index
-                .is_some_and(|highest| index < highest.saturating_sub(INDEXED_BATCHES - 1))
+            if state.behind(index) {
+                // Plan 200 D1: the separate files shed first. A lagging
+                // separate member ends here; a lagging Combined continues on
+                // the rebased history. Only a Combined with no separate
+                // member left to shed reports the lag.
+                if !state.shed_separate_members(&mut shed_leases) {
+                    return Err(FELL_BEHIND);
+                }
+                if role != COMBINED {
+                    return Err(LEFT_BATCH);
+                }
+            }
+            if let Some(selected) = state
+                .indexed
+                .iter()
+                .find(|(at, _)| *at == index)
+                .map(|(_, batch)| batch.frames[role].clone())
             {
-                return Err("ISO output fell behind the bounded completed-frame history");
-            }
-            if let Some((_, batch)) = state.indexed.iter().find(|(at, _)| *at == index) {
-                return Ok(batch.frames[role].clone());
+                state.last_index[role] =
+                    Some(state.last_index[role].map_or(index, |at| at.max(index)));
+                return Ok(selected);
             }
             let Some(candidate) = state.latest.as_ref() else {
                 return Ok(None);
@@ -185,6 +268,7 @@ impl SourceIsoBatchStore {
                 .highest_index
                 .map_or(index, |previous| previous.max(index));
             state.highest_index = Some(highest);
+            state.last_index[role] = Some(state.last_index[role].map_or(index, |at| at.max(index)));
             state.indexed.push_back((index, candidate));
             let floor = highest.saturating_sub(INDEXED_BATCHES - 1);
             let mut position = 0;
@@ -198,7 +282,39 @@ impl SourceIsoBatchStore {
             selected
         };
         drop(retired);
+        drop(shed_leases);
         Ok(selected)
+    }
+
+    /// Plan 200 D1: an encoder fell behind real time (the bridge's lag
+    /// trigger). Shed the separate files so Combined keeps up. True when this
+    /// call shed at least one member.
+    pub fn shed_separate_files(&self) -> bool {
+        let mut retired = Vec::new();
+        let shed = self
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .shed_separate_members(&mut retired);
+        drop(retired);
+        shed
+    }
+
+    /// Frames a shed member's file keeps, or `None` while it records (or
+    /// when it left the batch any other way).
+    pub fn shed_frames(&self, role: usize) -> Option<u64> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .shed_frames[role]
+    }
+
+    /// The take's one shed notice: true for exactly one caller after a shed.
+    pub fn claim_shed_report(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let claim = !state.shed_reported && state.shed_frames.iter().any(Option::is_some);
+        state.shed_reported |= claim;
+        claim
     }
 
     /// Membership is terminal for this take: re-adding a source does not
@@ -302,12 +418,8 @@ mod tests {
             store.publish(store.membership(), index + 10, frames(index + 10, at));
             store.select(index, COMBINED, |_| true).unwrap();
         }
-        assert!(
-            store
-                .select(1, CAMERA, |_| true)
-                .unwrap_err()
-                .contains("bounded")
-        );
+        // A member that falls behind this history sheds the separate files
+        // (plan 200 D1, covered below); here every member keeps up.
         assert_eq!(store.state.lock().unwrap().indexed.len(), 2);
         let stale_membership = store.membership();
         assert!(store.retire(CAMERA, Some(at)).is_some());
@@ -344,6 +456,141 @@ mod tests {
                 .all(|(_, batch)| batch.frames.iter().all(Option::is_none))
         );
     }
+    /// Screen and Camera latch indices 0..=3 while Combined stays at 0.
+    fn separate_files_ahead_of_combined(store: &SourceIsoBatchStore, at: Instant) {
+        for index in 0..4 {
+            assert!(store.publish(store.membership(), index + 10, frames(index + 10, at)));
+            if index == 0 {
+                store.select(0, COMBINED, |_| true).unwrap();
+            }
+            store.select(index, SCREEN, |_| true).unwrap();
+            store.select(index, CAMERA, |_| true).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_lagging_combined_sheds_the_separate_files_and_keeps_recording() {
+        let store = SourceIsoBatchStore::default();
+        let at = Instant::now();
+        separate_files_ahead_of_combined(&store, at);
+        assert!(!store.claim_shed_report(), "nothing shed yet");
+        // Index 1 is past the two-tick history the separate files fixed.
+        // Before plan 200 this was Combined's terminal error.
+        let combined = store
+            .select(1, COMBINED, |_| true)
+            .expect("Combined never fails while separate files can shed")
+            .expect("the newest completed tick");
+        assert_eq!(combined.frame.sequence, 13);
+        assert_eq!(store.membership().active, [true, false, false]);
+        // Each separate file ends at its own last latched tick.
+        assert_eq!(store.shed_frames(SCREEN), Some(4));
+        assert_eq!(store.shed_frames(CAMERA), Some(4));
+        assert_eq!(store.shed_frames(COMBINED), None);
+        assert_eq!(store.select(4, SCREEN, |_| true).unwrap_err(), LEFT_BATCH);
+        assert_eq!(store.select(4, CAMERA, |_| true).unwrap_err(), LEFT_BATCH);
+        // No separate lease outlives the shed.
+        {
+            let state = store.state.lock().unwrap();
+            assert!(state.indexed.iter().all(|(_, batch)| {
+                batch.frames[SCREEN].is_none() && batch.frames[CAMERA].is_none()
+            }));
+            let latest = state.latest.as_ref().unwrap();
+            assert!(latest.frames[SCREEN].is_none() && latest.frames[CAMERA].is_none());
+        }
+        // Combined continues alone on the rebased history.
+        let mut alone = frames(14, at);
+        alone[SCREEN] = None;
+        alone[CAMERA] = None;
+        assert!(store.publish(store.membership(), 14, alone));
+        for index in 2..6 {
+            let frame = store.select(index, COMBINED, |_| true).unwrap().unwrap();
+            assert_eq!(frame.frame.sequence, 14);
+        }
+        // One notice per take.
+        assert!(store.claim_shed_report());
+        assert!(!store.claim_shed_report());
+        assert!(!store.shed_separate_files(), "nothing left to shed");
+    }
+
+    #[test]
+    fn a_lagging_separate_file_sheds_both_and_combined_never_sees_the_lag() {
+        let store = SourceIsoBatchStore::default();
+        let at = Instant::now();
+        for index in 0..4 {
+            assert!(store.publish(store.membership(), index + 10, frames(index + 10, at)));
+            store.select(index, COMBINED, |_| true).unwrap();
+            store.select(index, CAMERA, |_| true).unwrap();
+            if index == 0 {
+                store.select(0, SCREEN, |_| true).unwrap();
+            }
+        }
+        assert_eq!(store.select(1, SCREEN, |_| true).unwrap_err(), LEFT_BATCH);
+        assert_eq!(store.shed_frames(SCREEN), Some(1));
+        assert_eq!(store.shed_frames(CAMERA), Some(4));
+        let mut alone = frames(14, at);
+        alone[SCREEN] = None;
+        alone[CAMERA] = None;
+        assert!(store.publish(store.membership(), 14, alone));
+        assert_eq!(
+            store
+                .select(4, COMBINED, |_| true)
+                .unwrap()
+                .unwrap()
+                .frame
+                .sequence,
+            14
+        );
+    }
+
+    #[test]
+    fn the_lag_trigger_sheds_once_and_a_retired_member_is_not_shed() {
+        let store = SourceIsoBatchStore::default();
+        let at = Instant::now();
+        assert!(store.publish(store.membership(), 10, frames(10, at)));
+        for role in [COMBINED, SCREEN, CAMERA] {
+            store.select(0, role, |_| true).unwrap();
+        }
+        // A source removal retires Camera first; it never reads as shed.
+        store.retire(CAMERA, Some(at));
+        assert!(store.shed_separate_files());
+        assert_eq!(store.shed_frames(SCREEN), Some(1));
+        assert_eq!(store.shed_frames(CAMERA), None);
+        assert!(!store.shed_separate_files());
+        assert!(store.claim_shed_report());
+    }
+
+    #[test]
+    fn combined_alone_still_reports_its_lag() {
+        let store = SourceIsoBatchStore::default();
+        let at = Instant::now();
+        store.retire(SCREEN, None);
+        store.retire(CAMERA, None);
+        let mut alone = frames(10, at);
+        alone[SCREEN] = None;
+        alone[CAMERA] = None;
+        assert!(store.publish(store.membership(), 10, alone));
+        store.select(5, COMBINED, |_| true).unwrap();
+        assert_eq!(
+            store.select(2, COMBINED, |_| true).unwrap_err(),
+            FELL_BEHIND
+        );
+        assert!(!store.claim_shed_report());
+    }
+
+    #[test]
+    fn a_shed_boundary_lands_on_its_frame_count() {
+        let epoch = Instant::now();
+        for fps in [24_u32, 30, 60] {
+            for frames in [0_u64, 1, 29, 30, 1_234, 107_999] {
+                let boundary = source_iso_frame_boundary(epoch, fps, frames);
+                // The writer's terminal check: ceil(elapsed * fps).
+                let covered = (boundary.duration_since(epoch).as_nanos() * u128::from(fps))
+                    .div_ceil(1_000_000_000);
+                assert_eq!(covered, u128::from(frames), "{frames} frames at {fps} fps");
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn source_iso_completed_batch_native_leases_hold_at_ring_cap_and_resume() {

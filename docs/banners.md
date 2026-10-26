@@ -17,6 +17,11 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
 - **Place** on the Scene page: drag or resize a banner on the canvas (its
   shape stays the image's), or use the snaps in its inspector (Top left, Top
   center, Top right, Bottom left, Bottom center, Bottom right, Full frame).
+  A press anywhere on a banner's picture grabs it, except a banner that
+  fills the canvas (a frame), which is picked by its label or its toolbar
+  chip so the sources under it stay reachable. A drag snaps to the canvas,
+  the sources and the other banners (never to the highlight, captions or
+  Buddy zones); Alt drags without snapping.
   The inspector says how big the banner is drawn on your largest output and
   warns when your image is too small to stay sharp there ("it will look soft
   at this size. Use one at least 2304 × 384 px."). With a vertical

@@ -67,6 +67,31 @@ describe('performanceCheckCeiling', () => {
       ceilingFps: 30
     })
   })
+
+  it('tells the check when the next take also writes the separate files', () => {
+    // Plan 200 D4: only when on, so an ordinary check sends what it always sent.
+    expect(
+      performanceCheckCeiling(videoPresets['record-4k30'], { width: 1920, height: 1080 }, true)
+    ).toEqual({
+      ceilingWidth: 3840,
+      ceilingHeight: 2160,
+      ceilingFps: 30,
+      separateSourceRecordings: true
+    })
+    expect(
+      performanceCheckCeiling(videoPresets['tutorial-1080p30'], { width: 5120, height: 2880 }, true)
+    ).toEqual({
+      ceilingWidth: 3840,
+      ceilingHeight: 2160,
+      ceilingFps: 30,
+      separateSourceRecordings: true
+    })
+    expect(performanceCheckCeiling(videoPresets['tutorial-1080p30'], undefined, false)).toEqual({
+      ceilingWidth: 1920,
+      ceilingHeight: 1080,
+      ceilingFps: 30
+    })
+  })
 })
 
 describe('outputVerdict', () => {

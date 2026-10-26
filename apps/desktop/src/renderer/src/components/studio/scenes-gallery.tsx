@@ -1,4 +1,10 @@
-import { sceneGalleryReason, sceneSourceGaps, visualSources } from '@/lib/scene-presets'
+import {
+  galleryPresetIsActive,
+  orientationSwitchPreset,
+  sceneGalleryReason,
+  sceneSourceGaps,
+  visualSources
+} from '@/lib/scene-presets'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { DisplayIcon, MobileIcon } from '@/components/icons'
 import { lazy, Suspense, type ReactElement } from 'react'
@@ -104,7 +110,23 @@ export function ScenesGallery(): ReactElement {
     if (target === mode) {
       return
     }
-    applyCameraPreset({ layoutPreset: studioModeTogglePreset(target, captureConfig) })
+    const targetScenes = target === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
+    const usable = (layoutPreset: LayoutPreset): boolean =>
+      sceneSourceGaps(
+        {
+          layout: { ...captureConfig.layout, layoutPreset, arrangementMode: 'preset' },
+          sources: visualSources(captureConfig.sources),
+          background: null
+        },
+        deviceList.devices
+      ).length === 0
+    applyCameraPreset({
+      layoutPreset: orientationSwitchPreset(
+        studioModeTogglePreset(target, captureConfig),
+        targetScenes.map((scene) => scene.id),
+        usable
+      )
+    })
   }
 
   return (
@@ -146,7 +168,7 @@ export function ScenesGallery(): ReactElement {
     >
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
         {cards.map(({ preset, gaps }) => {
-          const active = !activeSavedSceneId && activePreset === preset.id
+          const active = galleryPresetIsActive(captureConfig.layout, preset.id, activeSavedSceneId)
           const shortcut = settings.globalShortcuts?.layouts?.[preset.id]
           return (
             <SceneCard

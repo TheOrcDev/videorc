@@ -565,14 +565,18 @@ pub struct CompositorStartParams {
     pub buddy_overlay_on_aux: bool,
 }
 
-/// Plan 157: the separate-source (ISO) legs. Both legs render at ONE raster
-/// (the recording profile canvas, fit/contain) and publish into their own
-/// frame stores, which the Screen/Camera encoder bridges read. Neither leg
-/// carries captions, highlight cards, backgrounds or scene geometry.
+/// Plan 157: the separate-source (ISO) legs. The Screen leg renders at the
+/// recording profile canvas (fit/contain); the Camera leg at the camera's own
+/// size fitted inside that canvas (plan 200 D2), or the canvas when the
+/// camera's format was unknown at arm time. Each publishes into its own frame
+/// store, which the Screen/Camera encoder bridges read. Neither leg carries
+/// captions, highlight cards, backgrounds or scene geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompositorSourceIsoOutput {
     pub width: u32,
     pub height: u32,
+    pub camera_width: u32,
+    pub camera_height: u32,
     pub frame_consumer: CompositorFrameConsumer,
 }
 
@@ -581,6 +585,9 @@ pub struct CompositorSourceIsoOutput {
 pub struct CompositorSourceIsoFrameStores {
     pub screen: CompositorFrameStore,
     pub camera: CompositorFrameStore,
+    /// The Camera leg's raster, fixed at arm time (plan 200 D2). The Camera
+    /// encoder reads it from here, so it always matches what the leg draws.
+    pub camera_size: (u32, u32),
     pub(crate) batches: Arc<source_iso_batch::SourceIsoBatchStore>,
 }
 
@@ -3089,10 +3096,11 @@ async fn start_synthetic_compositor_with_lifecycle(
     let source_iso_frame_stores =
         params
             .source_iso_output
-            .map(|_| CompositorSourceIsoFrameStores {
+            .map(|output| CompositorSourceIsoFrameStores {
                 batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
                 screen: Arc::new(StdMutex::new(FrameStore::new(2))),
                 camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+                camera_size: (output.camera_width, output.camera_height),
             });
     let render_dimensions = Arc::new(AtomicU64::new(pack_render_dimensions(
         status.width,
@@ -3979,6 +3987,7 @@ pub(crate) async fn test_install_source_iso_frame_stores(
     let stores = CompositorSourceIsoFrameStores {
         screen: Arc::new(StdMutex::new(FrameStore::new(2))),
         camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+        camera_size: (64, 36),
         batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
     };
     state.compositor.lock().await.source_iso_frame_stores = Some(stores.clone());
@@ -5489,13 +5498,15 @@ async fn run_synthetic_compositor_loop(
     // built once and reused per frame. Held across the loop's awaits (it is Send).
     // Preview-owned compositors minify the scene into a small canvas; smooth
     // (linear) sampling there kills the crawling-grain aliasing of a nearest
-    // minification. Recording/stream compositors keep nearest for exact crops.
+    // minification. Recording/stream compositors keep nearest for 1:1 draws
+    // (exact crops) and read scaled draws linear (plan 200 D3).
     let smooth_preview_scaling =
         matches!(frame_consumer, CompositorFrameConsumer::NativePreview) && stream_output.is_none();
     let mut gpu_compositor = new_gpu_compositor(smooth_preview_scaling);
     let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor(false));
     // Plan 157: one GPU compositor per ISO leg; nearest sampling like the
-    // recording leg so a 1:1 screen stays pixel-exact.
+    // recording leg so a 1:1 screen stays pixel-exact (scaled draws read
+    // linear, plan 200 D3).
     let mut iso_screen_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
     let mut iso_camera_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
     // Plan 190: the primary leg's live background renderer, `None` until a
@@ -9018,6 +9029,20 @@ async fn publish_compositor_frame(
             iso_stores.screen.clone(),
             iso_stores.camera.clone(),
         ];
+        // Plan 200 D2: the Camera leg at the camera's own size fills it
+        // exactly (no bars from rounding to even). A camera whose format
+        // changed mid-take keeps the arm-time size and fits, as before.
+        let iso_camera_snapshot = iso_camera_snapshot.map(|mut leg| {
+            if let Some((frame, _)) = camera_frame.as_ref()
+                && source_iso_camera_fills(
+                    (frame.width, frame.height),
+                    (iso_output.camera_width, iso_output.camera_height),
+                )
+            {
+                leg.layout.camera_fit = crate::protocol::CameraFit::Fill;
+            }
+            leg
+        });
         // Screen leg: the Screen/Window source alone (image stand-ins apply,
         // they are screen-like). Camera leg: the camera alone. A committed
         // source removal is handled by the role supervisor; never publish
@@ -9028,12 +9053,14 @@ async fn publish_compositor_frame(
                 store: iso_stores.screen,
                 gpu: iso_screen_gpu,
                 image_source: active_image_source.as_ref(),
+                size: (iso_output.width, iso_output.height),
             },
             SourceIsoLeg {
                 snapshot: iso_camera_snapshot.as_ref(),
                 store: iso_stores.camera,
                 gpu: iso_camera_gpu,
                 image_source: None,
+                size: (iso_output.camera_width, iso_output.camera_height),
             },
         ];
         for (
@@ -9043,12 +9070,14 @@ async fn publish_compositor_frame(
                 store,
                 gpu,
                 image_source,
+                size: (leg_width, leg_height),
             },
         ) in legs.into_iter().enumerate()
         {
-            #[cfg(not(test))]
-            let _ = leg_index;
-            if leg_snapshot.is_none() {
+            // A leg whose file ended (shed under encoder pressure, its source
+            // removed, or Stop) no longer renders: after a shed the GPU work
+            // goes back to the Combined recording (plan 200 D1).
+            if leg_snapshot.is_none() || !membership.active[leg_index + 1] {
                 continue;
             }
             let leg_camera_frame = camera_frame
@@ -9078,8 +9107,8 @@ async fn publish_compositor_frame(
             );
             let inputs = CompositorRenderInputs {
                 sequence,
-                width: iso_output.width.max(1),
-                height: iso_output.height.max(1),
+                width: leg_width.max(1),
+                height: leg_height.max(1),
                 snapshot: leg_snapshot,
                 active_image_source: image_source,
                 background_image_source: None,
@@ -9752,6 +9781,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                linear: false,
             },
         )
     {
@@ -9811,6 +9841,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            linear: false,
                         },
                     )
                 } else if let Some(frame) = screen_frame {
@@ -9832,6 +9863,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            linear: false,
                         },
                     )
                 } else {
@@ -9862,6 +9894,9 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: snapshot.layout.camera_mirror,
                             mask: camera_mask(&snapshot.layout),
                             chroma_key: camera_chroma_key(&snapshot.layout),
+                            // Plan 200 D3: a scaled camera reads bilinear (CPU agrees
+                            // with the Metal linear sampler in kind).
+                            linear: true,
                         },
                     )
                 }),
@@ -9907,6 +9942,7 @@ fn render_unavailable_source_rect(
             mirror_x: false,
             mask,
             chroma_key: None,
+            linear: false,
         },
     );
 }
@@ -10130,6 +10166,12 @@ struct SourceRenderOptions {
     /// Camera chroma key from the shared spec; keyed pixels blend fractionally
     /// into the frame instead of overwriting (mirrors the Metal shader keyer).
     chroma_key: Option<ChromaKeySpec>,
+    /// Plan 200 D3: a scaled draw reads bilinear, like the Metal compositor's
+    /// linear sampler for scaled draws; a 1:1 draw stays point-sampled. Only
+    /// the camera asks for it: the CPU compositor is the production path on
+    /// Windows and Linux, and a full-frame bilinear screen would spend the
+    /// per-pixel budget Linux plan 0014 won back (see `map_source_axis`).
+    linear: bool,
 }
 
 struct RgbaSource<'a> {
@@ -10268,6 +10310,7 @@ fn render_scene_background(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            linear: false,
         },
     )
 }
@@ -10344,6 +10387,7 @@ fn render_synthetic_source_rect(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            linear: false,
         },
     );
 }
@@ -10650,6 +10694,17 @@ fn blit_rgba_to_yuv420p(
         );
         return true;
     }
+    if options.linear && cpu_fit_is_scaled(&fit) {
+        blit_linear_rgba_to_yuv420p(
+            source,
+            dest,
+            (canvas_width, canvas_height),
+            &fit,
+            options,
+            (draw_left, draw_top, draw_right, draw_bottom),
+        );
+        return true;
+    }
 
     // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
     // None means the pixel keys fully out. Without a spec every pixel is the
@@ -10766,6 +10821,245 @@ fn blit_rgba_to_yuv420p(
         },
     );
     true
+}
+
+/// Plan 200 D3: the share a drawn size may differ from its source crop and
+/// still count as 1:1. Mirrors `metal_compositor::SCALED_DRAW_TOLERANCE`.
+const CPU_SCALED_DRAW_TOLERANCE: f64 = 0.005;
+
+/// Plan 200 D3: does a fitted CPU draw resample its source? Same rule as the
+/// Metal compositor's `gpu_draw_is_scaled`.
+fn cpu_fit_is_scaled(fit: &SourceFit) -> bool {
+    if fit.source_width <= 0.0 || fit.source_height <= 0.0 || fit.width == 0 || fit.height == 0 {
+        return false;
+    }
+    (f64::from(fit.width) / fit.source_width - 1.0).abs() > CPU_SCALED_DRAW_TOLERANCE
+        || (f64::from(fit.height) / fit.source_height - 1.0).abs() > CPU_SCALED_DRAW_TOLERANCE
+}
+
+/// One axis of a bilinear sample: the two neighbouring source texels and the
+/// weight of the second, in 1/256ths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinearTap {
+    first: u32,
+    second: u32,
+    weight: u16,
+}
+
+/// One axis of bilinear source mapping (plan 200 D3), the GPU sampler's
+/// rule: the destination pixel's centre maps into the source, the sample
+/// stays half a texel inside the crop (the Metal crop clamp), so a scaled
+/// draw never blends in pixels the crop removed. Mirroring flips both taps
+/// across the source, exactly as `map_source_column` flips its one texel.
+fn linear_source_tap(
+    dest: u32,
+    fit_origin: u32,
+    fit_extent: u32,
+    source_origin: f64,
+    source_extent: f64,
+    source_len: u32,
+    mirror: bool,
+) -> Option<LinearTap> {
+    if dest < fit_origin || fit_extent == 0 || source_len == 0 {
+        return None;
+    }
+    let local = f64::from(dest - fit_origin);
+    if local >= f64::from(fit_extent) {
+        return None;
+    }
+    let last = f64::from(source_len - 1);
+    let centre = source_origin + (local + 0.5) * source_extent / f64::from(fit_extent) - 0.5;
+    let low = source_origin.clamp(0.0, last);
+    let high = (source_origin + source_extent - 1.0).clamp(0.0, last);
+    let position = if high >= low {
+        centre.clamp(low, high)
+    } else {
+        (low + high) / 2.0
+    };
+    let base = position.floor();
+    let weight = ((position - base) * 256.0).round() as u16;
+    let first = base as u32;
+    let second = (first + 1).min(source_len - 1);
+    Some(if mirror {
+        LinearTap {
+            first: source_len - 1 - first,
+            second: source_len - 1 - second,
+            weight,
+        }
+    } else {
+        LinearTap {
+            first,
+            second,
+            weight,
+        }
+    })
+}
+
+fn read_source_rgba_linear(
+    source: &RgbaSource<'_>,
+    column: LinearTap,
+    row: LinearTap,
+) -> (u8, u8, u8, u8) {
+    let top_left = read_source_rgba(source, column.first, row.first);
+    let top_right = read_source_rgba(source, column.second, row.first);
+    let bottom_left = read_source_rgba(source, column.first, row.second);
+    let bottom_right = read_source_rgba(source, column.second, row.second);
+    let (wx, wy) = (u32::from(column.weight), u32::from(row.weight));
+    let channel = |tl: u8, tr: u8, bl: u8, br: u8| -> u8 {
+        let top = u32::from(tl) * (256 - wx) + u32::from(tr) * wx;
+        let bottom = u32::from(bl) * (256 - wx) + u32::from(br) * wx;
+        ((top * (256 - wy) + bottom * wy + (1 << 15)) >> 16) as u8
+    };
+    (
+        channel(top_left.0, top_right.0, bottom_left.0, bottom_right.0),
+        channel(top_left.1, top_right.1, bottom_left.1, bottom_right.1),
+        channel(top_left.2, top_right.2, bottom_left.2, bottom_right.2),
+        channel(top_left.3, top_right.3, bottom_left.3, bottom_right.3),
+    )
+}
+
+/// The bilinear twin of `blit_rgba_to_yuv420p`'s general path (plan 200 D3):
+/// the same fit, mask, chroma key, alpha threshold and plane layout, with
+/// every sample read bilinear instead of from one texel.
+fn blit_linear_rgba_to_yuv420p(
+    source: &RgbaSource<'_>,
+    dest: &mut [u8],
+    (canvas_width, canvas_height): (usize, usize),
+    fit: &SourceFit,
+    options: SourceRenderOptions,
+    (draw_left, draw_top, draw_right, draw_bottom): (usize, usize, usize, usize),
+) {
+    let y_len = canvas_width * canvas_height;
+    let uv_width = canvas_width.div_ceil(2);
+    let uv_height = canvas_height.div_ceil(2);
+    let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
+        let Some(spec) = options.chroma_key.as_ref() else {
+            return Some((r, g, b, 255));
+        };
+        let key_alpha = chroma_key_alpha(spec, r, g, b);
+        if key_alpha == 0 {
+            return None;
+        }
+        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        Some((r, g, b, key_alpha))
+    };
+    let uv_left = draw_left / 2;
+    let uv_top = draw_top / 2;
+    let uv_right = draw_right.div_ceil(2).min(uv_width);
+    let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+    let masked = options.mask != SceneMask::None;
+    let mask_tester = source_mask_tester(options.mask, fit);
+    let column_tap = |dest_x: usize| {
+        linear_source_tap(
+            dest_x as u32,
+            fit.x,
+            fit.width,
+            fit.source_x,
+            fit.source_width,
+            source.width,
+            options.mirror_x,
+        )
+    };
+    let row_tap = |dest_y: usize| {
+        linear_source_tap(
+            dest_y as u32,
+            fit.y,
+            fit.height,
+            fit.source_y,
+            fit.source_height,
+            source.height,
+            false,
+        )
+    };
+    let luma_columns = (draw_left..draw_right.max(draw_left))
+        .map(column_tap)
+        .collect::<Vec<_>>();
+    let chroma_columns = (uv_left..uv_right.max(uv_left))
+        .map(|uv_x| column_tap((uv_x * 2).min(draw_right.saturating_sub(1))))
+        .collect::<Vec<_>>();
+    let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
+    let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
+    rayon::join(
+        || {
+            y_plane[draw_top * canvas_width..draw_bottom * canvas_width]
+                .par_chunks_mut(canvas_width)
+                .enumerate()
+                .for_each(|(relative_y, row)| {
+                    let dest_y = draw_top + relative_y;
+                    let Some(source_row) = row_tap(dest_y) else {
+                        return;
+                    };
+                    for (column, (dest_x, output)) in row
+                        .iter_mut()
+                        .enumerate()
+                        .take(draw_right)
+                        .skip(draw_left)
+                        .enumerate()
+                    {
+                        if masked && !mask_tester.allows(dest_x, dest_y) {
+                            continue;
+                        }
+                        let Some(source_column) = luma_columns[column] else {
+                            continue;
+                        };
+                        let (r, g, b, a) =
+                            read_source_rgba_linear(source, source_column, source_row);
+                        if a < 16 {
+                            continue;
+                        }
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                            continue;
+                        };
+                        let y_value = rgb_to_y(r, g, b);
+                        *output = if key_alpha == 255 {
+                            y_value
+                        } else {
+                            alpha_blend_channel(y_value, *output, u16::from(key_alpha))
+                        };
+                    }
+                });
+        },
+        || {
+            u_plane[uv_top * uv_width..uv_bottom * uv_width]
+                .par_chunks_mut(uv_width)
+                .zip(v_plane[uv_top * uv_width..uv_bottom * uv_width].par_chunks_mut(uv_width))
+                .enumerate()
+                .for_each(|(relative_y, (u_row, v_row))| {
+                    let uv_y = uv_top + relative_y;
+                    let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
+                    let Some(source_row) = row_tap(dest_y) else {
+                        return;
+                    };
+                    for (column, uv_x) in (uv_left..uv_right).enumerate() {
+                        let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
+                        if masked && !mask_tester.allows(dest_x, dest_y) {
+                            continue;
+                        }
+                        let Some(source_column) = chroma_columns[column] else {
+                            continue;
+                        };
+                        let (r, g, b, a) =
+                            read_source_rgba_linear(source, source_column, source_row);
+                        if a < 16 {
+                            continue;
+                        }
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                            continue;
+                        };
+                        let (u_value, v_value) = rgb_to_uv(r, g, b);
+                        if key_alpha == 255 {
+                            u_row[uv_x] = u_value;
+                            v_row[uv_x] = v_value;
+                        } else {
+                            u_row[uv_x] =
+                                alpha_blend_channel(u_value, u_row[uv_x], u16::from(key_alpha));
+                            v_row[uv_x] =
+                                alpha_blend_channel(v_value, v_row[uv_x], u16::from(key_alpha));
+                        }
+                    }
+                });
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11276,6 +11570,22 @@ struct SourceIsoLeg<'a> {
     store: CompositorFrameStore,
     gpu: Option<&'a mut GpuCompositor>,
     image_source: Option<&'a CompositorImageSource>,
+    /// The leg's raster: the canvas for Screen, the arm-time camera size for
+    /// Camera (plan 200 D2).
+    size: (u32, u32),
+}
+
+/// Plan 200 D2: the Camera leg fills its raster when the camera's aspect is
+/// within 1% of it (the arm-time format, rounded to even). Beyond that the
+/// format changed mid-take, and the leg fits it with bars instead of
+/// cropping the picture.
+fn source_iso_camera_fills(camera: (u32, u32), leg: (u32, u32)) -> bool {
+    if camera.0 == 0 || camera.1 == 0 || leg.0 == 0 || leg.1 == 0 {
+        return false;
+    }
+    let camera_aspect = f64::from(camera.0) / f64::from(camera.1);
+    let leg_aspect = f64::from(leg.0) / f64::from(leg.1);
+    (camera_aspect / leg_aspect - 1.0).abs() <= 0.01
 }
 
 /// Plan 157: which single source an ISO leg isolates.
@@ -11674,6 +11984,7 @@ mod tests {
             let stores = CompositorSourceIsoFrameStores {
                 screen: Arc::new(StdMutex::new(FrameStore::new(2))),
                 camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+                camera_size: (64, 36),
                 batches: Arc::new(source_iso_batch::SourceIsoBatchStore::default()),
             };
             let mut cache = CompositorRenderCache {
@@ -12329,11 +12640,181 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                linear: false,
             },
         ));
 
         let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
         assert!(bytes[..8].iter().all(|&value| value == blue_y));
+    }
+
+    fn checker_bgra(side: u32) -> Vec<u8> {
+        let mut bgra = Vec::with_capacity((side * side * 4) as usize);
+        for y in 0..side {
+            for x in 0..side {
+                let value = if (x + y) % 2 == 0 { 255 } else { 0 };
+                bgra.extend([value, value, value, 255]);
+            }
+        }
+        bgra
+    }
+
+    fn camera_blit(source: &[u8], side: u32, out: u32, crop: SceneCrop, linear: bool) -> Vec<u8> {
+        let mut bytes = vec![0; raw_yuv420p_len(out, out)];
+        fill_yuv420p(&mut bytes, out, out, 16, 128, 128);
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: source,
+                width: side,
+                height: side,
+                format: SourcePixelFormat::Bgra,
+            },
+            &mut bytes,
+            out,
+            out,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: out,
+                height: out,
+            },
+            SourceRenderOptions {
+                crop,
+                pan: (0.0, 0.0),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: None,
+                linear,
+            },
+        ));
+        bytes
+    }
+
+    #[test]
+    fn linear_source_tap_samples_pixel_centres_inside_the_crop() {
+        // 4:1 minification: dest 0's centre lands between texels 1 and 2.
+        assert_eq!(
+            linear_source_tap(0, 0, 8, 0.0, 32.0, 32, false),
+            Some(LinearTap {
+                first: 1,
+                second: 2,
+                weight: 128
+            })
+        );
+        // 2:1 upscale: dest 0's centre clamps to texel 0, dest 1 is a quarter in.
+        assert_eq!(
+            linear_source_tap(0, 0, 4, 0.0, 2.0, 2, false),
+            Some(LinearTap {
+                first: 0,
+                second: 1,
+                weight: 0
+            })
+        );
+        assert_eq!(
+            linear_source_tap(1, 0, 4, 0.0, 2.0, 2, false),
+            Some(LinearTap {
+                first: 0,
+                second: 1,
+                weight: 64
+            })
+        );
+        // A crop of the left half never reads the right half.
+        let last = linear_source_tap(3, 0, 4, 0.0, 2.0, 4, false).unwrap();
+        assert_eq!((last.first, last.weight), (1, 0));
+        // Mirroring flips both taps across the source.
+        assert_eq!(
+            linear_source_tap(0, 0, 8, 0.0, 32.0, 32, true),
+            Some(LinearTap {
+                first: 30,
+                second: 29,
+                weight: 128
+            })
+        );
+        assert_eq!(linear_source_tap(8, 0, 8, 0.0, 32.0, 32, false), None);
+    }
+
+    #[test]
+    fn cpu_scaled_camera_reads_bilinear_and_1_to_1_stays_point_sampled() {
+        // Plan 200 D3, the CPU half: a 1-pixel checker minified 4:1. Point
+        // sampling aliases it to one parity; bilinear reads an even grey.
+        let checker = checker_bgra(32);
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let (black_y, _, _) = rgb_to_yuv(0, 0, 0);
+        let grey_y = (u16::from(white_y) + u16::from(black_y)) / 2;
+        let nearest = camera_blit(&checker, 32, 8, SceneCrop::none(), false);
+        assert!(
+            nearest[..64]
+                .iter()
+                .all(|&luma| luma == white_y || luma == black_y),
+            "point sampling picks whole texels"
+        );
+        let linear = camera_blit(&checker, 32, 8, SceneCrop::none(), true);
+        for (index, &luma) in linear[..64].iter().enumerate() {
+            assert!(
+                u16::from(luma).abs_diff(grey_y) <= 2,
+                "bilinear minification at {index} is grey: {luma} (expected ~{grey_y})"
+            );
+        }
+        // 1:1 is not a scaled draw: byte-identical to the point-sampled path.
+        assert_eq!(
+            camera_blit(&checker, 32, 32, SceneCrop::none(), true),
+            camera_blit(&checker, 32, 32, SceneCrop::none(), false)
+        );
+    }
+
+    #[test]
+    fn cpu_bilinear_camera_never_blends_in_a_cropped_edge() {
+        // Left half red, right half blue; the crop keeps the red half and
+        // scales it 2:1. The last column is red, as on the Metal crop clamp.
+        let mut source = Vec::new();
+        for _row in 0..4 {
+            for column in 0..4 {
+                source.extend(if column < 2 {
+                    [0, 0, 255, 255]
+                } else {
+                    [255, 0, 0, 255]
+                });
+            }
+        }
+        let bytes = camera_blit(
+            &source,
+            4,
+            4,
+            SceneCrop {
+                left: 0.0,
+                top: 0.0,
+                right: 0.5,
+                bottom: 0.0,
+            },
+            true,
+        );
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        assert!(
+            bytes[..16].iter().all(|&luma| luma == red_y),
+            "{:?}",
+            &bytes[..16]
+        );
+    }
+
+    #[test]
+    fn source_iso_camera_leg_fills_its_own_format_and_fits_a_changed_one() {
+        // Plan 200 D2: the arm-time format (rounded to even) fills, no bars.
+        assert!(source_iso_camera_fills((1920, 1080), (1920, 1080)));
+        assert!(source_iso_camera_fills((1080, 1920), (606, 1080)));
+        assert!(source_iso_camera_fills((1279, 719), (1278, 718)));
+        // A camera that switched to 4:3 mid-take fits its 16:9 leg with bars.
+        assert!(!source_iso_camera_fills((1440, 1080), (1920, 1080)));
+        assert!(!source_iso_camera_fills((0, 0), (1920, 1080)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_share_one_scaled_draw_rule() {
+        assert_eq!(
+            CPU_SCALED_DRAW_TOLERANCE,
+            crate::metal_compositor::SCALED_DRAW_TOLERANCE
+        );
     }
 
     #[test]
@@ -12369,6 +12850,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                linear: false,
             },
         ));
 
@@ -12500,6 +12982,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(chroma_key_test_spec()),
+                linear: false,
             },
         ));
         let (blue_y, blue_u, blue_v) = rgb_to_yuv(0, 0, 255);
@@ -12559,6 +13042,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(spec),
+                linear: false,
             },
         ));
 
