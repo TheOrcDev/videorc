@@ -17978,10 +17978,14 @@ async fn probe_windows_native_encoded_bridge_uncached(
         BlockingProbeOutcome::Finished(Ok(probe)) => probe,
         BlockingProbeOutcome::Finished(Err(error)) => {
             let reason = format!("{error:#}");
-            if let Ok(mut cache) = rejections.lock() {
-                cache.insert(rejection_key, reason.clone(), Instant::now());
+            // A GPU with every encoder session taken can encode this profile
+            // once one frees up; remembering it would downgrade it for a week.
+            if !crate::windows_mf_rejections::is_encoder_session_exhaustion(&reason) {
+                if let Ok(mut cache) = rejections.lock() {
+                    cache.insert(rejection_key, reason.clone(), Instant::now());
+                }
+                remember_mf_rejection(remembered_key, graphics_adapter_driver_identity, &reason);
             }
-            remember_mf_rejection(remembered_key, graphics_adapter_driver_identity, &reason);
             return Err(error);
         }
         BlockingProbeOutcome::Panicked(error) => {

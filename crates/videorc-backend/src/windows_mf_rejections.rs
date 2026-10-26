@@ -134,6 +134,16 @@ impl StoredRejections {
     }
 }
 
+/// `MF_E_UNSUPPORTED_D3D_TYPE` from `SetOutputType` is how the NVIDIA H.264
+/// MFT says every GPU encoder session is taken (the consumer driver caps
+/// concurrent NVENC sessions; another app, or this one's retired encoders,
+/// can hold them). It says nothing about the profile, so it is never
+/// remembered as a rejection and earns a retry once sessions are freed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn is_encoder_session_exhaustion(failure: &str) -> bool {
+    failure.contains("set-output-type HRESULT=0xC00D6D76")
+}
+
 fn expired(rejected_at: &str, now: DateTime<Utc>) -> bool {
     let Ok(at) = DateTime::parse_from_rfc3339(rejected_at) else {
         return true;
@@ -225,6 +235,22 @@ mod tests {
         assert_eq!(new_app.app_version, "0.9.152");
         let none = StoredRejections::adopt(None, "driver-a", "0.9.151", at(2));
         assert_eq!(none, StoredRejections::empty("driver-a", "0.9.151"));
+    }
+
+    #[test]
+    fn encoder_session_exhaustion_is_recognized_at_either_output_type_stage() {
+        assert!(is_encoder_session_exhaustion(
+            "Media Foundation hardware H.264 probe rejected every activation for 640x360@30 2000kbps: Media Foundation probe stage=set-output-type HRESULT=0xC00D6D76 encoder=\"NVIDIA H.264 Encoder MFT\" input=<unset> profile=640x360@30 2000kbps"
+        ));
+        assert!(is_encoder_session_exhaustion(
+            "Media Foundation probe stage=d3d11-set-output-type HRESULT=0xC00D6D76 (the encoder refused a new session) encoder=\"NVIDIA H.264 Encoder MFT\""
+        ));
+        assert!(!is_encoder_session_exhaustion(
+            "Media Foundation probe stage=set-input-type HRESULT=0xC00D6D76 encoder=\"NVIDIA H.264 Encoder MFT\""
+        ));
+        assert!(!is_encoder_session_exhaustion(
+            "Media Foundation probe stage=process-output HRESULT=0x8000FFFF encoder=\"Intel Quick Sync Video H.264 Encoder MFT\""
+        ));
     }
 
     #[test]
