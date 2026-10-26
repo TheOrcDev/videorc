@@ -50,8 +50,7 @@ pub const HEALTH_ROLE_FAILED: &str = "separate-source-recordings-role-failed";
 /// Plan 200 D1: the separate files stopped so Combined keeps up. One event
 /// per take (the Studio's one toast); each file keeps what it recorded.
 pub const HEALTH_SHED: &str = "separate-source-recordings-shed";
-const HEALTH_SHED_MESSAGE: &str =
-    "Separate files stopped so the main recording keeps up. Each file keeps what it recorded.";
+const HEALTH_SHED_MESSAGE: &str = "Separate files stopped so the main recording keeps up. The separate files keep what they recorded.";
 
 /// Why a role ended before Stop without failing: its file closes cleanly at
 /// the boundary, publishes and exports like a full take.

@@ -340,14 +340,14 @@ export function showSeparateFileFailed(
 }
 
 /**
- * Plan 200 D1: under encoder pressure the Screen and Camera files stop first
- * so the Combined recording keeps up. One toast per take, not one per file:
- * both files stop together, and each keeps what it recorded.
+ * Plan 200 D1: under encoder pressure the separate files stop first so the
+ * Combined recording keeps up. One toast per take, not one per file. The copy
+ * names no roles: a file whose source was removed earlier is not shed.
  */
 export const SEPARATE_FILES_SHED_TOAST = {
   title: 'Separate files stopped so the main recording keeps up',
   description:
-    'Your Mac fell behind encoding three files at once. The Screen and Camera files keep what they recorded, and your Combined recording keeps going.'
+    'Your Mac fell behind encoding the separate files. The separate files keep what they recorded, and your Combined recording keeps going.'
 } as const
 
 export function showSeparateFilesShed(event: HealthEvent): void {
