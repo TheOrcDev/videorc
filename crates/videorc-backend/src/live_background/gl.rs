@@ -485,6 +485,20 @@ const EGL_DRM_RENDER_NODE_FILE_EXT: i32 = 0x3377;
 type QueryDevices = unsafe extern "C" fn(i32, *mut *mut c_void, *mut i32) -> u32;
 type QueryDeviceString = unsafe extern "C" fn(*mut c_void, i32) -> *const c_char;
 
+/// The EGL config the surfaceless GLES 3.0 context asks for. `SURFACE_TYPE`
+/// must be named: its default is `EGL_WINDOW_BIT`, and a device-platform
+/// display (no window system) has no window configs, so Mesa answered no
+/// config at all and every live background fell back to its poster
+/// (retest 150 on Intel i915). Every pass renders into an FBO, so any
+/// surface type will do.
+const GLES3_CONFIG_ATTRIBUTES: [khronos_egl::Int; 5] = [
+    khronos_egl::RENDERABLE_TYPE,
+    khronos_egl::OPENGL_ES3_BIT,
+    khronos_egl::SURFACE_TYPE,
+    0,
+    khronos_egl::NONE,
+];
+
 /// One surfaceless GLES 3.0 context on one render node.
 struct GlesContext {
     egl: Egl,
@@ -512,14 +526,7 @@ impl GlesContext {
             egl.bind_api(khronos_egl::OPENGL_ES_API)
                 .map_err(|error| no_gpu(format!("eglBindAPI: {error}")))?;
             let config = egl
-                .choose_first_config(
-                    display,
-                    &[
-                        khronos_egl::RENDERABLE_TYPE,
-                        khronos_egl::OPENGL_ES3_BIT,
-                        khronos_egl::NONE,
-                    ],
-                )
+                .choose_first_config(display, &GLES3_CONFIG_ATTRIBUTES)
                 .map_err(|error| no_gpu(format!("eglChooseConfig: {error}")))?
                 .ok_or_else(|| no_gpu("no GLES 3 EGL config".to_string()))?;
             let context = egl
@@ -1529,6 +1536,19 @@ unsafe fn link_program(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_config_never_asks_for_a_window_surface() {
+        // EGL's default SURFACE_TYPE is WINDOW_BIT; a device-platform display
+        // has none, so leaving it out matched no config (retest 150).
+        let attributes = super::GLES3_CONFIG_ATTRIBUTES;
+        let surface = attributes
+            .chunks(2)
+            .find(|pair| pair[0] == khronos_egl::SURFACE_TYPE)
+            .map(|pair| pair[1]);
+        assert_eq!(surface, Some(0));
+        assert_eq!(attributes.last(), Some(&khronos_egl::NONE));
+    }
+
     use super::*;
 
     fn candidate(name: &str) -> RenderNodeCandidate {

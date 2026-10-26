@@ -16,11 +16,21 @@ export const sameStageRect = (a: StageRect, b: StageRect): boolean =>
   (['x', 'y', 'width', 'height'] as const).every((key) => Math.abs(a[key] - b[key]) < 0.000001)
 
 type Magnet = { target: number; edge: number }
+/** A magnet catches the box this close to its snapped position (CSS px)... */
+const SNAP_ACQUIRE_PX = 5
+/** ...and lets go once the pointer pulls it this far away. */
+const SNAP_RELEASE_PX = 9
 /** Per-axis magnet ownership. Breaking away/releasing Alt rebases the grab offset. */
 class SnapAxis {
   private magnet: Magnet | null = null
   private offset = 0
-  private released: Magnet | null = null
+  /** Where the box was when its magnet let go. Every snapped position within
+   * the release distance of it counts as that same magnet until the box is
+   * out of their reach: a second target beside the first would otherwise
+   * catch the box the moment the first let go, and the two would trade it
+   * back and forth while the pointer moved on (a banner sitting centred,
+   * its right edge a few pixels from another item's left edge, never moved). */
+  private releasedAt: number | null = null
   private enabled: boolean
   private last: number
   constructor(position: number, enabled: boolean) {
@@ -36,34 +46,37 @@ class SnapAxis {
   ): { position: number; target?: number } {
     if (enabled !== this.enabled) {
       this.offset = this.last - raw
-      this.released = this.magnet
+      this.releasedAt = this.magnet ? this.last : null
       this.magnet = null
       this.enabled = enabled
     }
     let position = raw + this.offset
     if (enabled && this.magnet) {
       const fixed = this.magnet.target - this.magnet.edge * size
-      if (Math.abs(position - fixed) * pixels <= 9)
+      if (Math.abs(position - fixed) * pixels <= SNAP_RELEASE_PX)
         return { position: (this.last = fixed), target: this.magnet.target }
       // Absorb the release distance rather than jumping by the magnet radius.
       this.offset = this.last - raw
       position = this.last
-      this.released = this.magnet
+      this.releasedAt = this.last
       this.magnet = null
       return { position }
     }
     if (enabled) {
       if (
-        this.released &&
-        Math.abs(position + this.released.edge * size - this.released.target) * pixels > 9
+        this.releasedAt !== null &&
+        Math.abs(position - this.releasedAt) * pixels > SNAP_RELEASE_PX + SNAP_ACQUIRE_PX
       )
-        this.released = null
+        this.releasedAt = null
+      const releasedAt = this.releasedAt
       let best: { target: number; edge: number; distance: number } | null = null
       for (const target of targets)
         for (const edge of [0, 0.5, 1]) {
-          if (this.released?.target === target && this.released.edge === edge) continue
-          const distance = Math.abs(position + edge * size - target) * pixels
-          if (distance <= 5 && (!best || distance < best.distance))
+          const snapped = target - edge * size
+          if (releasedAt !== null && Math.abs(snapped - releasedAt) * pixels <= SNAP_RELEASE_PX)
+            continue
+          const distance = Math.abs(position - snapped) * pixels
+          if (distance <= SNAP_ACQUIRE_PX && (!best || distance < best.distance))
             best = { target, edge, distance }
         }
       if (best) {

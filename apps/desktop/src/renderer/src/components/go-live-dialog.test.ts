@@ -7,22 +7,34 @@ import { videoPresets } from '@/lib/capture'
 import { GoLiveCaptionsStatus, GoLiveCommentsStatus, GoLiveOutputAdvice } from './go-live-dialog'
 
 describe('Go Live comments status', () => {
-  it('states that native X comments attach after publish and stay read-only', () => {
+  it('shows ready X chat as ready to read and send', () => {
     const markup = renderToStaticMarkup(
       createElement(GoLiveCommentsStatus, {
-        read: 'waiting-for-broadcast-context',
-        write: 'read-only',
-        message:
-          'X comments attach after the native broadcast is published; X live chat is receive-only.'
+        read: 'ready',
+        write: 'ready',
+        message: 'X chat is ready to read and send.'
       })
     )
 
     expect(markup).toContain('aria-label="Chat read and send status"')
+    expect(markup).toMatch(/>Read<\/span><span[^>]*>Ready</)
+    expect(markup).toMatch(/>Send<\/span><span[^>]*>Ready</)
+    expect(markup).toContain('X chat is ready to read and send.')
+  })
+
+  it('names chat states in the glossary words', () => {
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveCommentsStatus, {
+        read: 'waiting-for-broadcast-context',
+        write: 'read-only',
+        message: ''
+      })
+    )
+
     expect(markup).toMatch(/>Read<\/span><span[^>]*>After publish</)
     // The glossary's word (plan 174 D4), never "Receive only".
     expect(markup).toMatch(/>Send<\/span><span[^>]*>Read-only</)
     expect(markup).not.toContain('Receive only')
-    expect(markup).toContain('X comments attach after the native broadcast is published')
   })
 
   it('shows Twitch read and write scope state independently', () => {

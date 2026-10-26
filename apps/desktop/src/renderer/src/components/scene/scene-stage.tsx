@@ -44,6 +44,7 @@ import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import {
   overlayRectToStage,
+  stageItemSnapPeers,
   stageRectToOverlay,
   type OverlayStageItem,
   type StageItemDraft
@@ -552,9 +553,11 @@ export function SceneStage({
     channel.sample(draftOf(gestureRef.current, { rect: initial, guides: [] }))
   }
   /** Grab an overlay item or a banner: the same pointer ownership and ghost
-   * maths as a source, snapping to sources and the other items, released as
-   * ONE `overlays.layout.set` or `banners.update` by the owner (never a scene
-   * commit). A banner's resize keeps its image's aspect, Shift or not. */
+   * maths as a source, snapping to sources and its peers (an overlay item to
+   * the other items, a banner to the other banners: `stageItemSnapPeers`),
+   * released as ONE `overlays.layout.set` or `banners.update` by the owner
+   * (never a scene commit). A banner's resize keeps its image's aspect, Shift
+   * or not. */
   const beginOverlayGesture = (
     entry: OverlayStageItem,
     kind: 'move' | StageHandleId,
@@ -590,7 +593,7 @@ export function SceneStage({
       stagePixelSize(mapping),
       stageSnapTargets([
         ...sources.map(displayed),
-        ...overlayItems.filter((other) => other.stageId !== entry.stageId).map(displayedOverlay)
+        ...stageItemSnapPeers(entry, overlayItems).map(displayedOverlay)
       ]),
       effectiveSnap,
       entry.aspectLocked,
@@ -1002,11 +1005,13 @@ export function SceneStage({
                     onPointerDown={(event) => beginOverlayGesture(entry, 'move', event)}
                   >
                     {/* Overlay items sit above the sources, so an unselected
-                        item takes the pointer only on its label chip (the
-                        toolbar chips select it too); once selected, its
+                        overlay item takes the pointer only on its label chip
+                        (the toolbar chips select it too); once selected, its
                         interior and outline drag it. A source underneath
                         stays clickable everywhere else (the preview-window
-                        probe's scene-hit-only gate). */}
+                        probe's scene-hit-only gate). A banner is a picture on
+                        the canvas, so its whole rect grabs it, selected or
+                        not, unless it fills the canvas (`grabsBody`). */}
                     <rect
                       data-videorc-stage-overlay-bounds
                       x={rect.x * STAGE_W}
@@ -1014,7 +1019,7 @@ export function SceneStage({
                       width={rect.width * STAGE_W}
                       height={rect.height * stageH}
                       fill="transparent"
-                      pointerEvents={selected ? 'all' : 'none'}
+                      pointerEvents={selected || entry.grabsBody ? 'all' : 'none'}
                     />
                     <rect
                       data-videorc-stage-overlay-grab

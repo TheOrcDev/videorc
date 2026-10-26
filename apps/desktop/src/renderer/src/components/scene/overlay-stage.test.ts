@@ -14,6 +14,7 @@ import {
   overlayItemFromStageId,
   overlayStageId,
   overlayStageItems,
+  stageItemSnapPeers,
   stageRectToOverlay,
   withOverlayRect,
   type BannerStageItem
@@ -261,6 +262,78 @@ describe('banners on the stage (plan 186)', () => {
     const [vertical] = bannerStageItems([banner('sponsor')], null, 'vertical', 9 / 16)
     expect(vertical!.rect.width).toBe(0.857778)
     expect(pixelAspect(stageRectToOverlay(vertical!.rect), 9 / 16)).toBeCloseTo(6, 3)
+  })
+
+  it("takes the pointer on a banner's whole picture, unless it frames the canvas", () => {
+    const [strip, frame] = bannerStageItems(
+      [
+        banner('sponsor'),
+        banner('frame', { width: 1920, height: 1080, horizontal: { x: 0, y: 0, w: 1, h: 1 } })
+      ],
+      null,
+      'horizontal',
+      LANDSCAPE
+    )
+    expect(strip!.grabsBody).toBe(true)
+    expect(frame!.grabsBody).toBe(false)
+    // An overlay item is a zone over the sources: its label chip takes the pointer.
+    for (const item of overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal'))
+      expect(item.grabsBody).toBe(false)
+  })
+
+  it('snaps a banner to the other banners, never to the overlay zones', () => {
+    const items = [
+      ...bannerStageItems([banner('sponsor'), banner('logo')], null, 'horizontal', LANDSCAPE),
+      ...overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal')
+    ]
+    expect(stageItemSnapPeers(items[0]!, items).map((item) => item.stageId)).toEqual([
+      'banner:logo'
+    ])
+    // An overlay item still snaps to every other item, banners included.
+    expect(stageItemSnapPeers(items[2]!, items).map((item) => item.stageId)).toEqual([
+      'banner:sponsor',
+      'banner:logo',
+      'overlay:captions',
+      'overlay:buddy'
+    ])
+  })
+
+  it('drags the default banner across the canvas with the pointer', () => {
+    // The default strip sits centred at the bottom, its right edge 1 px from
+    // the Buddy's left edge on a small canvas: the drag the owner could not
+    // make. The stage's real targets (a screen filling the canvas, the peers),
+    // Snap on as in every preset layout, 1 CSS px per sample.
+    const items = [
+      ...bannerStageItems([banner('sponsor')], 'sponsor', 'horizontal', LANDSCAPE),
+      ...overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal')
+    ]
+    const entry = items[0]!
+    const pixels = { width: 458, height: 257.625 }
+    const origin = { x: 0.5, y: 0.85 }
+    const gesture = new StageGesture(
+      entry.stageId,
+      1,
+      'move',
+      entry.rect,
+      origin,
+      pixels,
+      stageSnapTargets([
+        { x: 0, y: 0, width: 1, height: 1 },
+        ...stageItemSnapPeers(entry, items).map((item) => item.rect)
+      ]),
+      true,
+      entry.aspectLocked,
+      entry.aspectLocked
+    )
+    let x = entry.rect.x
+    for (let step = 1; step <= 80; step++) {
+      const next = gesture.sample({ x: origin.x + step / pixels.width, y: origin.y }, modifiers)
+        .rect.x
+      expect(next).toBeGreaterThanOrEqual(x - 1e-9)
+      x = next
+    }
+    // Held by the centre for the release distance, then with the pointer.
+    expect((x - entry.rect.x) * pixels.width).toBeGreaterThanOrEqual(80 - 10 - 1e-6)
   })
 
   it('commits one banners.update per drag, with an aspect-locked, clamped rect', async () => {

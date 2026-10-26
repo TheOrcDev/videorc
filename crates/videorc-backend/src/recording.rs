@@ -2213,6 +2213,14 @@ pub struct ActiveRecording {
     /// it in place (instant-record P4.1). Released after bridge teardown so
     /// the preview returns to its own dimensions and fps.
     compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
+    /// The compositor run this session started itself (the restart path:
+    /// Linux, and macOS sessions that can't arm in place). Stopped by exact
+    /// run id after bridge teardown so the idle preview goes back to its own
+    /// surface size and fps instead of rendering the session's output with
+    /// no consumer (retest 150: ~2.3 cores at 720p, ~5.5 at 1080p, idle).
+    /// Windows restores its own D3D11 preview in its teardown.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    restarted_compositor_run_id: Option<String>,
     /// FFmpeg output clock published by the stderr monitor; the stop ladder
     /// extends its quit grace while this keeps advancing.
     ffmpeg_progress: FfmpegProgressBeacon,
@@ -2324,6 +2332,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         stop_intent_sender: None,
         stop_requested: false,
         compositor_capture_lease: None,
+        restarted_compositor_run_id: None,
         ffmpeg_progress: FfmpegProgressBeacon::default(),
     }
 }
@@ -5087,6 +5096,7 @@ async fn start_session_with_timeline(
     let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
     let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
     let mut compositor_capture_lease: Option<CompositorCaptureLeaseGuard> = None;
+    let mut restarted_compositor_run_id: Option<String> = None;
     let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store, source_iso_frame_stores) =
         if direct_d3d11_recording_source.is_some() {
             // The direct path owns the retained WGC source and schedules it on
@@ -5193,7 +5203,7 @@ async fn start_session_with_timeline(
                 } else {
                     None
                 };
-                start_synthetic_compositor(
+                let started = start_synthetic_compositor(
                     state.clone(),
                     CompositorStartParams {
                         target_fps,
@@ -5226,6 +5236,7 @@ async fn start_session_with_timeline(
                     },
                 )
                 .await;
+                restarted_compositor_run_id = started.run_id;
             }
             if source_iso_plan.is_some() {
                 source_iso_capture_startup.batches =
@@ -6490,6 +6501,7 @@ async fn start_session_with_timeline(
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
         compositor_capture_lease: compositor_capture_lease.take(),
+        restarted_compositor_run_id: restarted_compositor_run_id.take(),
         ffmpeg_progress: ffmpeg_progress.clone(),
     };
     // The fully-constructed pipeline is now committed to becoming an active
@@ -10687,6 +10699,7 @@ async fn monitor_session(
             ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
         let compositor_capture_lease = active.compositor_capture_lease.take();
+        let restarted_compositor_run_id = active.restarted_compositor_run_id.take();
         let source_iso = active.source_iso.take();
         drop(active);
         let teardown_report = finish_recording_encoder_bridge_teardown(
@@ -10702,6 +10715,12 @@ async fn monitor_session(
         // preview compositor back (or stop it when no surface is live).
         if let Some(lease) = compositor_capture_lease {
             lease.release().await;
+        } else if let Some(run_id) = restarted_compositor_run_id {
+            // The restart path has no lease to hand back: stop this session's
+            // own run (a newer run, e.g. the next Clips ring, is never hit)
+            // and let a live preview surface start its own run again.
+            let _ = crate::compositor::stop_compositor_if_run_id(&state, &run_id).await;
+            crate::preview_surface::reconcile_preview_after_capture_release(&state).await;
         }
         if let Some(report) = teardown_report {
             encoder_bridge_teardown_duration_ms = report.teardown_duration_ms;
@@ -21440,7 +21459,24 @@ fn session_audio_options(
             system_gain_db: audio.system_audio_gain_db,
             echo_guard: audio.system_audio_echo_guard,
         },
-        None => crate::session_audio::SessionAudioOptions::default(),
+        None => crate::session_audio::SessionAudioOptions {
+            playout_delay: default_session_playout_delay(),
+            ..crate::session_audio::SessionAudioOptions::default()
+        },
+    }
+}
+
+/// The bus's write deadline where no system audio is mixed. Linux's Pulse
+/// worker delivers PCM tens of ms late under load; at 50 ms the bus wrote
+/// silence for those samples and then discarded them as overlap (retest 150:
+/// 37 s of mic lost in a 12-minute 1080p take, 2 s in a 10-minute 720p one).
+/// The delay changes when bytes are written, never which bytes
+/// (`playout_delay_150ms_writes_the_same_bytes_as_50ms`).
+fn default_session_playout_delay() -> std::time::Duration {
+    if cfg!(target_os = "linux") {
+        crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
+    } else {
+        crate::session_audio::PLAYOUT_DELAY
     }
 }
 
@@ -31003,6 +31039,7 @@ mod tests {
             stop_intent_sender: None,
             stop_requested: false,
             compositor_capture_lease: None,
+            restarted_compositor_run_id: None,
             ffmpeg_progress: FfmpegProgressBeacon::default(),
         }
     }
@@ -38779,6 +38816,7 @@ mod tests {
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,
             compositor_capture_lease: None,
+            restarted_compositor_run_id: None,
             ffmpeg_progress: FfmpegProgressBeacon::default(),
         });
 
@@ -44320,10 +44358,24 @@ mod tests {
             assert_eq!(capable.system_delay_frames, 0);
             assert_eq!(capable.system_gain_db, -9.0);
 
-            // Elsewhere the bus keeps its pre-mixer defaults exactly.
+            // Elsewhere the bus keeps its pre-mixer defaults, except Linux's
+            // longer deadline for the Pulse worker (retest 150).
+            let elsewhere = session_audio_options(&audio, false);
             assert_eq!(
-                session_audio_options(&audio, false),
+                crate::session_audio::SessionAudioOptions {
+                    playout_delay: crate::session_audio::SessionAudioOptions::default()
+                        .playout_delay,
+                    ..elsewhere
+                },
                 crate::session_audio::SessionAudioOptions::default()
+            );
+            assert_eq!(
+                elsewhere.playout_delay,
+                if cfg!(target_os = "linux") {
+                    crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
+                } else {
+                    crate::session_audio::PLAYOUT_DELAY
+                }
             );
 
             // A clamped offset splits from the clamped value.
