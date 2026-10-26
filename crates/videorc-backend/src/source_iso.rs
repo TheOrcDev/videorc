@@ -328,6 +328,90 @@ pub async fn live_camera_format(state: &AppState, sources: &SourceSelection) -> 
     Some((frame.width, frame.height))
 }
 
+/// How long arming waits for a cold camera's first frame before the Camera
+/// leg falls back to the canvas size (plan 200 D2).
+const ARM_CAMERA_FORMAT_WAIT: Duration = Duration::from_secs(2);
+const ARM_CAMERA_FORMAT_POLL: Duration = Duration::from_millis(20);
+
+/// Plan 200 D2: the Camera leg's size is fixed before the compositor starts,
+/// but a camera the layout retired (a Screen-only scene) or one still cold
+/// has no frame yet. Start the selected camera the same way the separate
+/// capture preparation does (it reuses this generation afterwards) and wait,
+/// bounded, for its first frame. `None` keeps the canvas size, with a log
+/// line saying why.
+pub async fn arm_camera_format(
+    state: &AppState,
+    params: &StartSessionParams,
+    ffmpeg_path: &str,
+) -> Option<(u32, u32)> {
+    if let Some(format) = live_camera_format(state, &params.sources).await {
+        return Some(format);
+    }
+    let selected = params.sources.camera_id.as_deref()?;
+    let current = crate::preview_camera::preview_camera_frame_source(state).await;
+    let running = current
+        .as_ref()
+        .and_then(|source| source.source_key())
+        .is_some_and(|key| key.id == selected);
+    let live = running
+        || crate::preview_camera::start_preview_camera(
+            state.clone(),
+            crate::protocol::PreviewCameraStartParams {
+                sources: params.sources.clone(),
+                layout: params.layout.clone(),
+                video: params.output.video.clone(),
+                ffmpeg_path: Some(ffmpeg_path.to_owned()),
+            },
+        )
+        .await
+        .state
+            == crate::protocol::PreviewCameraState::Live;
+    let format = if live {
+        poll_camera_format(
+            || live_camera_format(state, &params.sources),
+            ARM_CAMERA_FORMAT_WAIT,
+            ARM_CAMERA_FORMAT_POLL,
+        )
+        .await
+    } else {
+        None
+    };
+    if format.is_none() {
+        state.emit_log(
+            "warn",
+            format!(
+                "Separate source recordings: the camera reported no frame within {} ms of Record; the Camera file uses the {}x{} recording size.",
+                ARM_CAMERA_FORMAT_WAIT.as_millis(),
+                params.output.video.width,
+                params.output.video.height
+            ),
+        );
+    }
+    format
+}
+
+/// Probe until a format appears or `wait` runs out (always probes once).
+async fn poll_camera_format<F, Fut>(
+    mut probe: F,
+    wait: Duration,
+    interval: Duration,
+) -> Option<(u32, u32)>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<(u32, u32)>>,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Some(format) = probe().await {
+            return Some(format);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 /// MKV path for one ISO role beside the Combined file. Combined keeps the
 /// legacy name (every startup/ownership check keys on it); the ISO files
 /// insert the role before the extension so the three sort together.
@@ -2416,6 +2500,63 @@ mod tests {
         );
         assert!(
             SourceIsoPlan::from_settings(&SeparateSourceRecordingsSettings::default()).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn arm_waits_for_a_cold_cameras_first_frame_and_bounds_the_wait() {
+        // Plan 200 D2: a camera not live at arm time reports its first frame
+        // a few polls later; the leg takes that size, not the canvas.
+        let mut probes = 0;
+        let format = poll_camera_format(
+            || {
+                probes += 1;
+                let ready = probes >= 3;
+                async move { ready.then_some((1280, 960)) }
+            },
+            Duration::from_secs(2),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(format, Some((1280, 960)));
+        assert_eq!(probes, 3);
+        // A camera that never reports gives up at the bound (canvas size).
+        let started = Instant::now();
+        let never = poll_camera_format(
+            || async { None },
+            Duration::from_millis(60),
+            Duration::from_millis(5),
+        )
+        .await;
+        assert_eq!(never, None);
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(60), "{waited:?}");
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn arm_takes_a_live_cameras_format_without_restarting_it() {
+        let state = test_state();
+        let params = base_params();
+        let camera = VideoSettings {
+            width: 1280,
+            height: 960,
+            ..params.output.video.clone()
+        };
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:1",
+            &params.layout,
+            &camera,
+        )
+        .await;
+        assert_eq!(
+            arm_camera_format(&state, &params, "ffmpeg").await,
+            Some((1280, 960))
+        );
+        assert_eq!(
+            camera_leg_size(Some((1280, 960)), (1920, 1080)),
+            (1280, 960)
         );
     }
 

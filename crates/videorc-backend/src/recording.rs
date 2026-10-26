@@ -5175,9 +5175,10 @@ async fn start_session_with_timeline(
             };
             if !armed_in_place {
                 // Plan 200 D2: the Camera file is the live camera's own size,
-                // fitted inside the canvas, fixed here for the whole take.
+                // fitted inside the canvas, fixed here for the whole take. A
+                // cold or layout-retired camera is started first (bounded).
                 let source_iso_camera_format = if source_iso_plan.is_some() {
-                    crate::source_iso::live_camera_format(&state, &params.sources).await
+                    crate::source_iso::arm_camera_format(&state, &params, &ffmpeg_path).await
                 } else {
                     None
                 };
