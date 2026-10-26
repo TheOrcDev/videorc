@@ -1219,6 +1219,12 @@ fn signed_av_offset_ms(probe: &MediaProbe) -> Option<f64> {
 /// Builds the FFmpeg command for a repair plan. Re-encodes target visually lossless
 /// via the plan's capability-probed encoder; audio repairs re-encode to AAC. Resync
 /// trims a late audio start or delays an early one.
+///
+/// Plan 200 C7: a repair keeps the file whole: every video and audio stream,
+/// the chapters, faststart for MP4/MOV, and BT.709 tags on a re-encode. The
+/// `tmcd` timecode and chapter `text` data tracks are not copied (the MP4
+/// muxer rejects them as data); it rebuilds both from the video's timecode
+/// tag and the chapters.
 pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<String> {
     let mut args = vec![
         "-y".to_string(),
@@ -1231,6 +1237,12 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
         "1".to_string(),
         "-i".to_string(),
         input.to_string(),
+        "-map".to_string(),
+        "0".to_string(),
+        "-map".to_string(),
+        "-0:d".to_string(),
+        "-map_chapters".to_string(),
+        "0".to_string(),
     ];
 
     let mut video_filters: Vec<String> = Vec::new();
@@ -1274,6 +1286,8 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
     if !video_filters.is_empty() {
         args.extend(["-vf".to_string(), video_filters.join(",")]);
         args.extend(plan.video_encoder.encode_args());
+        // Videorc records BT.709 video range; a re-encode must not lose the tags.
+        args.extend(REPAIR_BT709_COLOR_TAG_ARGS.iter().map(|arg| arg.to_string()));
     }
     if audio_copy {
         args.extend(["-c:a".to_string(), "copy".to_string()]);
@@ -1283,13 +1297,38 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
             audio_filters.join(","),
             "-c:a".to_string(),
             "aac".to_string(),
+            // The same 256k AAC as the MP4 export (plan 200 C7).
             "-b:a".to_string(),
-            "192k".to_string(),
+            "256k".to_string(),
         ]);
+    }
+    let faststart = Path::new(output)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "mov" | "m4v"
+            )
+        });
+    if faststart {
+        args.extend(["-movflags".to_string(), "+faststart".to_string()]);
     }
     args.push(output.to_string());
     args
 }
+
+/// The recording colorimetry tags (`recording.rs` `h264_bt709_color_tag_args`).
+const REPAIR_BT709_COLOR_TAG_ARGS: [&str; 8] = [
+    "-colorspace",
+    "bt709",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
+    "-color_range",
+    "tv",
+];
 
 // --- Safe backup-then-atomic-replace (slice 6) ---
 
@@ -2901,6 +2940,93 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-crf" && w[1] == "18"));
         assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "copy"));
         assert_eq!(args.last().unwrap(), "out.mp4");
+    }
+
+    fn repair_plan(video: VideoRepair, audio: AudioRepair) -> RepairPlan {
+        RepairPlan {
+            interpolated: video == VideoRepair::Interpolate,
+            video,
+            audio,
+            target_fps: 30.0,
+            video_encoder: RepairVideoEncoder::Libx264,
+        }
+    }
+
+    fn assert_repair_keeps_the_file_whole(args: &[String]) {
+        assert!(args.windows(2).any(|w| w[0] == "-map" && w[1] == "0"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-map" && w[1] == "-0:d"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-map_chapters" && w[1] == "0"), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w[0] == "-movflags" && w[1] == "+faststart"),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|arg| arg == "-map_metadata"), "{args:?}");
+    }
+
+    #[test]
+    fn repair_args_for_copy_keep_streams_chapters_and_faststart() {
+        let args = build_repair_args(
+            "in.mp4",
+            ".in.videorc-repair.mp4",
+            &repair_plan(VideoRepair::Copy, AudioRepair::CenterChannel { source_channel: 1 }),
+        );
+        assert_repair_keeps_the_file_whole(&args);
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "copy"));
+        // A stream copy keeps the source's own colour tags.
+        assert!(!args.iter().any(|arg| arg == "-colorspace"));
+        assert!(args.windows(2).any(|w| w[0] == "-b:a" && w[1] == "256k"));
+        assert!(!args.iter().any(|arg| arg == "192k"));
+        assert_eq!(args.last().unwrap(), ".in.videorc-repair.mp4");
+
+        // MKV has no faststart.
+        let mkv = build_repair_args(
+            "in.mkv",
+            ".in.videorc-repair.mkv",
+            &repair_plan(VideoRepair::Copy, AudioRepair::Resync { offset_ms: 120.0 }),
+        );
+        assert!(!mkv.iter().any(|arg| arg == "-movflags"));
+        assert!(mkv.windows(2).any(|w| w[0] == "-map_chapters" && w[1] == "0"));
+    }
+
+    #[test]
+    fn repair_args_for_cfr_transcode_tag_bt709_and_keep_the_file_whole() {
+        let args = build_repair_args(
+            "in.mp4",
+            "out.MOV",
+            &repair_plan(VideoRepair::CfrTranscode, AudioRepair::Copy),
+        );
+        assert_repair_keeps_the_file_whole(&args);
+        assert!(args.windows(2).any(|w| w[0] == "-vf" && w[1] == "fps=30"));
+        for (flag, value) in [
+            ("-colorspace", "bt709"),
+            ("-color_primaries", "bt709"),
+            ("-color_trc", "bt709"),
+            ("-color_range", "tv"),
+        ] {
+            assert!(args.windows(2).any(|w| w[0] == flag && w[1] == value), "{flag}");
+        }
+        assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "copy"));
+    }
+
+    #[test]
+    fn repair_args_for_interpolation_tag_bt709_and_encode_aac_256k() {
+        let args = build_repair_args(
+            "in.mp4",
+            "out.mp4",
+            &repair_plan(
+                VideoRepair::Interpolate,
+                AudioRepair::CenterChannel { source_channel: 0 },
+            ),
+        );
+        assert_repair_keeps_the_file_whole(&args);
+        assert!(args.iter().any(|arg| arg.starts_with("minterpolate=fps=30")));
+        assert!(args.windows(2).any(|w| w[0] == "-color_range" && w[1] == "tv"));
+        assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "aac"));
+        assert!(args.windows(2).any(|w| w[0] == "-b:a" && w[1] == "256k"));
+        // Inputs come before every output option.
+        let map_index = args.iter().position(|arg| arg == "-map").unwrap();
+        let input_index = args.iter().position(|arg| arg == "-i").unwrap();
+        assert!(input_index < map_index);
     }
 
     #[test]
