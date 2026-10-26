@@ -3577,7 +3577,15 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         .recording_started_once
         .swap(true, std::sync::atomic::Ordering::AcqRel);
     let mut timeline = RecordingStartTimeline::start(params.requested_at_ms, cold);
-    let result = start_session_with_timeline(state.clone(), params, &mut timeline).await;
+    let failure_log = SessionStartFailureLog::new(state.database.clone());
+    let result =
+        start_session_with_timeline(state.clone(), params, &mut timeline, failure_log.pending())
+            .await;
+    if let Err(error) = &result
+        && let Some(reason) = failure_log.report(error)
+    {
+        state.emit_log("warn", format!("Session start refused: {reason}"));
+    }
     let outcome = if result.is_ok() { "running" } else { "refused" };
     let snapshot = timeline.snapshot(outcome);
     let summary = timeline.summary_line(outcome);
@@ -3592,6 +3600,12 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         .await;
     });
     result
+}
+
+/// A buffer-only start the renderer made on its own (plan 181): the only
+/// start the software-encoder guard may refuse.
+fn replay_auto_start_requested(replay_only: bool, params: &StartSessionParams) -> bool {
+    replay_only && params.replay.as_ref().is_some_and(|replay| replay.auto)
 }
 
 /// Plan 181: a buffer-only session composes exactly like a record-only
@@ -3616,6 +3630,7 @@ async fn start_session_with_timeline(
     state: AppState,
     mut params: StartSessionParams,
     timeline: &mut RecordingStartTimeline,
+    start_failure: PendingStartFailure,
 ) -> Result<RecordingStatus> {
     let replay_only = normalize_replay_only_params(&mut params);
     // Held until this start has run or failed, so a Record or Go Live that
@@ -3750,6 +3765,29 @@ async fn start_session_with_timeline(
     // Marked on every platform so the start timeline keeps one phase order;
     // only Windows spends time here.
     timeline.mark(RecordingStartPhase::RecordableVideoProbe);
+    // Plan 181 guard, decided early: a refused automatic ring must not first
+    // open the microphone and wait on preview sources. When either failed,
+    // the start never reached the guard below, so the renderer retried it
+    // as a plain failure and kept reopening the microphone (2026-10-25 Iris
+    // Xe tester). The probes are cached, so the later check repeats this
+    // decision for free.
+    if replay_auto_start_requested(replay_only, &params) {
+        let encoder_output_topology = encoder_output_topology_plan_from_session(&params)?;
+        let decision = resolve_windows_encoded_bridge_decision(
+            &ffmpeg_path,
+            &encoder_output_topology,
+            recording_encoder_bridge_video_output(
+                params.output.record_enabled,
+                params.output.stream_enabled,
+            ),
+        )
+        .await?;
+        if let Some(refusal) =
+            crate::replay_buffer::auto_start_refusal(decision.effective_encode_backend)
+        {
+            return Err(refusal.into());
+        }
+    }
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
     if params.output.record_enabled && !replay_only {
@@ -3818,7 +3856,8 @@ async fn start_session_with_timeline(
     // F-017: every early error below this point used to leave a permanent
     // 'running' Library row pointing at a file that never existed. The guard
     // marks the row failed on ANY exit path that doesn't reach the pipeline.
-    let mut session_row_guard = SessionStartRowGuard::new(state.database.clone(), &session_id);
+    let mut session_row_guard =
+        SessionStartRowGuard::reporting_to(state.database.clone(), &session_id, start_failure);
 
     if replay_only {
         // Plan 181: no Library row, no remembered capture. Its logs and
@@ -4255,9 +4294,9 @@ async fn start_session_with_timeline(
     // raw CPU encode of a weak Windows or Linux box), where it would be a
     // second encode. The decision above is the one the session would use;
     // nothing has been spawned yet, so the typed refusal costs nothing. A
-    // start the user chose (`auto: false`) runs anywhere.
-    if replay_only
-        && params.replay.as_ref().is_some_and(|replay| replay.auto)
+    // start the user chose (`auto: false`) runs anywhere. The early check
+    // assumed the bridge; this one holds whichever path the session took.
+    if replay_auto_start_requested(replay_only, &params)
         && let Some(refusal) = crate::replay_buffer::auto_start_refusal(
             windows_encoded_bridge_decision.effective_encode_backend,
         )
@@ -6979,14 +7018,27 @@ struct SessionStartRowGuard {
     database: Database,
     session_id: String,
     armed: bool,
+    /// Set for `session.start`: the row's log waits for the returned error.
+    failure: Option<PendingStartFailure>,
 }
 
 impl SessionStartRowGuard {
+    #[cfg(test)]
     fn new(database: Database, session_id: &str) -> Self {
         Self {
             database,
             session_id: session_id.to_string(),
             armed: true,
+            failure: None,
+        }
+    }
+
+    fn reporting_to(database: Database, session_id: &str, failure: PendingStartFailure) -> Self {
+        Self {
+            database,
+            session_id: session_id.to_string(),
+            armed: true,
+            failure: Some(failure),
         }
     }
 
@@ -7000,6 +7052,8 @@ impl Drop for SessionStartRowGuard {
         if !self.armed {
             return;
         }
+        // The row turns failed here, before the published terminal status
+        // that outlives this guard, so the Library never reloads it running.
         let _ = self.database.finish_session(
             &self.session_id,
             "failed",
@@ -7010,13 +7064,97 @@ impl Drop for SessionStartRowGuard {
         let _ = self
             .database
             .fail_uncommitted_source_iso_sessions(&self.session_id);
+        match &self.failure {
+            Some(failure) => {
+                *failure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(self.session_id.clone());
+            }
+            None => {
+                let _ = self.database.add_session_log(
+                    &self.session_id,
+                    HealthLevel::Error,
+                    SESSION_START_FAILED_CODE,
+                    &session_start_failed_message(None),
+                    None,
+                );
+            }
+        }
+    }
+}
+
+const SESSION_START_FAILED_CODE: &str = "session-start-failed";
+
+fn session_start_failed_message(reason: Option<&str>) -> String {
+    const MESSAGE: &str =
+        "Session start did not reach a running pipeline; the session was marked failed";
+    match reason {
+        Some(reason) => format!("{MESSAGE}: {reason}"),
+        None => format!("{MESSAGE}."),
+    }
+}
+
+/// The failed start's session id, handed from its [`SessionStartRowGuard`] to
+/// [`SessionStartFailureLog`].
+type PendingStartFailure = Arc<StdMutex<Option<String>>>;
+
+/// Writes the `session-start-failed` log for a start whose row guard fired,
+/// with the error `session.start` answered. The support bundle carries the
+/// session logs, not the toast: a log without its reason left five refused
+/// starts on a tester's Iris Xe laptop undiagnosable (2026-10-25). A start
+/// dropped before it returned still gets the bare line.
+struct SessionStartFailureLog {
+    database: Database,
+    pending: PendingStartFailure,
+}
+
+impl SessionStartFailureLog {
+    fn new(database: Database) -> Self {
+        Self {
+            database,
+            pending: Arc::default(),
+        }
+    }
+
+    fn pending(&self) -> PendingStartFailure {
+        self.pending.clone()
+    }
+
+    fn take_session_id(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Logs `error` against the session whose row guard fired, if one did,
+    /// and returns the sanitized reason it logged.
+    fn report(self, error: &anyhow::Error) -> Option<String> {
+        let session_id = self.take_session_id()?;
+        let reason = sanitized_ffmpeg_diagnostic_line(&format!("{error:#}"), 480);
         let _ = self.database.add_session_log(
-            &self.session_id,
+            &session_id,
             HealthLevel::Error,
-            "session-start-failed",
-            "Session start did not reach a running pipeline; the session was marked failed.",
+            SESSION_START_FAILED_CODE,
+            &session_start_failed_message(Some(&reason)),
             None,
         );
+        Some(reason)
+    }
+}
+
+impl Drop for SessionStartFailureLog {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.take_session_id() {
+            let _ = self.database.add_session_log(
+                &session_id,
+                HealthLevel::Error,
+                SESSION_START_FAILED_CODE,
+                &session_start_failed_message(None),
+                None,
+            );
+        }
     }
 }
 
@@ -36905,6 +37043,111 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("conversion-failed")
+        );
+    }
+
+    fn session_start_failed_logs(database: &Database, session_id: &str) -> Vec<String> {
+        database
+            .list_session_logs_page(session_id, None, 120)
+            .unwrap()
+            .entries
+            .into_iter()
+            .filter(|entry| entry.code == SESSION_START_FAILED_CODE)
+            .map(|entry| entry.message)
+            .collect()
+    }
+
+    #[test]
+    fn refused_start_logs_the_error_session_start_returned() {
+        let database = Database::open_in_memory_for_tests();
+        let session_id = "refused-start";
+        database.ensure_fake_live_chat_session(session_id).unwrap();
+        let failure_log = SessionStartFailureLog::new(database.clone());
+        drop(SessionStartRowGuard::reporting_to(
+            database.clone(),
+            session_id,
+            failure_log.pending(),
+        ));
+        assert_eq!(
+            database
+                .session_finalization_snapshot(session_id)
+                .unwrap()
+                .status,
+            "failed",
+            "the row turns failed when the guard fires, before the report"
+        );
+        assert!(session_start_failed_logs(&database, session_id).is_empty());
+
+        let error = anyhow::anyhow!(
+            "Cannot start: the screen preview source(s) produced no frames via rtmp://private.example/live/secret-key"
+        )
+        .context("session.start");
+        let reason = failure_log.report(&error).expect("the guard fired");
+
+        assert!(reason.contains("produced no frames"), "{reason}");
+        assert!(!reason.contains("private.example"), "{reason}");
+        assert_eq!(
+            session_start_failed_logs(&database, session_id),
+            vec![session_start_failed_message(Some(&reason))]
+        );
+    }
+
+    #[test]
+    fn start_dropped_before_it_returned_keeps_the_bare_failure_line() {
+        let database = Database::open_in_memory_for_tests();
+        let session_id = "dropped-start";
+        database.ensure_fake_live_chat_session(session_id).unwrap();
+        let failure_log = SessionStartFailureLog::new(database.clone());
+        drop(SessionStartRowGuard::reporting_to(
+            database.clone(),
+            session_id,
+            failure_log.pending(),
+        ));
+        drop(failure_log);
+
+        assert_eq!(
+            session_start_failed_logs(&database, session_id),
+            vec![session_start_failed_message(None)]
+        );
+    }
+
+    #[test]
+    fn disarmed_start_guard_leaves_nothing_to_report() {
+        let database = Database::open_in_memory_for_tests();
+        let session_id = "committed-start";
+        database.ensure_fake_live_chat_session(session_id).unwrap();
+        let failure_log = SessionStartFailureLog::new(database.clone());
+        let mut guard =
+            SessionStartRowGuard::reporting_to(database.clone(), session_id, failure_log.pending());
+        guard.disarm();
+        drop(guard);
+
+        // A later failure (the published terminal path) logs its own stage.
+        assert!(
+            failure_log
+                .report(&anyhow::anyhow!("muxer failed"))
+                .is_none()
+        );
+        assert!(session_start_failed_logs(&database, session_id).is_empty());
+    }
+
+    #[test]
+    fn only_an_automatic_buffer_only_start_meets_the_replay_guard() {
+        let mut params = base_params(true, false);
+        assert!(!replay_auto_start_requested(false, &params));
+        params.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: true,
+        });
+        assert!(replay_auto_start_requested(true, &params));
+        assert!(
+            !replay_auto_start_requested(false, &params),
+            "Record carrying its own ring is not an automatic start"
+        );
+        params.replay.as_mut().unwrap().auto = false;
+        assert!(
+            !replay_auto_start_requested(true, &params),
+            "a ring the user turned on runs anywhere"
         );
     }
 
