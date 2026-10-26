@@ -31,9 +31,10 @@ pub const SYSTEM_AUDIO_PLAYOUT_DELAY: Duration = Duration::from_millis(150);
 /// The enable/disable envelope for a mixed source and the microphone handoff
 /// ramp: 5 ms at 48 kHz.
 const RAMP_FRAMES: u16 = 240;
-/// Peak limiter on the mixed sum (plan 069 decision 7): -1 dBFS ceiling,
-/// instant attack, about 50 ms release. It runs only while a system source is
-/// attached, or while it is still releasing after one detached.
+/// Peak limiter on the session's output (plan 069 decision 7): -1 dBFS
+/// ceiling, instant attack, about 50 ms release. Since plan 200 A2 it runs on
+/// every chunk, the microphone-only path included, so a hot microphone is
+/// limited instead of hard-clamped at full scale.
 const LIMITER_CEILING: f32 = 0.891_250_9;
 const LIMITER_RELEASE_FRAMES: f64 = 0.050 * 48_000.0;
 
@@ -3870,10 +3871,11 @@ impl EnableRamp {
     }
 }
 
-/// Stereo-linked peak limiter on the mixed sum (plan 069 decision 7): -1 dBFS
-/// ceiling, instant attack (no look-ahead, so it adds no latency), and a
-/// one-pole release with a 50 ms time constant. Unity gain is exact, so an
-/// idle limiter is a no-op.
+/// Stereo-linked peak limiter on the session output (plan 069 decision 7,
+/// every path since plan 200 A2): -1 dBFS ceiling, instant attack (no
+/// look-ahead, so it adds no latency), and a one-pole release with a 50 ms
+/// time constant. Unity gain is exact, so an idle limiter is a no-op: a
+/// microphone that stays under the ceiling is written byte for byte.
 #[derive(Debug, Clone, Copy)]
 struct PeakLimiter {
     gain: f32,
@@ -3929,7 +3931,9 @@ struct MixedSamples {
 /// [`FoldPlan`], plan 200 A1); system audio keeps its stereo image and takes
 /// its own gain only; the soundboard (plan 189) is already at its gain and
 /// joins only while a sound plays, so the sum is unchanged without one; the
-/// sum passes the limiter.
+/// sum passes the limiter. Plan 200 A2: the sum takes the microphone before
+/// the full-scale clamp, so the limiter (not the clamp) holds a hot mic; the
+/// microphone ingredient (taps, meter) stays clamped as before.
 fn mix_chunk(
     microphone_raw: &[f32],
     microphone: AudioProcessingSettings,
@@ -3939,7 +3943,11 @@ fn mix_chunk(
     sounds: Option<&[f32]>,
     mut limiter: PeakLimiter,
 ) -> MixedSamples {
-    let microphone_samples = fold_interleaved_f32(microphone_raw, 2, microphone, fold, true);
+    let microphone_unclamped = fold_interleaved_f32(microphone_raw, 2, microphone, fold, false);
+    let microphone_samples = microphone_unclamped
+        .iter()
+        .map(|sample| sample.clamp(-1.0, 1.0))
+        .collect::<Vec<_>>();
     let system_gain = if system.muted {
         0.0
     } else {
@@ -3949,7 +3957,7 @@ fn mix_chunk(
         .iter()
         .map(|sample| sample * system_gain)
         .collect::<Vec<_>>();
-    let mut output = microphone_samples
+    let mut output = microphone_unclamped
         .iter()
         .zip(&system_samples)
         .map(|(microphone, system)| microphone + system)
@@ -5143,9 +5151,9 @@ fn run_bus_owned(
         sound_volume_db,
     } = context;
     let playout_delay = timing.playout_delay;
-    // Plan 069: the system slot, and the limiter that runs only while one is
-    // attached (or still releasing after one left). With no slot ever
-    // attached, every chunk takes the unchanged microphone-only write path.
+    // Plan 069: the system slot. With no slot attached, a chunk takes the
+    // microphone-only write path. Plan 200 A2: the limiter runs on both paths
+    // and carries its state across them.
     let mut system: Option<SourceSlot> = None;
     let mut limiter = PeakLimiter::default();
     // Plan 200 A1: the microphone fold's level detector, across chunks.
@@ -5755,7 +5763,7 @@ fn run_bus_owned(
             voice_fold = VoiceFold::default();
         }
         let microphone_fold = voice_fold.plan(&raw.samples, 2);
-        let mixing = system_raw.is_some() || sounds_raw.is_some() || !limiter.idle();
+        let mixing = system_raw.is_some() || sounds_raw.is_some();
         let write_started = Instant::now();
         let mut deferred_health = Vec::new();
         let mut wait = || {
@@ -5841,6 +5849,7 @@ fn run_bus_owned(
                 &raw.samples,
                 settings,
                 microphone_fold,
+                limiter,
                 &write_stop,
                 draining,
                 Instant::now,
@@ -5860,10 +5869,19 @@ fn run_bus_owned(
         // (decision 5). Without a system slot it is the written chunk itself.
         // Plan 092 Phase C: the written chunk is what the recording and the
         // stream get, so it feeds the master meter.
+        let mut clipped_samples = 0;
         let (stale_from, microphone_samples, mixed, master_levels, sounds_levels) = match outcome {
-            ChunkOutcome::Microphone(written) => {
-                let master = ChunkLevels::of(&written.samples);
-                (written.stale_from, written.samples, None, master, None)
+            ChunkOutcome::Microphone(write) => {
+                limiter = write.limiter;
+                clipped_samples = write.clipped_samples;
+                let master = ChunkLevels::of(&write.written.samples);
+                (
+                    write.written.stale_from,
+                    write.written.samples,
+                    None,
+                    master,
+                    None,
+                )
             }
             ChunkOutcome::Mixed(mixed) => {
                 limiter = mixed.limiter;
@@ -5999,10 +6017,12 @@ fn run_bus_owned(
             let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
             shared.status.sample_cursor = timeline.cursor();
             shared.status.counters = after;
-            if let Some((_, clipped)) = mixed.as_ref() {
-                shared.mix_clipped_samples += clipped;
-                shared.levels.master_clipped_samples += clipped;
-            }
+            // Plan 200 A2: clipping counts on every path.
+            let clipped = mixed
+                .as_ref()
+                .map_or(clipped_samples, |(_, clipped)| *clipped);
+            shared.mix_clipped_samples += clipped;
+            shared.levels.master_clipped_samples += clipped;
             shared.levels.microphone.add(microphone_levels);
             if let Some(system_levels) = system_levels {
                 shared.levels.system.add(system_levels);
@@ -6074,7 +6094,7 @@ fn run_bus_owned(
 }
 
 enum ChunkOutcome {
-    Microphone(WrittenChunk),
+    Microphone(MicrophoneWrite),
     Mixed(MixedWrite),
 }
 
@@ -6086,29 +6106,62 @@ struct WrittenChunk {
     silent_from: Option<usize>,
 }
 
-/// The microphone-only write path, byte for byte the pre-mixer writer.
-/// `fold` is planned once per chunk, so a re-render under new controls folds
-/// the chunk the same way.
+/// What the microphone-only path wrote, with its limiter.
+struct MicrophoneWrite {
+    written: WrittenChunk,
+    /// Samples the limiter had to pull under its ceiling.
+    clipped_samples: u64,
+    limiter: PeakLimiter,
+}
+
+/// The microphone-only write path: the pre-mixer writer plus the peak
+/// limiter (plan 200 A2). Under the ceiling with an idle limiter the bytes
+/// are exactly the pre-mixer writer's. `fold` is planned once per chunk, so a
+/// re-render under new controls folds the chunk the same way; like the mixed
+/// path, each attempt re-limits from the limiter state at the chunk start.
 #[allow(clippy::too_many_arguments)]
 fn write_chunk_with_clock(
     file: &mut impl Write,
     raw: &[f32],
     settings: &AudioProcessingSettingsHandle,
     fold: FoldPlan,
+    limiter: PeakLimiter,
     stop: &AtomicBool,
     draining: &AtomicBool,
     now: impl FnMut() -> Instant,
     wait: impl FnMut(),
-) -> io::Result<WrittenChunk> {
-    write_rendered_chunk(
+) -> io::Result<MicrophoneWrite> {
+    let mut clipped = vec![false; raw.len()];
+    let mut limiter_after = limiter;
+    let written = write_rendered_chunk(
         file,
         raw.len(),
-        |_| fold_interleaved_f32(raw, 2, settings.load(), fold, true),
+        |from| {
+            // Unclamped: the limiter, not a clamp at full scale, holds it.
+            let mut samples = fold_interleaved_f32(raw, 2, settings.load(), fold, false);
+            let mut flags = vec![false; samples.len()];
+            let mut chunk_limiter = limiter;
+            chunk_limiter.process(&mut samples, &mut flags);
+            clipped[from..].copy_from_slice(&flags[from..]);
+            limiter_after = chunk_limiter;
+            samples
+        },
         stop,
         draining,
         now,
         wait,
-    )
+    )?;
+    if let Some(from) = match (written.stale_from, written.silent_from) {
+        (Some(stale), Some(silent)) => Some(stale.min(silent)),
+        (stale, silent) => stale.or(silent),
+    } {
+        clipped[from * 2..].fill(false);
+    }
+    Ok(MicrophoneWrite {
+        written,
+        clipped_samples: clipped.iter().filter(|clipped| **clipped).count() as u64,
+        limiter: limiter_after,
+    })
 }
 
 struct MixedWrite {
@@ -6669,12 +6722,14 @@ mod tests {
             &[0.25; 960],
             &settings,
             FoldPlan::one_shot(&[0.25; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now,
             || {},
         )
-        .unwrap();
+        .unwrap()
+        .written;
         let gained = 0.25 * 10.0_f32.powf(6.0 / 20.0);
         assert!((result.samples[0] - gained).abs() < 0.00001);
         assert!((result.samples[1] - gained).abs() < 0.00001);
@@ -6730,12 +6785,14 @@ mod tests {
             &[0.8; 960],
             &settings,
             FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
             || now.set(now.get() + Duration::from_millis(200)),
         )
-        .unwrap();
+        .unwrap()
+        .written;
         assert!(result.samples.iter().all(|sample| *sample == 0.0));
         assert_eq!(result.stale_from, Some(0));
         let mut writer = BlockOnce {
@@ -6747,6 +6804,7 @@ mod tests {
             &[0.8; 960],
             &settings,
             FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
@@ -6764,6 +6822,7 @@ mod tests {
             &[0.8; 960],
             &settings,
             FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
             &stop,
             &AtomicBool::new(false),
             || now.get(),
@@ -6812,12 +6871,14 @@ mod tests {
             &[0.25; 960],
             &settings,
             FoldPlan::one_shot(&[0.25; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &draining,
             || now,
             || {},
         )
-        .unwrap();
+        .unwrap()
+        .written;
         assert_eq!(&written.samples[..2], &[0.25, 0.25]);
         assert!(written.samples[2..].iter().all(|sample| *sample == 0.0));
         assert_eq!(
@@ -6830,12 +6891,14 @@ mod tests {
             &[0.75; 960],
             &settings,
             FoldPlan::one_shot(&[0.75; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &draining,
             || now,
             || {},
         )
-        .unwrap();
+        .unwrap()
+        .written;
         assert!(written.samples.iter().all(|sample| *sample == 0.0));
     }
 
@@ -9098,14 +9161,24 @@ mod mix_tests {
     /// of per sample. The fixture's 100 ms one-channel-silent stretches are
     /// too short to move the detector 20 dB, so they are now averaged with
     /// the silent channel (half level) instead of switching to the live
-    /// channel sample by sample, and samples under 1e-5 are no longer zeroed.
+    /// channel sample by sample, and samples under 1e-5 are no longer zeroed
+    /// (A1 digest `02d599b4…1683c9`).
+    ///
+    /// Re-pinned again by plan 200 A2: the microphone-only path now runs the
+    /// peak limiter. This fixture is not under the ceiling: at +3 dB the
+    /// average of its 0.6 and 0.9 tones peaks near 1.06, which the old path
+    /// clamped at full scale and the limiter now holds at -1 dBFS. Its quiet
+    /// stretches still pass at exact unity once the limiter releases, and
+    /// `a_mic_under_the_ceiling_writes_exactly_the_unlimited_bytes` pins the
+    /// byte identity of a microphone that stays under the ceiling.
     #[cfg(target_os = "macos")]
     const MIC_ONLY_GOLDEN_SHA256: &str =
-        "02d599b49331235580213b9bcaef730d5b95d5285cfeae102dd69a60de1683c9";
+        "79dddc3133cecec949aec3960d897a896149f498f2d5728f44da089f8adb57b5";
 
     /// Deterministic stereo fixture addressed by absolute sample position:
     /// different L/R tones, with one-channel-silent and both-silent stretches
-    /// every second, and the +3 dB gain pushing the average past full scale.
+    /// every second, and the +3 dB gain pushing the average past the limiter
+    /// ceiling.
     fn fixture_sample(position: usize) -> (f32, f32) {
         let t = position as f32 / 48_000.0;
         let left = 0.6 * (std::f32::consts::TAU * 440.0 * t).sin();
@@ -9477,8 +9550,9 @@ mod mix_tests {
         let mut bytes = Vec::with_capacity(FIXTURE_FRAMES * 8);
         let stop = AtomicBool::new(false);
         // Plan 200 A1: one fold across the stream, planned per chunk as the
-        // bus does.
+        // bus does. Plan 200 A2: one limiter across the stream too.
         let mut fold = VoiceFold::default();
+        let mut limiter = PeakLimiter::default();
         while timeline.cursor() < FIXTURE_FRAMES as u64 {
             // Deliver every packet that starts within the next 100 ms.
             while next_packet * FIXTURE_PACKET < timeline.cursor() as usize + 4_800 {
@@ -9490,18 +9564,20 @@ mod mix_tests {
             }
             let raw = timeline.render_with_provenance();
             let now = Instant::now();
-            let written = write_chunk_with_clock(
+            let write = write_chunk_with_clock(
                 &mut bytes,
                 &raw.samples,
                 &settings,
                 fold.plan(&raw.samples, 2),
+                limiter,
                 &stop,
                 &AtomicBool::new(false),
                 || now,
                 || {},
             )
             .unwrap();
-            assert_eq!(written.stale_from, None);
+            limiter = write.limiter;
+            assert_eq!(write.written.stale_from, None);
         }
         assert_eq!(bytes.len(), FIXTURE_FRAMES * 8);
         bytes
@@ -10599,6 +10675,41 @@ mod mix_tests {
             tapped.iter().all(|sample| *sample == 0.0 || *sample == 0.6),
             "captions and voice activity hear only the processed microphone"
         );
+    }
+
+    /// Plan 200 A2 on the real bus: a microphone-only session at +12 dB is
+    /// limited under the -1 dBFS ceiling and counts its clipped samples
+    /// (`audioMixClippedSamples`), with no system audio attached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hot_mic_only_session_is_limited_and_counted() {
+        let epoch = Instant::now() + Duration::from_millis(100);
+        let microphone = signal_packets(epoch, 0, 48_000, 512, |position| {
+            let sample = 0.5 * (std::f32::consts::TAU * 440.0 * position as f32 / 48_000.0).sin();
+            (sample, sample)
+        });
+        let bus = start_bus(
+            epoch,
+            Some(microphone),
+            AudioProcessingSettings {
+                gain_db: 12.0,
+                muted: false,
+            },
+            SessionAudioOptions::default(),
+        )
+        .await;
+        bus.wait_for_frames(24_000).await;
+        let observation = bus.session.system_audio().observation();
+        let (bytes, _) = bus.finish();
+        let samples = decode(&bytes);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.abs() <= LIMITER_CEILING + 1.0e-6),
+            "the limiter holds the -1 dBFS ceiling"
+        );
+        assert!(samples.iter().any(|sample| sample.abs() > 0.85));
+        assert!(!observation.attached);
+        assert!(observation.mix_clipped_samples > 0, "{observation:?}");
     }
 
     /// Amplitude of `hz` in one channel of interleaved stereo: Goertzel over
@@ -12012,6 +12123,123 @@ mod mix_tests {
         let mut unity = stereo(0.25, -0.5, 480);
         limiter.process(&mut unity, &mut vec![false; 960]);
         assert_eq!(unity, stereo(0.25, -0.5, 480), "an idle limiter is a no-op");
+    }
+
+    // ---- Plan 200 A2: the microphone-only path is limited too -----------------
+
+    /// Writes `raw` chunk by chunk through the microphone-only path with one
+    /// fold and one limiter across the stream, as the bus does.
+    fn write_mic_only(
+        raw: &[f32],
+        settings: AudioProcessingSettings,
+    ) -> (Vec<u8>, u64, PeakLimiter) {
+        let settings = AudioProcessingSettingsHandle::new(settings);
+        let mut fold = VoiceFold::default();
+        let mut limiter = PeakLimiter::default();
+        let mut bytes = Vec::new();
+        let mut clipped = 0;
+        let now = Instant::now();
+        for chunk in raw.chunks(CHUNK_FRAMES * 2) {
+            let write = write_chunk_with_clock(
+                &mut bytes,
+                chunk,
+                &settings,
+                fold.plan(chunk, 2),
+                limiter,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+                || now,
+                || {},
+            )
+            .unwrap();
+            assert_eq!(write.written.stale_from, None);
+            limiter = write.limiter;
+            clipped += write.clipped_samples;
+        }
+        (bytes, clipped, limiter)
+    }
+
+    /// A 440 Hz tone at `amplitude` on both channels, `frames` long.
+    fn mic_tone(frames: usize, amplitude: f32) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|position| {
+                let sample =
+                    amplitude * (std::f32::consts::TAU * 440.0 * position as f32 / 48_000.0).sin();
+                [sample, sample]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mic_under_the_ceiling_writes_exactly_the_unlimited_bytes() {
+        // +3 dB on a 0.6 tone peaks at 0.85, under the 0.891 ceiling.
+        let settings = AudioProcessingSettings {
+            gain_db: 3.0,
+            muted: false,
+        };
+        let raw = mic_tone(48_000, 0.6);
+        let (bytes, clipped, limiter) = write_mic_only(&raw, settings);
+        let mut fold = VoiceFold::default();
+        let unlimited = raw
+            .chunks(CHUNK_FRAMES * 2)
+            .flat_map(|chunk| {
+                crate::audio::fold_interleaved_f32(chunk, 2, settings, fold.plan(chunk, 2), true)
+            })
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, unlimited, "unity gain is exact");
+        assert_eq!(clipped, 0);
+        assert!(limiter.idle());
+        // A muted microphone keeps its signed zeros too.
+        let (muted, _, _) = write_mic_only(
+            &raw,
+            AudioProcessingSettings {
+                gain_db: 3.0,
+                muted: true,
+            },
+        );
+        let mut fold = VoiceFold::default();
+        let unlimited_muted = raw
+            .chunks(CHUNK_FRAMES * 2)
+            .flat_map(|chunk| {
+                crate::audio::fold_interleaved_f32(
+                    chunk,
+                    2,
+                    AudioProcessingSettings {
+                        gain_db: 3.0,
+                        muted: true,
+                    },
+                    fold.plan(chunk, 2),
+                    true,
+                )
+            })
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(muted, unlimited_muted);
+    }
+
+    #[test]
+    fn a_hot_mic_is_limited_under_the_ceiling_and_counted_not_clamped() {
+        // +12 dB on a 0.5 tone peaks near 2.0: the old path clamped it at
+        // full scale, flat-topping every peak.
+        let settings = AudioProcessingSettings {
+            gain_db: 12.0,
+            muted: false,
+        };
+        let raw = mic_tone(48_000, 0.5);
+        let (bytes, clipped, _) = write_mic_only(&raw, settings);
+        let samples = bytes
+            .chunks_exact(4)
+            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.abs() <= LIMITER_CEILING + 1.0e-6),
+            "the limiter holds the -1 dBFS ceiling"
+        );
+        assert!(samples.iter().any(|sample| sample.abs() > 0.85));
+        assert!(clipped > 0, "the clipped counter rises");
     }
 
     #[test]
