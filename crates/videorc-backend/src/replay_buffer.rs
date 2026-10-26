@@ -377,6 +377,58 @@ pub fn partial_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
+/// Plan 200 B2: a name a save's partial file can have
+/// (`Clip 2026-10-12 18-30-05.mp4.partial`, ` (2)` suffixes included). The
+/// ring-start sweep deletes nothing else.
+pub fn is_clip_partial_name(file_name: &str) -> bool {
+    const PREFIX: &str = "Clip ";
+    const SUFFIX: &str = ".mp4.partial";
+    file_name.len() > PREFIX.len() + SUFFIX.len()
+        && file_name.starts_with(PREFIX)
+        && file_name.ends_with(SUFFIX)
+        && !file_name.contains(['/', '\\'])
+}
+
+/// Plan 200 B2: deletes the partial clips a crashed or killed save left in
+/// `replays`: regular files (never a link or a folder) with a partial name,
+/// last modified before `started`, that no save in flight owns. Returns what
+/// it deleted.
+pub fn sweep_stale_partials(
+    replays: &Path,
+    started: std::time::SystemTime,
+    in_flight: &[PathBuf],
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(replays) else {
+        return Vec::new();
+    };
+    let mut deleted = Vec::new();
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !is_clip_partial_name(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if in_flight.iter().any(|claimed| claimed == &path) {
+            continue;
+        }
+        // `DirEntry::file_type` does not follow links.
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified < started);
+        if stale && std::fs::remove_file(&path).is_ok() {
+            deleted.push(path);
+        }
+    }
+    deleted.sort();
+    deleted
+}
+
 /// Bytes per second the ring writes at this quality: the video bitrate plus
 /// the ring's AAC.
 pub fn bytes_per_second(video_bitrate_kbps: u32) -> u64 {
@@ -501,6 +553,9 @@ pub struct ReplayRegistry {
     /// A buffer-only `session.start` is between admission and its running
     /// session (see `begin_start_in_flight`).
     start_in_flight: bool,
+    /// Plan 200 B2: the partial files of the saves running now, which the
+    /// ring-start sweep must never delete.
+    saving_partials: Vec<PathBuf>,
 }
 
 fn lock(state: &AppState) -> std::sync::MutexGuard<'_, ReplayRegistry> {
@@ -607,6 +662,9 @@ pub struct RingGuard {
     pub dir: PathBuf,
     pub seconds: u32,
     armed: bool,
+    /// When the ring started: partial clips older than this belong to no
+    /// save of this ring (plan 200 B2).
+    started: std::time::SystemTime,
 }
 
 impl RingGuard {
@@ -711,6 +769,7 @@ pub fn prepare(state: &AppState, request: RingRequest<'_>) -> Result<RingGuard> 
         dir,
         seconds,
         armed: false,
+        started: std::time::SystemTime::now(),
     })
 }
 
@@ -721,7 +780,23 @@ pub fn attach(state: &AppState, mut guard: RingGuard) {
     let session_id = guard.session_id.clone();
     let task_state = state.clone();
     let task_session_id = session_id.clone();
+    let started = guard.started;
     let task = tokio::spawn(async move {
+        // Plan 200 B2: a save that died with the app (or was killed) leaves
+        // its `.partial` in Clips; the ring's start clears what no running
+        // save owns.
+        let replays = lock(&task_state)
+            .active
+            .as_ref()
+            .filter(|runtime| runtime.session_id == task_session_id)
+            .map(|runtime| replays_dir(&runtime.recordings_dir));
+        if let Some(replays) = replays {
+            let sweep_state = task_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                sweep_clip_partials(&sweep_state, &replays, started)
+            })
+            .await;
+        }
         loop {
             tokio::time::sleep(PRUNE_TICK).await;
             let (dir, seconds) = {
@@ -766,6 +841,59 @@ pub fn attach(state: &AppState, mut guard: RingGuard) {
         }
     }
     emit_state(state);
+}
+
+/// The ring-start sweep over the Clips folder (plan 200 B2).
+fn sweep_clip_partials(state: &AppState, replays: &Path, started: std::time::SystemTime) {
+    let in_flight = lock(state).saving_partials.clone();
+    let deleted = sweep_stale_partials(replays, started, &in_flight);
+    if !deleted.is_empty() {
+        tracing::info!(
+            count = deleted.len(),
+            folder = %replays.display(),
+            "Removed partial clips left by an earlier save"
+        );
+    }
+}
+
+/// A running save's claim on its partial file: the sweep skips it until the
+/// save ends, however it ends.
+struct PartialClaim {
+    state: AppState,
+    path: PathBuf,
+}
+
+impl PartialClaim {
+    fn new(state: &AppState, path: &Path) -> Self {
+        lock(state).saving_partials.push(path.to_path_buf());
+        Self {
+            state: state.clone(),
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+impl Drop for PartialClaim {
+    fn drop(&mut self) {
+        let mut registry = lock(&self.state);
+        if let Some(index) = registry
+            .saving_partials
+            .iter()
+            .position(|path| path == &self.path)
+        {
+            registry.saving_partials.swap_remove(index);
+        }
+    }
+}
+
+/// Plan 200 B2: flushes the saved clip to disk before its rename. Windows
+/// needs a handle with write access for `FlushFileBuffers` (`sync_all`).
+fn sync_clip(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()
 }
 
 /// Why a ring went away.
@@ -1366,6 +1494,7 @@ async fn write_replay(
     }
     let target = unused_target(&replays, &replay_file_name(&chrono::Local::now()));
     let partial = partial_path(&target);
+    let _claim = PartialClaim::new(state, &partial);
     let mut command = tokio::process::Command::new(&snapshot.ffmpeg_path);
     command
         .args(save_args(list_path, &partial))
@@ -1417,6 +1546,15 @@ async fn write_replay(
                 ));
             }
         };
+    if let Err(error) = sync_clip(&partial) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(failure(
+            save_id,
+            Some(session_id),
+            "io",
+            format!("Could not write the clip to disk: {error}"),
+        ));
+    }
     if let Err(error) = std::fs::rename(&partial, &target) {
         let _ = std::fs::remove_file(&partial);
         return Err(failure(
@@ -1425,6 +1563,11 @@ async fn write_replay(
             "io",
             format!("Could not move the replay into place: {error}"),
         ));
+    }
+    // The rename itself lasts once the folder is flushed (Unix; Windows
+    // renames have no portable folder flush).
+    if let Err(error) = crate::session_ops::sync_session_file_parent(&target) {
+        tracing::warn!("Could not flush the Clips folder after saving a clip: {error}");
     }
     let file_size_bytes = std::fs::metadata(&target)
         .ok()
@@ -2421,6 +2564,66 @@ mod pure_tests {
         // segment when one was there.
         let spans: f64 = listed.iter().map(Segment::duration_seconds).sum();
         assert!((spans - 29.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn the_sweep_matches_only_partial_clip_names() {
+        assert!(is_clip_partial_name("Clip 2026-10-12 18-30-05.mp4.partial"));
+        assert!(is_clip_partial_name(
+            "Clip 2026-10-12 18-30-05 (2).mp4.partial"
+        ));
+        assert_eq!(
+            partial_path(Path::new("/c/Clip 2026-10-12 18-30-05.mp4"))
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(is_clip_partial_name),
+            Some(true),
+            "every partial a save writes matches"
+        );
+        for kept in [
+            "Clip 2026-10-12 18-30-05.mp4",
+            "Clip 2026-10-12 18-30-05.mp4.partial.mov",
+            "notes.partial",
+            "Recording.mp4.partial",
+            "clip 2026-10-12 18-30-05.mp4.partial",
+            "Clip .mp4.partial",
+            ".DS_Store",
+            "",
+        ] {
+            assert!(!is_clip_partial_name(kept), "{kept:?}");
+        }
+    }
+
+    #[test]
+    fn the_sweep_deletes_only_stale_unclaimed_partial_clips() {
+        let dir = std::env::temp_dir().join(format!("videorc-clip-sweep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = dir.join("Clip 2026-10-12 18-30-05.mp4.partial");
+        let claimed = dir.join("Clip 2026-10-12 18-31-00.mp4.partial");
+        let clip = dir.join("Clip 2026-10-12 18-30-05.mp4");
+        let other = dir.join("notes.partial");
+        let folder = dir.join("Clip 2026-10-12 18-32-00.mp4.partial");
+        for file in [&stale, &claimed, &clip, &other] {
+            std::fs::write(file, b"mp4").unwrap();
+        }
+        std::fs::create_dir_all(&folder).unwrap();
+        // Everything was written before a ring that starts a second from now.
+        let started = std::time::SystemTime::now() + Duration::from_secs(1);
+        // A ring that started before the files were written deletes nothing.
+        assert!(
+            sweep_stale_partials(&dir, std::time::UNIX_EPOCH, std::slice::from_ref(&claimed))
+                .is_empty()
+        );
+        let deleted = sweep_stale_partials(&dir, started, std::slice::from_ref(&claimed));
+        assert_eq!(deleted, vec![stale.clone()]);
+        assert!(!stale.exists());
+        assert!(claimed.exists(), "a save in flight keeps its partial");
+        assert!(clip.exists(), "a clip is never touched");
+        assert!(other.exists(), "an unrelated .partial is never touched");
+        assert!(folder.is_dir(), "a folder is never touched");
+        // A missing Clips folder is nothing to sweep.
+        assert!(sweep_stale_partials(&dir.join("missing"), started, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
