@@ -6551,11 +6551,14 @@ fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>
     let _ = slot;
 }
 
+/// The image path a live background frame carries; such frames are never cached.
+const LIVE_BACKGROUND_FRAME_IMAGE_PATH: &str = "live-background";
+
 /// A CPU live frame as the background image source the resample reads.
 #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
 fn live_frame_image_source(frame: &crate::live_background::CpuLiveFrame) -> CompositorImageSource {
     CompositorImageSource {
-        image_path: "live-background".to_string(),
+        image_path: LIVE_BACKGROUND_FRAME_IMAGE_PATH.to_string(),
         file_revision: None,
         width: Some(frame.width),
         height: Some(frame.height),
@@ -10263,6 +10266,24 @@ fn render_scene_background(
     height: u32,
     bytes: &mut [u8],
 ) -> bool {
+    render_scene_background_with_cache(
+        &BACKGROUND_YUV_CACHE,
+        background,
+        background_image_source,
+        width,
+        height,
+        bytes,
+    )
+}
+
+fn render_scene_background_with_cache(
+    cache: &BackgroundYuvCache,
+    background: Option<&EffectiveSceneBackground>,
+    background_image_source: Option<&CompositorImageSource>,
+    width: u32,
+    height: u32,
+    bytes: &mut [u8],
+) -> bool {
     let Some(background) = background else {
         return false;
     };
@@ -10271,7 +10292,16 @@ fn render_scene_background(
     else {
         return false;
     };
-    blit_rgba_to_yuv420p(
+    let crop = background_zoom_crop(Some(background));
+    let contain = matches!(background.fit, BackgroundFit::Fit);
+    let cache_key = background_image_source
+        .and_then(|source| BackgroundYuvKey::new(source, width, height, crop, contain));
+    if let Some(key) = cache_key.as_ref()
+        && cache.copy_into(key, bytes)
+    {
+        return true;
+    }
+    let drawn = blit_rgba_to_yuv420p(
         &RgbaSource {
             bytes: pixels,
             width: image_width,
@@ -10288,15 +10318,132 @@ fn render_scene_background(
             height,
         },
         SourceRenderOptions {
-            crop: background_zoom_crop(Some(background)),
+            crop,
             pan: (0.0, 0.0),
-            contain: matches!(background.fit, BackgroundFit::Fit),
+            contain,
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
             linear: false,
         },
-    )
+    );
+    if drawn && let Some(key) = cache_key {
+        cache.store(key, bytes);
+    }
+    drawn
+}
+
+/// The CPU compositor's background, already resampled and converted to the
+/// canvas (retest 151): a still picture background re-ran the full-canvas
+/// RGBA -> YUV resample on every frame, ~2 cores at 1080p30 on a 6-core
+/// laptop. The frame under the sources is a pure function of the decoded
+/// image, the canvas and the zoom/fit, so it is drawn once per key and copied
+/// after that. Live background frames change every tick and are never kept.
+static BACKGROUND_YUV_CACHE: BackgroundYuvCache = BackgroundYuvCache::new();
+
+/// Distinct canvases at once: the primary leg, a vertical simulcast leg and a
+/// preview run being resized.
+const BACKGROUND_YUV_CACHE_ENTRIES: usize = 4;
+
+#[derive(Debug, Clone)]
+struct BackgroundYuvKey {
+    /// Held so the decoded buffer (and so its address) outlives the entry.
+    pixels: Arc<Vec<u8>>,
+    content_revision: u64,
+    canvas: (u32, u32),
+    crop: [u64; 4],
+    contain: bool,
+}
+
+impl BackgroundYuvKey {
+    fn new(
+        source: &CompositorImageSource,
+        width: u32,
+        height: u32,
+        crop: SceneCrop,
+        contain: bool,
+    ) -> Option<Self> {
+        if source.image_path == LIVE_BACKGROUND_FRAME_IMAGE_PATH {
+            return None;
+        }
+        let pixels = source.bgra.as_ref().or(source.rgba.as_ref())?;
+        Some(Self {
+            pixels: Arc::clone(pixels),
+            content_revision: source.content_revision,
+            canvas: (width, height),
+            crop: [
+                crop.left.to_bits(),
+                crop.top.to_bits(),
+                crop.right.to_bits(),
+                crop.bottom.to_bits(),
+            ],
+            contain,
+        })
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pixels, &other.pixels)
+            && self.content_revision == other.content_revision
+            && self.canvas == other.canvas
+            && self.crop == other.crop
+            && self.contain == other.contain
+    }
+}
+
+struct BackgroundYuvCache {
+    /// Most recently used last.
+    entries: StdMutex<Vec<(BackgroundYuvKey, Vec<u8>)>>,
+}
+
+impl BackgroundYuvCache {
+    const fn new() -> Self {
+        Self {
+            entries: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn copy_into(&self, key: &BackgroundYuvKey, bytes: &mut [u8]) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let Some(index) = entries.iter().position(|(cached, _)| cached.matches(key)) else {
+            return false;
+        };
+        let entry = entries.remove(index);
+        let hit = entry.1.len() == bytes.len();
+        if hit {
+            bytes.copy_from_slice(&entry.1);
+        }
+        entries.push(entry);
+        hit
+    }
+
+    fn store(&self, key: BackgroundYuvKey, bytes: &[u8]) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        // A canvas shows one background at a time, and a picture only this
+        // cache still holds is gone from the scene: neither may pin memory.
+        let mut frame = Vec::new();
+        entries.retain_mut(|(cached, cached_frame)| {
+            let keep = cached.canvas != key.canvas && Arc::strong_count(&cached.pixels) > 1;
+            if !keep && frame.capacity() < cached_frame.capacity() {
+                frame = std::mem::take(cached_frame);
+            }
+            keep
+        });
+        if entries.len() >= BACKGROUND_YUV_CACHE_ENTRIES {
+            entries.remove(0);
+        }
+        frame.clear();
+        frame.extend_from_slice(bytes);
+        entries.push((key, frame));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().map_or(0, |entries| entries.len())
+    }
 }
 
 fn scene_content_rect_pixels(stage_margin: f64, width: u32, height: u32) -> PixelRect {
@@ -22316,6 +22463,150 @@ mod live_background_metal_tests {
         // A release shares nothing either.
         renderer.release();
         assert!(renderer.frame_at(still_at).is_none());
+    }
+}
+
+/// Retest 151: the CPU background is drawn once per (picture, canvas, zoom,
+/// fit) and copied after that, byte for byte what a fresh resample draws.
+#[cfg(test)]
+mod background_yuv_cache_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn picture(seed: u8) -> CompositorImageSource {
+        let (width, height) = (40_u32, 30_u32);
+        CompositorImageSource {
+            image_path: "background.png".to_string(),
+            file_revision: Some("1".to_string()),
+            width: Some(width),
+            height: Some(height),
+            rgba: Some(Arc::new(
+                (0..width * height * 4)
+                    .map(|index| (index as u8).wrapping_mul(seed) | 0x0f)
+                    .collect(),
+            )),
+            bgra: None,
+            content_revision: 1,
+            state: "ready".to_string(),
+            message: None,
+        }
+    }
+
+    fn background(scale: f64, fit: BackgroundFit) -> EffectiveSceneBackground {
+        EffectiveSceneBackground {
+            asset_id: "picture".to_string(),
+            managed_asset_path: "background.png".to_string(),
+            fit,
+            scale,
+            offset_x: 20.0,
+            offset_y: -10.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: None,
+        }
+    }
+
+    fn draw(
+        cache: &BackgroundYuvCache,
+        background: &EffectiveSceneBackground,
+        source: &CompositorImageSource,
+        (width, height): (u32, u32),
+    ) -> Vec<u8> {
+        let mut bytes = vec![0xaa; raw_yuv420p_len(width, height)];
+        fill_yuv420p(&mut bytes, width, height, 16, 128, 128);
+        assert!(render_scene_background_with_cache(
+            cache,
+            Some(background),
+            Some(source),
+            width,
+            height,
+            &mut bytes
+        ));
+        bytes
+    }
+
+    #[test]
+    fn a_cached_background_is_byte_identical_to_a_fresh_draw() {
+        let cache = BackgroundYuvCache::new();
+        let source = picture(7);
+        for (background, canvas) in [
+            (background(100.0, BackgroundFit::Fill), (64, 36)),
+            (background(150.0, BackgroundFit::Fill), (64, 36)),
+            (background(100.0, BackgroundFit::Fit), (64, 36)),
+            (background(100.0, BackgroundFit::Fill), (36, 64)),
+        ] {
+            let first = draw(&cache, &background, &source, canvas);
+            let cached = draw(&cache, &background, &source, canvas);
+            let fresh = draw(&BackgroundYuvCache::new(), &background, &source, canvas);
+            assert_eq!(cached, first);
+            assert_eq!(cached, fresh);
+        }
+    }
+
+    #[test]
+    fn the_second_frame_is_a_copy() {
+        let cache = BackgroundYuvCache::new();
+        let source = picture(3);
+        let scene_background = background(120.0, BackgroundFit::Fill);
+        let key = BackgroundYuvKey::new(
+            &source,
+            64,
+            36,
+            background_zoom_crop(Some(&scene_background)),
+            false,
+        )
+        .expect("a picture is cacheable");
+        let mut frame = vec![0; raw_yuv420p_len(64, 36)];
+        assert!(!cache.copy_into(&key, &mut frame));
+        let drawn = draw(&cache, &scene_background, &source, (64, 36));
+        assert!(cache.copy_into(&key, &mut frame));
+        assert_eq!(frame, drawn);
+        // Another zoom of the same picture is a different frame.
+        let zoomed = BackgroundYuvKey::new(&source, 64, 36, SceneCrop::none(), false)
+            .expect("a picture is cacheable");
+        assert!(!cache.copy_into(&zoomed, &mut frame));
+    }
+
+    #[test]
+    fn live_background_frames_are_never_kept() {
+        let cache = BackgroundYuvCache::new();
+        let live = CompositorImageSource {
+            image_path: LIVE_BACKGROUND_FRAME_IMAGE_PATH.to_string(),
+            ..picture(5)
+        };
+        let _ = draw(
+            &cache,
+            &background(100.0, BackgroundFit::Fill),
+            &live,
+            (64, 36),
+        );
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn a_replaced_or_dropped_picture_is_released() {
+        let cache = BackgroundYuvCache::new();
+        let scene_background = background(100.0, BackgroundFit::Fill);
+        let old = picture(3);
+        let old_pixels = Arc::downgrade(old.rgba.as_ref().expect("rgba"));
+        let _ = draw(&cache, &scene_background, &old, (64, 36));
+        // The scene moved on: the next picture on the same canvas replaces it.
+        let new = picture(9);
+        let _ = draw(&cache, &scene_background, &new, (64, 36));
+        assert_eq!(cache.len(), 1);
+        drop(old);
+        assert!(old_pixels.upgrade().is_none());
+        // A picture dropped by the scene is not pinned by another canvas's store.
+        let new_pixels = Arc::downgrade(new.rgba.as_ref().expect("rgba"));
+        drop(new);
+        let other = picture(11);
+        let _ = draw(&cache, &scene_background, &other, (36, 64));
+        assert!(new_pixels.upgrade().is_none());
+        assert_eq!(cache.len(), 1);
     }
 }
 
