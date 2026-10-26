@@ -101,7 +101,8 @@ describe('runtime info helpers', () => {
         VIDEORC_NOTES_RECORDING_OVERLAY: '1',
         VIDEORC_COMMENTS_WINDOW: '1',
         VIDEORC_COMMENTS_RECORDING_OVERLAY: '1',
-        VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE: '1'
+        VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE: '1',
+        VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1'
       }
     })
 
@@ -116,6 +117,7 @@ describe('runtime info helpers', () => {
       commentsWindowRecordingOverlayAllowed: true,
       previewSmokeMode: true,
       windowsLiveAudioSmokeMode: true,
+      windowsD3d11PreviewSmokeMode: true,
       disableAutoPreview: true,
       disableAutoSourcePreview: true,
       nativePreviewSurfaceStageSuspended: true

@@ -188,6 +188,10 @@ import {
   type WindowsLiveAudioSmokeRequest
 } from '../shared/windows-live-audio-smoke'
 import {
+  validateWindowsD3d11PreviewSmokeRequest,
+  type WindowsD3d11PreviewSmokeRequest
+} from '../shared/windows-d3d11-preview-smoke'
+import {
   parseMainBackendWireMessage,
   parseMainBannerList,
   parseMainBannersChangedEvent,
@@ -1231,10 +1235,12 @@ const packagedSmokeHarnessCapability =
     ? process.env.VIDEORC_SMOKE_COMMAND_CAPABILITY
     : undefined
 const windowsLiveAudioSmokeMode = process.env.VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE === '1'
+const windowsD3d11PreviewSmokeMode = process.env.VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE === '1'
 const smokeCommandServerEnabled = smokeCommandServerAllowed(
   process.env.VIDEORC_SMOKE_PREVIEW_MOTION === '1' ||
     process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1' ||
-    windowsLiveAudioSmokeMode,
+    windowsLiveAudioSmokeMode ||
+    windowsD3d11PreviewSmokeMode,
   app.isPackaged,
   packagedSmokeHarnessCapability
 )
@@ -10547,6 +10553,20 @@ async function runSmokePreviewMotionCommand(
     )
   }
 
+  if (command === 'windows-d3d11-preview-harness') {
+    if (!app.isPackaged || !packagedSmokeHarnessCapability || !windowsD3d11PreviewSmokeMode) {
+      throw new Error('Windows D3D11 preview harness is unavailable in this app mode.')
+    }
+    const request = validateWindowsD3d11PreviewSmokeRequest(params)
+    if (!request) {
+      throw new Error('Invalid Windows D3D11 preview harness action.')
+    }
+    return mainWindow.webContents.executeJavaScript(
+      windowsD3d11PreviewSmokeRendererScript(request),
+      true
+    )
+  }
+
   if (command === 'resize-window') {
     const width = typeof params.width === 'number' ? params.width : 1180
     const height = typeof params.height === 'number' ? params.height : 780
@@ -12794,6 +12814,23 @@ function windowsLiveAudioSmokeRendererScript(request: WindowsLiveAudioSmokeReque
         await new Promise((resolve) => window.setTimeout(resolve, 50));
       }
       throw new Error('Windows live audio renderer harness did not become ready.');
+    })()
+  `
+}
+
+function windowsD3d11PreviewSmokeRendererScript(request: WindowsD3d11PreviewSmokeRequest): string {
+  const requestJson = jsonForInlineScript(request)
+  return `
+    (async () => {
+      const deadline = performance.now() + 15000;
+      while (performance.now() < deadline) {
+        const harness = window.__videorcWindowsD3d11PreviewHarness;
+        if (typeof harness === 'function') {
+          return harness(${requestJson});
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+      }
+      throw new Error('Windows D3D11 preview renderer harness did not become ready.');
     })()
   `
 }

@@ -4141,6 +4141,8 @@ export interface RuntimeInfo {
   previewSmokeMode?: boolean
   /** Enables the fixed, packaged Windows live-microphone acceptance bridge. */
   windowsLiveAudioSmokeMode?: boolean
+  /** Enables the fixed, packaged Windows D3D11 preview source bridge. */
+  windowsD3d11PreviewSmokeMode?: boolean
   disableAutoPreview?: boolean
   disableAutoSourcePreview?: boolean
   nativePreviewSurfaceStageSuspended?: boolean

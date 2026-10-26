@@ -130,6 +130,10 @@ import type {
   WindowsLiveAudioSmokeState,
   WindowsLiveAudioSmokeTelemetry
 } from '../../../shared/windows-live-audio-smoke'
+import type {
+  WindowsD3d11PreviewSmokeRequest,
+  WindowsD3d11PreviewSmokeState
+} from '../../../shared/windows-d3d11-preview-smoke'
 import {
   applyStoredManualStreamKeyResult,
   auxiliaryStreamOutputVideoSettings,
@@ -15348,6 +15352,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     }
   }, [deviceList.devices, runtimeInfo?.windowsLiveAudioSmokeMode, startSession, stopSession])
+
+  useEffect(() => {
+    type WindowsD3d11PreviewSmokeWindow = Window & {
+      __videorcWindowsD3d11PreviewHarness?: (
+        request: WindowsD3d11PreviewSmokeRequest
+      ) => Promise<WindowsD3d11PreviewSmokeState>
+    }
+    const smokeWindow = window as WindowsD3d11PreviewSmokeWindow
+    if (!runtimeInfo?.windowsD3d11PreviewSmokeMode) {
+      delete smokeWindow.__videorcWindowsD3d11PreviewHarness
+      return
+    }
+
+    const harness = async (
+      request: WindowsD3d11PreviewSmokeRequest
+    ): Promise<WindowsD3d11PreviewSmokeState> => {
+      // Smoke-only code: loaded on first use so it never ships in the eager bundle.
+      const smoke = await import('@/lib/windows-d3d11-preview-smoke-harness')
+      if (request.action === 'configure') {
+        const next = smoke.configureWindowsD3d11PreviewSmokeCapture(
+          captureConfigRef.current,
+          deviceList.devices,
+          request
+        )
+        // The default camera scene refused every start before this; those
+        // warnings are not part of the screen-only baseline.
+        lastErrorRef.current = null
+        setLastError(null)
+        captureConfigRef.current = next
+        setCaptureConfig(next)
+        await new Promise<void>((resolveFrame) =>
+          window.requestAnimationFrame(() => resolveFrame())
+        )
+      }
+      return smoke.windowsD3d11PreviewSmokeState({
+        recording: recordingRef.current,
+        lastError: lastErrorRef.current,
+        captureConfig: captureConfigRef.current
+      })
+    }
+    smokeWindow.__videorcWindowsD3d11PreviewHarness = harness
+    return () => {
+      if (smokeWindow.__videorcWindowsD3d11PreviewHarness === harness) {
+        delete smokeWindow.__videorcWindowsD3d11PreviewHarness
+      }
+    }
+  }, [deviceList.devices, runtimeInfo?.windowsD3d11PreviewSmokeMode])
 
   const renameSession = useCallback(
     async (sessionId: string, title: string): Promise<void> => {
