@@ -706,24 +706,10 @@ fn detect_freezes_in(
 ) -> Result<Vec<FreezeSegment>, String> {
     let filter = format!("freezedetect=n={noise_db}dB:d={min_freeze_seconds}");
     let mut command = Command::new(ffmpeg_path);
-    command.args([
-        "-hide_banner",
-        "-threads",
-        "1",
-        "-filter_threads",
-        "1",
-    ]);
+    command.args(["-hide_banner", "-threads", "1", "-filter_threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-i",
-        file_path,
-        "-map",
-        "0:v:0",
-        "-vf",
-        &filter,
-        "-f",
-        "null",
-        "-",
+        "-i", file_path, "-map", "0:v:0", "-vf", &filter, "-f", "null", "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run freezedetect: {error}"))?;
@@ -878,14 +864,7 @@ fn detect_repeated_frames_in(
     command.args(["-hide_banner", "-nostats", "-threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-i",
-        file_path,
-        "-an",
-        "-map",
-        "0:v:0",
-        "-f",
-        "framemd5",
-        "-",
+        "-i", file_path, "-an", "-map", "0:v:0", "-f", "framemd5", "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run framemd5: {error}"))?;
@@ -1353,7 +1332,11 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
         args.extend(["-vf".to_string(), video_filters.join(",")]);
         args.extend(plan.video_encoder.encode_args());
         // Videorc records BT.709 video range; a re-encode must not lose the tags.
-        args.extend(REPAIR_BT709_COLOR_TAG_ARGS.iter().map(|arg| arg.to_string()));
+        args.extend(
+            REPAIR_BT709_COLOR_TAG_ARGS
+                .iter()
+                .map(|arg| arg.to_string()),
+        );
     }
     if audio_copy {
         args.extend(["-c:a".to_string(), "copy".to_string()]);
@@ -3187,11 +3170,22 @@ mod tests {
     }
 
     fn assert_repair_keeps_the_file_whole(args: &[String]) {
-        assert!(args.windows(2).any(|w| w[0] == "-map" && w[1] == "0"), "{args:?}");
-        assert!(args.windows(2).any(|w| w[0] == "-map" && w[1] == "-0:d"), "{args:?}");
-        assert!(args.windows(2).any(|w| w[0] == "-map_chapters" && w[1] == "0"), "{args:?}");
         assert!(
-            args.windows(2).any(|w| w[0] == "-movflags" && w[1] == "+faststart"),
+            args.windows(2).any(|w| w[0] == "-map" && w[1] == "0"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "-map" && w[1] == "-0:d"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-map_chapters" && w[1] == "0"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-movflags" && w[1] == "+faststart"),
             "{args:?}"
         );
         assert!(!args.iter().any(|arg| arg == "-map_metadata"), "{args:?}");
@@ -3202,7 +3196,10 @@ mod tests {
         let args = build_repair_args(
             "in.mp4",
             ".in.videorc-repair.mp4",
-            &repair_plan(VideoRepair::Copy, AudioRepair::CenterChannel { source_channel: 1 }),
+            &repair_plan(
+                VideoRepair::Copy,
+                AudioRepair::CenterChannel { source_channel: 1 },
+            ),
         );
         assert_repair_keeps_the_file_whole(&args);
         assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "copy"));
@@ -3219,7 +3216,10 @@ mod tests {
             &repair_plan(VideoRepair::Copy, AudioRepair::Resync { offset_ms: 120.0 }),
         );
         assert!(!mkv.iter().any(|arg| arg == "-movflags"));
-        assert!(mkv.windows(2).any(|w| w[0] == "-map_chapters" && w[1] == "0"));
+        assert!(
+            mkv.windows(2)
+                .any(|w| w[0] == "-map_chapters" && w[1] == "0")
+        );
     }
 
     #[test]
@@ -3237,7 +3237,10 @@ mod tests {
             ("-color_trc", "bt709"),
             ("-color_range", "tv"),
         ] {
-            assert!(args.windows(2).any(|w| w[0] == flag && w[1] == value), "{flag}");
+            assert!(
+                args.windows(2).any(|w| w[0] == flag && w[1] == value),
+                "{flag}"
+            );
         }
         assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "copy"));
     }
@@ -3253,8 +3256,14 @@ mod tests {
             ),
         );
         assert_repair_keeps_the_file_whole(&args);
-        assert!(args.iter().any(|arg| arg.starts_with("minterpolate=fps=30")));
-        assert!(args.windows(2).any(|w| w[0] == "-color_range" && w[1] == "tv"));
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("minterpolate=fps=30"))
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-color_range" && w[1] == "tv")
+        );
         assert!(args.windows(2).any(|w| w[0] == "-c:a" && w[1] == "aac"));
         assert!(args.windows(2).any(|w| w[0] == "-b:a" && w[1] == "256k"));
         // Inputs come before every output option.
@@ -3291,7 +3300,10 @@ mod tests {
             .collect();
         assert_eq!(middle, [756.0, 1452.0, 2148.0, 2844.0]);
         for pair in windows.windows(2) {
-            assert!(pair[0].start + pair[0].duration <= pair[1].start, "{pair:?}");
+            assert!(
+                pair[0].start + pair[0].duration <= pair[1].start,
+                "{pair:?}"
+            );
         }
     }
 
@@ -3301,7 +3313,10 @@ mod tests {
         assert_eq!(windows.len(), 6);
         assert_eq!(windows[5].start + windows[5].duration, 1260.0);
         for pair in windows.windows(2) {
-            assert!(pair[0].start + pair[0].duration <= pair[1].start, "{pair:?}");
+            assert!(
+                pair[0].start + pair[0].duration <= pair[1].start,
+                "{pair:?}"
+            );
         }
         // Exactly 20 minutes, shorter, unknown: the full check.
         assert_eq!(quick_check_windows(QUICK_CHECK_MIN_DURATION_SECONDS), None);
@@ -3329,7 +3344,10 @@ mod tests {
         assert_eq!(sampled_one_sided_channel(&[]), None);
         assert_eq!(sampled_one_sided_channel(&[None, None]), None);
         // Silent windows don't count against a one-sided channel.
-        assert_eq!(sampled_one_sided_channel(&[Some(2), None, Some(2)]), Some(2));
+        assert_eq!(
+            sampled_one_sided_channel(&[Some(2), None, Some(2)]),
+            Some(2)
+        );
         // Windows that disagree are not one-sided audio.
         assert_eq!(sampled_one_sided_channel(&[Some(1), Some(2)]), None);
     }

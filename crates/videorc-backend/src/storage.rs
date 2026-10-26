@@ -2605,7 +2605,15 @@ impl Database {
                         derived_from_session_id IS NOT NULL OR processing_kind IS NOT NULL
                  FROM sessions WHERE id = ?1",
                 params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()?;
         let Some((started_at, mode, output_json, take_id, derived)) = row else {

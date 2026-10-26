@@ -7688,7 +7688,9 @@ impl Mp4ExportProbe {
     /// probe keeps today's assumption (Videorc only records H.264);
     /// `h264_metadata` would reject any other codec.
     fn video_is_h264(&self) -> bool {
-        self.video_codec.as_deref().is_none_or(|codec| codec == "h264")
+        self.video_codec
+            .as_deref()
+            .is_none_or(|codec| codec == "h264")
     }
 
     /// Plan 200 C2: AAC already (record+stream takes) is copied, never
@@ -7870,9 +7872,9 @@ impl Mp4ExportOptions {
             tag_h264_bt709: probe.video_is_h264(),
             copy_audio: probe.audio_is_aac(),
             snap_fps: mp4_export_snap_fps(probe, take),
-            creation_time: take.and_then(|take| take.started_at).map(|started_at| {
-                started_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
-            }),
+            creation_time: take
+                .and_then(|take| take.started_at)
+                .map(|started_at| started_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
             timecode: take
                 .and_then(|take| take.started_at)
                 .zip(mp4_export_take_fps(probe, take))
@@ -11984,9 +11986,7 @@ async fn export_mp4_from_mkv_tracked(
         control,
         total_seconds,
     };
-    let first = tracked
-        .run(mp4_export_args(input, output, &options))
-        .await;
+    let first = tracked.run(mp4_export_args(input, output, &options)).await;
     let Err(error) = first else {
         return Ok(());
     };
@@ -12587,11 +12587,7 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
                         return;
                     }
                     PostRecordingGateStep::AttemptRepair => {
-                        record_running_quality_snapshot(
-                            &mut job,
-                            &status,
-                            Utc::now().to_rfc3339(),
-                        );
+                        record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
                         let _ = state.database.upsert_repair_job(&job);
                         emit_gate_health(&state, None, &status);
                         true
@@ -40419,7 +40415,10 @@ mod tests {
         assert_eq!(probe.exported_seconds(), Some(6.336));
         assert_eq!(parse_ffprobe_rational("0/0"), None);
         assert_eq!(parse_ffprobe_rational("30000/1001"), Some((30_000, 1_001)));
-        assert_eq!(Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({})), Mp4ExportProbe::default());
+        assert_eq!(
+            Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({})),
+            Mp4ExportProbe::default()
+        );
     }
 
     fn probe_with_codecs(video: &str, audio: &str) -> Mp4ExportProbe {
@@ -40467,7 +40466,10 @@ mod tests {
         assert_eq!(arg_value(&args, "-colorspace"), None);
         assert_eq!(arg_value(&args, "-color_range"), None);
         assert!(!args.iter().any(|arg| arg.contains("setts")));
-        assert_eq!(mp4_export_snap_fps(&probe, Some(&videorc_take(Some(30)))), None);
+        assert_eq!(
+            mp4_export_snap_fps(&probe, Some(&videorc_take(Some(30)))),
+            None
+        );
         // A failed probe keeps today's H.264 assumption.
         assert!(Mp4ExportProbe::default().video_is_h264());
         assert!(!Mp4ExportProbe::default().audio_is_aac());
@@ -40479,16 +40481,40 @@ mod tests {
 
     #[test]
     fn mp4_export_timecode_counts_frames_from_the_sub_second() {
-        assert_eq!(mp4_export_timecode(time_of_day(10, 4, 5, 0), 30), "10:04:05:00");
-        assert_eq!(mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 30), "10:04:05:15");
-        assert_eq!(mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 60), "10:04:05:30");
-        assert_eq!(mp4_export_timecode(time_of_day(9, 0, 0, 999_999_999), 60), "09:00:00:59");
-        assert_eq!(mp4_export_timecode(time_of_day(9, 0, 0, 33_333_334), 30), "09:00:00:01");
+        assert_eq!(
+            mp4_export_timecode(time_of_day(10, 4, 5, 0), 30),
+            "10:04:05:00"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 30),
+            "10:04:05:15"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 60),
+            "10:04:05:30"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(9, 0, 0, 999_999_999), 60),
+            "09:00:00:59"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(9, 0, 0, 33_333_334), 30),
+            "09:00:00:01"
+        );
         // Midnight edges: the last instant of the day never rolls over.
-        assert_eq!(mp4_export_timecode(time_of_day(23, 59, 59, 999_999_999), 30), "23:59:59:29");
-        assert_eq!(mp4_export_timecode(time_of_day(0, 0, 0, 0), 30), "00:00:00:00");
+        assert_eq!(
+            mp4_export_timecode(time_of_day(23, 59, 59, 999_999_999), 30),
+            "23:59:59:29"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(0, 0, 0, 0), 30),
+            "00:00:00:00"
+        );
         // A leap second clamps to the last frame.
-        assert_eq!(mp4_export_timecode(time_of_day(23, 59, 59, 1_500_000_000), 30), "23:59:59:29");
+        assert_eq!(
+            mp4_export_timecode(time_of_day(23, 59, 59, 1_500_000_000), 30),
+            "23:59:59:29"
+        );
     }
 
     #[test]
@@ -40506,7 +40532,7 @@ mod tests {
             text,
             ";FFMETADATA1\n\
              [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Start\n\
-             [CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=5500\ntitle=a\\=b\;c\\#d\\\\e\\\nf\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=5500\ntitle=a\\=b\\;c\\#d\\\\e\\\nf\n\
              [CHAPTER]\nTIMEBASE=1/1000\nSTART=5500\nEND=10000\ntitle=Marker 2\n"
         );
 
@@ -40525,7 +40551,8 @@ mod tests {
 
     #[tokio::test]
     async fn mp4_export_writes_no_chapters_file_without_markers() {
-        let directory = std::env::temp_dir().join(format!("videorc-p200-chapters-{}", Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("videorc-p200-chapters-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let output = directory.join("export.mp4");
         let probe = Mp4ExportProbe {
@@ -40538,10 +40565,17 @@ mod tests {
             markers: Vec::new(),
         };
         assert_eq!(
-            write_mp4_export_chapters(Some(&take), &probe, &output).await.unwrap(),
+            write_mp4_export_chapters(Some(&take), &probe, &output)
+                .await
+                .unwrap(),
             None
         );
-        assert_eq!(write_mp4_export_chapters(None, &probe, &output).await.unwrap(), None);
+        assert_eq!(
+            write_mp4_export_chapters(None, &probe, &output)
+                .await
+                .unwrap(),
+            None
+        );
         let with_markers = Mp4ExportTake {
             markers: vec![(1.0, Some("One".to_string()))],
             ..take
@@ -40551,7 +40585,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(path.parent(), Some(directory.as_path()));
-        assert!(std::fs::read_to_string(&path).unwrap().contains("title=One"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("title=One")
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -40565,7 +40603,8 @@ mod tests {
             started_at: Some(started_at),
             markers: Vec::new(),
         };
-        let mut options = Mp4ExportOptions::plan(&probe_with_codecs("h264", "pcm_s16le"), Some(&take));
+        let mut options =
+            Mp4ExportOptions::plan(&probe_with_codecs("h264", "pcm_s16le"), Some(&take));
         assert_eq!(
             options.creation_time.as_deref(),
             Some("2026-10-26T09:15:30.500000Z")
@@ -40595,7 +40634,10 @@ mod tests {
             .collect();
         assert_eq!(
             inputs,
-            ["/tmp/videorc-test.mkv", "/tmp/videorc-test/chapters.ffmetadata"]
+            [
+                "/tmp/videorc-test.mkv",
+                "/tmp/videorc-test/chapters.ffmetadata"
+            ]
         );
 
         // An import carries none of the take's metadata.
@@ -40607,7 +40649,11 @@ mod tests {
             Path::new("/tmp/videorc-test.mp4"),
             &import,
         );
-        assert!(!args.iter().any(|arg| arg == "-timecode" || arg == "-metadata" || arg == "-map_chapters"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "-timecode" || arg == "-metadata" || arg == "-map_chapters")
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -40635,7 +40681,11 @@ mod tests {
         let preferred = directory.join("recording.mp4");
 
         let staging = prepare_mp4_export_staging(&preferred).unwrap();
-        let args = mp4_export_args(&directory.join("recording.mkv"), &staging.output_path, &Mp4ExportOptions::remux());
+        let args = mp4_export_args(
+            &directory.join("recording.mkv"),
+            &staging.output_path,
+            &Mp4ExportOptions::remux(),
+        );
 
         assert!(staging.directory_path.is_dir());
         assert!(!staging.output_path.exists());
@@ -40714,7 +40764,15 @@ mod tests {
     /// muxed into Matroska at its 1/1000 time base.
     fn plan200_write_capture_mkv(path: &Path, seconds: &str, fps: u32) {
         let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
             .arg(format!("testsrc2=size=320x180:rate={fps}"))
             .args([
                 "-f",
@@ -40747,7 +40805,11 @@ mod tests {
             .arg(path)
             .output()
             .expect("ffprobe runs");
-        assert!(output.status.success(), "ffprobe failed on {}", path.display());
+        assert!(
+            output.status.success(),
+            "ffprobe failed on {}",
+            path.display()
+        );
         String::from_utf8(output.stdout).unwrap()
     }
 
@@ -40766,7 +40828,14 @@ mod tests {
         assert_eq!(
             plan200_ffprobe(
                 &input,
-                &["-select_streams", "v:0", "-show_entries", "stream=time_base", "-of", "csv=p=0"]
+                &[
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=time_base",
+                    "-of",
+                    "csv=p=0"
+                ]
             )
             .trim(),
             "1/1000"
@@ -40786,7 +40855,14 @@ mod tests {
 
         let durations = plan200_ffprobe(
             &output,
-            &["-select_streams", "v:0", "-show_entries", "packet=duration", "-of", "csv=p=0"],
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=duration",
+                "-of",
+                "csv=p=0",
+            ],
         );
         let durations: Vec<&str> = durations.lines().filter(|line| !line.is_empty()).collect();
         assert_eq!(durations.len(), 90, "3 s at 30 fps");
@@ -40798,7 +40874,14 @@ mod tests {
         assert_eq!(
             plan200_ffprobe(
                 &output,
-                &["-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0"]
+                &[
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=r_frame_rate",
+                    "-of",
+                    "csv=p=0"
+                ]
             )
             .trim(),
             "30/1"
@@ -40813,8 +40896,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "spawns ffmpeg/ffprobe and writes media; run with --ignored"]
     async fn plan200_real_export_has_chapters_and_one_timecode_per_take() {
-        if !plan200_ffmpeg_available("plan200_real_export_has_chapters_and_one_timecode_per_take")
-        {
+        if !plan200_ffmpeg_available("plan200_real_export_has_chapters_and_one_timecode_per_take") {
             return;
         }
         let directory = plan200_fixture_directory("c3-take-metadata");
@@ -40841,27 +40923,53 @@ mod tests {
 
             let chapters = plan200_ffprobe(
                 &output,
-                &["-show_chapters", "-show_entries", "chapter_tags=title", "-of", "csv=p=0"],
+                &[
+                    "-show_chapters",
+                    "-show_entries",
+                    "chapter_tags=title",
+                    "-of",
+                    "csv=p=0",
+                ],
             );
             let titles: Vec<&str> = chapters.lines().filter(|line| !line.is_empty()).collect();
             assert_eq!(titles, ["Start", "Intro", "Marker 2"], "{role} chapters");
 
             let streams = plan200_ffprobe(
                 &output,
-                &["-show_entries", "stream=codec_type,codec_tag_string", "-of", "csv=p=0"],
+                &[
+                    "-show_entries",
+                    "stream=codec_type,codec_tag_string",
+                    "-of",
+                    "csv=p=0",
+                ],
             );
-            assert!(streams.lines().any(|line| line.contains("tmcd")), "{role}: {streams}");
+            assert!(
+                streams.lines().any(|line| line.contains("tmcd")),
+                "{role}: {streams}"
+            );
             assert_eq!(
                 plan200_ffprobe(
                     &output,
-                    &["-show_entries", "format_tags=creation_time", "-of", "csv=p=0"]
+                    &[
+                        "-show_entries",
+                        "format_tags=creation_time",
+                        "-of",
+                        "csv=p=0"
+                    ]
                 )
                 .trim(),
                 "2026-10-26T09:15:30.500000Z"
             );
             let timecode = plan200_ffprobe(
                 &output,
-                &["-select_streams", "v:0", "-show_entries", "stream_tags=timecode", "-of", "csv=p=0"],
+                &[
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream_tags=timecode",
+                    "-of",
+                    "csv=p=0",
+                ],
             )
             .trim()
             .to_string();
