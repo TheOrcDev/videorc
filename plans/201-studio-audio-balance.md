@@ -467,4 +467,26 @@ If those files moved, re-check "Verified facts" before S0.
 
 ## Execution notes
 
-None yet.
+- S0 (2026-10-27): Added `clips-idle`, with a pure gate for the ring's
+  session id, tone readings, 12 dB +/- 2 dB gain drop and return to the
+  -120 dBFS floor. Gain writes use the existing dev-only
+  `__videorcSmokeScenePresets.configure` hook and `setCaptureConfig`.
+  `pnpm test:scripts`: 2568 passed, 0 failed, 1 skipped; the focused gate
+  file passed all 31 tests. The first `pnpm smoke:system-audio` failed before
+  app launch: `Backend still compiling after 1200s`. Retrying with
+  `VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS=3600000` completed the backend build.
+  That run then failed before the app handshake because the host exports
+  `ELECTRON_RUN_AS_NODE=1` (`Cannot read properties of undefined (reading
+  'getVersion')`). Retrying with `env -u ELECTRON_RUN_AS_NODE`; no audio
+  assertion was relaxed. The real app then failed the missing-grant check.
+  The authorized rerun with
+  `VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1` exited 0:
+
+  ```text
+  system-audio: SKIPPED (VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1): System audio device is permission-required; the dev app needs the Screen Recording grant (System Settings > Privacy & Security > Screen & System Audio Recording).
+  ```
+
+  Root `CLAUDE.md` is absent on this branch; followed `AGENTS.md`, this plan
+  and the owner's supplied route. No audio case ran, so no S0 data-path STOP
+  was observed. The owner owes the granted macOS run; continuing to S1 under
+  the explicit missing-grant exception.
