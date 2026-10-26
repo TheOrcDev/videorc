@@ -159,6 +159,7 @@ import {
   reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
   resolveProviderStreamOutputPlan,
+  separateSourceRecordingsForSession,
   simulcastArmed,
   simulcastLegLiveRequest,
   smokePreviewCompositorCaptureConfig,
@@ -15895,13 +15896,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       width: window.screen.width * window.devicePixelRatio,
       height: window.screen.height * window.devicePixelRatio
     }
+    // Plan 200 D4: the check counts the separate files' encoders when the
+    // next take would write them.
+    const separateFiles =
+      separateSourceRecordingsForSession(captureConfigRef.current, runtimeInfo?.platform) !==
+      undefined
     setPerformanceCheck(
       await client.requestTyped(
         'performance.check.run',
-        performanceCheckCeiling(captureConfigRef.current.video, display)
+        performanceCheckCeiling(captureConfigRef.current.video, display, separateFiles)
       )
     )
-  }, [client])
+  }, [client, runtimeInfo?.platform])
 
   useEffect(() => {
     if (!client || wsStatus !== 'connected') {

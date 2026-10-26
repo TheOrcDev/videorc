@@ -67,8 +67,10 @@ struct FragParams {
     // color.rs. If these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
     float4 chroma_key2;
-    // (opacity, reserved, reserved, reserved): multiplies the quad's alpha
-    // (plan 168 S-B2, the Buddy sprite); 1 for every other quad.
+    // (opacity, crop_clamp, reserved, reserved). opacity multiplies the
+    // quad's alpha (plan 168 S-B2, the Buddy sprite); 1 for every other quad.
+    // crop_clamp (plan 200 D3) keeps a linear sample half a texel inside the
+    // crop so a scaled draw never blends in pixels the crop removed.
     float4 layer;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
@@ -124,6 +126,12 @@ fragment float4 f_main(VOut in [[stage_in]],
     // Crop: sample only the visible region [cl, 1-cr] x [ct, 1-cb] of the source.
     float cl = params.crop.x, ct = params.crop.y, cr = params.crop.z, cb = params.crop.w;
     float2 src = float2(cl + u * (1.0 - cl - cr), ct + uv.y * (1.0 - ct - cb));
+    if (params.layer.y > 0.5) {
+        float2 half_texel = 0.5 / float2(tex.get_width(), tex.get_height());
+        float2 lo = float2(cl, ct) + half_texel;
+        float2 hi = float2(1.0 - cr, 1.0 - cb) - half_texel;
+        src = clamp(src, min(lo, hi), max(lo, hi));
+    }
     float4 color = tex.sample(samp, src);
     // Chroma key (scene_geometry::chroma_key_alpha / chroma_key_despill in
     // f32, ANGLE model): the angle between the pixel's CbCr vector and the
@@ -285,10 +293,67 @@ pub struct GpuSource<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuSourceSampler {
     /// The compositor's scene sampler: nearest on recording compositors (exact
-    /// crop edges at ~1:1), linear on preview compositors.
+    /// crop edges at 1:1; a scaled draw reads linear, plan 200 D3), linear on
+    /// preview compositors.
     Scene,
     /// Always linear: the Buddy sprite, which is scaled, turned and squashed.
     Linear,
+}
+
+/// How far a quad's drawn size may differ from its source crop and still
+/// count as a 1:1 draw (plan 200 D3): 0.5% absorbs rounding of a fitted rect.
+pub(crate) const SCALED_DRAW_TOLERANCE: f64 = 0.005;
+
+/// Plan 200 D3: does this draw resample its source? Compares the source crop
+/// in pixels with the destination rect in output pixels, per axis. A 1:1 draw
+/// (a 1080p screen on a 1080p canvas, an overlay bitmap rendered at its rect)
+/// is not scaled; a camera minified into a bubble or a 1080p camera upscaled
+/// onto a 4K canvas is.
+pub(crate) fn gpu_draw_is_scaled(
+    source_width: usize,
+    source_height: usize,
+    crop: [f32; 4],
+    dest: [f32; 4],
+    out_width: usize,
+    out_height: usize,
+) -> bool {
+    let crop_width = source_width as f64 * (1.0 - f64::from(crop[0]) - f64::from(crop[2]));
+    let crop_height = source_height as f64 * (1.0 - f64::from(crop[1]) - f64::from(crop[3]));
+    let dest_width = f64::from(dest[2]) * out_width as f64;
+    let dest_height = f64::from(dest[3]) * out_height as f64;
+    if crop_width <= 0.0 || crop_height <= 0.0 || dest_width <= 0.0 || dest_height <= 0.0 {
+        return false;
+    }
+    (dest_width / crop_width - 1.0).abs() > SCALED_DRAW_TOLERANCE
+        || (dest_height / crop_height - 1.0).abs() > SCALED_DRAW_TOLERANCE
+}
+
+/// The sampler a quad actually reads with (plan 200 D3). Recording, stream
+/// and ISO compositors keep the nearest scene sampler for 1:1 draws, so a
+/// 1:1 screen stays pixel-exact, and read scaled draws with the linear
+/// sampler: a nearest minification shimmers on fine detail and a nearest
+/// upscale is blocky. Preview compositors are linear already.
+fn effective_quad_sampler(
+    source: &GpuSource<'_>,
+    smooth_scaling: bool,
+    out_width: usize,
+    out_height: usize,
+) -> GpuSourceSampler {
+    if source.sampler == GpuSourceSampler::Scene
+        && !smooth_scaling
+        && gpu_draw_is_scaled(
+            source.width,
+            source.height,
+            source.crop,
+            source.dest,
+            out_width,
+            out_height,
+        )
+    {
+        GpuSourceSampler::Linear
+    } else {
+        source.sampler
+    }
 }
 
 /// Content namespaces whose texture lives in a key-addressed slot rather than
@@ -1193,8 +1258,9 @@ impl MetalSceneCompositor {
     }
 
     /// `smooth_scaling` selects a linear min/mag sampler for scene draws.
-    /// Recording compositors keep the nearest sampler: their sources land at
-    /// ~1:1 scale and nearest preserves exact crop edges. Preview-owned
+    /// Recording compositors keep the nearest sampler for 1:1 draws, where it
+    /// preserves exact crop edges, and read scaled draws linear (plan 200 D3,
+    /// `effective_quad_sampler`). Preview-owned
     /// compositors render the scene into a small canvas — point-sampling that
     /// minification re-picks a different subset of source pixels every frame,
     /// which reads as crawling grain ("snow") on any noisy source.
@@ -1364,13 +1430,15 @@ impl MetalSceneCompositor {
                 });
                 encoder_blend = source.blend;
             }
-            if source.sampler != encoder_sampler {
-                let sampler = match source.sampler {
+            let quad_sampler =
+                effective_quad_sampler(source, self.smooth_scaling, out_width, out_height);
+            if quad_sampler != encoder_sampler {
+                let sampler = match quad_sampler {
                     GpuSourceSampler::Scene => &self.sampler,
                     GpuSourceSampler::Linear => &self.linear_sampler,
                 };
                 unsafe { encoder.setFragmentSamplerState_atIndex(Some(sampler), 0) };
-                encoder_sampler = source.sampler;
+                encoder_sampler = quad_sampler;
             }
             let vertices = match source.corners {
                 Some(corners) => quad_vertices_corners(corners),
@@ -1408,7 +1476,17 @@ impl MetalSceneCompositor {
                 radius: source.mask.shader_radius(),
                 chroma_key,
                 chroma_key2,
-                layer: [source.opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                layer: [
+                    source.opacity.clamp(0.0, 1.0),
+                    // Only a draw D3 moved to linear: explicit linear quads
+                    // (the Buddy sprite) and preview compositors keep theirs.
+                    f32::from(u8::from(
+                        quad_sampler == GpuSourceSampler::Linear
+                            && source.sampler == GpuSourceSampler::Scene,
+                    )),
+                    0.0,
+                    0.0,
+                ],
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
             let texture = if let Some(external) = source.texture {
@@ -3612,6 +3690,133 @@ mod tests {
             pixel(&px, 4, 3, 0),
             [0, 0, 255, 255],
             "right still red after crop"
+        );
+    }
+
+    fn checker(side: usize) -> Vec<u8> {
+        let mut bgra = Vec::with_capacity(side * side * 4);
+        for y in 0..side {
+            for x in 0..side {
+                let value = if (x + y) % 2 == 0 { 255 } else { 0 };
+                bgra.extend([value, value, value, 255]);
+            }
+        }
+        bgra
+    }
+
+    #[test]
+    fn scaled_draw_detection_compares_the_crop_with_the_drawn_rect() {
+        // 1:1, and a fitted rect that rounds within 0.5%.
+        assert!(!gpu_draw_is_scaled(
+            1920,
+            1080,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            1920,
+            1080
+        ));
+        assert!(!gpu_draw_is_scaled(
+            1000,
+            1000,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            1004,
+            1000
+        ));
+        // A 1080p camera minified into a bubble, or upscaled onto 4K.
+        assert!(gpu_draw_is_scaled(
+            1920,
+            1080,
+            [0.0; 4],
+            [0.7, 0.0, 0.25, 0.25],
+            1920,
+            1080
+        ));
+        assert!(gpu_draw_is_scaled(
+            1920,
+            1080,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            3840,
+            2160
+        ));
+        // The crop counts: half of a 3840-wide source drawn 1920 wide is 1:1.
+        assert!(!gpu_draw_is_scaled(
+            3840,
+            1080,
+            [0.25, 0.0, 0.25, 0.0],
+            [0.0, 0.0, 1.0, 1.0],
+            1920,
+            1080
+        ));
+        // Degenerate sizes never claim a resample.
+        assert!(!gpu_draw_is_scaled(
+            0,
+            0,
+            [0.0; 4],
+            [0.0, 0.0, 1.0, 1.0],
+            8,
+            8
+        ));
+    }
+
+    #[test]
+    fn recording_compositor_minifies_with_linear_and_keeps_1_to_1_exact_or_skips() {
+        if !metal_available() {
+            return;
+        }
+        // Plan 200 D3: a 1-pixel checker minified 4:1. Nearest picks the same
+        // parity texel for every output pixel (solid black or white: aliasing);
+        // linear averages two white and two black texels into an even grey.
+        let source = checker(32);
+        let sources = [full_frame(
+            &source,
+            32,
+            32,
+            false,
+            SourceMask::None,
+            [0.0; 4],
+        )];
+        let px = composite_sources(8, 8, [1.0, 0.0, 0.0, 1.0], &sources).unwrap();
+        for y in 0..8 {
+            for x in 0..8 {
+                let [b, g, r, a] = pixel(&px, 8, x, y);
+                assert_eq!(a, 255);
+                for channel in [b, g, r] {
+                    assert!(
+                        (124..=131).contains(&channel),
+                        "minified checker at {x},{y} is grey, not aliased: {channel}"
+                    );
+                }
+            }
+        }
+        // A 1:1 draw keeps the nearest sampler: bit-exact against the source.
+        let exact = composite_sources(32, 32, [1.0, 0.0, 0.0, 1.0], &sources).unwrap();
+        assert_eq!(exact, source, "a 1:1 draw is pixel-exact");
+    }
+
+    #[test]
+    fn preview_and_explicit_linear_quads_keep_their_sampler() {
+        let source = checker(4);
+        let mut quad = full_frame(&source, 4, 4, false, SourceMask::None, [0.0; 4]);
+        // A preview compositor's scene sampler is linear already: no change.
+        assert_eq!(
+            effective_quad_sampler(&quad, true, 2, 2),
+            GpuSourceSampler::Scene
+        );
+        // A recording compositor promotes the scaled draw, never a 1:1 one.
+        assert_eq!(
+            effective_quad_sampler(&quad, false, 2, 2),
+            GpuSourceSampler::Linear
+        );
+        assert_eq!(
+            effective_quad_sampler(&quad, false, 4, 4),
+            GpuSourceSampler::Scene
+        );
+        quad.sampler = GpuSourceSampler::Linear;
+        assert_eq!(
+            effective_quad_sampler(&quad, false, 4, 4),
+            GpuSourceSampler::Linear
         );
     }
 

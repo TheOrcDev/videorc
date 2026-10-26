@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -44,6 +45,12 @@ struct FfmpegWorkState {
     recording_file_mutation_active: bool,
     maintenance_cancel_generation: u64,
     maintenance_cancel_requested: bool,
+    /// Blocking maintenance threads (FFmpeg analysis/repair) still running.
+    /// A permit can be dropped by a timeout while its thread is still killing
+    /// FFmpeg (plan 200 C6); nothing new starts and quit waits until it exits.
+    maintenance_workers: usize,
+    /// Process shutdown cancels every maintenance job, now and later.
+    shutdown_cancel: bool,
 }
 
 #[derive(Debug, Default)]
@@ -161,6 +168,7 @@ impl FfmpegWorkCoordinator {
             return Err(MaintenanceDeferral::FinalizingActive);
         }
         if state.maintenance_running
+            || state.maintenance_workers > 0
             || state.priority_maintenance_waiting > 0
             || state.recording_file_mutation_waiting > 0
             || state.recording_file_mutation_active
@@ -222,6 +230,7 @@ impl FfmpegWorkCoordinator {
                     && !state.finalizing_active
                     && state.export_active == 0
                     && !state.maintenance_running
+                    && state.maintenance_workers == 0
                     && state.recording_file_mutation_waiting == 0
                     && !state.recording_file_mutation_active
                 {
@@ -255,6 +264,40 @@ impl FfmpegWorkCoordinator {
         MaintenancePermit {
             coordinator: self.clone(),
             generation: state.maintenance_cancel_generation,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Process shutdown (quit, quit-and-update): cancel the running repair or
+    /// analysis so its FFmpeg is killed, and every later one before it starts.
+    pub fn cancel_maintenance_for_shutdown(&self) {
+        {
+            let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+            state.shutdown_cancel = true;
+            state.maintenance_cancel_generation =
+                state.maintenance_cancel_generation.saturating_add(1);
+            state.maintenance_cancel_requested = state.maintenance_running;
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves once no maintenance thread is running (a cancelled repair has
+    /// killed its FFmpeg and removed its temp).
+    pub async fn wait_for_maintenance_workers(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            if self
+                .state
+                .lock()
+                .expect("ffmpeg work state poisoned")
+                .maintenance_workers
+                == 0
+            {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -278,7 +321,10 @@ impl FfmpegWorkCoordinator {
             let _ = notified.as_mut().enable();
             let acquired = {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-                if !state.maintenance_running && !state.recording_file_mutation_active {
+                if !state.maintenance_running
+                    && state.maintenance_workers == 0
+                    && !state.recording_file_mutation_active
+                {
                     state.recording_file_mutation_waiting =
                         state.recording_file_mutation_waiting.saturating_sub(1);
                     waiter.registered = false;
@@ -349,7 +395,20 @@ impl FfmpegWorkCoordinator {
 
     fn maintenance_cancelled_since(&self, generation: u64) -> bool {
         let state = self.state.lock().expect("ffmpeg work state poisoned");
-        state.maintenance_cancel_generation > generation
+        state.shutdown_cancel || state.maintenance_cancel_generation > generation
+    }
+
+    fn begin_maintenance_worker(&self) {
+        let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+        state.maintenance_workers = state.maintenance_workers.saturating_add(1);
+    }
+
+    fn end_maintenance_worker(&self) {
+        {
+            let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+            state.maintenance_workers = state.maintenance_workers.saturating_sub(1);
+        }
+        self.notify.notify_waiters();
     }
 
     fn end_capture(&self, light: bool) {
@@ -541,6 +600,8 @@ impl Drop for ExportPermit {
 pub struct MaintenancePermit {
     coordinator: Arc<FfmpegWorkCoordinator>,
     generation: u64,
+    /// This job's own cancellation (a timeout), shared by its tokens.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl MaintenancePermit {
@@ -548,6 +609,7 @@ impl MaintenancePermit {
         MaintenanceCancelToken {
             coordinator: self.coordinator.clone(),
             generation: self.generation,
+            cancelled: self.cancelled.clone(),
         }
     }
 }
@@ -556,6 +618,42 @@ impl MaintenancePermit {
 pub struct MaintenanceCancelToken {
     coordinator: Arc<FfmpegWorkCoordinator>,
     generation: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Counts one blocking maintenance thread for as long as it lives (moved
+/// into the `spawn_blocking` closure).
+#[derive(Debug)]
+pub struct MaintenanceWorker {
+    coordinator: Arc<FfmpegWorkCoordinator>,
+}
+
+impl Drop for MaintenanceWorker {
+    fn drop(&mut self) {
+        self.coordinator.end_maintenance_worker();
+    }
+}
+
+/// Cancels its job when dropped before [`MaintenanceCancelOnDrop::disarm`]:
+/// a `timeout` that drops the waiting future then kills the FFmpeg child
+/// instead of leaving it running unowned.
+#[derive(Debug)]
+pub struct MaintenanceCancelOnDrop {
+    token: Option<MaintenanceCancelToken>,
+}
+
+impl MaintenanceCancelOnDrop {
+    pub fn disarm(mut self) {
+        self.token = None;
+    }
+}
+
+impl Drop for MaintenanceCancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            token.cancel();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -571,8 +669,28 @@ impl Drop for RecordingFileMutationPermit {
 
 impl MaintenanceCancelToken {
     pub fn is_cancelled(&self) -> bool {
-        self.coordinator
-            .maintenance_cancelled_since(self.generation)
+        self.cancelled.load(Ordering::Acquire)
+            || self
+                .coordinator
+                .maintenance_cancelled_since(self.generation)
+    }
+
+    /// Cancels this job only (its timeout fired).
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn worker(&self) -> MaintenanceWorker {
+        self.coordinator.begin_maintenance_worker();
+        MaintenanceWorker {
+            coordinator: self.coordinator.clone(),
+        }
+    }
+
+    pub fn cancel_on_drop(&self) -> MaintenanceCancelOnDrop {
+        MaintenanceCancelOnDrop {
+            token: Some(self.clone()),
+        }
     }
 }
 
@@ -585,6 +703,68 @@ impl Drop for MaintenancePermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_timed_out_repair_is_cancelled_and_holds_maintenance_until_it_exits() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let permit = coordinator.try_begin_maintenance().unwrap();
+        let token = permit.cancel_token();
+        let worker = token.worker();
+        let waiting = tokio::spawn({
+            let token = token.clone();
+            async move {
+                let _cancel_on_drop = token.cancel_on_drop();
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!token.is_cancelled());
+        // The timeout drops the waiting future: the job is cancelled.
+        waiting.abort();
+        let _ = waiting.await;
+        assert!(token.is_cancelled());
+        // The job's permit is gone, but its thread is still killing FFmpeg.
+        drop(permit);
+        assert_eq!(
+            coordinator.try_begin_maintenance().unwrap_err(),
+            MaintenanceDeferral::MaintenanceRunning
+        );
+        let joined = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_for_maintenance_workers().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!joined.is_finished());
+        drop(worker);
+        tokio::time::timeout(std::time::Duration::from_secs(1), joined)
+            .await
+            .unwrap()
+            .unwrap();
+        // A later job is not cancelled by the earlier timeout.
+        let next = coordinator.try_begin_maintenance().unwrap();
+        assert!(!next.cancel_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_disarmed_cancel_guard_leaves_the_job_running() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let permit = coordinator.try_begin_maintenance().unwrap();
+        let token = permit.cancel_token();
+        token.cancel_on_drop().disarm();
+        assert!(!token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_the_running_repair_and_every_later_one() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let permit = coordinator.try_begin_maintenance().unwrap();
+        let token = permit.cancel_token();
+        coordinator.cancel_maintenance_for_shutdown();
+        assert!(token.is_cancelled());
+        drop(permit);
+        let later = coordinator.try_begin_maintenance().unwrap();
+        assert!(later.cancel_token().is_cancelled());
+    }
 
     #[tokio::test]
     async fn maintenance_is_deferred_while_capture_is_active() {

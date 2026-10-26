@@ -1,10 +1,11 @@
 // Separate source recordings (plan 157): one Record session can leave three
 // files beside each other, Combined (mix), Screen (system audio) and Camera
 // (microphone). These gates judge the TAKE, not one file: every armed role
-// must exist, each file must carry exactly one video and one audio stream on
-// the recording canvas, the audio tracks must be the ones the role promises
-// (a swapped mic/system pairing is a hard failure), and the three files must
-// cover the same span so an editor can lay them on one timeline.
+// must exist, each file must carry exactly one video and one audio stream
+// (Combined and Screen on the recording canvas, Camera at the camera's own
+// size inside it, plan 200 D2), the audio tracks must be the ones the role
+// promises (a swapped mic/system pairing is a hard failure), and the three
+// files must cover the same span so an editor can lay them on one timeline.
 //
 // The pure evaluators take ffprobe JSON (or decoded PCM) that has already
 // been read; the smoke scripts (`scripts/smoke-separate-source-take.mjs`,
@@ -25,7 +26,8 @@ export const DEFAULT_TAKE_GATES = Object.freeze({
   // The three muxers stop on the same request; the ISO legs drain their own
   // FIFOs, so a second of spread is pipeline slack, more is a lost tail.
   maxDurationSpreadSeconds: 1.0,
-  // Canvas law: every file of a take is the recording profile canvas.
+  // Canvas law: Combined and Screen are the recording profile canvas; the
+  // Camera file is the camera's own size, never larger than the canvas.
   requireCanvasDimensions: true,
   // Audio law: one stereo PCM/AAC track per file, titled for its role.
   requireAudioTitles: true,
@@ -93,8 +95,10 @@ export function summarizeRoleProbe(ffprobeJson) {
  *
  * @param {{combined?: object|null, screen?: object|null, camera?: object|null}} summaries
  *   `summarizeRoleProbe` output per role; `null`/absent means the file is missing.
- * @param {{roles?: string[], video?: {width:number,height:number,fps:number}|null}} expectations
- *   `roles` are the roles the session armed (default: all three).
+ * @param {{roles?: string[], video?: {width:number,height:number,fps:number}|null, cameraVideo?: {width:number,height:number}|null}} expectations
+ *   `roles` are the roles the session armed (default: all three). `cameraVideo`
+ *   pins the Camera file's size when the camera's format is known (a fixture);
+ *   otherwise the Camera file must fit inside the canvas (plan 200 D2).
  * @returns {{pass:boolean, failures:string[], warnings:string[]}}
  */
 export function evaluateTake(summaries, expectations = {}, gates = DEFAULT_TAKE_GATES) {
@@ -145,7 +149,24 @@ export function evaluateTake(summaries, expectations = {}, gates = DEFAULT_TAKE_
       }
     }
     if (canvas && settings.requireCanvasDimensions) {
-      if (summary.width !== canvas.width || summary.height !== canvas.height) {
+      const cameraVideo = expectations.cameraVideo ?? null
+      if (role === 'camera' && cameraVideo) {
+        if (summary.width !== cameraVideo.width || summary.height !== cameraVideo.height) {
+          failures.push(
+            `camera video is ${summary.width}x${summary.height} (expected the camera's own ${cameraVideo.width}x${cameraVideo.height})`
+          )
+        }
+      } else if (role === 'camera') {
+        if (
+          !(summary.width > 0 && summary.height > 0) ||
+          summary.width > canvas.width ||
+          summary.height > canvas.height
+        ) {
+          failures.push(
+            `camera video is ${summary.width}x${summary.height} (expected the camera's own size inside the ${canvas.width}x${canvas.height} recording canvas)`
+          )
+        }
+      } else if (summary.width !== canvas.width || summary.height !== canvas.height) {
         failures.push(
           `${role} video is ${summary.width}x${summary.height} (expected the ${canvas.width}x${canvas.height} recording canvas)`
         )
@@ -156,8 +177,10 @@ export function evaluateTake(summaries, expectations = {}, gates = DEFAULT_TAKE_
     }
     const interval = expectations.intervals?.[role]
     if (interval) {
+      // A file ends early when its source was removed, or when the separate
+      // files were shed so Combined keeps up (plan 200 D1).
       if (
-        interval.outcome !== 'source-removed' ||
+        !['source-removed', 'shed'].includes(interval.outcome) ||
         !(interval.endSeconds > 0) ||
         interval.startSeconds !== 0
       ) {

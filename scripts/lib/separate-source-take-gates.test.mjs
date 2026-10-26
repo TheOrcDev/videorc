@@ -83,6 +83,14 @@ describe('evaluateTake', () => {
       evaluateTake(shorter, { video: canvas, intervals: { camera: interval } }).pass,
       true
     )
+    // Plan 200 D1: a shed file carries the same explicit end.
+    assert.equal(
+      evaluateTake(shorter, {
+        video: canvas,
+        intervals: { camera: { ...interval, outcome: 'shed' } }
+      }).pass,
+      true
+    )
     for (const changed of [
       { ...interval, outcome: 'completed' },
       { ...interval, startSeconds: 1 },
@@ -138,10 +146,33 @@ describe('evaluateTake', () => {
     assert.equal(relaxed.warnings.length, 1)
   })
 
-  it('fails an ISO file that is not on the recording canvas', () => {
-    const result = evaluateTake(take({ camera: { width: 1280, height: 720 } }), { video: canvas })
+  it('fails a Screen file that is not on the recording canvas', () => {
+    const result = evaluateTake(take({ screen: { width: 1280, height: 720 } }), { video: canvas })
     assert.equal(result.pass, false)
-    assert.match(result.failures[0], /camera video is 1280x720/)
+    assert.match(result.failures[0], /screen video is 1280x720/)
+  })
+
+  it("takes the Camera file at the camera's own size inside the canvas", () => {
+    // Plan 200 D2: a 4:3 camera on a 16:9 canvas is 1440x1080, never pillarboxed.
+    for (const camera of [
+      { width: 1440, height: 1080 },
+      { width: 1280, height: 720 },
+      { width: 606, height: 1080 }
+    ]) {
+      const result = evaluateTake(take({ camera }), { video: canvas })
+      assert.equal(result.pass, true, result.failures.join('; '))
+    }
+    const larger = evaluateTake(take({ camera: { width: 3840, height: 2160 } }), {
+      video: canvas
+    })
+    assert.equal(larger.pass, false)
+    assert.match(larger.failures[0], /camera video is 3840x2160 \(expected the camera's own size/)
+    // A fixture that knows its camera pins the exact size.
+    const pinned = { video: canvas, cameraVideo: { width: 1440, height: 1080 } }
+    assert.equal(evaluateTake(take({ camera: { width: 1440, height: 1080 } }), pinned).pass, true)
+    const wrong = evaluateTake(take({ camera: { width: 1920, height: 1080 } }), pinned)
+    assert.equal(wrong.pass, false)
+    assert.match(wrong.failures[0], /expected the camera's own 1440x1080/)
   })
 
   it('fails extra or missing streams and mono audio', () => {

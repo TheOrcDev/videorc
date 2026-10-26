@@ -262,6 +262,22 @@ export function separateSourceRecordingsForSession(
   return config.separateSourceRecordings
 }
 
+/**
+ * Plan 200 D4: the Output row's notice before Record. At 4K or 60 fps the
+ * Screen and Camera files triple the encoder work, and a Mac that falls
+ * behind stops them to keep the Combined recording smooth (plan 200 D1).
+ * Null unless the next take would really write the separate files.
+ */
+export function separateSourceRecordingsEncoderNotice(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources' | 'separateSourceRecordings' | 'video'>,
+  platform?: string
+): string | null {
+  if (!separateSourceRecordingsForSession(config, platform)) return null
+  const { video } = config
+  if (Math.min(video.width, video.height) < 2160 && video.fps < 60) return null
+  return `Separate files at ${formatVideoQuality(video)} use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.`
+}
+
 /** The vertical simulcast leg's user-facing settings. */
 export type SimulcastLegPatch = Partial<
   Pick<CaptureConfig, 'lastVerticalPreset' | 'simulcastScreenFraming' | 'simulcastFollowsProgram'>

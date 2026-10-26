@@ -47,6 +47,43 @@ pub const HEALTH_UNAVAILABLE: &str = "separate-source-recordings-unavailable";
 pub const HEALTH_STARTED: &str = "separate-source-recordings-started";
 pub const HEALTH_FINISHED: &str = "separate-source-recordings-finished";
 pub const HEALTH_ROLE_FAILED: &str = "separate-source-recordings-role-failed";
+/// Plan 200 D1: the separate files stopped so Combined keeps up. One event
+/// per take (the Studio's one toast); each file keeps what it recorded.
+pub const HEALTH_SHED: &str = "separate-source-recordings-shed";
+const HEALTH_SHED_MESSAGE: &str = "Separate files stopped so the main recording keeps up. The separate files keep what they recorded.";
+
+/// Why a role ended before Stop without failing: its file closes cleanly at
+/// the boundary, publishes and exports like a full take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceIsoEarlyEnd {
+    /// Its selected source was turned off (plan 158).
+    SourceRemoved,
+    /// Plan 200 D1: shed under encoder pressure so Combined keeps up.
+    Shed,
+}
+
+impl SourceIsoEarlyEnd {
+    /// `sourceIsoOutcome` in the row's diagnostics and the session log code.
+    pub const fn outcome(self) -> &'static str {
+        match self {
+            Self::SourceRemoved => "source-removed",
+            Self::Shed => "shed",
+        }
+    }
+
+    fn reason(self, role: RecordingRole) -> String {
+        match self {
+            Self::SourceRemoved => format!(
+                "{} recording ended because its selected source was removed.",
+                role.title_suffix()
+            ),
+            Self::Shed => format!(
+                "{} recording stopped to keep the main recording smooth.",
+                role.title_suffix()
+            ),
+        }
+    }
+}
 
 /// How long the stop path waits for an ISO muxer to flush after its video
 /// FIFO hit EOF before it is killed and the file kept as recovery media.
@@ -235,6 +272,145 @@ pub fn armed_plan(output: &OutputSettings) -> Option<SourceIsoPlan> {
     SourceIsoPlan::from_settings(&separate_settings(output))
 }
 
+/// Plan 200 D2: the Camera file's raster. The camera's own size, never
+/// larger than the canvas: a larger camera scales down to fit inside it with
+/// its aspect kept, and both sides round down to even (never an upscale).
+/// An unknown camera format keeps the canvas, the plan 157 behavior.
+pub fn camera_leg_size(camera: Option<(u32, u32)>, canvas: (u32, u32)) -> (u32, u32) {
+    // The epsilon keeps an exact fit (1080 / 3024 * 4032 = 1440) from losing
+    // two pixels to floating-point rounding.
+    let even_floor = |value: f64| ((value / 2.0 + 1e-6).floor() as u32 * 2).max(2);
+    let canvas_even = (canvas.0.max(2) & !1, canvas.1.max(2) & !1);
+    let Some((width, height)) = camera.filter(|(width, height)| *width > 0 && *height > 0) else {
+        return canvas;
+    };
+    let scale = (f64::from(canvas.0) / f64::from(width))
+        .min(f64::from(canvas.1) / f64::from(height))
+        .min(1.0);
+    (
+        even_floor(f64::from(width) * scale).min(canvas_even.0),
+        even_floor(f64::from(height) * scale).min(canvas_even.1),
+    )
+}
+
+/// The bitrate floor at 1080p30, scaled by pixel rate for other legs.
+const CAMERA_LEG_FLOOR_KBPS_AT_1080P30: u64 = 4_000;
+
+/// Plan 200 D2: the Camera file's bitrate is the canvas bitrate scaled by the
+/// leg's share of the canvas pixels, with a floor of 4 Mbps at 1080p30
+/// (scaled by pixel rate), never above the canvas bitrate.
+pub fn camera_leg_bitrate_kbps(
+    canvas_kbps: u32,
+    leg: (u32, u32),
+    canvas: (u32, u32),
+    fps: u32,
+) -> u32 {
+    let leg_pixels = u64::from(leg.0) * u64::from(leg.1);
+    let canvas_pixels = (u64::from(canvas.0) * u64::from(canvas.1)).max(1);
+    let scaled = u64::from(canvas_kbps) * leg_pixels / canvas_pixels;
+    let floor =
+        CAMERA_LEG_FLOOR_KBPS_AT_1080P30 * leg_pixels * u64::from(fps.max(1)) / (1920 * 1080 * 30);
+    u32::try_from(scaled.max(floor))
+        .unwrap_or(u32::MAX)
+        .min(canvas_kbps)
+}
+
+/// Plan 200 D2: the selected camera's current frame size, when it is live
+/// right now. Recording arms the Camera leg at this size.
+pub async fn live_camera_format(state: &AppState, sources: &SourceSelection) -> Option<(u32, u32)> {
+    let selected = sources.camera_id.as_deref()?;
+    let source = crate::preview_camera::preview_camera_frame_source(state).await?;
+    if source.source_key()?.id != selected {
+        return None;
+    }
+    let frame = crate::preview_camera::preview_camera_latest_frame_info(state).await?;
+    Some((frame.width, frame.height))
+}
+
+/// How long arming waits for a cold camera's first frame before the Camera
+/// leg falls back to the canvas size (plan 200 D2).
+const ARM_CAMERA_FORMAT_WAIT: Duration = Duration::from_secs(2);
+const ARM_CAMERA_FORMAT_POLL: Duration = Duration::from_millis(20);
+
+/// Plan 200 D2: the Camera leg's size is fixed before the compositor starts,
+/// but a camera the layout retired (a Screen-only scene) or one still cold
+/// has no frame yet. Start the selected camera the same way the separate
+/// capture preparation does (it reuses this generation afterwards) and wait,
+/// bounded, for its first frame. `None` keeps the canvas size, with a log
+/// line saying why.
+pub async fn arm_camera_format(
+    state: &AppState,
+    params: &StartSessionParams,
+    ffmpeg_path: &str,
+) -> Option<(u32, u32)> {
+    if let Some(format) = live_camera_format(state, &params.sources).await {
+        return Some(format);
+    }
+    let selected = params.sources.camera_id.as_deref()?;
+    let current = crate::preview_camera::preview_camera_frame_source(state).await;
+    let running = current
+        .as_ref()
+        .and_then(|source| source.source_key())
+        .is_some_and(|key| key.id == selected);
+    let live = running
+        || crate::preview_camera::start_preview_camera(
+            state.clone(),
+            crate::protocol::PreviewCameraStartParams {
+                sources: params.sources.clone(),
+                layout: params.layout.clone(),
+                video: params.output.video.clone(),
+                ffmpeg_path: Some(ffmpeg_path.to_owned()),
+            },
+        )
+        .await
+        .state
+            == crate::protocol::PreviewCameraState::Live;
+    let format = if live {
+        poll_camera_format(
+            || live_camera_format(state, &params.sources),
+            ARM_CAMERA_FORMAT_WAIT,
+            ARM_CAMERA_FORMAT_POLL,
+        )
+        .await
+    } else {
+        None
+    };
+    if format.is_none() {
+        state.emit_log(
+            "warn",
+            format!(
+                "Separate source recordings: the camera reported no frame within {} ms of Record; the Camera file uses the {}x{} recording size.",
+                ARM_CAMERA_FORMAT_WAIT.as_millis(),
+                params.output.video.width,
+                params.output.video.height
+            ),
+        );
+    }
+    format
+}
+
+/// Probe until a format appears or `wait` runs out (always probes once).
+async fn poll_camera_format<F, Fut>(
+    mut probe: F,
+    wait: Duration,
+    interval: Duration,
+) -> Option<(u32, u32)>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<(u32, u32)>>,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Some(format) = probe().await {
+            return Some(format);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 /// MKV path for one ISO role beside the Combined file. Combined keeps the
 /// legacy name (every startup/ownership check keys on it); the ISO files
 /// insert the role before the extension so the three sort together.
@@ -247,6 +423,44 @@ pub fn recording_role_mkv_path(combined_mkv_path: &Path, role: RecordingRole) ->
         .and_then(|stem| stem.to_str())
         .unwrap_or("videorc-session");
     combined_mkv_path.with_file_name(format!("{stem}-{}.mkv", role.as_str()))
+}
+
+/// The private folder a separate file is captured in (`.videorc-iso-<uuid>`).
+const CAPTURE_DIRECTORY_PREFIX: &str = ".videorc-iso-";
+
+fn is_capture_directory(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.strip_prefix(CAPTURE_DIRECTORY_PREFIX)
+                .is_some_and(|rest| !rest.is_empty())
+        })
+}
+
+/// Plan 200 C6: where a separate file's MP4 is published. A file that
+/// stopped early is still in its private capture folder; its MP4 goes to the
+/// public recordings folder beside Combined, under its `-screen`/`-camera`
+/// name. Any other recording publishes beside its MKV, as before.
+pub fn public_mp4_output_path(input: &Path) -> PathBuf {
+    if let (Some(directory), Some(name)) = (input.parent(), input.file_name())
+        && is_capture_directory(directory)
+        && let Some(public) = directory.parent()
+    {
+        return public.join(name).with_extension("mp4");
+    }
+    input.with_extension("mp4")
+}
+
+/// Plan 200 C6: removes the private capture folder holding `path` once it is
+/// empty (after a publish, an export or a deletion). Never removes anything
+/// else: `remove_dir` refuses a folder that still holds a file.
+pub fn remove_empty_capture_directory(path: &Path) {
+    if let Some(directory) = path.parent()
+        && is_capture_directory(directory)
+    {
+        let _ = std::fs::remove_dir(directory);
+    }
 }
 
 fn iso_video_fifo_path(session_id: &str, role: RecordingRole) -> PathBuf {
@@ -488,6 +702,8 @@ pub struct FinishedSourceIsoRole {
     pub duration_ms: Option<i64>,
     pub fps: u32,
     pub end_reason: Option<String>,
+    /// Why `end_reason` is set (plan 200 D1).
+    pub early_end: Option<SourceIsoEarlyEnd>,
     pub expect_audio: bool,
     pub muxer_exit_code: Option<i32>,
     /// The supervisor already emitted `HEALTH_ROLE_FAILED` for `outcome`'s
@@ -752,9 +968,32 @@ pub fn start_source_iso_writers(
                 RecordingRole::Camera => frame_stores.camera.clone(),
                 RecordingRole::Combined => unreachable!("iso_roles never yields Combined"),
             };
+            // Plan 200 D2: the Camera file is the camera's own size (the leg
+            // the compositor draws, fixed at arm time), at a bitrate scaled
+            // by its pixels. The Screen file stays on the canvas.
+            let role_video = match writer.role {
+                RecordingRole::Camera => {
+                    let (width, height) = frame_stores.camera_size;
+                    VideoSettings {
+                        width,
+                        height,
+                        bitrate_kbps: camera_leg_bitrate_kbps(
+                            bitrate_kbps,
+                            (width, height),
+                            (video.width, video.height),
+                            video.fps,
+                        ),
+                        ..video.clone()
+                    }
+                }
+                _ => VideoSettings {
+                    bitrate_kbps,
+                    ..video.clone()
+                },
+            };
             let diagnostics_context = crate::recording::encoder_bridge_diagnostics_context(
                 EncoderBridgeOutputRole::Recording,
-                Some(video),
+                Some(&role_video),
                 None,
                 video_output,
                 false,
@@ -763,8 +1002,8 @@ pub fn start_source_iso_writers(
                 state.clone(),
                 session_id.to_string(),
                 video.fps,
-                video.width,
-                video.height,
+                role_video.width,
+                role_video.height,
                 writer.video_fifo.clone(),
                 Some(store),
                 None,
@@ -773,7 +1012,7 @@ pub fn start_source_iso_writers(
                 #[cfg(target_os = "windows")]
                 None,
                 video_output,
-                Some(bitrate_kbps),
+                Some(role_video.bitrate_kbps),
                 Default::default(),
                 false,
                 diagnostics_context,
@@ -797,9 +1036,12 @@ pub fn start_source_iso_writers(
                 .map(|writer| writer.role.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let (camera_width, camera_height) = frame_stores.camera_size;
             state.emit_log(
                 "info",
-                format!("Separate source recordings armed for session {session_id}: {roles}."),
+                format!(
+                    "Separate source recordings armed for session {session_id}: {roles}. Camera file {camera_width}x{camera_height}."
+                ),
             );
             Ok(guard)
         }
@@ -1099,6 +1341,7 @@ async fn supervise_role(
 ) -> FinishedSourceIsoRole {
     let mut failure = None;
     let mut end_reason = None;
+    let mut early_end = None;
     let mut ended_at = None;
     // Plan 198: the recovery latch is process-global and outlives sessions.
     // An incident already latched when this take armed is not a failure of
@@ -1144,6 +1387,37 @@ async fn supervise_role(
                 "{} encoder failed: {error}",
                 writer.role.title_suffix()
             ));
+            break;
+        }
+        // Plan 200 D1: the separate files were shed so Combined keeps up.
+        // Checked before the muxer and the tap: a shed writer closes its
+        // FIFO at its own last tick, and that clean end is not a failure.
+        if let Some(boundary) = writer
+            .bridge
+            .as_ref()
+            .and_then(EncoderBridgeRecordingSession::source_iso_shed_frames)
+            .zip(epoch.get().copied())
+            .map(|(frames, origin)| {
+                crate::compositor::source_iso_batch::source_iso_frame_boundary(origin, fps, frames)
+            })
+            .filter(|boundary| stop_at.get().is_none_or(|stop_at| boundary <= stop_at))
+        {
+            if writer
+                .bridge
+                .as_ref()
+                .is_some_and(EncoderBridgeRecordingSession::claim_source_iso_shed_report)
+            {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    HEALTH_SHED,
+                    HEALTH_SHED_MESSAGE,
+                );
+            }
+            ended_at = Some(boundary);
+            early_end = Some(SourceIsoEarlyEnd::Shed);
+            end_reason = Some(SourceIsoEarlyEnd::Shed.reason(writer.role));
             break;
         }
         if let Some(error) =
@@ -1226,10 +1500,8 @@ async fn supervise_role(
             removed.filter(|removed_at| stop_at.get().is_none_or(|stop_at| removed_at <= stop_at))
         {
             ended_at = Some(boundary);
-            end_reason = Some(format!(
-                "{} recording ended because its selected source was removed.",
-                writer.role.title_suffix()
-            ));
+            early_end = Some(SourceIsoEarlyEnd::SourceRemoved);
+            end_reason = Some(SourceIsoEarlyEnd::SourceRemoved.reason(writer.role));
             break;
         }
         // A committed removal keeps its earlier boundary even when Stop was
@@ -1441,17 +1713,21 @@ async fn supervise_role(
     #[cfg(test)]
     test_trace_teardown(session_id, role, "after-publication");
     if let Some(reason) = end_reason.as_ref() {
-        let _ = crate::recording::emit_health_event(
-            state,
-            Some(session_id),
-            crate::protocol::HealthLevel::Warn,
-            "separate-source-recordings-source-removed",
-            reason,
-        );
+        let early_end = early_end.unwrap_or(SourceIsoEarlyEnd::SourceRemoved);
+        // A shed already raised the take's one notice (plan 200 D1).
+        if early_end == SourceIsoEarlyEnd::SourceRemoved {
+            let _ = crate::recording::emit_health_event(
+                state,
+                Some(session_id),
+                crate::protocol::HealthLevel::Warn,
+                "separate-source-recordings-source-removed",
+                reason,
+            );
+        }
         let _ = state.database.add_session_log(
             &format!("{session_id}-{}", role.as_str()),
             crate::protocol::HealthLevel::Warn,
-            "source-removed",
+            early_end.outcome(),
             reason,
             None,
         );
@@ -1463,6 +1739,7 @@ async fn supervise_role(
         duration_ms,
         fps,
         end_reason,
+        early_end,
         expect_audio: role_audio_tap(&taps, role).is_some(),
         muxer_exit_code,
         failure_reported,
@@ -1703,7 +1980,11 @@ pub fn commit_finished_source_iso_roles(
             json["sourceIsoMuxerExitCode"] = serde_json::json!(role.muxer_exit_code);
             if let Some(reason) = role.end_reason.as_ref() {
                 json["sourceIsoEndReason"] = serde_json::json!(reason);
-                json["sourceIsoOutcome"] = serde_json::json!("source-removed");
+                json["sourceIsoOutcome"] = serde_json::json!(
+                    role.early_end
+                        .unwrap_or(SourceIsoEarlyEnd::SourceRemoved)
+                        .outcome()
+                );
                 json["sourceIsoEndOffsetMs"] = serde_json::json!(wall_duration_ms);
             }
             finalization.diagnostics_json = json.to_string();
@@ -1886,6 +2167,7 @@ mod tests {
                         camera: Arc::new(std::sync::Mutex::new(
                             crate::frame_store::FrameStore::new(2),
                         )),
+                        camera_size: (params.output.video.width, params.output.video.height),
                     },
                     video_epoch: Arc::new(Default::default()),
                     bitrate_kbps: 8000,
@@ -2256,6 +2538,179 @@ mod tests {
         assert!(
             SourceIsoPlan::from_settings(&SeparateSourceRecordingsSettings::default()).is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn arm_waits_for_a_cold_cameras_first_frame_and_bounds_the_wait() {
+        // Plan 200 D2: a camera not live at arm time reports its first frame
+        // a few polls later; the leg takes that size, not the canvas.
+        let mut probes = 0;
+        let format = poll_camera_format(
+            || {
+                probes += 1;
+                let ready = probes >= 3;
+                async move { ready.then_some((1280, 960)) }
+            },
+            Duration::from_secs(2),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(format, Some((1280, 960)));
+        assert_eq!(probes, 3);
+        // A camera that never reports gives up at the bound (canvas size).
+        let started = Instant::now();
+        let never = poll_camera_format(
+            || async { None },
+            Duration::from_millis(60),
+            Duration::from_millis(5),
+        )
+        .await;
+        assert_eq!(never, None);
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(60), "{waited:?}");
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn arm_takes_a_live_cameras_format_without_restarting_it() {
+        let state = test_state();
+        let params = base_params();
+        let camera = VideoSettings {
+            width: 1280,
+            height: 960,
+            ..params.output.video.clone()
+        };
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:1",
+            &params.layout,
+            &camera,
+        )
+        .await;
+        assert_eq!(
+            arm_camera_format(&state, &params, "ffmpeg").await,
+            Some((1280, 960))
+        );
+        assert_eq!(
+            camera_leg_size(Some((1280, 960)), (1920, 1080)),
+            (1280, 960)
+        );
+    }
+
+    #[test]
+    fn camera_file_is_the_cameras_own_size_inside_the_canvas() {
+        // Plan 200 D2: never an upscale, never larger than the canvas.
+        assert_eq!(
+            camera_leg_size(Some((1920, 1080)), (3840, 2160)),
+            (1920, 1080),
+            "1080p camera on a 4K canvas"
+        );
+        assert_eq!(
+            camera_leg_size(Some((3840, 2160)), (1920, 1080)),
+            (1920, 1080),
+            "4K camera capped at a 1080p canvas"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1280, 960)), (1920, 1080)),
+            (1280, 960),
+            "a 4:3 camera keeps its aspect: no pillarbox"
+        );
+        assert_eq!(
+            camera_leg_size(Some((4032, 3024)), (1920, 1080)),
+            (1440, 1080),
+            "a large 4:3 camera fits by height"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1080, 1920)), (1920, 1080)),
+            (606, 1080),
+            "a portrait camera fits by height, rounded down to even"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1279, 719)), (1920, 1080)),
+            (1278, 718),
+            "odd sizes round down to even, never up"
+        );
+        assert_eq!(
+            camera_leg_size(Some((1080, 1920)), (1080, 1920)),
+            (1080, 1920),
+            "a vertical canvas"
+        );
+        // Unknown format at arm time: the canvas, as before plan 200.
+        assert_eq!(camera_leg_size(None, (2560, 1440)), (2560, 1440));
+        assert_eq!(camera_leg_size(Some((0, 0)), (2560, 1440)), (2560, 1440));
+    }
+
+    #[test]
+    fn camera_file_bitrate_follows_its_pixels_with_a_floor() {
+        // A 1080p camera on 4K30 at 30 Mbps: a quarter of the pixels.
+        assert_eq!(
+            camera_leg_bitrate_kbps(30_000, (1920, 1080), (3840, 2160), 30),
+            7_500
+        );
+        // The canvas size keeps the canvas bitrate.
+        assert_eq!(
+            camera_leg_bitrate_kbps(8_000, (2560, 1440), (2560, 1440), 30),
+            8_000
+        );
+        // A thin canvas bitrate meets the 4 Mbps floor at 1080p30.
+        assert_eq!(
+            camera_leg_bitrate_kbps(8_000, (1920, 1080), (3840, 2160), 30),
+            4_000
+        );
+        // The floor scales with pixel rate: 1080p60 floors at 8 Mbps.
+        assert_eq!(
+            camera_leg_bitrate_kbps(12_000, (1920, 1080), (3840, 2160), 60),
+            8_000
+        );
+        // Small cameras scale down with the canvas share.
+        assert_eq!(
+            camera_leg_bitrate_kbps(8_000, (640, 480), (2560, 1440), 30),
+            666
+        );
+        // Never above the canvas bitrate, floor or not.
+        assert_eq!(
+            camera_leg_bitrate_kbps(3_000, (1920, 1080), (1920, 1080), 30),
+            3_000
+        );
+    }
+
+    #[test]
+    fn a_stopped_early_file_exports_beside_combined() {
+        let public = Path::new("/Movies/Videorc");
+        let hidden = public.join(".videorc-iso-1b2c").join("take-screen.mkv");
+        assert_eq!(
+            public_mp4_output_path(&hidden),
+            public.join("take-screen.mp4")
+        );
+        // A published separate file and an ordinary recording are unchanged.
+        assert_eq!(
+            public_mp4_output_path(&public.join("take-camera.mkv")),
+            public.join("take-camera.mp4")
+        );
+        assert_eq!(
+            public_mp4_output_path(&public.join(".videorc-iso-").join("take.mkv")),
+            public.join(".videorc-iso-").join("take.mp4")
+        );
+    }
+
+    #[test]
+    fn the_private_capture_folder_is_removed_only_when_empty() {
+        let root =
+            std::env::temp_dir().join(format!("videorc-p200-iso-dir-{}", uuid::Uuid::new_v4()));
+        let hidden = root.join(".videorc-iso-test");
+        std::fs::create_dir_all(&hidden).unwrap();
+        let file = hidden.join("take-screen.mkv");
+        std::fs::write(&file, b"partial").unwrap();
+        remove_empty_capture_directory(&file);
+        assert!(file.exists(), "a folder that still holds the file stays");
+        std::fs::remove_file(&file).unwrap();
+        remove_empty_capture_directory(&file);
+        assert!(!hidden.exists(), "the empty private folder goes");
+        // Never any other folder, even an empty one.
+        let public_file = root.join("take.mkv");
+        remove_empty_capture_directory(&public_file);
+        assert!(root.exists());
+        std::fs::remove_dir(&root).unwrap();
     }
 
     #[test]

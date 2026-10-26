@@ -253,12 +253,31 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
         throw new Error(`Runtime did not apply requested ${variant} controls`)
       if (manifest.latency && variant === 'normal') latency.push(manifest.latency)
       if (receivers) await verifyStreams(receivers)
+      // Plan 200 D1: on a Mac that can't keep up (a 4K take) the separate
+      // files are shed so Combined keeps up. A shed file ends early by
+      // design: the take gate judges it on its explicit end, and the timing
+      // checks below compare every file only before the earliest shed end.
+      const shedIntervals = Object.entries(manifest.intervals ?? {}).filter(
+        ([, interval]) => interval.outcome === 'shed'
+      )
+      const shedRoles = new Set(shedIntervals.map(([role]) => role))
+      const shedEndSeconds = Math.min(
+        Infinity,
+        ...shedIntervals.map(([, interval]) => interval.endSeconds)
+      )
+      if (shedRoles.size)
+        console.log(
+          `separate-source-runtime: ${[...shedRoles].join(', ')} shed at ${shedEndSeconds.toFixed(3)}s; judged on their own end`
+        )
       for (const extension of ['mkv', 'mp4']) {
         const combined = manifest.combinedPath.replace(/\.mkv$/, `.${extension}`)
         await run(process.execPath, [
           'scripts/smoke-separate-source-take.mjs',
           combined,
-          '--no-motion'
+          '--no-motion',
+          ...(Object.keys(manifest.intervals ?? {}).length
+            ? ['--expectations', join(evidence, 'runtime-take.json')]
+            : [])
         ])
         const paths = takeSiblingPaths(combined)
         const events = {}
@@ -452,9 +471,25 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
             2
           )
         )
-        const frameVerdict = evaluateFrameMarkers(markers, fps)
+        const beforeShed = (time) => time < shedEndSeconds - 1 / fps - 0.01
+        const shedClip = (byRole, time) =>
+          shedRoles.size
+            ? Object.fromEntries(
+                Object.entries(byRole).map(([role, list]) => [
+                  role,
+                  list.filter((item) => beforeShed(time(item)))
+                ])
+              )
+            : byRole
+        const frameVerdict = evaluateFrameMarkers(
+          shedClip(markers, (frame) => frame.time),
+          fps
+        )
         if (!frameVerdict.pass) throw new Error(`${extension}: ${frameVerdict.failures.join('; ')}`)
-        const verdict = evaluateEventAlignment(events, fps)
+        const verdict = evaluateEventAlignment(
+          shedClip(events, (at) => at),
+          fps
+        )
         if (!verdict.pass) throw new Error(`${extension}: ${verdict.failures.join('; ')}`)
         const monoGain = (1 + (manifest.stereoRightGain ?? 1)) / 2
         const expectedLevels = {
@@ -468,7 +503,7 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
               : monoGain * 0.2 * 10 ** (manifest.audio.systemAudioGainDb / 20)
         }
         if (manifest.runtimeDurationMs === 3500 && expectedLevels.system > 0) {
-          for (const role of ['combined', 'screen']) {
+          for (const role of ['combined', 'screen'].filter((role) => !shedRoles.has(role))) {
             const endWindow = tones[role].system.findLast(
               (window) => window.time <= stopBoundarySeconds - 0.03
             )
@@ -491,17 +526,20 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
           ['screen', 'system', 0]
         ]) {
           if (!expectedLevels[source]) continue
+          const roleEndSeconds = shedRoles.has(role)
+            ? (manifest.intervals[role].endSeconds ?? shedEndSeconds)
+            : stopBoundarySeconds
           const av = evaluateAudioVideoEvents(events[role], audioEvents[role][source], {
             fps,
             offsetMs,
-            endSeconds: stopBoundarySeconds + Math.min(0, offsetMs / 1000),
+            endSeconds: roleEndSeconds + Math.min(0, offsetMs / 1000),
             measurement: audioEdgeDiagnostics[role][source]
           })
           if (!av.pass) throw new Error(`${extension} ${role}/${source}: ${av.failures.join('; ')}`)
           const envelope = evaluateSourceEnvelope(markers[role], tones[role][source], {
             fps,
             offsetMs,
-            endSeconds: stopBoundarySeconds
+            endSeconds: roleEndSeconds
           })
           if (!envelope.pass)
             throw new Error(`${extension} ${role}/${source}: ${envelope.failures.join('; ')}`)
@@ -510,6 +548,7 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
           ['camera', 'microphone'],
           ['screen', 'system']
         ]) {
+          if (shedRoles.has(role)) continue
           const tail = evaluateAudioTail(tones.combined[source], tones[role][source], fps)
           if (!tail.pass) throw new Error(`${extension} ${role}: ${tail.failures.join('; ')}`)
         }
@@ -576,7 +615,12 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
           channel: 0,
           timestamps: shiftedProbe.frames.map((frame) => Number(frame.best_effort_timestamp_time))
         })
-        if (evaluateEventAlignment({ ...events, camera: shiftedEvents }, fps).pass) {
+        if (
+          evaluateEventAlignment(
+            shedClip({ ...events, camera: shiftedEvents }, (at) => at),
+            fps
+          ).pass
+        ) {
           throw new Error('Encoded artifact timing negative control was not rejected')
         }
         const swappedPath = join(evidence, `deliberately-swapped-camera.${extension}`)

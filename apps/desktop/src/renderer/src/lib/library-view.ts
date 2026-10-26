@@ -370,7 +370,10 @@ export function libraryQualityChip(
     case 'not-hundred-percent':
       return {
         label: 'Quality issues',
-        detail: "Some of it isn't 100%. Choose Check quality in its menu for the details."
+        // Plan 200 C8: a long recording gets a quick check of sampled parts.
+        detail: status.sampled
+          ? "Quick check (long recording): some of the sampled parts aren't 100%. Choose Check quality in its menu for a full check."
+          : "Some of it isn't 100%. Choose Check quality in its menu for the details."
       }
     case 'failed':
       return {

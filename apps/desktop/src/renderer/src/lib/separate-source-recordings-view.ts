@@ -60,6 +60,7 @@ type SeparateFileFailureKind =
   | 'missing'
   | 'placement'
   | 'ownership'
+  | 'interrupted'
 
 const SEPARATE_FILE_FAILURES: readonly (readonly [RegExp, SeparateFileFailureKind])[] = [
   [/capture failed after source recovery/i, 'capture'],
@@ -69,7 +70,9 @@ const SEPARATE_FILE_FAILURES: readonly (readonly [RegExp, SeparateFileFailureKin
   [/artifact ended at|artifact duration could not be verified/i, 'short'],
   [/file was missing after stop/i, 'missing'],
   [/could not (bind|publish|persist)/i, 'placement'],
-  [/separate recording ownership could not be verified/i, 'ownership']
+  [/separate recording ownership could not be verified/i, 'ownership'],
+  // Plan 200 C6: Videorc quit or crashed mid-take (`storage.rs` reconcile).
+  [/partial media is available for recovery/i, 'interrupted']
 ]
 
 /** Below this, a stopped file holds nothing worth exporting. */
@@ -105,6 +108,8 @@ function separateFileFailureSentence(
       return "Videorc couldn't place this file beside your recording."
     case 'ownership':
       return "Videorc couldn't confirm this file after it restarted."
+    case 'interrupted':
+      return 'Videorc closed before this file finished.'
   }
 }
 
@@ -143,6 +148,15 @@ export function separateFileStopped(
   const sentence = separateFileFailureSentence(kind, role)
   if (kind === 'missing' || kind === 'ownership') {
     return { label: 'Not saved', detail: sentence, exportable: false }
+  }
+  // An interrupted file's length is unknown until it is exported; the
+  // backend has already confirmed the file is Videorc's own.
+  if (kind === 'interrupted' && session.durationMs == null) {
+    return {
+      label: 'Stopped early',
+      detail: `${sentence} What it recorded before then is kept.`,
+      exportable: true
+    }
   }
   const kept = session.durationMs ?? 0
   const exportable = kept >= USABLE_PARTIAL_MS
