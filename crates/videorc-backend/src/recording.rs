@@ -5185,6 +5185,14 @@ async fn start_session_with_timeline(
                 false
             };
             if !armed_in_place {
+                // Plan 200 D2: the Camera file is the live camera's own size,
+                // fitted inside the canvas, fixed here for the whole take. A
+                // cold or layout-retired camera is started first (bounded).
+                let source_iso_camera_format = if source_iso_plan.is_some() {
+                    crate::source_iso::arm_camera_format(&state, &params, &ffmpeg_path).await
+                } else {
+                    None
+                };
                 start_synthetic_compositor(
                     state.clone(),
                     CompositorStartParams {
@@ -5194,9 +5202,15 @@ async fn start_session_with_timeline(
                         frame_consumer: compositor_frame_consumer,
                         stream_output: encoder_bridge_stream_output,
                         source_iso_output: source_iso_plan.as_ref().map(|_| {
+                            let (camera_width, camera_height) = crate::source_iso::camera_leg_size(
+                                source_iso_camera_format,
+                                (params.output.video.width, params.output.video.height),
+                            );
                             crate::compositor::CompositorSourceIsoOutput {
                                 width: params.output.video.width,
                                 height: params.output.video.height,
+                                camera_width,
+                                camera_height,
                                 frame_consumer: compositor_frame_consumer,
                             }
                         }),
@@ -30145,13 +30159,26 @@ mod tests {
         if failure_case.as_deref() == Some("bridge") {
             assert_eq!(camera_diagnostics["sourceIsoMuxerExitCode"], 0, "a failed encoder with clean muxer EOF stays failed");
         }
-        let intervals = if let Some(role) = remove_role.as_deref() {
+        let mut intervals = if let Some(role) = remove_role.as_deref() {
             let row = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")).unwrap();
             let diagnostics: serde_json::Value = serde_json::from_str(&row.diagnostics_json).unwrap();
             assert_eq!(diagnostics["sourceIsoOutcome"], "source-removed");
             serde_json::json!({role: {"outcome": "source-removed", "startSeconds": 0,
                 "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap() / 1000.0}})
         } else { serde_json::json!({}) };
+        // Plan 200 D1: a file shed so Combined keeps up (a slow 4K take) ends
+        // early by design; the take gate judges it on its explicit end.
+        for role in ["screen", "camera"] {
+            let Ok(row) = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")) else {
+                continue;
+            };
+            let diagnostics: serde_json::Value =
+                serde_json::from_str(&row.diagnostics_json).unwrap_or_default();
+            if diagnostics["sourceIsoOutcome"] == "shed" {
+                intervals[role] = serde_json::json!({"outcome": "shed", "startSeconds": 0,
+                    "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap_or(0.0) / 1000.0});
+            }
+        }
         std::fs::write(directory.join("runtime-take.json"), serde_json::to_vec_pretty(&serde_json::json!({
             "combinedPath": status.output_path, "sessionId": session_id,
             "video": params.output.video, "layout": params.layout, "audio": params.audio, "offsetMs": params.audio.microphone_sync_offset_ms,

@@ -968,7 +968,8 @@ const performanceCheckRunParamsSchema = objectSchema(
   {
     ceilingWidth: performanceCheckDimension,
     ceilingHeight: performanceCheckDimension,
-    ceilingFps: numberSchema({ integer: true, min: 1, max: 240 })
+    ceilingFps: numberSchema({ integer: true, min: 1, max: 240 }),
+    separateSourceRecordings: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<PerformanceCheckRunParams>

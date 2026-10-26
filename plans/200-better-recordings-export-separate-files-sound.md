@@ -944,3 +944,75 @@ rerun passes.
   `pnpm typecheck`: pass; prettier: pass.
 - Not run here (slice E, on the merged branch): the smokes, and
   `pnpm smoke:record-latency` for the finalization-slot change.
+
+### Group D (`plan-200-iso`)
+
+**D3 — scaled draws read linear; 1:1 stays exact.** Shipped as specified, no
+STOP. A Metal draw whose drawn size differs from its source crop by more than
+0.5% (`SCALED_DRAW_TOLERANCE`, per axis) is promoted from the nearest scene
+sampler to the linear one in recording, stream and ISO compositors, with a
+half-texel crop clamp in the shader so a scaled crop never blends in removed
+pixels. Preview compositors and explicit linear quads (the Buddy sprite) are
+unchanged. The CPU compositor agrees in kind for the camera only (bilinear
+with the same pixel-centre mapping and crop clamp); screens and images stay
+point-sampled on CPU, the production path on Windows/Linux, to keep its
+per-pixel budget (deviation, by design: unmeasured on weak Windows PCs for a
+full-frame scaled camera). Camera masks are tested per destination pixel in
+both paths; the FFmpeg path is untouched. No golden or CPU/Metal parity test
+changed.
+
+**D1 — the separate files shed first.** Shipped, no STOP: Combined's frame
+selection did not need to leave the batch. Any member past the two-tick
+history, or a bridge lag held above 250 ms for 500 ms, retires every
+still-active separate member at its own last latched tick (each file closes
+cleanly through the source-removal drain, outcome `shed`, reason "‹Role›
+recording stopped to keep the main recording smooth."). Combined continues on
+the rebased history and gets `FELL_BEHIND` only with no separate member left.
+One health event per take (`separate-source-recordings-shed`) and one toast;
+the copy names no roles ("The separate files keep what they recorded"), since
+a file whose source was removed earlier is not shed. Shed or ended legs stop
+rendering. One assertion of the existing history test was removed because the
+behaviour it pinned (a separate member's terminal lag error) changed by
+design. **Runtime case not covered:** there is no forced-lag hook in
+`smoke:separate-source-runtime`; its manifest now records a `shed` interval
+for any role whose outcome is `shed`, so a real shed on a slow 4K run is
+judged on its explicit end instead of failing the duration spread.
+
+**D2 — the Camera file is the camera's own size.** Shipped, no STOP: the ISO
+legs already render through their own GPU compositors and frame stores; the
+batch publish checks only the tick, so a smaller Camera raster needed no
+frame-store or lease change. Size = the camera's frame fitted inside the
+canvas, never upscaled, both sides rounded down to even; Fill when the live
+frame is within 1% of that aspect, Fit (bars) after a mid-take format change.
+Bitrate = canvas bitrate × pixel share, floor 4 Mbps at 1080p30 scaled by
+pixel rate, never above the canvas bitrate. Arming starts a cold or
+layout-retired selected camera first and waits up to 2 s for its first frame
+(`arm_camera_format`); if it never reports, the leg keeps the canvas size and
+the log says so. The bounded wait and the already-live path are unit-tested;
+an end-to-end "camera not live at Record" case needs a real device and is not
+covered.
+
+**D4 — say what separate files cost.** The Output row notice ships as
+specified (4K on the short side, or 60 fps and up, only when the next take
+would arm the separate files). The performance check carries the switch, and
+the verdict counts the budget. Deviation: a benchmark take records one test
+pattern paced to real time, so neither it nor FFmpeg's `speed` (~1.0x) can
+show encoder headroom, and the benchmark cannot arm the separate files (no
+camera or screen). The measured encoder throughput is therefore the highest
+single-encode pixel rate the ladder passed; a rung with the switch on fails
+(`separate-files-over-encoder-budget`) when that rate over the rung's pixels,
+divided by the take's load factor (Combined + Screen + Camera at a 1080p
+camera's D2 size), is below the rung's fps. This is conservative: a passing
+top rung proves only its own rate, so a 4K30 selection steps down until the
+budget is proven. The saved verdict is keyed like any other check, so a
+check run with the switch on stays conservative after the switch is turned
+off until the check is re-run.
+
+**Gates (Group D, 2026-10-26, on `plan-200-iso`):** `cargo fmt --check
+--all` clean; `cargo clippy -p videorc-backend -- -D warnings` clean;
+`cargo test -p videorc-backend -- source_iso:: compositor_source_iso_batch::
+encoder_bridge:: metal_compositor:: compositor:: performance_check::` 48 +
+440 passed, 0 failed; vitest on the four touched renderer test files 76
+passed. Smokes (`smoke:separate-source-fixture`,
+`smoke:separate-source-runtime`) run with slice E on the merged branch.
+

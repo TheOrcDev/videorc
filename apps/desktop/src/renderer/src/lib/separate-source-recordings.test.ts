@@ -5,6 +5,7 @@ import {
   defaultCaptureConfig,
   loadCaptureConfig,
   normalizeSeparateSourceRecordings,
+  separateSourceRecordingsEncoderNotice,
   separateSourceRecordingsForSession,
   separateSourceRecordingsIneligibility,
   separateSourceRecordingsIneligibilityCopy,
@@ -31,6 +32,69 @@ function config(patch: Partial<CaptureConfig> = {}): CaptureConfig {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('separate files encoder notice (plan 200 D4)', () => {
+  const on = { enabled: true, keepCombined: true }
+  const video = (width: number, height: number, fps: number) => ({
+    ...defaultCaptureConfig.video,
+    width,
+    height,
+    fps
+  })
+
+  it('shows at 4K or 60 fps when the next take writes the separate files', () => {
+    expect(
+      separateSourceRecordingsEncoderNotice(
+        config({ separateSourceRecordings: on, video: video(3840, 2160, 30) }),
+        'darwin'
+      )
+    ).toBe(
+      'Separate files at 4K · 30 fps use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.'
+    )
+    expect(
+      separateSourceRecordingsEncoderNotice(
+        config({ separateSourceRecordings: on, video: video(1920, 1080, 60) }),
+        'darwin'
+      )
+    ).toContain('1080p · 60 fps')
+    // A vertical 4K canvas is 4K too.
+    expect(
+      separateSourceRecordingsEncoderNotice(
+        config({ separateSourceRecordings: on, video: video(2160, 3840, 30) }),
+        'darwin'
+      )
+    ).not.toBeNull()
+  })
+
+  it('stays quiet below 4K at 30 fps, with the switch off, or when the take cannot arm', () => {
+    expect(
+      separateSourceRecordingsEncoderNotice(
+        config({ separateSourceRecordings: on, video: video(2560, 1440, 30) }),
+        'darwin'
+      )
+    ).toBeNull()
+    expect(
+      separateSourceRecordingsEncoderNotice(config({ video: video(3840, 2160, 30) }), 'darwin')
+    ).toBeNull()
+    // No camera: the row shows the ineligibility reason instead.
+    expect(
+      separateSourceRecordingsEncoderNotice(
+        config({
+          separateSourceRecordings: on,
+          video: video(3840, 2160, 60),
+          sources: { screenId: 'screen:1', testPattern: false }
+        }),
+        'darwin'
+      )
+    ).toBeNull()
+    expect(
+      separateSourceRecordingsEncoderNotice(
+        config({ separateSourceRecordings: on, video: video(3840, 2160, 60) }),
+        'win32'
+      )
+    ).toBeNull()
+  })
 })
 
 describe('separate source recordings (plan 157)', () => {
