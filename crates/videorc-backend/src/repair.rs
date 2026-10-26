@@ -1428,20 +1428,62 @@ pub fn safe_replace<V>(
 where
     V: FnOnce(&Path) -> Result<(), String>,
 {
-    if let Err(reason) = validate(repaired_temp) {
+    safe_replace_with(original, repaired_temp, validate, |from, to| {
+        fs::rename(from, to)
+    })
+}
+
+/// [`safe_replace`] with the final rename injectable, so a failing rename can
+/// be tested. Plan 200 C6: every path that does not install the temp deletes
+/// it (validation, backup space, backup folder, backup copy and rename).
+fn safe_replace_with<V, R>(
+    original: &Path,
+    repaired_temp: &Path,
+    validate: V,
+    rename: R,
+) -> Result<PathBuf, SafeReplaceError>
+where
+    V: FnOnce(&Path) -> Result<(), String>,
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let discard = |error: SafeReplaceError| {
         let _ = fs::remove_file(repaired_temp);
-        return Err(SafeReplaceError::ValidationFailed(reason));
+        error
+    };
+    if let Err(reason) = validate(repaired_temp) {
+        return Err(discard(SafeReplaceError::ValidationFailed(reason)));
     }
 
-    let backup = backup_path_for(original).ok_or(SafeReplaceError::InvalidPath)?;
-    if let Some(backup_dir) = backup.parent() {
-        fs::create_dir_all(backup_dir).map_err(|error| SafeReplaceError::Io(error.to_string()))?;
+    let Some(backup) = backup_path_for(original) else {
+        return Err(discard(SafeReplaceError::InvalidPath));
+    };
+    // Plan 200 C5: the backup is a full copy beside the recording. Without
+    // room for it, leave the recording as it is.
+    if let (Ok(metadata), Some(available)) = (
+        fs::metadata(original),
+        original
+            .parent()
+            .and_then(crate::disk_space::available_bytes),
+    ) && let Err(reason) = crate::disk_space::check_backup_space(metadata.len(), available)
+    {
+        return Err(discard(SafeReplaceError::Io(reason)));
     }
-    fs::copy(original, &backup)
-        .map_err(|error| SafeReplaceError::Io(format!("backup failed: {error}")))?;
+    if let Some(backup_dir) = backup.parent()
+        && let Err(error) = fs::create_dir_all(backup_dir)
+    {
+        return Err(discard(SafeReplaceError::Io(error.to_string())));
+    }
+    if let Err(error) = fs::copy(original, &backup) {
+        return Err(discard(SafeReplaceError::Io(format!(
+            "backup failed: {error}"
+        ))));
+    }
 
-    fs::rename(repaired_temp, original)
-        .map_err(|error| SafeReplaceError::Io(format!("replace failed: {error}")))?;
+    if let Err(error) = rename(repaired_temp, original) {
+        return Err(discard(SafeReplaceError::Io(format!(
+            "replace failed: {error}"
+        ))));
+    }
     Ok(backup)
 }
 
@@ -1894,6 +1936,71 @@ fn repair_temp_path(original: &Path) -> PathBuf {
     let mut temp = original.to_path_buf();
     temp.set_file_name(format!(".{stem}.videorc-repair.{ext}"));
     temp
+}
+
+/// Plan 200 C6: true only for the exact hidden name [`repair_temp_path`]
+/// writes, `.<stem>.videorc-repair.<ext>` with a video extension. Backups
+/// (`.videorc-backups/<name>`), MP4s, MKVs and `.partial` files never match.
+pub fn is_repair_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((stem, ext)) = rest.rsplit_once(".videorc-repair.") else {
+        return false;
+    };
+    !stem.is_empty()
+        && VIDEO_EXTENSIONS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(ext))
+}
+
+/// What a repair-temp sweep removed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RepairTempSweep {
+    pub removed: usize,
+    pub bytes: u64,
+    pub errors: Vec<String>,
+}
+
+/// Deletes leftover repair temps directly inside each folder (not in
+/// subfolders). Safe by construction: `safe_replace` keeps the original in
+/// place until the final rename, so a temp is never the only copy. Only
+/// regular files with the exact temp name are touched; symlinks never are.
+pub fn sweep_repair_temps(directories: &[PathBuf]) -> RepairTempSweep {
+    let mut sweep = RepairTempSweep::default();
+    let mut seen = std::collections::HashSet::new();
+    for directory in directories {
+        if !seen.insert(directory.clone()) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_repair_temp_name(name) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    sweep.removed += 1;
+                    sweep.bytes = sweep.bytes.saturating_add(metadata.len());
+                }
+                Err(error) => sweep.errors.push(format!("{}: {error}", path.display())),
+            }
+        }
+    }
+    sweep
 }
 
 /// Repairs one assessed recording, quality-gated: writes the repaired temp, re-analyzes
@@ -3569,6 +3676,110 @@ mod tests {
             !backup_path_for(&original).unwrap().exists(),
             "no backup is written before validation passes"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failing_replace_rename_leaves_no_temp() {
+        let dir = scratch_dir("replace-rename-fails");
+        let original = dir.join("rec.mp4");
+        let temp = dir.join(".rec.videorc-repair.mp4");
+        fs::write(&original, b"ORIGINAL").unwrap();
+        fs::write(&temp, b"REPAIRED").unwrap();
+
+        let result = safe_replace_with(
+            &original,
+            &temp,
+            |_| Ok(()),
+            |_, _| Err(std::io::Error::other("injected rename failure")),
+        );
+        assert!(
+            matches!(&result, Err(SafeReplaceError::Io(reason)) if reason.contains("replace failed")),
+            "{result:?}"
+        );
+        assert!(!temp.exists(), "the temp is removed when the rename fails");
+        assert_eq!(fs::read(&original).unwrap(), b"ORIGINAL");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failing_backup_copy_leaves_no_temp() {
+        let dir = scratch_dir("replace-backup-fails");
+        // The original is gone, so the backup copy fails.
+        let original = dir.join("missing.mp4");
+        let temp = dir.join(".missing.videorc-repair.mp4");
+        fs::write(&temp, b"REPAIRED").unwrap();
+
+        let result = safe_replace(&original, &temp, |_| Ok(()));
+        assert!(
+            matches!(&result, Err(SafeReplaceError::Io(reason)) if reason.contains("backup failed")),
+            "{result:?}"
+        );
+        assert!(!temp.exists(), "the temp is removed when the backup fails");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_temp_names_match_exactly_what_a_repair_writes() {
+        for original in ["rec.mp4", "take 2.mkv", "a.b.mov", "clip.M4V"] {
+            let temp = repair_temp_path(Path::new(original));
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert!(is_repair_temp_name(name), "{name}");
+        }
+        for name in [
+            "rec.mp4",
+            "rec.mkv",
+            ".rec.mp4",
+            "rec.videorc-repair.mp4",
+            "..videorc-repair.mp4",
+            ".rec.videorc-repair.txt",
+            ".rec.videorc-repair.mp4.partial",
+            ".videorc-backups",
+            ".videorc-export-1234.partial",
+            "clip.mp4.partial",
+        ] {
+            assert!(!is_repair_temp_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_startup_sweep_deletes_only_repair_temps() {
+        let dir = scratch_dir("startup-sweep");
+        let temp = dir.join(".rec.videorc-repair.mp4");
+        let recording = dir.join("rec.mp4");
+        let mkv = dir.join("rec.mkv");
+        let backup = backup_path_for(&recording).unwrap();
+        let partial = dir.join("clip.mp4.partial");
+        let backup_named_like_a_temp = backup.with_file_name(".rec.videorc-repair.mp4");
+        fs::write(&temp, b"0123456789").unwrap();
+        fs::write(&recording, b"RECORDING").unwrap();
+        fs::write(&mkv, b"MKV").unwrap();
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::write(&backup, b"BACKUP").unwrap();
+        fs::write(&backup_named_like_a_temp, b"IN BACKUPS").unwrap();
+        fs::write(&partial, b"PARTIAL").unwrap();
+        // A folder with the temp name is never removed.
+        let folder_named_like_a_temp = dir.join(".dir.videorc-repair.mkv");
+        fs::create_dir(&folder_named_like_a_temp).unwrap();
+
+        let sweep = sweep_repair_temps(&[dir.clone(), dir.clone()]);
+        assert_eq!(sweep.removed, 1);
+        assert_eq!(sweep.bytes, 10);
+        assert!(sweep.errors.is_empty(), "{:?}", sweep.errors);
+        assert!(!temp.exists());
+        for kept in [
+            &recording,
+            &mkv,
+            &backup,
+            &backup_named_like_a_temp,
+            &partial,
+            &folder_named_like_a_temp,
+        ] {
+            assert!(kept.exists(), "{} must be kept", kept.display());
+        }
+        // A missing folder is skipped.
+        let missing = sweep_repair_temps(&[dir.join("missing")]);
+        assert_eq!(missing, RepairTempSweep::default());
         let _ = fs::remove_dir_all(&dir);
     }
 

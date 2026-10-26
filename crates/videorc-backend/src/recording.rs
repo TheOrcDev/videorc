@@ -3924,9 +3924,20 @@ async fn start_session_with_timeline(
         let disk_state = state.clone();
         let disk_session_id = session_id.clone();
         let disk_output_dir = output_dir.clone();
+        // Plan 200 C5: the notice counts minutes, from the bitrate of every
+        // file this take writes.
+        let disk_video_kbps = params.output.video.bitrate_kbps;
+        let disk_separate_files = crate::source_iso::armed_plan(&params.output)
+            .map_or(0, |plan| plan.iso_roles().count());
         tokio::spawn(async move {
-            let _ =
-                emit_disk_space_health_event(&disk_state, &disk_session_id, &disk_output_dir).await;
+            let _ = emit_disk_space_health_event(
+                &disk_state,
+                &disk_session_id,
+                &disk_output_dir,
+                disk_video_kbps,
+                disk_separate_files,
+            )
+            .await;
         });
     }
 
@@ -7535,7 +7546,7 @@ where
         bail!("Only MKV session outputs can be remuxed to MP4");
     }
 
-    let preferred_output = input.with_extension("mp4");
+    let preferred_output = crate::source_iso::public_mp4_output_path(&input);
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
     let mut base_finalization = state
         .database
@@ -7552,6 +7563,7 @@ where
             "ISO capture ownership could not be verified; refusing to adopt its current path"
         );
     }
+    ensure_mp4_export_disk_space(&input)?;
     let mut recovery_path = None;
     let published = export_recording_to_mp4_with_exporter(
         &state,
@@ -7593,6 +7605,7 @@ where
     finalization.mp4_path = Some(published.path.display().to_string());
     persist_finalization_or_recovery_with_fault(&state, &finalization, &mut recovery_path, fault)
         .map_err(anyhow::Error::msg)?;
+    crate::source_iso::remove_empty_capture_directory(&input);
 
     state.emit_log("info", "Created MP4 copy for session.");
     Ok(published.path.display().to_string())
@@ -10903,6 +10916,11 @@ async fn monitor_session(
     if let Some(finished) = source_iso_finished.take()
         && !performance_check_session
     {
+        // Plan 200 C4: the separate files queue first, but Combined exports
+        // first. Withdrawn below when this take gets no Combined job.
+        state
+            .recording_finalization
+            .expect_primary_export(&session_id);
         crate::source_iso::commit_finished_source_iso_roles(
             &state,
             &session_id,
@@ -11433,6 +11451,11 @@ async fn monitor_session(
         RecordingState::Failed => "failed",
         _ => "non-terminal",
     };
+    if pending_finalization_job.is_none() {
+        state
+            .recording_finalization
+            .withdraw_primary_export(&stop_timeline_session_id);
+    }
     state.capture_interruption.capture_finished();
     state.emit_event("recording.status", terminal_status);
     publish_stop_timeline(&state, &stop_timeline_session_id, terminal_outcome).await;
@@ -11577,7 +11600,7 @@ async fn finalize_recording_media(
     let mut finalization_recovery_path = None;
     let export_result = {
         let queued = Instant::now();
-        let _export_slot = state.recording_finalization.export_slot().await;
+        let _export_slot = state.recording_finalization.export_slot(&session_id).await;
         state.emit_log(
             "info",
             format!(
@@ -11585,22 +11608,27 @@ async fn finalize_recording_media(
                 queued.elapsed().as_millis()
             ),
         );
-        export_completed_recording_to_mp4_tracked(
-            state,
-            &session_id,
-            &ffmpeg_path,
-            &input_mkv,
-            Mp4ExportFinalizationContext {
-                ended_at: &ended_at,
-                duration_ms: wall_duration_ms,
-                diagnostics: &final_diagnostics,
-                output_ownership: output_ownership.clone(),
-                keep_original_media,
-            },
-            &mut finalization_recovery_path,
-            control,
-        )
-        .await
+        match ensure_mp4_export_disk_space(&input_mkv) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                export_completed_recording_to_mp4_tracked(
+                    state,
+                    &session_id,
+                    &ffmpeg_path,
+                    &input_mkv,
+                    Mp4ExportFinalizationContext {
+                        ended_at: &ended_at,
+                        duration_ms: wall_duration_ms,
+                        diagnostics: &final_diagnostics,
+                        output_ownership: output_ownership.clone(),
+                        keep_original_media,
+                    },
+                    &mut finalization_recovery_path,
+                    control,
+                )
+                .await
+            }
+        }
     };
     mark_stop_timeline(state, RecordingStopPhase::Mp4Export);
     let (published_mp4, export_error) = match export_result {
@@ -11715,6 +11743,11 @@ async fn finalize_recording_media(
             anyhow::anyhow!(message)
         })?;
     mark_stop_timeline(state, RecordingStopPhase::DbCommit);
+    // Plan 200 C6: an export that consumed the MKV of a separate file still
+    // in its private capture folder leaves that folder empty.
+    if published_mp4.is_some() {
+        crate::source_iso::remove_empty_capture_directory(&input_mkv);
+    }
     state.emit_log(
         "info",
         format!(
@@ -11772,6 +11805,15 @@ async fn finalize_recording_media(
         file_size_bytes,
         error: None,
     })
+}
+
+/// Plan 200 C5: an export needs room for a second copy of the MKV. Without
+/// it the job fails before FFmpeg starts and the MKV stays the recording.
+fn ensure_mp4_export_disk_space(input_mkv: &Path) -> Result<()> {
+    let Some(output_dir) = input_mkv.parent() else {
+        return Ok(());
+    };
+    crate::disk_space::ensure_export_space(input_mkv, output_dir)
 }
 
 /// Rows left in `finalizing` by a backend exit mid-export: re-run the job.
@@ -12289,7 +12331,12 @@ async fn run_quality_assessment(
     expectations: QualityExpectations,
     cancel_token: MaintenanceCancelToken,
 ) -> std::result::Result<GateStatus, String> {
-    tokio::task::spawn_blocking(move || {
+    // Plan 200 C6: a timeout that drops this future cancels the job (FFmpeg
+    // is killed), and the thread stays counted until it has exited.
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
+    let result = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let path = file_path.clone();
         let is_cancelled = || cancel_token.is_cancelled();
@@ -12324,8 +12371,9 @@ async fn run_quality_assessment(
             Ok(status)
         }
     })
-    .await
-    .map_err(|error| format!("quality assessment task failed: {error}"))?
+    .await;
+    cancel_on_drop.disarm();
+    result.map_err(|error| format!("quality assessment task failed: {error}"))?
 }
 
 /// What the post-recording gate does after its fast assessment.
@@ -12366,7 +12414,12 @@ async fn run_quality_gate(
     expectations: QualityExpectations,
     cancel_token: MaintenanceCancelToken,
 ) -> std::result::Result<GateStatus, String> {
-    tokio::task::spawn_blocking(move || {
+    // Plan 200 C6: a repair timeout kills the repair's FFmpeg; quit waits
+    // for the thread (and its temp cleanup) to finish.
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
+    let result = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let is_cancelled = || cancel_token.is_cancelled();
         let status = gate_recording_cancellable(
@@ -12385,8 +12438,9 @@ async fn run_quality_gate(
             Ok(status)
         }
     })
-    .await
-    .map_err(|error| format!("quality check task failed: {error}"))?
+    .await;
+    cancel_on_drop.disarm();
+    result.map_err(|error| format!("quality check task failed: {error}"))?
 }
 
 /// Emits the health event that matches a gate verdict (passed / repaired / not 100% /
@@ -12788,7 +12842,9 @@ where
         return Ok(None);
     }
 
-    let preferred_output = input.with_extension("mp4");
+    // Plan 200 C6: a stopped-early separate file publishes beside Combined,
+    // never into its private capture folder.
+    let preferred_output = crate::source_iso::public_mp4_output_path(input);
     let staging_plan = plan_mp4_export_staging(&preferred_output)?;
     let mut initial_intent = base_finalization.clone();
     initial_intent.mp4_path = Some(preferred_output.display().to_string());
@@ -25321,38 +25377,24 @@ async fn emit_disk_space_health_event(
     state: &AppState,
     session_id: &str,
     output_dir: &Path,
+    video_kbps: u32,
+    separate_files: usize,
 ) -> Result<()> {
-    let output = Command::new("df")
-        .args(["-Pk", &output_dir.display().to_string()])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-
-    let Ok(output) = output else {
+    let directory = output_dir.to_path_buf();
+    let Ok(Some(available)) =
+        tokio::task::spawn_blocking(move || crate::disk_space::available_bytes(&directory)).await
+    else {
         return Ok(());
     };
-
-    if !output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(line) = stdout.lines().nth(1) else {
-        return Ok(());
-    };
-    let columns = line.split_whitespace().collect::<Vec<_>>();
-    let Some(available_kb) = columns.get(3).and_then(|value| value.parse::<u64>().ok()) else {
-        return Ok(());
-    };
-
-    if available_kb < 1_048_576 {
+    if let Some(message) =
+        crate::disk_space::record_space_notice(available, video_kbps, separate_files)
+    {
         emit_health_event(
             state,
             Some(session_id),
             HealthLevel::Warn,
             "disk-space-low",
-            "Less than 1 GB is available in the selected recording location.",
+            &message,
         )?;
     }
 
@@ -31347,6 +31389,53 @@ mod tests {
             !mkv.exists(),
             "auto-finalization removes MKV only after recovery commit"
         );
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stopped_early_separate_file_exports_beside_combined() {
+        let session_id = format!("take-stopped-early-{}-screen", Uuid::new_v4());
+        let directory =
+            std::env::temp_dir().join(format!("videorc-p200-iso-export-{}", Uuid::new_v4()));
+        let hidden = directory.join(format!(".videorc-iso-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&hidden).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = hidden.join("take-screen.mkv");
+        std::fs::write(&mkv, b"stopped-early partial").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let published = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::None,
+            |_ffmpeg_path, _input, output| async move {
+                std::fs::write(output, b"exported partial mp4")?;
+                Ok(())
+            },
+        )
+        .await
+        .expect("the stopped-early file exports");
+
+        let expected = directory.join("take-screen.mp4");
+        assert_eq!(published, expected.display().to_string());
+        assert_eq!(std::fs::read(&expected).unwrap(), b"exported partial mp4");
+        assert!(
+            !hidden.join("take-screen.mp4").exists(),
+            "nothing is published into the private folder"
+        );
+        // Export MP4 keeps the MKV, so its folder stays until the row goes.
+        assert!(mkv.exists());
+        assert!(directory.read_dir().unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
         drop(state);
         std::fs::remove_dir_all(directory).unwrap();
     }
