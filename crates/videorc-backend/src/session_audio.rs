@@ -5869,7 +5869,9 @@ fn run_bus_owned(
         };
         // The microphone tap (captions, Buddy voice activity, the mic meter)
         // is the processed microphone chunk as written, before any sum
-        // (decision 5). Without a system slot it is the written chunk itself.
+        // (decision 5). On both paths it is the clamped ingredient, not the
+        // limited output (plan 200 A2): without a system slot it equals the
+        // written chunk while the microphone stays under the ceiling.
         // Plan 092 Phase C: the written chunk is what the recording and the
         // stream get, so it feeds the master meter.
         let mut clipped_samples = 0;
@@ -5880,7 +5882,7 @@ fn run_bus_owned(
                 let master = ChunkLevels::of(&write.written.samples);
                 (
                     write.written.stale_from,
-                    write.written.samples,
+                    write.microphone,
                     None,
                     master,
                     None,
@@ -6112,6 +6114,12 @@ struct WrittenChunk {
 /// What the microphone-only path wrote, with its limiter.
 struct MicrophoneWrite {
     written: WrittenChunk,
+    /// The processed microphone ingredient (fold, gain, mute, clamped at full
+    /// scale; zero where the chunk went stale or drained), exactly as the
+    /// mixed path's `MixedWrite::microphone`. The taps, the microphone meter
+    /// and the echo reference read this, so the Microphone file and meter
+    /// get the same signal whether or not anything is mixed (plan 200 A2).
+    microphone: Vec<f32>,
     /// Samples the limiter had to pull under its ceiling.
     clipped_samples: u64,
     limiter: PeakLimiter,
@@ -6135,6 +6143,7 @@ fn write_chunk_with_clock(
     wait: impl FnMut(),
 ) -> io::Result<MicrophoneWrite> {
     let mut clipped = vec![false; raw.len()];
+    let mut microphone = vec![0.0; raw.len()];
     let mut limiter_after = limiter;
     let written = write_rendered_chunk(
         file,
@@ -6142,6 +6151,10 @@ fn write_chunk_with_clock(
         |from| {
             // Unclamped: the limiter, not a clamp at full scale, holds it.
             let mut samples = fold_interleaved_f32(raw, 2, settings.load(), fold, false);
+            // The ingredient is clamped, as `mix_chunk` clamps it.
+            for (ingredient, sample) in microphone[from..].iter_mut().zip(&samples[from..]) {
+                *ingredient = sample.clamp(-1.0, 1.0);
+            }
             let mut flags = vec![false; samples.len()];
             let mut chunk_limiter = limiter;
             chunk_limiter.process(&mut samples, &mut flags);
@@ -6158,10 +6171,12 @@ fn write_chunk_with_clock(
         (Some(stale), Some(silent)) => Some(stale.min(silent)),
         (stale, silent) => stale.or(silent),
     } {
+        microphone[from * 2..].fill(0.0);
         clipped[from * 2..].fill(false);
     }
     Ok(MicrophoneWrite {
         written,
+        microphone,
         clipped_samples: clipped.iter().filter(|clipped| **clipped).count() as u64,
         limiter: limiter_after,
     })
@@ -12243,6 +12258,50 @@ mod mix_tests {
         );
         assert!(samples.iter().any(|sample| sample.abs() > 0.85));
         assert!(clipped > 0, "the clipped counter rises");
+    }
+
+    #[test]
+    fn the_mic_only_ingredient_matches_the_mixed_paths() {
+        // Plan 157 / plan 200 A2: the Microphone file and meter get the same
+        // signal whether or not anything is mixed: the clamped ingredient,
+        // not the limited output.
+        let settings = AudioProcessingSettings {
+            gain_db: 12.0,
+            muted: false,
+        };
+        let raw = mic_tone(CHUNK_FRAMES, 0.5);
+        let handle = AudioProcessingSettingsHandle::new(settings);
+        let now = Instant::now();
+        let write = write_chunk_with_clock(
+            &mut Vec::new(),
+            &raw,
+            &handle,
+            FoldPlan::one_shot(&raw, 2),
+            PeakLimiter::default(),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            || now,
+            || {},
+        )
+        .unwrap();
+        let mixed = mix_chunk(
+            &raw,
+            settings,
+            FoldPlan::one_shot(&raw, 2),
+            &vec![0.0; raw.len()],
+            AudioProcessingSettings::default(),
+            None,
+            PeakLimiter::default(),
+        );
+        assert_eq!(write.microphone, mixed.microphone);
+        assert!(write.microphone.iter().any(|sample| *sample == 1.0));
+        assert!(
+            write
+                .written
+                .samples
+                .iter()
+                .all(|sample| sample.abs() <= LIMITER_CEILING + 1.0e-6)
+        );
     }
 
     #[test]
