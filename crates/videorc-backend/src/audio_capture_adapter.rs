@@ -446,6 +446,28 @@ impl PulseTimeline {
     }
 }
 
+/// The newest stamp (1/48000 s, wall clock) a pulse packet of `frames` can
+/// carry when it reaches the worker at wall time `wall_now` (1/48000 s): its
+/// last sample cannot be later than its arrival. After a stall long enough to
+/// overrun the Pulse stream, the demuxer's stamps (wall clock less the latency
+/// Pulse reports) ran up to ~17 ms past the packets' arrival for a while (ends
+/// 27 ms past it on ogre). Their capture instants then crossed the 20 ms
+/// `PULSE_CLOCK_UNCERTAINTY`, `CaptureClock` stopped the worker as "PCM is
+/// ahead of its capture clock" and the microphone stayed silent for the rest
+/// of the session (retest 151: 27 minutes of a 30-minute soak).
+fn latest_pulse_stamp_at(wall_now: i64, frames: usize) -> i64 {
+    wall_now.saturating_sub(frames as i64)
+}
+
+/// [`latest_pulse_stamp_at`] for a packet arriving at `now`, read through the
+/// same wall/monotonic pair that maps its anchor back to an `Instant`.
+fn latest_pulse_stamp(clock: &ClockPair, now: Instant, frames: usize) -> i64 {
+    let wall_now_ns =
+        clock.wall_ns + now.saturating_duration_since(clock.monotonic).as_nanos() as i128;
+    let wall_now = i64::try_from(wall_now_ns * 48_000 / 1_000_000_000).unwrap_or(i64::MAX);
+    latest_pulse_stamp_at(wall_now, frames)
+}
+
 /// A pulse packet's anchor: its counted sample position, captured at the
 /// wall-clock stamp `PulseTimeline::place` gave it. Both in 1/48000 s.
 fn pulse_anchor(
@@ -1465,7 +1487,12 @@ fn assemble_pcm(
         let mut packet = parse_pcm_description(&line)?;
         if protocol == CaptureProtocol::Pulse {
             observe_wall(&mut clock_pair, &mut wall_watch, &mut last_wall_check, true);
-            let (position, captured) = pulse.place(packet.pts, packet.frames);
+            let stamp = packet.pts.min(latest_pulse_stamp(
+                &clock_pair,
+                Instant::now(),
+                packet.frames,
+            ));
+            let (position, captured) = pulse.place(stamp, packet.frames);
             packet.pts = position;
             clock.push(pulse_anchor(
                 position,
@@ -2019,6 +2046,40 @@ mod tests {
         assert_eq!(anchor.captured_start, now - Duration::from_millis(20));
         assert_eq!(anchor.input_duration, Some(Duration::from_millis(10)));
         assert_eq!(anchor.uncertainty, PULSE_CLOCK_UNCERTAINTY);
+    }
+
+    #[test]
+    fn a_pulse_stamp_never_puts_its_packet_past_its_arrival() {
+        // The pair maps wall 1.000 s to `now`: a 10 ms packet arriving then
+        // can start no later than 0.990 s.
+        let now = Instant::now();
+        assert_eq!(latest_pulse_stamp(&pair(now), now, 480), 47_520);
+        assert_eq!(
+            latest_pulse_stamp(&pair(now), now + Duration::from_millis(5), 480),
+            47_760
+        );
+        // Retest 151: after an overrun the demuxer stamped packets ~17 ms past
+        // their arrival for a while (ends 27.4 ms past it, beyond the 20 ms
+        // `PULSE_CLOCK_UNCERTAINTY`). Clamped, the capture clock follows the
+        // arrivals instead: no packet ends after it arrived, so `CaptureClock`
+        // keeps the worker (and the microphone) running.
+        let future = 835_i64;
+        assert!(
+            Duration::from_secs_f64((future + 480) as f64 / 48_000.0) > PULSE_CLOCK_UNCERTAINTY
+        );
+        let mut timeline = PulseTimeline::default();
+        let mut worst_end_past_arrival = i64::MIN;
+        for index in 0..200_i64 {
+            let arrival = 100_000 + index * 480;
+            let stamp = arrival + future;
+            let (position, captured) =
+                timeline.place(stamp.min(latest_pulse_stamp_at(arrival, 480)), 480);
+            assert_eq!(position, 100_000 - 480 + index * 480);
+            worst_end_past_arrival = worst_end_past_arrival.max(captured + 480 - arrival);
+        }
+        assert!(worst_end_past_arrival <= 0, "{worst_end_past_arrival}");
+        // On-time stamps are untouched.
+        assert_eq!(47_000_i64.min(latest_pulse_stamp_at(47_520, 480)), 47_000);
     }
 
     #[test]

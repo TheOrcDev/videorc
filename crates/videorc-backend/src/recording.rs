@@ -9845,6 +9845,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
     let mut microphone_generation = 0;
+    let mut microphone_reopen_attempts = 0_u32;
     loop {
         ticker.tick().await;
         let counters = {
@@ -9920,6 +9921,20 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                 source_loss_after_ms.after_ms,
                 source_loss_after_ms.reason,
             );
+            if microphone_auto_reopen_due(
+                source_loss_after_ms.reason,
+                microphone_reopen_attempts,
+                cfg!(target_os = "linux"),
+            ) {
+                microphone_reopen_attempts += 1;
+                tokio::spawn(reopen_stopped_microphone(
+                    state.clone(),
+                    session_id.clone(),
+                    source_loss_after_ms.device_name.clone(),
+                    source_loss_after_ms.after_ms,
+                    microphone_reopen_attempts,
+                ));
+            }
         }
 
         // Early truthful warning (plan 021 F3): a mic that has produced nothing
@@ -10147,6 +10162,98 @@ fn emit_microphone_input_lost_health_event(
         },
         &message,
     );
+}
+
+/// Retest 151: a Linux Pulse capture worker stops on its own consistency
+/// checks when the desktop starves it (its timestamp queue overflowed after a
+/// 2 s stall; stamps ran ahead of the capture clock after an overrun) while
+/// the microphone itself is fine. Nothing opened it again, so a 30-minute live
+/// session recorded and streamed 27 minutes of silence. Such a stop now opens
+/// the same microphone again through the path that choosing it again uses, a
+/// bounded number of times per session. A timeline loss keeps its own
+/// re-anchor (plan 076); other platforms keep their behaviour.
+const MICROPHONE_AUTO_REOPEN_LIMIT: u32 = 5;
+const MICROPHONE_AUTO_REOPEN_DELAY: Duration = Duration::from_secs(1);
+const MICROPHONE_REOPENED_CODE: &str = "microphone-input-recovered";
+
+fn microphone_auto_reopen_due(
+    reason: crate::session_audio::SourceLossReason,
+    attempts: u32,
+    platform_reopens: bool,
+) -> bool {
+    platform_reopens
+        && reason == crate::session_audio::SourceLossReason::CaptureStopped
+        && attempts < MICROPHONE_AUTO_REOPEN_LIMIT
+}
+
+/// Opens the session's confirmed microphone again after its capture stopped,
+/// unless it already came back, the user is changing it, or it is gone.
+async fn reopen_stopped_microphone(
+    state: AppState,
+    session_id: String,
+    device_name: String,
+    stopped_after_ms: u64,
+    attempt: u32,
+) {
+    tokio::time::sleep(MICROPHONE_AUTO_REOPEN_DELAY).await;
+    let Ok(sources) = crate::live_source_switch::get(&state, &session_id).await else {
+        return;
+    };
+    let Some(device_id) = sources.confirmed.microphone_id.clone() else {
+        return;
+    };
+    let lost = sources.health.iter().any(|health| {
+        health.kind == crate::live_source_switch::SourceKind::Microphone
+            && health.health == crate::live_source_switch::SourceHealth::Unavailable
+    });
+    if !lost || sources.pending.is_some() {
+        return;
+    }
+    let request = crate::live_source_switch::SourceSwitchParams {
+        session_id: session_id.clone(),
+        request_id: format!("microphone-reopen-{attempt}-{}", Uuid::new_v4()),
+        expected_source_revision: sources.source_revision,
+        kind: crate::live_source_switch::SourceKind::Microphone,
+        device_id: Some(device_id),
+        protected_overlay_window_ids: Vec::new(),
+    };
+    let reopened = crate::live_source_switch::reopen_microphone(&state, request)
+        .await
+        .is_ok_and(|after| {
+            after.health.iter().any(|health| {
+                health.kind == crate::live_source_switch::SourceKind::Microphone
+                    && matches!(
+                        health.health,
+                        crate::live_source_switch::SourceHealth::Ready
+                            | crate::live_source_switch::SourceHealth::Starting
+                    )
+            })
+        });
+    if reopened {
+        let message = microphone_reopened_message(&device_name, stopped_after_ms);
+        state.emit_log("info", &message);
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            MICROPHONE_REOPENED_CODE,
+            &message,
+        );
+    } else {
+        state.emit_log(
+            "warn",
+            format!(
+                "Microphone \"{device_name}\" could not be opened again after it stopped (attempt {attempt} of {MICROPHONE_AUTO_REOPEN_LIMIT})."
+            ),
+        );
+    }
+}
+
+fn microphone_reopened_message(device_name: &str, stopped_after_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" stopped after {:.1} seconds and Videorc opened it again. Only the moments in between are silent.",
+        stopped_after_ms as f64 / 1_000.0
+    )
 }
 
 fn microphone_input_lost_message(device_name: &str, source_loss_after_ms: u64) -> String {
@@ -26188,6 +26295,30 @@ mod tests {
         assert_eq!(
             microphone_input_lost_message("Desk Mic", 92_345),
             "Microphone \"Desk Mic\" stopped after 92.3 seconds. Videorc replaced the missing input with silence."
+        );
+    }
+
+    #[test]
+    fn a_stopped_linux_microphone_is_reopened_a_bounded_number_of_times() {
+        use crate::session_audio::SourceLossReason::{CaptureStopped, TimelineRejected};
+        // Retest 151: a starved Pulse worker stopped and the session stayed
+        // silent for 27 minutes. A stop is reopened, up to the limit.
+        for attempts in 0..MICROPHONE_AUTO_REOPEN_LIMIT {
+            assert!(microphone_auto_reopen_due(CaptureStopped, attempts, true));
+        }
+        assert!(!microphone_auto_reopen_due(
+            CaptureStopped,
+            MICROPHONE_AUTO_REOPEN_LIMIT,
+            true
+        ));
+        // A timeline loss keeps its own re-anchor; other platforms are unchanged.
+        assert!(!microphone_auto_reopen_due(TimelineRejected, 0, true));
+        assert!(!microphone_auto_reopen_due(CaptureStopped, 0, false));
+        // The `-recovered` code clears the renderer's "stopped" notice.
+        assert!(MICROPHONE_REOPENED_CODE.ends_with("-recovered"));
+        assert_eq!(
+            microphone_reopened_message("Desk Mic", 166_000),
+            "Microphone \"Desk Mic\" stopped after 166.0 seconds and Videorc opened it again. Only the moments in between are silent."
         );
     }
 
