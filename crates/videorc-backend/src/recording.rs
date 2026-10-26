@@ -19475,22 +19475,35 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
     // press can land while that buffer-only start is still between admission
     // and its running session. Wait for it (bounded) and hand over from the
     // running session instead of meeting "A capture session is starting".
+    //
+    // A session that already left `state.recording` keeps the capture
+    // admission until its terminal status is published. When Clips is
+    // switched off (or the ring stops for any reason) a Record landing in
+    // that window met "A capture session is active or finalizing"
+    // (retest 151); wait for the terminal edge instead, on the same bound.
     let wait_deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
     let session_id = loop {
-        let replay_only_session = state
-            .recording
-            .lock()
-            .await
-            .as_ref()
-            .filter(|active| active.replay_only)
-            .map(|active| active.session_id.clone());
+        let (replay_only_session, slot_empty) = {
+            let recording = state.recording.lock().await;
+            (
+                recording
+                    .as_ref()
+                    .filter(|active| active.replay_only)
+                    .map(|active| active.session_id.clone()),
+                recording.is_none(),
+            )
+        };
         if let Some(session_id) = replay_only_session {
             break session_id;
         }
-        if !crate::replay_buffer::start_in_flight(state) {
+        let finishing = slot_empty && state.capture_interruption.capture_is_finalizing();
+        if !finishing && !crate::replay_buffer::start_in_flight(state) {
             return Ok(());
         }
         if Instant::now() >= wait_deadline {
+            if finishing {
+                bail!("The last session is still finishing. Try again in a moment.");
+            }
             bail!("Clips are still starting. Try again in a moment.");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -31212,6 +31225,39 @@ mod tests {
                 .is_some_and(|error| error.contains("missing")),
             "{item:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_waits_for_a_finishing_session_instead_of_refusing() {
+        // Retest 151: a capture that already left `state.recording` holds the
+        // admission until its terminal status. A Record in that window used to
+        // meet "A capture session is active or finalizing".
+        let state = test_state();
+        state
+            .capture_interruption
+            .try_begin_session_start()
+            .expect("idle admission")
+            .commit();
+        assert!(state.recording.lock().await.is_none());
+        let finisher = state.clone();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            finisher.capture_interruption.capture_finished();
+        });
+        let waited_from = Instant::now();
+        hand_over_replay_only_session(&state)
+            .await
+            .expect("the hand-over waits for the terminal edge");
+        assert!(waited_from.elapsed() >= Duration::from_millis(150));
+        assert!(state.capture_interruption.capture_admission_is_idle());
+        release.await.expect("finisher");
+
+        // Nothing finishing and nothing starting: no wait at all.
+        let waited_from = Instant::now();
+        hand_over_replay_only_session(&state)
+            .await
+            .expect("idle hand-over");
+        assert!(waited_from.elapsed() < Duration::from_millis(100));
     }
 
     #[tokio::test(flavor = "current_thread")]
