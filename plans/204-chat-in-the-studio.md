@@ -21,17 +21,18 @@
 
 | Slice | What                                                  | State   |
 | ----- | ----------------------------------------------------- | ------- |
-| S0    | Drift check and the eager bundle baseline             | PLANNED |
-| S1    | The setting and when the section shows (pure, tested) | PLANNED |
-| S2    | The chat list and its rows (lazy chunk)               | PLANNED |
-| S3    | The Chat section in the Studio inspector, both looks  | PLANNED |
-| S4    | The switch: Settings → General and ⌘K                 | PLANNED |
-| S5    | Words and docs: glossary, design skill, release note  | PLANNED |
-| S6    | `smoke:studio-chat` and the gates                     | PLANNED |
+| S0    | Drift check and the eager bundle baseline             | BUILT   |
+| S1    | The setting and when the section shows (pure, tested) | BUILT   |
+| S2    | The chat list and its rows (lazy chunk)               | BUILT   |
+| S3    | The Chat section in the Studio inspector, both looks  | BUILT   |
+| S4    | The switch: Settings → General and ⌘K                 | BUILT   |
+| S5    | Words and docs: glossary, design skill, release note  | BUILT   |
+| S6    | `smoke:studio-chat` and the gates                     | BUILT   |
 
-- **Status**: EXECUTING 2026-10-27 on `plan-204-studio-chat`. The owner
-  answered all four questions the same day (see Owner answers) and said
-  "execute the entire plan and create a PR".
+- **Status**: BUILT 2026-10-27 on `plan-204-studio-chat`, one desktop PR.
+  The owner answered all four questions the same day (see Owner answers)
+  and said "execute the entire plan and create a PR". What was measured and
+  what is still owed is in As built, at the end.
 - **Priority**: P1 (owner request, 2026-10-27).
 - **Effort**: M. Renderer only: one lazy component, one setting, one ⌘K
   item, one Settings row, one smoke mode. No backend, wire or IPC change.
@@ -617,3 +618,58 @@ On a real stream with YouTube and Twitch chat, in both themes and both looks:
    back.
 5. At the default window size the whole section is in view, and the
    preview doesn't move when it appears.
+
+## As built (2026-10-27)
+
+- **Where the code is.**
+  - `lib/studio-chat.ts` is the eager gate (`studioChatOn`,
+    `studioChatShows`). It imports only `sessionIsLive`.
+  - `lib/studio-chat-view.ts` holds what the section lists and says.
+  - `components/studio/studio-chat.tsx` is the lazy chunk:
+    `StudioChatSection`, `StudioChatList` and `StudioChatRow`.
+  - `studio-tab.tsx` renders the section under Session behind the gate,
+    with a fallback of the same height.
+- **S2.3 took the hook.** The list mechanics were about 110 lines, so they
+  moved out of `ChatPane` unchanged into `hooks/use-chat-list.ts`, and the
+  jump chip into `components/chat-jump-chip.tsx`. Both lists use them.
+  - `ChatPane` passes its filter as a memoized `countsAsArrival` with the
+    old effect's dependencies.
+  - The Stream Manager's chat tests (147, including the arrival and follow
+    integration test) and the default `smoke:comment-highlight-stream`
+    (four scenarios) pass on the refactor.
+- **Small exports.** `liveChatProviderNotice` (the empty chat and the
+  Studio notice share it), `CommentMessageBody` and
+  `COMMENT_ROW_TINT_CLASS`.
+- **The switch.** Settings → General's section is now called "Chat", and
+  it always renders: Chat in Studio first, then the Stream Manager row,
+  which keeps its `commentsWindowEnabled` gate, then the emote rows. ⌘K
+  "Chat in Studio" sits in Appearance with the check.
+- **Bundle (S0 against S6).**
+  - Eager JS went from 1,990,647 raw / 400,516 gzip to 1,990,947 raw /
+    400,604 gzip: +300 raw, +88 gzip, under the 400-byte target. The entry
+    grew +160 raw / +56 gzip.
+  - The section's chunk is about 15 KB raw.
+- **Layout (S3, from `smoke:studio-chat` at 1180×780, one destination).**
+  - The preview card did not move or resize when the section appeared.
+  - The section's bottom sat at 697 of the pane's 754 px, unscrolled, so it
+    was fully in view.
+  - Screenshots in dark, light and Retro LCD are in the smoke's evidence
+    folder (not committed).
+  - The first build's rows ran 8 px past the section's edges (a negative
+    margin) and were fixed to line up with the Session list.
+- **Gates run.**
+  - `pnpm typecheck`, `pnpm lint`, `pnpm format:check` and `pnpm build`.
+  - `pnpm --filter @videorc/desktop test`: 5,679 passed. One unrelated
+    timing test, "bounds a hung X END…" in
+    `studio-provider.integration.test.ts`, timed out at 5.16 s against its
+    5 s limit while the Rust backend built beside it. It passes alone in
+    4.3 s.
+  - `pnpm check:renderer-assets`, `pnpm smoke:studio-chat`,
+    `pnpm smoke:comment-highlight-stream` and `pnpm probe:preview-lifecycle`.
+  - No Rust gates: no Rust changed.
+- **Owed (owner).**
+  - The by-eye on a real stream with real YouTube and Twitch chat (Owner
+    acceptance), in both themes.
+  - With two destinations live, checking that the section still fits at
+    1180×780. The smoke has one.
+  - Whether "4. yes" meant avatars. They are on (Owner answers, 4).

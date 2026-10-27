@@ -387,6 +387,7 @@ async function runScenario(ws, smoke, scenario, index) {
     if (surface === 'studio') {
       // After the capture, so the card's frames are already in the stream.
       await takeOffStudioRow(ws, smoke, message)
+      await shootStudioChatRetroLcd(smoke, scenarioDirectory)
       await hideAndUndoStudioChat(smoke)
     }
     const stopped = await request(ws, timeoutMs, 'session.stop', {})
@@ -816,18 +817,11 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
     metrics.paneScrollTop === 0 &&
     metrics.section.bottom <= metrics.pane.bottom + 0.5
   const shots = {}
-  for (const theme of ['dark', 'light']) {
-    await studioEval(
-      smoke,
-      `localStorage.setItem('videorc.theme', '${theme}')
-       window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' }))
-       await sleep(700)
-       return document.documentElement.classList.contains('${theme}')`
-    )
-    shots[theme] = (
-      await smokeCommand(smoke, 'capture-page', { name: `studio-chat-${theme}` })
-    )?.file
+  const shoot = async (theme, name) => {
+    shots[name] = await shootStudio(smoke, theme, name)
   }
+  await shoot('dark', 'dark')
+  await shoot('light', 'light')
   const evidence = { metrics, previewBefore: before, previewStill, inView, shots }
   writeFileSync(
     join(scenarioDirectory, 'studio-chat-layout.json'),
@@ -841,6 +835,41 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
       `The preview card moved when the Chat section appeared: ${JSON.stringify(evidence)}`
     )
   }
+}
+
+/** The main window in one theme, as `videorc-ui-studio-chat-<name>.png`. */
+async function shootStudio(smoke, theme, name) {
+  await studioEval(
+    smoke,
+    `localStorage.setItem('videorc.theme', '${theme}')
+     window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' }))
+     await sleep(700)
+     return document.documentElement.classList.contains('${theme}')`
+  )
+  return (await smokeCommand(smoke, 'capture-page', { name: `studio-chat-${name}` }))?.file
+}
+
+/**
+ * Retro LCD keeps the section in its default look (owner answer 3): one shot
+ * of it among the LCD screens, then Retro LCD back off. After the take-off, so
+ * the card's 10 s lifetime never meets the detour through Settings.
+ */
+async function shootStudioChatRetroLcd(smoke, scenarioDirectory) {
+  const retro = `await openTab('settings', '#retro-lcd-studio')
+     const toggle = document.querySelector('#retro-lcd-studio')
+     if (toggle.getAttribute('aria-checked') !== String(params.on)) toggle.click()
+     await sleep(150)
+     await openTab('studio', ${JSON.stringify(STUDIO_CHAT)})
+     await sleep(400)
+     return document.querySelector('#retro-lcd-studio')?.getAttribute('aria-checked') ?? null`
+  await studioEval(smoke, retro, { on: true })
+  const file = await shootStudio(smoke, 'dark', 'retro-dark')
+  await studioEval(smoke, retro, { on: false })
+  writeFileSync(
+    join(scenarioDirectory, 'studio-chat-retro-lcd.json'),
+    JSON.stringify({ file }, null, 2)
+  )
+  console.log(`[studio] Retro LCD shot ${file}`)
 }
 
 /** A click on the live row takes it off (owner call, D10). */
