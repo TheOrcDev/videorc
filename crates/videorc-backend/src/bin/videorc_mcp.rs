@@ -266,6 +266,30 @@ fn reach(path: &Path) -> Reach {
     }
 }
 
+/// Windows: the install this bridge sits in (`<install>\\resources\\`), else
+/// the default per-user install, for a copy outside it (S22: the Claude
+/// Desktop extension unpacks the bridge into Claude's own folder).
+fn windows_videorc_exe(
+    bridge: Option<&Path>,
+    local_app_data: Option<&str>,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let beside = bridge
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|install| install.join("Videorc.exe"));
+    let installed = local_app_data.map(|folder| {
+        PathBuf::from(folder)
+            .join("Programs")
+            .join("Videorc")
+            .join("Videorc.exe")
+    });
+    [beside, installed]
+        .into_iter()
+        .flatten()
+        .find(|exe| exists(exe))
+}
+
 /// Open Videorc in the background (D7). macOS by bundle id, Windows the exe
 /// beside this bridge's `resources` folder, Linux per D20.
 fn open_videorc() -> Result<(), String> {
@@ -274,17 +298,12 @@ fn open_videorc() -> Result<(), String> {
         command.args(["-g", "-b", MACOS_BUNDLE_ID]);
         command
     } else if cfg!(target_os = "windows") {
-        let exe = std::env::current_exe()
-            .ok()
-            .and_then(|bridge| {
-                bridge
-                    .parent()
-                    .and_then(Path::parent)
-                    .map(Path::to_path_buf)
-            })
-            .map(|install| install.join("Videorc.exe"))
-            .filter(|exe| exe.exists())
-            .ok_or_else(|| "Videorc.exe isn't beside this bridge.".to_string())?;
+        let exe = windows_videorc_exe(
+            std::env::current_exe().ok().as_deref(),
+            env_var("LOCALAPPDATA").as_deref(),
+            &|path| path.exists(),
+        )
+        .ok_or_else(|| "Videorc.exe isn't beside this bridge.".to_string())?;
         std::process::Command::new(exe)
     } else {
         let launcher = env_var("VIDEORC_APP_PATH")
@@ -630,6 +649,28 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_finds_videorc_beside_the_bridge_or_in_the_default_install() {
+        let bridge = Path::new("/install/resources/videorc-mcp.exe");
+        let beside = Path::new("/install").join("Videorc.exe");
+        let default = PathBuf::from("/local")
+            .join("Programs")
+            .join("Videorc")
+            .join("Videorc.exe");
+        let only = |wanted: PathBuf| move |path: &Path| path == wanted.as_path();
+        assert_eq!(
+            windows_videorc_exe(Some(bridge), Some("/local"), &only(beside.clone())),
+            Some(beside.clone())
+        );
+        // The extension's copy lives in Claude's folder: the default install.
+        let extension = Path::new("/claude/extensions/videorc/server/videorc-mcp.exe");
+        assert_eq!(
+            windows_videorc_exe(Some(extension), Some("/local"), &only(default.clone())),
+            Some(default)
+        );
+        assert_eq!(windows_videorc_exe(Some(extension), None, &|_| false), None);
     }
 
     #[test]
