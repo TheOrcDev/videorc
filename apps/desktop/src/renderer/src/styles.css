@@ -52,6 +52,8 @@
  *   Selection  bg-accent (hover/selected block) · bg-accent-pressed.
  *   Chips      glass-chip · glass-chip-tinted · glass-dot · glass-keycap, with
  *              the tone-* utilities carrying colour.
+ *   Chrome     chrome-fill · chrome-plate · chrome-bead(-ink) · chrome-led
+ *              (plan 208 S4): the controls' shine, in components/ui only.
  *   Focus      :focus-visible ring is wired in @layer base below.
  *   Motion     100–150ms ease-out; reduced-motion collapse wired below.
  */
@@ -162,27 +164,60 @@
   --glass-float-rim: oklch(0 0 0 / 10%);
   --glass-float-drop: 0 12px 36px oklch(0 0 0 / 14%), 0 1px 3px oklch(0 0 0 / 8%);
 
-  /* Glass chips (plan 050, D9): the porcelain twin of the dark chip glass. */
-  --chip-fill-top: oklch(1 0 0 / 70%);
-  --chip-fill-bottom: oklch(1 0 0 / 45%);
-  --chip-rim: oklch(0 0 0 / 8%);
-  --chip-highlight: oklch(1 0 0 / 90%);
-  --chip-drop: oklch(0 0 0 / 6%);
+  /* Glass chips (plan 050, D9; plan 208 S4 crisper): the porcelain twin of
+     the dark chip glass, a whiter fill under a full white top line. */
+  --chip-fill-top: oklch(1 0 0 / 95%);
+  --chip-fill-bottom: oklch(1 0 0 / 55%);
+  --chip-rim: oklch(0 0 0 / 9%);
+  --chip-highlight: oklch(1 0 0);
+  --chip-drop: oklch(0 0 0 / 5%);
   --chip-tint-top: 16%;
   --chip-tint-bottom: 6%;
   --chip-tint-rim: 32%;
   --chip-tint-ink: 80%;
   --chip-tint-ink-base: var(--foreground);
   --chip-dot-glow: 45%;
-  --keycap-fill-top: oklch(1 0 0 / 95%);
-  --keycap-fill-bottom: oklch(1 0 0 / 70%);
-  --keycap-rim: oklch(0 0 0 / 10%);
+  --keycap-fill-top: oklch(1 0 0);
+  --keycap-fill-bottom: oklch(1 0 0 / 72%);
+  --keycap-rim: oklch(0 0 0 / 11%);
   --keycap-highlight: oklch(1 0 0);
-  --keycap-base: oklch(0 0 0 / 12%);
+  --keycap-base: oklch(0 0 0 / 14%);
 
-  /* Slider and switch knobs stay white in both themes, like AppKit's. */
+  /* Chrome controls (plan 208 S4, D2): the light column is the crisp invert,
+     black chrome on porcelain. A primary fill is polished graphite with white
+     ink, a selected plate is a faint dark sheen under a white top line, a
+     knob is a pearl bead, and Record is the same red LED as dark. */
+  --chrome-fill-stops:
+    oklch(0.45 0 0) 0%, oklch(0.27 0 0) 40%, oklch(0.13 0 0) 54%, oklch(0.23 0 0) 82%,
+    oklch(0.4 0 0) 100%;
+  --chrome-fill-flat: oklch(0.27 0 0);
+  --chrome-fill-ink: oklch(0.985 0 0);
+  --chrome-fill-hi: oklch(1 0 0 / 35%);
+  --chrome-fill-lo: oklch(0 0 0 / 35%);
+  --chrome-fill-drop: oklch(0 0 0 / 35%);
+  --chrome-fill-lift: oklch(1 0 0 / 10%);
+  --chrome-press: oklch(0 0 0 / 45%);
+  --chrome-plate-top: oklch(0 0 0 / 9%);
+  --chrome-plate-bottom: oklch(0 0 0 / 3%);
+  --chrome-plate-hi: oklch(1 0 0 / 90%);
+  --chrome-plate-rim: oklch(0 0 0 / 7%);
+  --chrome-bead-stops: oklch(1 0 0), oklch(0.9 0 0) 55%, oklch(0.7 0 0);
+  --chrome-bead-drop: oklch(0 0 0 / 35%);
+  --chrome-bead-ink-stops: oklch(1 0 0), oklch(0.95 0 0) 55%, oklch(0.8 0 0);
+  --chrome-bead-ink-drop: oklch(0 0 0 / 50%);
+  --chrome-led-stops: oklch(0.64 0.22 27) 0%, oklch(0.52 0.24 27) 55%, oklch(0.46 0.22 27) 100%;
+  --chrome-led-flat: oklch(0.52 0.24 27);
+  --chrome-led-hi: oklch(1 0 0 / 38%);
+  --chrome-led-lo: oklch(0 0 0 / 25%);
+  --chrome-led-drop: oklch(0 0 0 / 30%);
+  --chrome-led-lift: oklch(1 0 0 / 10%);
+  --chrome-led-glow: color-mix(in oklch, var(--live) 30%, transparent);
+  /* The edge a fill or LED gains under Increase Contrast (D12). */
+  --chrome-edge: transparent;
+
+  /* The knob's hairline: the chrome bead's rim (black 20% on porcelain). */
   --knob: oklch(1 0 0);
-  --knob-ring: oklch(0 0 0 / 12%);
+  --knob-ring: oklch(0 0 0 / 20%);
 
   /* The video ground: the letterbox the docked preview sits on, with its
      text. Dark in both themes, because it frames video. */
@@ -280,13 +315,13 @@
   --glass-float-rim: oklch(1 0 0 / 10%);
   --glass-float-drop: 0 14px 44px oklch(0 0 0 / 50%), 0 1px 3px oklch(0 0 0 / 30%);
 
-  /* Glass chips (plan 050, D9): white 10% to 3.5% with a 13% rim, a 12% top
-     highlight and a soft drop. Emphasis chips tint the same glass with their
-     tone; the status dot glows in it. */
-  --chip-fill-top: oklch(1 0 0 / 10%);
-  --chip-fill-bottom: oklch(1 0 0 / 3.5%);
-  --chip-rim: oklch(1 0 0 / 13%);
-  --chip-highlight: oklch(1 0 0 / 12%);
+  /* Glass chips (plan 050, D9; plan 208 S4 crisper): white 13% to 3% with a
+     9% rim, an 18% top highlight and a soft drop. Emphasis chips tint the
+     same glass with their tone; the status dot glows in it. */
+  --chip-fill-top: oklch(1 0 0 / 13%);
+  --chip-fill-bottom: oklch(1 0 0 / 3%);
+  --chip-rim: oklch(1 0 0 / 9%);
+  --chip-highlight: oklch(1 0 0 / 18%);
   --chip-drop: oklch(0 0 0 / 30%);
   --chip-tint-top: 30%;
   --chip-tint-bottom: 12%;
@@ -294,11 +329,43 @@
   --chip-tint-ink: 35%;
   --chip-tint-ink-base: oklch(1 0 0);
   --chip-dot-glow: 75%;
-  --keycap-fill-top: oklch(1 0 0 / 12%);
+  --keycap-fill-top: oklch(1 0 0 / 15%);
   --keycap-fill-bottom: oklch(1 0 0 / 4%);
-  --keycap-rim: oklch(1 0 0 / 13%);
-  --keycap-highlight: oklch(1 0 0 / 14%);
-  --keycap-base: oklch(0 0 0 / 30%);
+  --keycap-rim: oklch(1 0 0 / 10%);
+  --keycap-highlight: oklch(1 0 0 / 22%);
+  --keycap-base: oklch(0 0 0 / 35%);
+
+  /* Chrome controls (plan 208 S4, D2): polished silver on black, the
+     Welcome screen's Liquid Chrome in the hand. A primary fill is a bright
+     band over a darker waist with dark ink, a selected plate is a white sheen
+     under a top line, a knob is a silver bead (black on a silver track), and
+     Record is a red LED that glows while a session runs. */
+  --chrome-fill-stops:
+    oklch(1 0 0) 0%, oklch(0.93 0 0) 40%, oklch(0.75 0 0) 52%, oklch(0.88 0 0) 78%,
+    oklch(0.97 0 0) 100%;
+  --chrome-fill-flat: oklch(0.88 0 0);
+  --chrome-fill-ink: oklch(0.13 0 0);
+  --chrome-fill-hi: oklch(1 0 0);
+  --chrome-fill-lo: oklch(0 0 0 / 30%);
+  --chrome-fill-drop: oklch(0 0 0 / 60%);
+  --chrome-fill-lift: oklch(1 0 0 / 14%);
+  --chrome-press: oklch(0 0 0 / 40%);
+  --chrome-plate-top: oklch(1 0 0 / 14%);
+  --chrome-plate-bottom: oklch(1 0 0 / 4%);
+  --chrome-plate-hi: oklch(1 0 0 / 16%);
+  --chrome-plate-rim: oklch(1 0 0 / 5%);
+  --chrome-bead-stops: oklch(1 0 0), oklch(0.85 0 0) 55%, oklch(0.6 0 0);
+  --chrome-bead-drop: oklch(0 0 0 / 70%);
+  --chrome-bead-ink-stops: oklch(0.5 0 0), oklch(0.22 0 0) 55%, oklch(0.1 0 0);
+  --chrome-bead-ink-drop: oklch(0 0 0 / 50%);
+  --chrome-led-stops: oklch(0.7 0.21 27) 0%, oklch(0.56 0.23 27) 55%, oklch(0.5 0.21 27) 100%;
+  --chrome-led-flat: oklch(0.56 0.23 27);
+  --chrome-led-hi: oklch(1 0 0 / 38%);
+  --chrome-led-lo: oklch(0 0 0 / 30%);
+  --chrome-led-drop: oklch(0 0 0 / 50%);
+  --chrome-led-lift: oklch(1 0 0 / 10%);
+  --chrome-led-glow: color-mix(in oklch, var(--live) 40%, transparent);
+  --chrome-edge: transparent;
 
   --knob: oklch(1 0 0);
   --knob-ring: oklch(0 0 0 / 35%);
@@ -329,6 +396,20 @@
   );
 }
 
+/* The chrome controls' light and shade (plan 208 S4), cut from each theme's
+   tokens above: a top line, a bottom line and a drop, plus the edge Increase
+   Contrast adds. Pressed is concave: a shade along the top and no drop. */
+:root,
+.dark {
+  --chrome-fill-shadow:
+    inset 0 1px 0 var(--chrome-fill-hi), inset 0 -1px 0 var(--chrome-fill-lo),
+    0 1px 3px var(--chrome-fill-drop), 0 0 0 1px var(--chrome-edge);
+  --chrome-led-shadow:
+    inset 0 1px 0 var(--chrome-led-hi), inset 0 -1px 0 var(--chrome-led-lo),
+    0 1px 3px var(--chrome-led-drop), 0 0 0 1px var(--chrome-edge);
+  --chrome-pressed-shadow: inset 0 1px 2px var(--chrome-press), 0 0 0 1px var(--chrome-edge);
+}
+
 /* Increase Contrast: hairlines strong enough to read on the ground, the
    secondary and tertiary tiers one step closer to the primary, and both
    covers at 95% (plan 091, D7; plan 208 D12; the tertiary since plan 174
@@ -344,6 +425,8 @@
     --glass-float-rim: oklch(0 0 0 / 24%);
     --chip-rim: oklch(0 0 0 / 24%);
     --keycap-rim: oklch(0 0 0 / 28%);
+    --chrome-edge: oklch(0 0 0 / 60%);
+    --chrome-plate-rim: oklch(0 0 0 / 28%);
   }
   .dark {
     --border: oklch(1 0 0 / 24%);
@@ -355,6 +438,8 @@
     --glass-float-rim: oklch(1 0 0 / 30%);
     --chip-rim: oklch(1 0 0 / 30%);
     --keycap-rim: oklch(1 0 0 / 30%);
+    --chrome-edge: oklch(1 0 0 / 55%);
+    --chrome-plate-rim: oklch(1 0 0 / 30%);
   }
 }
 
@@ -604,6 +689,100 @@ html:has([data-first-run-backdrop], [data-first-run-surface]) [data-chrome-groun
   box-shadow:
     inset 0 1px 0 var(--keycap-highlight),
     inset 0 -1px 0 var(--keycap-base);
+}
+
+/*
+ * Chrome controls (plan 208 S4, D2): the Welcome screen's Liquid Chrome on
+ * the controls you touch, and only there. Four materials, used by the
+ * primitives in components/ui (plus the sidebar's selected row and
+ * MediaCard), never by a screen; a style guard holds it:
+ *   chrome-fill   polished primary fills (Button default, a checked Checkbox
+ *                 or Switch, Progress and slider ranges). Hover lifts it,
+ *                 pressed turns it concave, disabled is flat.
+ *   chrome-plate  selected and active (a segment, a tab, a pressed toggle, the
+ *                 sidebar's page, a MediaCard in use). Hover stays bg-accent.
+ *   chrome-bead   knobs and thumbs; chrome-bead-ink is the inverse bead for a
+ *                 knob on a chrome track.
+ *   chrome-led    Record and the stop button: a red LED, glowing with
+ *                 data-lit while a recording or livestream runs (D8).
+ * Each writes its light and shade into --tw-shadow and repeats Tailwind's
+ * shadow stack, so a focus or hover ring (ring-*) still composes with it.
+ * Fast and flat: no transition, no motion, no backdrop-filter.
+ */
+@utility chrome-fill {
+  color: var(--chrome-fill-ink);
+  background-color: var(--chrome-fill-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-fill-stops));
+  background-origin: border-box;
+  --tw-shadow: var(--chrome-fill-shadow);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &:is(button, a):hover:not(:disabled) {
+    background-image:
+      linear-gradient(var(--chrome-fill-lift), var(--chrome-fill-lift)),
+      linear-gradient(to bottom, var(--chrome-fill-stops));
+  }
+  &:is(button, a):active:not(:disabled) {
+    background-image: linear-gradient(to top, var(--chrome-fill-stops));
+    --tw-shadow: var(--chrome-pressed-shadow);
+  }
+  &:disabled {
+    background-image: none;
+    --tw-shadow: 0 0 0 1px var(--chrome-edge);
+  }
+}
+
+@utility chrome-plate {
+  background-image: linear-gradient(to bottom, var(--chrome-plate-top), var(--chrome-plate-bottom));
+  background-origin: border-box;
+  --tw-shadow: inset 0 1px 0 var(--chrome-plate-hi), inset 0 0 0 1px var(--chrome-plate-rim);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+@utility chrome-bead {
+  background-image: radial-gradient(circle at 35% 30%, var(--chrome-bead-stops));
+  --tw-shadow: 0 1px 2px var(--chrome-bead-drop);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+@utility chrome-bead-ink {
+  background-image: radial-gradient(circle at 35% 30%, var(--chrome-bead-ink-stops));
+  --tw-shadow: 0 1px 2px var(--chrome-bead-ink-drop);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+@utility chrome-led {
+  color: var(--live-foreground);
+  background-color: var(--chrome-led-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-led-stops));
+  background-origin: border-box;
+  --tw-shadow: var(--chrome-led-shadow);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &[data-lit] {
+    --tw-shadow: var(--chrome-led-shadow), 0 0 12px var(--chrome-led-glow);
+  }
+  &:is(button, a):hover:not(:disabled) {
+    background-image:
+      linear-gradient(var(--chrome-led-lift), var(--chrome-led-lift)),
+      linear-gradient(to bottom, var(--chrome-led-stops));
+  }
+  &:is(button, a):active:not(:disabled) {
+    background-image: linear-gradient(to top, var(--chrome-led-stops));
+    --tw-shadow: var(--chrome-pressed-shadow);
+  }
+  &:disabled {
+    background-image: none;
+    --tw-shadow: 0 0 0 1px var(--chrome-edge);
+  }
 }
 
 @utility tone-success {

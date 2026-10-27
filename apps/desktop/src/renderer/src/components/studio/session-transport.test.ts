@@ -204,6 +204,31 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
   })
 })
 
+// Plan 208 S4 (D8): Record and the stop button are the red LED, unlit at idle
+// and lit while the session runs; Go Live… is the chrome primary.
+describe('SessionTransport materials (plan 208 D8)', () => {
+  const button = (label: string): HTMLButtonElement | undefined =>
+    [...container.querySelectorAll('button')].find((candidate) =>
+      candidate.textContent?.includes(label)
+    )
+
+  it('draws Record as the unlit LED and Go Live… as the chrome primary', () => {
+    renderTransport({ state: 'idle' }, { active: false })
+    expect(button('Record')?.dataset.variant).toBe('record')
+    expect(button('Record')?.hasAttribute('data-lit')).toBe(false)
+    expect(button('Go Live…')?.dataset.variant).toBe('default')
+  })
+
+  it('lights the stop button while a recording or livestream runs', () => {
+    renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
+    expect(button('Stop recording')?.dataset.variant).toBe('record')
+    expect(button('Stop recording')?.hasAttribute('data-lit')).toBe(true)
+    renderTransport({ state: 'streaming', sessionId: 's', streamUrl: STREAM_URL })
+    expect(button('End livestream')?.dataset.variant).toBe('record')
+    expect(button('End livestream')?.hasAttribute('data-lit')).toBe(true)
+  })
+})
+
 // Plan 174 S1.3 (B-17): recording, on air and trouble no longer read as the
 // same red chip, and a blocked start no longer reads a green Ready.
 describe('SessionStatusPill (plan 174 S1.3)', () => {

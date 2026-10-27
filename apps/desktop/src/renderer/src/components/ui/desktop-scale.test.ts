@@ -59,7 +59,7 @@ describe('desktop scale', () => {
     expect(read('select.tsx')).toContain('data-[size=default]:h-control')
   })
 
-  it('draws the selected segment as a glass chip, keyed off data-state (#392)', () => {
+  it('draws the selected segment as the chrome plate, keyed off data-state (#392)', () => {
     const markup = renderToStaticMarkup(
       createElement(
         Tabs,
@@ -73,7 +73,7 @@ describe('desktop scale', () => {
       )
     )
     expect(markup).toContain(
-      'group-data-[variant=default]/tabs-list:data-[state=active]:glass-chip'
+      'group-data-[variant=default]/tabs-list:data-[state=active]:chrome-plate'
     )
     expect(markup).toContain('data-state="active"')
     expect(markup).not.toMatch(/data-active:/)
@@ -160,12 +160,42 @@ describe('desktop scale', () => {
     }
   })
 
-  it('keeps the switch knob white on its rim in both themes, like the slider (J1-15)', () => {
+  it('draws the switch knob as a chrome bead on its rim, like the slider (J1-15, plan 208 S4)', () => {
     const markup = renderToStaticMarkup(createElement(Switch, { checked: true }))
-    expect(markup).toContain('bg-knob shadow-sm ring-1 ring-knob-ring')
+    // On, the track is chrome and the knob the inverse bead; off, the
+    // recessed track and the chrome bead.
+    expect(markup).toContain('not-data-[state=unchecked]:chrome-fill')
+    expect(markup).toContain('data-[state=checked]:chrome-bead-ink')
+    expect(markup).toContain('chrome-bead ring-1 ring-knob-ring')
     expect(markup).not.toMatch(
-      /bg-background|bg-primary-foreground|dark:data-\[state=unchecked\]:bg-foreground/
+      /bg-knob|bg-primary|bg-background|shadow-sm|dark:data-\[state=unchecked\]:bg-foreground/
     )
+    expect(read('slider.tsx')).toContain('chrome-bead ring-1 ring-knob-ring')
+    expect(read('slider.tsx')).toContain('absolute chrome-fill')
+  })
+
+  it('wears the chrome on the controls only: primary, record LED, the quiet destructive (plan 208 S4, D8)', () => {
+    const button = (variant?: 'secondary' | 'destructive' | 'record'): string =>
+      renderToStaticMarkup(createElement(Button, variant ? { variant } : null, 'Go'))
+    // The chrome primary reaches its edge: no border, the ring still draws.
+    expect(button()).toContain('chrome-fill')
+    expect(button()).toContain('border-0')
+    expect(button()).toContain('focus-visible:ring-3')
+    expect(button()).not.toContain('bg-primary')
+    expect(button('record')).toContain('data-variant="record"')
+    expect(button('record')).toContain('chrome-led')
+    expect(button('secondary')).toContain('glass-chip')
+    // Delete and every other destructive action keep the quiet tint.
+    expect(button('destructive')).toContain('bg-destructive/10')
+    expect(button('destructive')).not.toMatch(/chrome-/)
+    for (const name of ['checkbox.tsx', 'progress.tsx', 'fader.tsx', 'parameter-slider.tsx']) {
+      expect(read(name), name).toContain('chrome-fill')
+      expect(read(name), name).not.toContain('bg-primary')
+    }
+    for (const name of ['segmented-control.tsx', 'toggle.tsx', 'toggle-group.tsx']) {
+      expect(read(name), name).toContain(':chrome-plate')
+      expect(read(name), name).not.toContain(':glass-chip')
+    }
   })
 
   it('sets inputs and text areas at 14 px at every width, never the mobile 16 px (J1-10)', () => {

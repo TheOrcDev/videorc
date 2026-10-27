@@ -8,9 +8,9 @@ import { cn } from '@/lib/utils'
  * thumbnail, a takeover screen, a Buddy. Lists of like things stay rows
  * (`GroupedList`); only a picture earns a card. The skill's one recipe: the
  * row radius (8 px), a 4% fill, a 1 px hairline and no shadow. `selected`
- * is the one in use (a brighter rim on the accent block, never a colour);
- * `interactive` gives the hover block. `asChild` puts the look on the child,
- * so a card can be a button.
+ * is the one in use (a brighter rim on the chrome plate, plan 208 S4, never
+ * a colour); `interactive` gives the hover block. `asChild` puts the look on
+ * the child, so a card can be a button.
  */
 export function MediaCard({
   selected = false,
@@ -27,7 +27,7 @@ export function MediaCard({
     className: cn(
       'flex min-w-0 flex-col rounded-row border border-border bg-foreground/[0.04]',
       interactive && 'transition-colors duration-100 hover:bg-accent',
-      selected && 'border-foreground/25 bg-accent',
+      selected && 'border-foreground/25 chrome-plate',
       className
     ),
     'data-selected': selected || undefined,

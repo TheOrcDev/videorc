@@ -149,7 +149,7 @@ describe('FirstRunSetup', () => {
   it('reads Continue with the arrow once every needed grant is in, Skip for now as an outline before', () => {
     const done = render()
     expect(done).toMatch(
-      /<button[^>]*class="[^"]*bg-primary[^"]*"[^>]*data-first-run-primary=""[^>]*>Continue</
+      /<button[^>]*class="[^"]*chrome-fill[^"]*"[^>]*data-first-run-primary=""[^>]*>Continue</
     )
     expect(done).toMatch(/Continue<svg[^>]*data-icon="inline-end"/)
     studio.rows = [

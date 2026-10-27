@@ -131,7 +131,7 @@ export const FaderRange = ({ className, style, ...props }: ComponentProps<'div'>
   return (
     <div
       className={cn(
-        'bg-primary absolute rounded-full',
+        'chrome-fill absolute rounded-full',
         orientation === 'horizontal'
           ? 'inset-y-0 left-(--fader-range-start) w-(--fader-range-size)'
           : 'inset-x-0 bottom-(--fader-range-start) h-(--fader-range-size)',
@@ -151,7 +151,7 @@ export const FaderRange = ({ className, style, ...props }: ComponentProps<'div'>
 }
 
 const thumbVariants = cva(
-  'bg-background ring-foreground/15 hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block shrink-0 shadow-sm ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-disabled:pointer-events-none data-dragging:ring-4',
+  'hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block shrink-0 ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-disabled:pointer-events-none data-dragging:ring-4',
   {
     compoundVariants: [
       {
@@ -177,8 +177,9 @@ const thumbVariants = cva(
         vertical: ''
       },
       variant: {
-        console: 'border-border rounded-chip border',
-        default: 'size-(--fader-thumb-size) rounded-full'
+        console: 'bg-background ring-foreground/15 border-border rounded-chip border shadow-sm',
+        // Videorc's knob (plan 208 S4): a chrome bead on its rim.
+        default: 'chrome-bead ring-knob-ring size-(--fader-thumb-size) rounded-full'
       }
     }
   }
