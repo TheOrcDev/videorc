@@ -7216,14 +7216,25 @@ function applyBackendWindowsD3d11PresenterStatus(
     nativePreviewSurfaceStatus,
     generation
   )
-  nativePreviewSurfaceStatus = {
-    ...reconcileWindowsD3d11PresenterStatus(nativePreviewSurfaceStatus, backendStatus, {
+  const reconciled = reconcileWindowsD3d11PresenterStatus(
+    nativePreviewSurfaceStatus,
+    backendStatus,
+    {
       platform: process.platform,
       previewWindowOpen: previewWindowIsOpenForSurface(),
       proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
       generation,
       trustedGeneration: nativePreviewBackendD3d11TrustedGeneration
-    }),
+    }
+  )
+  // An event for a generation main has not trusted yet changes nothing; the
+  // status it hands back may still be the idle one from the last close, and
+  // feeding that to the supervisor fails the open in flight.
+  if (!generationIsTrusted && reconciled === nativePreviewSurfaceStatus) {
+    return
+  }
+  nativePreviewSurfaceStatus = {
+    ...reconciled,
     // The reconciled status is built on the last proof-surface status, whose
     // queue snapshot stops refreshing once the presenter suppresses proof
     // polling. Without this a pending count captured mid-placement sticks.
