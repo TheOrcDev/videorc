@@ -1744,7 +1744,9 @@ export type StudioBannersContextValue = {
   /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
   selectedBannerId: string | null
   selectBanner: (id: string | null) => void
-  /** Assets → Import image…: the picker, then `banners.importImage`. Never shows the new banner. */
+  /** Assets → Import image…: the picker, then `banners.importImage`, which shows the new banner
+   * (plan 205 D3) unless four already show or a running session can't take one: then it
+   * arrives hidden (with four showing, the Scene list's limit reason says why). */
   importBanner: () => Promise<void>
   updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
   /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
@@ -11467,7 +11469,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       },
       isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
       onPhase: setBannerImportPhase,
-      // The new tile is the confirmation. An import never shows the banner.
+      // The new tile is the confirmation. The backend shows the new banner
+      // unless it can't (plan 205 D3); the answer says which, as `shown`.
       onImported: (banner) => {
         if (bannerListEventRevision.current === revision) commitBanner(banner)
       },

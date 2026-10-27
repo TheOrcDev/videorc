@@ -52,6 +52,7 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod preview_debug_sample;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -93,6 +94,7 @@ mod platform_stream_watch;
 mod posters;
 mod preflight;
 mod preview_bmp;
+mod preview_buddy_layer;
 mod preview_camera;
 mod preview_screen;
 mod preview_surface;
@@ -603,6 +605,11 @@ async fn run_backend() -> Result<()> {
         .route("/preview/screen/live.png", get(live_screen_frame_handler))
         .route("/preview/camera/latest.bmp", get(live_camera_bmp_handler))
         .route("/preview/screen/latest.bmp", get(live_screen_bmp_handler))
+        // Plan 205 S9: the Buddy's layer for the Electron proof surface.
+        .route(
+            "/preview/buddy/latest.bmp",
+            get(preview_buddy_layer::latest_bmp_handler),
+        )
         .route("/preview/{id}", get(preview_handler))
         .route("/sessions/{id}/poster", get(session_poster_handler))
         .route("/compositor/status", get(compositor_status_handler))
@@ -5795,6 +5802,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.chat.snapshot"
         | "remote.describe"
         | "compositor.status"
+        | "preview.debug.sample"
         | "preview.camera.status"
         | "preview.screen.status"
         | "audio.meter.probeNative"
@@ -10606,6 +10614,22 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "preview.debug.sample" => {
+            if !cfg!(debug_assertions) {
+                ServerResponse::error(
+                    command.id,
+                    "preview-debug-disabled",
+                    "Preview sampling is refused in packaged builds.",
+                )
+            } else {
+                match preview_debug_sample::sample(state, command.params).await {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "preview-debug-sample-failed", error)
+                    }
+                }
+            }
+        }
         "compositor.status" => {
             let status = compositor_status(state).await;
             ServerResponse::ok(command.id, status)
@@ -12662,6 +12686,10 @@ async fn handle_text_message_with_role(
                     });
                     match result {
                         Ok(banner) => {
+                            // Plan 205 D3: a banner you add shows, under the
+                            // same gates as `banners.show`; refused, it stays
+                            // hidden and the reply is still the row.
+                            let banner = banners::show_imported_banner(state, banner).await;
                             let _ = banners::on_banners_changed(state).await;
                             ServerResponse::ok(command.id, banner)
                         }
@@ -16318,6 +16346,15 @@ mod tests {
     }
 
     #[test]
+    fn preview_debug_sample_is_read_only_without_a_mutation_lane() {
+        let text = json!({"id":"sample", "method":"preview.debug.sample", "params":{"rects":[]}})
+            .to_string();
+        assert!(websocket_command_is_read_only(&text));
+        assert!(!websocket_observation_requires_operator_fence(&text));
+        assert_eq!(websocket_command_mutation_max_execution_age(&text), None);
+    }
+
+    #[test]
     fn websocket_handler_execution_policy_inventory_is_exhaustive() {
         for method in [
             "screens.active",
@@ -17392,7 +17429,8 @@ mod tests {
             let banner: protocol::Banner =
                 serde_json::from_value(response.payload.clone().unwrap()).unwrap();
             assert_eq!(banner.name, format!("sponsor-{index}"));
-            assert!(!banner.shown);
+            // Plan 205 D3: a banner you add shows, until four do.
+            assert_eq!(banner.shown, index < 4, "import {index}: {banner:?}");
             ids.push(banner.id);
         }
         // Every import republished the full list, with no null anywhere.
@@ -17513,6 +17551,88 @@ mod tests {
                 .is_empty()
         );
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plan 205 D3 (owner): an import while nothing runs answers a shown
+    /// banner; with four showing, or under a session that cannot draw a new
+    /// banner, it answers `ok` with a hidden one (the import itself never
+    /// fails for the show), and each import republishes the list once.
+    #[tokio::test]
+    async fn banners_import_shows_the_new_banner_unless_the_show_gates_refuse() {
+        let (state, mut events, dir) = banner_test_state();
+        let import = |name: String| {
+            let path = write_banner_png(&dir, &name);
+            let state = &state;
+            async move {
+                let response =
+                    banner_rpc(state, "banners.importImage", json!({ "path": path })).await;
+                assert!(response.ok, "{response:?}");
+                let banner: protocol::Banner =
+                    serde_json::from_value(response.payload.unwrap()).unwrap();
+                banner
+            }
+        };
+        // Idle: shown at once, and the store agrees.
+        let first = import("first.png".to_string()).await;
+        assert!(first.shown, "{first:?}");
+        assert_eq!(
+            banners::shown_banners_for_compositor(&state.database)
+                .unwrap()
+                .iter()
+                .map(|banner| banner.id.as_str())
+                .collect::<Vec<_>>(),
+            [first.id.as_str()]
+        );
+        for index in 1..4 {
+            assert!(import(format!("shown-{index}.png")).await.shown);
+        }
+        // Four showing: the fifth is added hidden, and `banners.show` says
+        // why in the one sentence.
+        let fifth = import("fifth.png".to_string()).await;
+        assert!(!fifth.shown, "{fifth:?}");
+        assert_eq!(
+            banners::shown_banners_for_compositor(&state.database)
+                .unwrap()
+                .len(),
+            4
+        );
+        let refused = banner_rpc(&state, "banners.show", json!({ "id": fifth.id })).await;
+        assert_eq!(
+            rpc_error_message(&refused),
+            "Four banners are showing. Hide one first."
+        );
+        // A session that cannot draw a banner added after its start: hidden,
+        // even with room under the cap.
+        assert!(
+            banner_rpc(&state, "banners.hide", json!({ "id": first.id }))
+                .await
+                .ok
+        );
+        let mut session = recording::test_active_recording_stub("banner-import-session");
+        session.set_accepts_banners_for_test(false);
+        *state.recording.lock().await = Some(session);
+        let under_session = import("under-session.png".to_string()).await;
+        assert!(!under_session.shown, "{under_session:?}");
+        drop(state.recording.lock().await.take());
+        // The same import under a session that draws new banners shows.
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "banner-import-session",
+        ));
+        let under_drawing_session = import("under-drawing-session.png".to_string()).await;
+        assert!(under_drawing_session.shown, "{under_drawing_session:?}");
+        drop(state.recording.lock().await.take());
+
+        // One `banners.changed` per mutation (7 imports + 1 hide), each the
+        // full list: the import and its show republish once together.
+        let mut changed = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "banners.changed" {
+                changed += 1;
+                assert!(event.payload.as_array().is_some());
+            }
+        }
+        assert_eq!(changed, 8);
         let _ = std::fs::remove_dir_all(dir);
     }
 

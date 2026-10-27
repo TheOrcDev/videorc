@@ -10,7 +10,10 @@ import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
 
 import {
   BANNER_AT_BACK_REASON,
+  BANNER_HIDDEN_LINE,
+  BANNER_OFF_LINE,
   BANNER_IN_FRONT_REASON,
+  BANNER_SHOWING_LINE,
   BannerInspector,
   SceneBannersSection
 } from './banner-inspector'
@@ -110,6 +113,44 @@ describe('BannerInspector', () => {
     expect(document.body.textContent).toContain('Hidden')
     await act(async () => button('Show').click())
     expect(hidden.onShowChange).toHaveBeenCalledWith(true)
+  })
+
+  // Plan 205 S3 (D3): a hidden banner is placed but drawn nowhere, the
+  // Preview included, so the first row says so, with Show right beside it.
+  it('says a hidden banner is hidden from viewers, beside Show, on its first row', async () => {
+    const header = (): HTMLElement => document.querySelector('section > header')!
+    const state = (): HTMLElement => header().querySelector('[data-videorc-banner-state]')!
+
+    const hidden = inspectorProps({ banner: banner('logo-color-600', { shown: false }) })
+    await renderInspector(hidden)
+    expect(state().getAttribute('data-videorc-banner-state')).toBe('hidden')
+    expect(state().textContent).toBe(BANNER_HIDDEN_LINE)
+    expect(BANNER_HIDDEN_LINE).toBe("Hidden. Viewers don't see it.")
+    // Secondary text, never the faint tier: it is the banner's state.
+    expect(state().parentElement!.className).toContain('text-muted-foreground')
+    expect(state().closest('[class*="text-subtle"]')).toBeNull()
+    const show = header().querySelector<HTMLButtonElement>('[data-videorc-banner-show-toggle]')!
+    expect(show.textContent).toBe('Show')
+    expect(show.disabled).toBe(false)
+    await act(async () => show.click())
+    expect(hidden.onShowChange).toHaveBeenCalledWith(true)
+
+    const shown = inspectorProps({ banner: banner('logo-color-600') })
+    await renderInspector(shown)
+    expect(state().getAttribute('data-videorc-banner-state')).toBe('shown')
+    expect(state().textContent).toBe(BANNER_SHOWING_LINE)
+    expect(header().textContent).not.toContain("Viewers don't see it.")
+    expect(
+      header().querySelector<HTMLButtonElement>('[data-videorc-banner-show-toggle]')!.textContent
+    ).toBe('Hide')
+
+    // Shown, but no output carries it: the chip says "Off", and so does the row.
+    const off = inspectorProps({
+      banner: banner('logo-color-600', { showOnStream: false, showInRecording: false })
+    })
+    await renderInspector(off)
+    expect(state().getAttribute('data-videorc-banner-state')).toBe('off')
+    expect(state().textContent).toBe(BANNER_OFF_LINE)
   })
 
   it('offers the seven places as one-shot buttons, in order', async () => {
@@ -344,6 +385,11 @@ describe('SceneBannersSection', () => {
   it('lists every banner as a 32 px row: picture, name, Showing, Show or Hide', async () => {
     const props = sectionProps({ selectedId: 'logo' })
     await renderSection(props)
+    // A banner you add already shows (plan 205 D3): a click only places it.
+    expect(document.querySelector('section > header')?.textContent).toContain(
+      'Your images on the picture. Click one to place it.'
+    )
+    expect(document.body.textContent).not.toContain('on the stage')
     expect(document.querySelector('[data-slot="grouped-list"]')).not.toBeNull()
     expect(row('sponsor').className).toContain('h-row')
     expect(row('sponsor').querySelector('[data-banner-thumbnail]')).not.toBeNull()

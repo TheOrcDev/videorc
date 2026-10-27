@@ -3771,10 +3771,20 @@ pub struct CompositorFramePipelineStatus {
     pub live_background_programs: u32,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub live_background_scratch_bytes: u64,
+    /// Plan 205 S6: the Preview presents its own picture, the program leg,
+    /// because the program differs from the primary leg (Clips at idle, or
+    /// a split record + stream, with a stream-only item). False is left off
+    /// the wire, so a run without one sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preview_program_leg: bool,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_zero_u64(value: &u64) -> bool {

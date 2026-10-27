@@ -1,3 +1,8 @@
+import type { OverlayAuxLeg, OverlaySessionShape } from '../../../shared/preview-program'
+
+export { programShows } from '../../../shared/preview-program'
+export type { OverlayAuxLeg, OverlaySessionShape } from '../../../shared/preview-program'
+
 import {
   OVERLAY_ITEMS,
   OVERLAY_RECT_MIN_SIZE,
@@ -178,18 +183,10 @@ export function overlayOrientationForCanvas(width: number, height: number): Over
 
 // --- Leg plan (D12) ----------------------------------------------------------
 
-export type OverlayAuxLeg = 'none' | 'stream' | 'vertical-simulcast'
-
 export interface OverlayLegPlan {
   primary: boolean
   aux: boolean
   needsSplit: boolean
-}
-
-export interface OverlaySessionShape {
-  recordEnabled: boolean
-  streamEnabled: boolean
-  auxLeg: OverlayAuxLeg
 }
 
 /** The one leg plan for every overlay item; the table lives in Rust's doc. */

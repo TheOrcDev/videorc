@@ -7,6 +7,7 @@ import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 import {
   BannerEdits,
   OverlayEdits,
+  STAGE_ITEM_BADGE_LABELS,
   bannerIdFromStageId,
   bannerStageId,
   bannerStageItems,
@@ -242,6 +243,45 @@ describe('banners on the stage (plan 186)', () => {
     // A selected hidden banner is dimmed and says so (the plan 174 "off" treatment).
     expect(items[1]).toMatchObject({ badge: 'hidden', off: true })
     expect(items[2]).toMatchObject({ badge: 'off', off: true })
+  })
+
+  // Plan 205 S3: the owner's state on 2026-10-27, a hidden banner placed and
+  // selected, Buddy on the stream only, captions in the recording only. The
+  // live canvas draws nothing for the banner, so its chip's word says why.
+  it("words every chip's state in sentence case, and nothing for both outputs", () => {
+    const layout: OverlayLayout = {
+      ...DEFAULT_OVERLAY_LAYOUT,
+      highlight: { ...DEFAULT_OVERLAY_LAYOUT.highlight, showOnStream: true, showInRecording: true },
+      captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, showOnStream: false, showInRecording: true },
+      buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true, showInRecording: false }
+    }
+    const owner = banner('logo-color-600', {
+      shown: false,
+      horizontal: { x: 0.866, y: 0.764, w: 0.1, h: 0.1 }
+    })
+    const items = [
+      ...bannerStageItems([owner], owner.id, 'horizontal', LANDSCAPE),
+      ...overlayStageItems(layout, 'horizontal')
+    ]
+    const word = (item: (typeof items)[number]): string | null =>
+      item.badge ? STAGE_ITEM_BADGE_LABELS[item.badge] : null
+    expect(items.map((item) => [item.label, word(item)])).toEqual([
+      ['logo-color-600', 'Hidden'],
+      ['Highlight', null],
+      ['Captions', 'Recording only'],
+      ['Buddy', 'Stream only']
+    ])
+    const off = overlayStageItems(
+      { ...layout, buddy: { ...layout.buddy, showOnStream: false, showInRecording: false } },
+      'horizontal'
+    )
+    expect(word(off[2])).toBe('Off')
+    expect(Object.values(STAGE_ITEM_BADGE_LABELS)).toEqual([
+      'Hidden',
+      'Off',
+      'Stream only',
+      'Recording only'
+    ])
   })
 
   it("draws a banner's rect around its image, in canvas units", () => {

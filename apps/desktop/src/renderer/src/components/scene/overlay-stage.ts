@@ -77,6 +77,19 @@ export type StageItemTarget =
 /** What the label says after the name: hidden, off, or which output alone shows it. */
 export type StageItemBadge = 'hidden' | 'off' | 'stream only' | 'recording only'
 
+/**
+ * The badge as the stage toolbar's chip says it after the item's name, a
+ * status word in sentence case (plan 205 S3). On the live canvas the stage's
+ * own badge is invisible under the picture, and the Preview draws nothing for
+ * a hidden or off item, so the chip is the one place this word shows there.
+ */
+export const STAGE_ITEM_BADGE_LABELS: Record<StageItemBadge, string> = {
+  hidden: 'Hidden',
+  off: 'Off',
+  'stream only': 'Stream only',
+  'recording only': 'Recording only'
+}
+
 /** What the schematic canvas draws for an item, so a drag shows the item
  * itself moving and not only its outline: a banner's image over its rect,
  * the Buddy's still in the square its pet fills. The live canvas never

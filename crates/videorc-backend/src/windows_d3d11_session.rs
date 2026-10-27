@@ -147,6 +147,74 @@ fn windows_d3d11_banner_z_index(index: usize) -> i32 {
         .min(WINDOWS_D3D11_BANNER_Z_INDEX_TOP)
 }
 
+/// The layers one overlay item (the highlight card, captions, the Buddy, a
+/// banner) has this tick, and which outputs each draws on (plan 205 S8).
+/// The `PreviewBgra` texture is composed on the primary's canvas from the
+/// primary's sources, so an item lands there from its primary-canvas layer
+/// whenever one exists, else from its auxiliary one, scaled.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowsD3d11ItemTargets {
+    /// The layer laid out on the primary's canvas: the primary leg's own
+    /// (`PRIMARY | PREVIEW`) when that leg burns the item; the Preview's
+    /// alone (`PREVIEW`) when no encoded leg burns it but the program carries
+    /// it (a Clips ring's stream-only item, D2); `None` otherwise.
+    pub(crate) primary_canvas:
+        Option<crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets>,
+    /// The auxiliary leg's layer when that leg burns the item: `AUXILIARY`,
+    /// plus `PREVIEW` when the primary does not burn it (the Preview draws
+    /// each item once).
+    pub(crate) auxiliary_canvas:
+        Option<crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets>,
+}
+
+/// The rule (plan 205, "The Preview shows the program"), per item, from
+/// which encoded legs burn it (`overlay_leg_plan` with the D13 fallbacks, or
+/// `banner_leg_carries`) and whether the program carries it
+/// (`program_shows`). Each encoded leg keeps exactly its own layer; only the
+/// `PREVIEW` bit moves. Pure; the table is the unit test below.
+///
+/// | primary burns | auxiliary burns | program carries | primary canvas    | auxiliary canvas    |
+/// |---------------|-----------------|-----------------|-------------------|---------------------|
+/// | yes           | yes             | (yes)           | PRIMARY + PREVIEW | AUXILIARY           |
+/// | yes           | no              | (yes)           | PRIMARY + PREVIEW | none                |
+/// | no            | yes             | (yes)           | none              | AUXILIARY + PREVIEW |
+/// | no            | no              | yes             | PREVIEW           | none                |
+/// | no            | no              | no              | none              | none                |
+///
+/// An item an output carries is in the program by definition (nothing that
+/// goes out is missing from the Preview), so `program_carries` decides only
+/// the no-leg row: a buffer-only session's ring keeps the recording plan
+/// while its Preview shows the idle program, every item with either switch
+/// on (D2). In every other session shape the program is the union of the
+/// legs' plans, and that row never happens.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_d3d11_item_targets(
+    primary_burns: bool,
+    auxiliary_burns: bool,
+    program_carries: bool,
+) -> WindowsD3d11ItemTargets {
+    use crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets as Targets;
+    let primary_canvas = if primary_burns {
+        Some(Targets::PRIMARY.union(Targets::PREVIEW))
+    } else if !auxiliary_burns && program_carries {
+        Some(Targets::PREVIEW)
+    } else {
+        None
+    };
+    let auxiliary_canvas = auxiliary_burns.then(|| {
+        if primary_burns {
+            Targets::AUXILIARY
+        } else {
+            Targets::AUXILIARY.union(Targets::PREVIEW)
+        }
+    });
+    WindowsD3d11ItemTargets {
+        primary_canvas,
+        auxiliary_canvas,
+    }
+}
+
 /// The pump's Buddy clock (plan 168 S-C4): `output_sequence / fps`, the
 /// pump's own deterministic time, the first animation clock on this path.
 /// Both legs of a tick read the same value, so the animator steps once per
@@ -806,10 +874,18 @@ mod runtime {
     const BANNER_LAYERS_PER_LEG: usize = 8;
     const BANNER_PRIMARY_SOURCE_ID_BASE: u64 = 40;
     const BANNER_AUXILIARY_SOURCE_ID_BASE: u64 = 48;
+    /// Plan 205 S8: the banners only the Preview draws (a buffer-only
+    /// session's ring keeps the recording plan while the Preview shows the
+    /// idle program, D2), ids 56.., laid out on the primary's canvas.
+    const BANNER_PREVIEW_SOURCE_ID_BASE: u64 = 56;
     const _: () = assert!(super::WINDOWS_D3D11_BANNER_Z_INDEX_TOP < CAPTION_Z_INDEX);
     const _: () = assert!(
         BANNER_PRIMARY_SOURCE_ID_BASE + BANNER_LAYERS_PER_LEG as u64
             <= BANNER_AUXILIARY_SOURCE_ID_BASE
+    );
+    const _: () = assert!(
+        BANNER_AUXILIARY_SOURCE_ID_BASE + BANNER_LAYERS_PER_LEG as u64
+            <= BANNER_PREVIEW_SOURCE_ID_BASE
     );
 
     /// Shared committed authority only; no recording/pump back-reference.
@@ -1011,10 +1087,24 @@ mod runtime {
         pub(crate) highlight_on_auxiliary: bool,
         pub(crate) buddy_on_primary: bool,
         pub(crate) buddy_on_auxiliary: bool,
+        /// Plan 205 S8: the program carries the highlight card / the Buddy
+        /// (`program_shows` over the layout at session start, like the leg
+        /// flags above; mid-session switches apply at the next start, as the
+        /// log says). It differs from "some leg burns it" only for a
+        /// buffer-only session, whose ring keeps the recording plan (D2)
+        /// while its Preview shows the idle program.
+        pub(crate) highlight_in_program: bool,
+        pub(crate) buddy_in_program: bool,
         /// The banners' leg plan shape (plan 186 S4): each banner's switches
         /// pick its legs through `banners::banner_leg_carries`, live, so a
         /// switch change mid-session moves it on the next tick.
         pub(crate) banner_shape: crate::overlay_layout::OverlaySessionShape,
+        /// Plan 205 S8: the shape the Preview's program is read from, for the
+        /// banners (live, from the committed set). `Some(banner_shape)` for a
+        /// session that is an output; `None` for a buffer-only (Clips)
+        /// session, whose program is the idle one: every shown banner with
+        /// either switch on, while the ring keeps `banner_shape`'s plan.
+        pub(crate) program_shape: Option<crate::overlay_layout::OverlaySessionShape>,
         /// The shared prepare service: the bitmaps are prepared once per
         /// (banner, canvas, rect, opacity) off this thread and shared here.
         pub(crate) banner_prepare: crate::banner_prepare::BannerPrepareService,
@@ -1842,19 +1932,64 @@ mod runtime {
         WindowsD3d11UploadPixels::shared(FrameUploadBytes(frame.clone()))
     }
 
+    /// Plan 205 S8: the captions' layers this tick. Their program is "burned
+    /// on any running leg" (plan 090, one shared encode), so the Preview
+    /// draws them from whichever leg burns them; a buffer-only session has
+    /// no captions.
+    fn caption_targets(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+    ) -> super::WindowsD3d11ItemTargets {
+        let on_auxiliary = plan.auxiliary.is_some() && input.caption_on_auxiliary;
+        super::windows_d3d11_item_targets(
+            input.caption_on_primary,
+            on_auxiliary,
+            input.caption_on_primary || on_auxiliary,
+        )
+    }
+
+    /// Plan 205 S8: the highlight card's layers this tick.
+    fn highlight_targets(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+    ) -> super::WindowsD3d11ItemTargets {
+        super::windows_d3d11_item_targets(
+            input.highlight_on_primary,
+            plan.auxiliary.is_some() && input.highlight_on_auxiliary,
+            input.highlight_in_program,
+        )
+    }
+
+    /// Plan 205 S8: the Buddy's layers (pet and bubble) this tick.
+    fn buddy_targets(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+    ) -> super::WindowsD3d11ItemTargets {
+        super::windows_d3d11_item_targets(
+            input.buddy_on_primary,
+            plan.auxiliary.is_some() && input.buddy_on_auxiliary,
+            input.buddy_in_program,
+        )
+    }
+
     /// The Buddy on each leg for this tick (plan 168 S-B4): the pet's draw
     /// and the bubble's anchor, from the sprite slot, with the gaze targets
     /// Phase C reads (the card's and the caption bar's blits on the leg).
-    /// `now_seconds` is the pump's deterministic clock.
+    /// `now_seconds` is the pump's deterministic clock. The primary leg's
+    /// frame is also the Preview's when only the program carries the Buddy
+    /// (plan 205 S8): the Preview is composed on the primary's canvas.
     fn current_buddy_legs(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
         now_seconds: f64,
     ) -> [Option<crate::buddy_sprite::BuddyLegFrame>; 2] {
         use crate::buddy_sprite::{BuddyLegRequest, BuddySpriteLeg};
-        if !input.buddy_on_primary && !input.buddy_on_auxiliary {
+        let targets = buddy_targets(plan, input);
+        if targets.primary_canvas.is_none() && targets.auxiliary_canvas.is_none() {
             return [None, None];
         }
+        let caption_on = caption_targets(plan, input);
+        let highlight_on = highlight_targets(plan, input);
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
         let blit = |overlay: &CaptionOverlay, (width, height): (u32, u32), inset: usize| {
@@ -1891,20 +2026,22 @@ mod runtime {
                 }),
             })
         };
-        let primary = input.buddy_on_primary.then(|| {
+        let primary = targets.primary_canvas.map(|_| {
             leg(
                 BuddySpriteLeg::Primary,
                 (plan.primary.width, plan.primary.height),
                 captions
                     .primary
                     .as_ref()
-                    .filter(|_| input.caption_on_primary),
-                highlight.as_ref().filter(|_| input.highlight_on_primary),
+                    .filter(|_| caption_on.primary_canvas.is_some()),
+                highlight
+                    .as_ref()
+                    .filter(|_| highlight_on.primary_canvas.is_some()),
             )
         });
         let auxiliary = plan
             .auxiliary
-            .filter(|_| input.buddy_on_auxiliary)
+            .filter(|_| targets.auxiliary_canvas.is_some())
             .map(|video| {
                 leg(
                     BuddySpriteLeg::Auxiliary,
@@ -1912,45 +2049,48 @@ mod runtime {
                     captions
                         .auxiliary
                         .as_ref()
-                        .filter(|_| input.caption_on_auxiliary),
-                    highlight.as_ref().filter(|_| input.highlight_on_auxiliary),
+                        .filter(|_| caption_on.auxiliary_canvas.is_some()),
+                    highlight
+                        .as_ref()
+                        .filter(|_| highlight_on.auxiliary_canvas.is_some()),
                 )
             });
         [primary, auxiliary]
     }
 
-    /// The pet's layer per leg that has an atlas this tick.
+    /// The pet's layer per leg that has an atlas this tick, on the targets
+    /// `buddy_targets` gives each leg (plan 205 S8).
     fn buddy_sprite_frames(
         plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
         buddy_legs: &[Option<crate::buddy_sprite::BuddyLegFrame>; 2],
     ) -> Result<Vec<WindowsD3d11SpriteFrame>, String> {
+        let targets = buddy_targets(plan, input);
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
                 .map_err(|error| error.to_string())?;
-        let primary_targets = if plan.auxiliary.is_none() {
-            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
-        } else {
-            WindowsD3d11SceneOutputTargets::PRIMARY
-        };
         let mut frames = Vec::with_capacity(2);
-        if let Some(sprite) = buddy_legs[0].as_ref().and_then(|leg| leg.sprite.clone()) {
+        if let (Some(sprite), Some(output_targets)) = (
+            buddy_legs[0].as_ref().and_then(|leg| leg.sprite.clone()),
+            targets.primary_canvas,
+        ) {
             frames.push(WindowsD3d11SpriteFrame {
                 source_id: BUDDY_SPRITE_PRIMARY_SOURCE_ID,
                 layer: sprite,
-                output_targets: primary_targets,
+                output_targets,
                 output_dimensions: primary_dimensions,
                 z_index: BUDDY_SPRITE_Z_INDEX,
             });
         }
-        if let (Some(sprite), Some(video)) = (
+        if let (Some(sprite), Some(video), Some(output_targets)) = (
             buddy_legs[1].as_ref().and_then(|leg| leg.sprite.clone()),
             plan.auxiliary,
+            targets.auxiliary_canvas,
         ) {
             frames.push(WindowsD3d11SpriteFrame {
                 source_id: BUDDY_SPRITE_AUXILIARY_SOURCE_ID,
                 layer: sprite,
-                output_targets: WindowsD3d11SceneOutputTargets::AUXILIARY
-                    .union(WindowsD3d11SceneOutputTargets::PREVIEW),
+                output_targets,
                 output_dimensions: WindowsD3d11OutputDimensions::new(video.width, video.height)
                     .map_err(|error| error.to_string())?,
                 z_index: BUDDY_SPRITE_Z_INDEX,
@@ -1961,53 +2101,139 @@ mod runtime {
 
     /// The banners each leg carries this tick (plan 186 S4), bottom to top:
     /// the same `banner_draws_for_leg` the Metal and CPU paths draw (leg
-    /// plan, fade, prepared bitmap), with the leg's output targets as the
-    /// Buddy's pet has them. No draft: drafts only exist while idle.
+    /// plan, fade, prepared bitmap). Each encoded leg's list is its own plan;
+    /// the Preview draws the program's banners once each (plan 205 S8,
+    /// `windows_d3d11_item_targets`), plus, for a buffer-only session, the
+    /// banners the ring skips, from the idle plan on the primary's canvas.
+    /// No draft: drafts only exist while idle.
     fn current_banner_frames(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
         set: &crate::banners::BannerSet,
         now: Instant,
     ) -> Result<Vec<WindowsD3d11BannerFrame>, String> {
+        use crate::banners::BannerLeg;
+        use crate::compositor::banner_draws_for_leg;
         if set.layers.is_empty() {
             return Ok(Vec::new());
         }
-        let primary_targets = if plan.auxiliary.is_none() {
-            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
-        } else {
-            WindowsD3d11SceneOutputTargets::PRIMARY
-        };
-        let mut legs = vec![(
-            crate::banners::BannerLeg::Primary,
-            (plan.primary.width, plan.primary.height),
-            primary_targets,
-            BANNER_PRIMARY_SOURCE_ID_BASE,
-        )];
-        if let Some(video) = plan.auxiliary {
-            legs.push((
-                crate::banners::BannerLeg::Auxiliary,
-                (video.width, video.height),
-                WindowsD3d11SceneOutputTargets::AUXILIARY
-                    .union(WindowsD3d11SceneOutputTargets::PREVIEW),
-                BANNER_AUXILIARY_SOURCE_ID_BASE,
-            ));
-        }
-        let mut frames = Vec::new();
-        for (leg, canvas, output_targets, source_id_base) in legs {
-            let output_dimensions = WindowsD3d11OutputDimensions::new(canvas.0, canvas.1)
+        let primary_canvas = (plan.primary.width, plan.primary.height);
+        let primary_dimensions =
+            WindowsD3d11OutputDimensions::new(primary_canvas.0, primary_canvas.1)
                 .map_err(|error| error.to_string())?;
-            let draws = crate::compositor::banner_draws_for_leg(
+        let shape = Some(input.banner_shape);
+        let primary_draws = banner_draws_for_leg(
+            set,
+            shape,
+            BannerLeg::Primary,
+            primary_canvas,
+            now,
+            None,
+            &input.banner_prepare,
+        );
+        let auxiliary_draws = match plan.auxiliary {
+            Some(video) => {
+                let canvas = (video.width, video.height);
+                Some((
+                    WindowsD3d11OutputDimensions::new(canvas.0, canvas.1)
+                        .map_err(|error| error.to_string())?,
+                    banner_draws_for_leg(
+                        set,
+                        shape,
+                        BannerLeg::Auxiliary,
+                        canvas,
+                        now,
+                        None,
+                        &input.banner_prepare,
+                    ),
+                ))
+            }
+            None => None,
+        };
+        let primary_slots: Vec<u64> = primary_draws.iter().map(|draw| draw.slot).collect();
+        let auxiliary_slots: Vec<u64> = auxiliary_draws
+            .iter()
+            .flat_map(|(_, draws)| draws.iter().map(|draw| draw.slot))
+            .collect();
+        // Plan 205 S8 (D2): a buffer-only session's ring keeps `banner_shape`'s
+        // plan (the recording's) while its Preview shows the idle program,
+        // every shown banner with either switch on, in Scene order. The ring's
+        // list is a sub-sequence of that program (same bitmaps, same fades);
+        // the banners it skips become Preview-only layers, and every layer at
+        // this canvas takes its z from its place in the program, so the
+        // Preview stacks the program's way while the ring's own order is
+        // unchanged. In every other shape the program at this canvas is the
+        // primary leg's own list, and nothing here changes.
+        let program_only_draws = match input.program_shape {
+            Some(_) => Vec::new(),
+            None => banner_draws_for_leg(
                 set,
-                Some(input.banner_shape),
-                leg,
-                canvas,
+                None,
+                BannerLeg::Primary,
+                primary_canvas,
                 now,
                 None,
                 &input.banner_prepare,
-            );
+            ),
+        };
+        let program_index_of = |slot: u64, ring_index: usize| {
+            if program_only_draws.is_empty() {
+                ring_index
+            } else {
+                program_only_draws
+                    .iter()
+                    .position(|draw| draw.slot == slot)
+                    .unwrap_or(ring_index)
+            }
+        };
+        let mut frames = Vec::new();
+        for (index, draw) in primary_draws
+            .into_iter()
+            .take(BANNER_LAYERS_PER_LEG)
+            .enumerate()
+        {
+            let output_targets =
+                super::windows_d3d11_item_targets(true, auxiliary_slots.contains(&draw.slot), true)
+                    .primary_canvas
+                    .ok_or_else(|| "the primary leg's own banner lost its layer".to_string())?;
+            let z_index = super::windows_d3d11_banner_z_index(program_index_of(draw.slot, index));
+            frames.push(WindowsD3d11BannerFrame {
+                source_id: BANNER_PRIMARY_SOURCE_ID_BASE + index as u64,
+                draw,
+                output_targets,
+                output_dimensions: primary_dimensions,
+                z_index,
+            });
+        }
+        let preview_only = program_only_draws
+            .into_iter()
+            .enumerate()
+            .filter(|(_, draw)| !primary_slots.contains(&draw.slot))
+            .take(BANNER_LAYERS_PER_LEG)
+            .enumerate();
+        for (index, (program_index, draw)) in preview_only {
+            let output_targets = super::windows_d3d11_item_targets(false, false, true)
+                .primary_canvas
+                .ok_or_else(|| "a program-only banner lost its Preview layer".to_string())?;
+            frames.push(WindowsD3d11BannerFrame {
+                source_id: BANNER_PREVIEW_SOURCE_ID_BASE + index as u64,
+                draw,
+                output_targets,
+                output_dimensions: primary_dimensions,
+                z_index: super::windows_d3d11_banner_z_index(program_index),
+            });
+        }
+        if let Some((output_dimensions, draws)) = auxiliary_draws {
             for (index, draw) in draws.into_iter().take(BANNER_LAYERS_PER_LEG).enumerate() {
+                let output_targets = super::windows_d3d11_item_targets(
+                    primary_slots.contains(&draw.slot),
+                    true,
+                    true,
+                )
+                .auxiliary_canvas
+                .ok_or_else(|| "the auxiliary leg's own banner lost its layer".to_string())?;
                 frames.push(WindowsD3d11BannerFrame {
-                    source_id: source_id_base + index as u64,
+                    source_id: BANNER_AUXILIARY_SOURCE_ID_BASE + index as u64,
                     draw,
                     output_targets,
                     output_dimensions,
@@ -2018,6 +2244,10 @@ mod runtime {
         Ok(frames)
     }
 
+    /// The captions, the Buddy's bubble and the highlight card per leg this
+    /// tick, each on the targets `windows_d3d11_item_targets` gives it (plan
+    /// 205 S8): the encoded legs keep their own plans, the Preview draws the
+    /// program's items once each, the primary-canvas layer first.
     fn current_overlay_frames(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
@@ -2026,6 +2256,9 @@ mod runtime {
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
         let buddy = current_caption_overlays(&input.buddy);
+        let caption_on = caption_targets(plan, input);
+        let highlight_on = highlight_targets(plan, input);
+        let buddy_on = buddy_targets(plan, input);
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
                 .map_err(|error| error.to_string())?;
@@ -2034,24 +2267,13 @@ mod runtime {
             .map(|video| WindowsD3d11OutputDimensions::new(video.width, video.height))
             .transpose()
             .map_err(|error| error.to_string())?;
-        let primary_targets = if plan.auxiliary.is_none() {
-            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
-        } else {
-            WindowsD3d11SceneOutputTargets::PRIMARY
-        };
-        let auxiliary_targets = WindowsD3d11SceneOutputTargets::AUXILIARY
-            .union(WindowsD3d11SceneOutputTargets::PREVIEW);
         let mut frames = Vec::with_capacity(6);
 
-        if input.caption_on_primary
-            && let Some(caption) = captions.primary
+        if let (Some(output_targets), Some(caption)) = (caption_on.primary_canvas, captions.primary)
         {
             let safe_inset = caption_overlay_safe_inset(
                 Some(&caption),
-                input
-                    .highlight_on_primary
-                    .then_some(highlight.as_ref())
-                    .flatten(),
+                highlight_on.primary_canvas.and(highlight.as_ref()),
                 primary_dimensions.width,
                 primary_dimensions.height,
             );
@@ -2059,23 +2281,21 @@ mod runtime {
                 source_id: CAPTION_PRIMARY_SOURCE_ID,
                 source_kind: WindowsD3d11SceneSourceKind::CaptionOverlay,
                 overlay: caption,
-                output_targets: primary_targets,
+                output_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset,
                 z_index: CAPTION_Z_INDEX,
                 bubble_anchor: None,
             });
         }
-        if input.caption_on_auxiliary
-            && let (Some(caption), Some(output_dimensions)) =
-                (captions.auxiliary, auxiliary_dimensions)
-        {
+        if let (Some(output_targets), Some(caption), Some(output_dimensions)) = (
+            caption_on.auxiliary_canvas,
+            captions.auxiliary,
+            auxiliary_dimensions,
+        ) {
             let safe_inset = caption_overlay_safe_inset(
                 Some(&caption),
-                input
-                    .highlight_on_auxiliary
-                    .then_some(highlight.as_ref())
-                    .flatten(),
+                highlight_on.auxiliary_canvas.and(highlight.as_ref()),
                 output_dimensions.width,
                 output_dimensions.height,
             );
@@ -2083,64 +2303,65 @@ mod runtime {
                 source_id: CAPTION_AUXILIARY_SOURCE_ID,
                 source_kind: WindowsD3d11SceneSourceKind::CaptionOverlay,
                 overlay: caption,
-                output_targets: auxiliary_targets,
+                output_targets,
                 output_dimensions,
                 safe_inset,
                 z_index: CAPTION_Z_INDEX,
                 bubble_anchor: None,
             });
         }
-        if input.buddy_on_primary
-            && let Some(overlay) = buddy.primary
-        {
+        if let (Some(output_targets), Some(overlay)) = (buddy_on.primary_canvas, buddy.primary) {
             frames.push(WindowsD3d11OverlayFrame {
                 source_id: BUDDY_PRIMARY_SOURCE_ID,
                 source_kind: WindowsD3d11SceneSourceKind::BuddyOverlay,
                 overlay,
-                output_targets: primary_targets,
+                output_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset: 0,
                 z_index: BUDDY_Z_INDEX,
                 bubble_anchor: buddy_legs[0].as_ref().map(|leg| leg.bubble_anchor),
             });
         }
-        if input.buddy_on_auxiliary
-            && let (Some(overlay), Some(output_dimensions)) =
-                (buddy.auxiliary, auxiliary_dimensions)
-        {
+        if let (Some(output_targets), Some(overlay), Some(output_dimensions)) = (
+            buddy_on.auxiliary_canvas,
+            buddy.auxiliary,
+            auxiliary_dimensions,
+        ) {
             frames.push(WindowsD3d11OverlayFrame {
                 source_id: BUDDY_AUXILIARY_SOURCE_ID,
                 source_kind: WindowsD3d11SceneSourceKind::BuddyOverlay,
                 overlay,
-                output_targets: auxiliary_targets,
+                output_targets,
                 output_dimensions,
                 safe_inset: 0,
                 z_index: BUDDY_Z_INDEX,
                 bubble_anchor: buddy_legs[1].as_ref().map(|leg| leg.bubble_anchor),
             });
         }
-        if input.highlight_on_primary
-            && let Some(overlay) = highlight.clone()
+        if let (Some(output_targets), Some(overlay)) =
+            (highlight_on.primary_canvas, highlight.clone())
         {
             frames.push(WindowsD3d11OverlayFrame {
                 source_id: HIGHLIGHT_PRIMARY_SOURCE_ID,
                 source_kind: WindowsD3d11SceneSourceKind::CommentHighlight,
                 overlay,
-                output_targets: primary_targets,
+                output_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset: 0,
                 z_index: HIGHLIGHT_Z_INDEX,
                 bubble_anchor: None,
             });
         }
-        if input.highlight_on_auxiliary
-            && let (Some(overlay), Some(output_dimensions)) = (highlight, auxiliary_dimensions)
-        {
+        if let (Some(output_targets), Some(overlay), Some(output_dimensions)) = (
+            highlight_on.auxiliary_canvas,
+            highlight,
+            auxiliary_dimensions,
+        ) {
             frames.push(WindowsD3d11OverlayFrame {
                 source_id: HIGHLIGHT_AUXILIARY_SOURCE_ID,
                 source_kind: WindowsD3d11SceneSourceKind::CommentHighlight,
                 overlay,
-                output_targets: auxiliary_targets,
+                output_targets,
                 output_dimensions,
                 safe_inset: 0,
                 z_index: HIGHLIGHT_Z_INDEX,
@@ -2480,7 +2701,7 @@ mod runtime {
                     break;
                 }
             };
-            let sprite_frames = match buddy_sprite_frames(&plan, &buddy_legs) {
+            let sprite_frames = match buddy_sprite_frames(&plan, &overlays, &buddy_legs) {
                 Ok(frames) => frames,
                 Err(error) => {
                     finish_with_error(&snapshot, &mut startup_tx, error);
@@ -3734,11 +3955,18 @@ mod runtime {
             highlight_on_auxiliary: false,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
+            highlight_in_program: false,
+            buddy_in_program: true,
             banner_shape: crate::overlay_layout::OverlaySessionShape {
                 record_enabled: true,
                 stream_enabled: true,
                 aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
             },
+            program_shape: Some(crate::overlay_layout::OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: true,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
+            }),
             banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
         };
         input
@@ -3832,11 +4060,18 @@ mod runtime {
             highlight_on_auxiliary: true,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
+            highlight_in_program: true,
+            buddy_in_program: true,
             banner_shape: crate::overlay_layout::OverlaySessionShape {
                 record_enabled: true,
                 stream_enabled: true,
                 aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
             },
+            program_shape: Some(crate::overlay_layout::OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: true,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::Stream,
+            }),
             banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
         };
         crate::captions::install_caption_overlays(
@@ -3913,15 +4148,17 @@ mod runtime {
                 && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
                 && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
         );
+        // Plan 205 S8: both legs burn the Buddy, so the Preview draws it once,
+        // from the primary's layer (the Preview's canvas and sources are the
+        // primary's); the stream leg's layer is the stream's alone.
         let buddy_primary = &frames[2];
         assert_eq!(
             buddy_primary.output_targets,
-            WindowsD3d11SceneOutputTargets::PRIMARY
+            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
         );
         assert_eq!(
             frames[3].output_targets,
             WindowsD3d11SceneOutputTargets::AUXILIARY
-                .union(WindowsD3d11SceneOutputTargets::PREVIEW)
         );
         assert_eq!(buddy_primary.overlay.blit_rect(1280, 720), buddy_rect);
         assert_eq!(buddy_primary.safe_inset, 0);
@@ -3989,6 +4226,286 @@ mod runtime {
                 ),
             ]
         );
+    }
+
+    /// Plan 205 S8: the `PreviewBgra` composition draws the program (every
+    /// item at least one running output carries; the idle program for a
+    /// Clips ring) while each encoded leg keeps exactly its own plan.
+    #[cfg(test)]
+    #[test]
+    fn windows_preview_composition_draws_the_program_while_each_leg_keeps_its_plan() {
+        use crate::banner_prepare::{BannerBitmapKey, BannerFileRevision, prepare_banner_bitmap};
+        use crate::banners::{
+            BannerFade, BannerLayer, BannerSet, banner_draw_rect, banner_rect_for,
+        };
+        use crate::overlay_layout::{OverlayAuxLeg, OverlayOrientation, OverlaySessionShape};
+        use crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTarget;
+
+        let canvas = (1280_u32, 720_u32);
+        let video = super::WindowsD3d11VideoPlan {
+            width: canvas.0,
+            height: canvas.1,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let split_plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary: video,
+            auxiliary: Some(video),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let split_shape = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: OverlayAuxLeg::Stream,
+        };
+        let record_shape = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: false,
+            aux_leg: OverlayAuxLeg::None,
+        };
+        let now = Instant::now();
+        let file_revision = BannerFileRevision {
+            size: 1,
+            modified_nanos: 1,
+        };
+        let prepare = crate::banner_prepare::BannerPrepareService::with_decoder(
+            Arc::new(|_: &std::path::Path| Err("no decode in this test".to_string())),
+            crate::banner_prepare::BANNER_BITMAP_BUDGET_BYTES,
+        );
+        // Two banners with their exact bitmaps seeded for the canvas: one the
+        // recording alone carries, one the stream alone carries.
+        let mut recording_only = crate::banners::tests::sample_banner("recording-only", 0);
+        recording_only.show_on_stream = false;
+        let mut stream_only = crate::banners::tests::sample_banner("stream-only", 1);
+        stream_only.show_in_recording = false;
+        for banner in [&recording_only, &stream_only] {
+            let rect = banner_rect_for(
+                banner,
+                OverlayOrientation::for_canvas(canvas.0, canvas.1),
+                None,
+            );
+            let (_, _, width, height) = banner_draw_rect(
+                banner.width,
+                banner.height,
+                canvas.0 as usize,
+                canvas.1 as usize,
+                rect,
+            );
+            let image = image::RgbaImage::from_pixel(
+                banner.width,
+                banner.height,
+                image::Rgba([255, 0, 255, 255]),
+            );
+            prepare.insert_for_test(
+                BannerBitmapKey::new(&banner.id, file_revision, canvas, rect, banner.opacity),
+                prepare_banner_bitmap(&image, width as u32, height as u32, banner.opacity),
+            );
+        }
+        let layer = |banner: &crate::banners::Banner| BannerLayer {
+            image_path: Arc::from(std::path::Path::new("/nonexistent").join(&banner.image_file)),
+            banner: banner.clone(),
+            file_revision: Some(file_revision),
+            fade: BannerFade {
+                from: 1.0,
+                to: 1.0,
+                started_at: now,
+            },
+        };
+        let set = BannerSet {
+            layers: vec![layer(&recording_only), layer(&stream_only)],
+        };
+        let png = {
+            use base64::Engine as _;
+            let mut bytes = Vec::new();
+            image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 255, 0, 255]))
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        };
+        // A stream-only Buddy: its bubble on both targets, its pet's atlas on
+        // both legs, as a real session has them.
+        let input = |shape: OverlaySessionShape, program_shape: Option<OverlaySessionShape>| {
+            let input = WindowsD3d11OverlayInput {
+                captions: crate::captions::new_caption_overlay_slots(),
+                highlight: crate::captions::new_caption_overlay_slot(),
+                buddy: crate::captions::new_caption_overlay_slots(),
+                buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
+                    &crate::cohost::CohostPersona::default(),
+                    crate::overlay_layout::OverlayLayout::default().buddy,
+                    None,
+                ),
+                caption_on_primary: false,
+                caption_on_auxiliary: false,
+                highlight_on_primary: false,
+                highlight_on_auxiliary: false,
+                buddy_on_primary: false,
+                buddy_on_auxiliary: shape.stream_enabled && shape.aux_leg == OverlayAuxLeg::Stream,
+                highlight_in_program: false,
+                buddy_in_program: crate::overlay_layout::program_shows(program_shape, true, false),
+                banner_shape: shape,
+                program_shape,
+                banner_prepare: prepare.clone(),
+            };
+            crate::buddy_overlay::install_buddy_overlay(
+                &input.buddy,
+                crate::buddy_overlay::SetBuddyOverlayParams {
+                    png_base64: png.clone(),
+                    target: None,
+                    rect: None,
+                },
+            )
+            .unwrap();
+            input.buddy_sprite.set_source(Box::new(
+                crate::buddy_animator::BuddyAnimatorSource::new(
+                    crate::buddy_animator::BuddyAnimatorSettings::default(),
+                    7,
+                ),
+            ));
+            for leg in crate::buddy_sprite::BuddySpriteLeg::ALL {
+                input.buddy_sprite.install_atlas_for_test(
+                    leg,
+                    canvas,
+                    crate::buddy_animator::tests::alive(),
+                );
+            }
+            input
+        };
+        let compose = |plan: &WindowsD3d11SessionPlan, input: &WindowsD3d11OverlayInput| {
+            let buddy_legs =
+                current_buddy_legs(plan, input, super::windows_d3d11_buddy_clock_seconds(1, 30));
+            let overlays = current_overlay_frames(plan, input, &buddy_legs).unwrap();
+            let sprites = buddy_sprite_frames(plan, input, &buddy_legs).unwrap();
+            let banners = current_banner_frames(plan, input, &set, now).unwrap();
+            build_scene_plan(
+                plan,
+                1,
+                1,
+                None,
+                None,
+                &overlays,
+                &sprites,
+                &banners,
+                None,
+                Some((1920, 1080)),
+            )
+            .unwrap()
+        };
+        let ids_on = |scene: &crate::windows_d3d11_compositor::WindowsD3d11ScenePlan,
+                      target: WindowsD3d11SceneOutputTarget| {
+            let mut ids = scene
+                .layers
+                .iter()
+                .filter(|layer| layer.source_id >= CAPTION_PRIMARY_SOURCE_ID)
+                .filter(|layer| layer.applies_to(target))
+                .map(|layer| layer.source_id)
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids
+        };
+        let preview = WindowsD3d11SceneOutputTarget::Preview;
+        let recording =
+            WindowsD3d11SceneOutputTarget::Encoded(WindowsD3d11EncodedOutputRole::Primary);
+        let stream =
+            WindowsD3d11SceneOutputTarget::Encoded(WindowsD3d11EncodedOutputRole::Auxiliary);
+
+        // Record + stream on a split leg: the Preview has the stream-only
+        // Buddy and banner (from the stream leg's layers) and the
+        // recording-only banner (from the recording's); the recording has
+        // its banner alone, the stream the Buddy and its banner alone.
+        let scene = compose(&split_plan, &input(split_shape, Some(split_shape)));
+        assert_eq!(
+            ids_on(&scene, preview),
+            vec![
+                BUDDY_AUXILIARY_SOURCE_ID,
+                BUDDY_SPRITE_AUXILIARY_SOURCE_ID,
+                BANNER_PRIMARY_SOURCE_ID_BASE,
+                BANNER_AUXILIARY_SOURCE_ID_BASE,
+            ]
+        );
+        assert_eq!(
+            ids_on(&scene, recording),
+            vec![BANNER_PRIMARY_SOURCE_ID_BASE]
+        );
+        assert_eq!(
+            ids_on(&scene, stream),
+            vec![
+                BUDDY_AUXILIARY_SOURCE_ID,
+                BUDDY_SPRITE_AUXILIARY_SOURCE_ID,
+                BANNER_AUXILIARY_SOURCE_ID_BASE,
+            ]
+        );
+
+        // Record only: the stream-only Buddy and banner go nowhere, so the
+        // Preview drops them with the recording.
+        let record_plan = WindowsD3d11SessionPlan {
+            auxiliary: None,
+            roles: [WindowsD3d11MediaRole::Record].into_iter().collect(),
+            ..split_plan.clone()
+        };
+        let scene = compose(&record_plan, &input(record_shape, Some(record_shape)));
+        assert_eq!(ids_on(&scene, preview), vec![BANNER_PRIMARY_SOURCE_ID_BASE]);
+        assert_eq!(
+            ids_on(&scene, recording),
+            vec![BANNER_PRIMARY_SOURCE_ID_BASE]
+        );
+
+        // Buffer only (D2): the ring keeps the recording plan, so it has the
+        // recording-only banner alone; the Preview shows the idle program,
+        // the stream-only Buddy and banner too, from Preview-only layers.
+        let scene = compose(&record_plan, &input(record_shape, None));
+        assert_eq!(
+            ids_on(&scene, preview),
+            vec![
+                BUDDY_PRIMARY_SOURCE_ID,
+                BUDDY_SPRITE_PRIMARY_SOURCE_ID,
+                BANNER_PRIMARY_SOURCE_ID_BASE,
+                BANNER_PREVIEW_SOURCE_ID_BASE,
+            ]
+        );
+        assert_eq!(
+            ids_on(&scene, recording),
+            vec![BANNER_PRIMARY_SOURCE_ID_BASE]
+        );
+        let preview_only = scene
+            .layers
+            .iter()
+            .find(|layer| layer.source_id == BANNER_PREVIEW_SOURCE_ID_BASE)
+            .expect("the stream-only banner's Preview layer");
+        assert_eq!(
+            preview_only.output_targets,
+            WindowsD3d11SceneOutputTargets::PREVIEW
+        );
+        // The Preview stacks the program's way: the stream-only banner is
+        // second in the Scene order, so it draws above the ring's banner.
+        let ring_banner = scene
+            .layers
+            .iter()
+            .find(|layer| layer.source_id == BANNER_PRIMARY_SOURCE_ID_BASE)
+            .expect("the recording-only banner's layer");
+        assert_eq!(ring_banner.z_index, super::windows_d3d11_banner_z_index(0));
+        assert_eq!(preview_only.z_index, super::windows_d3d11_banner_z_index(1));
+        // Every overlay layer has its own source id, so the upload table
+        // (one entry per id) stays valid.
+        let mut overlay_ids = scene
+            .layers
+            .iter()
+            .filter(|layer| layer.source_id >= CAPTION_PRIMARY_SOURCE_ID)
+            .map(|layer| layer.source_id)
+            .collect::<Vec<_>>();
+        overlay_ids.sort_unstable();
+        overlay_ids.dedup();
+        assert_eq!(overlay_ids.len(), 4);
     }
 
     #[cfg(test)]
@@ -4317,6 +4834,216 @@ mod tests {
             WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
             "captions draw at z 10"
         );
+    }
+
+    fn draws_on(
+        targets: Option<crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets>,
+        output: crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets,
+    ) -> bool {
+        targets.is_some_and(|targets| targets.union(output) == targets)
+    }
+
+    /// Plan 205 S8, the three cases the slice names: record + stream with a
+    /// stream-only Buddy and a recording-only banner (the Preview has both,
+    /// the recording only the banner, the stream only the Buddy); record
+    /// only (the Preview drops a stream-only item); buffer only (the Preview
+    /// has a stream-only item, the ring does not).
+    #[test]
+    fn the_preview_draws_the_program_and_each_encoded_leg_keeps_its_plan() {
+        use crate::overlay_layout::{OverlayAuxLeg, OverlaySessionShape, program_shows};
+        use crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets as Targets;
+
+        let split = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: true,
+            aux_leg: OverlayAuxLeg::Stream,
+        };
+        let record = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: false,
+            aux_leg: OverlayAuxLeg::None,
+        };
+        let stream_only = |shape: OverlaySessionShape, program: Option<OverlaySessionShape>| {
+            item_targets_for(shape, program, true, false)
+        };
+        let recording_only = |shape: OverlaySessionShape, program: Option<OverlaySessionShape>| {
+            item_targets_for(shape, program, false, true)
+        };
+
+        // Record + stream, split leg.
+        let buddy = stream_only(split, Some(split));
+        assert_eq!(
+            buddy,
+            WindowsD3d11ItemTargets {
+                primary_canvas: None,
+                auxiliary_canvas: Some(Targets::AUXILIARY.union(Targets::PREVIEW)),
+            }
+        );
+        let banner = recording_only(split, Some(split));
+        assert_eq!(
+            banner,
+            WindowsD3d11ItemTargets {
+                primary_canvas: Some(Targets::PRIMARY.union(Targets::PREVIEW)),
+                auxiliary_canvas: None,
+            }
+        );
+        // An item both legs burn is in the Preview once, from the primary's
+        // layer; the stream leg's layer is the stream's alone.
+        assert_eq!(
+            item_targets_for(split, Some(split), true, true),
+            WindowsD3d11ItemTargets {
+                primary_canvas: Some(Targets::PRIMARY.union(Targets::PREVIEW)),
+                auxiliary_canvas: Some(Targets::AUXILIARY),
+            }
+        );
+
+        // Record only: a stream-only item goes nowhere, and the Preview says so.
+        assert_eq!(
+            stream_only(record, Some(record)),
+            WindowsD3d11ItemTargets {
+                primary_canvas: None,
+                auxiliary_canvas: None,
+            }
+        );
+        assert!(!program_shows(Some(record), true, false));
+
+        // Buffer only (D2): the ring keeps the recording plan, the Preview
+        // shows the idle program.
+        assert_eq!(
+            stream_only(record, None),
+            WindowsD3d11ItemTargets {
+                primary_canvas: Some(Targets::PREVIEW),
+                auxiliary_canvas: None,
+            }
+        );
+        assert_eq!(
+            recording_only(record, None),
+            WindowsD3d11ItemTargets {
+                primary_canvas: Some(Targets::PRIMARY.union(Targets::PREVIEW)),
+                auxiliary_canvas: None,
+            }
+        );
+    }
+
+    /// The item's targets for a session shape and a pair of switches, the
+    /// way the pump's inputs are built: the leg plan with the D13 fallback
+    /// (`overlay_session_plans`, `banner_leg_carries`) and `program_shows`.
+    fn item_targets_for(
+        shape: crate::overlay_layout::OverlaySessionShape,
+        program_shape: Option<crate::overlay_layout::OverlaySessionShape>,
+        show_on_stream: bool,
+        show_in_recording: bool,
+    ) -> WindowsD3d11ItemTargets {
+        let plan = crate::overlay_layout::overlay_leg_plan(
+            shape.record_enabled,
+            shape.stream_enabled,
+            shape.aux_leg,
+            show_on_stream,
+            show_in_recording,
+        );
+        let plan = if plan.needs_split {
+            plan.shared_leg_fallback()
+        } else {
+            plan
+        };
+        windows_d3d11_item_targets(
+            plan.primary,
+            plan.aux,
+            crate::overlay_layout::program_shows(program_shape, show_on_stream, show_in_recording),
+        )
+    }
+
+    /// Plan 205 S8, the whole table: over every session shape the D3D11 path
+    /// runs (record, stream, record + stream on one leg or a split leg, and
+    /// a buffer-only ring) and every switch pair, the Preview draws an item
+    /// exactly once when the program carries it and never otherwise, and
+    /// each encoded leg's layer exists exactly when its plan burns the item.
+    #[test]
+    fn the_preview_bit_follows_program_shows_over_every_d3d11_session_shape() {
+        use crate::overlay_layout::{OverlayAuxLeg, OverlaySessionShape, program_shows};
+        use crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets as Targets;
+
+        let shape = |record_enabled: bool, stream_enabled: bool, aux_leg: OverlayAuxLeg| {
+            OverlaySessionShape {
+                record_enabled,
+                stream_enabled,
+                aux_leg,
+            }
+        };
+        let sessions = [
+            ("record only", shape(true, false, OverlayAuxLeg::None), true),
+            ("stream only", shape(false, true, OverlayAuxLeg::None), true),
+            (
+                "record + stream, one leg",
+                shape(true, true, OverlayAuxLeg::None),
+                true,
+            ),
+            (
+                "record + stream, split",
+                shape(true, true, OverlayAuxLeg::Stream),
+                true,
+            ),
+            (
+                "buffer only",
+                shape(true, false, OverlayAuxLeg::None),
+                false,
+            ),
+        ];
+        for (name, session, is_output) in sessions {
+            let program_shape = is_output.then_some(session);
+            for (show_on_stream, show_in_recording) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let plan = crate::overlay_layout::overlay_leg_plan(
+                    session.record_enabled,
+                    session.stream_enabled,
+                    session.aux_leg,
+                    show_on_stream,
+                    show_in_recording,
+                );
+                let plan = if plan.needs_split {
+                    plan.shared_leg_fallback()
+                } else {
+                    plan
+                };
+                let targets =
+                    item_targets_for(session, program_shape, show_on_stream, show_in_recording);
+                let case =
+                    format!("{name}, on_stream={show_on_stream}, in_rec={show_in_recording}");
+                let in_preview = usize::from(draws_on(targets.primary_canvas, Targets::PREVIEW))
+                    + usize::from(draws_on(targets.auxiliary_canvas, Targets::PREVIEW));
+                assert_eq!(
+                    in_preview,
+                    usize::from(program_shows(
+                        program_shape,
+                        show_on_stream,
+                        show_in_recording
+                    )),
+                    "{case}: the Preview draws the item once when the program carries it"
+                );
+                assert_eq!(
+                    draws_on(targets.primary_canvas, Targets::PRIMARY),
+                    plan.primary,
+                    "{case}: the primary leg keeps its own plan"
+                );
+                assert_eq!(
+                    targets.auxiliary_canvas.is_some(),
+                    plan.aux,
+                    "{case}: the auxiliary leg keeps its own plan"
+                );
+                assert!(
+                    targets
+                        .auxiliary_canvas
+                        .is_none_or(|aux| aux.union(Targets::AUXILIARY) == aux),
+                    "{case}: the auxiliary canvas layer is the auxiliary leg's"
+                );
+                assert!(
+                    !draws_on(targets.primary_canvas, Targets::AUXILIARY)
+                        && !draws_on(targets.auxiliary_canvas, Targets::PRIMARY),
+                    "{case}: no layer crosses legs"
+                );
+            }
+        }
     }
 
     /// Every sleep wakes a little late. Pacing each tick relative to its own

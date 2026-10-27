@@ -3043,6 +3043,13 @@ impl ActiveRecording {
     pub(crate) fn accepts_banners(&self) -> bool {
         self.accepts_banners
     }
+
+    /// A stub session that cannot draw a banner added after its start, for
+    /// the RPC tests of the show gate (`banners.show`, `banners.importImage`).
+    #[cfg(test)]
+    pub(crate) fn set_accepts_banners_for_test(&mut self, accepts: bool) {
+        self.accepts_banners = accepts;
+    }
 }
 
 /// Whether a session can take a banner shown after it started (plan 186 S4).
@@ -4671,6 +4678,25 @@ async fn start_session_with_timeline(
                     d3d11_overlay_plans.highlight.primary,
                     d3d11_overlay_plans.highlight.aux,
                 );
+                // Plan 205 S8: the session's Preview draws the program. A
+                // buffer-only session's ring keeps the recording plan (D2;
+                // `normalize_replay_only_params` raised `record_enabled`)
+                // while its Preview shows the idle program, so its program
+                // shape is `None`; every other session's is its own shape.
+                // The Buddy and highlight switches still apply at the next
+                // start on this path (`apply_overlay_layout_to_active_session`
+                // says so in the log).
+                let d3d11_program_shape = (!replay_only).then_some(d3d11_overlay_shape);
+                let highlight_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.highlight.show_on_stream,
+                    overlay_layout.highlight.show_in_recording,
+                );
+                let buddy_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.buddy.show_on_stream,
+                    overlay_layout.buddy.show_in_recording,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
@@ -4682,13 +4708,31 @@ async fn start_session_with_timeline(
                     highlight_on_auxiliary,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
+                    highlight_in_program,
+                    buddy_in_program,
                     // Plan 186 S4: banners follow this session's leg plan
                     // live, from the compositor's banner set.
                     banner_shape: d3d11_overlay_shape,
+                    program_shape: d3d11_program_shape,
                     banner_prepare: state.banner_prepare.clone(),
                 };
+                // The pet's atlases for the legs that draw it, including the
+                // primary canvas when only the Preview does (plan 205 S8):
+                // the Preview is composed on the primary's canvas.
+                let buddy_sprite_targets = crate::windows_d3d11_session::windows_d3d11_item_targets(
+                    d3d11_overlay_plans.buddy.primary,
+                    d3d11_overlay_plans.buddy.aux,
+                    buddy_in_program,
+                );
                 state.buddy_sprite.prepare(&buddy_sprite_legs(
-                    d3d11_overlay_plans.buddy,
+                    crate::overlay_layout::OverlayLegPlan {
+                        primary: buddy_sprite_targets.primary_canvas.is_some(),
+                        aux: buddy_sprite_targets.auxiliary_canvas.is_some(),
+                        needs_split: false,
+                    },
+                    // The D3D11 session draws the program itself (S8); its
+                    // targets above already include it.
+                    false,
                     (plan.primary.width, plan.primary.height),
                     plan.auxiliary.map(|video| (video.width, video.height)),
                 ));
@@ -4978,11 +5022,20 @@ async fn start_session_with_timeline(
     };
     let overlay_plans =
         crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    // Plan 205 S6: the same plans plus the program's verdict for the Preview
+    // (idle for a buffer-only session, D2), which the Preview's own picture
+    // draws when the primary leg does not.
+    let overlay_flags = crate::compositor::OverlayLegFlags::for_session(
+        overlay_session_shape,
+        replay_only,
+        &overlay_layout,
+    );
     // Plan 168 S-B1: the pet's atlases start building now (off this task),
     // so the session's first frame already has the Buddy.
     if use_encoder_bridge {
         state.buddy_sprite.prepare(&buddy_sprite_legs(
             overlay_plans.buddy,
+            overlay_flags.buddy_on_program,
             (params.output.video.width, params.output.video.height),
             encoder_bridge_stream_output
                 .as_ref()
@@ -5230,6 +5283,8 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        highlight_overlay_on_program: overlay_flags.highlight_on_program,
+                        buddy_overlay_on_program: overlay_flags.buddy_on_program,
                     },
                 )
                 .await
@@ -23387,59 +23442,77 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
 /// place. Captions keep their start-time plan (their burn target is a session
 /// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
 /// start-time overlay input, which is said in the log rather than hidden.
+/// With no session, the idle preview run follows the layout instead
+/// (plan 205, `apply_overlay_layout_to_idle_preview`).
 pub async fn apply_overlay_layout_to_active_session(
     state: &AppState,
     layout: &crate::overlay_layout::OverlayLayout,
 ) {
-    let (session_id, plans, d3d11) = {
+    let session = {
         let mut recording = state.recording.lock().await;
-        let Some(active) = recording.as_mut() else {
-            return;
-        };
-        let Some(shape) = active.overlay_session_shape else {
-            return;
-        };
-        let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
-        active.comment_highlight_available = plans.highlight.burns_anywhere();
-        #[cfg(target_os = "windows")]
-        let d3d11 = active.windows_d3d11_media.is_some();
-        #[cfg(not(target_os = "windows"))]
-        let d3d11 = false;
-        (active.session_id.clone(), plans, d3d11)
+        match recording.as_mut() {
+            None => None,
+            Some(active) => {
+                // A session without a compositor shape (the legacy FFmpeg
+                // graph) applies its switches at the next start.
+                let Some(shape) = active.overlay_session_shape else {
+                    return;
+                };
+                let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+                active.comment_highlight_available = plans.highlight.burns_anywhere();
+                #[cfg(target_os = "windows")]
+                let d3d11 = active.windows_d3d11_media.is_some();
+                #[cfg(not(target_os = "windows"))]
+                let d3d11 = false;
+                // Plan 205 S6: the program's verdict too, idle for a
+                // buffer-only session (D2), so the Preview's own picture
+                // re-plans with the legs.
+                let flags = crate::compositor::OverlayLegFlags::for_session(
+                    shape,
+                    active.replay_only,
+                    layout,
+                );
+                Some((active.session_id.clone(), plans, flags, d3d11))
+            }
+        }
     };
-    let swapped = crate::compositor::update_overlay_flags(
-        state,
-        crate::compositor::OverlayLegFlags {
-            highlight_on_primary: plans.highlight.primary,
-            highlight_on_aux: plans.highlight.aux,
-            buddy_on_primary: plans.buddy.primary,
-            buddy_on_aux: plans.buddy.aux,
-        },
-    )
-    .await;
+    let Some((session_id, plans, flags, d3d11)) = session else {
+        apply_overlay_layout_to_idle_preview(state, layout).await;
+        return;
+    };
+    let swapped = crate::compositor::update_overlay_flags(state, flags).await;
     // Plan 168 S-B1, mid-session: the pet's atlases for a leg it just joined
     // start building now, as they do at session start. The first frames
     // after the swap draw it as soon as the atlas exists (`leg_frame` asks
-    // too, so this only shortens the wait).
-    let buddy_canvases = if swapped && (plans.buddy.primary || plans.buddy.aux) {
-        let canvases = crate::compositor::banner_prepare_canvases(state).await;
-        match canvases.first() {
-            Some(primary) => {
-                let legs = buddy_sprite_legs(plans.buddy, *primary, canvases.get(1).copied());
-                state.buddy_sprite.prepare(&legs);
-                legs.len()
+    // too, so this only shortens the wait). Plan 205: the program's Buddy
+    // (the Preview's own picture) prepares the Primary atlas the same way.
+    let buddy_canvases =
+        if swapped && (plans.buddy.primary || plans.buddy.aux || flags.buddy_on_program) {
+            let canvases = crate::compositor::banner_prepare_canvases(state).await;
+            match canvases.first() {
+                Some(primary) => {
+                    let legs = buddy_sprite_legs(
+                        plans.buddy,
+                        flags.buddy_on_program,
+                        *primary,
+                        canvases.get(1).copied(),
+                    );
+                    state.buddy_sprite.prepare(&legs);
+                    legs.len()
+                }
+                None => 0,
             }
-            None => 0,
-        }
-    } else {
-        0
-    };
+        } else {
+            0
+        };
     tracing::info!(
         session = %session_id,
         highlight_primary = plans.highlight.primary,
         highlight_aux = plans.highlight.aux,
         buddy_primary = plans.buddy.primary,
         buddy_aux = plans.buddy.aux,
+        highlight_program = flags.highlight_on_program,
+        buddy_program = flags.buddy_on_program,
         buddy_legs_prepared = buddy_canvases,
         swapped,
         "overlay layout changed mid-session"
@@ -23452,6 +23525,32 @@ pub async fn apply_overlay_layout_to_active_session(
     }
 }
 
+/// Plan 205 (S1): a layout saved while nothing runs swaps the idle preview
+/// run's flags to the program (`OverlayLegFlags::idle`): a Buddy turned on
+/// for an output joins the picture at once, and one turned off for both
+/// leaves it. A run a capture holds is refused by
+/// `update_idle_overlay_flags` and keeps the session's plan (the session
+/// lands in `state.recording` after its lease is armed).
+async fn apply_overlay_layout_to_idle_preview(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let flags = crate::compositor::OverlayLegFlags::idle(layout);
+    let swapped = crate::compositor::update_idle_overlay_flags(state, flags).await;
+    if swapped {
+        let canvases = crate::compositor::banner_prepare_canvases(state).await;
+        if let Some(primary) = canvases.first() {
+            crate::compositor::prepare_idle_buddy(state, flags, *primary);
+        }
+    }
+    tracing::info!(
+        highlight_primary = flags.highlight_on_primary,
+        buddy_primary = flags.buddy_on_primary,
+        swapped,
+        "overlay layout changed while nothing runs"
+    );
+}
+
 /// A session can put a comment card on stream only when the compositor bridge
 /// renders it AND the leg plan burns it on at least one leg. Deriving this
 /// from the same plan the compositor receives keeps "On stream" honest: the
@@ -23462,13 +23561,19 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
 
 /// The legs (and their canvases) the Buddy's pet draws on in a session
 /// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
+/// The Buddy atlases a session wants (plan 168 S-B1): the Primary atlas at
+/// the primary canvas when the primary leg burns the pet, or (plan 205 S6)
+/// when the program carries it and the Preview's own picture draws it at
+/// that same canvas; the Auxiliary atlas at the aux canvas when that leg
+/// burns it.
 fn buddy_sprite_legs(
     plan: crate::overlay_layout::OverlayLegPlan,
+    program: bool,
     primary: (u32, u32),
     auxiliary: Option<(u32, u32)>,
 ) -> Vec<(crate::buddy_sprite::BuddySpriteLeg, (u32, u32))> {
     let mut legs = Vec::with_capacity(2);
-    if plan.primary {
+    if plan.primary || program {
         legs.push((crate::buddy_sprite::BuddySpriteLeg::Primary, primary));
     }
     if plan.aux
@@ -34640,6 +34745,81 @@ mod tests {
         assert!(!normalize_replay_only_params(&mut record));
         assert_eq!(record.output.separate_source_recordings, separate);
         assert!(crate::source_iso::armed_plan(&record.output).is_some());
+    }
+
+    /// Plan 205 D2 (owner): a buffer-only (Clips) session keeps planning
+    /// every item by "Show in recording", exactly as a recording does. Its
+    /// shape is record-only, so a stream-only Buddy and a stream-only banner
+    /// burn on neither leg of the ring, and a record-only session drops them
+    /// the same way. The program (what the Preview shows) still has both:
+    /// Phase 2 gives the Preview its own picture while the ring runs.
+    #[test]
+    fn a_buffer_only_session_burns_neither_a_stream_only_buddy_nor_banner() {
+        use crate::banners::{BannerLeg, banner_leg_carries};
+        use crate::overlay_layout::{OverlayAuxLeg, OverlaySessionShape, program_shows};
+
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        layout.buddy.show_in_recording = false;
+        let mut banner = crate::banners::tests::sample_banner("stream-only", 0);
+        banner.show_on_stream = true;
+        banner.show_in_recording = false;
+
+        let mut buffer = base_params(false, false);
+        buffer.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(normalize_replay_only_params(&mut buffer));
+        // The shape `start_session` builds for it: a recording with no stream
+        // and no auxiliary leg.
+        let shape = OverlaySessionShape {
+            record_enabled: buffer.output.record_enabled,
+            stream_enabled: buffer.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(
+            shape,
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: OverlayAuxLeg::None,
+            }
+        );
+        let plans = crate::overlay_layout::overlay_session_plans(shape, &layout);
+        assert!(!plans.buddy.primary && !plans.buddy.aux);
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Primary,
+            &banner
+        ));
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Auxiliary,
+            &banner
+        ));
+        assert!(!program_shows(Some(shape), true, false));
+
+        // A real recording plans the same.
+        let mut record = base_params(true, false);
+        assert!(!normalize_replay_only_params(&mut record));
+        let record_shape = OverlaySessionShape {
+            record_enabled: record.output.record_enabled,
+            stream_enabled: record.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(record_shape, shape);
+        assert!(
+            !crate::overlay_layout::overlay_session_plans(record_shape, &layout)
+                .buddy
+                .primary
+        );
+
+        // The program while nothing runs has both (the Preview's half; on
+        // macOS it needs Phase 2's program leg while the ring runs).
+        assert!(program_shows(None, true, false));
+        assert!(banner_leg_carries(None, BannerLeg::Primary, &banner));
+        assert!(crate::compositor::OverlayLegFlags::idle(&layout).buddy_on_primary);
     }
 
     /// Plan 181: the replay ring output on every FFmpeg arg builder.

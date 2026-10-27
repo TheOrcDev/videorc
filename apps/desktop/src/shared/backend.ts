@@ -2388,6 +2388,13 @@ export interface CompositorFramePipelineStatus {
   /** Plan 190: live background programs built and scratch bytes held (0 while off). */
   liveBackgroundPrograms?: number
   liveBackgroundScratchBytes?: number
+  /**
+   * Plan 205 S6: the Preview presents its own picture (the program leg)
+   * because the program differs from the primary leg: Clips at idle or a
+   * split record + stream with a stream-only item. Left off the wire while
+   * the primary leg is the program.
+   */
+  previewProgramLeg?: boolean
 }
 
 export interface CompositorStatus {
@@ -2448,6 +2455,8 @@ export type PreviewSurfaceSceneLayerKind =
   | 'screen-image'
   | 'background'
   | 'banner'
+  /** Plan 205 S9: the Buddy's frame-polled layer (`main/preview-surface-buddy.ts`). */
+  | 'buddy'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
