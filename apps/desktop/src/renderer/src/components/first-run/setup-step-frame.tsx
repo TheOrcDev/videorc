@@ -34,6 +34,8 @@ export interface FirstRunStepFrame {
   nextLabel: string
   /** Leaves setup at once, keeping what was chosen (D3). */
   skip: () => void
+  /** Goes straight to an earlier step that applies here ("Back to permissions"). */
+  goTo: (step: FirstRunStep) => void
 }
 
 const FrameContext = createContext<FirstRunStepFrame | null>(null)

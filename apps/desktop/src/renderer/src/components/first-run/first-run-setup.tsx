@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { GoalStep } from '@/components/first-run/goal-step'
 import { PermissionsStep } from '@/components/first-run/permissions-step'
+import { SoundStep } from '@/components/first-run/sound-step'
 import {
   FirstRunCard,
   FirstRunStepFrameProvider,
@@ -28,7 +29,8 @@ export const FIRST_RUN_LEAVE_MS = 150
 /** The steps that have a screen, in order. A step without one is passed over. */
 const STEP_SIZES: Partial<Record<FirstRunStep, FirstRunCardSize>> = {
   permissions: 'lg',
-  goal: 'lg'
+  goal: 'lg',
+  sound: 'lg'
 }
 
 const stepOrder = (step: FirstRunStep): number => FIRST_RUN_STEPS.indexOf(step)
@@ -101,7 +103,10 @@ export function FirstRunSetup({
     next: () => nextFrom(steps),
     nextLabel:
       index < steps.length - 1 ? 'Continue' : mode.kind === 'replay' ? 'Done' : 'Open Studio',
-    skip: () => setLeaving({ completion: 'skipped' })
+    skip: () => setLeaving({ completion: 'skipped' }),
+    goTo: (target) => {
+      if (steps.includes(target)) enter(target)
+    }
   }
 
   // Grants flip in System Settings or the native prompt while Videorc is in
@@ -173,6 +178,8 @@ export function FirstRunSetup({
             >
               {step === 'goal' ? (
                 <GoalStep key={step} goal={goal} onPick={pickGoal} />
+              ) : step === 'sound' ? (
+                <SoundStep key={step} />
               ) : (
                 <PermissionsStep key={step} />
               )}

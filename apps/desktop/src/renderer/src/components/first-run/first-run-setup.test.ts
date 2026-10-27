@@ -24,7 +24,26 @@ const studio = vi.hoisted(() => ({
       hardwareAccelerationDisabled: boolean
     },
     refreshBackend: vi.fn(async () => undefined),
-    handleSystemPermission: vi.fn(async () => undefined)
+    handleSystemPermission: vi.fn(async () => undefined),
+    // Sound check (plan 207 S6) reads the same fields as the Studio's Audio section.
+    captureConfig: {
+      audio: {
+        microphoneGainDb: 0,
+        microphoneMuted: false,
+        systemAudioEnabled: false,
+        systemAudioGainDb: -6
+      },
+      sources: { microphoneId: 'mic', microphoneName: 'MacBook Pro Microphone' }
+    },
+    setCaptureConfig: vi.fn(),
+    selectedMicrophone: undefined,
+    switchSourceDeviceLive: vi.fn(async () => undefined),
+    sourceSwitchReason: () => null,
+    isSessionActive: false,
+    audioBusActive: false,
+    systemAudioConfirmed: null,
+    systemAudioJoining: false,
+    systemAudioIssue: null
   },
   rows: [] as SystemAccessRow[]
 }))
@@ -72,9 +91,13 @@ const render = (
     createElement(FirstRunSetup, { mode, onLeave: () => undefined, ...progress })
   )
 
+const SYSTEM_AUDIO = { id: 'system-audio:default', kind: 'system-audio', status: 'available' }
+
 beforeEach(() => {
   studio.core.wsStatus = 'connected'
-  studio.core.deviceList = { devices: [{ id: 'mic', kind: 'microphone', status: 'available' }] }
+  studio.core.deviceList = {
+    devices: [{ id: 'mic', kind: 'microphone', status: 'available' }, SYSTEM_AUDIO]
+  }
   studio.core.mediaAccess = { camera: 'granted', microphone: 'granted', screen: 'granted' }
   studio.core.runtimeInfo = { platform: 'darwin', hardwareAccelerationDisabled: true }
   studio.rows = allGranted()
@@ -212,5 +235,52 @@ describe('FirstRunSetup', () => {
     )
     expect(markup).toMatch(/data-first-run-goal="stream"[^>]*data-selected="true"/)
     expect(markup).toContain('Chosen')
+  })
+
+  it('Sound check: the microphone, its level and Gain, the verdict line and Set level for me (plan 207 S6)', () => {
+    const markup = render({ kind: 'first-run' }, { initialStep: 'sound', initialGoal: 'both' })
+    expect(markup).toContain('data-first-run-step="sound"')
+    expect(markup).toMatch(/<h1[^>]*id="first-run-title"[^>]*>Sound check<\/h1>/)
+    expect(markup).toContain('data-first-run-sound-row="microphone"')
+    expect(markup).toContain('data-mic-level-meter=""')
+    expect(markup).toContain('aria-label="Microphone gain"')
+    expect(markup).toContain('data-first-run-sound-verdict="none"')
+    expect(markup).toContain('Say something. The bar moves when Videorc hears you.')
+    // No verdict yet: the level button waits, and says why.
+    expect(markup).toMatch(/<button[^>]*data-first-run-sound-level=""[^>]*disabled=""/)
+    expect(markup).toContain('Talk for a few seconds first.')
+    expect(markup).toContain('data-first-run-primary=""')
+  })
+
+  it('Sound check: System audio is a switch, Off by default, with its line', () => {
+    const markup = render({ kind: 'first-run' }, { initialStep: 'sound', initialGoal: 'both' })
+    expect(markup).toContain('data-first-run-sound-row="system-audio"')
+    expect(markup).toMatch(
+      /role="switch"[^>]*aria-checked="false"|aria-checked="false"[^>]*role="switch"/
+    )
+    expect(markup).toContain(
+      'The sound your Mac plays: games, music and calls. Its level shows once you record or go live.'
+    )
+  })
+
+  it('Sound check: System audio waits for Screen Recording on macOS, and says so', () => {
+    studio.core.deviceList = {
+      devices: [
+        { id: 'mic', kind: 'microphone', status: 'available' },
+        { ...SYSTEM_AUDIO, status: 'permission-required' }
+      ]
+    }
+    const markup = render({ kind: 'first-run' }, { initialStep: 'sound', initialGoal: 'both' })
+    expect(markup).toContain('Comes with Screen Recording. Go back to permissions to allow it.')
+    expect(markup).toMatch(/role="switch"[^>]*disabled=""|disabled=""[^>]*role="switch"/)
+  })
+
+  it('Sound check: a microphone Videorc may not use sends you back to permissions', () => {
+    studio.core.mediaAccess = { camera: 'granted', microphone: 'denied', screen: 'granted' }
+    const markup = render({ kind: 'first-run' }, { initialStep: 'sound', initialGoal: 'both' })
+    expect(markup).toContain('data-first-run-sound-blocked=""')
+    expect(markup).toMatch(/Videorc can(&#x27;|')t hear your microphone yet\./)
+    expect(markup).toContain('Back to permissions')
+    expect(markup).not.toContain('data-mic-level-meter=""')
   })
 })
