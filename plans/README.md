@@ -14,7 +14,7 @@
   Eight slices, from before pictures through the ground assets, opaque
   windows, the probe, controls, the Welcome invert and the served pages, to
   docs and gates. **EXECUTED** 2026-10-27 (S0 to S7) on
-  `plan-208-liquid-chrome-colour`, PR pending: every window sits on the
+  `plan-208-liquid-chrome-colour`, PR #883: every window sits on the
   chrome ground, controls wear chrome, Record is the red LED, light
   Welcome is the invert, and the phone remote and OAuth page follow; the
   design skill is rewritten for it. `VIDEORC_GLASS=clear` keeps the old

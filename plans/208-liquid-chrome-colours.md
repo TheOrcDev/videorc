@@ -1,7 +1,7 @@
 # Plan 208: Liquid Chrome colours
 
 **Status:** EXECUTED 2026-10-27 on `plan-208-liquid-chrome-colour` (PR
-pending). S0 to S7 are done; the gates, the owner's by-eye and the Windows
+#883). S0 to S7 are done; the gates, the owner's by-eye and the Windows
 pass are tracked in the
 [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md).
 D1 to D5 are owner decisions (2026-10-27); D6 to D13 are recommendations

@@ -1,7 +1,7 @@
 # Plan 208 acceptance: Liquid Chrome colours
 
 S0 to S6 are built and S7's docs are written on
-`plan-208-liquid-chrome-colour` (PR pending). The final gate run and the
+`plan-208-liquid-chrome-colour` (PR #883). The final gate run and the
 owner's by-eye are below.
 
 Baseline: `origin/main` `dc1309cb` (before any Liquid Chrome product change).
