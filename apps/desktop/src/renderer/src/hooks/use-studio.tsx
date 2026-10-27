@@ -102,7 +102,7 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
-import { replayStartWaitsForGrant } from '@/lib/replay-buffer-grants'
+import { replayStartWaitsForGrant, replayStartWaitsForScreen } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -1639,6 +1639,12 @@ export interface ReplayBufferControls {
    * the user turns it on themselves.
    */
   blockedReason: string | null
+  /**
+   * Why the ring is waiting rather than starting (plan 203 S2, plan 207 S2):
+   * a grant macOS has not asked for yet, or a screen the layout shows that
+   * nobody has chosen. The Output page's Clips row says it; never a toast.
+   */
+  waitReason?: string | null
   /** The one switch (Output → Clips → Keep the last seconds). */
   setEnabled: (enabled: boolean) => void
 }
@@ -2343,6 +2349,7 @@ const REPLAY_BUFFER_OFF_CONTROLS: ReplayBufferControls = Object.freeze({
   state: REPLAY_STATE_OFF,
   armed: false,
   blockedReason: null,
+  waitReason: null,
   setEnabled: () => {}
 })
 
@@ -15885,13 +15892,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // recording does; on a never-asked Mac that was a cold OS prompt at launch.
   // First-run setup holds the preview back, so a start would find no frames
   // and say Clips couldn't start over setup: the ring waits for it too.
+  // Plan 207 S2: a layout that shows a screen nobody has chosen (a fresh
+  // profile without Screen Recording) waits the same way; the Clips row says
+  // what Sources says. A chosen screen without frames still fails as today.
   const replayGrantWait =
     firstRunSetupOpen ||
     replayStartWaitsForGrant({
       mediaAccess,
       sources: captureConfig.sources,
       layoutPreset: captureConfig.layout.layoutPreset
-    })
+    }) ||
+    replayStartWaitsForScreen({ sources: captureConfig.sources, layout: captureConfig.layout })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
     if (recordBlockedReason || replayGrantWait) {
@@ -16107,9 +16118,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       state: replayState,
       armed: replayArmed,
       blockedReason: replayBlockedReason,
+      waitReason: typeof replayGrantWait === 'string' ? replayGrantWait : null,
       setEnabled: setReplayEnabled
     }),
-    [replayArmed, replayBlockedReason, replayState, setReplayEnabled]
+    [replayArmed, replayBlockedReason, replayGrantWait, replayState, setReplayEnabled]
   )
 
   const assessRecording = useCallback(

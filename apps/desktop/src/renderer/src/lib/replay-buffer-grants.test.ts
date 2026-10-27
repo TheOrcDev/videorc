@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { replayStartWaitsForGrant } from './replay-buffer-grants'
+import {
+  REPLAY_WAITS_FOR_SCREEN,
+  replayStartWaitsForGrant,
+  replayStartWaitsForScreen
+} from './replay-buffer-grants'
 
 const sources = {
   screenId: 'screen:screencapturekit:1',
@@ -124,6 +128,69 @@ describe('replayStartWaitsForGrant (plan 203 S2)', () => {
         sources: { ...sources, cameraId: 'camera:synthetic-preview-smoke' },
         layoutPreset: 'side-by-side'
       })
+    ).toBeNull()
+  })
+})
+
+describe('replayStartWaitsForScreen (plan 207 S2)', () => {
+  const preset = { layoutPreset: 'screen-camera', arrangementMode: 'preset' } as const
+  const noScreen = { screenId: undefined, windowId: undefined, captureOff: undefined }
+
+  it('waits while the layout shows a screen and none is chosen', () => {
+    expect(replayStartWaitsForScreen({ sources: noScreen, layout: preset })).toBe(
+      REPLAY_WAITS_FOR_SCREEN
+    )
+    expect(
+      replayStartWaitsForScreen({
+        sources: noScreen,
+        layout: { layoutPreset: 'vertical-screen-only', arrangementMode: 'preset' }
+      })
+    ).toBe(REPLAY_WAITS_FOR_SCREEN)
+  })
+
+  it('never waits for a layout without a screen', () => {
+    expect(
+      replayStartWaitsForScreen({
+        sources: noScreen,
+        layout: { layoutPreset: 'camera-only', arrangementMode: 'preset' }
+      })
+    ).toBeNull()
+    expect(
+      replayStartWaitsForScreen({
+        sources: noScreen,
+        layout: { layoutPreset: 'vertical-camera-only', arrangementMode: 'preset' }
+      })
+    ).toBeNull()
+    // Freeform shows what it has.
+    expect(
+      replayStartWaitsForScreen({
+        sources: noScreen,
+        layout: { layoutPreset: 'screen-camera', arrangementMode: 'freeform' }
+      })
+    ).toBeNull()
+  })
+
+  it('clears once a screen, a window, or the test pattern stands in', () => {
+    expect(
+      replayStartWaitsForScreen({
+        sources: { ...noScreen, screenId: 'screen:screencapturekit:1' },
+        layout: preset
+      })
+    ).toBeNull()
+    expect(
+      replayStartWaitsForScreen({
+        sources: { ...noScreen, windowId: 'window:screencapturekit:7' },
+        layout: preset
+      })
+    ).toBeNull()
+    expect(
+      replayStartWaitsForScreen({ sources: { ...noScreen, testPattern: true }, layout: preset })
+    ).toBeNull()
+  })
+
+  it('leaves Screen set to None to the record block', () => {
+    expect(
+      replayStartWaitsForScreen({ sources: { ...noScreen, captureOff: true }, layout: preset })
     ).toBeNull()
   })
 })
