@@ -8357,7 +8357,106 @@ impl Database {
             "pipeline_reported_audio_loss",
             "pipeline_reported_audio_loss INTEGER NOT NULL DEFAULT 0",
         )?;
+        // Plan 209 S2: every agent action, who made it and how it ended.
+        // Capped at AGENT_ACTIVITY_MAX_ROWS rows or AGENT_ACTIVITY_MAX_DAYS
+        // days by `prune_agent_activity`. A new table only; older backends
+        // ignore it.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_activity (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_activity_at ON agent_activity(at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_activity_agent_at
+                ON agent_activity(agent_id, at DESC, id DESC);",
+        )?;
         Ok(())
+    }
+
+    // --- Agent activity (plan 209) -------------------------------------------
+
+    /// Insert one activity row, then keep the table inside its caps.
+    pub(crate) fn insert_agent_activity(&self, entry: &AgentActivityEntry) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO agent_activity (id, at, agent_id, agent_name, tool, summary, outcome, message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.id,
+                entry.at,
+                entry.agent_id,
+                entry.agent_name,
+                entry.tool,
+                entry.summary,
+                entry.outcome.as_str(),
+                entry.message,
+            ],
+        )?;
+        prune_agent_activity_locked(&conn, Utc::now())
+    }
+
+    /// The newest rows first, optionally one agent's, at most `limit`.
+    pub(crate) fn list_agent_activity(
+        &self,
+        limit: usize,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<AgentActivityEntry>> {
+        let conn = self.lock()?;
+        let limit = i64::try_from(limit.clamp(1, AGENT_ACTIVITY_MAX_ROWS)).unwrap_or(100);
+        let mut rows = Vec::new();
+        let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<AgentActivityEntry> {
+            let outcome: String = row.get(6)?;
+            Ok(AgentActivityEntry {
+                id: row.get(0)?,
+                at: row.get(1)?,
+                agent_id: row.get(2)?,
+                agent_name: row.get(3)?,
+                tool: row.get(4)?,
+                summary: row.get(5)?,
+                outcome: AgentActivityOutcome::parse(&outcome),
+                message: row.get(7)?,
+            })
+        };
+        match agent_id {
+            Some(agent_id) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, at, agent_id, agent_name, tool, summary, outcome, message
+                     FROM agent_activity WHERE agent_id = ?1
+                     ORDER BY at DESC, id DESC LIMIT ?2",
+                )?;
+                for row in stmt.query_map(params![agent_id, limit], map)? {
+                    rows.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, at, agent_id, agent_name, tool, summary, outcome, message
+                     FROM agent_activity ORDER BY at DESC, id DESC LIMIT ?1",
+                )?;
+                for row in stmt.query_map(params![limit], map)? {
+                    rows.push(row?);
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prune_agent_activity_for_test(&self, now: chrono::DateTime<Utc>) -> Result<()> {
+        let conn = self.lock()?;
+        prune_agent_activity_locked(&conn, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_activity_count(&self) -> Result<i64> {
+        let conn = self.lock()?;
+        Ok(conn.query_row("SELECT COUNT(*) FROM agent_activity", [], |row| row.get(0))?)
     }
 
     /// Inserts or replaces a persisted repair job so it survives an app restart.
@@ -9578,6 +9677,70 @@ fn clip_mark_source_label(source: crate::protocol::ClipMarkSource) -> &'static s
         crate::protocol::ClipMarkSource::Voice => "voice",
         crate::protocol::ClipMarkSource::Manual => "manual",
     }
+}
+
+/// Plan 209 S2: the activity list keeps 1,000 rows or 30 days, whichever
+/// is smaller.
+pub(crate) const AGENT_ACTIVITY_MAX_ROWS: usize = 1_000;
+pub(crate) const AGENT_ACTIVITY_MAX_DAYS: i64 = 30;
+
+/// How an agent action ended. The wire word is the Settings list's word.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentActivityOutcome {
+    Ok,
+    Refused,
+    Failed,
+    Timeout,
+}
+
+impl AgentActivityOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    fn parse(text: &str) -> Self {
+        match text {
+            "ok" => Self::Ok,
+            "refused" => Self::Refused,
+            "timeout" => Self::Timeout,
+            _ => Self::Failed,
+        }
+    }
+}
+
+/// One row of the agents' Activity list (plan 209 S2): who did what, when,
+/// and how it ended. `summary` is a short rendering of the arguments, never
+/// a secret (tool arguments carry none by design).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityEntry {
+    pub id: String,
+    pub at: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub tool: String,
+    pub summary: String,
+    pub outcome: AgentActivityOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn prune_agent_activity_locked(conn: &Connection, now: chrono::DateTime<Utc>) -> Result<()> {
+    let cutoff = (now - chrono::Duration::days(AGENT_ACTIVITY_MAX_DAYS)).to_rfc3339();
+    conn.execute("DELETE FROM agent_activity WHERE at < ?1", params![cutoff])?;
+    conn.execute(
+        "DELETE FROM agent_activity WHERE id NOT IN (
+            SELECT id FROM agent_activity ORDER BY at DESC, id DESC LIMIT ?1
+        )",
+        params![i64::try_from(AGENT_ACTIVITY_MAX_ROWS).unwrap_or(1_000)],
+    )?;
+    Ok(())
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {

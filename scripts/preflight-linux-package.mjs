@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const inputs = [
   join(repoRoot, 'target', 'release', 'videorc-backend'),
+  // Plan 209 S4: the stdio bridge agent apps run.
+  join(repoRoot, 'target', 'release', 'videorc-mcp'),
   join(repoRoot, 'vendor', 'ffmpeg', 'linux-x64', 'bin', 'ffmpeg'),
   // The backend resolves ffprobe as a sibling of the bundled ffmpeg.
   join(repoRoot, 'vendor', 'ffmpeg', 'linux-x64', 'bin', 'ffprobe'),

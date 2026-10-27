@@ -48,7 +48,7 @@
     "build:native-preview-addon:release": "node scripts/build-native-preview-addon.mjs --release --universal",
     "package:backend": "cargo build --release -p videorc-backend",
     "package:desktop:linux": "pnpm package:backend && pnpm ffmpeg:fetch:linux && node scripts/preflight-linux-package.mjs && pnpm --filter @videorc/desktop package:linux",
-    "package:backend:macos": "cargo build --release -p videorc-backend --bin videorc-backend --bin native_preview_host_helper && pnpm build:native-preview-addon:release",
+    "package:backend:macos": "cargo build --release -p videorc-backend --bin videorc-backend --bin native_preview_host_helper --bin videorc-mcp && pnpm build:native-preview-addon:release",
     "package:preflight:macos": "node scripts/preflight-macos-package.mjs",
     "package:preflight:windows": "node scripts/preflight-windows-package.mjs",
     "package:preflight:linux": "node scripts/preflight-linux-package.mjs",

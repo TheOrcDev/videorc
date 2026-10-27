@@ -64,6 +64,15 @@ mac:
       to: native_preview_host_helper
       filter:
         - native_preview_host_helper
+    # Plan 209 S4: the stdio bridge agent apps run (`videorc-mcp`). Signed
+    # with the rest: @electron/osx-sign walks Contents/Resources and signs
+    # every Mach-O it finds, the helper above included, so no `binaries`
+    # list is needed; scripts/sign-macos-local-app.mjs and the release
+    # validator name it explicitly.
+    - from: ../../target/release/videorc-mcp
+      to: videorc-mcp
+      filter:
+        - videorc-mcp
     - from: ../../target/release/videorc_native_preview.node
       to: videorc_native_preview.node
       filter:
@@ -124,6 +133,11 @@ win:
     # exe in target/release/, not target/<triple>/release/.
     - from: ../../target/release/videorc-backend.exe
       to: videorc-backend.exe
+    # Plan 209 S4: unsigned inside the installer like videorc-backend.exe
+    # (electron-builder signs the app exe and the installer, not
+    # extraResources); agent apps point at resources\videorc-mcp.exe.
+    - from: ../../target/release/videorc-mcp.exe
+      to: videorc-mcp.exe
     - from: ../../vendor/ffmpeg/windows-x64
       to: ffmpeg
       filter:
@@ -161,6 +175,12 @@ linux:
       to: videorc-backend
       filter:
         - videorc-backend
+    # Plan 209 S4, D20: Connect copies this to ~/.local/share/videorc/bin/
+    # because the AppImage mounts at a new path each launch.
+    - from: ../../target/release/videorc-mcp
+      to: videorc-mcp
+      filter:
+        - videorc-mcp
     - from: ../../vendor/ffmpeg/linux-x64
       to: ffmpeg
       filter:

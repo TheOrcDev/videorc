@@ -16,18 +16,24 @@ pub enum BackendRole {
     /// stream is locked to `remote.state`/`remote.ack` at connection setup.
     /// Assume hostile local software probes the port — everything else 403s.
     Remote,
+    /// AI agents (plan 209). An agent token opens the `/mcp` router on the
+    /// Agents listener and nothing else: `/ws` never authenticates one, and
+    /// this role is admitted to no websocket method at all. Agent tools run
+    /// through the catalog's executors, never through RPC admission.
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodAdmissionError {
     AdminOnly,
+    RendererOnly,
     SmokeDisabled,
 }
 
 impl MethodAdmissionError {
     pub fn code(self) -> &'static str {
         match self {
-            Self::AdminOnly => "forbidden-method",
+            Self::AdminOnly | Self::RendererOnly => "forbidden-method",
             Self::SmokeDisabled => "smoke-method-disabled",
         }
     }
@@ -35,6 +41,7 @@ impl MethodAdmissionError {
     pub fn message(self) -> &'static str {
         match self {
             Self::AdminOnly => "This backend method is restricted to Electron main.",
+            Self::RendererOnly => "This backend method is restricted to the Studio window.",
             Self::SmokeDisabled => "This smoke/test backend method is unavailable in this process.",
         }
     }
@@ -104,6 +111,13 @@ pub fn authorize_backend_method(
     method: &str,
     smoke_rpc_enabled: bool,
 ) -> Result<(), MethodAdmissionError> {
+    // Plan 209 D19, Security: the Agent role reaches no RPC, smoke methods
+    // included. Its only door is the `/mcp` router on the Agents listener,
+    // which calls the catalog's executors directly.
+    if role == BackendRole::Agent {
+        return Err(MethodAdmissionError::AdminOnly);
+    }
+
     if renderer_smoke_method(method) {
         if role == BackendRole::Remote {
             return Err(MethodAdmissionError::AdminOnly);
@@ -141,7 +155,17 @@ pub fn authorize_backend_method(
     if admin_only_method(method) && role != BackendRole::Admin {
         return Err(MethodAdmissionError::AdminOnly);
     }
+    if renderer_only_method(method) && role != BackendRole::Renderer {
+        return Err(MethodAdmissionError::RendererOnly);
+    }
     Ok(())
+}
+
+/// Plan 209 S3: the Studio answers agent intents and publishes the agent
+/// projection. Main never executes an intent, so an admin socket cannot ack
+/// one; remote sockets are already refused by their allowlist.
+fn renderer_only_method(method: &str) -> bool {
+    matches!(method, "agent.intent.ack" | "agent.surface.publish")
 }
 
 fn renderer_smoke_method(method: &str) -> bool {
@@ -466,6 +490,90 @@ mod remote_role_tests {
             assert!(
                 authorize_backend_method(BackendRole::Remote, forbidden, false).is_err(),
                 "remote role must not reach {forbidden}"
+            );
+        }
+    }
+
+    /// Plan 209 D19: the remote allowlist is byte-identical to `dc1309cb`.
+    /// The Agent role is a new door, never a wider old one.
+    #[test]
+    fn remote_allowlist_is_pinned_to_dc1309cb() {
+        let source = include_str!("backend_authority.rs");
+        assert!(
+            source.contains(
+                "fn remote_allowed_method(method: &str) -> bool {\n    matches!(\n        method,\n        \"remote.describe\" | \"remote.intent\" | \"remote.chat.snapshot\"\n    )\n}"
+            ),
+            "the remote allowlist changed; plan 209 forbids widening it"
+        );
+        for allowed in ["remote.describe", "remote.intent", "remote.chat.snapshot"] {
+            assert!(remote_allowed_method(allowed));
+        }
+    }
+
+    #[test]
+    fn agent_role_reaches_no_websocket_method() {
+        for method in [
+            "remote.describe",
+            "remote.intent",
+            "remote.chat.snapshot",
+            "agents.status",
+            "agents.create",
+            "agent.intent.ack",
+            "agent.surface.publish",
+            "session.start",
+            "sessions.list",
+            "banners.show",
+            "session.marker.create",
+            "health.ping",
+            "test.anything",
+            "test.commandLanes.liveControl.block",
+            "events.setIncluded",
+        ] {
+            assert!(
+                authorize_backend_method(BackendRole::Agent, method, true).is_err(),
+                "agent role must not reach {method}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_intent_ack_and_surface_publish_are_renderer_only() {
+        for method in ["agent.intent.ack", "agent.surface.publish"] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Renderer, method, false),
+                Ok(())
+            );
+            assert_eq!(
+                authorize_backend_method(BackendRole::Admin, method, false),
+                Err(MethodAdmissionError::RendererOnly)
+            );
+            assert_eq!(
+                authorize_backend_method(BackendRole::Remote, method, false),
+                Err(MethodAdmissionError::AdminOnly)
+            );
+            assert_eq!(
+                authorize_backend_method(BackendRole::Agent, method, false),
+                Err(MethodAdmissionError::AdminOnly)
+            );
+        }
+        assert_eq!(
+            MethodAdmissionError::RendererOnly.code(),
+            "forbidden-method"
+        );
+        // The admin RPCs for the Agents section stay renderer-and-admin.
+        for method in [
+            "agents.status",
+            "agents.enable",
+            "agents.create",
+            "agents.stop",
+        ] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Admin, method, false),
+                Ok(())
+            );
+            assert_eq!(
+                authorize_backend_method(BackendRole::Renderer, method, false),
+                Ok(())
             );
         }
     }

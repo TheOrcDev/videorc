@@ -4697,6 +4697,121 @@ export interface RemoteLanPairing {
   expiresAt: string
 }
 
+// --- Agents (plan 209): AI agents on this computer run the studio over MCP ---
+
+/** Which app the streamer connected (D6): it picks the config line shown. */
+export type AgentClientKind =
+  | 'claude-desktop'
+  | 'claude-code'
+  | 'cursor'
+  | 'codex'
+  | 'vs-code'
+  | 'other'
+
+/** How an agent action ended; the Activity list's word. */
+export type AgentActivityOutcome = 'ok' | 'refused' | 'failed' | 'timeout'
+
+export interface AgentLastAction {
+  tool: string
+  at: string
+  outcome: AgentActivityOutcome
+}
+
+/** One connected agent. Carries no token: the token exists once, in
+ * `agents.create`'s answer. */
+export interface AgentSummary {
+  id: string
+  name: string
+  client: AgentClientKind
+  createdAt: string
+  lastUsedAt?: string
+  lastAction?: AgentLastAction
+  /** Heard from (a call or the bridge's heartbeat) inside the last 45 s. */
+  connected: boolean
+}
+
+export interface AgentsStatus {
+  enabled: boolean
+  /** Bound port; absent while off or when the bind failed. */
+  port?: number
+  bindError?: string
+  /** Where `agents.json` lives; absent for an in-memory database. */
+  discoveryPath?: string
+  agents: AgentSummary[]
+  connectedCount: number
+  /** A Studio window is attached, so Studio tools can run. */
+  studioOpen: boolean
+}
+
+export interface AgentsCreateParams {
+  name: string
+  client: AgentClientKind
+}
+
+/** The one time the token exists in the clear. Show it once; never store it. */
+export interface AgentCreated {
+  agent: AgentSummary
+  token: string
+}
+
+export interface AgentIdParams {
+  id: string
+}
+
+/** One row of Settings → Remote → Agents → Activity. */
+export interface AgentActivityEntry {
+  id: string
+  at: string
+  agentId: string
+  agentName: string
+  tool: string
+  /** A short rendering of the arguments. */
+  summary: string
+  outcome: AgentActivityOutcome
+  message?: string
+}
+
+export interface AgentsActivityListParams {
+  /** Newest first; default 100, at most 1,000. */
+  limit?: number
+  agentId?: string
+}
+
+export interface AgentsActivityPage {
+  entries: AgentActivityEntry[]
+}
+
+/** A Studio tool call relayed to the renderer (S3): run it through the
+ * Studio action executor and answer with `agent.intent.ack`. */
+export interface AgentIntentEvent {
+  intentId: string
+  agentId: string
+  agentName: string
+  tool: string
+  args: Record<string, unknown>
+}
+
+export interface AgentIntentAckParams {
+  intentId: string
+  ok: boolean
+  /** The app's own sentence; the agent reads it. */
+  message?: string
+  /** The tool's structured result, matching its output schema. */
+  result?: Record<string, unknown>
+}
+
+/** The Studio's projection for `get_status` and the `list_*` tools (S3),
+ * built like the remote surface: allowlisted fields, never a token, a path
+ * or a URL. */
+export interface AgentSurfacePublishParams {
+  surface: Record<string, unknown>
+}
+
+export interface AgentAcknowledged {
+  ok: true
+}
+// --- end Agents (plan 209) ---
+
 export interface GlobalShortcutsConfig {
   layoutNext?: string
   layoutPrevious?: string

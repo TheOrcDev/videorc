@@ -39,6 +39,11 @@ const inputs = [
     remedy: 'pnpm package:backend'
   },
   {
+    // Plan 209 S4: the stdio bridge agent apps run.
+    path: join(repoRoot, 'target', 'release', 'videorc-mcp.exe'),
+    remedy: 'pnpm package:backend'
+  },
+  {
     path: ffmpegExe,
     remedy: 'pnpm ffmpeg:fetch:windows'
   },

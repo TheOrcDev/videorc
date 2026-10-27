@@ -135,6 +135,18 @@ import type {
   UsageStatsState,
   DiscordAnnounceSnapshot,
   DiscordAnnounceUpdateParams,
+  AgentAcknowledged,
+  AgentActivityEntry,
+  AgentCreated,
+  AgentIdParams,
+  AgentIntentAckParams,
+  AgentIntentEvent,
+  AgentsActivityListParams,
+  AgentsActivityPage,
+  AgentsCreateParams,
+  AgentsStatus,
+  AgentSummary,
+  AgentSurfacePublishParams,
   DiscordLinksPreview,
   DiscordTargetsParams,
   DiscordTestParams,
@@ -548,6 +560,24 @@ export interface BackendRpcMethodMap {
   // --- end Buddy pets (plan 168, Phase B) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
+  // --- Agents (plan 209 S2, S3): renderer and admin ---
+  'agents.status': BackendRpcDefinition<undefined, AgentsStatus>
+  'agents.enable': BackendRpcDefinition<undefined, AgentsStatus>
+  'agents.disable': BackendRpcDefinition<undefined, AgentsStatus>
+  /** The token is in the answer once; show it, never store it. */
+  'agents.create': BackendRpcDefinition<AgentsCreateParams, AgentCreated>
+  'agents.remove': BackendRpcDefinition<AgentIdParams, AgentsStatus>
+  'agents.activity.list': BackendRpcDefinition<
+    AgentsActivityListParams | undefined,
+    AgentsActivityPage
+  >
+  /** Stop (D12): every agent is cut and Agents turns off. */
+  'agents.stop': BackendRpcDefinition<undefined, AgentsStatus>
+  /** Renderer-only: the Studio's answer to an `agent.intent` event. */
+  'agent.intent.ack': BackendRpcDefinition<AgentIntentAckParams, AgentAcknowledged>
+  /** Renderer-only: the Studio's projection for the Look tools. */
+  'agent.surface.publish': BackendRpcDefinition<AgentSurfacePublishParams, AgentAcknowledged>
+  // --- end Agents (plan 209) ---
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
   'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
   'liveChat.moderation.request': BackendRpcDefinition<ModerationRequestParams, ModerationOperation>
@@ -651,6 +681,11 @@ export interface BackendEventMap {
   'liveChat.moderationOperation': ModerationOperation
   'youtube.quota': YouTubeQuotaStatus
   'discord.announce.changed': DiscordAnnounceSnapshot
+  // --- Agents (plan 209): renderer sockets only ---
+  'agents.status': AgentsStatus
+  'agents.activity': AgentActivityEntry
+  'agent.intent': AgentIntentEvent
+  // --- end Agents (plan 209) ---
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -1158,6 +1193,115 @@ const discordAnnounceSnapshotSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordAnnounceSnapshot>
+// --- Agents (plan 209): strict shapes, no nulls, no tokens past agents.create ---
+const AGENT_NAME_MAX_CHARS = 40
+const AGENT_TOOL_NAME_MAX_CHARS = 40
+const AGENT_ACTIVITY_MAX_ROWS = 1000
+const agentClientKindSchema = enumSchema([
+  'claude-desktop',
+  'claude-code',
+  'cursor',
+  'codex',
+  'vs-code',
+  'other'
+])
+const agentActivityOutcomeSchema = enumSchema(['ok', 'refused', 'failed', 'timeout'])
+const agentIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const agentNameSchema = stringSchema({ minLength: 1, maxLength: AGENT_NAME_MAX_CHARS * 4 })
+const agentToolNameSchema = stringSchema({ minLength: 1, maxLength: AGENT_TOOL_NAME_MAX_CHARS })
+const agentLastActionSchema = objectSchema(
+  { tool: agentToolNameSchema, at: timestamp, outcome: agentActivityOutcomeSchema },
+  { allowUnknown: false }
+)
+const agentSummarySchema = objectSchema(
+  {
+    id: agentIdSchema,
+    name: agentNameSchema,
+    client: agentClientKindSchema,
+    createdAt: timestamp,
+    lastUsedAt: optionalSchema(timestamp),
+    lastAction: optionalSchema(agentLastActionSchema),
+    connected: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentSummary>
+const agentsStatusSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    port: optionalSchema(numberSchema({ integer: true, min: 1, max: 65_535 })),
+    bindError: optionalSchema(stringSchema({ maxLength: 1024 })),
+    discoveryPath: optionalSchema(boundedPath),
+    agents: arraySchema(agentSummarySchema, { maxLength: 64 }),
+    connectedCount: nonNegativeInteger,
+    studioOpen: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsStatus>
+const agentsCreateParamsSchema = objectSchema(
+  { name: agentNameSchema, client: agentClientKindSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsCreateParams>
+const agentCreatedSchema = objectSchema(
+  { agent: agentSummarySchema, token: stringSchema({ minLength: 1, maxLength: 256 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentCreated>
+const agentIdParamsSchema = objectSchema(
+  { id: agentIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIdParams>
+const agentActivityEntrySchema = objectSchema(
+  {
+    id: agentIdSchema,
+    at: timestamp,
+    agentId: agentIdSchema,
+    agentName: agentNameSchema,
+    tool: agentToolNameSchema,
+    summary: stringSchema({ maxLength: 512 }),
+    outcome: agentActivityOutcomeSchema,
+    message: optionalSchema(stringSchema({ maxLength: 2048 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentActivityEntry>
+const agentsActivityListParamsSchema = objectSchema(
+  {
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: AGENT_ACTIVITY_MAX_ROWS })),
+    agentId: optionalSchema(agentIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsActivityListParams>
+const agentsActivityPageSchema = objectSchema(
+  { entries: arraySchema(agentActivityEntrySchema, { maxLength: AGENT_ACTIVITY_MAX_ROWS }) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsActivityPage>
+const agentIntentEventSchema = objectSchema(
+  {
+    intentId: agentIdSchema,
+    agentId: agentIdSchema,
+    agentName: agentNameSchema,
+    tool: agentToolNameSchema,
+    args: boundedBackendParamValueSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentEvent>
+const agentIntentAckParamsSchema = objectSchema(
+  {
+    intentId: agentIdSchema,
+    ok: booleanSchema,
+    message: optionalSchema(stringSchema({ maxLength: 2048 })),
+    result: optionalSchema(boundedBackendParamValueSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentAckParams>
+const agentSurfacePublishParamsSchema = objectSchema(
+  { surface: boundedBackendParamValueSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentSurfacePublishParams>
+const agentAcknowledgedSchema = objectSchema(
+  { ok: literalSchema(true) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentAcknowledged>
+// --- end Agents (plan 209) ---
+
 const discordAnnounceUpdateParamsSchema = objectSchema(
   {
     enabled: optionalSchema(booleanSchema),
@@ -5065,7 +5209,24 @@ const runtimeContracts = {
   'cohost.report.latest': {
     params: undefinedSchema,
     result: nullableSchema(cohostReportPayloadSchema)
+  },
+  // --- Agents (plan 209 S2, S3) ---
+  'agents.status': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.enable': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.disable': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.create': { params: agentsCreateParamsSchema, result: agentCreatedSchema },
+  'agents.remove': { params: agentIdParamsSchema, result: agentsStatusSchema },
+  'agents.activity.list': {
+    params: optionalSchema(agentsActivityListParamsSchema),
+    result: agentsActivityPageSchema
+  },
+  'agents.stop': { params: undefinedSchema, result: agentsStatusSchema },
+  'agent.intent.ack': { params: agentIntentAckParamsSchema, result: agentAcknowledgedSchema },
+  'agent.surface.publish': {
+    params: agentSurfacePublishParamsSchema,
+    result: agentAcknowledgedSchema
   }
+  // --- end Agents (plan 209) ---
 } satisfies Record<BackendRpcMethod, RuntimeBackendRpcContract>
 
 export function isTypedBackendRpcMethod(method: string): method is BackendRpcMethod {
@@ -5155,7 +5316,12 @@ const runtimeEventSchemas = {
   'liveChat.moderationOperation': moderationOperationSchema,
   'youtube.quota': youtubeQuotaStatusSchema,
   'liveChat.totals': sessionChatTotalsSchema,
-  'discord.announce.changed': discordAnnounceSnapshotSchema
+  'discord.announce.changed': discordAnnounceSnapshotSchema,
+  // --- Agents (plan 209) ---
+  'agents.status': agentsStatusSchema,
+  'agents.activity': agentActivityEntrySchema,
+  'agent.intent': agentIntentEventSchema
+  // --- end Agents (plan 209) ---
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

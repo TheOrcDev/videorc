@@ -6,6 +6,10 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 mod account;
+mod agent_call;
+mod agent_mcp;
+mod agent_registry;
+mod agent_tools;
 mod atomic_file;
 mod audience;
 mod audio;
@@ -672,6 +676,15 @@ async fn run_backend() -> Result<()> {
         );
     }
     crate::remote_lan_server::start_if_enabled(&state).await;
+    // Plan 209: the Agents listener (only while Agents is on) and its
+    // discovery file (always, so the bridge can say "Turn on Agents").
+    crate::agent_mcp::start_if_enabled(&state).await;
+    if let Err(error) = crate::agent_mcp::sync_discovery_file(&state) {
+        state.emit_log(
+            "warn",
+            format!("Agents discovery file could not be written: {error:#}"),
+        );
+    }
     // Restore the signed-in account's verified entitlement at boot so a
     // premium user's cloud AI, co-host, and streaming-quality limits survive
     // an app restart without touching the AI tab first (fail-closed: no
@@ -839,6 +852,7 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
         crate::remote_control::remove_discovery(&path);
     }
     crate::remote_lan_server::stop(&state);
+    crate::agent_mcp::shutdown(&state);
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     state.clean_cut.interrupt_all_for_shutdown();
@@ -4586,11 +4600,30 @@ fn token_expires_soon(expires_at: Option<&str>) -> bool {
 struct ConnectionEventFilter {
     excluded: std::collections::HashSet<String>,
     included: Option<std::collections::HashSet<String>>,
+    /// Plan 209: only the Studio window's socket receives the Agents events.
+    /// Set from the role at connection setup; `events.setExcluded` and
+    /// `events.setIncluded` cannot change it.
+    renderer: bool,
+}
+
+/// Plan 209 S2/S3: the Agents section's status and activity, and the Studio
+/// tool intents, reach renderer sockets only. Main (admin) never executes an
+/// intent, and remote and phone sockets are locked to their own lanes anyway.
+fn renderer_only_event(event: &str) -> bool {
+    matches!(event, "agents.status" | "agents.activity" | "agent.intent")
 }
 
 impl ConnectionEventFilter {
+    fn for_role(role: BackendRole) -> Self {
+        Self {
+            renderer: role == BackendRole::Renderer,
+            ..Self::default()
+        }
+    }
+
     fn allows(&self, event: &str) -> bool {
-        !self.excluded.contains(event)
+        (self.renderer || !renderer_only_event(event))
+            && !self.excluded.contains(event)
             && self
                 .included
                 .as_ref()
@@ -5583,6 +5616,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.control.enable"
         | "remote.control.disable"
         | "remote.control.regenerate"
+        | "agents.enable"
+        | "agents.disable"
+        | "agents.stop"
+        | "agents.create"
+        | "agents.remove"
         | "remote.lan.enable"
         | "remote.lan.disable"
         | "remote.lan.pairing.begin"
@@ -5591,6 +5629,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.devices.rename"
         | "remote.surface.publish"
         | "remote.intent.ack"
+        | "agent.surface.publish"
+        | "agent.intent.ack"
         | "remote.intent"
         | "compositor.scene.update"
         | "preview.camera.start"
@@ -5791,6 +5831,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.status"
         | "remote.chat.snapshot"
         | "remote.describe"
+        | "agents.status"
+        | "agents.activity.list"
         | "compositor.status"
         | "preview.camera.status"
         | "preview.screen.status"
@@ -8108,9 +8150,10 @@ async fn websocket_session_with_handler_role_and_redaction(
                     "remote.ack".to_string(),
                 ])
             }),
+            renderer: false,
         }
     } else {
-        ConnectionEventFilter::default()
+        ConnectionEventFilter::for_role(role)
     }));
     let event_filter_for_events = event_filter.clone();
     // Count Remote clients with a Drop guard: every exit path (early return on
@@ -8135,6 +8178,24 @@ async fn websocket_session_with_handler_role_and_redaction(
         }
         state.emit_event("remote.control.status", remote_control_status(&state));
         RemoteClientCountGuard(state.clone())
+    });
+    // Plan 209 S3: a Studio tool needs a renderer to run in. Counted with a
+    // Drop guard for the same reason as remote clients.
+    struct RendererSocketGuard(AppState);
+    impl Drop for RendererSocketGuard {
+        fn drop(&mut self) {
+            self.0
+                .agents
+                .renderer_sockets
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _renderer_socket_guard = (role == BackendRole::Renderer).then(|| {
+        state
+            .agents
+            .renderer_sockets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RendererSocketGuard(state.clone())
     });
 
     let writer_task = tokio::spawn(run_websocket_writer(
@@ -10448,6 +10509,84 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 209 S2: the Agents section's RPCs (renderer and admin).
+        "agents.status" => ServerResponse::ok(command.id, crate::agent_mcp::status(state)),
+        "agents.enable" => match crate::agent_mcp::enable(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+        },
+        // Stop (D12) is Off: every agent is cut and the port closes.
+        "agents.disable" | "agents.stop" => match crate::agent_mcp::disable(state) {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+        },
+        "agents.create" => {
+            match serde_json::from_value::<crate::agent_mcp::CreateAgentParams>(command.params) {
+                Ok(params) => match crate::agent_mcp::create_agent(state, params) {
+                    Ok(created) => ServerResponse::ok(command.id, created),
+                    Err(message) => ServerResponse::error(command.id, "agents", message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "agents.remove" => {
+            match serde_json::from_value::<crate::agent_mcp::AgentIdParams>(command.params) {
+                Ok(params) => match crate::agent_mcp::remove_agent(state, params) {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "agents.activity.list" => {
+            match serde_json::from_value::<crate::agent_mcp::ActivityListParams>(
+                if command.params.is_null() {
+                    serde_json::json!({})
+                } else {
+                    command.params
+                },
+            ) {
+                Ok(params) => match crate::agent_mcp::activity(state, params) {
+                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 209 S3 (renderer-only, `backend_authority`): the Studio's
+        // answer to an `agent.intent`. A late or unknown id is still `ok`:
+        // the agent's call already ended with its timeout sentence.
+        "agent.intent.ack" => {
+            match serde_json::from_value::<crate::agent_mcp::AgentIntentAck>(command.params) {
+                Ok(ack) => {
+                    crate::agent_call::ack_studio_intent(state, ack);
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 209 S3 (renderer-only): the Studio's projection for
+        // `get_status` and the `list_*` tools. Stored, deduped, never relayed
+        // to any socket.
+        "agent.surface.publish" => match command.params.get("surface") {
+            Some(surface) if surface.is_object() => {
+                crate::agent_call::publish_surface(state, surface.clone());
+                ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+            }
+            _ => ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "agent.surface.publish needs a surface object.".to_string(),
+            ),
+        },
         "remote.control.status" => ServerResponse::ok(command.id, remote_control_status(state)),
         "remote.control.enable" => match enable_remote_control(state) {
             Ok(status) => ServerResponse::ok(command.id, status),
@@ -19550,6 +19689,7 @@ mod tests {
         let event_filter = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter {
             excluded: std::collections::HashSet::from(["events.lagged".to_string()]),
             included: None,
+            renderer: false,
         }));
         let relay = tokio::spawn(relay_websocket_events(
             relay_state.clone(),
@@ -22839,5 +22979,140 @@ mod tests {
         );
         let only_twitch: std::collections::HashSet<&str> = ["twitch"].into_iter().collect();
         assert_eq!(session_audience_sources(&streaming, &only_twitch).len(), 1);
+    }
+}
+
+/// Plan 209 (S2): the Agent role is a new door, never a wider old one.
+#[cfg(test)]
+mod agent_role_tests {
+    use super::*;
+    use crate::agent_mcp::test_support;
+
+    /// D19: Phone remote's event list and the remote intent surface are
+    /// byte-identical to `dc1309cb`. A change here needs its own plan and a
+    /// leak argument, never a ride on the Agents work.
+    #[test]
+    fn remote_surface_is_pinned_to_dc1309cb() {
+        assert_eq!(
+            crate::remote_lan::LAN_EVENTS,
+            &[
+                "remote.state",
+                "remote.ack",
+                "remote.chat.message",
+                "remote.chat.reset",
+                "remote.highlight",
+            ]
+        );
+        let source = include_str!("remote_control.rs");
+        let start = source
+            .find("pub enum RemoteIntent {")
+            .expect("RemoteIntent enum");
+        let end = source[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset + 3)
+            .expect("RemoteIntent enum end");
+        let block = &source[start..end];
+        let mut digest = <sha2::Sha256 as sha2::Digest>::new();
+        sha2::Digest::update(&mut digest, block.as_bytes());
+        let hash = sha2::Digest::finalize(digest)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            hash, "4858a6c539c15f41af2682f40b038cbf53d89f8d2897a6db4a089c4f9d45f466",
+            "RemoteIntent is not byte-identical to dc1309cb"
+        );
+    }
+
+    /// S2/S3: the Agents events reach renderer sockets only, and an admin
+    /// socket cannot widen its filter into them.
+    #[test]
+    fn agents_events_reach_renderer_sockets_only() {
+        let renderer = ConnectionEventFilter::for_role(BackendRole::Renderer);
+        let admin = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::for_role(
+            BackendRole::Admin,
+        )));
+        for event in ["agents.status", "agents.activity", "agent.intent"] {
+            assert!(renderer.allows(event), "{event}");
+            assert!(!admin.lock().unwrap().allows(event), "{event}");
+        }
+        assert!(admin.lock().unwrap().allows("remote.control.status"));
+        handle_connection_control(
+            &admin,
+            r#"{"id":"i","method":"events.setIncluded","params":{"events":["agent.intent"]}}"#,
+        )
+        .expect("connection control");
+        assert!(!admin.lock().unwrap().allows("agent.intent"));
+        assert!(
+            crate::remote_lan::LAN_EVENTS
+                .iter()
+                .all(|event| !renderer_only_event(event))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_refuses_agent_tokens_and_the_agents_rpcs_are_renderer_and_admin() {
+        let state = test_support::test_state();
+        let (_, token) = test_support::connect_agent(&state, "Claude Code");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={token}"))
+                .await
+                .is_err(),
+            "an agent token must never open the websocket"
+        );
+        // The renderer and admin sockets still open, and the agents RPCs
+        // answer on them; a remote socket never reaches them.
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={}", state.token))
+                .await
+                .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"id":"s","method":"agents.status"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let answer = loop {
+            let message = timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("answer in time")
+                .expect("socket open")
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if value["id"] == "s" {
+                break value;
+            }
+        };
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["payload"]["agents"][0]["name"], "Claude Code");
+        assert!(answer["payload"]["agents"][0].get("tokenHash").is_none());
+        assert_eq!(
+            authorize_backend_method(BackendRole::Remote, "agents.status", false),
+            Err(crate::backend_authority::MethodAdmissionError::AdminOnly)
+        );
+        // Every agents RPC arm has an execution policy, like the rest.
+        for method in [
+            "agents.status",
+            "agents.enable",
+            "agents.disable",
+            "agents.stop",
+            "agents.create",
+            "agents.remove",
+            "agents.activity.list",
+        ] {
+            assert!(
+                websocket_method_execution_policy(method).is_some(),
+                "{method} has no execution policy"
+            );
+        }
     }
 }

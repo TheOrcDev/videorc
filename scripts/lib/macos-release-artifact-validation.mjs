@@ -38,6 +38,13 @@ export function captureEntitlementCheckTargets(appPath) {
       label: 'native_preview_host_helper',
       path: `${appPath}/Contents/Resources/native_preview_host_helper`
     },
+    // Plan 209 S4: the stdio bridge is signed with the same plist as the
+    // helper, so the same check proves it is present, signed and entitled.
+    {
+      id: 'videorc-mcp',
+      label: 'videorc-mcp',
+      path: `${appPath}/Contents/Resources/videorc-mcp`
+    },
     { id: 'ffmpeg', label: 'ffmpeg', path: `${appPath}/Contents/Resources/ffmpeg/bin/ffmpeg` },
     { id: 'ffprobe', label: 'ffprobe', path: `${appPath}/Contents/Resources/ffmpeg/bin/ffprobe` }
   ]
