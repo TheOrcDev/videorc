@@ -131,6 +131,15 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     ).toThrow(/onAir/)
   })
 
+  it('fails on a description outside 40 to 400 characters, like Rust', () => {
+    const short = JSON.parse(fixtureText) as { tools: { description: string }[] }
+    short.tools[0]!.description = 'Too short to say when.'
+    expect(() => parseAgentToolCatalog(short)).toThrow(/must be 40 to 400/)
+    const long = JSON.parse(fixtureText) as { tools: { description: string }[] }
+    long.tools[0]!.description = 'x'.repeat(401)
+    expect(() => parseAgentToolCatalog(long)).toThrow(/must be 40 to 400/)
+  })
+
   it('checks arguments against the input schema with the same sentences as Rust', () => {
     const notify = agentTool('notify')!
     expect(validateAgentToolArguments(notify, { message: 'hi' })).toBeNull()

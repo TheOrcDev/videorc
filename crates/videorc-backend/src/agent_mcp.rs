@@ -408,10 +408,10 @@ pub fn log_activity(
         at: chrono::Utc::now().to_rfc3339(),
         agent_id: agent.id.clone(),
         agent_name: agent.name.clone(),
-        tool: tool.to_string(),
+        tool: activity_tool_label(tool),
         summary,
         outcome,
-        message,
+        message: message.map(|text| clip_chars(&text, ACTIVITY_MESSAGE_MAX_CHARS)),
     };
     if let Err(error) = state.database.insert_agent_activity(&entry) {
         tracing::warn!("Could not record agent activity: {error:#}");
@@ -425,6 +425,36 @@ pub fn log_activity(
         },
     );
     state.emit_event("agents.activity", entry);
+}
+
+/// The strict contract bounds an activity row (`backend-rpc-contract.ts`):
+/// a tool label of 1 to 40 characters and a message of at most 2,048. An
+/// agent can call a tool name or pass an argument of any length, and the
+/// refusal sentence may quote it, so both are clipped before the row exists.
+pub const ACTIVITY_TOOL_MAX_CHARS: usize = 40;
+pub const ACTIVITY_MESSAGE_MAX_CHARS: usize = 1_000;
+
+pub fn activity_tool_label(tool: &str) -> String {
+    let label: String = tool
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    let label = clip_chars(label.trim(), ACTIVITY_TOOL_MAX_CHARS);
+    if label.is_empty() {
+        "unknown".to_string()
+    } else {
+        label
+    }
+}
+
+/// At most `max` characters, the last one an ellipsis when cut.
+pub fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }
 
 /// A call or heartbeat from an agent: presence for the Session line, and
@@ -729,6 +759,11 @@ async fn guard(State(state): State<AppState>, mut request: Request, next: Next) 
         );
         return response;
     };
+    // Stop (D12) closes the port, but a kept-alive connection can still
+    // carry one more request while the server drains: refuse it here.
+    if !registry(&state).persisted.enabled {
+        return plain(StatusCode::SERVICE_UNAVAILABLE, "");
+    }
     // The role and the identity ride the request to the tool executors.
     request.extensions_mut().insert(BackendRole::Agent);
     request.extensions_mut().insert(identity);
@@ -955,9 +990,11 @@ mod tests {
             format!("localhost:{}", address.port()),
             "127.0.0.1".to_string(),
         ] {
+            // Streamable HTTP: a client accepts JSON and SSE (else 406).
             let response = client
                 .post(format!("http://{address}/mcp"))
                 .header("host", &host)
+                .header("accept", "application/json, text/event-stream")
                 .bearer_auth(&token)
                 .json(&ping)
                 .send()
@@ -1206,7 +1243,8 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["protocol", "pid", "enabled", "port"]);
+        // serde_json's map is sorted: the exact set, no token among it.
+        assert_eq!(keys, ["enabled", "pid", "port", "protocol"]);
         write_discovery(
             &path,
             &AgentsDiscovery {
@@ -1329,6 +1367,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.database.agent_activity_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn activity_rows_stay_inside_the_contract_bounds() {
+        assert_eq!(activity_tool_label("set_banner"), "set_banner");
+        assert_eq!(activity_tool_label(""), "unknown");
+        assert_eq!(activity_tool_label("\u{0}\n"), "unknown");
+        let long = activity_tool_label(&"x".repeat(500));
+        assert_eq!(long.chars().count(), ACTIVITY_TOOL_MAX_CHARS);
+        assert!(long.ends_with('…'));
+        assert_eq!(clip_chars("short", 10), "short");
+        let state = test_state();
+        let (agent, _) = connect_agent(&state, "Cursor");
+        log_activity(
+            &state,
+            &agent,
+            &"y".repeat(300),
+            String::new(),
+            AgentActivityOutcome::Refused,
+            Some("z".repeat(5_000)),
+        );
+        let row = &activity(&state, ActivityListParams::default())
+            .unwrap()
+            .entries[0];
+        assert_eq!(row.tool.chars().count(), ACTIVITY_TOOL_MAX_CHARS);
+        assert_eq!(
+            row.message.as_ref().unwrap().chars().count(),
+            ACTIVITY_MESSAGE_MAX_CHARS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_draining_listener_refuses_once_agents_is_off() {
+        let state = test_state();
+        let address = serve(&state).await;
+        let (_, token) = connect_agent(&state, "Codex");
+        let ping = rpc(1, "ping", serde_json::json!({}));
+        assert_eq!(
+            post(address, Some(&token), ping.clone()).await.status(),
+            200
+        );
+        state.agent_registry.lock().unwrap().persisted.enabled = false;
+        assert_eq!(post(address, Some(&token), ping).await.status(), 503);
     }
 
     #[test]

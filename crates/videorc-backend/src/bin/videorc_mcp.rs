@@ -369,6 +369,10 @@ impl Bridge {
                     if status == reqwest::StatusCode::UNAUTHORIZED {
                         return response(&id, refusal(BAD_TOKEN));
                     }
+                    // Agents was turned off while this connection was open.
+                    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                        return response(&id, refusal(TURN_ON_AGENTS));
+                    }
                     let content_type = http
                         .headers()
                         .get("content-type")

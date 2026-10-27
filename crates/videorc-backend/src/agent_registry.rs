@@ -255,15 +255,23 @@ pub fn generate_token() -> String {
 }
 
 /// One line, collapsed whitespace, at most `MAX_AGENT_NAME_CHARS` graphemes.
+/// A pile of combining marks is one grapheme: the name also stops at twice
+/// the grapheme cap in chars, which keeps it inside the strict contract's 160
+/// UTF-16 units.
 pub fn sanitize_agent_name(raw: &str) -> String {
     let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out = String::new();
+    let mut chars = 0;
     for (index, grapheme) in collapsed.graphemes(true).enumerate() {
         if index >= MAX_AGENT_NAME_CHARS {
             break;
         }
         if grapheme.chars().any(char::is_control) {
             continue;
+        }
+        chars += grapheme.chars().count();
+        if chars > MAX_AGENT_NAME_CHARS * 2 {
+            break;
         }
         out.push_str(grapheme);
     }
@@ -352,6 +360,8 @@ mod tests {
             MAX_AGENT_NAME_CHARS
         );
         assert_eq!(sanitize_agent_name("a\u{0}b\tc"), "ab c");
+        let zalgo = format!("a{}", "\u{0301}".repeat(500));
+        assert!(sanitize_agent_name(&zalgo.repeat(3)).chars().count() <= MAX_AGENT_NAME_CHARS * 2);
     }
 
     #[test]

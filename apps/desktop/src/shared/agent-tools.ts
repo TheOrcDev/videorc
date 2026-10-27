@@ -391,6 +391,15 @@ export function parseAgentToolCatalog(raw: unknown): AgentToolCatalog {
     const title = expectString(entry, 'title', where)
     if (title.trim().length === 0) throw new Error(`Tool \`${name}\` needs a title.`)
     const description = expectString(entry, 'description', where)
+    const descriptionChars = [...description].length
+    if (
+      descriptionChars < MIN_AGENT_TOOL_DESCRIPTION_CHARS ||
+      descriptionChars > MAX_AGENT_TOOL_DESCRIPTION_CHARS
+    ) {
+      throw new Error(
+        `Tool \`${name}\` description is ${descriptionChars} characters; it must be ${MIN_AGENT_TOOL_DESCRIPTION_CHARS} to ${MAX_AGENT_TOOL_DESCRIPTION_CHARS}.`
+      )
+    }
     const inputSchema = entry.inputSchema
     const outputSchema = entry.outputSchema
     try {

@@ -234,12 +234,7 @@ pub fn summarize_arguments(arguments: &Value) -> String {
         Value::Object(fields) if fields.is_empty() => String::new(),
         other => other.to_string(),
     };
-    if text.chars().count() <= SUMMARY_MAX_CHARS {
-        return text;
-    }
-    let mut cut: String = text.chars().take(SUMMARY_MAX_CHARS - 1).collect();
-    cut.push('…');
-    cut
+    agent_mcp::clip_chars(&text, SUMMARY_MAX_CHARS)
 }
 
 fn clock(seconds: f64) -> String {
