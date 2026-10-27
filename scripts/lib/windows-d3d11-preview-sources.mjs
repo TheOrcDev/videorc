@@ -1,0 +1,83 @@
+// A Windows D3D11 preview gate needs a live D3D11 media generation before the
+// backend presenter has anything to present. The renderer's default camera
+// scene never starts one on a box without a camera, so D3D11-mode smokes and
+// probes point the renderer at one real DXGI screen through the smoke-only
+// `windows-d3d11-preview-harness` command.
+
+import { connectBackend, request } from '../smoke-recording-session.mjs'
+import { nativeWindowsScreenCandidates } from './windows-native-screen-gates.mjs'
+
+export const WINDOWS_D3D11_PREVIEW_HARNESS_COMMAND = 'windows-d3d11-preview-harness'
+
+/** The renderer selected `screenId` as its only source in ScreenOnly. */
+export function windowsD3d11HarnessStateFailures(state, screenId) {
+  const failures = []
+  const sources = state?.sources
+  if (sources?.screenId !== screenId) failures.push(`screenId=${sources?.screenId ?? 'missing'}`)
+  if (sources?.cameraId !== undefined) failures.push(`cameraId=${sources.cameraId}`)
+  if (sources?.cameraOff !== true) failures.push('camera is not off')
+  if (sources?.microphoneId !== undefined) failures.push(`microphoneId=${sources.microphoneId}`)
+  if (sources?.testPattern !== false) failures.push('test pattern is selected')
+  if (state?.layout?.layoutPreset !== 'screen-only') {
+    failures.push(`layout=${state?.layout?.layoutPreset ?? 'missing'}`)
+  }
+  return failures
+}
+
+/** Desktop Duplication only: the gdigrab fallback never feeds D3D11 media. */
+export function windowsD3d11ProbeScreenId(devices) {
+  return (
+    nativeWindowsScreenCandidates(devices).find((candidate) =>
+      candidate.id.startsWith('screen:dxgi:')
+    )?.id ?? null
+  )
+}
+
+export async function configureWindowsD3d11RendererSources(smokeCommand, screenId) {
+  const state = await smokeCommand(WINDOWS_D3D11_PREVIEW_HARNESS_COMMAND, {
+    action: 'configure',
+    screenId
+  })
+  const failures = windowsD3d11HarnessStateFailures(state, screenId)
+  if (failures.length > 0) {
+    throw new Error(
+      `Renderer did not select screen ${screenId} as its only ScreenOnly source (${failures.join(', ')}): ${JSON.stringify(state)}`
+    )
+  }
+  return state
+}
+
+/** Before its first device refresh the renderer does not know the screen yet. */
+export function windowsD3d11HarnessScreenNotListed(error) {
+  return /could not select available screen/.test(String(error?.message ?? error))
+}
+
+/** For probes that hold only the app's backend-ready marker. */
+export async function configureWindowsD3d11ProbeSources({
+  backendConnection,
+  smokeCommand,
+  timeoutMs
+}) {
+  const ws = await connectBackend(backendConnection, timeoutMs)
+  try {
+    const devices = await request(ws, timeoutMs, 'devices.list', {})
+    const screenId = windowsD3d11ProbeScreenId(devices?.devices ?? [])
+    if (!screenId) {
+      throw new Error(
+        `No DXGI screen is available for the Windows D3D11 preview probe: ${JSON.stringify(devices?.devices ?? [])}`
+      )
+    }
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      try {
+        await configureWindowsD3d11RendererSources(smokeCommand, screenId)
+        return screenId
+      } catch (error) {
+        if (!windowsD3d11HarnessScreenNotListed(error) || Date.now() >= deadline) throw error
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+    }
+  } finally {
+    ws.close()
+  }
+}

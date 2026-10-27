@@ -36,6 +36,7 @@ import {
   windowsPreviewLifecycleOpenFailures,
   windowsPreviewPresenterFailures
 } from './lib/windows-preview-lifecycle-gates.mjs'
+import { configureWindowsD3d11ProbeSources } from './lib/windows-d3d11-preview-sources.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const expectWindowsD3d11 = process.env.VIDEORC_EXPECT_WINDOWS_D3D11 === '1'
@@ -143,7 +144,8 @@ async function main() {
         ? {
             VIDEORC_WINDOWS_D3D11_MEDIA: '1',
             VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
-            VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
+            VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts',
+            VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1'
           }
         : {})
     },
@@ -162,6 +164,12 @@ async function main() {
   await smokeCommand('enable-synthetic-source', { settleMs: 250 })
   await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
   if (expectWindowsD3d11) {
+    const screenId = await configureWindowsD3d11ProbeSources({
+      backendConnection: launched.connections['backend-ready'],
+      smokeCommand,
+      timeoutMs
+    })
+    console.log(`Preview window probe feeds the D3D11 media path from ${screenId}.`)
     return runWindowsD3d11WindowProbe()
   }
 

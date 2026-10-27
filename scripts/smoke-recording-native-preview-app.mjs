@@ -17,6 +17,7 @@ import {
   summarizeNativePreviewRecordingDiagnostics
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
+import { configureWindowsD3d11RendererSources } from './lib/windows-d3d11-preview-sources.mjs'
 import {
   nativePreviewSurfaceStatusReady,
   previewWindowSurfaceReady,
@@ -335,22 +336,10 @@ async function startPackagedWindowsScreenPreview(ws) {
 }
 
 async function configurePackagedWindowsD3d11RendererSources(smoke, screenId) {
-  const state = await smokeCommand(smoke, 'windows-d3d11-preview-harness', {
-    action: 'configure',
+  await configureWindowsD3d11RendererSources(
+    (command, params) => smokeCommand(smoke, command, params),
     screenId
-  })
-  if (
-    state?.sources?.screenId !== screenId ||
-    state.sources.cameraId !== undefined ||
-    state.sources.cameraOff !== true ||
-    state.sources.microphoneId !== undefined ||
-    state.sources.testPattern !== false ||
-    state.layout?.layoutPreset !== 'screen-only'
-  ) {
-    throw new Error(
-      `Packaged renderer did not select screen ${screenId} as its only ScreenOnly source: ${JSON.stringify(state)}`
-    )
-  }
+  )
   console.log(`Native-preview recording smoke set renderer sources to ${screenId} + ScreenOnly.`)
 }
 
