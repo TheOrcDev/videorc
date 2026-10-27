@@ -1,5 +1,16 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
+  steps 2 to 5. Owner request: after permissions, "What are you making?",
+  "Your look", "Sound check" and "Where you stream". The goal (Recordings,
+  Livestreams or Both) decides whether the streaming step shows. Your look
+  picks orientation, layout, camera shape and a live background on the
+  scene's own picture, with the background moving. Sound check is the
+  microphone, its level with a verdict, "Set level for me", and System
+  audio. Where you stream signs in to YouTube, Twitch, Kick or X and turns
+  each one on. Nothing in setup opens a capture device. It also fixes
+  "Clips couldn't start" on a fresh install without a screen. **PLANNED**,
+  D1 to D12 recommended, owner review pending.
 - 2026-10-27: [Plan 206](206-facebook-live.md), Facebook Live in the
   Livestream tab. Owner request: a Facebook connector like the other
   platforms, stream key first, the rest once Meta approves. Phase 1 (one
