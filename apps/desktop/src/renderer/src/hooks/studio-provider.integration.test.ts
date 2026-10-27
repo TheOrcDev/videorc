@@ -134,6 +134,7 @@ import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlement
 import type { SessionStopOrigin } from '../lib/session-stop'
 import {
   buildCameraSources,
+  buildCaptureSources,
   buildMicrophoneSources,
   defaultCaptureConfig,
   STORAGE_KEYS,
@@ -5786,6 +5787,175 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.layout.cameraZoom).toBe(175)
   })
 
+  // Owner, 2026-10-27: a saved scene keeps its screen, microphone and System
+  // audio, and choosing it brings all three back, idle and while recording.
+  it('saves the screen, microphone and System audio with a scene and restores them', async () => {
+    const screen1 = 'screen:dxgi:0000000000000001:1'
+    const screen2 = 'screen:dxgi:0000000000000001:2'
+    const backend = new StudioBackend()
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: screen2,
+          name: 'Display 2',
+          kind: 'screen',
+          status: 'available',
+          width: 1920,
+          height: 1080
+        },
+        { id: 'mic:2', name: 'Microphone 2', kind: 'microphone', status: 'available' }
+      ]
+    }
+    backend.reportsActiveSceneRevision = true
+    const respond = backend.response.bind(backend)
+    backend.response = (command) => {
+      const result = respond(command)
+      if (command.method === 'scene.layout.apply_live') {
+        // Like the real backend: a live scene commit moves the session's
+        // source revision on, so a switch built before it is refused.
+        backend.confirmedSourceRevision += 1
+        queueMicrotask(() =>
+          backend.sockets[0]?.onmessage?.({
+            data: JSON.stringify({
+              event: 'session.sources.changed',
+              payload: backend.sourceSnapshot(backend.recordingSessionId ?? '')
+            })
+          })
+        )
+      }
+      return result
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest().canSaveScene &&
+        latest().captureConfig.sources.screenId === screen1 &&
+        latest().captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      expect(latest().saveScene('Desk')).toBe(true)
+    })
+    const desk = latest().savedScenes[0]
+    expect(desk.visual.sources.screenId).toBe(screen1)
+    expect(desk.audio).toStrictEqual({
+      microphoneId: 'mic:1',
+      microphoneName: 'Microphone 1',
+      microphoneOff: false,
+      systemAudioEnabled: false
+    })
+    expect(JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].audio).toMatchObject({
+      microphoneId: 'mic:1',
+      systemAudioEnabled: false
+    })
+
+    const devices = latest().deviceList.devices
+    const pickOthers = async (): Promise<void> => {
+      await act(async () =>
+        latest().switchSourceDeviceLive(
+          'microphone',
+          buildMicrophoneSources(
+            latest().captureConfig.sources,
+            devices.filter((device) => device.kind === 'microphone'),
+            'mic:2'
+          )
+        )
+      )
+      await act(async () =>
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, systemAudioEnabled: true }
+        }))
+      )
+    }
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'capture',
+        buildCaptureSources(
+          latest().captureConfig.sources,
+          devices.filter((device) => device.kind === 'screen'),
+          screen2
+        )
+      )
+    )
+    await pickOthers()
+    await waitForObservation(
+      () =>
+        latest().captureConfig.sources.screenId === screen2 &&
+        latest().captureConfig.sources.microphoneId === 'mic:2' &&
+        latest().captureConfig.audio.systemAudioEnabled
+    )
+    expect(latest().activeSavedSceneId).toBe(desk.id)
+    expect(latest().savedSceneModified).toBe(true)
+
+    const idleFrom = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(desk.id)).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        latest().layoutSwitchPending === null &&
+        latest().captureConfig.sources.microphoneId === 'mic:1' &&
+        !latest().captureConfig.audio.systemAudioEnabled
+    )
+    expect(latest().captureConfig.sources.screenId).toBe(screen1)
+    expect(latest().savedSceneModified).toBe(false)
+    const idleSent = backend.sentCommands.slice(idleFrom)
+    expect(
+      idleSent.find((command) => command.method.startsWith('scene.layout.apply'))?.params
+    ).toMatchObject({ sources: { screenId: screen1, microphoneId: 'mic:1' } })
+    expect(idleSent.some((command) => command.method === 'session.source.switch')).toBe(false)
+
+    // While recording, the session switches to the scene's microphone.
+    await act(async () => latest().startSession())
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.recording.recording.state === 'recording' &&
+        latest().sourceSelectionState.snapshot !== null
+    )
+    await pickOthers()
+    await waitForObservation(
+      () =>
+        backend.confirmedSources.microphoneId === 'mic:2' &&
+        latest().captureConfig.sources.microphoneId === 'mic:2' &&
+        latest().captureConfig.audio.systemAudioEnabled &&
+        latest().sourceSelectionState.pending === null
+    )
+    const liveFrom = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(desk.id)).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        backend.confirmedSources.microphoneId === 'mic:1' &&
+        latest().captureConfig.sources.microphoneId === 'mic:1' &&
+        latest().layoutSwitchPending === null
+    )
+    expect(latest().captureConfig.audio.systemAudioEnabled).toBe(false)
+    const switches = backend.sentCommands
+      .slice(liveFrom)
+      .filter((command) => command.method === 'session.source.switch')
+    expect(switches).toHaveLength(1)
+    expect(switches[0].params).toMatchObject({ kind: 'microphone', deviceId: 'mic:1' })
+    expect(latest().savedSceneModified).toBe(false)
+  }, 15_000)
+
   it('refreshes only the device list from Sources, and keeps it when other reads would fail (C-32)', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
@@ -7283,6 +7453,8 @@ describe('real StudioProvider lifecycle', () => {
     )
     await act(async () => latest()!.replay.setEnabled(true))
     await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+    expect(latest()?.core.audioBusActive).toBe(true)
+    expect(latest()?.core.isSessionActive).toBe(false)
     expect(latest()?.core.sourceSwitchReason('capture')).toBeNull()
     expect(latest()?.core.sourceSwitchReason('camera')).toBeNull()
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
@@ -7316,6 +7488,8 @@ describe('real StudioProvider lifecycle', () => {
       )
     })
     expect(latest()?.recording.recording.replayOnly).toBe(true)
+    expect(latest()?.core.audioBusActive).toBe(true)
+    expect(latest()?.core.isSessionActive).toBe(false)
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
   }, 15_000)
 
@@ -8636,7 +8810,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'linux',
       getMediaAccessStatus: async () => ({
         camera: 'not-applicable',
-        microphone: 'not-applicable'
+        microphone: 'not-applicable',
+        screen: 'not-applicable'
       })
     })
     const testDom = installProviderTestEnvironment(api)
@@ -8700,7 +8875,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions
@@ -8763,7 +8939,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -9436,7 +9613,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -10328,7 +10506,7 @@ describe('real StudioProvider lifecycle', () => {
         if (!statusReadAvailable) {
           throw new Error('TCC status read failed')
         }
-        return { camera: 'not-determined', microphone: 'granted' }
+        return { camera: 'not-determined', microphone: 'granted', screen: 'granted' }
       },
       requestMediaAccess,
       openSystemPermissions
@@ -10393,7 +10571,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'denied' }),
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'denied',
+        screen: 'granted'
+      }),
       requestMediaAccess,
       openSystemPermissions
     })
@@ -10435,9 +10617,121 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(latest()?.audio.audioMeter).toBeNull()
+    expect(latest()?.core.systemAccessContext.pendingPane).toBe('microphone')
     expect(openSystemPermissions).toHaveBeenCalledWith('microphone')
     expect(requestMediaAccess).not.toHaveBeenCalled()
   })
+
+  it.each(['available', 'permission-required'] as const)(
+    'keeps screen grants checking until a replacement publishes %s devices',
+    async (replacementStatus) => {
+      const initial = new StudioBackend()
+      const screenDevices = (status: Device['status']): DeviceList => ({
+        devices: [{ id: 'screen:screencapturekit:1', kind: 'screen', name: 'Display', status }],
+        warnings: []
+      })
+      initial.deviceList = screenDevices('permission-required')
+      TestWebSocket.backend = initial
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      let screen: 'not-determined' | 'granted' = 'not-determined'
+      let emit: ((name: string, value: unknown) => void) | undefined
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => [],
+        platform: 'darwin',
+        backendConnection: { host: '127.0.0.1', port: 9988, pid: 401, token: 'initial' },
+        getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted', screen }),
+        registerEmitter: (nextEmit) => {
+          emit = nextEmit
+        }
+      })
+      api.requestScreenAccess = vi.fn(async () => {
+        screen = 'granted'
+        return {
+          granted: true,
+          status: screen,
+          restarted: false,
+          staleBackend: { port: 9988, pid: 401 }
+        }
+      })
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = () => observations.at(-1)!
+      const access = () =>
+        systemAccessRows({
+          ...latest().core.systemAccessContext,
+          deviceList: latest().core.deviceList,
+          audioMeter: latest().audio.audioMeter,
+          mediaAccess: latest().core.mediaAccess,
+          platform: 'darwin'
+        })[0]
+      await act(async () => {
+        root = createRoot(testDom.container)
+        root.render(
+          createElement(
+            BackgroundAssetsProvider,
+            null,
+            createElement(
+              StudioProvider,
+              null,
+              createElement(Probe, {
+                observe: (value) => {
+                  observations.push(value)
+                }
+              })
+            )
+          )
+        )
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          latest()?.core.mediaAccess?.screen === 'not-determined'
+      )
+      expect(access().state).toBe('first-use')
+      await act(async () => {
+        await latest().core.handleSystemPermission('screen-recording')
+      })
+      expect(latest().core.systemAccessContext.pendingPane).toBeNull()
+      expect(access()).toMatchObject({ checking: true })
+      expect(access().state).not.toBe('not-granted')
+      expect(access().state).not.toBe('needs-relaunch')
+
+      // A new renderer client on the retired process is not replacement proof.
+      act(() =>
+        emit?.('backend:connection', { host: '127.0.0.1', port: 9988, pid: 401, token: 'retired' })
+      )
+      await waitForObservation(
+        () => initial.commands.filter((command) => command.method === 'devices.list').length > 1
+      )
+      expect(access().checking).toBe(true)
+
+      const replacement = new StudioBackend()
+      replacement.deviceList = screenDevices(replacementStatus)
+      const releaseDevices = replacement.deferResponse('devices.list', replacement.deviceList)
+      TestWebSocket.backend = replacement
+      act(() =>
+        emit?.('backend:connection', {
+          host: '127.0.0.1',
+          port: 9991,
+          pid: 402,
+          token: 'replacement'
+        })
+      )
+      await waitForObservation(() =>
+        replacement.sentCommands.some((command) => command.method === 'devices.list')
+      )
+      expect(access().checking).toBe(true)
+      await act(async () => releaseDevices())
+      await waitForObservation(() => !access().checking)
+      expect(access().state).toBe(replacementStatus === 'available' ? 'granted' : 'needs-relaunch')
+      expect(latest().core.systemAccessContext.captureRestarting).toBe(false)
+      expect(latest().core.systemAccessContext.screenGrantStale).toBe(false)
+    }
+  )
 
   it('refreshes exact permission and devices through the reconnected backend after a grant', async () => {
     const initialBackend = new StudioBackend()
@@ -10468,7 +10762,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions,
@@ -10568,7 +10863,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 101 },
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10694,7 +10990,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10798,7 +11095,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 401 },
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -15420,7 +15718,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted' })
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'granted',
+        screen: 'granted'
+      })
     })
     const testDom = installProviderTestEnvironment(api)
     const audio = installVisualMicAudioEnvironment()
@@ -15662,6 +15964,7 @@ function createVideorcApi(options: {
         gpuDevices: [],
         hardwareAccelerationDisabled: false,
         isPackaged: false,
+        firstRunSuppressed: false,
         permissionTargetName: 'Videorc',
         permissionTargetPath: 'C:\\Videorc.exe',
         capturePermissionTargetName: 'Videorc',
@@ -15696,7 +15999,7 @@ function createVideorcApi(options: {
       getCaptionsWindowState: async () => idleCaptions,
       getMediaAccessStatus:
         options.getMediaAccessStatus ??
-        (async () => ({ camera: 'granted', microphone: 'granted' })),
+        (async () => ({ camera: 'granted', microphone: 'granted', screen: 'granted' })),
       requestMediaAccess: options.requestMediaAccess,
       openSystemPermissions: options.openSystemPermissions,
       getViewerSample: async () => null,

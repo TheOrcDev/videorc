@@ -46,7 +46,7 @@ function Slider({
       >
         <SliderPrimitive.Range
           data-slot="slider-range"
-          className="absolute bg-primary select-none data-horizontal:h-full data-vertical:w-full"
+          className="absolute chrome-fill select-none data-horizontal:h-full data-vertical:w-full"
         />
       </SliderPrimitive.Track>
       {Array.from({ length: _values.length }, (_, index) => (
@@ -56,7 +56,7 @@ function Slider({
           {...thumbLabel}
           aria-labelledby={labelledBy}
           aria-valuetext={ariaValueText}
-          className="block size-4 shrink-0 rounded-full bg-knob shadow-sm ring-1 ring-knob-ring transition-[color,box-shadow] duration-150 select-none hover:ring-4 hover:ring-ring/30 focus-visible:ring-4 focus-visible:ring-ring/30 focus-visible:outline-hidden disabled:pointer-events-none disabled:opacity-50"
+          className="block size-4 shrink-0 rounded-full chrome-bead ring-1 ring-knob-ring transition-[color,box-shadow] duration-150 select-none hover:ring-4 hover:ring-ring/30 focus-visible:ring-4 focus-visible:ring-ring/30 focus-visible:outline-hidden disabled:pointer-events-none disabled:opacity-50"
         />
       ))}
     </SliderPrimitive.Root>

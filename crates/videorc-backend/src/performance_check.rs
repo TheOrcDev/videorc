@@ -274,6 +274,53 @@ pub(crate) fn score_rung_for_backend(
     reasons
 }
 
+/// FFmpeg reports its output clock every `-stats_period` (0.5 s). Waiting for
+/// the value to change pins it to a wall time within one poll.
+const MEDIA_TICK_POLL: Duration = Duration::from_millis(20);
+/// Longer than any progress period. A clock that does not move in this long
+/// is a stalled encoder; its last value is returned so the pace reads low.
+const MEDIA_TICK_WAIT: Duration = Duration::from_millis(1_500);
+/// Shorter windows are not worth a verdict; the cumulative speed is kept.
+const MIN_MEDIA_PACE_WINDOW: Duration = Duration::from_secs(2);
+
+/// The wall time at which the session's FFmpeg output clock next advances,
+/// with its value in microseconds. `None` when FFmpeg reports no clock.
+async fn next_media_tick(
+    state: &AppState,
+    clock: &crate::recording::FfmpegProgressBeacon,
+) -> Option<(Instant, u64)> {
+    let previous = clock.media_micros();
+    let deadline = Instant::now() + MEDIA_TICK_WAIT;
+    while Instant::now() < deadline && !state.performance_check.cancelled() {
+        tokio::time::sleep(MEDIA_TICK_POLL).await;
+        let current = clock.media_micros();
+        if current != previous {
+            return Some((Instant::now(), current));
+        }
+    }
+    (previous > 0).then(|| (Instant::now(), previous))
+}
+
+/// Media seconds the encoder produced per wall second between two progress
+/// reports.
+///
+/// The performance check scored FFmpeg's cumulative `speed=`, which carries
+/// the encoder's start into every reading: ogre's VAAPI encoder starts ~0.3 s
+/// behind, so 720p30 and 540p30 read 0.933-0.941 at the end of a 5.5 s rung
+/// while 30.0 fps went through with no stalls (Omarchy 2026-10-26) and the
+/// check said nothing held steady. Over a window after the warm-up the start
+/// drops out.
+pub(crate) fn encoder_media_pace(
+    window: Duration,
+    start_micros: u64,
+    end_micros: u64,
+) -> Option<f64> {
+    if window < MIN_MEDIA_PACE_WINDOW || start_micros == 0 {
+        return None;
+    }
+    Some(end_micros.saturating_sub(start_micros) as f64 / 1_000_000.0 / window.as_secs_f64())
+}
+
 /// A failing rung this far below realtime also rules out the next one down.
 pub(crate) fn should_fast_skip_next(measurement: &RungMeasurement) -> bool {
     should_fast_skip_next_on(measurement, cfg!(target_os = "linux"))
@@ -822,7 +869,12 @@ async fn measure_rung(
         }
     }
 
+    let media_clock = crate::recording::active_ffmpeg_progress(state).await;
     sleep_unless_cancelled(state, RUNG_WARMUP).await;
+    let pace_start = match &media_clock {
+        Some(clock) => next_media_tick(state, clock).await,
+        None => None,
+    };
     let baseline = state.diagnostics.lock().await.clone();
     // Bridge windows publish on their own cadence; a single read at the end
     // can land between two windows and see nothing. Keep the latest reading
@@ -845,6 +897,19 @@ async fn measure_rung(
             .or(sample.render_fps)
             .or(measurement.delivered_fps);
         stats = sample;
+    }
+
+    // FFmpeg's own `speed=` counts from process start, so the encoder's start
+    // is in every reading of a 5.5 s rung; the pace between two fresh
+    // progress reports is not.
+    let pace_end = match (&media_clock, pace_start) {
+        (Some(clock), Some(_)) => next_media_tick(state, clock).await,
+        _ => None,
+    };
+    if let (Some((started, start_micros)), Some((ended, end_micros))) = (pace_start, pace_end)
+        && let Some(pace) = encoder_media_pace(ended - started, start_micros, end_micros)
+    {
+        measurement.encoder_speed = Some(pace);
     }
 
     // The time FFmpeg needs to flush after `q` is a first-class signal: a
@@ -1195,6 +1260,54 @@ mod tests {
         };
         assert!(should_fast_skip_next_on(&soft, false));
         assert!(!should_fast_skip_next_on(&soft, true));
+    }
+
+    #[test]
+    fn a_realtime_encoder_with_a_slow_start_passes_on_its_pace() {
+        // Omarchy 2026-10-26, VAAPI 720p30: cumulative 0.94 after 5.5 s with a
+        // ~0.33 s start; between two reports 4 s apart it made 4 s of media.
+        let pace = encoder_media_pace(Duration::from_millis(4_000), 1_170_000, 5_170_000).unwrap();
+        assert!((pace - 1.0).abs() < 1e-9);
+        let measurement = RungMeasurement {
+            encoder_speed: Some(pace),
+            ..healthy(30)
+        };
+        assert!(
+            score_rung_for_backend(&measurement, Some(EncodeBackend::HardwareVaapi)).is_empty()
+        );
+        // Report timing within one poll moves the pace by well under the margin.
+        let late = encoder_media_pace(Duration::from_millis(4_020), 1_170_000, 5_170_000).unwrap();
+        assert!(late >= MIN_ENCODER_SPEED, "{late}");
+    }
+
+    #[test]
+    fn a_slow_or_stalled_encoder_fails_on_its_pace() {
+        let slow = encoder_media_pace(Duration::from_secs(4), 1_000_000, 4_600_000).unwrap();
+        assert!((slow - 0.9).abs() < 1e-9);
+        let stalled = encoder_media_pace(Duration::from_secs(4), 2_000_000, 2_000_000).unwrap();
+        assert_eq!(stalled, 0.0);
+        for pace in [slow, stalled] {
+            let measurement = RungMeasurement {
+                encoder_speed: Some(pace),
+                ..healthy(30)
+            };
+            assert_eq!(
+                score_rung_for_backend(&measurement, Some(EncodeBackend::HardwareVaapi)),
+                vec!["encoder-below-realtime".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_or_clockless_window_keeps_the_cumulative_speed() {
+        assert_eq!(
+            encoder_media_pace(Duration::from_millis(1_900), 1_000_000, 2_900_000),
+            None
+        );
+        assert_eq!(
+            encoder_media_pace(Duration::from_secs(4), 0, 4_000_000),
+            None
+        );
     }
 
     #[test]

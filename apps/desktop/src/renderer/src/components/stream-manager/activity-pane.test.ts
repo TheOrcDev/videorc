@@ -76,6 +76,13 @@ describe('ActivityPane', () => {
   it('renders no Auto-show switch without a handler', () => {
     expect(markup).not.toContain('data-testid="activity-auto-show"')
   })
+
+  it('shows one All chip: the platform filter leads, kind chips toggle off', () => {
+    expect(markup.match(/>All</g)).toHaveLength(1)
+    expect(markup.indexOf('aria-label="Show activity from"')).toBeLessThan(
+      markup.indexOf('aria-label="Filter activity"')
+    )
+  })
 })
 
 // Plan 156: the one switch that auto-shows celebrations on stream.
@@ -277,6 +284,17 @@ describe('activityCapabilityNote for X', () => {
     expect(note('2026-09-28T10:00:00Z', '2026-09-28T10:30:00Z')).toBe(
       "X doesn't share tips. New X followers show as a count."
     )
+  })
+})
+
+// Plan 206: a stream-key Facebook live shares no comments or viewers.
+describe('activityCapabilityNote for key-only destinations', () => {
+  it('names Facebook with a stream key beside the platforms that have no live API', () => {
+    const expected =
+      "Facebook with a stream key, TikTok, Instagram and custom RTMP don't share comments or viewers."
+    expect(activityCapabilityNote(['facebook'])).toBe(expected)
+    expect(activityCapabilityNote(['tiktok'])).toBe(expected)
+    expect(activityCapabilityNote(['twitch'])).toBeNull()
   })
 })
 

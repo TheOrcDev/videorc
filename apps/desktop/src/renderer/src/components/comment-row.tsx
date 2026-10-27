@@ -319,7 +319,7 @@ const ROLE_LABELS: Record<string, string> = {
  * row is a fill and a hairline ring; a member's row is one notch quieter,
  * a fill alone, so a member's Super Chat still reads louder.
  */
-const ROW_TINT_CLASS: Record<Exclude<CommentRowTint, null>, string> = {
+export const COMMENT_ROW_TINT_CLASS: Record<Exclude<CommentRowTint, null>, string> = {
   paid: 'bg-warning/10 ring-1 ring-warning/30',
   spotlight: 'bg-accent',
   member: 'bg-member/8'
@@ -660,6 +660,23 @@ function MessageBody({
         <FragmentText fragments={message.fragments} links={!message.isDeleted} text={noticeWords} />
       </span>
     </>
+  )
+}
+
+/**
+ * A message's words as a chat row shows them: emotes, GIFs and inert links,
+ * and a notice's sentence over the viewer's own words. For rows outside
+ * `CommentRow`, like the Studio's Chat section (plan 204).
+ */
+export function CommentMessageBody({
+  message,
+  density
+}: {
+  message: LiveChatMessage
+  density: 'compact' | 'comfortable'
+}): ReactNode {
+  return (
+    <MessageBody density={density} message={message} noticeWords={noticeViewerWords(message)} />
   )
 }
 
@@ -1050,7 +1067,7 @@ export function CommentRow({
           disabled={highlight.phase === 'applying'}
           className={cn(
             'h-auto w-full min-w-0 flex-1 items-start justify-start gap-2 whitespace-normal px-2 py-1.5',
-            tint && ROW_TINT_CLASS[tint]
+            tint && COMMENT_ROW_TINT_CLASS[tint]
           )}
           tabIndex={tabIndex}
           type="button"
@@ -1070,7 +1087,7 @@ export function CommentRow({
         <div
           className={cn(
             'flex min-w-0 flex-1 items-start gap-2 rounded-row px-2 py-1.5',
-            tint && ROW_TINT_CLASS[tint]
+            tint && COMMENT_ROW_TINT_CLASS[tint]
           )}
         >
           {content}

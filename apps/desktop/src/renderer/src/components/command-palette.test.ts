@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WorkspaceNavContext } from '@/components/workspace-nav'
+import { FIRST_RUN_SETUP_OPEN_EVENT } from '@/lib/workspace-navigation'
 
 import { CommandPalette } from './command-palette'
 
@@ -313,11 +314,34 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
 
   it('checks the look in use', async () => {
     await render()
-    expect(groupValues('Appearance')).toEqual(['Light theme', 'Dark theme', 'System theme'])
+    expect(groupValues('Appearance')).toEqual([
+      'Light theme',
+      'Dark theme',
+      'System theme',
+      'Chat in Studio'
+    ])
     expect(item('Dark theme').dataset.checked).toBe('true')
     expect(item('Light theme').dataset.checked).toBe('false')
     await act(async () => item('Light theme').click())
     expect(mocked.setTheme).toHaveBeenCalledWith('light')
+  })
+
+  // Plan 204 (D4): a mirror of Settings → General → Chat in Studio.
+  it('checks Chat in Studio while it is on, and turns it on and off', async () => {
+    mocked.core.setSettings = vi.fn()
+    await render()
+    expect(item('Chat in Studio').dataset.checked).toBe('false')
+    await act(async () => item('Chat in Studio').click())
+    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
+    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
+    expect(update({})).toEqual({ studioChat: true })
+    expect(update({ studioChat: true })).toEqual({ studioChat: false })
+  })
+
+  it('finds Chat in Studio by "chat" and "comments"', async () => {
+    await render()
+    await search('comments')
+    expect(values()).toContain('Chat in Studio')
   })
 })
 
@@ -428,5 +452,26 @@ describe('CommandPalette sounds (plan 189 S10)', () => {
     mocked.soundboard.sounds = []
     await render()
     expect(headings()).not.toContain('Sounds')
+  })
+
+  it('runs setup again and comes back to the page it was opened from (plan 203 S6)', async () => {
+    await render()
+    const requests: unknown[] = []
+    const listen = (event: Event): void => void requests.push((event as CustomEvent).detail)
+    window.addEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    await act(async () => item('Run setup again…').click())
+    window.removeEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    expect(requests).toEqual([{ returnTo: 'library' }])
+  })
+
+  it('hides Run setup again… while a recording or livestream runs, not for the Clips ring', async () => {
+    for (const state of ['starting', 'recording', 'streaming', 'stopping']) {
+      mocked.recording = { state }
+      await render()
+      expect(values(), state).not.toContain('Run setup again…')
+    }
+    mocked.recording = { state: 'recording', replayOnly: true }
+    await render()
+    expect(values()).toContain('Run setup again…')
   })
 })

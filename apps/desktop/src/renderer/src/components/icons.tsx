@@ -85,6 +85,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'DotsThree'
     | 'DownloadSimple'
     | 'Eye'
+    | 'FacebookLogo'
     | 'FileVideo'
     | 'FilmReel'
     | 'FilmSlate'
@@ -286,7 +287,8 @@ export {
 export {
   TwitchLogo as TwitchIcon,
   TiktokLogo as TiktokIcon,
-  InstagramLogo as InstagramIcon
+  InstagramLogo as InstagramIcon,
+  FacebookLogo as FacebookIcon
 } from '@phosphor-icons/react'
 
 export { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX }

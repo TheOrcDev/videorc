@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import { LIVE_BACKGROUND_DEFAULT_LOOKS, LIVE_BACKGROUND_IDS } from './live-background-ids'
+import { STREAM_PLATFORMS } from './stream-platforms'
 
 import type {
   Banner,
@@ -1171,7 +1172,11 @@ describe('backend RPC contract', () => {
         immutableTextureUploads: 0,
         immutableTextureReuses: 0,
         liveBackgroundPrograms: 2,
-        liveBackgroundScratchBytes: 8_294_400
+        liveBackgroundScratchBytes: 8_294_400,
+        // Plan 205 S6: the Preview's own picture, inside the bounded
+        // pipeline payload, never a top-level field the strict schema
+        // would reject.
+        previewProgramLeg: true
       },
       updatedAt: '2026-10-24T00:00:00Z'
     } satisfies CompositorStatus
@@ -2253,14 +2258,47 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
 
-    // One question can gather askers from every platform, Kick included.
-    const everyPlatform = ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom']
+    // One question can gather askers from every platform, Kick included. The
+    // cap is the platform count, never a literal (plan 206: an 8th platform
+    // failed every audience, viewer and co-host event against `maxLength: 7`).
+    const everyPlatform = [...STREAM_PLATFORMS]
+    expect(everyPlatform).toContain('facebook')
     const widest = { ...state, questions: [{ ...state.questions[0], platforms: everyPlatform }] }
     expect(validateBackendEventPayload('cohost.state', widest)).toEqual(widest)
     expect(() =>
       validateBackendEventPayload('cohost.state', {
         ...state,
         questions: [{ ...state.questions[0], platforms: [...everyPlatform, 'kick'] }]
+      })
+    ).toThrow()
+    const audience = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({
+        platform,
+        metric: 'followers',
+        capability: 'unavailable'
+      })),
+      updatedAt: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('stream.audience.snapshot', audience)).toEqual(audience)
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...audience,
+        platforms: [...audience.platforms, audience.platforms[0]]
+      })
+    ).toThrow()
+    const viewers = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({ platform, count: 1 })),
+      total: everyPlatform.length,
+      at: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('sessions.viewers.list', { samples: [viewers] })).toEqual({
+      samples: [viewers]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', {
+        samples: [{ ...viewers, platforms: [...viewers.platforms, viewers.platforms[0]] }]
       })
     ).toThrow()
 
@@ -3121,10 +3159,20 @@ describe('banner backend wire contract (plan 186)', () => {
   })
 
   it('validates the secret-free Discord announcement surface (plan 187)', () => {
+    const webhook = {
+      id: '123456789012345678',
+      name: 'Stream alerts',
+      hint: '…/9xyz',
+      lastPost: {
+        at: '2026-10-22T18:02:00+00:00',
+        messageUrl: 'https://discord.com/channels/1/2/3',
+        state: 'live'
+      },
+      lastError: { code: 'unreachable', at: '2026-10-22T18:03:00+00:00' }
+    }
     const snapshot = {
-      webhookPresent: true,
-      webhookHint: '…/9xyz',
-      webhookName: 'Stream alerts',
+      // Several webhooks, one per server; a bare one has only its id and tail.
+      webhooks: [webhook, { id: '2', hint: '…/a1B2' }],
       enabled: true,
       ping: 'everyone',
       branding: true,
@@ -3139,13 +3187,7 @@ describe('banner backend wire contract (plan 186)', () => {
           avatarUrl: 'https://static-cdn.jtvnw.net/a.png'
         },
         { postAs: { kind: 'videorc' }, name: 'Orc' }
-      ],
-      lastPost: {
-        at: '2026-10-22T18:02:00+00:00',
-        messageUrl: 'https://discord.com/channels/1/2/3',
-        state: 'live'
-      },
-      lastError: { code: 'unreachable', at: '2026-10-22T18:03:00+00:00' }
+      ]
     }
     for (const method of [
       'discord.announce.get',
@@ -3160,15 +3202,49 @@ describe('banner backend wire contract (plan 186)', () => {
     )
     // Rust omits None; a null would mean the serde trap is back.
     expect(() =>
-      validateBackendRpcResult('discord.announce.get', { ...snapshot, webhookHint: null })
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, name: null }]
+      })
     ).toThrow()
-    // The webhook URL never travels back to the renderer.
+    // A webhook URL never travels back to the renderer, on the snapshot or a row.
     expect(() =>
       validateBackendRpcResult('discord.announce.get', {
         ...snapshot,
         webhookUrl: 'https://discord.com/api/webhooks/1/secret'
       })
     ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, url: 'https://discord.com/api/webhooks/1/secret' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, token: 'secret' }]
+      })
+    ).toThrow()
+    // Ten servers is the cap; the renderer never has to draw more.
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: Array.from({ length: 11 }, (_, index) => ({ id: String(index), hint: '…/a' }))
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ hint: '…/a1B2' }]
+      })
+    ).toThrow()
+    // Remove and the test name one webhook by its id.
+    expect(validateBackendRpcParams('discord.webhook.remove', { webhookId: '2' })).toStrictEqual({
+      webhookId: '2'
+    })
+    expect(() => validateBackendRpcParams('discord.webhook.remove', {})).toThrow()
+    expect(() => validateBackendRpcParams('discord.webhook.remove', undefined)).toThrow()
     expect(() =>
       validateBackendRpcParams('discord.announce.update', { url: 'https://discord.com/x' })
     ).toThrow()
@@ -3197,6 +3273,9 @@ describe('banner backend wire contract (plan 186)', () => {
         targets: [{ ...targets.targets[0], streamKey: 'live_123' }]
       })
     ).toThrow()
+    const test = { ...targets, webhookId: '123456789012345678' }
+    expect(validateBackendRpcParams('discord.webhook.sendTest', test)).toStrictEqual(test)
+    expect(() => validateBackendRpcParams('discord.webhook.sendTest', targets)).toThrow()
     const preview = {
       links: [
         { targetId: 'yt', label: 'YouTube · Vertical', linkKind: 'at-go-live', included: true },

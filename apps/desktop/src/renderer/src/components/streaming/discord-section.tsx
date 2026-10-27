@@ -26,12 +26,14 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { useDiscordAnnounce } from '@/hooks/use-discord-announce'
-import type {
-  DiscordAnnounceSnapshot,
-  DiscordLinkPreview,
-  DiscordPing,
-  StreamPlatform,
-  StreamTargetSettings
+import {
+  DISCORD_MAX_WEBHOOKS,
+  type DiscordAnnounceSnapshot,
+  type DiscordLinkPreview,
+  type DiscordPing,
+  type DiscordWebhookSnapshot,
+  type StreamPlatform,
+  type StreamTargetSettings
 } from '@/lib/backend'
 import { AvatarCircle } from '@/lib/chat-avatar'
 import {
@@ -46,10 +48,10 @@ import {
 import { formatRelativeTime } from '@/lib/format-time'
 
 /**
- * Livestream → Setup → Discord (plan 187, issue #634): paste a webhook once,
- * and every public Go Live posts to the streamer's server under their own
- * name, with a link button per live destination. It stays editable while
- * live; changes apply to the next stream.
+ * Livestream → Setup → Discord (plan 187, issue #634): paste a webhook per
+ * server, and every public Go Live posts to each of them under the
+ * streamer's own name, with a link button per live destination. It stays
+ * editable while live; changes apply to the next stream.
  */
 export function DiscordSection({
   targets,
@@ -61,10 +63,11 @@ export function DiscordSection({
   const linkTargets = useMemo(() => discordLinkTargets(targets), [targets])
   const discord = useDiscordAnnounce(linkTargets)
   const { snapshot } = discord
+  const several = (snapshot?.webhooks.length ?? 0) > 1
 
   return (
     <PanelSection
-      description="Tell your server when you go live. Unlisted and private YouTube streams are never announced."
+      description={`Tell your ${several ? 'servers' : 'server'} when you go live. Unlisted and private YouTube streams are never announced.`}
       icon={SendIcon}
       title="Discord"
     >
@@ -77,7 +80,7 @@ export function DiscordSection({
               Loading Discord settings…
             </p>
           )
-        ) : !snapshot.webhookPresent ? (
+        ) : snapshot.webhooks.length === 0 ? (
           <WebhookPaste onSave={discord.saveWebhook} />
         ) : (
           <ConnectedDiscord
@@ -94,10 +97,13 @@ export function DiscordSection({
 
 function WebhookPaste({
   label = 'Webhook URL',
-  onSave
+  onSave,
+  onCancel
 }: {
   label?: string
   onSave: (url: string) => Promise<string | null>
+  /** Hides the field again; absent while it is the only way in. */
+  onCancel?: () => void
 }): ReactElement {
   const id = useId()
   const [value, setValue] = useState('')
@@ -125,6 +131,7 @@ function WebhookPaste({
         <Input
           aria-invalid={error ? true : undefined}
           autoComplete="off"
+          autoFocus={onCancel !== undefined}
           className="min-w-0 flex-1 select-text"
           data-testid="discord-webhook-input"
           id={id}
@@ -137,6 +144,7 @@ function WebhookPaste({
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') void save()
+            if (event.key === 'Escape') onCancel?.()
           }}
         />
         <Button
@@ -147,6 +155,11 @@ function WebhookPaste({
         >
           {pending ? 'Connecting…' : 'Connect'}
         </Button>
+        {onCancel ? (
+          <Button data-testid="discord-webhook-add-cancel" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        ) : null}
       </div>
       <FieldDescription>
         In Discord: Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL.
@@ -155,6 +168,14 @@ function WebhookPaste({
     </Field>
   )
 }
+
+type TestState =
+  | { kind: 'idle' }
+  | { kind: 'sending' }
+  | { kind: 'sent'; messageUrl?: string }
+  | { kind: 'failed'; error: string }
+
+const TEST_IDLE: TestState = { kind: 'idle' }
 
 function ConnectedDiscord({
   snapshot,
@@ -167,64 +188,87 @@ function ConnectedDiscord({
   platformById: ReadonlyMap<string, StreamPlatform>
   sessionActive: boolean
 }): ReactElement {
-  const [confirmRemove, setConfirmRemove] = useState(false)
-  const [testState, setTestState] = useState<
-    | { kind: 'idle' }
-    | { kind: 'sending' }
-    | { kind: 'sent'; messageUrl?: string }
-    | { kind: 'failed'; error: string }
-  >({ kind: 'idle' })
-  const deleted = snapshot.lastError?.code === 'webhook-deleted'
+  const [confirmRemove, setConfirmRemove] = useState<DiscordWebhookSnapshot | null>(null)
+  const [adding, setAdding] = useState(false)
+  // Each webhook's test runs and reports on its own row.
+  const [tests, setTests] = useState<ReadonlyMap<string, TestState>>(new Map())
+  const anyDeleted = snapshot.webhooks.some(
+    (webhook) => webhook.lastError?.code === 'webhook-deleted'
+  )
+  const full = snapshot.webhooks.length >= DISCORD_MAX_WEBHOOKS
+  // A webhook deleted in Discord wants a replacement, so the field shows itself.
+  const pasting = !full && (adding || anyDeleted)
   // The preview resolves the current choice, so it names Automatic only while
   // Automatic is the choice.
   const automatic = snapshot.postAs.kind === 'automatic'
   const sender = automatic ? discord.preview?.sender : undefined
   const automaticLabel = sender ? `Automatic · ${sender.name}` : 'Automatic'
 
-  const sendTest = async (): Promise<void> => {
-    setTestState({ kind: 'sending' })
-    const result = await discord.sendTest()
-    setTestState(
+  const setTest = (webhookId: string, state: TestState): void => {
+    setTests((previous) => new Map(previous).set(webhookId, state))
+  }
+
+  const sendTest = async (webhookId: string): Promise<void> => {
+    setTest(webhookId, { kind: 'sending' })
+    const result = await discord.sendTest(webhookId)
+    setTest(
+      webhookId,
       result.error
         ? { kind: 'failed', error: result.error }
         : { kind: 'sent', messageUrl: result.messageUrl }
     )
   }
 
+  const addWebhook = async (url: string): Promise<string | null> => {
+    const refused = await discord.saveWebhook(url)
+    if (!refused) setAdding(false)
+    return refused
+  }
+
   return (
     <>
+      <FieldGroup data-testid="discord-webhooks" variant="grouped">
+        {snapshot.webhooks.map((webhook) => (
+          <WebhookRow
+            key={webhook.id}
+            test={tests.get(webhook.id) ?? TEST_IDLE}
+            webhook={webhook}
+            onRemove={() => setConfirmRemove(webhook)}
+            onSendTest={() => void sendTest(webhook.id)}
+          />
+        ))}
+      </FieldGroup>
+
+      {pasting ? (
+        <WebhookPaste
+          label={anyDeleted ? 'New webhook URL' : 'Another webhook URL'}
+          onCancel={adding && !anyDeleted ? () => setAdding(false) : undefined}
+          onSave={addWebhook}
+        />
+      ) : (
+        <div className="flex">
+          <DisabledReason
+            reason={
+              full
+                ? `You can connect up to ${DISCORD_MAX_WEBHOOKS} webhooks. Remove one to add another.`
+                : undefined
+            }
+          >
+            <Button
+              data-testid="discord-webhook-add"
+              disabled={full}
+              variant="outline"
+              onClick={() => setAdding(true)}
+            >
+              Add webhook…
+            </Button>
+          </DisabledReason>
+        </div>
+      )}
+
       <FieldGroup variant="grouped">
         <SettingsRow
-          data-testid="discord-webhook-row"
-          description={
-            snapshot.webhookHint ? `Posts to its channel · ${snapshot.webhookHint}` : undefined
-          }
-          error={snapshot.lastError ? discordErrorLine(snapshot.lastError.code) : undefined}
-          label={snapshot.webhookName ?? 'Webhook'}
-        >
-          <div className="flex shrink-0 items-center gap-2">
-            <DisabledReason reason={deleted ? 'Paste a new webhook URL first.' : undefined}>
-              <Button
-                data-testid="discord-send-test"
-                disabled={testState.kind === 'sending' || deleted}
-                variant="outline"
-                onClick={() => void sendTest()}
-              >
-                <SendIcon data-icon="inline-start" />
-                {testState.kind === 'sending' ? 'Sending…' : 'Send test message'}
-              </Button>
-            </DisabledReason>
-            <Button
-              data-testid="discord-webhook-remove"
-              variant="ghost"
-              onClick={() => setConfirmRemove(true)}
-            >
-              Remove
-            </Button>
-          </div>
-        </SettingsRow>
-        <SettingsRow
-          description="One post when you're on air. It adds destinations as they come up and says when you stopped."
+          description="One post in every connected server when you're on air. It adds destinations as they come up and says when you stopped."
           label="Announce when I go live"
         >
           <Switch
@@ -283,53 +327,115 @@ function ConnectedDiscord({
         </SettingsRow>
       </FieldGroup>
 
-      {deleted ? <WebhookPaste label="New webhook URL" onSave={discord.saveWebhook} /> : null}
-
-      {testState.kind === 'sent' ? (
-        <p className="flex items-center gap-2 text-meta text-muted-foreground" role="status">
-          Test sent.
-          {testState.messageUrl ? (
-            <ViewInDiscord url={testState.messageUrl} />
-          ) : (
-            'Check the channel in Discord.'
-          )}
-        </p>
-      ) : testState.kind === 'failed' ? (
-        <FieldError>{testState.error}</FieldError>
-      ) : null}
-
       <DiscordLinks discord={discord} platformById={platformById} snapshot={snapshot} />
 
       {discord.error ? <FieldError>{discord.error}</FieldError> : null}
-      {snapshot.lastPost || sessionActive ? (
-        <div className="flex flex-col gap-1 text-meta text-muted-foreground">
-          {snapshot.lastPost ? (
-            <p className="flex items-center gap-2" data-testid="discord-last-post">
-              Last post {formatRelativeTime(snapshot.lastPost.at, Date.now())}
-              {snapshot.lastPost.state === 'live' ? ', still live' : null}.
-              {snapshot.lastPost.messageUrl ? (
-                <ViewInDiscord url={snapshot.lastPost.messageUrl} />
-              ) : null}
-            </p>
-          ) : null}
-          {sessionActive ? <p>Changes apply to your next stream.</p> : null}
-        </div>
+      {sessionActive ? (
+        <p className="text-meta text-muted-foreground">Changes apply to your next stream.</p>
       ) : null}
 
       <ConfirmDialog
         confirmLabel="Remove webhook"
-        description="Videorc stops posting to this channel. The webhook itself stays in Discord."
-        open={confirmRemove}
+        description="Videorc stops posting to its channel. The webhook itself stays in Discord."
+        open={confirmRemove !== null}
         testId="discord-remove"
-        title="Remove the Discord webhook?"
-        onCancel={() => setConfirmRemove(false)}
+        title={
+          confirmRemove?.name
+            ? `Remove the ${confirmRemove.name} webhook?`
+            : 'Remove the Discord webhook?'
+        }
+        onCancel={() => setConfirmRemove(null)}
         onConfirm={() => {
-          setConfirmRemove(false)
-          setTestState({ kind: 'idle' })
-          void discord.removeWebhook()
+          const removed = confirmRemove
+          setConfirmRemove(null)
+          if (!removed) return
+          setTest(removed.id, TEST_IDLE)
+          void discord.removeWebhook(removed.id)
         }}
       />
     </>
+  )
+}
+
+/**
+ * One connected webhook: Discord's name for it, where it posts, its own
+ * last post and failure, and its own test and Remove.
+ */
+function WebhookRow({
+  webhook,
+  test,
+  onSendTest,
+  onRemove
+}: {
+  webhook: DiscordWebhookSnapshot
+  test: TestState
+  onSendTest: () => void
+  onRemove: () => void
+}): ReactElement {
+  const deleted = webhook.lastError?.code === 'webhook-deleted'
+  const failure = webhook.lastError ? discordErrorLine(webhook.lastError.code) : null
+  const testFailure = test.kind === 'failed' ? test.error : null
+  return (
+    <SettingsRow
+      data-testid={`discord-webhook-row-${webhook.id}`}
+      description={
+        <>
+          Posts to its channel · {webhook.hint}
+          {webhook.lastPost ? (
+            <span
+              className="flex items-center gap-2"
+              data-testid={`discord-last-post-${webhook.id}`}
+            >
+              Last post {formatRelativeTime(webhook.lastPost.at, Date.now())}
+              {webhook.lastPost.state === 'live' ? ', still live' : null}.
+              {webhook.lastPost.messageUrl ? (
+                <ViewInDiscord url={webhook.lastPost.messageUrl} />
+              ) : null}
+            </span>
+          ) : null}
+          {test.kind === 'sent' ? (
+            <span className="flex items-center gap-2" role="status">
+              Test sent.
+              {test.messageUrl ? (
+                <ViewInDiscord url={test.messageUrl} />
+              ) : (
+                'Check the channel in Discord.'
+              )}
+            </span>
+          ) : null}
+        </>
+      }
+      error={
+        failure || testFailure ? (
+          <>
+            {failure ? <span className="block">{failure}</span> : null}
+            {testFailure ? <span className="block">{testFailure}</span> : null}
+          </>
+        ) : undefined
+      }
+      label={webhook.name ?? 'Webhook'}
+    >
+      <div className="flex shrink-0 items-center gap-2">
+        <DisabledReason reason={deleted ? 'Paste a new webhook URL first.' : undefined}>
+          <Button
+            data-testid={`discord-send-test-${webhook.id}`}
+            disabled={test.kind === 'sending' || deleted}
+            variant="outline"
+            onClick={onSendTest}
+          >
+            <SendIcon data-icon="inline-start" />
+            {test.kind === 'sending' ? 'Sending…' : 'Send test message'}
+          </Button>
+        </DisabledReason>
+        <Button
+          data-testid={`discord-webhook-remove-${webhook.id}`}
+          variant="ghost"
+          onClick={onRemove}
+        >
+          Remove
+        </Button>
+      </div>
+    </SettingsRow>
   )
 }
 

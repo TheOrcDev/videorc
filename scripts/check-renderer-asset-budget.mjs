@@ -46,9 +46,22 @@ const htmlPath = resolve(
 // and a start waits with plain copy when the scene shows a source turned off
 // (~280 bytes). Raise gzip to 400,000 (~1.3%); keep re-splitting the answer
 // for net-new UI.
+// Recalibrated 2026-10-27 (plan 203 S5): main measured 399,287 gzip (713 bytes
+// of headroom) and first-run setup's shell state (the surface switch, the
+// replay opener, the preview and global-key gate in the provider, ~790 bytes)
+// takes it to 400,072. The setup UI itself is lazy (its chunk is 308 KB raw,
+// ~43 KB gzip). Raise gzip to 405,000 (~1.2%); keep re-splitting the answer
+// for net-new UI.
+// Recalibrated 2026-10-27 (plan 207): main measured 1,996,019 raw (3,981
+// bytes of headroom). Setup's steps add 6,695 raw bytes of shell and Studio
+// state: the record's step and goal (~1.9 KB), the provider applying a look
+// as state or holding it behind a running session (~2.8 KB), Clips waiting
+// for a chosen screen (~0.6 KB) and the shell's step wiring (~0.8 KB). The
+// step UI and the look's helpers are lazy (setup's chunk is 357 KB raw).
+// Raise raw to 2,030,000 (~1.4%); keep re-splitting the answer for net-new UI.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 400_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_030_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 405_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

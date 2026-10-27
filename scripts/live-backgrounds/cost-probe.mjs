@@ -19,11 +19,13 @@
 //                    desktop's bundled backgrounds, prints each file's size
 //                    and encoding, and fails on a file over its limit
 //
+//   --mode grounds   renders Polished at 1280×720; Rust blurs and writes chrome grounds + stats
+//
 // --ids a,b limits every mode to those backgrounds; --render <file> swaps in
 // another render JSON (timing a variant of a look).
 //
 // Usage: pnpm probe:live-background-cost [-- --mode cost|golden|frames|posters] [--all-looks] [--ids ...]
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { hostname, loadavg, platform, tmpdir } from 'node:os'
@@ -64,7 +66,7 @@ function parseArgs(argv) {
     else if (arg === '--out') options.out = resolve(argv[++index])
     else throw new Error(`unknown argument ${arg}`)
   }
-  if (!['cost', 'golden', 'frames', 'posters'].includes(options.mode)) {
+  if (!['cost', 'golden', 'frames', 'posters', 'grounds'].includes(options.mode)) {
     throw new Error(`unknown --mode ${options.mode}`)
   }
   if (options.mode === 'frames' && !options.out) throw new Error('--mode frames needs --out <dir>')
@@ -176,6 +178,13 @@ function mergeGoldens(existing, rendered, renderer, options) {
 }
 
 const options = parseArgs(process.argv.slice(2))
+if (options.mode === 'grounds') {
+  if (options.render || options.size || options.phaseOffset || options.ids.length || options.out) {
+    throw new Error(
+      '--mode grounds uses fixed catalogue inputs; no render/size/phase/ids/out overrides'
+    )
+  }
+}
 const result = await runElectron(options)
 console.log(`GPU: ${result.renderer} (${result.vendor})`)
 console.log(
@@ -253,4 +262,26 @@ if (options.mode === 'posters') {
     console.error(`over the size limit (poster 250 KB, thumbnail 20 KB):\n${over.join('\n')}`)
     process.exitCode = 1
   }
+}
+
+if (options.mode === 'grounds') {
+  const generated = spawnSync(
+    'cargo',
+    [
+      'run',
+      '-p',
+      'videorc-backend',
+      '--example',
+      'chrome-grounds',
+      '--',
+      String(result.ground.phase)
+    ],
+    {
+      cwd: repoRoot,
+      input: Buffer.from(result.ground.png, 'base64'),
+      stdio: ['pipe', 'inherit', 'inherit']
+    }
+  )
+  if (generated.error) throw generated.error
+  if (generated.status !== 0) throw new Error(`chrome ground generator exited ${generated.status}`)
 }

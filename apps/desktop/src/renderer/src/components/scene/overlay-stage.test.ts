@@ -7,13 +7,16 @@ import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 import {
   BannerEdits,
   OverlayEdits,
+  STAGE_ITEM_BADGE_LABELS,
   bannerIdFromStageId,
   bannerStageId,
   bannerStageItems,
+  buddyPetBox,
   overlayEditsBlockedReason,
   overlayItemFromStageId,
   overlayStageId,
   overlayStageItems,
+  stageItemPictureRect,
   stageItemSnapPeers,
   stageRectToOverlay,
   withOverlayRect,
@@ -242,6 +245,45 @@ describe('banners on the stage (plan 186)', () => {
     expect(items[2]).toMatchObject({ badge: 'off', off: true })
   })
 
+  // Plan 205 S3: the owner's state on 2026-10-27, a hidden banner placed and
+  // selected, Buddy on the stream only, captions in the recording only. The
+  // live canvas draws nothing for the banner, so its chip's word says why.
+  it("words every chip's state in sentence case, and nothing for both outputs", () => {
+    const layout: OverlayLayout = {
+      ...DEFAULT_OVERLAY_LAYOUT,
+      highlight: { ...DEFAULT_OVERLAY_LAYOUT.highlight, showOnStream: true, showInRecording: true },
+      captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, showOnStream: false, showInRecording: true },
+      buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true, showInRecording: false }
+    }
+    const owner = banner('logo-color-600', {
+      shown: false,
+      horizontal: { x: 0.866, y: 0.764, w: 0.1, h: 0.1 }
+    })
+    const items = [
+      ...bannerStageItems([owner], owner.id, 'horizontal', LANDSCAPE),
+      ...overlayStageItems(layout, 'horizontal')
+    ]
+    const word = (item: (typeof items)[number]): string | null =>
+      item.badge ? STAGE_ITEM_BADGE_LABELS[item.badge] : null
+    expect(items.map((item) => [item.label, word(item)])).toEqual([
+      ['logo-color-600', 'Hidden'],
+      ['Highlight', null],
+      ['Captions', 'Recording only'],
+      ['Buddy', 'Stream only']
+    ])
+    const off = overlayStageItems(
+      { ...layout, buddy: { ...layout.buddy, showOnStream: false, showInRecording: false } },
+      'horizontal'
+    )
+    expect(word(off[2])).toBe('Off')
+    expect(Object.values(STAGE_ITEM_BADGE_LABELS)).toEqual([
+      'Hidden',
+      'Off',
+      'Stream only',
+      'Recording only'
+    ])
+  })
+
   it("draws a banner's rect around its image, in canvas units", () => {
     // The logo's place is wider than the logo: the rect hugs the square
     // picture at the place's right edge (its gravity).
@@ -432,5 +474,83 @@ describe('banners on the stage (plan 186)', () => {
     orphan.submit('gone', 'horizontal', { x: 0.1, y: 0.1, width: 0.3, height: 0.05 })
     orphan.observe([banner('sponsor')])
     expect(orphan.draft).toBeNull()
+  })
+})
+
+describe('pictures on the schematic canvas', () => {
+  const close = (
+    actual: { x: number; y: number; width: number; height: number },
+    expected: typeof actual
+  ): void => {
+    for (const key of ['x', 'y', 'width', 'height'] as const)
+      expect(actual[key], key).toBeCloseTo(expected[key], 6)
+  }
+
+  it("draws a banner's own image over its rect, at its opacity", () => {
+    const [sponsor, faded] = bannerStageItems(
+      [banner('sponsor'), banner('faded', { opacity: 0.35 })],
+      null,
+      'horizontal',
+      LANDSCAPE
+    )
+    expect(sponsor!.picture).toStrictEqual({
+      href: 'videorc-asset://banner/sponsor.png',
+      fit: 'rect',
+      opacity: 1
+    })
+    expect(faded!.picture?.opacity).toBe(0.35)
+    // The picture follows whatever rect the stage shows: a drag's ghost too.
+    const ghost = { x: 0.1, y: 0.1, width: 0.3, height: 0.05 }
+    expect(stageItemPictureRect(sponsor!.picture!, ghost, LANDSCAPE)).toStrictEqual(ghost)
+  })
+
+  it("draws the Buddy's still in its pet's square, and no picture for the empty zones", () => {
+    const items = overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal', 'idle.webp')
+    expect(items.map((item) => item.picture?.fit ?? null)).toEqual([null, null, 'buddy'])
+    expect(items[2]!.picture).toStrictEqual({ href: 'idle.webp', fit: 'buddy', opacity: 1 })
+    expect(
+      overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal').every((item) => !item.picture)
+    ).toBe(true)
+    // Dragged or resized, the pet's square is recomputed from the ghost (it
+    // stays square in pixels), never stretched with the zone.
+    const ghost = { x: 0.1, y: 0.1, width: 0.2, height: 0.5 }
+    close(stageItemPictureRect(items[2]!.picture!, ghost, LANDSCAPE), buddyPetBox(ghost, LANDSCAPE))
+  })
+
+  it("places the Buddy's pet like the backend's buddy_box", () => {
+    // Lower half: rests on the zone's bottom edge, centred, square in pixels.
+    close(buddyPetBox({ x: 0.78, y: 0.6, width: 0.18, height: 0.36 }, LANDSCAPE), {
+      x: 0.78,
+      y: 0.64,
+      width: 0.18,
+      height: 0.32
+    })
+    // Upper half: hangs from the zone's top edge.
+    close(buddyPetBox({ x: 0.02, y: 0.04, width: 0.18, height: 0.2 }, LANDSCAPE), {
+      x: 0.02,
+      y: 0.04,
+      width: 0.18,
+      height: 0.32
+    })
+    // Kept inside the canvas.
+    close(buddyPetBox({ x: 0.95, y: 0.8, width: 0.18, height: 0.2 }, LANDSCAPE), {
+      x: 0.82,
+      y: 0.68,
+      width: 0.18,
+      height: 0.32
+    })
+    // Never wider than the canvas's shorter side.
+    close(buddyPetBox({ x: 0, y: 0.5, width: 1, height: 0.5 }, 9 / 16), {
+      x: 0,
+      y: 0.4375,
+      width: 1,
+      height: 0.5625
+    })
+    close(buddyPetBox({ x: 0, y: 0, width: 1, height: 1 }, LANDSCAPE), {
+      x: 0.21875,
+      y: 0,
+      width: 0.5625,
+      height: 1
+    })
   })
 })

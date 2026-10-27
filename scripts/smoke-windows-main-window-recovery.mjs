@@ -5,10 +5,12 @@
 // stayed empty for ever and nothing was logged. This smoke launches the
 // packaged app and proves, against the real window:
 //
-//   1. a normal launch mounts the UI, and the Mica paint check reports painted;
+//   1. a normal launch mounts the UI on the opaque chrome ground (plan 208);
 //   2. a crashed renderer is reloaded and the UI comes back, with log lines;
-//   3. software rendering starts on the solid window, never Mica;
-//   4. a blank paint verdict drops Mica to solid and the next launch stays solid.
+//   3. under VIDEORC_GLASS=clear (the plan 091 A/B, one release) the Mica
+//      paint check reports painted, software rendering starts on the solid
+//      window, never Mica, and a blank paint verdict drops Mica to solid and
+//      the next launch stays solid.
 //
 // It reads the renderer over CDP and photographs the real desktop as evidence.
 import { spawn, spawnSync } from 'node:child_process'
@@ -20,6 +22,7 @@ import { join, resolve } from 'node:path'
 import { performanceAppSpawnSpec } from './lib/app-launcher.mjs'
 import {
   evaluateBlankFallback,
+  evaluateClearGlassLaunch,
   evaluateCrashRecovery,
   evaluateDefaultLaunch,
   evaluateRememberedFallback,
@@ -167,6 +170,8 @@ async function launch(name, env, userData) {
     env: {
       ...process.env,
       ...env,
+      VIDEORC_SMOKE_SKIP_FIRST_RUN:
+        env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? process.env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
       VIDEORC_USER_DATA_DIR: userData,
       VIDEORC_REMOTE_DEBUG_PORT: String(port)
     },
@@ -208,6 +213,8 @@ const record = (name, evidence, scenarioFailures) => {
 }
 
 let micaOnThisMachine = false
+// Mica only exists under the clear-glass A/B since plan 208.
+const CLEAR_GLASS = { VIDEORC_GLASS: 'clear' }
 
 // 1 + 2: normal launch, then a renderer crash.
 {
@@ -216,12 +223,11 @@ let micaOnThisMachine = false
     const isMounted = Boolean(await mounted(app))
     const glass = (await settledGlass(app)) ?? (await readPage(app.port))?.runtimeInfo?.windowGlass
     const osRelease = (await readPage(app.port))?.runtimeInfo?.osRelease
-    micaOnThisMachine = glass?.kind === 'mica'
     screenshot(join(app.dir, 'screen-1-launched.png'))
     record(
       'default-launch',
       { mounted: isMounted, glass, osRelease },
-      evaluateDefaultLaunch({ mounted: isMounted, glass, osRelease })
+      evaluateDefaultLaunch({ mounted: isMounted, glass })
     )
 
     const crashed = await crashRenderer(app.port)
@@ -242,11 +248,30 @@ let micaOnThisMachine = false
   }
 }
 
-// 3: software rendering never gets Mica.
+// 3a: the clear-glass A/B gets Mica on Windows 11, and its paint check passes.
+{
+  const app = await launch('clear-glass', CLEAR_GLASS, join(outputDirectory, 'clear-userdata'))
+  try {
+    const isMounted = Boolean(await mounted(app))
+    const glass = (await settledGlass(app)) ?? (await readPage(app.port))?.runtimeInfo?.windowGlass
+    const osRelease = (await readPage(app.port))?.runtimeInfo?.osRelease
+    micaOnThisMachine = glass?.kind === 'mica'
+    screenshot(join(app.dir, 'screen-1-launched.png'))
+    record(
+      'clear-glass-launch',
+      { mounted: isMounted, glass, osRelease },
+      evaluateClearGlassLaunch({ mounted: isMounted, glass, osRelease })
+    )
+  } finally {
+    await app.stop()
+  }
+}
+
+// 3b: software rendering never gets Mica.
 {
   const app = await launch(
     'software-rendering',
-    { VIDEORC_DISABLE_GPU: '1' },
+    { ...CLEAR_GLASS, VIDEORC_DISABLE_GPU: '1' },
     join(outputDirectory, 'software-rendering-userdata')
   )
   try {
@@ -265,13 +290,13 @@ let micaOnThisMachine = false
   }
 }
 
-// 4: a blank verdict drops Mica, and the next launch remembers.
+// 3c: a blank verdict drops Mica, and the next launch remembers.
 if (micaOnThisMachine) {
   const userData = join(outputDirectory, 'blank-fallback-userdata')
   const stateFile = join(userData, 'window-glass-fallback.json')
   const first = await launch(
     'blank-fallback',
-    { VIDEORC_SMOKE_FORCE_BLANK_PAINT_CHECK: '1' },
+    { ...CLEAR_GLASS, VIDEORC_SMOKE_FORCE_BLANK_PAINT_CHECK: '1' },
     userData
   )
   try {
@@ -285,7 +310,7 @@ if (micaOnThisMachine) {
     await first.stop()
   }
 
-  const second = await launch('remembered-fallback', {}, userData)
+  const second = await launch('remembered-fallback', CLEAR_GLASS, userData)
   try {
     const isMounted = Boolean(await mounted(second))
     const glass = (await readPage(second.port))?.runtimeInfo?.windowGlass

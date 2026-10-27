@@ -56,8 +56,10 @@ Use `0.9.46-alpha.1` instead.
 ## 2. Build the private candidate
 
 Merge the candidate source to protected `main`, then dispatch **Build Windows
-Alpha Candidate** from the current `main` commit and provide `release_id`. The
-workflow has two trust-separated jobs:
+Alpha Candidate** from the current `main` commit and provide `release_id`.
+On a coordinated release, dispatch this the moment the version PR lands; do
+not wait for the local macOS build or upload. Watch the run with
+`gh run watch`. The workflow has two trust-separated jobs:
 
 1. The `unsigned` job has only `contents: read`, no protected environment, and
    no OIDC permission. It checks out `github.sha` with credentials disabled,

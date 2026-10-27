@@ -18,7 +18,11 @@ import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
-import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import {
+  isRetryableSmokeCommandError,
+  requestSmokeCommand,
+  requestSmokeCommandWithRetry
+} from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
@@ -87,7 +91,20 @@ try {
   })
 
   try {
-    await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 0 }, { timeoutMs })
+    // A fresh profile shows the first-run placeholder, with no sidebar, until
+    // the first-run decision arrives (plan 203). The command is idempotent.
+    await requestSmokeCommandWithRetry(
+      smoke,
+      'enable-synthetic-source',
+      { settleMs: 0 },
+      {
+        timeoutMs: 30_000,
+        requestTimeoutMs: timeoutMs,
+        isRetryable: (error) =>
+          isRetryableSmokeCommandError(error) ||
+          String(error?.message ?? error).includes('Could not find tab ')
+      }
+    )
     await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
     const previewDeadline = Date.now() + timeoutMs
     while (true) {
@@ -103,7 +120,9 @@ try {
     }
     const strip = await importBanner(stripPath)
     const logo = await importBanner(logoPath)
-    assert.equal(strip.shown, false, 'an import never shows itself')
+    // Plan 205 D3: a banner you add shows while it fits the cap and session.
+    assert.equal(strip.shown, true, 'an import shows the new banner')
+    assert.equal(logo.shown, true, 'a second import shows too (under the cap)')
     assert.equal(strip.hasAlpha, false, 'the opaque strip has no alpha')
     assert.equal(logo.hasAlpha, true, 'the half-transparent logo keeps its alpha')
     assert.deepEqual([strip.width, strip.height], [2400, 400])
@@ -282,11 +301,24 @@ try {
         { path, kind: 'input-file' },
         { timeoutMs }
       )
-      return withFrameContinuity(() =>
-        request(ws, timeoutMs, 'banners.importImage', {
-          sourceCapability: capability.capabilityId
-        })
-      )
+      // One import at a time process-wide (the AssetImport lane), shared
+      // with the first launch's starter-sound seeding. "Already being
+      // imported" means try again, so wait for the lane.
+      const busyUntil = Date.now() + 30_000
+      while (true) {
+        try {
+          return await withFrameContinuity(() =>
+            request(ws, timeoutMs, 'banners.importImage', {
+              sourceCapability: capability.capabilityId
+            })
+          )
+        } catch (error) {
+          if (!/already being imported/.test(error?.message ?? '') || Date.now() > busyUntil) {
+            throw error
+          }
+          await sleep(200)
+        }
+      }
     }
     async function bannerById(id) {
       const banner = (await request(ws, timeoutMs, 'banners.list')).find((b) => b.id === id)
@@ -500,7 +532,14 @@ function sampleTimeline(path, rects) {
 }
 
 function assertOneSession(statuses, sessionId) {
-  const ids = new Set(statuses.map((status) => status.sessionId).filter(Boolean))
+  // The Clips ring (a buffer-only session) stops when Record starts and
+  // re-arms after Stop; only the recording or stream session counts.
+  const ids = new Set(
+    statuses
+      .filter((status) => status.replayOnly !== true)
+      .map((status) => status.sessionId)
+      .filter(Boolean)
+  )
   assert(
     ids.size === 1 && ids.has(sessionId),
     `A banner change appears to have restarted the session: ${[...ids].join(', ')}`

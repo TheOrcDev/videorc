@@ -51,6 +51,7 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
   'VIDEORC_DISABLE_BACKEND_REAP',
   'VIDEORC_USAGE_STATS',
+  'VIDEORC_SMOKE_SKIP_FIRST_RUN',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
   'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN'
@@ -68,6 +69,7 @@ test('macOS real-source launch uses the exact app bundle through LaunchServices'
       HOME: '/Users/probe',
       PATH: '/usr/bin:/bin',
       VIDEORC_APP_DATA_DIR: '/private/tmp/state/app-data',
+      VIDEORC_SMOKE_SKIP_FIRST_RUN: '1',
       VIDEORC_PACKAGED_SMOKE_TEST: '1',
       VIDEORC_SMOKE_COMMAND_CAPABILITY: 'capability'
     },
@@ -96,6 +98,7 @@ test('macOS real-source launch uses the exact app bundle through LaunchServices'
     '/private/tmp/launch.stderr.log'
   ])
   assert.ok(spec.args.includes('VIDEORC_APP_DATA_DIR=/private/tmp/state/app-data'))
+  assert.ok(spec.args.includes('VIDEORC_SMOKE_SKIP_FIRST_RUN=1'))
   assert.ok(spec.args.includes('VIDEORC_PACKAGED_SMOKE_TEST=1'))
   assert.ok(spec.args.includes('VIDEORC_SMOKE_COMMAND_CAPABILITY=capability'))
   assert.ok(spec.args.includes(`VIDEORC_SMOKE_APP_OWNERSHIP_PATH=${appOwnership.path}`))
@@ -328,6 +331,20 @@ test('smokeAppEnv enables ledger reaping by default for isolated smoke launches'
     assert.equal(env.VIDEORC_SMOKE_PRINT_BACKEND_READY, '1')
     assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(stateDir, 'app-data'))
     assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(stateDir, 'user-data'))
+  })
+})
+
+test('smokeAppEnv suppresses first-run setup unless the caller explicitly opts in', () => {
+  withCleanSmokeEnv(() => {
+    const base = { VIDEORC_SMOKE_STATE_DIR: '/tmp/videorc-smoke-state' }
+    assert.equal(smokeAppEnv(base).VIDEORC_SMOKE_SKIP_FIRST_RUN, '1')
+    // A parent shell must not accidentally make every smoke show setup.
+    process.env.VIDEORC_SMOKE_SKIP_FIRST_RUN = '0'
+    assert.equal(smokeAppEnv(base).VIDEORC_SMOKE_SKIP_FIRST_RUN, '1')
+    assert.equal(
+      smokeAppEnv({ ...base, VIDEORC_SMOKE_SKIP_FIRST_RUN: '0' }).VIDEORC_SMOKE_SKIP_FIRST_RUN,
+      '0'
+    )
   })
 })
 

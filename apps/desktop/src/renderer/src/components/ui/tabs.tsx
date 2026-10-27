@@ -47,10 +47,11 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
       data-slot="tabs-trigger"
       className={cn(
         tabsTriggerBaseClassName,
-        // Selected = a raised glass chip with primary text, keyed off Radix's
-        // data-state="active" (#392: a data-active variant never matches), so
-        // the choice reads at a glance without leaning on the focus ring.
-        'data-[state=active]:text-foreground group-data-[variant=default]/tabs-list:data-[state=active]:glass-chip',
+        // Selected = the chrome plate with primary text (plan 208 S4), keyed
+        // off Radix's data-state="active" (#392: a data-active variant never
+        // matches), so the choice reads at a glance without leaning on the
+        // focus ring.
+        'data-[state=active]:text-foreground group-data-[variant=default]/tabs-list:data-[state=active]:chrome-plate',
         className
       )}
       {...props}

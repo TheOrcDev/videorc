@@ -2295,9 +2295,12 @@ mod runtime {
 
     struct WindowsD3d11EncoderRuntime {
         role: WindowsD3d11MediaRole,
+        /// Declared before `retained_tickets`: dropping the runtime tears the
+        /// MFT down before any ticket it may still reference returns a lease.
         encoder: MediaFoundationD3d11H264Encoder,
         /// A successful ProcessInput moves the ticket here. Only a tracked
-        /// sample release reported by the MFT may remove it.
+        /// sample release reported by the MFT may remove it, or the teardown
+        /// of an encoder that has drained.
         retained_tickets: BTreeMap<u64, WindowsD3d11TextureLeaseTicket>,
     }
 
@@ -4360,7 +4363,7 @@ mod runtime {
             .encoders
             .get(&role)
             .ok_or_else(|| encoder_missing(role))?;
-        if !runtime.encoder.is_drained() || !runtime.retained_tickets.is_empty() {
+        if !runtime.encoder.is_drained() {
             return Err(WindowsD3d11Error::new(
                 WindowsD3d11ErrorCode::EncoderUnavailable,
                 format!(
@@ -4369,6 +4372,11 @@ mod runtime {
                 ),
             ));
         }
+        // A drained encoder has produced every output, so any ticket still
+        // here is a surface the MFT itself references (NVIDIA keeps its last
+        // input). Removing the runtime drops the encoder (MFT teardown) before
+        // its tickets, so no lease returns while the transform can read it.
+        let transform_held = runtime.retained_tickets.len();
         let diagnostics = runtime.encoder.diagnostics();
         media_runtime
             .retired_encoder_counters
@@ -4381,6 +4389,11 @@ mod runtime {
                 diagnostics.ownership.stale_release_callbacks,
             );
         media_runtime.encoders.remove(&role);
+        if transform_held > 0 {
+            tracing::info!(
+                "{role:?} encoder released {transform_held} transform-held texture lease(s) at teardown"
+            );
+        }
         Ok(progress)
     }
 

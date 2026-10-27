@@ -12,6 +12,7 @@ import {
   type ElectronInvokeResult
 } from '../shared/electron-ipc-contract'
 import { rendererRoleFromArguments } from '../shared/renderer-security-policy'
+import { windowGroundFromArguments } from '../shared/window-ground'
 import { apiForRendererRole } from './api-policy'
 
 async function invoke<TChannel extends ElectronInvokeChannel>(
@@ -35,6 +36,13 @@ function subscribe<TChannel extends ElectronEventChannel>(
 }
 
 const api: VideorcApi = {
+  // What this window sits on (plan 208): main's call, off the window's argv,
+  // so the theme bootstrap can set data-ground before the first paint. Every
+  // Videorc window names one; a missing value leaves the bootstrap's default.
+  ...(() => {
+    const windowGround = windowGroundFromArguments(process.argv)
+    return windowGround ? { windowGround } : {}
+  })(),
   getBackendConnection: () => invoke('backend:get-connection'),
   getBackendLogs: () => invoke('backend:get-logs'),
   getRuntimeInfo: () => invoke('app:get-runtime-info'),
@@ -209,6 +217,10 @@ const api: VideorcApi = {
   openSystemPermissions: (pane) => invoke('system:open-permissions', pane),
   getMediaAccessStatus: () => invoke('system:media-access-status'),
   requestMediaAccess: (pane) => invoke('system:request-media-access', pane),
+  requestScreenAccess: () => invoke('system:request-screen-access'),
+  recheckPermissionGrants: () => invoke('system:recheck-permission-grants'),
+  relaunchForPermission: () => invoke('app:relaunch-for-permission'),
+  workspaceShown: () => invoke('app:workspace-shown'),
   revealPermissionTarget: () => invoke('system:reveal-permission-target'),
   revealSelectedResource: (capabilityId) => invoke('resource:reveal-selection', capabilityId),
   authorizeOutputDirectory: (directoryHandleId) =>

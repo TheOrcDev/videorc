@@ -125,6 +125,10 @@ try {
   if (launchVideorc) {
     children.push(
       spawn('pnpm', ['--filter', '@videorc/desktop', 'dev'], {
+        env: {
+          ...process.env,
+          VIDEORC_SMOKE_SKIP_FIRST_RUN: process.env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1'
+        },
         detached: true,
         stdio: 'inherit'
       })

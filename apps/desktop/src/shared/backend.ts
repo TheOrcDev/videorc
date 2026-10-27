@@ -4,6 +4,7 @@ import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 import type { LiveBackgroundId, LiveBackgroundMotion } from './live-background-ids'
 import type { TwitchGifMode } from './chat-gif'
+import type { WindowGround } from './window-ground'
 import type {
   BuddyAvatar,
   BuddyMotionSettings,
@@ -11,6 +12,7 @@ import type {
   BuddyReactionTable
 } from './buddy-pet'
 import type { BuddyLibraryId } from './buddy-library'
+import type { StreamPlatform } from './stream-platforms'
 export type { BackgroundImportResult } from './background-import'
 export type { TwitchGifMode } from './chat-gif'
 
@@ -1002,7 +1004,7 @@ export interface RtmpSettings {
 // Multi-platform streaming (per-target) model. Session start consumes it
 // (recording.rs reads params.streaming for the per-target fan-out); the legacy
 // single-RTMP fields remain only as the no-settings fallback.
-export type StreamPlatform = 'youtube' | 'twitch' | 'kick' | 'x' | 'tiktok' | 'instagram' | 'custom'
+export type { StreamPlatform }
 /**
  * Which composed leg a destination consumes in a dual-orientation session.
  * Explicit per-target property — never inferred from resolution equality.
@@ -1950,14 +1952,29 @@ export interface DiscordLastPost {
   state: 'live' | 'ended'
 }
 
+/** How many webhooks (servers) a streamer can connect. */
+export const DISCORD_MAX_WEBHOOKS = 10
+
+/**
+ * One connected webhook. `id` is Discord's id for it, how the RPCs name it;
+ * the token never travels, only its masked tail.
+ */
+export interface DiscordWebhookSnapshot {
+  id: string
+  name?: string
+  /** `…/a1B2`, the last characters of the token. */
+  hint: string
+  lastPost?: DiscordLastPost
+  lastError?: DiscordAnnounceError
+}
+
 /**
  * `discord.announce.get` and the `discord.announce.changed` event. Never
- * carries the webhook URL: only whether one is saved and its masked tail.
+ * carries a webhook URL. The choices below apply to every webhook.
  */
 export interface DiscordAnnounceSnapshot {
-  webhookPresent: boolean
-  webhookHint?: string
-  webhookName?: string
+  /** In the order they were connected; only webhooks whose secret is saved. */
+  webhooks: DiscordWebhookSnapshot[]
   enabled: boolean
   ping: DiscordPing
   branding: boolean
@@ -1966,8 +1983,6 @@ export interface DiscordAnnounceSnapshot {
   /** Typed links by destination id. */
   linkOverrides: Record<string, string>
   identities: DiscordPostAsIdentity[]
-  lastPost?: DiscordLastPost
-  lastError?: DiscordAnnounceError
 }
 
 /** `discord.announce.update`. `linkOverride` without `link` removes it. */
@@ -1984,6 +1999,11 @@ export interface DiscordWebhookSaveParams {
   url: string
 }
 
+/** `discord.webhook.remove`: which saved webhook goes. */
+export interface DiscordWebhookRemoveParams {
+  webhookId: string
+}
+
 /** A configured destination, as `discord.links.preview` and the test read it. */
 export interface DiscordLinkTarget {
   id: string
@@ -1997,6 +2017,11 @@ export interface DiscordLinkTarget {
 
 export interface DiscordTargetsParams {
   targets: DiscordLinkTarget[]
+}
+
+/** `discord.webhook.sendTest`: the destinations, and which webhook to test. */
+export interface DiscordTestParams extends DiscordTargetsParams {
+  webhookId: string
 }
 
 /** Built from the account, typed by the streamer, made at Go Live, or none. */
@@ -2364,6 +2389,13 @@ export interface CompositorFramePipelineStatus {
   /** Plan 190: live background programs built and scratch bytes held (0 while off). */
   liveBackgroundPrograms?: number
   liveBackgroundScratchBytes?: number
+  /**
+   * Plan 205 S6: the Preview presents its own picture (the program leg)
+   * because the program differs from the primary leg: Clips at idle or a
+   * split record + stream with a stream-only item. Left off the wire while
+   * the primary leg is the program.
+   */
+  previewProgramLeg?: boolean
 }
 
 export interface CompositorStatus {
@@ -2424,6 +2456,8 @@ export type PreviewSurfaceSceneLayerKind =
   | 'screen-image'
   | 'background'
   | 'banner'
+  /** Plan 205 S9: the Buddy's frame-polled layer (`main/preview-surface-buddy.ts`). */
+  | 'buddy'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
@@ -3565,6 +3599,37 @@ export type MediaAccessStatus =
 export interface MediaAccessSnapshot {
   camera: MediaAccessStatus
   microphone: MediaAccessStatus
+  /** Screen & System Audio Recording (plan 203 S2): the exact TCC value on
+   * macOS; 'not-applicable' on Windows (no per-app screen grant) and Linux
+   * (portal consent per capture). */
+  screen: MediaAccessStatus
+}
+
+/** The screen request's outcome (plan 203 S2). macOS never answers the first
+ * Screen Recording prompt in place: the user flips the switch in System
+ * Settings, so `status` is usually still 'not-determined' right after the
+ * request and the grant watcher restarts capture when it lands. */
+export interface ScreenAccessResult {
+  status: MediaAccessStatus
+  granted: boolean
+  /** True only when a fresh grant already restarted the capture backend. */
+  restarted: boolean
+  staleBackend?: BackendRestartBoundary
+}
+
+/** `recheckPermissionGrants` (plan 203 S2): whether a late grant (noticed
+ * past the watcher's window, on focus) restarted capture just now. */
+export interface PermissionRecheckResult {
+  restarted: boolean
+}
+
+export type RelaunchForPermissionRefusal = 'capture-active' | 'backend-busy'
+
+/** `relaunchForPermission` (plan 203 S2): false with a reason when a recording,
+ * livestream or capture start is in flight; true once the app is relaunching. */
+export interface RelaunchForPermissionResult {
+  relaunched: boolean
+  reason?: RelaunchForPermissionRefusal
 }
 
 export interface HealthEvent {
@@ -4117,7 +4182,8 @@ export interface RuntimeInfo {
    * verdict on whether the page drew anything; `skipped` off Mica.
    */
   windowGlass?: {
-    kind: 'material' | 'mica' | 'solid'
+    /** `ground` is the opaque chrome ground, the default since plan 208. */
+    kind: 'ground' | 'material' | 'mica' | 'solid'
     reason: string | null
     paintCheck: 'pending' | 'painted' | 'blank' | 'unknown' | 'skipped'
     /**
@@ -4129,6 +4195,8 @@ export interface RuntimeInfo {
     styleRequested: 'clear' | 'material'
   }
   isPackaged: boolean
+  /** Suppresses first-run setup without changing its persisted record (smokes). */
+  firstRunSuppressed: boolean
   permissionTargetName: string
   permissionTargetPath: string
   capturePermissionTargetName: string
@@ -4141,6 +4209,8 @@ export interface RuntimeInfo {
   previewSmokeMode?: boolean
   /** Enables the fixed, packaged Windows live-microphone acceptance bridge. */
   windowsLiveAudioSmokeMode?: boolean
+  /** Enables the fixed, packaged Windows D3D11 preview source bridge. */
+  windowsD3d11PreviewSmokeMode?: boolean
   disableAutoPreview?: boolean
   disableAutoSourcePreview?: boolean
   nativePreviewSurfaceStageSuspended?: boolean
@@ -4696,6 +4766,12 @@ export type SessionMediaGrantResult =
 export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
+  /**
+   * What this window sits on (plan 208): the chrome ground, the OS glass, or
+   * the solid base. Main decides it per window and the preload reads it from
+   * the window's argv, so the theme bootstrap knows it before the first paint.
+   */
+  windowGround?: WindowGround
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
   /** While armed, main suspends Videorc's global shortcuts and forwards every
@@ -4938,7 +5014,8 @@ export interface VideorcApi {
   updateNativePreviewSurfaceCompositor: (
     status: PreviewSurfaceCompositorUpdateParams
   ) => Promise<PreviewSurfaceStatus>
-  // Keeps the macOS vibrancy material in step with the in-app theme.
+  // Keeps the windows' opaque base (and the clear glass's vibrancy) in step
+  // with the in-app theme.
   setNativeTheme: (theme: 'dark' | 'light') => Promise<void>
   // True while the MAIN process pumps presents from its own backend socket;
   // the renderer pump stays dormant then and resumes only as a fallback.
@@ -4961,6 +5038,20 @@ export interface VideorcApi {
    * `restarted` is true only when a fresh grant restarted the capture backend
    * — callers probing a device right after must wait for reconnect first. */
   requestMediaAccess: (pane: 'camera' | 'microphone') => Promise<MediaAccessResult>
+  /** Plan 203 S2: ask macOS for Screen & System Audio Recording in place (the
+   * request main's launch prime used to make cold). Starts the grant watcher;
+   * elsewhere answers 'not-applicable'. */
+  requestScreenAccess: () => Promise<ScreenAccessResult>
+  /** Plan 203 S2: re-read the watched grant now (window focus, setup open past
+   * the watcher's window). A real not-granted → granted transition restarts
+   * capture exactly once. */
+  recheckPermissionGrants: () => Promise<PermissionRecheckResult>
+  /** Plan 203 S2: Reopen Videorc after a grant macOS only honours per launch.
+   * Refused while a recording, livestream or capture start is active. */
+  relaunchForPermission: () => Promise<RelaunchForPermissionResult>
+  /** Plan 203 S5: the main window shows the workspace (not first-run setup):
+   * main restores the Preview window from its launch prefs, once per launch. */
+  workspaceShown: () => Promise<void>
   revealPermissionTarget: () => Promise<void>
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>

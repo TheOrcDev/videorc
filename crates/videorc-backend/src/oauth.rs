@@ -614,9 +614,10 @@ impl OAuthSessions {
             StreamPlatform::Twitch => &self.twitch_finalization,
             StreamPlatform::Kick => &self.kick_finalization,
             StreamPlatform::X => &self.x_finalization,
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {
-                &self.custom_finalization
-            }
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => &self.custom_finalization,
         };
         lock.clone().lock_owned().await
     }
@@ -2620,6 +2621,7 @@ fn parse_provider_profile(
         StreamPlatform::X => parse_x_profile(value),
         StreamPlatform::Kick => parse_kick_profile(value),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth profiles."),
+        StreamPlatform::Facebook => anyhow::bail!(FACEBOOK_SIGN_IN_UNAVAILABLE),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
@@ -2931,8 +2933,14 @@ impl OAuthTokenResponse {
     }
 }
 
+/// Facebook is a stream-key destination until its Page sign-in passes Meta's
+/// App Review (plan 206 S7); the renderer shows the same words on the card.
+pub const FACEBOOK_SIGN_IN_UNAVAILABLE: &str =
+    "Signing in with Facebook isn't available yet. Use a stream key.";
+
 fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     match platform {
+        StreamPlatform::Facebook => anyhow::bail!(FACEBOOK_SIGN_IN_UNAVAILABLE),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
@@ -5446,6 +5454,21 @@ mod tests {
     }
 
     #[test]
+    fn facebook_sign_in_is_refused_until_meta_approves_it() {
+        let config = provider_config(StreamPlatform::Facebook).unwrap_err();
+        assert_eq!(config.to_string(), FACEBOOK_SIGN_IN_UNAVAILABLE);
+        let profile =
+            parse_provider_profile(StreamPlatform::Facebook, serde_json::json!({})).unwrap_err();
+        assert_eq!(profile.to_string(), FACEBOOK_SIGN_IN_UNAVAILABLE);
+        assert!(optional_scopes_for(StreamPlatform::Facebook).is_empty());
+        assert!(
+            provider_credential_statuses()
+                .iter()
+                .all(|status| status.platform != StreamPlatform::Facebook)
+        );
+    }
+
+    #[test]
     fn provider_credential_statuses_cover_native_platforms_without_secret_values() {
         let statuses = provider_credential_statuses();
 
@@ -6092,6 +6115,7 @@ mod tests {
         for platform in [
             StreamPlatform::Youtube,
             StreamPlatform::X,
+            StreamPlatform::Facebook,
             StreamPlatform::Tiktok,
             StreamPlatform::Instagram,
             StreamPlatform::Custom,

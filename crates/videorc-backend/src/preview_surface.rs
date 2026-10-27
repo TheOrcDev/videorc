@@ -1794,20 +1794,7 @@ async fn reconcile_live_preview_compositor_with_hook(
 
         let started_run_id = start_synthetic_compositor_if_idle(
             state.clone(),
-            CompositorStartParams {
-                target_fps: status.target_fps,
-                width: status.width,
-                height: status.height,
-                frame_consumer: CompositorFrameConsumer::NativePreview,
-                stream_output: None,
-                source_iso_output: None,
-                caption_overlay_on_primary: false,
-                caption_overlay_on_aux: false,
-                highlight_overlay_on_primary: false,
-                highlight_overlay_on_aux: false,
-                buddy_overlay_on_primary: false,
-                buddy_overlay_on_aux: false,
-            },
+            idle_preview_start_params(state, status.target_fps, status.width, status.height),
         )
         .await
         .and_then(|status| status.run_id);
@@ -1873,23 +1860,39 @@ pub(crate) async fn ensure_preview_compositor_after_scene_commit(state: &AppStat
     let (width, height, target_fps) = preview_compositor_start_size(scene);
     let _ = start_synthetic_compositor_if_idle(
         state.clone(),
-        CompositorStartParams {
-            target_fps,
-            width,
-            height,
-            frame_consumer: CompositorFrameConsumer::NativePreview,
-            stream_output: None,
-            source_iso_output: None,
-            caption_overlay_on_primary: false,
-            caption_overlay_on_aux: false,
-            highlight_overlay_on_primary: false,
-            highlight_overlay_on_aux: false,
-            buddy_overlay_on_primary: false,
-            buddy_overlay_on_aux: false,
-        },
+        idle_preview_start_params(state, target_fps, width, height),
     )
     .await;
     sync_preview_surface_source_from_compositor(state).await;
+}
+
+/// The idle preview run's start parameters (plan 205 S1): the native preview
+/// consumer, no auxiliary leg, no captions (they exist only in a session),
+/// and the highlight and Buddy flags of the program while nothing runs, read
+/// from the stored layout (`compositor::idle_overlay_flags`). When the Buddy
+/// is in it, its atlas for this canvas starts building now.
+fn idle_preview_start_params(
+    state: &AppState,
+    target_fps: u32,
+    width: u32,
+    height: u32,
+) -> CompositorStartParams {
+    let overlays = crate::compositor::idle_overlay_flags(state);
+    crate::compositor::prepare_idle_buddy(state, overlays, (width, height));
+    CompositorStartParams {
+        target_fps,
+        width,
+        height,
+        frame_consumer: CompositorFrameConsumer::NativePreview,
+        stream_output: None,
+        source_iso_output: None,
+        caption_overlay_on_primary: false,
+        caption_overlay_on_aux: false,
+        highlight_overlay_on_primary: overlays.highlight_on_primary,
+        highlight_overlay_on_aux: overlays.highlight_on_aux,
+        buddy_overlay_on_primary: overlays.buddy_on_primary,
+        buddy_overlay_on_aux: overlays.buddy_on_aux,
+    }
 }
 
 fn scene_needs_portal_proof_compositor(scene: &Scene) -> bool {
@@ -4044,6 +4047,8 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await
@@ -4123,6 +4128,154 @@ mod tests {
         let after = compositor_status(&state).await;
         assert_eq!(after.run_id.as_deref(), Some(preview_run_id.as_str()));
         assert_eq!((after.width, after.height), (400, 200));
+        stop_compositor(&state).await;
+    }
+
+    /// Plan 205 (S1, D1): the idle run starts with the program's flags from
+    /// the stored layout, not with every overlay off: the owner's stream-only
+    /// Buddy is on the primary from the first frame, as is the highlight.
+    #[tokio::test]
+    async fn the_idle_preview_run_starts_with_the_programs_flags() {
+        let state = test_state();
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).expect("layout saves");
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(160.0, 90.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        wait_for_frame_dimensions_after(&state, 320, 180, None)
+            .await
+            .expect("preview compositor publishes at the surface size");
+        let config = crate::compositor::loop_config_for_test(&state)
+            .await
+            .expect("the preview run is live");
+        assert_eq!(
+            config.frame_consumer,
+            CompositorFrameConsumer::NativePreview
+        );
+        assert!(config.buddy_overlay_on_primary, "{config:?}");
+        assert!(config.highlight_overlay_on_primary, "{config:?}");
+        assert!(!config.buddy_overlay_on_aux && !config.highlight_overlay_on_aux);
+        assert!(
+            !config.caption_overlay_on_primary,
+            "captions exist only in a session"
+        );
+        stop_compositor(&state).await;
+    }
+
+    /// Plan 205 (S1): a lease release returns the run to the program of the
+    /// layout as stored NOW. A layout saved while the capture holds the run
+    /// is left to the session's plan (the idle rule never reaches a leased
+    /// run), and the release reads it fresh instead of restoring the flags
+    /// captured at arm time.
+    #[tokio::test]
+    async fn a_lease_release_restores_the_flags_of_the_layout_saved_during_the_session() {
+        use crate::compositor::{
+            CompositorArmParams, arm_compositor_for_capture, loop_config_for_test,
+            release_compositor_capture_lease,
+        };
+
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(160.0, 90.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        let preview_frame = wait_for_frame_dimensions_after(&state, 320, 180, None)
+            .await
+            .expect("preview compositor publishes at the surface size");
+        let idle = loop_config_for_test(&state).await.expect("live run");
+        assert!(!idle.buddy_overlay_on_primary, "the shipped Buddy is off");
+
+        // A record-only session arms the run; its plan drops a stream-only
+        // Buddy whatever the idle rule says.
+        let capture = state.ffmpeg_work.begin_capture_when_available().await;
+        arm_compositor_for_capture(
+            &state,
+            "session-layout",
+            CompositorArmParams {
+                target_fps: 30,
+                width: 640,
+                height: 360,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                replay_only: false,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: true,
+                highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
+                highlight_overlay_on_program: true,
+                buddy_overlay_on_program: false,
+            },
+        )
+        .await
+        .expect("live preview run arms in place");
+        wait_for_frame_dimensions_after(&state, 640, 360, Some(preview_frame.sequence))
+            .await
+            .expect("the armed run renders the capture canvas");
+
+        // The layout saved during the session: Buddy stream only. With the
+        // session not yet in `state.recording` (the start window) the idle
+        // rule is refused; with it there, the session re-plans by its shape.
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let held = loop_config_for_test(&state).await.expect("leased run");
+        assert!(!held.buddy_overlay_on_primary, "{held:?}");
+        let mut session = crate::recording::test_active_recording_stub("session-layout");
+        session.overlay_session_shape = Some(crate::overlay_layout::OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: false,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+        });
+        *state.recording.lock().await = Some(session);
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let replanned = loop_config_for_test(&state).await.expect("leased run");
+        assert!(
+            !replanned.buddy_overlay_on_primary,
+            "a record-only session still drops a stream-only Buddy: {replanned:?}"
+        );
+        drop(state.recording.lock().await.take());
+
+        drop(capture);
+        let released = release_compositor_capture_lease(&state, "session-layout")
+            .await
+            .expect("release restores the live surface");
+        assert_eq!(
+            released.frame_pipeline.consumer.as_deref(),
+            Some("native-preview")
+        );
+        let restored = loop_config_for_test(&state).await.expect("live run");
+        assert!(
+            restored.buddy_overlay_on_primary,
+            "the idle run follows the layout saved during the session: {restored:?}"
+        );
+        assert!(restored.highlight_overlay_on_primary);
+        assert!(!restored.buddy_overlay_on_aux);
+        assert_eq!(
+            restored.frame_consumer,
+            CompositorFrameConsumer::NativePreview
+        );
+        wait_for_frame_dimensions_after(&state, 320, 180, Some(preview_frame.sequence))
+            .await
+            .expect("the released run renders at the surface size");
         stop_compositor(&state).await;
     }
 

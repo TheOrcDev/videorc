@@ -9,11 +9,11 @@ same place.
 
 ## The three items
 
-| Item      | What it is                                                                              | Default place                     | Default switches (stream / recording)                                 |
-| --------- | --------------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------------- |
-| Highlight | The highlighted comment card ("show on stream" in Stream Manager, voice, auto-show)      | Bottom left corner                | on / on                                                               |
-| Captions  | The live caption bar; its width is the rect, style and size stay in Captions            | Bottom, centred                   | off / off (captions off burn nothing; the switches replace `burnTarget`) |
-| Buddy     | Your Buddy and its speech bubble ([buddy.md](buddy.md))                                 | Bottom right corner               | off / off (opt-in)                                                    |
+| Item      | What it is                                                                          | Default place       | Default switches (stream / recording)                                    |
+| --------- | ----------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------ |
+| Highlight | The highlighted comment card ("show on stream" in Stream Manager, voice, auto-show) | Bottom left corner  | on / on                                                                  |
+| Captions  | The live caption bar; its width is the rect, style and size stay in Captions        | Bottom, centred     | off / off (captions off burn nothing; the switches replace `burnTarget`) |
+| Buddy     | Your Buddy and its speech bubble ([buddy.md](buddy.md))                             | Bottom right corner | off / off (opt-in)                                                       |
 
 A place is a normalized rect, `x y w h` in canvas units (0 to 1), one for
 the horizontal picture and one for the vertical one. The smallest side a
@@ -31,11 +31,53 @@ the left, the centre or the right by where the rect's centre sits. A
 bitmap wider than the rect is centre-cropped. So the three old placements
 (left corner, centred bar, right corner) fall out of the rect alone.
 
+## The Preview shows the program
+
+The program is what goes out: every layer at least one running output
+carries. While nothing runs, it is every layer with a switch on. Hidden
+banners and items with both switches off are never drawn. Clips keeps what
+a recording would, using each item's **Show in recording** switch.
+
+| What runs                         | The Preview draws the item when | The primary leg burns it when |
+| --------------------------------- | ------------------------------- | ----------------------------- |
+| Nothing (Clips off)               | either switch                   | either switch (no output)     |
+| Clips only                        | either switch                   | Show in recording             |
+| Record only                       | Show in recording               | Show in recording             |
+| Stream only                       | Show on stream                  | Show on stream                |
+| Record + stream, one shared leg   | either switch                   | either switch                 |
+| Record + stream, split stream leg | either switch                   | Show in recording             |
+| Record + vertical stream          | either switch (horizontal)      | either switch                 |
+
+The Preview shows the program in every row. On macOS, the native Preview
+presents the primary leg's IOSurface whenever that leg is the program. In
+the two rows where it is not (Clips at idle, and a split record + stream)
+and some item is in the program but not on the primary leg, the run
+composes the Preview's own picture, the **program leg**, after the encoded
+legs in the same tick: the same snapshot (the Scene editor's draft and
+chrome included), the same sources, the same live background frame and
+the program's items, at the primary's canvas, so every prepared bitmap is
+the one the legs already hold. The Preview lease and the pixel oracle
+present that picture while it is current; the ring, the recording and the
+stream are untouched. While the primary leg is the program nothing extra
+runs on the GPU. `compositor.status.framePipeline.previewProgramLeg` says
+when the program leg is on; `VIDEORC_PREVIEW_PROGRAM_LEG=0` keeps the
+Preview on the primary leg (a measurement and support switch, said in
+the log). The pure trigger is `preview_needs_program_leg` in
+`compositor.rs`.
+
 ## Placing them: the Live Scene canvas
 
 The canvas (Studio → Scene) draws the three items as labelled dashed rects
-over the sources. Drag or resize one like a source; a released gesture is
-one save. Click one to open its inspector on the right:
+over the sources, the Buddy with its still in the square its pet fills
+(dimmed while both switches are off). Drag or resize one like a source; a
+released gesture is one save, and the item stays where it was dropped
+until that save lands. On the live canvas (macOS, the preview docked into
+the Scene tab) the idle picture draws Buddy whenever either output switch is
+on, with Clips off. Selecting or dragging an off Buddy never draws it. The
+highlight card and the caption bar have nothing to draw until a session;
+their frame shows the zone. With the preview floating in its own window,
+the canvas is the schematic and that window follows each drag. Click one
+to open its inspector on the right:
 
 - **Show on stream** and **Show in recording** switches.
 - **Snap** for the orientation on the stage: Top left, Top right, Bottom
@@ -45,9 +87,9 @@ one save. Click one to open its inspector on the right:
   here under "Placement and output".
 
 When the switches differ, the item's label carries a **stream only** or
-**recording only** badge. The docked native preview shows the primary
-composite, so a stream-only item does not appear there during a split; the
-canvas rect is the truth.
+**recording only** badge. The docked native preview shows the program, so
+a stream-only item appears there during a split and under Clips at idle
+(the program leg above), in the place it will appear on the stream.
 
 When a vertical destination is armed (dual-orientation streaming), an
 **Overlays on** control above the stage switches between Horizontal and
@@ -73,16 +115,16 @@ the encoder topology, never by an overlay. One pure function,
 `overlay_leg_plan(record, stream, aux_leg, show_on_stream,
 show_in_recording)`, says where each item burns (D12):
 
-| Session           | Auxiliary leg      | Primary burns when            | Auxiliary burns when | Needs a split |
-| ----------------- | ------------------ | ----------------------------- | -------------------- | ------------- |
-| Idle              | any                | never                         | never                | no            |
-| Record only       | any                | `showInRecording`             | never                | no            |
-| Stream only       | none or split      | `showOnStream`                | never                | no            |
-| Stream only       | vertical simulcast | `showOnStream`                | `showOnStream`       | no            |
-| Record + stream   | none, switches agree | the shared value            | never                | no            |
-| Record + stream   | none, switches differ | `showInRecording`          | `showOnStream`       | **yes**       |
-| Record + stream   | split stream leg   | `showInRecording`             | `showOnStream`       | no            |
-| Record + stream   | vertical simulcast | `showInRecording` or `showOnStream` | `showOnStream` | no            |
+| Session         | Auxiliary leg         | Primary burns when                  | Auxiliary burns when | Needs a split |
+| --------------- | --------------------- | ----------------------------------- | -------------------- | ------------- |
+| Idle            | any                   | never                               | never                | no            |
+| Record only     | any                   | `showInRecording`                   | never                | no            |
+| Stream only     | none or split         | `showOnStream`                      | never                | no            |
+| Stream only     | vertical simulcast    | `showOnStream`                      | `showOnStream`       | no            |
+| Record + stream | none, switches agree  | the shared value                    | never                | no            |
+| Record + stream | none, switches differ | `showInRecording`                   | `showOnStream`       | **yes**       |
+| Record + stream | split stream leg      | `showInRecording`                   | `showOnStream`       | no            |
+| Record + stream | vertical simulcast    | `showInRecording` or `showOnStream` | `showOnStream`       | no            |
 
 Why the last row: the recording and the horizontal stream share the primary
 leg's pixels, so the primary burns if either switch wants it.
@@ -104,12 +146,12 @@ sheet under the destinations, with the item's name, never silently. The
 same sentence is written to the session's health log (`overlay-start-notice`,
 info) when the session starts. The sentences, word for word:
 
-| Session                                              | Switches                        | Sentence                                                                                        |
-| ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Record + stream, one shared encode                   | stream on, recording off (or the reverse) | "Both the stream and the recording will include highlights: this computer shares one encode for them." |
-| Record + stream, one shared encode                   | same, for the Buddy             | "Both the stream and the recording will include the Buddy: this computer shares one encode for them." |
-| Record + dual-orientation stream                     | stream on, recording off        | "Recording will include highlights while streaming vertical." (also "... captions ..." and "... the Buddy ...") |
-| Record + dual-orientation stream                     | recording on, stream off        | "The horizontal stream will include highlights while streaming vertical." (also "... captions ..." and "... the Buddy ...") |
+| Session                            | Switches                                  | Sentence                                                                                                                    |
+| ---------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Record + stream, one shared encode | stream on, recording off (or the reverse) | "Both the stream and the recording will include highlights: this computer shares one encode for them."                      |
+| Record + stream, one shared encode | same, for the Buddy                       | "Both the stream and the recording will include the Buddy: this computer shares one encode for them."                       |
+| Record + dual-orientation stream   | stream on, recording off                  | "Recording will include highlights while streaming vertical." (also "... captions ..." and "... the Buddy ...")             |
+| Record + dual-orientation stream   | recording on, stream off                  | "The horizontal stream will include highlights while streaming vertical." (also "... captions ..." and "... the Buddy ...") |
 
 Captions on one shared encode get no sentence: they keep the plan 090
 behaviour (below). A session with a split stream leg needs no sentence.
@@ -125,9 +167,9 @@ Banners ([banners.md](banners.md)) reuse this model: each banner has a
 horizontal and a vertical rect and the two switches (labelled **Appears
 in: Stream / Recording** on a banner, because a banner also has Show and
 Hide), and each banner's legs come from the same `overlay_leg_plan` with
-the same shared-leg fallback as the highlight card and the Buddy. Unlike
-the three items, a banner also draws on the idle preview, and it is a list,
-stored in its own `banners` table rather than in `overlayLayout`. All
+the same shared-leg fallback as the highlight card and Buddy. A showing
+banner follows the program at idle, like Buddy. Banners are a list, stored
+in their own `banners` table rather than in `overlayLayout`. All
 showing banners count as one item in the Go Live sheet, labelled
 `banners` ("Recording will include banners while streaming vertical.").
 

@@ -589,8 +589,12 @@ function showSessionAudioNews(event: HealthEvent): void {
       description: event.message,
       duration: 12_000
     })
-  } else if (event.code === 'microphone-timeline-recovered') {
-    notifyOnce('microphone-timeline-recovered', 'success', 'Microphone is back', {
+  } else if (
+    event.code === 'microphone-timeline-recovered' ||
+    // Retest 151: a stopped Linux capture worker was opened again.
+    event.code === 'microphone-input-recovered'
+  ) {
+    notifyOnce(event.code, 'success', 'Microphone is back', {
       description: event.message,
       duration: 8_000
     })

@@ -1,5 +1,118 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
+  colours. Owner request: redesign Videorc's colour after the Welcome
+  screen's Liquid Chrome, metallic black with its shine, and the other way
+  around in light mode. Owner calls from a rendered mockup:
+  - every window sits on a solid, frosted still of Liquid Chrome under the
+    coats, with no desktop showing through, the same on every platform;
+  - polished chrome controls and edges (primary buttons, beads, plates, a
+    red LED Record) while panels, menus and text stay flat;
+  - light mode is the crisp pixel invert;
+  - the phone remote and the OAuth page come along.
+
+  Eight slices, from before pictures through the ground assets, opaque
+  windows, the probe, controls, the Welcome invert and the served pages, to
+  docs and gates. **EXECUTED** 2026-10-27 (S0 to S7) on
+  `plan-208-liquid-chrome-colour`, PR #883: every window sits on the
+  chrome ground, controls wear chrome, Record is the red LED, light
+  Welcome is the invert, and the phone remote and OAuth page follow; the
+  design skill is rewritten for it. `VIDEORC_GLASS=clear` keeps the old
+  glass for one release. Gates in the
+  [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
+  the owner's by-eye in both themes and a Windows pass are owed.
+- 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
+  steps 2 to 5. Owner request: after permissions, "What are you making?",
+  "Your look", "Sound check" and "Where you stream". The goal (Recordings,
+  Livestreams or Both) decides whether the streaming step shows. Your look
+  picks orientation, layout, camera shape and a live background on the
+  scene's own picture, with the background moving. Sound check is the
+  microphone, its level with a verdict, "Set level for me", and System
+  audio. Where you stream signs in to YouTube, Twitch, Kick or X and turns
+  each one on. Nothing in setup opens a capture device. It also fixes
+  "Clips couldn't start" on a fresh install without a screen. **BUILT IN PR**
+  (unmerged); owner acceptance and the final smoke bundle are still owed.
+  [Acceptance](../docs/acceptance/2026-10-27-first-run-steps.md).
+- 2026-10-27: [Plan 206](206-facebook-live.md), Facebook Live in the
+  Livestream tab. Owner request: a Facebook connector like the other
+  platforms, stream key first, the rest once Meta approves. Phase 1 (one
+  desktop PR, no Meta, no web change): a horizontal Facebook card after X,
+  server filled in, key from Live Producer, a Go Live reminder to press Go
+  live there; chat, viewers and title say they need sign-in. Phase 2: the
+  owner's Meta app and Business Verification, plus a spike that picks device
+  code or a website relay for sign-in. Phase 3 (dark in public builds):
+  connect a Page, Go Live with our title, comments, viewers. Phase 4: App
+  Review and the switch. Replaces plan 079 (#504, closed stale). **Phase 1
+  BUILT** (S0 to S5, one desktop PR; owner live take owed); Phases 2 to 4
+  wait on the owner's Meta setup (M1). Owner calls D6 (website) and D7
+  (sign-in, after S6) open.
+- 2026-10-27: [Plan 205](205-preview-is-the-source-of-truth.md), The
+  preview is the source of truth. Owner request: a banner and Buddy put on
+  the picture weren't visible in the preview; "our preview window should
+  actually be the source of truth". Root causes, checked on the owner's
+  profile: Clips (on by default) makes the idle preview a recording, so
+  Buddy set to stream only never draws. The idle preview never draws Buddy
+  at all, and draws it only while the Scene editor holds it. The banner
+  was placed while hidden, and on the docked live canvas no label says so.
+  One rule, "the Preview shows the program": every layer at least one
+  running output carries, and at idle every layer with a switch on. Phase
+  1 covers that rule in Rust and TS, Clips following Show in recording, "Hidden",
+  "Off" and "Stream only" on the Scene chips, and a dev-only Preview pixel
+  oracle with `smoke:preview-truth`. Phase 2 adds a macOS program leg for
+  Clips at idle and record + stream with a split stream leg (measured spike
+  first). Phase 3
+  covers the Windows media session's preview and Buddy on the proof
+  surface. **BUILT**, PR #880: S1 to S9. Owed: S10 (Windows tester pass,
+  Linux box), the owner's by-eye, the 4K idle program-leg cost call.
+- 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
+  Owner request: live chat in the Studio in a small window, optional with a
+  switch, a click putting a message on stream, less detail than the Stream
+  Manager. With **Chat in Studio** on (Settings → General → Chat, off by
+  default; ⌘K mirrors it), the inspector shows a Chat section under Session
+  while on air. Each row has a small avatar, the name, the words and the
+  platform mark. A click shows the message on stream through the same
+  highlight the Stream Manager uses. The list follows the newest message,
+  and the header has Open Stream Manager and a hide button with Undo. It
+  keeps its default look under Retro LCD. The Stream Manager's list
+  mechanics moved, unchanged, into one hook both lists share. Renderer
+  only, in its own lazy chunk (+88 eager gzip bytes). `smoke:studio-chat`
+  proves the card in the stream output. **BUILT IN PR**. Owed: the owner's
+  by-eye on a real stream, the two-destination fit, and confirming that
+  "yes" meant avatars.
+- 2026-10-27: [Plan 203](203-first-run-permissions.md), First-run setup,
+  step 1: permissions. Owner request: onboarding only on the first launch,
+  a Settings button to run it again, and permissions done perfectly first.
+  The Liquid Chrome live background fills the window (the shared WebGL2
+  player, lazy, 30 fps cap, poster when still), and one centred card asks
+  for Screen Recording, System audio, Microphone and Camera in place, with
+  live states and proof. Launch requests were removed; Reopen and resume
+  handle grants that require a relaunch. Existing installs skip it; smokes
+  suppress it by default. "Run setup again…" sits in Settings → General
+  and ⌘K. **SHIPPED IN PR**: S1 to S7 implemented, Polished at Normal
+  chosen by the owner. Owner-owed: S0 clean macOS account (cold launch,
+  main's identity, System audio and Reopen), light and dark by-eye, Windows
+  tester pass, long refused-row copy, review of D2/D3/D5 to D7 shipped as
+  recommended. [Acceptance](../docs/acceptance/2026-10-27-first-run-permissions.md).
+- 2026-10-26: [Plan 202](202-buddy-talks-in-its-bubble.md), Buddy talks in
+  its bubble. Owner request: a mode where Buddy talks only in its bubble, not
+  in chat, and a switch for whether Buddy shows on takeover screens. A fourth
+  mode, "Buddy talks: Off · Bubble · Suggest · Auto": greetings, answers and
+  banter speak only in the on-stream bubble and never post to chat. It needs
+  no posting consent, uses a settings field older apps survive, paces bubbles
+  so none is cut short, and answers start with "@name". "Show on takeovers"
+  in Layout → Buddy hides the pet and bubble while a takeover shows; it
+  starts off for everyone, so the release notes must say so. Four desktop
+  phases, no web change. **PLANNED**; owner answers recorded 2026-10-26.
+- 2026-10-26: [Plan 201](201-studio-audio-balance.md), Balance the Microphone
+  and System audio from the Studio. One Audio section puts both levels on
+  one audiocn Mixer scale, each with the same Gain fader Sources uses, in
+  the default and Retro LCD looks. System audio's idle level comes from the
+  Clips bus; no new capture. The Sources mirror keeps Screen and Camera.
+  **BUILT** 2026-10-27: S0 to S4 done. Owed: the granted System audio smoke,
+  the Sources idle meter check, the owner's by-eye in both looks and themes
+  (including D5's LCD faders), and the granted CPU comparison. The four CPU
+  attempts and their failures are in the
+  [acceptance record](../docs/acceptance/2026-10-27-studio-audio-balance.md).
 - 2026-10-26: [Plan 200](200-better-recordings-export-separate-files-sound.md),
   Better recordings: exports, separate files and sound. Owner request: make
   exporting with separate sources, sound and system audio even better. Four

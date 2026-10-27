@@ -5,11 +5,13 @@
  * sends and says.
  */
 import type {
+  DiscordAnnounceError,
   DiscordAnnounceErrorCode,
   DiscordAnnounceSnapshot,
   DiscordLinkTarget,
   DiscordPing,
   DiscordPostAs,
+  DiscordWebhookSnapshot,
   StreamTargetSettings
 } from '@/lib/backend'
 
@@ -106,39 +108,68 @@ export interface DiscordFailureToast {
   description: string
 }
 
-const FAILURE_COPY: Record<DiscordAnnounceErrorCode, Omit<DiscordFailureToast, 'at'>> = {
-  'webhook-deleted': {
-    type: 'error',
-    title: "Couldn't post to Discord",
-    description: 'The webhook was deleted in Discord. Paste a new one in Livestream → Setup.'
-  },
-  unreachable: {
-    type: 'warning',
-    title: "Couldn't post to Discord",
-    description: "Discord couldn't be reached for 5 minutes. Your stream is fine."
-  },
-  rejected: {
-    type: 'error',
-    title: "Couldn't post to Discord",
-    description: 'Discord refused the post. Check the webhook in Livestream → Setup.'
+/** The failure's copy; a named webhook is named, so servers tell apart. */
+function failureCopy(
+  code: DiscordAnnounceErrorCode,
+  name: string | undefined
+): Omit<DiscordFailureToast, 'at'> {
+  const title = "Couldn't post to Discord"
+  const webhook = name ? `The ${name} webhook` : 'The webhook'
+  switch (code) {
+    case 'webhook-deleted':
+      return {
+        type: 'error',
+        title,
+        description: `${webhook} was deleted in Discord. Paste a new one in Livestream → Setup.`
+      }
+    case 'unreachable':
+      return {
+        type: 'warning',
+        title,
+        description: name
+          ? `Discord couldn't be reached for 5 minutes (${name}). Your stream is fine.`
+          : "Discord couldn't be reached for 5 minutes. Your stream is fine."
+      }
+    case 'rejected':
+      return {
+        type: 'error',
+        title,
+        description: name
+          ? `Discord refused the post to ${name}. Check the webhook in Livestream → Setup.`
+          : 'Discord refused the post. Check the webhook in Livestream → Setup.'
+      }
   }
 }
 
+/** The webhook whose failure is newest, if any has one. */
+export function newestDiscordFailure(
+  webhooks: readonly Pick<DiscordWebhookSnapshot, 'name' | 'lastError'>[]
+): { name?: string; error: DiscordAnnounceError } | null {
+  let newest: { name?: string; error: DiscordAnnounceError } | null = null
+  for (const webhook of webhooks) {
+    if (!webhook.lastError) continue
+    if (!newest || Date.parse(webhook.lastError.at) > Date.parse(newest.error.at)) {
+      newest = { error: webhook.lastError, ...(webhook.name ? { name: webhook.name } : {}) }
+    }
+  }
+  return newest
+}
+
 /**
- * The toast for a new announcement failure (D13), or `null`: the same failure
- * never toasts twice, and an old one carried by a settings change never
- * toasts at all.
+ * The toast for a new announcement failure (D13), or `null`: the newest
+ * failure across the webhooks, the same failure never toasts twice, and an
+ * old one carried by a settings change never toasts at all.
  */
 export function discordFailureToast(
   lastToastedAt: string | null,
-  snapshot: Pick<DiscordAnnounceSnapshot, 'lastError'>,
+  snapshot: Pick<DiscordAnnounceSnapshot, 'webhooks'>,
   nowMs: number
 ): DiscordFailureToast | null {
-  const error = snapshot.lastError
-  if (!error || error.at === lastToastedAt) return null
-  const atMs = Date.parse(error.at)
+  const newest = newestDiscordFailure(snapshot.webhooks)
+  if (!newest || newest.error.at === lastToastedAt) return null
+  const atMs = Date.parse(newest.error.at)
   if (!Number.isFinite(atMs) || nowMs - atMs > FAILURE_TOAST_WINDOW_MS) return null
-  return { at: error.at, ...FAILURE_COPY[error.code] }
+  return { at: newest.error.at, ...failureCopy(newest.error.code, newest.name) }
 }
 
 /** The webhook row's error line while a failure stands. */

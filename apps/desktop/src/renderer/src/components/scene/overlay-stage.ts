@@ -17,6 +17,7 @@ import {
   overlayItemOutputBadge
 } from '@/lib/overlay-layout'
 
+import { bannerAssetUrl } from '../../../../shared/banner-assets'
 import type { StageRect } from './stage-transform'
 
 // Overlay items on the Live Scene canvas (plan 164, D15). The stage draws the
@@ -76,6 +77,32 @@ export type StageItemTarget =
 /** What the label says after the name: hidden, off, or which output alone shows it. */
 export type StageItemBadge = 'hidden' | 'off' | 'stream only' | 'recording only'
 
+/**
+ * The badge as the stage toolbar's chip says it after the item's name, a
+ * status word in sentence case (plan 205 S3). On the live canvas the stage's
+ * own badge is invisible under the picture, and the Preview draws nothing for
+ * a hidden or off item, so the chip is the one place this word shows there.
+ */
+export const STAGE_ITEM_BADGE_LABELS: Record<StageItemBadge, string> = {
+  hidden: 'Hidden',
+  off: 'Off',
+  'stream only': 'Stream only',
+  'recording only': 'Recording only'
+}
+
+/** What the schematic canvas draws for an item, so a drag shows the item
+ * itself moving and not only its outline: a banner's image over its rect,
+ * the Buddy's still in the square its pet fills. The live canvas never
+ * shows it: there the compositor draws the real thing. */
+export interface StageItemPicture {
+  href: string
+  /** Where it sits in the item's rect: all of it (a banner's rect hugs its
+   * image), or the square the Buddy's pet fills (`buddyPetBox`). */
+  fit: 'rect' | 'buddy'
+  /** 0 to 1: a banner's own opacity. */
+  opacity: number
+}
+
 interface StageItemFacts {
   stageId: string
   label: string
@@ -91,6 +118,7 @@ interface StageItemFacts {
    * banner that fills the canvas is a frame: both leave the sources under
    * them to the pointer (`bannerFillsCanvas`). */
   grabsBody: boolean
+  picture: StageItemPicture | null
 }
 
 /** An item the stage draws after the sources: an overlay item or a banner. */
@@ -111,9 +139,42 @@ export function overlayItemOff(
   return !item.showOnStream && !item.showInRecording
 }
 
+/**
+ * The square the Buddy's pet fills inside its rect, in canvas units: the
+ * renderer's twin of the backend's `buddy_sprite::buddy_box` (without its
+ * whole-pixel rounding). The side is the rect's width in pixels, at most the
+ * canvas's shorter side; it is centred on the rect, rests on the rect's
+ * bottom edge when the rect sits in the lower half (else hangs from its top
+ * edge), and stays inside the canvas. `canvasAspect` is width / height.
+ */
+export function buddyPetBox(rect: StageRect, canvasAspect: number): StageRect {
+  const aspect = Number.isFinite(canvasAspect) && canvasAspect > 0 ? canvasAspect : 16 / 9
+  const width = Math.min(rect.width, 1, 1 / aspect)
+  const height = width * aspect
+  const x = Math.min(Math.max(rect.x + rect.width / 2 - width / 2, 0), 1 - width)
+  const y = Math.min(
+    Math.max(rect.y + rect.height / 2 >= 0.5 ? rect.y + rect.height - height : rect.y, 0),
+    1 - height
+  )
+  return { x, y, width, height }
+}
+
+/** Where an item's picture sits for the rect the stage shows it at (its
+ * place, a drag's ghost or a released draft), in canvas units. */
+export function stageItemPictureRect(
+  picture: StageItemPicture,
+  rect: StageRect,
+  canvasAspect: number
+): StageRect {
+  return picture.fit === 'buddy' ? buddyPetBox(rect, canvasAspect) : rect
+}
+
+/** `buddyPicture` is the Buddy's idle still (`buddyStateImageUrl`), drawn in
+ * its pet's square on the schematic canvas; null draws its zone alone. */
 export function overlayStageItems(
   layout: OverlayLayout,
-  orientation: OverlayOrientation
+  orientation: OverlayOrientation,
+  buddyPicture: string | null = null
 ): OverlayItemStageItem[] {
   return OVERLAY_ITEMS.map((item) => {
     const off = overlayItemOff(layout[item])
@@ -126,7 +187,11 @@ export function overlayStageItems(
       badge: off ? 'off' : overlayItemOutputBadge(layout[item]),
       off,
       aspectLocked: false,
-      grabsBody: false
+      grabsBody: false,
+      // The highlight card and the caption bar have no picture until a
+      // comment or a caption exists: their zone is the truth.
+      picture:
+        item === 'buddy' && buddyPicture ? { href: buddyPicture, fit: 'buddy', opacity: 1 } : null
     }
   })
 }
@@ -187,7 +252,13 @@ export function bannerStageItems(
         badge: !banner.shown ? 'hidden' : off ? 'off' : overlayItemOutputBadge(banner),
         off: !banner.shown || off,
         aspectLocked: true,
-        grabsBody: !bannerFillsCanvas(rect)
+        grabsBody: !bannerFillsCanvas(rect),
+        // The full image, not the thumbnail: a strip may span the canvas.
+        picture: {
+          href: bannerAssetUrl(banner.imageFile),
+          fit: 'rect',
+          opacity: Math.min(Math.max(banner.opacity, 0), 1)
+        }
       }
     })
 }

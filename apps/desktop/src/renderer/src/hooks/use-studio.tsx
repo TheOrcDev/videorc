@@ -1,3 +1,10 @@
+import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
+import { isReplacementPermissionClient } from '@/lib/permission-evidence'
+import {
+  mediaAccessStatusForPane,
+  systemAccessRows,
+  type SystemAccessContext
+} from '@/lib/system-access'
 import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
 import { createBannerImporter, type BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
@@ -43,7 +50,10 @@ import {
   visualSources,
   snapshotBackground,
   resolveSavedBackground,
+  sameSceneAudio,
   sameSceneVisual,
+  sceneAudio,
+  sceneMicrophone,
   sceneSourceProblems,
   sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
@@ -51,6 +61,8 @@ import {
   type SavedScene
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
+import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
+import type { FirstRunLook } from '@/lib/first-run-look'
 import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
@@ -92,6 +104,7 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
+import { replayStartWaitsForGrant, replayStartWaitsForScreen } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -130,6 +143,10 @@ import type {
   WindowsLiveAudioSmokeState,
   WindowsLiveAudioSmokeTelemetry
 } from '../../../shared/windows-live-audio-smoke'
+import type {
+  WindowsD3d11PreviewSmokeRequest,
+  WindowsD3d11PreviewSmokeState
+} from '../../../shared/windows-d3d11-preview-smoke'
 import {
   applyStoredManualStreamKeyResult,
   auxiliaryStreamOutputVideoSettings,
@@ -572,8 +589,11 @@ import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@
 import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
 import {
   confirmedSystemAudioMix,
+  nextSystemAudioJoin,
   systemAudioIssueFromHealthEvent,
-  type SystemAudioIssue
+  systemAudioJoining as isSystemAudioJoining,
+  type SystemAudioIssue,
+  type SystemAudioJoin
 } from '@/lib/system-audio-session'
 import {
   activeAudioProcessingUpdateParams,
@@ -1347,6 +1367,7 @@ export type StudioContextValue = {
   audioMeterLoading: boolean
   /** Real OS camera/mic access status (null before the first read). */
   mediaAccess: MediaAccessSnapshot | null
+  systemAccessContext: SystemAccessContext
   // ai + jobs
   aiConsent: boolean
   /** Persists across launches (durable preference, not a per-launch answer). */
@@ -1385,6 +1406,14 @@ export type StudioContextValue = {
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   applyCameraPreset: (patch: Partial<LayoutSettings>) => void
+  /**
+   * Plan 207 S4: the look chosen in first-run setup, written as state only so
+   * the idle scene reload commits it without opening a device. While a
+   * backend session runs (the Clips ring during a replay of setup) the look
+   * is held here and applied through one transaction when setup closes.
+   */
+  firstRunLookHold: FirstRunLook | null
+  applyFirstRunLook: (look: FirstRunLook) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
   savedScenePendingId: string | null
@@ -1580,9 +1609,13 @@ export type StudioContextValue = {
   outputEnabled: boolean
   streamReady: boolean
   isSessionActive: boolean
+  /** A recording, livestream or Clips ring has a running audio bus (plan 201). */
+  audioBusActive: boolean
   /** Whether the active session mixes system audio, from `recording.status`
    * `mixSources` (plan 069); null until the backend reports it. */
   systemAudioConfirmed: boolean | null
+  /** The session still opens the System audio it started with (`systemAudioJoining`). */
+  systemAudioJoining: boolean
   /** The newest system-audio health issue for the active session. */
   systemAudioIssue: SystemAudioIssue | null
   startBlockedReason: string | null
@@ -1616,6 +1649,12 @@ export interface ReplayBufferControls {
    * the user turns it on themselves.
    */
   blockedReason: string | null
+  /**
+   * Why the ring is waiting rather than starting (plan 203 S2, plan 207 S2):
+   * a grant macOS has not asked for yet, or a screen the layout shows that
+   * nobody has chosen. The Output page's Clips row says it; never a toast.
+   */
+  waitReason?: string | null
   /** The one switch (Output → Clips → Keep the last seconds). */
   setEnabled: (enabled: boolean) => void
 }
@@ -1721,7 +1760,9 @@ export type StudioBannersContextValue = {
   /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
   selectedBannerId: string | null
   selectBanner: (id: string | null) => void
-  /** Assets → Import image…: the picker, then `banners.importImage`. Never shows the new banner. */
+  /** Assets → Import image…: the picker, then `banners.importImage`, which shows the new banner
+   * (plan 205 D3) unless four already show or a running session can't take one: then it
+   * arrives hidden (with four showing, the Scene list's limit reason says why). */
   importBanner: () => Promise<void>
   updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
   /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
@@ -1784,6 +1825,9 @@ interface StudioShellContextValue {
   stopConfirmation: SessionStopConfirmation | null
   confirmStopSession: () => void
   cancelStopSession: () => void
+  /** First-run setup replaces the workspace (plan 203 S5): preview and global keys wait. */
+  firstRunSetupOpen: boolean
+  setFirstRunSetupOpen: (open: boolean) => void
 }
 
 const StudioShellContext = createContext<StudioShellContextValue | null>(null)
@@ -2317,6 +2361,7 @@ const REPLAY_BUFFER_OFF_CONTROLS: ReplayBufferControls = Object.freeze({
   state: REPLAY_STATE_OFF,
   armed: false,
   blockedReason: null,
+  waitReason: null,
   setEnabled: () => {}
 })
 
@@ -2371,6 +2416,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // every change (enable/disable/regenerate/deck connect), so nothing polls.
   const [remoteControlStatus, setRemoteControlStatus] = useState<RemoteControlStatus | null>(null)
   const [remoteLanStatus, setRemoteLanStatus] = useState<RemoteLanStatus | null>(null)
+  // Plan 203 S5: while first-run setup replaces the workspace the Studio is not
+  // mounted and the preview has no slot. Auto-preview capture, the native
+  // source previews, the Preview window and the OS-global shortcuts wait for it
+  // to close; the shell owns the flag.
+  const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  // Plan 207 S4: a look chosen in setup while a session holds the idle
+  // reload back (the Clips ring in a replay); applied once setup closes.
+  const [firstRunLookHold, setFirstRunLookHold] = useState<FirstRunLook | null>(null)
+  const firstRunLookHoldRef = useRef<FirstRunLook | null>(null)
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -2419,7 +2473,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [aiQuota, setAiQuota] = useState<AiQuotaStatus | null>(null)
   const [aiReadinessError, setAiReadinessError] = useState<string | null>(null)
   const [aiReadinessLoading, setAiReadinessLoading] = useState(false)
-  const [deviceList, setDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  const [deviceList, commitDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  // A connection alone is not proof: only its published devices.list counts.
+  const [permissionEvidenceClient, setPermissionEvidenceClient] = useState<BackendClient | null>(
+    null
+  )
+  const setDeviceList = useCallback((nextDevices: DeviceList) => {
+    setPermissionEvidenceClient(clientRef.current)
+    commitDeviceList(nextDevices)
+  }, [])
   const previewDevicesSignature = useMemo(
     () => previewDeviceRefreshSignature(deviceList.devices),
     [deviceList.devices]
@@ -2462,6 +2524,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     issue: SystemAudioIssue
   } | null>(null)
   const [systemAudioRetry, retrySystemAudio] = useState(0)
+  // Which session is still opening the System audio it started with.
+  const [systemAudioJoin, setSystemAudioJoin] = useState<SystemAudioJoin | null>(null)
   const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null)
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
@@ -3801,7 +3865,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A fresh mic grant can defer its backend restart until capture becomes idle.
   // Remember the pre-grant client so proof can run only on the replacement.
   const [pendingMicrophonePermissionProof, setPendingMicrophonePermissionProof] = useState<
-    | (import('@/lib/system-permission-orchestration').MicrophonePermissionProof & {
+    | (MicrophonePermissionProof & {
         retry: number
       })
     | null
@@ -3812,6 +3876,78 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // This distinguishes never-asked from denied on macOS and is the only
   // truthful privacy-toggle signal on Windows.
   const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
+  const mediaAccessRef = useRef<MediaAccessSnapshot | null>(null)
+  const permissionGrantBoundariesRef = useRef<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  const [pendingPermissionPane, setPendingPermissionPane] = useState<SystemPermissionPane | null>(
+    null
+  )
+  const [permissionProofs, setPermissionProofs] = useState<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  // Retain inputs for the last chip, never a stored Waiting/Reopen state.
+  const [permissionEvidenceBeforeGrant, setPermissionEvidenceBeforeGrant] = useState<Pick<
+    Parameters<typeof systemAccessRows>[0],
+    'deviceList' | 'audioMeter' | 'platform' | 'mediaAccess' | 'pendingPane'
+  > | null>(null)
+  const lastPermissionStates = useMemo<SystemAccessContext['lastKnownStates']>(
+    () =>
+      permissionEvidenceBeforeGrant
+        ? Object.fromEntries(
+            systemAccessRows(permissionEvidenceBeforeGrant).map((row) => [row.id, row.state])
+          )
+        : {},
+    [permissionEvidenceBeforeGrant]
+  )
+  const notePermissionRestart = useCallback(
+    (pane: SystemPermissionPane, proof: MicrophonePermissionProof) => {
+      permissionGrantBoundariesRef.current[pane] = proof
+      setPermissionProofs((current) => ({ ...current, [pane]: proof }))
+    },
+    []
+  )
+  const screenGrantStale =
+    !permissionEvidenceClient ||
+    Boolean(
+      permissionProofs['screen-recording'] &&
+      !isReplacementPermissionClient(permissionEvidenceClient, permissionProofs['screen-recording'])
+    )
+  const captureRestarting = Object.values(permissionProofs).some(
+    (proof) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+  )
+  useEffect(() => {
+    if (
+      !Object.values(permissionProofs).some((proof) =>
+        isReplacementPermissionClient(permissionEvidenceClient, proof)
+      )
+    )
+      return
+    setPermissionProofs((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([, proof]) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+        )
+      )
+    )
+  }, [permissionEvidenceClient, permissionProofs])
+  const systemAccessContext = useMemo<SystemAccessContext>(
+    () => ({
+      pendingPane: pendingPermissionPane,
+      captureRestarting,
+      screenGrantStale,
+      lastKnownStates: lastPermissionStates
+    }),
+    [pendingPermissionPane, captureRestarting, screenGrantStale, lastPermissionStates]
+  )
+  const systemAccessContextRef = useRef(systemAccessContext)
+  systemAccessContextRef.current = systemAccessContext
+  const permissionPlatformRef = useRef(runtimeInfo?.platform)
+  permissionPlatformRef.current = runtimeInfo?.platform
+  const pendingPermissionPaneRef = useRef(pendingPermissionPane)
+  pendingPermissionPaneRef.current = pendingPermissionPane
+  const permissionEvidenceClientRef = useRef(permissionEvidenceClient)
+  permissionEvidenceClientRef.current = permissionEvidenceClient
   const refreshMediaAccess = useCallback(async (): Promise<MediaAccessSnapshot | null> => {
     const bridge = window.videorc?.getMediaAccessStatus
     if (!bridge) {
@@ -3819,6 +3955,63 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     try {
       const snapshot = await bridge()
+      const previous = mediaAccessRef.current
+      if (previous && permissionPlatformRef.current === 'darwin') {
+        const newlyGranted = (['screen-recording', 'camera', 'microphone'] as const).filter(
+          (pane) =>
+            ['not-determined', 'denied', 'restricted'].includes(
+              mediaAccessStatusForPane(previous, pane) ?? ''
+            ) && mediaAccessStatusForPane(snapshot, pane) === 'granted'
+        )
+        if (newlyGranted.length > 0) {
+          // An action may have begun before this grant. Its decision after
+          // the await must see the new restart boundary in the same turn.
+          systemAccessContextRef.current = {
+            ...systemAccessContextRef.current,
+            captureRestarting: true,
+            screenGrantStale:
+              newlyGranted.includes('screen-recording') ||
+              systemAccessContextRef.current.screenGrantStale
+          }
+          setPermissionEvidenceBeforeGrant({
+            deviceList: deviceListRef.current,
+            audioMeter: audioMeterRef.current,
+            platform: permissionPlatformRef.current,
+            mediaAccess: previous,
+            pendingPane: pendingPermissionPaneRef.current
+          })
+          setPermissionProofs((current) => {
+            const next = { ...current }
+            for (const pane of newlyGranted)
+              next[pane] ??= permissionGrantBoundariesRef.current[pane] ?? {
+                previousClient: permissionEvidenceClientRef.current
+              }
+            return next
+          })
+        }
+      }
+      setPermissionProofs((current) => {
+        const revoked = Object.keys(current).filter(
+          (pane) => mediaAccessStatusForPane(snapshot, pane as SystemPermissionPane) !== 'granted'
+        )
+        if (revoked.length === 0) return current
+        const next = { ...current }
+        for (const pane of revoked) delete next[pane as SystemPermissionPane]
+        return next
+      })
+      for (const pane of ['screen-recording', 'camera', 'microphone'] as const) {
+        if (mediaAccessStatusForPane(snapshot, pane) !== 'granted') {
+          const previousClient = clientRef.current
+          permissionGrantBoundariesRef.current[pane] = {
+            previousClient,
+            ...(previousClient ? { staleBackend: previousClient.connection } : {})
+          }
+        }
+      }
+      mediaAccessRef.current = snapshot
+      setPendingPermissionPane((pane) =>
+        pane && mediaAccessStatusForPane(snapshot, pane) === 'granted' ? null : pane
+      )
       setMediaAccess(snapshot)
       return snapshot
     } catch {
@@ -7902,7 +8095,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Plan 187: a go-live post that failed is news wherever the streamer
       // is (D13). Success stays quiet; Livestream shows "Last post".
       nextClient.on('discord.announce.changed', (snapshot) => {
-        if (!snapshot.lastError) return
+        if (!snapshot.webhooks.some((webhook) => webhook.lastError)) return
         void loadSessionRuntimeRecovery().then((runtime) => {
           if (generationIsCurrent()) runtime.showDiscordAnnounceFailure(snapshot)
         })
@@ -8637,6 +8830,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (options?: { fresh?: boolean }): Promise<void> =>
       focusRefreshCoordinatorRef.current[options?.fresh ? 'runFresh' : 'run'](
         async (generationIsCurrent) => {
+          await window.videorc?.recheckPermissionGrants?.()
           await refreshMediaAccess()
           const activeClient = clientRef.current
           // Multiple focus listeners intentionally share this one coordinator.
@@ -8775,6 +8969,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshAiReadinessForClient,
       refreshEntitlementsForClient,
       refreshMediaAccess,
+      setDeviceList,
       reportError
     ]
   )
@@ -8806,7 +9001,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }
       }),
-    [refreshMediaAccess, reportError]
+    [refreshMediaAccess, reportError, setDeviceList]
   )
 
   // Purchases and token expiry must not remain stale. App ready (first connect)
@@ -8929,9 +9124,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // regains focus, since grants flip in the OS Settings while we're backgrounded.
   useEffect(() => {
     const refresh = (): void => {
-      void refreshMediaAccess()
+      void (async () => {
+        await window.videorc?.recheckPermissionGrants?.()
+        await refreshMediaAccess()
+      })()
     }
-    refresh()
+    void refreshMediaAccess()
     window.addEventListener('focus', refresh)
     return () => {
       window.removeEventListener('focus', refresh)
@@ -9830,15 +10028,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
+  // Plan 207 S4: held while first-run setup is open (the transaction starts
+  // the scene's devices), and run once when the workspace shows. Setup's own
+  // background choice goes through the idle reload and keeps the applied
+  // fingerprint in step, so the held sync usually finds nothing to do.
   useEffect(() => {
     const fingerprint = JSON.stringify(snapshotBackground(desiredLibraryBackground))
-    if (fingerprint === libraryBackgroundFingerprintRef.current) return
+    if (
+      backgroundLibrarySyncDecision({
+        setupOpen: firstRunSetupOpen,
+        fingerprint,
+        applied: libraryBackgroundFingerprintRef.current
+      }) !== 'apply'
+    )
+      return
     libraryBackgroundFingerprintRef.current = fingerprint
     void requestLayoutTransaction(captureConfigRef.current.layout, {
       pendingIndicator: false,
       backgroundOverride: desiredLibraryBackground
     })
-  }, [desiredLibraryBackground, requestLayoutTransaction])
+  }, [desiredLibraryBackground, firstRunSetupOpen, requestLayoutTransaction])
 
   const applyLayoutPatch = useCallback(
     (patch: Partial<LayoutSettings>) => {
@@ -9916,7 +10125,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [requestLayoutTransaction])
 
   const requestCameraPresetTransaction = useCallback(
-    (patch: Partial<LayoutSettings>) => {
+    (
+      patch: Partial<LayoutSettings>,
+      options?: { backgroundOverride?: Scene['background'] | null }
+    ) => {
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
       if (patch.layoutPreset !== undefined) {
@@ -9988,6 +10200,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           captureConfigPatch,
           ...(patch.layoutPreset !== undefined
             ? { savedSceneId: null, origin: 'builtin' as const }
+            : {}),
+          ...(options && 'backgroundOverride' in options
+            ? { backgroundOverride: options.backgroundOverride }
             : {})
         }
       )
@@ -10048,10 +10263,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
     [captureConfig.layout, captureConfig.sources, workingBackground]
   )
+  const workingAudio = useMemo(
+    () => sceneAudio(captureConfig.sources, captureConfig.audio),
+    [captureConfig.sources, captureConfig.audio]
+  )
   const savedSceneModified = Boolean(
     activeSavedSceneId &&
     sceneLibrary.scenes.some(
-      (entry) => entry.id === activeSavedSceneId && !sameSceneVisual(entry.visual, workingVisual)
+      (entry) =>
+        entry.id === activeSavedSceneId &&
+        (!sameSceneVisual(entry.visual, workingVisual) ||
+          !sameSceneAudio(entry.audio, workingAudio))
     )
   )
   const canSaveScene =
@@ -10069,7 +10291,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const saveScene = useCallback(
     (name: string, updateId?: string): boolean => {
       if (!canSaveScene || layoutIntentAwaitingProofRef.current !== null) return false
-      const id = saveSceneEntry(name, workingVisual, updateId)
+      const id = saveSceneEntry(name, workingVisual, workingAudio, updateId)
       if (!id) return false
       activeSavedSceneIdRef.current = id
       workingOriginRef.current = 'saved'
@@ -10082,7 +10304,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
       return true
     },
-    [canSaveScene, saveSceneEntry, workingVisual, persistWorkingVisual]
+    [canSaveScene, saveSceneEntry, workingVisual, workingAudio, persistWorkingVisual]
   )
   const deleteSavedScene = useCallback(
     (id: string): boolean => {
@@ -10101,12 +10323,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [removeSceneEntry, persistWorkingVisual]
   )
+  // A shortcut or remote request is sent even when it repeats the last one:
+  // the retry after a failed start or a lost update.
+  const setSystemAudioEnabled = useCallback((systemAudioEnabled: boolean): void => {
+    if (liveAudioProcessingSyncRef.current)
+      liveAudioProcessingSyncRef.current.systemAudioSent = null
+    retrySystemAudio((count) => count + 1)
+    setCaptureConfig((current) => ({
+      ...current,
+      audio: { ...current.audio, systemAudioEnabled }
+    }))
+  }, [])
   const applySavedScene = useCallback(
     async (id: string, repaired?: SceneVisual): Promise<boolean> => {
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
       if (!saved) return false
       const visual = normalizeSceneVisual(repaired ?? saved.visual)
       const current = captureConfigRef.current
+      // Idle, the scene's microphone rides in its sources and the commit makes
+      // it the pick. A recording or livestream switches to it after the
+      // commit, and only the session's confirmation changes the pick.
+      const microphone = saved.audio
+        ? sceneMicrophone(saved.audio, deviceListRef.current.devices)
+        : null
+      const live = sessionOwnsTransport(recordingRef.current)
       const coupling = !isActiveRecordingState(recordingRef.current.state)
         ? verticalOrientationVideoPatch(
             current.layout.layoutPreset,
@@ -10115,8 +10355,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             current.verticalRestoreVideo
           )
         : null
-      return requestLayoutTransaction(visual.layout, {
-        sourcesOverride: { ...current.sources, ...visual.sources },
+      const applied = await requestLayoutTransaction(visual.layout, {
+        sourcesOverride: { ...current.sources, ...visual.sources, ...(live ? null : microphone) },
         backgroundOverride: resolveSavedBackground(visual.background),
         savedSceneId: id,
         origin: 'saved',
@@ -10131,8 +10371,65 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           : {})
       })
+      if (!applied || !saved.audio) return applied
+      if (saved.audio.systemAudioEnabled !== captureConfigRef.current.audio.systemAudioEnabled)
+        setSystemAudioEnabled(saved.audio.systemAudioEnabled)
+      if (!microphone) {
+        if (saved.audio.microphoneId)
+          toast.warning(
+            `${saved.audio.microphoneName ?? "The scene's microphone"} isn't available`,
+            {
+              id: 'saved-scene-microphone',
+              description:
+                'The scene kept your current microphone. Connect it, then choose the scene again.'
+            }
+          )
+        return applied
+      }
+      if (
+        live &&
+        sessionOwnsTransport(recordingRef.current) &&
+        microphone.microphoneId !== current.sources.microphoneId
+      ) {
+        // The commit moved the session's sources on, and a read already in
+        // flight may predate it: a switch carrying that would be refused.
+        await sourceSelectionController.refresh()
+        await sourceSelectionController.refresh()
+        const blocked = sourceSelectionController.reason('microphone')
+        if (blocked) {
+          toast.warning(blocked, {
+            id: 'source-switch-blocked',
+            description: 'The scene kept your current microphone.'
+          })
+          return applied
+        }
+        // Plan 0027: the session confirms only the device; None is renderer intent.
+        if (microphone.microphoneOff)
+          setCaptureConfig((latest) =>
+            latest.sources.microphoneOff
+              ? latest
+              : { ...latest, sources: { ...latest.sources, microphoneOff: true } }
+          )
+        try {
+          await sourceSelectionController.select(
+            'microphone',
+            microphone.microphoneId ?? null,
+            currentProtectedOverlayWindowIds(),
+            microphone.microphoneName
+          )
+        } catch (error) {
+          reportError(error, { action: 'switch', object: 'the microphone' })
+        }
+      }
+      return applied
     },
-    [sceneLibrary.scenes, requestLayoutTransaction]
+    [
+      sceneLibrary.scenes,
+      requestLayoutTransaction,
+      setSystemAudioEnabled,
+      sourceSelectionController,
+      reportError
+    ]
   )
 
   const applyCameraPreset = useCallback(
@@ -10141,6 +10438,74 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [requestCameraPresetTransaction]
   )
+
+  // Plan 207 S4: "Your look" writes state only. The scene reload commits it
+  // idle (`scene.load_from_capture_config` starts nothing and carries the
+  // background), so no device opens while setup is open. The library sync
+  // above sees the fingerprint already applied. Setup's changes start the
+  // Studio with no undo history and no saved-scene origin (a built-in look).
+  // The setup chunk has already loaded the look's helpers when this runs.
+  const applyFirstRunLook = useCallback(
+    (look: FirstRunLook): void => {
+      if (firstRunLookWritesHeld(recordingRef.current)) {
+        firstRunLookHoldRef.current = look
+        setFirstRunLookHold(look)
+        return
+      }
+      // The session that held an earlier look has ended: this write wins.
+      if (firstRunLookHoldRef.current) {
+        firstRunLookHoldRef.current = null
+        setFirstRunLookHold(null)
+      }
+      void import('@/lib/first-run-look').then(
+        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+          const current = captureConfigRef.current
+          if (current.layout.arrangementMode === 'freeform') {
+            noteLayoutLeavingFreeform(current.layout)
+          }
+          const next = firstRunLookPatch(current, look)
+          latestRequestedLayoutRef.current = next.layout.layoutPreset
+          workingOriginRef.current = 'builtin'
+          activeSavedSceneIdRef.current = null
+          setActiveSavedSceneId(null)
+          setCaptureConfig((latest) => firstRunLookPatch(latest, look))
+          const registry = backgroundRegistryRef.current
+          const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
+          const background = effectiveSceneBackground(nextRegistry)
+          libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
+          workingBackgroundRef.current = background
+          setWorkingBackground(background)
+          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+        }
+      )
+    },
+    [setBackgroundRegistry]
+  )
+  // A look held behind a running session lands when setup closes, through
+  // the Studio's own transaction: one commit with the preset, the shape and
+  // the background. It may open the layout's devices, as a Studio change does.
+  useEffect(() => {
+    if (firstRunSetupOpen) return
+    const held = firstRunLookHoldRef.current
+    if (!held) return
+    firstRunLookHoldRef.current = null
+    setFirstRunLookHold(null)
+    void import('@/lib/first-run-look').then(
+      ({ cameraShapeLayoutPatch, firstRunBackgroundChoice, firstRunLookPreset }) => {
+        const registry = firstRunBackgroundChoice(
+          backgroundRegistryRef.current,
+          held.liveBackgroundId
+        )
+        void requestCameraPresetTransaction(
+          {
+            layoutPreset: firstRunLookPreset(captureConfigRef.current, held),
+            ...cameraShapeLayoutPatch(held.cameraShape)
+          },
+          { backgroundOverride: effectiveSceneBackground(registry) }
+        )
+      }
+    )
+  }, [firstRunSetupOpen, requestCameraPresetTransaction])
 
   const switchSourceDeviceLive = useCallback(
     async (sourceKind: LiveSourceDeviceSwitchPending, sources: SourceSelection) => {
@@ -10230,7 +10595,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewCameraStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewCameraStatusRef.current
     }
 
@@ -10297,6 +10666,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.sources,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -10308,7 +10678,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewScreenStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewScreenStatusRef.current
     }
 
@@ -10403,6 +10777,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.layout.layoutPreset,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -10865,6 +11240,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [])
 
+  // Plan 203 S5: no Preview window beside first-run setup. Main restores the
+  // window at launch before the renderer decides, so setup closes it through
+  // the same call as the Preview hint and opens it again when setup leaves, only if it
+  // closed it.
+  const reopenPreviewAfterSetupRef = useRef(false)
+  useEffect(() => {
+    if (firstRunSetupOpen) {
+      if (!previewWindow.open) return
+      reopenPreviewAfterSetupRef.current = true
+      void closePreviewWindow()
+      return
+    }
+    if (!reopenPreviewAfterSetupRef.current) return
+    reopenPreviewAfterSetupRef.current = false
+    void openPreviewWindow()
+  }, [closePreviewWindow, firstRunSetupOpen, openPreviewWindow, previewWindow.open])
+
   const setPreviewWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     const next = await window.videorc?.setPreviewWindowAlwaysOnTop?.(alwaysOnTop)
     if (next) {
@@ -11183,7 +11575,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       },
       isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
       onPhase: setBannerImportPhase,
-      // The new tile is the confirmation. An import never shows the banner.
+      // The new tile is the confirmation. The backend shows the new banner
+      // unless it can't (plan 205 D3); the answer says which, as `shown`.
       onImported: (banner) => {
         if (bannerListEventRevision.current === revision) commitBanner(banner)
       },
@@ -11470,26 +11863,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     systemAudioIssueEvent.sessionId === recording.sessionId
       ? systemAudioIssueEvent.issue
       : null
+  // A starting session (the Clips ring at launch, a recording) mixes the
+  // microphone alone until its capture opens; that is not the switch going
+  // Off. The latch outlives renders; the first mix, an issue or a toggle
+  // settles it.
+  const nextJoin = nextSystemAudioJoin(systemAudioJoin, {
+    sessionId: mixingSessionActive ? (recording.sessionId ?? null) : null,
+    requested: captureConfig.audio.systemAudioEnabled,
+    confirmed: systemAudioConfirmed,
+    issue: systemAudioIssue !== null
+  })
+  if (nextJoin !== systemAudioJoin) setSystemAudioJoin(nextJoin)
+  const systemAudioJoining = isSystemAudioJoining(
+    nextJoin,
+    captureConfig.audio.systemAudioEnabled,
+    systemAudioConfirmed
+  )
   // Plan 069 S6: what the shortcut and the remotes act on — the device status
   // and the state the switch shows (the confirmed mix, else the request).
   const systemAudioStatus = deviceList.devices.find(
     (device) => device.kind === 'system-audio'
   )?.status
-  // With an issue the switch stays as the user set it, so a toggle turns it
-  // Off (PR #477 review).
+  // With an issue, or while the session joins, the switch stays as the user
+  // set it, so a toggle turns it Off (PR #477 review).
   const systemAudioShown =
-    (systemAudioIssue ? null : systemAudioConfirmed) ?? captureConfig.audio.systemAudioEnabled
-  // A shortcut or remote request is sent even when it repeats the last one:
-  // the retry after a failed start or a lost update.
-  const setSystemAudioEnabled = (systemAudioEnabled: boolean): void => {
-    if (liveAudioProcessingSyncRef.current)
-      liveAudioProcessingSyncRef.current.systemAudioSent = null
-    retrySystemAudio((count) => count + 1)
-    setCaptureConfig((current) => ({
-      ...current,
-      audio: { ...current.audio, systemAudioEnabled }
-    }))
-  }
+    (systemAudioIssue || systemAudioJoining ? null : systemAudioConfirmed) ??
+    captureConfig.audio.systemAudioEnabled
   // Plan 076: Resume after the echo guard paused System audio, from its
   // toast or a mixer row (lazy chunks), re-sends On like a shortcut does.
   const resumeSystemAudio = useEffectEvent(() => setSystemAudioEnabled(true))
@@ -12974,7 +13373,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, reportError, streamMetadataDraft, wsStatus])
 
   useEffect(() => {
-    if (runtimeInfo?.disableAutoPreview) {
+    if (firstRunSetupOpen || runtimeInfo?.disableAutoPreview) {
       return
     }
     if (
@@ -12999,6 +13398,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     previewDevicesSignature,
     previewRefreshNonce,
     refreshPreview,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     wsStatus
   ])
@@ -15349,6 +15749,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [deviceList.devices, runtimeInfo?.windowsLiveAudioSmokeMode, startSession, stopSession])
 
+  useEffect(() => {
+    type WindowsD3d11PreviewSmokeWindow = Window & {
+      __videorcWindowsD3d11PreviewHarness?: (
+        request: WindowsD3d11PreviewSmokeRequest
+      ) => Promise<WindowsD3d11PreviewSmokeState>
+    }
+    const smokeWindow = window as WindowsD3d11PreviewSmokeWindow
+    if (!runtimeInfo?.windowsD3d11PreviewSmokeMode) {
+      delete smokeWindow.__videorcWindowsD3d11PreviewHarness
+      return
+    }
+
+    const harness = async (
+      request: WindowsD3d11PreviewSmokeRequest
+    ): Promise<WindowsD3d11PreviewSmokeState> => {
+      // Smoke-only code: loaded on first use so it never ships in the eager bundle.
+      const smoke = await import('@/lib/windows-d3d11-preview-smoke-harness')
+      if (request.action === 'configure') {
+        const next = smoke.configureWindowsD3d11PreviewSmokeCapture(
+          captureConfigRef.current,
+          deviceList.devices,
+          request
+        )
+        // The default camera scene refused every start before this; those
+        // warnings are not part of the screen-only baseline.
+        lastErrorRef.current = null
+        setLastError(null)
+        captureConfigRef.current = next
+        setCaptureConfig(next)
+        await new Promise<void>((resolveFrame) =>
+          window.requestAnimationFrame(() => resolveFrame())
+        )
+      }
+      return smoke.windowsD3d11PreviewSmokeState({
+        recording: recordingRef.current,
+        lastError: lastErrorRef.current,
+        captureConfig: captureConfigRef.current
+      })
+    }
+    smokeWindow.__videorcWindowsD3d11PreviewHarness = harness
+    return () => {
+      if (smokeWindow.__videorcWindowsD3d11PreviewHarness === harness) {
+        delete smokeWindow.__videorcWindowsD3d11PreviewHarness
+      }
+    }
+  }, [deviceList.devices, runtimeInfo?.windowsD3d11PreviewSmokeMode])
+
   const renameSession = useCallback(
     async (sessionId: string, title: string): Promise<void> => {
       if (!client) {
@@ -15543,9 +15990,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   scheduleReplayReconcileRef.current = scheduleReplayReconcile
 
+  // Plan 203 S2: a buffer-only session opens the scene's devices like a
+  // recording does; on a never-asked Mac that was a cold OS prompt at launch.
+  // First-run setup holds the preview back, so a start would find no frames
+  // and say Clips couldn't start over setup: the ring waits for it too.
+  // Plan 207 S2: a layout that shows a screen nobody has chosen (a fresh
+  // profile without Screen Recording) waits the same way; the Clips row says
+  // what Sources says. A chosen screen without frames still fails as today.
+  const replayGrantWait =
+    firstRunSetupOpen ||
+    replayStartWaitsForGrant({
+      mediaAccess,
+      sources: captureConfig.sources,
+      layoutPreset: captureConfig.layout.layoutPreset
+    }) ||
+    replayStartWaitsForScreen({ sources: captureConfig.sources, layout: captureConfig.layout })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
-    if (recordBlockedReason) {
+    if (recordBlockedReason || replayGrantWait) {
       // Not yet: a source or a permission is missing. The switch stays on
       // and the ring starts once the reason clears (the effect below), so a
       // launch before Sources settle never turns clips off.
@@ -15600,6 +16062,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyRecordingStatus,
     client,
     recordBlockedReason,
+    replayGrantWait,
     sceneEditMode,
     sceneWithBackground,
     scheduleReplayReconcile
@@ -15649,7 +16112,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     replayFailedStartsRef.current = 0
     rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
-  }, [recordBlockedReason, scheduleReplayReconcile])
+  }, [recordBlockedReason, replayGrantWait, scheduleReplayReconcile])
   // A source change while only the buffer-only session runs is an idle
   // change: stop the ring (it restarts empty) and re-arm with the new
   // sources, including the microphone Linux cannot swap mid-session.
@@ -15757,9 +16220,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       state: replayState,
       armed: replayArmed,
       blockedReason: replayBlockedReason,
+      waitReason: typeof replayGrantWait === 'string' ? replayGrantWait : null,
       setEnabled: setReplayEnabled
     }),
-    [replayArmed, replayBlockedReason, replayState, setReplayEnabled]
+    [replayArmed, replayBlockedReason, replayGrantWait, replayState, setReplayEnabled]
   )
 
   const assessRecording = useCallback(
@@ -16270,7 +16734,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelled = true
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
     }
-  }, [canSampleAudio, client, pendingMicrophonePermissionProof, reportError, wsStatus])
+  }, [
+    canSampleAudio,
+    client,
+    pendingMicrophonePermissionProof,
+    reportError,
+    setDeviceList,
+    wsStatus
+  ])
 
   const handleSystemPermission = useCallback(
     async (pane: SystemPermissionPane): Promise<void> => {
@@ -16278,6 +16749,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const { runSystemPermissionAction } = await import('@/lib/system-permission-orchestration')
         await runSystemPermissionAction({
           pane,
+          getAccessContext: () => systemAccessContextRef.current,
+          setPendingPane: setPendingPermissionPane,
+          onGrantRestart: notePermissionRestart,
           platform: runtimeInfo?.platform,
           refreshMediaAccess,
           getDeviceList: () => deviceListRef.current,
@@ -16301,7 +16775,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [openSystemPermissionSettings, refreshMediaAccess, reportError, runtimeInfo?.platform]
+    [
+      notePermissionRestart,
+      openSystemPermissionSettings,
+      refreshMediaAccess,
+      setDeviceList,
+      reportError,
+      runtimeInfo?.platform
+    ]
   )
 
   // Space lives on the Studio page (plan 174 S0.1, D1): StudioTab owns it, so
@@ -16688,6 +17169,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [reportError])
   globalShortcutsRegistrarRef.current?.sync(settings.globalShortcuts ?? {})
   const handleGlobalShortcut = useEffectEvent((action: GlobalShortcutAction) => {
+    // Plan 203 S5: no global key records, goes live or switches a scene while
+    // first-run setup is open.
+    if (firstRunSetupOpen) return
     const context: GlobalShortcutContext = {
       switchLayout: (layoutAction) => {
         const current = captureConfigRef.current
@@ -16787,10 +17271,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? stopConfirmation
           : null,
       confirmStopSession,
-      cancelStopSession
+      cancelStopSession,
+      firstRunSetupOpen,
+      setFirstRunSetupOpen
     }),
     [
       cancelStopSession,
+      firstRunSetupOpen,
       closeCommentsWindow,
       closeNotesWindow,
       commentsWindow.open,
@@ -17088,6 +17575,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,
@@ -17154,6 +17642,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       savedScenes: sceneLibrary.scenes,
       activeSavedSceneId,
       savedScenePendingId,
@@ -17210,7 +17700,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      audioBusActive: mixingSessionActive,
       systemAudioConfirmed,
+      systemAudioJoining,
       systemAudioIssue,
       startBlockedReason,
       canStart,
@@ -17324,6 +17816,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,
@@ -17390,6 +17883,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       sceneLibrary.scenes,
       sceneLibrary.error,
       sceneLibrary.rename,
@@ -17445,7 +17940,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      mixingSessionActive,
       systemAudioConfirmed,
+      systemAudioJoining,
       systemAudioIssue,
       startBlockedReason,
       canStart,

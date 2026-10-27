@@ -4,7 +4,8 @@ import test from 'node:test'
 import {
   WINDOWS_ENCODED_BRIDGE_PROFILES,
   parseWindowsEncodedBridgeArgs,
-  selectWindowsEncodedBridgeProfiles
+  selectWindowsEncodedBridgeProfiles,
+  windowsEncodedBridgeNativeScreenArgs
 } from './windows-encoded-bridge-profiles.mjs'
 
 test('defaults to the complete ten-profile characterization matrix', () => {
@@ -90,4 +91,26 @@ test('propagates strict D3D11 selection and natural fallback modes', () => {
       parseWindowsEncodedBridgeArgs(['--d3d11', '--require-d3d11', '--expect-fallback', 'natural']),
     /cannot be combined/
   )
+})
+
+test('forwards the selected D3D11 mode to each native-screen run', () => {
+  assert.deepEqual(
+    windowsEncodedBridgeNativeScreenArgs(
+      parseWindowsEncodedBridgeArgs(['--profiles', '1080p30', '--d3d11', '--require-d3d11'])
+    ),
+    ['--d3d11', '--require-d3d11']
+  )
+  assert.deepEqual(
+    windowsEncodedBridgeNativeScreenArgs(
+      parseWindowsEncodedBridgeArgs(['--profiles', '1080p30', '--d3d11'])
+    ),
+    ['--d3d11']
+  )
+  assert.deepEqual(
+    windowsEncodedBridgeNativeScreenArgs(
+      parseWindowsEncodedBridgeArgs(['--profiles', '1080p30', '--expect-fallback', 'natural'])
+    ),
+    ['--expect-fallback', 'natural']
+  )
+  assert.deepEqual(windowsEncodedBridgeNativeScreenArgs(parseWindowsEncodedBridgeArgs([])), [])
 })

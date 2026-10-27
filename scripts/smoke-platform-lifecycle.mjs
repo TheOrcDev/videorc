@@ -30,6 +30,8 @@ try {
       'youtube-no-stream',
       'twitch-ready',
       'kick-manual',
+      'facebook-manual',
+      'facebook-signed-in',
       'youtube-disabled',
       'youtube-manual',
       'x-missing'
@@ -49,6 +51,17 @@ try {
       }),
       target('kick-manual', 'kick', 'manual-rtmp', true, {
         serverUrl: 'rtmps://fa723fc1b171.global-contribute.live-video.net:443/app',
+        platformBroadcastId: undefined,
+        platformStreamId: undefined
+      }),
+      // Facebook (plan 206): a key is ready; a sign-in can't start until Meta
+      // approves it.
+      target('facebook-manual', 'facebook', 'manual-rtmp', true, {
+        serverUrl: 'rtmps://live-api-s.facebook.com:443/rtmp/',
+        platformBroadcastId: undefined,
+        platformStreamId: undefined
+      }),
+      target('facebook-signed-in', 'facebook', 'oauth', true, {
         platformBroadcastId: undefined,
         platformStreamId: undefined
       }),
@@ -81,6 +94,7 @@ try {
     'youtube-no-stream',
     'twitch-ready',
     'kick-manual',
+    'facebook-manual',
     'youtube-manual'
   ])
 

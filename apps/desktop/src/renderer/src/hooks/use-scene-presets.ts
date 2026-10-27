@@ -3,9 +3,11 @@ import { toast } from '@/lib/toast'
 import { loadJson } from '@/lib/capture'
 import {
   hydrateSceneLibrary,
+  normalizeSceneAudio,
   normalizeSceneVisual,
   sceneNameError,
   SCENE_LIBRARY_KEY,
+  type SceneAudio,
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
@@ -31,7 +33,12 @@ export function useScenePresets() {
     }
   }, [])
   const save = useCallback(
-    (name: string, visual: SceneVisual, id?: string): string | null => {
+    (
+      name: string,
+      visual: SceneVisual,
+      audio: SceneAudio | undefined,
+      id?: string
+    ): string | null => {
       const scenes = current.current.library.scenes
       const error = sceneNameError(name, scenes, id)
       if (error) {
@@ -40,12 +47,14 @@ export function useScenePresets() {
       }
       const previous = scenes.find((entry) => entry.id === id)
       const now = new Date().toISOString()
+      const sceneAudio = normalizeSceneAudio(audio)
       const scene: SavedScene = {
         id: previous?.id ?? crypto.randomUUID(),
         name: name.trim(),
         createdAt: previous?.createdAt ?? now,
         updatedAt: now,
-        visual: normalizeSceneVisual(visual)
+        visual: normalizeSceneVisual(visual),
+        ...(sceneAudio ? { audio: sceneAudio } : {})
       }
       return write(
         previous
@@ -60,7 +69,7 @@ export function useScenePresets() {
   const rename = useCallback(
     (id: string, name: string): boolean => {
       const scene = current.current.library.scenes.find((entry) => entry.id === id)
-      return scene ? save(name, scene.visual, id) !== null : false
+      return scene ? save(name, scene.visual, scene.audio, id) !== null : false
     },
     [save]
   )

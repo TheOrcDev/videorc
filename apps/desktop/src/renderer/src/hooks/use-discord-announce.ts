@@ -16,11 +16,12 @@ export interface DiscordAnnounceState {
   preview: DiscordLinksPreview | null
   /** Set when the settings could not be read or a change could not be saved. */
   error: string | null
-  /** Pastes the webhook; resolves to the refusal sentence, or null when saved. */
+  /** Pastes a webhook; resolves to the refusal sentence, or null when saved. */
   saveWebhook: (url: string) => Promise<string | null>
-  removeWebhook: () => Promise<void>
-  /** Sends the test post; resolves to its outcome. */
-  sendTest: () => Promise<{ messageUrl?: string; error?: string }>
+  /** Removes one webhook; the others keep posting. */
+  removeWebhook: (webhookId: string) => Promise<void>
+  /** Sends the test post through one webhook; resolves to its outcome. */
+  sendTest: (webhookId: string) => Promise<{ messageUrl?: string; error?: string }>
   update: (patch: DiscordAnnounceUpdateParams) => Promise<string | null>
 }
 
@@ -123,28 +124,32 @@ export function useDiscordAnnounce(targets: readonly DiscordLinkTarget[]): Disco
     }
   }, [])
 
-  const removeWebhook = useCallback(async () => {
+  const removeWebhook = useCallback(async (webhookId: string) => {
     const active = client.current
     if (!active) return
     try {
-      setSnapshot(await active.requestTyped('discord.webhook.remove'))
+      setSnapshot(await active.requestTyped('discord.webhook.remove', { webhookId }))
     } catch (caught) {
       setError(discordRefusal(caught, 'remove', 'the webhook'))
     }
   }, [])
 
-  const sendTest = useCallback(async () => {
-    const active = client.current
-    if (!active) return { error: 'Videorc is reconnecting. Try again in a moment.' }
-    try {
-      const result: DiscordTestResult = await active.requestTyped('discord.webhook.sendTest', {
-        targets: stableTargets
-      })
-      return result.messageUrl ? { messageUrl: result.messageUrl } : {}
-    } catch (caught) {
-      return { error: discordRefusal(caught, 'send', 'the test message') }
-    }
-  }, [stableTargets])
+  const sendTest = useCallback(
+    async (webhookId: string) => {
+      const active = client.current
+      if (!active) return { error: 'Videorc is reconnecting. Try again in a moment.' }
+      try {
+        const result: DiscordTestResult = await active.requestTyped('discord.webhook.sendTest', {
+          targets: stableTargets,
+          webhookId
+        })
+        return result.messageUrl ? { messageUrl: result.messageUrl } : {}
+      } catch (caught) {
+        return { error: discordRefusal(caught, 'send', 'the test message') }
+      }
+    },
+    [stableTargets]
+  )
 
   return { snapshot, preview, error, saveWebhook, removeWebhook, sendTest, update }
 }

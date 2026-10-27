@@ -250,6 +250,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ needs.resolve.outputs.source_sha || github.sha }}
+      - name: Cache capture FFmpeg sources
+        # Same pin-keyed cache as windows.yml. SHA-256 is still verified
+        # before configure; this only removes the ffmpeg.org timeout flake.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            vendor/ffmpeg/_src
+            vendor/ffmpeg/_build/windows-download.zip
+          key: windows-ffmpeg-capture-src-${{ hashFiles('vendor/ffmpeg/windows-capture-pin.json', 'vendor/ffmpeg/windows-pin.json') }}
       - name: Verify current protected-main source
         if: ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED != 'true' }}
         shell: pwsh

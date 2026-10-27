@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { systemAccessAction, systemAccessRows } from './system-access'
 
 import {
   openPermissionSettingsLabel,
@@ -27,15 +28,15 @@ describe('sourcePermissionAlerts', () => {
     expect(alerts()).toEqual([])
   })
 
-  it('gives Screen Recording its pane, the helper and the relaunch', () => {
+  it('gives Screen Recording a settings round trip without an unconditional relaunch', () => {
     const [screen] = alerts({ screenRecording: true, targetName: 'videorc-backend' })
     expect(screen).toEqual({
       id: 'screen-recording',
       title: 'Screen Recording permission is required for videorc-backend.',
       description:
-        'Turn on videorc-backend in System Settings → Privacy & Security → Screen Recording, then quit and reopen Videorc.',
+        'Turn on videorc-backend in System Settings → Privacy & Security → Screen Recording, then come back here.',
       actionLabel: 'Open Screen Recording settings',
-      revealLabel: 'Show helper in Finder'
+      revealLabel: null
     })
   })
 
@@ -65,7 +66,7 @@ describe('sourcePermissionAlerts', () => {
     const [camera] = alerts({
       camera: { state: 'first-use', action: 'request-media-access', chosen: true }
     })
-    expect(camera?.actionLabel).toBe('Allow access…')
+    expect(camera?.actionLabel).toBe('Allow…')
     expect(camera?.description).toBe('macOS asks once. Choose Allow.')
   })
 
@@ -106,4 +107,54 @@ describe('permission labels', () => {
     expect(showHelperLabel('win32')).toBe('Show helper in Explorer')
     expect(showHelperLabel('linux')).toBe('Show helper in folder')
   })
+})
+
+describe('shared screen states in Sources', () => {
+  it.each(['first-use', 'waiting', 'checking', 'needs-relaunch', 'granted'] as const)(
+    'uses the same action and copy for %s',
+    (state) => {
+      const granted = state === 'checking' || state === 'needs-relaunch' || state === 'granted'
+      const screen = systemAccessRows({
+        deviceList: {
+          devices: [
+            {
+              id: 'screen:screencapturekit:1',
+              kind: 'screen',
+              name: 'Display',
+              status: state === 'granted' ? 'available' : 'permission-required'
+            }
+          ],
+          warnings: []
+        },
+        audioMeter: null,
+        platform: 'darwin',
+        osRelease: '24.0.0',
+        permissionTargetName: 'Videorc',
+        mediaAccess: { screen: granted ? 'granted' : 'not-determined' },
+        pendingPane: state === 'waiting' ? 'screen-recording' : null,
+        screenGrantStale: state === 'checking'
+      })[0]
+      const action = systemAccessAction({
+        pane: screen.id,
+        state: screen.state,
+        checking: screen.checking,
+        platform: 'darwin',
+        mediaAccessStatus: granted ? 'granted' : 'not-determined'
+      })
+      const result = alerts({ screen: { row: screen, action } })
+      if (state === 'granted' || state === 'checking') expect(result).toEqual([])
+      else {
+        expect(result[0].revealLabel).toBeNull()
+        expect(result[0].actionLabel).toBe(
+          state === 'first-use'
+            ? 'Allow…'
+            : state === 'waiting'
+              ? 'Open System Settings…'
+              : 'Reopen Videorc'
+        )
+        if (state !== 'first-use') expect(result[0].description).toBe(screen.detail)
+        expect(result[0].description).not.toContain('quit and reopen')
+      }
+    }
+  )
 })

@@ -254,7 +254,10 @@ pub(crate) fn greeting_platform(platform: StreamPlatform) -> Option<CohostGreeti
         StreamPlatform::Youtube => Some(CohostGreetingPlatform::Youtube),
         StreamPlatform::Kick => Some(CohostGreetingPlatform::Kick),
         StreamPlatform::X => Some(CohostGreetingPlatform::X),
-        StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => None,
+        StreamPlatform::Facebook
+        | StreamPlatform::Tiktok
+        | StreamPlatform::Instagram
+        | StreamPlatform::Custom => None,
     }
 }
 

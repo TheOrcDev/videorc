@@ -137,7 +137,9 @@ import type {
   DiscordAnnounceUpdateParams,
   DiscordLinksPreview,
   DiscordTargetsParams,
+  DiscordTestParams,
   DiscordTestResult,
+  DiscordWebhookRemoveParams,
   DiscordWebhookSaveParams,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
@@ -169,6 +171,7 @@ import {
 } from './session-markers'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
+import { STREAM_PLATFORMS } from './stream-platforms'
 import {
   BANNER_MAX_COUNT,
   BANNER_OPACITY_MAX,
@@ -381,8 +384,11 @@ export interface BackendRpcMethodMap {
     DiscordAnnounceSnapshot
   >
   'discord.webhook.save': BackendRpcDefinition<DiscordWebhookSaveParams, DiscordAnnounceSnapshot>
-  'discord.webhook.remove': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
-  'discord.webhook.sendTest': BackendRpcDefinition<DiscordTargetsParams, DiscordTestResult>
+  'discord.webhook.remove': BackendRpcDefinition<
+    DiscordWebhookRemoveParams,
+    DiscordAnnounceSnapshot
+  >
+  'discord.webhook.sendTest': BackendRpcDefinition<DiscordTestParams, DiscordTestResult>
   'discord.links.preview': BackendRpcDefinition<DiscordTargetsParams, DiscordLinksPreview>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
@@ -1073,23 +1079,16 @@ const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<StreamOutputTopologyProbeResult>
 
-// Every StreamPlatform on the wire (mirror of the shared union): TikTok and
-// Instagram are manual-key vertical destinations, so they show up in stream
-// target snapshots, OAuth callback results (refused, but typed) and co-host
-// question provenance exactly like the OAuth platforms.
-const STREAM_PLATFORMS = [
-  'youtube',
-  'twitch',
-  'kick',
-  'x',
-  'tiktok',
-  'instagram',
-  'custom'
-] as const
+// Every StreamPlatform on the wire: TikTok, Instagram and Facebook's stream-key
+// card are manual-key destinations, so they show up in stream target
+// snapshots, OAuth callback results (refused, but typed) and co-host question
+// provenance exactly like the OAuth platforms. Per-platform lists cap at
+// STREAM_PLATFORMS.length, never a literal.
 const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<StreamPlatform>
 
 // --- Discord go-live announcement (plan 187) ---
 const DISCORD_MAX_TARGETS = 64
+const DISCORD_MAX_WEBHOOKS = 10
 const discordIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
 const discordShortText = stringSchema({ maxLength: 512 })
 const discordPingSchema = enumSchema(['none', 'here', 'everyone'])
@@ -1102,11 +1101,35 @@ const discordPostAsSchema = unionSchema([
   objectSchema({ kind: literalSchema('videorc') }, { allowUnknown: false }),
   objectSchema({ kind: literalSchema('webhook') }, { allowUnknown: false })
 ])
+const discordLastPostSchema = objectSchema(
+  {
+    at: discordShortText,
+    messageUrl: optionalSchema(discordShortText),
+    state: enumSchema(['live', 'ended'])
+  },
+  { allowUnknown: false }
+)
+const discordAnnounceErrorSchema = objectSchema(
+  {
+    code: enumSchema(['webhook-deleted', 'unreachable', 'rejected']),
+    at: discordShortText
+  },
+  { allowUnknown: false }
+)
+// One webhook: its Discord id and masked tail, never a URL or token.
+const discordWebhookSnapshotSchema = objectSchema(
+  {
+    id: discordIdSchema,
+    name: optionalSchema(discordShortText),
+    hint: discordShortText,
+    lastPost: optionalSchema(discordLastPostSchema),
+    lastError: optionalSchema(discordAnnounceErrorSchema)
+  },
+  { allowUnknown: false }
+)
 const discordAnnounceSnapshotSchema = objectSchema(
   {
-    webhookPresent: booleanSchema,
-    webhookHint: optionalSchema(discordShortText),
-    webhookName: optionalSchema(discordShortText),
+    webhooks: arraySchema(discordWebhookSnapshotSchema, { maxLength: DISCORD_MAX_WEBHOOKS }),
     enabled: booleanSchema,
     ping: discordPingSchema,
     branding: booleanSchema,
@@ -1124,25 +1147,6 @@ const discordAnnounceSnapshotSchema = objectSchema(
         { allowUnknown: false }
       ),
       { maxLength: 64 }
-    ),
-    lastPost: optionalSchema(
-      objectSchema(
-        {
-          at: discordShortText,
-          messageUrl: optionalSchema(discordShortText),
-          state: enumSchema(['live', 'ended'])
-        },
-        { allowUnknown: false }
-      )
-    ),
-    lastError: optionalSchema(
-      objectSchema(
-        {
-          code: enumSchema(['webhook-deleted', 'unreachable', 'rejected']),
-          at: discordShortText
-        },
-        { allowUnknown: false }
-      )
     )
   },
   { allowUnknown: false }
@@ -1169,26 +1173,33 @@ const discordWebhookSaveParamsSchema = objectSchema(
   { url: stringSchema({ minLength: 1, maxLength: 2048 }) },
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordWebhookSaveParams>
+const discordWebhookRemoveParamsSchema = objectSchema(
+  { webhookId: discordIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordWebhookRemoveParams>
+const discordLinkTargetsSchema = arraySchema(
+  objectSchema(
+    {
+      id: discordIdSchema,
+      platform: streamPlatformSchema,
+      label: discordShortText,
+      authMode: enumSchema(['manual-rtmp', 'oauth']),
+      accountId: optionalSchema(discordIdSchema),
+      outputOrientation: optionalSchema(enumSchema(['horizontal', 'vertical'])),
+      platformBroadcastId: optionalSchema(discordShortText)
+    },
+    { allowUnknown: false }
+  ),
+  { maxLength: DISCORD_MAX_TARGETS }
+)
 const discordTargetsParamsSchema = objectSchema(
-  {
-    targets: arraySchema(
-      objectSchema(
-        {
-          id: discordIdSchema,
-          platform: streamPlatformSchema,
-          label: discordShortText,
-          authMode: enumSchema(['manual-rtmp', 'oauth']),
-          accountId: optionalSchema(discordIdSchema),
-          outputOrientation: optionalSchema(enumSchema(['horizontal', 'vertical'])),
-          platformBroadcastId: optionalSchema(discordShortText)
-        },
-        { allowUnknown: false }
-      ),
-      { maxLength: DISCORD_MAX_TARGETS }
-    )
-  },
+  { targets: discordLinkTargetsSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordTargetsParams>
+const discordTestParamsSchema = objectSchema(
+  { targets: discordLinkTargetsSchema, webhookId: discordIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<DiscordTestParams>
 const discordLinksPreviewSchema = objectSchema(
   {
     links: arraySchema(
@@ -1261,7 +1272,7 @@ const audienceSnapshotSchema = objectSchema(
         },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     ),
     updatedAt: boundedString
   },
@@ -1276,7 +1287,7 @@ const viewerSampleSchema = objectSchema(
         { platform: streamPlatformSchema, count: numberSchema({ integer: true, min: 0 }) },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     ),
     total: numberSchema({ integer: true, min: 0 }),
     at: boundedString
@@ -3389,7 +3400,7 @@ const cohostQuestionSchema = objectSchema(
     text: stringSchema({ maxLength: 2000 }),
     messageIds: arraySchema(boundedString, { maxLength: 500 }),
     askers: arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 500 }),
-    platforms: arraySchema(streamPlatformSchema, { maxLength: 7 }),
+    platforms: arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length }),
     priority: enumSchema(['high', 'normal', 'low']),
     suggestedReply: stringSchema({ maxLength: 2000 }),
     fromNotes: booleanSchema,
@@ -3863,7 +3874,9 @@ const cohostReportQuestionSchema = objectSchema(
     id: boundedString,
     text: stringSchema({ maxLength: 2000 }),
     askers: optionalSchema(arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 5 })),
-    platforms: optionalSchema(arraySchema(streamPlatformSchema, { maxLength: 7 })),
+    platforms: optionalSchema(
+      arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length })
+    ),
     priority: enumSchema(['high', 'normal', 'low']),
     firstSeenAt: timestamp,
     outcome: cohostReportQuestionOutcomeSchema
@@ -3987,7 +4000,7 @@ const cohostReportPostSchema = objectSchema(
     at: timestamp,
     trigger: enumSchema(['greeting', 'answer', 'banter', 'manual']),
     text: stringSchema({ maxLength: 2000 }),
-    destinations: arraySchema(streamPlatformSchema, { maxLength: 7 }),
+    destinations: arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length }),
     result: enumSchema(['sent', 'partial', 'failed']),
     // Plan 192 S2.2: greetings only; absent on other posts and older rows.
     source: optionalSchema(enumSchema(['ai', 'line']))
@@ -4035,7 +4048,7 @@ const cohostReportChatSchema = objectSchema(
         { platform: streamPlatformSchema, messages: nonNegativeInteger },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     )
   },
   { allowUnknown: false }
@@ -4668,9 +4681,12 @@ const runtimeContracts = {
     params: discordWebhookSaveParamsSchema,
     result: discordAnnounceSnapshotSchema
   },
-  'discord.webhook.remove': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
+  'discord.webhook.remove': {
+    params: discordWebhookRemoveParamsSchema,
+    result: discordAnnounceSnapshotSchema
+  },
   'discord.webhook.sendTest': {
-    params: discordTargetsParamsSchema,
+    params: discordTestParamsSchema,
     result: discordTestResultSchema
   },
   'discord.links.preview': {

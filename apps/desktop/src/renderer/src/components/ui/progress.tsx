@@ -4,7 +4,7 @@ import { Progress as ProgressPrimitive } from 'radix-ui'
 import { cn } from '@/lib/utils'
 
 // shadcn `progress` (radix-rhea), plan 174 S1.5 (J1-21): one determinate bar,
-// a 6 px round track with the fill in the primary tone. `value` runs from 0 to
+// a 6 px round track with the chrome fill (plan 208 S4). `value` runs from 0 to
 // `max` (100 by default) and reaches the progressbar's aria-valuenow; the
 // caller names the bar with `aria-label` and says the number in words beside
 // it when the streamer needs it.
@@ -26,7 +26,7 @@ function Progress({
     >
       <ProgressPrimitive.Indicator
         data-slot="progress-indicator"
-        className="size-full bg-primary transition-transform duration-150 ease-out"
+        className="size-full chrome-fill transition-transform duration-150 ease-out"
         style={{ transform: `translateX(-${100 - percent}%)` }}
       />
     </ProgressPrimitive.Root>

@@ -10,7 +10,7 @@ import {
   MobileIcon
 } from '@/components/icons'
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
-import type { ReactElement, ReactNode } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { LockAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
@@ -23,12 +23,14 @@ import {
   bannerStageId,
   bannerStageItems,
   overlayEditsBlockedReason,
+  overlayItemOff,
   overlayStageId,
   overlayStageItems,
   withOverlayRect,
   type StageItemDraft
 } from '@/components/scene/overlay-stage'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
+import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
@@ -69,6 +71,7 @@ import {
   type LayoutOrientation
 } from '@/lib/capture'
 import { bannerSnapRect } from '@/lib/banner-place'
+import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
@@ -247,6 +250,7 @@ export function LayoutTab(): ReactElement {
     setSettings,
     overlayLayout,
     setOverlayLayout,
+    cohostSettings,
     reportError,
     wsStatus
   } = useStudioCore()
@@ -524,6 +528,12 @@ export function LayoutTab(): ReactElement {
       ? dockHiddenDisplay(previewWindow.dockHiddenReason ?? 'no-slot-report')
       : null
   const liveHint = liveHidden ? `${liveHidden.title}. ${liveHidden.detail}` : null
+  // The Buddy's still, drawn in its zone on the schematic canvas (the live
+  // canvas shows the pet itself while it is selected or dragged).
+  const buddyPicture = buddyStateImageUrl(
+    cohostSettings?.persona ?? { images: {}, source: 'default' },
+    'idle'
+  )
   // Decision 6: entering the tab with the preview CLOSED opens it docked into
   // the canvas; an open floating preview stays floating (the footer offers
   // "Show preview here"); leaving the tab changes nothing. Once per tab entry,
@@ -751,12 +761,19 @@ export function LayoutTab(): ReactElement {
               liveDocked={!verticalView && liveCanvasActive}
               liveHint={verticalView ? 'Vertical stream: overlay placement only.' : liveHint}
               liveSurface={!verticalView && liveSurface}
+              // The preview floating in its own window follows a drag too.
+              previewFollowsGestures={
+                liveCanvasSupported &&
+                !verticalView &&
+                previewWindow.open &&
+                previewWindow.mode === 'floating'
+              }
               slotRef={liveCanvasSupported && !verticalView ? slotRef : undefined}
               overlays={{
                 // Banners first: they draw under the overlay items (D5).
                 items: [
                   ...bannerStageItems(banners, selectedBannerId, overlayOrientation, stageAspect),
-                  ...overlayStageItems(overlayLayout, overlayOrientation)
+                  ...overlayStageItems(overlayLayout, overlayOrientation, buddyPicture)
                 ],
                 selectedId: selectedBanner
                   ? bannerStageId(selectedBanner.id)
@@ -809,6 +826,19 @@ export function LayoutTab(): ReactElement {
               onSnapCorner={
                 isFreeform ? undefined : (cameraCorner) => applyCameraPreset({ cameraCorner })
               }
+              // ...at the preset's size and margin: the stage shows that box
+              // while the camera is in the corner.
+              cornerDropRect={
+                isFreeform
+                  ? undefined
+                  : (cameraCorner) =>
+                      presetCameraCornerRect(
+                        layout,
+                        cameraCorner,
+                        captureConfig.video.width,
+                        captureConfig.video.height
+                      )
+              }
               onTogglePreview={() => void togglePreviewWindow()}
               onUndo={undoControl.shown ? undoLayout : undefined}
               undoEnabled={undoControl.enabled}
@@ -859,20 +889,14 @@ export function LayoutTab(): ReactElement {
               }}
             />
           ) : !selectedSource && selectedOverlayItem && selectedOverlayLayout ? (
-            <PanelSection
-              className="min-w-0"
-              icon={AdjustIcon}
-              title={OVERLAY_ITEM_LABELS[selectedOverlayItem]}
-            >
-              <OverlayItemInspector
-                blockedReason={overlayBlockedReason}
-                item={selectedOverlayItem}
-                layout={selectedOverlayLayout}
-                orientation={overlayOrientation}
-                onPatch={patchSelectedOverlay}
-                onSnap={snapSelectedOverlay}
-              />
-            </PanelSection>
+            <OverlayItemSection
+              blockedReason={overlayBlockedReason}
+              item={selectedOverlayItem}
+              layout={selectedOverlayLayout}
+              orientation={overlayOrientation}
+              onPatch={patchSelectedOverlay}
+              onSnap={snapSelectedOverlay}
+            />
           ) : !selectedSource ? (
             <PanelSection
               className="min-w-0"
@@ -1468,6 +1492,35 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   captions:
     'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
   buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
+}
+
+/** What the selected overlay item's first row says while both switches are
+ * off (plan 205 S3, D4): no output carries it, so the Preview draws nothing
+ * for it, even while it is selected, and these words say why. Only Buddy has
+ * a picture you'd look for at rest; the highlight card's and the caption
+ * bar's chips still say "Off". */
+export const OVERLAY_ITEM_OFF_LINES: Partial<Record<OverlayItem, string>> = {
+  buddy: "Off. Viewers don't see Buddy."
+}
+
+/** The selected overlay item's section: its name, then its state while no
+ * output shows it, above the inspector's two switches. Exported for its test. */
+export function OverlayItemSection(
+  props: ComponentProps<typeof OverlayItemInspector>
+): ReactElement {
+  const offLine = overlayItemOff(props.layout) ? (OVERLAY_ITEM_OFF_LINES[props.item] ?? null) : null
+  return (
+    <PanelSection
+      className="min-w-0"
+      description={
+        offLine ? <span data-videorc-overlay-off-line={props.item}>{offLine}</span> : undefined
+      }
+      icon={AdjustIcon}
+      title={OVERLAY_ITEM_LABELS[props.item]}
+    >
+      <OverlayItemInspector {...props} />
+    </PanelSection>
+  )
 }
 
 /** Exported for its test: the overlay controls, off with one reason while

@@ -690,6 +690,20 @@ pub fn chat_capability(
                 moderate_state_for_scope(account, crate::kick_chat::KICK_CHAT_MODERATE_SCOPE);
             capability
         }
+        // A stream-key Facebook live can't be read: comments need the Page
+        // sign-in that waits on Meta's review (plan 206 S9).
+        StreamPlatform::Facebook => ChatCapability {
+            platform,
+            state: ChatCapabilityState::Unsupported,
+            read: CommentsReadState::Unavailable,
+            write: CommentsWriteState::Unavailable,
+            moderate: Some(CommentsModerateState::Unsupported),
+            chat_read_available: false,
+            required_scope: None,
+            account_id: None,
+            account_label: None,
+            message: FACEBOOK_COMMENTS_UNAVAILABLE.to_string(),
+        },
         StreamPlatform::Tiktok | StreamPlatform::Instagram => ChatCapability {
             platform,
             state: ChatCapabilityState::Unsupported,
@@ -805,8 +819,14 @@ fn scope_capability(
     }
 }
 
+/// Facebook's row in a session that streams to it with a key.
+pub const FACEBOOK_COMMENTS_UNAVAILABLE: &str =
+    "Facebook comments need Facebook sign-in, which isn't available yet.";
+
 /// Chat capability for every native platform (YouTube, Twitch, X, Kick), preferring a connected
-/// account over stale saved rows. Custom RTMP has no platform comments and is omitted.
+/// account over stale saved rows. Custom RTMP has no platform comments and is omitted, and so
+/// are the key-only destinations (Facebook, TikTok, Instagram): a session that streams to one
+/// gets its unsupported row from its destination instead.
 pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
     chat_capabilities_with_quota(accounts, false)
 }
@@ -1985,7 +2005,10 @@ where
                 .kick
                 .as_ref()
                 .and_then(|config| config.target_id.clone()),
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => None,
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => None,
         };
         let configured_target_id = configured_target_id.or_else(|| {
             params
@@ -7182,6 +7205,36 @@ mod tests {
         assert_eq!(providers[0].state, LiveChatProviderConnectionState::Failed);
         assert_eq!(providers[0].read, CommentsReadState::Unavailable);
         assert_eq!(providers[0].write, CommentsWriteState::Unavailable);
+    }
+
+    #[test]
+    fn facebook_stream_key_destination_says_comments_need_sign_in() {
+        let capability = chat_capability(StreamPlatform::Facebook, None);
+        assert_eq!(capability.state, ChatCapabilityState::Unsupported);
+        assert!(!capability.chat_read_available);
+        assert_eq!(capability.message, FACEBOOK_COMMENTS_UNAVAILABLE);
+        // Only a session that streams to Facebook carries its row.
+        assert!(
+            chat_capabilities(&[])
+                .iter()
+                .all(|capability| capability.platform != StreamPlatform::Facebook)
+        );
+        let providers = session_provider_rows(
+            &[],
+            &[],
+            &[LiveChatDestinationStart {
+                target_id: "facebook".to_string(),
+                platform: StreamPlatform::Facebook,
+                read: None,
+                write: None,
+                preparation_error: None,
+            }],
+        );
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].target_id.as_deref(), Some("facebook"));
+        assert_eq!(providers[0].read, CommentsReadState::Unavailable);
+        assert_eq!(providers[0].write, CommentsWriteState::Unavailable);
+        assert_eq!(providers[0].message, FACEBOOK_COMMENTS_UNAVAILABLE);
     }
 
     #[test]

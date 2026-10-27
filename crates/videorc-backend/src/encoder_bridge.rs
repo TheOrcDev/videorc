@@ -84,6 +84,13 @@ const VIDEOTOOLBOX_FRESH_FRAME_HEADROOM: Duration = Duration::from_millis(4);
 // generic 240-frame (eight-second at 30fps) hidden backlog.
 const RECORDING_OUTPUT_QUEUE_MAX_FRAMES: usize = 16;
 const RECORDING_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(250);
+// Linux raw-YUV recording: FFmpeg stamps each frame when it reads it
+// (`-use_wallclock_as_timestamps`), so every frame waiting here is stamped
+// that much late while the microphone keeps its capture clock. Three frames
+// (~100 ms at 30 fps) bound that skew; a deeper queue only turned a slow
+// encoder into picture-behind-sound, longer files and a silent mic tail
+// (retest 151: ~0.5 s with the 16-frame ceiling on a 1080p30 VAAPI take).
+const ARRIVAL_STAMPED_RAW_RECORDING_QUEUE_MAX_FRAMES: usize = 3;
 const STREAM_OUTPUT_QUEUE_COALESCE_FRAMES: usize = 4;
 const STREAM_OUTPUT_QUEUE_COALESCE_AGE: Duration = Duration::from_millis(100);
 const STREAM_OUTPUT_QUEUE_MAX_FRAMES: usize = 8;
@@ -1132,6 +1139,26 @@ fn encoder_bridge_output_queue_policy(
 }
 
 impl EncoderBridgeOutputQueuePolicy {
+    /// Caps the recording ceiling where FFmpeg stamps raw frames on arrival
+    /// (Linux raw YUV). Waiting adds no smoothing there: a backlog read in a
+    /// burst is stamped together and thinned by the CFR filter exactly like
+    /// skipped ticks, so the depth only shifts the picture behind the sound.
+    /// The stream mailbox already keeps only the latest frame.
+    fn for_arrival_stamped_raw_input(mut self, video_output: EncoderBridgeVideoOutput) -> Self {
+        if cfg!(target_os = "linux")
+            && video_output == EncoderBridgeVideoOutput::RawYuv420p
+            && matches!(
+                self.role,
+                EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
+            )
+        {
+            self.max_frames = self
+                .max_frames
+                .min(ARRIVAL_STAMPED_RAW_RECORDING_QUEUE_MAX_FRAMES);
+        }
+        self
+    }
+
     fn with_iso_audio_advance(mut self, fps: u32, advance_ms: u32) -> Self {
         if matches!(
             self.role,
@@ -3553,7 +3580,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let direct_d3d11_enabled = direct_d3d11_source.is_some();
     #[cfg(not(target_os = "windows"))]
     let direct_d3d11_enabled = false;
-    let mut output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
+    let mut output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context)
+        .for_arrival_stamped_raw_input(video_output);
     if video_output.uses_video_toolbox()
         && let Some(barrier) = start_barrier.as_ref()
     {
@@ -10887,6 +10915,59 @@ mod tests {
                 .receive()
                 .and_then(QueuedRawVideoFrame::into_synthetic_buffer),
             Some(vec![2])
+        );
+    }
+
+    #[test]
+    fn linux_raw_recording_queue_is_capped_where_ffmpeg_stamps_on_arrival() {
+        let policy = |role| {
+            encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role,
+                ..EncoderBridgeDiagnosticsContext::default()
+            })
+        };
+        let raw = EncoderBridgeVideoOutput::RawYuv420p;
+        let capped = if cfg!(target_os = "linux") {
+            ARRIVAL_STAMPED_RAW_RECORDING_QUEUE_MAX_FRAMES
+        } else {
+            RECORDING_OUTPUT_QUEUE_MAX_FRAMES
+        };
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let adjusted = policy(role).for_arrival_stamped_raw_input(raw);
+            assert_eq!(adjusted.max_frames, capped);
+            // Same pause semantics, just earlier: a full queue skips the tick
+            // while FFmpeg still makes progress.
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    adjusted,
+                    capped as u64,
+                    None,
+                    Duration::from_millis(1),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+                ),
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame
+            );
+        }
+        // Encoders that carry their own timestamps keep the calibrated ceiling.
+        for output in [
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ] {
+            assert_eq!(
+                policy(EncoderBridgeOutputRole::Recording)
+                    .for_arrival_stamped_raw_input(output)
+                    .max_frames,
+                RECORDING_OUTPUT_QUEUE_MAX_FRAMES
+            );
+        }
+        // The stream leg keeps its latest-frame mailbox policy.
+        let stream = policy(EncoderBridgeOutputRole::Stream);
+        assert_eq!(
+            stream.for_arrival_stamped_raw_input(raw).max_frames,
+            stream.max_frames
         );
     }
 

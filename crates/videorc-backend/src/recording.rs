@@ -1139,7 +1139,7 @@ impl FfmpegProgressBeacon {
         self.media_micros.fetch_max(micros, Ordering::Relaxed);
     }
 
-    fn media_micros(&self) -> u64 {
+    pub(crate) fn media_micros(&self) -> u64 {
         self.media_micros.load(Ordering::Relaxed)
     }
 
@@ -1150,6 +1150,17 @@ impl FfmpegProgressBeacon {
     fn stop_escalated(&self) -> bool {
         self.stop_escalated.load(Ordering::Acquire)
     }
+}
+
+/// The running session's FFmpeg output clock, for the performance check's
+/// encoder pace.
+pub(crate) async fn active_ffmpeg_progress(state: &AppState) -> Option<FfmpegProgressBeacon> {
+    state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .map(|active| active.ffmpeg_progress.clone())
 }
 
 const FFMPEG_STDERR_TAIL_LINES: usize = 5;
@@ -3033,6 +3044,13 @@ impl ActiveRecording {
     pub(crate) fn accepts_banners(&self) -> bool {
         self.accepts_banners
     }
+
+    /// A stub session that cannot draw a banner added after its start, for
+    /// the RPC tests of the show gate (`banners.show`, `banners.importImage`).
+    #[cfg(test)]
+    pub(crate) fn set_accepts_banners_for_test(&mut self, accepts: bool) {
+        self.accepts_banners = accepts;
+    }
 }
 
 /// Whether a session can take a banner shown after it started (plan 186 S4).
@@ -3686,6 +3704,12 @@ async fn start_session_with_timeline(
     // over here, so no caller meets "A capture session is already running"
     // because of the buffer. The new session carries its own ring.
     if !replay_only {
+        // A request that will be refused anyway must not stop the clip buffer
+        // first: the ring that re-arms after the refusal starts empty
+        // (retest 152: 24 s buffered -> 2 s). The same checks run again below.
+        if replay_hand_over_pending(&state).await {
+            refuse_invalid_request(&state, &params)?;
+        }
         hand_over_replay_only_session(&state).await?;
     }
     // Once armed at the Starting edge this guard owns the admission itself, so
@@ -4655,6 +4679,25 @@ async fn start_session_with_timeline(
                     d3d11_overlay_plans.highlight.primary,
                     d3d11_overlay_plans.highlight.aux,
                 );
+                // Plan 205 S8: the session's Preview draws the program. A
+                // buffer-only session's ring keeps the recording plan (D2;
+                // `normalize_replay_only_params` raised `record_enabled`)
+                // while its Preview shows the idle program, so its program
+                // shape is `None`; every other session's is its own shape.
+                // The Buddy and highlight switches still apply at the next
+                // start on this path (`apply_overlay_layout_to_active_session`
+                // says so in the log).
+                let d3d11_program_shape = (!replay_only).then_some(d3d11_overlay_shape);
+                let highlight_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.highlight.show_on_stream,
+                    overlay_layout.highlight.show_in_recording,
+                );
+                let buddy_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.buddy.show_on_stream,
+                    overlay_layout.buddy.show_in_recording,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
@@ -4666,13 +4709,31 @@ async fn start_session_with_timeline(
                     highlight_on_auxiliary,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
+                    highlight_in_program,
+                    buddy_in_program,
                     // Plan 186 S4: banners follow this session's leg plan
                     // live, from the compositor's banner set.
                     banner_shape: d3d11_overlay_shape,
+                    program_shape: d3d11_program_shape,
                     banner_prepare: state.banner_prepare.clone(),
                 };
+                // The pet's atlases for the legs that draw it, including the
+                // primary canvas when only the Preview does (plan 205 S8):
+                // the Preview is composed on the primary's canvas.
+                let buddy_sprite_targets = crate::windows_d3d11_session::windows_d3d11_item_targets(
+                    d3d11_overlay_plans.buddy.primary,
+                    d3d11_overlay_plans.buddy.aux,
+                    buddy_in_program,
+                );
                 state.buddy_sprite.prepare(&buddy_sprite_legs(
-                    d3d11_overlay_plans.buddy,
+                    crate::overlay_layout::OverlayLegPlan {
+                        primary: buddy_sprite_targets.primary_canvas.is_some(),
+                        aux: buddy_sprite_targets.auxiliary_canvas.is_some(),
+                        needs_split: false,
+                    },
+                    // The D3D11 session draws the program itself (S8); its
+                    // targets above already include it.
+                    false,
                     (plan.primary.width, plan.primary.height),
                     plan.auxiliary.map(|video| (video.width, video.height)),
                 ));
@@ -4962,11 +5023,20 @@ async fn start_session_with_timeline(
     };
     let overlay_plans =
         crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    // Plan 205 S6: the same plans plus the program's verdict for the Preview
+    // (idle for a buffer-only session, D2), which the Preview's own picture
+    // draws when the primary leg does not.
+    let overlay_flags = crate::compositor::OverlayLegFlags::for_session(
+        overlay_session_shape,
+        replay_only,
+        &overlay_layout,
+    );
     // Plan 168 S-B1: the pet's atlases start building now (off this task),
     // so the session's first frame already has the Buddy.
     if use_encoder_bridge {
         state.buddy_sprite.prepare(&buddy_sprite_legs(
             overlay_plans.buddy,
+            overlay_flags.buddy_on_program,
             (params.output.video.width, params.output.video.height),
             encoder_bridge_stream_output
                 .as_ref()
@@ -5214,6 +5284,8 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        highlight_overlay_on_program: overlay_flags.highlight_on_program,
+                        buddy_overlay_on_program: overlay_flags.buddy_on_program,
                     },
                 )
                 .await
@@ -9997,6 +10069,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
     let mut microphone_generation = 0;
+    let mut microphone_reopen_attempts = 0_u32;
     loop {
         ticker.tick().await;
         let counters = {
@@ -10072,6 +10145,20 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                 source_loss_after_ms.after_ms,
                 source_loss_after_ms.reason,
             );
+            if microphone_auto_reopen_due(
+                source_loss_after_ms.reason,
+                microphone_reopen_attempts,
+                cfg!(target_os = "linux"),
+            ) {
+                microphone_reopen_attempts += 1;
+                tokio::spawn(reopen_stopped_microphone(
+                    state.clone(),
+                    session_id.clone(),
+                    source_loss_after_ms.device_name.clone(),
+                    source_loss_after_ms.after_ms,
+                    microphone_reopen_attempts,
+                ));
+            }
         }
 
         // Early truthful warning (plan 021 F3): a mic that has produced nothing
@@ -10299,6 +10386,98 @@ fn emit_microphone_input_lost_health_event(
         },
         &message,
     );
+}
+
+/// Retest 151: a Linux Pulse capture worker stops on its own consistency
+/// checks when the desktop starves it (its timestamp queue overflowed after a
+/// 2 s stall; stamps ran ahead of the capture clock after an overrun) while
+/// the microphone itself is fine. Nothing opened it again, so a 30-minute live
+/// session recorded and streamed 27 minutes of silence. Such a stop now opens
+/// the same microphone again through the path that choosing it again uses, a
+/// bounded number of times per session. A timeline loss keeps its own
+/// re-anchor (plan 076); other platforms keep their behaviour.
+const MICROPHONE_AUTO_REOPEN_LIMIT: u32 = 5;
+const MICROPHONE_AUTO_REOPEN_DELAY: Duration = Duration::from_secs(1);
+const MICROPHONE_REOPENED_CODE: &str = "microphone-input-recovered";
+
+fn microphone_auto_reopen_due(
+    reason: crate::session_audio::SourceLossReason,
+    attempts: u32,
+    platform_reopens: bool,
+) -> bool {
+    platform_reopens
+        && reason == crate::session_audio::SourceLossReason::CaptureStopped
+        && attempts < MICROPHONE_AUTO_REOPEN_LIMIT
+}
+
+/// Opens the session's confirmed microphone again after its capture stopped,
+/// unless it already came back, the user is changing it, or it is gone.
+async fn reopen_stopped_microphone(
+    state: AppState,
+    session_id: String,
+    device_name: String,
+    stopped_after_ms: u64,
+    attempt: u32,
+) {
+    tokio::time::sleep(MICROPHONE_AUTO_REOPEN_DELAY).await;
+    let Ok(sources) = crate::live_source_switch::get(&state, &session_id).await else {
+        return;
+    };
+    let Some(device_id) = sources.confirmed.microphone_id.clone() else {
+        return;
+    };
+    let lost = sources.health.iter().any(|health| {
+        health.kind == crate::live_source_switch::SourceKind::Microphone
+            && health.health == crate::live_source_switch::SourceHealth::Unavailable
+    });
+    if !lost || sources.pending.is_some() {
+        return;
+    }
+    let request = crate::live_source_switch::SourceSwitchParams {
+        session_id: session_id.clone(),
+        request_id: format!("microphone-reopen-{attempt}-{}", Uuid::new_v4()),
+        expected_source_revision: sources.source_revision,
+        kind: crate::live_source_switch::SourceKind::Microphone,
+        device_id: Some(device_id),
+        protected_overlay_window_ids: Vec::new(),
+    };
+    let reopened = crate::live_source_switch::reopen_microphone(&state, request)
+        .await
+        .is_ok_and(|after| {
+            after.health.iter().any(|health| {
+                health.kind == crate::live_source_switch::SourceKind::Microphone
+                    && matches!(
+                        health.health,
+                        crate::live_source_switch::SourceHealth::Ready
+                            | crate::live_source_switch::SourceHealth::Starting
+                    )
+            })
+        });
+    if reopened {
+        let message = microphone_reopened_message(&device_name, stopped_after_ms);
+        state.emit_log("info", &message);
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            MICROPHONE_REOPENED_CODE,
+            &message,
+        );
+    } else {
+        state.emit_log(
+            "warn",
+            format!(
+                "Microphone \"{device_name}\" could not be opened again after it stopped (attempt {attempt} of {MICROPHONE_AUTO_REOPEN_LIMIT})."
+            ),
+        );
+    }
+}
+
+fn microphone_reopened_message(device_name: &str, stopped_after_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" stopped after {:.1} seconds and Videorc opened it again. Only the moments in between are silent.",
+        stopped_after_ms as f64 / 1_000.0
+    )
 }
 
 fn microphone_input_lost_message(device_name: &str, source_loss_after_ms: u64) -> String {
@@ -17979,10 +18158,14 @@ async fn probe_windows_native_encoded_bridge_uncached(
         BlockingProbeOutcome::Finished(Ok(probe)) => probe,
         BlockingProbeOutcome::Finished(Err(error)) => {
             let reason = format!("{error:#}");
-            if let Ok(mut cache) = rejections.lock() {
-                cache.insert(rejection_key, reason.clone(), Instant::now());
+            // A GPU with every encoder session taken can encode this profile
+            // once one frees up; remembering it would downgrade it for a week.
+            if !crate::windows_mf_rejections::is_encoder_session_exhaustion(&reason) {
+                if let Ok(mut cache) = rejections.lock() {
+                    cache.insert(rejection_key, reason.clone(), Instant::now());
+                }
+                remember_mf_rejection(remembered_key, graphics_adapter_driver_identity, &reason);
             }
-            remember_mf_rejection(remembered_key, graphics_adapter_driver_identity, &reason);
             return Err(error);
         }
         BlockingProbeOutcome::Panicked(error) => {
@@ -18975,6 +19158,7 @@ async fn run_windows_d3d11_session_monitor(
     > = None;
     let mut last_presenter = None;
     let mut last_placement_error = None;
+    let mut last_configure_error: Option<String> = None;
     let mut consecutive_snapshot_errors = 0_u8;
     'monitor: while !stop.load(Ordering::Acquire) {
         if !windows_d3d11_monitor_identity_is_current(&state, &stop, &session_id, generation).await
@@ -19150,6 +19334,17 @@ async fn run_windows_d3d11_session_monitor(
                             configured_placement = None;
                             last_presenter = None;
                             let reason = format!("windows-d3d11-preview-configure-failed: {error}");
+                            // The monitor retries every tick, so name each new
+                            // reason once instead of failing over silently.
+                            if last_configure_error.as_deref() != Some(reason.as_str()) {
+                                state.emit_log(
+                                    "warn",
+                                    format!(
+                                        "Windows D3D11 presenter for session {session_id} could not be configured; the Electron proof preview stays active: {reason}"
+                                    ),
+                                );
+                                last_configure_error = Some(reason.clone());
+                            }
                             if let Some(previous) = previous_placement {
                                 let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
                                     &state,
@@ -19643,27 +19838,67 @@ fn append_replay_segment_output(
 /// the ordinary path (bounded, no finalization: it has no file), then wait
 /// for the pieces the admission checks below need, so the Record that
 /// follows is not refused for a microphone still closing.
+/// A buffer-only session runs, or one is starting, so this start would hand
+/// over from it.
+async fn replay_hand_over_pending(state: &AppState) -> bool {
+    state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| active.replay_only)
+        || crate::replay_buffer::start_in_flight(state)
+}
+
+/// The refusals `start_session` makes from the request alone, on a copy of it.
+fn refuse_invalid_request(state: &AppState, params: &StartSessionParams) -> Result<()> {
+    let mut params = params.clone();
+    hydrate_stream_key_secret_refs(state, &mut params)?;
+    normalize_stream_only_output_video(&mut params)?;
+    validate_session_entitlements(&params, &entitlements::current_entitlements())?;
+    validate_outputs(&params)?;
+    if let Some(scene) = params.scene.as_ref()
+        && let Err(message) = validate_scene_background(scene)
+    {
+        bail!(message);
+    }
+    Ok(())
+}
+
 async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
     // The ring re-arms right after every Stop (redesign R2), so the next
     // press can land while that buffer-only start is still between admission
     // and its running session. Wait for it (bounded) and hand over from the
     // running session instead of meeting "A capture session is starting".
+    //
+    // A session that already left `state.recording` keeps the capture
+    // admission until its terminal status is published. When Clips is
+    // switched off (or the ring stops for any reason) a Record landing in
+    // that window met "A capture session is active or finalizing"
+    // (retest 151); wait for the terminal edge instead, on the same bound.
     let wait_deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
     let session_id = loop {
-        let replay_only_session = state
-            .recording
-            .lock()
-            .await
-            .as_ref()
-            .filter(|active| active.replay_only)
-            .map(|active| active.session_id.clone());
+        let (replay_only_session, slot_empty) = {
+            let recording = state.recording.lock().await;
+            (
+                recording
+                    .as_ref()
+                    .filter(|active| active.replay_only)
+                    .map(|active| active.session_id.clone()),
+                recording.is_none(),
+            )
+        };
         if let Some(session_id) = replay_only_session {
             break session_id;
         }
-        if !crate::replay_buffer::start_in_flight(state) {
+        let finishing = slot_empty && state.capture_interruption.capture_is_finalizing();
+        if !finishing && !crate::replay_buffer::start_in_flight(state) {
             return Ok(());
         }
         if Instant::now() >= wait_deadline {
+            if finishing {
+                bail!("The last session is still finishing. Try again in a moment.");
+            }
             bail!("Clips are still starting. Try again in a moment.");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -23208,59 +23443,77 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
 /// place. Captions keep their start-time plan (their burn target is a session
 /// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
 /// start-time overlay input, which is said in the log rather than hidden.
+/// With no session, the idle preview run follows the layout instead
+/// (plan 205, `apply_overlay_layout_to_idle_preview`).
 pub async fn apply_overlay_layout_to_active_session(
     state: &AppState,
     layout: &crate::overlay_layout::OverlayLayout,
 ) {
-    let (session_id, plans, d3d11) = {
+    let session = {
         let mut recording = state.recording.lock().await;
-        let Some(active) = recording.as_mut() else {
-            return;
-        };
-        let Some(shape) = active.overlay_session_shape else {
-            return;
-        };
-        let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
-        active.comment_highlight_available = plans.highlight.burns_anywhere();
-        #[cfg(target_os = "windows")]
-        let d3d11 = active.windows_d3d11_media.is_some();
-        #[cfg(not(target_os = "windows"))]
-        let d3d11 = false;
-        (active.session_id.clone(), plans, d3d11)
+        match recording.as_mut() {
+            None => None,
+            Some(active) => {
+                // A session without a compositor shape (the legacy FFmpeg
+                // graph) applies its switches at the next start.
+                let Some(shape) = active.overlay_session_shape else {
+                    return;
+                };
+                let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+                active.comment_highlight_available = plans.highlight.burns_anywhere();
+                #[cfg(target_os = "windows")]
+                let d3d11 = active.windows_d3d11_media.is_some();
+                #[cfg(not(target_os = "windows"))]
+                let d3d11 = false;
+                // Plan 205 S6: the program's verdict too, idle for a
+                // buffer-only session (D2), so the Preview's own picture
+                // re-plans with the legs.
+                let flags = crate::compositor::OverlayLegFlags::for_session(
+                    shape,
+                    active.replay_only,
+                    layout,
+                );
+                Some((active.session_id.clone(), plans, flags, d3d11))
+            }
+        }
     };
-    let swapped = crate::compositor::update_overlay_flags(
-        state,
-        crate::compositor::OverlayLegFlags {
-            highlight_on_primary: plans.highlight.primary,
-            highlight_on_aux: plans.highlight.aux,
-            buddy_on_primary: plans.buddy.primary,
-            buddy_on_aux: plans.buddy.aux,
-        },
-    )
-    .await;
+    let Some((session_id, plans, flags, d3d11)) = session else {
+        apply_overlay_layout_to_idle_preview(state, layout).await;
+        return;
+    };
+    let swapped = crate::compositor::update_overlay_flags(state, flags).await;
     // Plan 168 S-B1, mid-session: the pet's atlases for a leg it just joined
     // start building now, as they do at session start. The first frames
     // after the swap draw it as soon as the atlas exists (`leg_frame` asks
-    // too, so this only shortens the wait).
-    let buddy_canvases = if swapped && (plans.buddy.primary || plans.buddy.aux) {
-        let canvases = crate::compositor::banner_prepare_canvases(state).await;
-        match canvases.first() {
-            Some(primary) => {
-                let legs = buddy_sprite_legs(plans.buddy, *primary, canvases.get(1).copied());
-                state.buddy_sprite.prepare(&legs);
-                legs.len()
+    // too, so this only shortens the wait). Plan 205: the program's Buddy
+    // (the Preview's own picture) prepares the Primary atlas the same way.
+    let buddy_canvases =
+        if swapped && (plans.buddy.primary || plans.buddy.aux || flags.buddy_on_program) {
+            let canvases = crate::compositor::banner_prepare_canvases(state).await;
+            match canvases.first() {
+                Some(primary) => {
+                    let legs = buddy_sprite_legs(
+                        plans.buddy,
+                        flags.buddy_on_program,
+                        *primary,
+                        canvases.get(1).copied(),
+                    );
+                    state.buddy_sprite.prepare(&legs);
+                    legs.len()
+                }
+                None => 0,
             }
-            None => 0,
-        }
-    } else {
-        0
-    };
+        } else {
+            0
+        };
     tracing::info!(
         session = %session_id,
         highlight_primary = plans.highlight.primary,
         highlight_aux = plans.highlight.aux,
         buddy_primary = plans.buddy.primary,
         buddy_aux = plans.buddy.aux,
+        highlight_program = flags.highlight_on_program,
+        buddy_program = flags.buddy_on_program,
         buddy_legs_prepared = buddy_canvases,
         swapped,
         "overlay layout changed mid-session"
@@ -23273,6 +23526,32 @@ pub async fn apply_overlay_layout_to_active_session(
     }
 }
 
+/// Plan 205 (S1): a layout saved while nothing runs swaps the idle preview
+/// run's flags to the program (`OverlayLegFlags::idle`): a Buddy turned on
+/// for an output joins the picture at once, and one turned off for both
+/// leaves it. A run a capture holds is refused by
+/// `update_idle_overlay_flags` and keeps the session's plan (the session
+/// lands in `state.recording` after its lease is armed).
+async fn apply_overlay_layout_to_idle_preview(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let flags = crate::compositor::OverlayLegFlags::idle(layout);
+    let swapped = crate::compositor::update_idle_overlay_flags(state, flags).await;
+    if swapped {
+        let canvases = crate::compositor::banner_prepare_canvases(state).await;
+        if let Some(primary) = canvases.first() {
+            crate::compositor::prepare_idle_buddy(state, flags, *primary);
+        }
+    }
+    tracing::info!(
+        highlight_primary = flags.highlight_on_primary,
+        buddy_primary = flags.buddy_on_primary,
+        swapped,
+        "overlay layout changed while nothing runs"
+    );
+}
+
 /// A session can put a comment card on stream only when the compositor bridge
 /// renders it AND the leg plan burns it on at least one leg. Deriving this
 /// from the same plan the compositor receives keeps "On stream" honest: the
@@ -23283,13 +23562,19 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
 
 /// The legs (and their canvases) the Buddy's pet draws on in a session
 /// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
+/// The Buddy atlases a session wants (plan 168 S-B1): the Primary atlas at
+/// the primary canvas when the primary leg burns the pet, or (plan 205 S6)
+/// when the program carries it and the Preview's own picture draws it at
+/// that same canvas; the Auxiliary atlas at the aux canvas when that leg
+/// burns it.
 fn buddy_sprite_legs(
     plan: crate::overlay_layout::OverlayLegPlan,
+    program: bool,
     primary: (u32, u32),
     auxiliary: Option<(u32, u32)>,
 ) -> Vec<(crate::buddy_sprite::BuddySpriteLeg, (u32, u32))> {
     let mut legs = Vec::with_capacity(2);
-    if plan.primary {
+    if plan.primary || program {
         legs.push((crate::buddy_sprite::BuddySpriteLeg::Primary, primary));
     }
     if plan.aux
@@ -26362,6 +26647,30 @@ mod tests {
         assert_eq!(
             microphone_input_lost_message("Desk Mic", 92_345),
             "Microphone \"Desk Mic\" stopped after 92.3 seconds. Videorc replaced the missing input with silence."
+        );
+    }
+
+    #[test]
+    fn a_stopped_linux_microphone_is_reopened_a_bounded_number_of_times() {
+        use crate::session_audio::SourceLossReason::{CaptureStopped, TimelineRejected};
+        // Retest 151: a starved Pulse worker stopped and the session stayed
+        // silent for 27 minutes. A stop is reopened, up to the limit.
+        for attempts in 0..MICROPHONE_AUTO_REOPEN_LIMIT {
+            assert!(microphone_auto_reopen_due(CaptureStopped, attempts, true));
+        }
+        assert!(!microphone_auto_reopen_due(
+            CaptureStopped,
+            MICROPHONE_AUTO_REOPEN_LIMIT,
+            true
+        ));
+        // A timeline loss keeps its own re-anchor; other platforms are unchanged.
+        assert!(!microphone_auto_reopen_due(TimelineRejected, 0, true));
+        assert!(!microphone_auto_reopen_due(CaptureStopped, 0, false));
+        // The `-recovered` code clears the renderer's "stopped" notice.
+        assert!(MICROPHONE_REOPENED_CODE.ends_with("-recovered"));
+        assert_eq!(
+            microphone_reopened_message("Desk Mic", 166_000),
+            "Microphone \"Desk Mic\" stopped after 166.0 seconds and Videorc opened it again. Only the moments in between are silent."
         );
     }
 
@@ -29677,6 +29986,35 @@ mod tests {
         assert!(!record_only_bridge_60fps_eligible(&streaming));
     }
 
+    #[tokio::test]
+    async fn a_refused_request_is_refused_before_the_clip_buffer_hands_over() {
+        // Retest 152: separate files refused on Linux, but only after Record
+        // had stopped the clip buffer, so the re-armed ring started empty.
+        // A ring start in flight makes the hand-over wait up to its 5 s
+        // timeout and fail with "Clips are still starting"; the request's
+        // own refusal must come first.
+        let state = test_state();
+        let _ring_starting = crate::replay_buffer::begin_start_in_flight(&state);
+        let mut params = base_params(true, false);
+        params.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: false,
+            });
+        let started = Instant::now();
+        let error = format!(
+            "{:#}",
+            start_session(state.clone(), params).await.unwrap_err()
+        );
+        assert!(error.contains("separate-source-recordings-"), "{error}");
+        assert!(
+            started.elapsed() < REPLAY_HANDOVER_CLEANUP_TIMEOUT / 5,
+            "refused after {:?}",
+            started.elapsed()
+        );
+        assert!(state.recording.lock().await.is_none());
+    }
+
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
         StartSessionParams {
             requested_at_ms: None,
@@ -31386,6 +31724,39 @@ mod tests {
                 .is_some_and(|error| error.contains("missing")),
             "{item:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_waits_for_a_finishing_session_instead_of_refusing() {
+        // Retest 151: a capture that already left `state.recording` holds the
+        // admission until its terminal status. A Record in that window used to
+        // meet "A capture session is active or finalizing".
+        let state = test_state();
+        state
+            .capture_interruption
+            .try_begin_session_start()
+            .expect("idle admission")
+            .commit();
+        assert!(state.recording.lock().await.is_none());
+        let finisher = state.clone();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            finisher.capture_interruption.capture_finished();
+        });
+        let waited_from = Instant::now();
+        hand_over_replay_only_session(&state)
+            .await
+            .expect("the hand-over waits for the terminal edge");
+        assert!(waited_from.elapsed() >= Duration::from_millis(150));
+        assert!(state.capture_interruption.capture_admission_is_idle());
+        release.await.expect("finisher");
+
+        // Nothing finishing and nothing starting: no wait at all.
+        let waited_from = Instant::now();
+        hand_over_replay_only_session(&state)
+            .await
+            .expect("idle hand-over");
+        assert!(waited_from.elapsed() < Duration::from_millis(100));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -34376,6 +34747,81 @@ mod tests {
         assert!(!normalize_replay_only_params(&mut record));
         assert_eq!(record.output.separate_source_recordings, separate);
         assert!(crate::source_iso::armed_plan(&record.output).is_some());
+    }
+
+    /// Plan 205 D2 (owner): a buffer-only (Clips) session keeps planning
+    /// every item by "Show in recording", exactly as a recording does. Its
+    /// shape is record-only, so a stream-only Buddy and a stream-only banner
+    /// burn on neither leg of the ring, and a record-only session drops them
+    /// the same way. The program (what the Preview shows) still has both:
+    /// Phase 2 gives the Preview its own picture while the ring runs.
+    #[test]
+    fn a_buffer_only_session_burns_neither_a_stream_only_buddy_nor_banner() {
+        use crate::banners::{BannerLeg, banner_leg_carries};
+        use crate::overlay_layout::{OverlayAuxLeg, OverlaySessionShape, program_shows};
+
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        layout.buddy.show_in_recording = false;
+        let mut banner = crate::banners::tests::sample_banner("stream-only", 0);
+        banner.show_on_stream = true;
+        banner.show_in_recording = false;
+
+        let mut buffer = base_params(false, false);
+        buffer.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(normalize_replay_only_params(&mut buffer));
+        // The shape `start_session` builds for it: a recording with no stream
+        // and no auxiliary leg.
+        let shape = OverlaySessionShape {
+            record_enabled: buffer.output.record_enabled,
+            stream_enabled: buffer.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(
+            shape,
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: OverlayAuxLeg::None,
+            }
+        );
+        let plans = crate::overlay_layout::overlay_session_plans(shape, &layout);
+        assert!(!plans.buddy.primary && !plans.buddy.aux);
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Primary,
+            &banner
+        ));
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Auxiliary,
+            &banner
+        ));
+        assert!(!program_shows(Some(shape), true, false));
+
+        // A real recording plans the same.
+        let mut record = base_params(true, false);
+        assert!(!normalize_replay_only_params(&mut record));
+        let record_shape = OverlaySessionShape {
+            record_enabled: record.output.record_enabled,
+            stream_enabled: record.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(record_shape, shape);
+        assert!(
+            !crate::overlay_layout::overlay_session_plans(record_shape, &layout)
+                .buddy
+                .primary
+        );
+
+        // The program while nothing runs has both (the Preview's half; on
+        // macOS it needs Phase 2's program leg while the ring runs).
+        assert!(program_shows(None, true, false));
+        assert!(banner_leg_carries(None, BannerLeg::Primary, &banner));
+        assert!(crate::compositor::OverlayLegFlags::idle(&layout).buddy_on_primary);
     }
 
     /// Plan 181: the replay ring output on every FFmpeg arg builder.

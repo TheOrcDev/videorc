@@ -54,6 +54,7 @@ describe('previewSupervisorDisplay', () => {
         action: null,
         row: {
           id: 'camera',
+          required: false,
           label: 'Camera',
           purpose: 'Camera overlay in your scenes.',
           state: 'device-issue',
@@ -78,6 +79,7 @@ describe('previewSupervisorDisplay', () => {
           action: null,
           row: {
             id: 'screen-recording',
+            required: true,
             label: 'Screen Recording',
             purpose: 'Capture displays, app windows and system audio.',
             state: 'granted',
@@ -101,6 +103,7 @@ describe('previewSupervisorDisplay', () => {
           action: 'open-settings',
           row: {
             id: 'screen-recording',
+            required: true,
             label: 'Screen Recording',
             purpose: 'Capture displays, app windows and system audio.',
             state: 'not-granted',

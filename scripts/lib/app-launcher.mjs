@@ -38,6 +38,7 @@ const LAUNCH_SERVICES_COMPUTED_ENV_NAMES = [
   'VIDEORC_RECORDINGS_DIR',
   'VIDEORC_SECRETS_PATH',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
+  'VIDEORC_SMOKE_SKIP_FIRST_RUN',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
   'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN',
   'VIDEORC_USER_DATA_DIR'
@@ -193,6 +194,7 @@ export function smokeAppEnv(env = {}, options = {}) {
     // Every isolated profile is a new install: a smoke that records or goes
     // live must not reach the anonymous usage stats unless a run asks to.
     VIDEORC_USAGE_STATS: smokeEnvValue(env, 'VIDEORC_USAGE_STATS') ?? '0',
+    VIDEORC_SMOKE_SKIP_FIRST_RUN: env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
     VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,
     // Isolating Electron userData is NOT enough: the backend resolves its own

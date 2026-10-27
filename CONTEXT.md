@@ -57,10 +57,16 @@ _Avoid_: broadcast (except a platform's own object, like an X broadcast), live s
 What Videorc writes to a file, and each item in Library.
 _Avoid_: session (in copy), take, capture
 
+**Program**:
+What goes out: every layer at least one running output carries, and while
+nothing runs, every layer with a switch on. The Preview shows the program;
+Clips keeps what a recording would (each item's Show in recording).
+
 **Clips**:
 The Output section and its one switch, "Keep the last seconds" (plan 181,
-the owner's redesign): whenever Videorc is open it keeps the last minute of
-the program ready (plan 199), writing nothing permanent. The status bar
+the owner's redesign): whenever Videorc is open it keeps the last minute
+ready (plan 199), using each item's Show in recording switch and writing
+nothing permanent. The status bar
 reads "Clip · 1:00"; the ring is never "Recording" or "On air".
 _Avoid_: Replay buffer, instant replay, replay cache, buffer (alone)
 
@@ -216,9 +222,10 @@ action that fixes it ("Twitch: reconnect to send").
 _Avoid_: re-auth, re-authorize
 
 **Discord announcement**:
-The one message Videorc posts to the streamer's Discord channel when they go
-live, through the webhook they pasted in Livestream → Setup → Discord. It
-links each live destination and becomes "Was live" at the stop (plan 187).
+The one message Videorc posts to each of the streamer's Discord channels when
+they go live, through the webhooks they pasted in Livestream → Setup → Discord
+(one per server). It links each live destination and becomes "Was live" at
+the stop (plan 187).
 _Avoid_: notification, alert, ping (a ping is only the @here or @everyone it
 carries)
 
@@ -229,12 +236,25 @@ _Avoid_: hook, integration, bot
 
 ### Windows and pages
 
+**First-run setup**:
+The welcome steps shown once on a fresh install: Permissions ("Welcome to
+Videorc"), What are you making?, Your look, Sound check, and Where you
+stream. Where you stream shows only for Livestreams or Both; Recordings
+has four steps. Liquid Chrome fills the main window behind one card; Your
+look's scene picture plays the chosen live background inside it. Settings
+→ General → Setup and ⌘K offer "Run setup again…"; replaying returns to the
+page it opened from and preserves the first-run record. Existing installs
+skip setup on update.
+_Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
+Livestream tab)
+
 **Stream Manager**:
 The live dashboard window: chat, activity, Buddy and the stats bar.
 _Avoid_: Chat window, Comments window, comments (for chat)
 
 **Chat**:
-The viewers' messages in Stream Manager.
+The viewers' messages, in Stream Manager and, while on air with Chat in
+Studio on, in the Studio's Chat section (plan 204).
 _Avoid_: comments
 
 **Captions reader**:
@@ -244,6 +264,21 @@ _Avoid_: Captions window, caption viewer
 **Preview**, **Notes**:
 The two other windows, by these names.
 _Avoid_: Teleprompter, Preview window (as a title)
+
+**Chrome ground**:
+The still of Liquid Chrome under every Videorc window (plan 208): black
+metal with soft silver streaks in dark, and the same turned around,
+porcelain with graphite streaks, in light. It never moves, and the desktop
+never shows through it. The Preview has none, because it frames video.
+_Avoid_: wallpaper, background (a scene has one), live background (it never
+moves), glass
+
+**Chrome controls**:
+The polished controls you touch: the chrome primary button (Go Live…,
+Continue, Save), the beads on switches and sliders, the plate on what is
+selected, and the red Record LED that lights while a recording or
+livestream runs. Panels, menus, dialogs and text stay flat.
+_Avoid_: metallic, shiny, glass buttons
 
 **Keep on top**:
 The pin that keeps a window over other apps, the same name in every window.

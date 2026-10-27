@@ -11,6 +11,7 @@ import type {
 } from '../shared/backend'
 import { MAX_COMMENTS_SNAPSHOT_MESSAGES } from '../shared/comments-snapshot-delta'
 import { validateElectronInvokeArgs } from '../shared/electron-ipc-contract'
+import { isStreamPlatform } from '../shared/stream-platforms'
 import { parseCommentsViewMode } from './comments-command-broker'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
 
@@ -135,6 +136,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'window-bounds-storm',
   'window-glass-state',
   'windows-preview-os-input-probe',
+  'windows-d3d11-preview-harness',
   'windows-live-audio-harness'
 ])
 
@@ -307,6 +309,10 @@ export const PACKAGED_SMOKE_COMMAND_NAMES = new Set([
   'restore-window',
   'resume-native-preview-surface',
   'suspend-native-preview-surface',
+  // Renderer source selection for the packaged D3D11 preview gate. It only
+  // selects a screen the harness can already start over its own backend
+  // connection, and refuses outside VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE=1.
+  'windows-d3d11-preview-harness',
   'windows-live-audio-harness'
 ])
 
@@ -451,10 +457,7 @@ function validCommentsSendReceipt(
           'reason'
         ]) &&
         nonEmptyString(destination.destinationId) &&
-        typeof destination.platform === 'string' &&
-        ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom'].includes(
-          destination.platform
-        ) &&
+        isStreamPlatform(destination.platform) &&
         typeof destination.phase === 'string' &&
         ['pending', 'sent', 'failed', 'read-only', 'unavailable', 'timed-out-unknown'].includes(
           destination.phase

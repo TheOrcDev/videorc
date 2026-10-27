@@ -41,7 +41,39 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   document.body.innerHTML = ''
+  delete document.documentElement.dataset.ground
   vi.unstubAllGlobals()
+})
+
+describe('the chrome ground (plan 208)', () => {
+  it.each(WINDOWS)('mounts once under the %s window while the root says chrome', async (window) => {
+    document.documentElement.dataset.ground = 'chrome'
+    await act(async () =>
+      root.render(
+        createElement(WindowProviders, { window, children: createElement('p', null, 'x') })
+      )
+    )
+    const grounds = document.querySelectorAll('[data-chrome-ground]')
+    expect(grounds).toHaveLength(1)
+    // Under everything: first in the root, before the window's own tree.
+    expect(container.firstElementChild?.hasAttribute('data-chrome-ground')).toBe(true)
+  })
+
+  it.each(['glass', 'solid'] as const)(
+    'stays unmounted under VIDEORC_GLASS=%s: the escape hatches show no ground',
+    async (ground) => {
+      document.documentElement.dataset.ground = ground
+      await act(async () =>
+        root.render(
+          createElement(WindowProviders, {
+            window: 'main',
+            children: createElement('p', null, 'x')
+          })
+        )
+      )
+      expect(document.querySelector('[data-chrome-ground]')).toBeNull()
+    }
+  )
 })
 
 describe('windowToasterOffset', () => {

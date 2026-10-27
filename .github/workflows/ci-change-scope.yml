@@ -1,0 +1,56 @@
+name: Change scope
+
+# Called by CI, Windows, and Linux. Classifies the push or PR diff so those
+# workflows can skip heavy jobs for version-only release PRs and docs-record
+# PRs. Fail closed: an unreadable or empty diff is treated as code.
+# This workflow does not compile, test, or publish anything.
+
+on:
+  workflow_call:
+    outputs:
+      kind:
+        description: code, version-release, or docs-record
+        value: ${{ jobs.scope.outputs.kind }}
+      windows_heavy:
+        description: Whether Windows source gates and the installer must run
+        value: ${{ jobs.scope.outputs.windows_heavy }}
+      linux_heavy:
+        description: Whether Linux FFmpeg policy plus Rust compile/test must run
+        value: ${{ jobs.scope.outputs.linux_heavy }}
+      macos_rust:
+        description: Whether the hosted macOS Rust job must run
+        value: ${{ jobs.scope.outputs.macos_rust }}
+      js:
+        description: Whether the JS format/lint/test job must run
+        value: ${{ jobs.scope.outputs.js }}
+
+jobs:
+  scope:
+    name: Classify change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kind: ${{ steps.classify.outputs.kind }}
+      windows_heavy: ${{ steps.classify.outputs.windows_heavy }}
+      linux_heavy: ${{ steps.classify.outputs.linux_heavy }}
+      macos_rust: ${{ steps.classify.outputs.macos_rust }}
+      js: ${{ steps.classify.outputs.js }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+
+      - name: Classify change scope
+        id: classify
+        run: node scripts/ci-change-scope.mjs
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.sha }}

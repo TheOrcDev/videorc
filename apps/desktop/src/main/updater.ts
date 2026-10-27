@@ -13,6 +13,7 @@ import type { UpdateFeedRoute } from './updater-mirror'
 import {
   BACKGROUND_RECHECK_INTERVAL_MS,
   isMissingUpdateFeedError,
+  settleStatusAfterCheck,
   shouldAutoDownload,
   shouldBackgroundRecheck,
   updateReadyNotification,
@@ -340,6 +341,13 @@ export function initAutoUpdater(
     requestAccountPilotGrant = options.requestWindowsPilotUpdateGrant ?? null
   }
 
+  // An inactive updater (an AppImage without APPIMAGE, a snap) never checks,
+  // so Settings must not promise background updates.
+  if (!autoUpdater.isUpdaterActive()) {
+    setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    return
+  }
+
   // The opt-out suppresses only silent checks. Pilot feed routing and bearer
   // ownership still apply to the packaged app's explicit manual update flow.
   if (backgroundUpdatesDisabled) return
@@ -405,6 +413,7 @@ export function registerUpdaterIpc(
     try {
       setStatus(updateStatusFromEvent({ type: 'checking' }))
       await checkForUpdatesOnAllFeeds()
+      setStatus(settleStatusAfterCheck(currentStatus))
       // The events above have set the truth by the time checkForUpdates resolves.
       // If an update is available, start downloading immediately for a one-click
       // feel; progress + downloaded states flow through the listeners.
