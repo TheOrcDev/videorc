@@ -1376,6 +1376,152 @@
       "notice": null
     },
     {
+      "name": "send_chat_message",
+      "title": "Post in chat",
+      "description": "Post a message in the livestream's chat as the streamer's own account: on every chat that can take it, or only on the destinations named. Viewers see it, so post only what the streamer asked for. The answer says, per destination, whether it was posted.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The message, 1 to 200 characters.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "destinations": {
+            "type": "array",
+            "description": "Only these chats: destination ids from list_destinations, or platform names like twitch. Left out: every chat that can take a post.",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "minItems": 1,
+            "maxItems": 8
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["sending", "sent", "partial", "failed", "delivery-unknown"]
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": ["id", "platform", "label", "state"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["operationId", "state", "destinations"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": true,
+      "rateFamily": "chat",
+      "notice": "{agent} posted in chat."
+    },
+    {
+      "name": "remove_chat_message",
+      "title": "Remove a chat message",
+      "description": "Remove one viewer's message from chat for everyone, like Remove from chat in the Stream Manager. Most platforms remove it at once. YouTube asks the streamer to confirm first: the answer then says it is waiting, and the removal card shows in Videorc. Use a message id from read_chat.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "description": "The message's id from read_chat.",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "reason": {
+            "type": "string",
+            "description": "A short reason for the record, like spam. At most 40 characters.",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "required": ["messageId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "viewerName": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": ["pending-confirm", "executing", "removed", "hidden-locally"]
+          },
+          "waitingForYou": {
+            "type": "boolean"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": ["operationId", "messageId", "platform", "viewerName", "phase", "summary"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": true,
+      "rateFamily": "removal",
+      "notice": "{agent} {summary}."
+    },
+    {
       "name": "open_window",
       "title": "Bring a window forward",
       "description": "Bring a Videorc window to the front of the streamer's screen: the Stream Manager (chat and activity), Notes, or the detached Preview. Use it when the streamer should look at something.",

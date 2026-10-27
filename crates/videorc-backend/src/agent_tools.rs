@@ -886,17 +886,16 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(catalog.tools.len(), backend.len() + studio.len());
         // D15: Buddy never reads one take's files, never opens windows.
         for name in ["get_recording", "open_window", "notify"] {
             assert!(!catalog.tool(name).unwrap().buddy, "{name}");
         }
-        // D11: the two PR A tools that earn a notice.
-        let on_air: Vec<&str> = catalog
-            .tools
+        // D11: the two PR A tools that earn a notice (PR B adds its own).
+        let on_air: Vec<&str> = backend
             .iter()
-            .filter(|tool| tool.on_air)
-            .map(|tool| tool.name.as_str())
+            .chain(studio.iter())
+            .copied()
+            .filter(|name| catalog.tool(name).unwrap().on_air)
             .collect();
         assert_eq!(on_air, ["stop", "notify"]);
         // Every read is a read, honestly hinted.

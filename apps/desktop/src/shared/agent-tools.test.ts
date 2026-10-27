@@ -228,7 +228,8 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     const where = Object.fromEntries(
       AGENT_TOOL_CATALOG.tools.map((tool) => [tool.name, tool.runsIn])
     )
-    expect(where).toEqual({
+    // PR B adds its own tools (plan 209 S10 to S15); these stay where they were.
+    const prATools: Record<string, string> = {
       get_status: 'backend',
       get_picture: 'backend',
       list_scenes: 'backend',
@@ -251,13 +252,15 @@ describe('the agent tool catalog (plan 209 S1)', () => {
       set_highlight: 'studio',
       open_window: 'studio',
       notify: 'studio'
-    })
+    }
+    expect(where).toMatchObject(prATools)
     expect(buddyAgentTools().map((tool) => tool.name)).not.toContain('get_recording')
     expect(buddyAgentTools().map((tool) => tool.name)).not.toContain('open_window')
-    expect(AGENT_TOOL_CATALOG.tools.filter((tool) => tool.onAir).map((tool) => tool.name)).toEqual([
-      'stop',
-      'notify'
-    ])
+    expect(
+      AGENT_TOOL_CATALOG.tools
+        .filter((tool) => tool.onAir && Object.hasOwn(prATools, tool.name))
+        .map((tool) => tool.name)
+    ).toEqual(['stop', 'notify'])
     for (const tool of AGENT_TOOL_CATALOG.tools) {
       expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.rateFamily === 'read')
     }

@@ -122,6 +122,14 @@ pub fn backend_executor(name: &str) -> Option<BackendExecutor> {
         "save_clip" => Some(|state, agent, args| Box::pin(look::save_clip(state, agent, args))),
         "add_marker" => Some(|state, agent, args| Box::pin(add_marker(state, agent, args))),
         "set_banner" => Some(|state, agent, args| Box::pin(set_banner(state, agent, args))),
+        // Plan 209 PR B, S12 to S15 (agent_chat.rs, agent_prepare.rs,
+        // agent_library.rs).
+        "send_chat_message" => Some(|state, agent, args| {
+            Box::pin(crate::agent_chat::send_chat_message(state, agent, args))
+        }),
+        "remove_chat_message" => Some(|state, agent, args| {
+            Box::pin(crate::agent_chat::remove_chat_message(state, agent, args))
+        }),
         _ => None,
     }
 }

@@ -127,14 +127,14 @@ Premium (Buddy).
 ### Rust API (`live_chat_moderation.rs`), used by S3
 
 ```rust
-pub enum ModerationSource { Manual, BuddyVoice }          // wire: "manual" | "orcle-voice" (serde rename, plan 170 D22)
+pub enum ModerationSource { Manual, BuddyVoice, Agent }   // wire: "manual" | "orcle-voice" (serde rename, plan 170 D22) | "agent" (plan 209 S12)
 pub enum RemoveConfirmMode { Confirm, Countdown }         // wire: "confirm" | "countdown"
 pub struct ModerationRequest {
     pub operation_id: String,      // UUID v4, minted by the caller (idempotency key)
     pub message_id: String,        // the app message id from live_chat_messages.id
     pub source: ModerationSource,
     pub reason: Option<String>,    // "toxic", "spam"… (≤ 40 chars, audit only)
-    pub confirm_mode: RemoveConfirmMode, // ignored for Manual (runs at once)
+    pub confirm_mode: RemoveConfirmMode, // ignored for Manual and Agent
 }
 pub async fn request(state: &AppState, req: ModerationRequest) -> Result<ModerationOperation, ModerationRefusal>;
 pub async fn confirm(state: &AppState, operation_id: &str) -> Result<ModerationOperation, ModerationRefusal>;
@@ -170,7 +170,7 @@ every change. **Never add it to `LAN_EVENTS`.**
   "targetId": "…?",
   "authorName": "coders_x",
   "excerpt": "≤ 140 chars of the message",
-  "source": "manual|orcle-voice",
+  "source": "manual|orcle-voice|agent",
   "reason": "toxic?",
   "phase": "pending-confirm|cancelled|expired|executing|removed|hidden-locally|failed|delivery-unknown",
   "confirmMode": "confirm|countdown",
@@ -187,6 +187,14 @@ every change. **Never add it to `LAN_EVENTS`.**
 **Phase rules:**
 
 - `Manual` requests go straight to `executing`.
+- `Agent` requests (plan 209 S12: an AI agent on this computer called
+  `remove_chat_message`) go straight to `executing` too, except on YouTube:
+  there they start in `pending-confirm` with `requiresExplicitConfirm: true`
+  and `confirmBy` 20 s out, show the same removal card (and its main-window
+  toast), and run only on the streamer's confirm. The agent is answered
+  "Waiting for you to confirm in Videorc." at once. Like `Manual`, they are
+  free and ignore the voice kill switch. Only the Agents endpoint mints them:
+  `liveChat.moderation.request` from a renderer never sends `agent`.
 - `BuddyVoice` requests start in `pending-confirm`:
   - In `confirm` mode, `confirmBy` is 20 s out. With no answer the operation
     becomes `expired`.
