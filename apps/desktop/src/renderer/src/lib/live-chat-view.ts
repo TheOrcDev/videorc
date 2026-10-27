@@ -441,10 +441,20 @@ export function liveChatEmptyMessage(
   if (snapshot.providers.length === 0) {
     return noProviderMessage
   }
-  const provider = snapshot.providers
+  return liveChatProviderNotice(snapshot.providers) ?? healthyMessage
+}
+
+/**
+ * What the destination whose chat most needs the streamer says (failed,
+ * reconnect, unavailable, unsupported), or null when none does. The one
+ * choice behind the empty chat's words and the Studio's Chat notice
+ * (plan 204).
+ */
+export function liveChatProviderNotice(providers: readonly LiveChatProviderState[]): string | null {
+  const provider = providers
     .filter(providerNeedsAction)
     .sort((left, right) => providerStatePriority(left) - providerStatePriority(right))[0]
-  return provider?.message ?? healthyMessage
+  return provider ? provider.message : null
 }
 
 /**
