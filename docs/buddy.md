@@ -15,6 +15,11 @@ name is Buddy. Saved and wire values keep `orcle` (plan 170 D22): the
 moderation source `orcle-voice`, the service-flags `orcle` key and the
 `videorc.orcleTab` storage key.
 
+The Preview shows the program: Buddy appears whenever a running output
+carries it, or either switch is on while nothing runs. An off Buddy is never
+drawn, even while selected. On macOS, Clips at idle and split record + stream
+still show the primary leg until plan 205 Phase 2 ([overlays.md](overlays.md)).
+
 ## The promise
 
 **Buddy posts only in the modes you turn on. Everything is off by

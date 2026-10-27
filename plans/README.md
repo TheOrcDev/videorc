@@ -23,12 +23,14 @@
   was placed while hidden, and on the docked live canvas no label says so.
   One rule, "the Preview shows the program": every layer at least one
   running output carries, and at idle every layer with a switch on. Phase
-  1 covers that rule in Rust and TS, Clips keeping the program, "Hidden",
+  1 covers that rule in Rust and TS, Clips following Show in recording, "Hidden",
   "Off" and "Stream only" on the Scene chips, and a dev-only Preview pixel
   oracle with `smoke:preview-truth`. Phase 2 adds a macOS program leg for
-  record + stream with a split stream leg (measured spike first). Phase 3
+  Clips at idle and record + stream with a split stream leg (measured spike
+  first). Phase 3
   covers the Windows media session's preview and Buddy on the proof
-  surface. **PLANNED**; D1 to D6 pre-filled, owner review pending.
+  surface. **IN PROGRESS**; D1 to D6 answered; S1 to S3 committed, S4
+  Preview oracle and acceptance gate in progress.
 - 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
   Owner request: live chat in the Studio in a small window, optional with a
   switch, a click putting a message on stream, less detail than the Stream

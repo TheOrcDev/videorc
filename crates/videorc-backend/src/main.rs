@@ -52,6 +52,7 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod preview_debug_sample;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
 mod buddy_pet_create;
@@ -5795,6 +5796,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.chat.snapshot"
         | "remote.describe"
         | "compositor.status"
+        | "preview.debug.sample"
         | "preview.camera.status"
         | "preview.screen.status"
         | "audio.meter.probeNative"
@@ -10603,6 +10605,22 @@ async fn handle_text_message_with_role(
                 }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-intent", error.to_string())
+                }
+            }
+        }
+        "preview.debug.sample" => {
+            if !cfg!(debug_assertions) {
+                ServerResponse::error(
+                    command.id,
+                    "preview-debug-disabled",
+                    "Preview sampling is refused in packaged builds.",
+                )
+            } else {
+                match preview_debug_sample::sample(state, command.params).await {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "preview-debug-sample-failed", error)
+                    }
                 }
             }
         }
@@ -16319,6 +16337,15 @@ mod tests {
                 "{method} can change authoritative takeover state and must use mutation execution"
             );
         }
+    }
+
+    #[test]
+    fn preview_debug_sample_is_read_only_without_a_mutation_lane() {
+        let text = json!({"id":"sample", "method":"preview.debug.sample", "params":{"rects":[]}})
+            .to_string();
+        assert!(websocket_command_is_read_only(&text));
+        assert!(!websocket_observation_requires_operator_fence(&text));
+        assert_eq!(websocket_command_mutation_max_execution_age(&text), None);
     }
 
     #[test]

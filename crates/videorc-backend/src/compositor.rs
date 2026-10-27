@@ -31,7 +31,7 @@ use crate::color::{
 use crate::overlay_layout::{OverlayOrientation, OverlayRect, OverlaySessionShape};
 
 #[path = "compositor_preview_frame_lease.rs"]
-mod preview_frame_lease;
+pub(crate) mod preview_frame_lease;
 #[cfg(test)]
 #[path = "compositor_scene_switch_tests.rs"]
 mod scene_switch_tests;
@@ -116,7 +116,7 @@ pub struct CompositorFrameExportHandle {
     // Output tick time, independent of how long the source pixels have been held.
     presentation_at: Option<Instant>,
     #[cfg(target_os = "macos")]
-    metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
+    pub(crate) metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
     d3d11_texture: Option<WindowsD3d11TextureLeaseTicket>,
 }
 

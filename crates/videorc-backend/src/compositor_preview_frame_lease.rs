@@ -2,6 +2,12 @@
 //! storage alive when a resize replaces the compositor target ring.
 use super::*;
 
+/// The single source for Preview leases and the read-only pixel oracle.
+/// Phase 2 will redirect this to the Preview's own program store when needed.
+pub(crate) fn presented_frame_store(compositor: &CompositorRuntime) -> CompositorFrameStore {
+    compositor.frame_store.clone()
+}
+
 pub(crate) struct CompositorPreviewFrameLease {
     pub frame: CompositorFrameReady,
     _retained: FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>,
@@ -33,8 +39,7 @@ fn acquire(
         .clone()
         .try_acquire_owned()
         .ok()?;
-    let frame = compositor
-        .frame_store
+    let frame = presented_frame_store(compositor)
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .latest()?;
@@ -113,6 +118,16 @@ mod tests {
         assert!(acquire(&runtime, "preview-run", None).is_none());
         assert!(acquire(&runtime, "preview-run", Some(6)).is_none());
         let lease = acquire(&runtime, "preview-run", Some(7)).unwrap();
+        // The oracle's store remains readable while main owns the only lease.
+        let oracle_frame = presented_frame_store(&runtime)
+            .lock()
+            .unwrap()
+            .latest()
+            .unwrap();
+        assert_eq!(oracle_frame.sequence, 42);
+        assert_eq!(runtime.preview_frame_lease_capacity.available_permits(), 0);
+        drop(oracle_frame);
+
         assert_eq!(lease.frame.scene_revision, Some(7));
         assert!(
             acquire(&runtime, "preview-run", Some(7)).is_none(),
