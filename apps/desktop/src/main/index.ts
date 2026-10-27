@@ -7207,17 +7207,19 @@ function applyBackendWindowsD3d11PresenterStatus(
     nativePreviewSurfaceStatus,
     generation
   )
-  nativePreviewSurfaceStatus = reconcileWindowsD3d11PresenterStatus(
-    nativePreviewSurfaceStatus,
-    backendStatus,
-    {
+  nativePreviewSurfaceStatus = {
+    ...reconcileWindowsD3d11PresenterStatus(nativePreviewSurfaceStatus, backendStatus, {
       platform: process.platform,
       previewWindowOpen: previewWindowIsOpenForSurface(),
       proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
       generation,
       trustedGeneration: nativePreviewBackendD3d11TrustedGeneration
-    }
-  )
+    }),
+    // The reconciled status is built on the last proof-surface status, whose
+    // queue snapshot stops refreshing once the presenter suppresses proof
+    // polling. Without this a pending count captured mid-placement sticks.
+    ...nativePreviewPlacementStatusFields()
+  }
   const canonical = isCanonicalWindowsD3d11PreviewStatus(nativePreviewSurfaceStatus, generation)
   const proofFallbackActive =
     !canonical &&

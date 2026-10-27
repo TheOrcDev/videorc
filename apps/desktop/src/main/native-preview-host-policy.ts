@@ -270,6 +270,15 @@ export function reconcileWindowsD3d11PresenterStatus(
       windowsD3d11Presenter: presenter,
       presentedFrameId,
       framesRendered: Math.max(current.framesRendered, presentedFrameId),
+      // `current` still carries the hidden proof surface's last measurements;
+      // the presenter's cadence and latency come from the backend only.
+      presentFps: backend.presentFps,
+      intervalP95Ms: backend.intervalP95Ms,
+      intervalP99Ms: backend.intervalP99Ms,
+      inputToPresentLatencyMs: backend.inputToPresentLatencyMs,
+      inputToPresentLatencyP50Ms: backend.inputToPresentLatencyP50Ms,
+      inputToPresentLatencyP95Ms: backend.inputToPresentLatencyP95Ms,
+      inputToPresentLatencyP99Ms: backend.inputToPresentLatencyP99Ms,
       firstFrameContract: 'met',
       firstFrameReason: 'Backend D3D11 presenter completed its first live-source present.',
       updatedAt: backend.updatedAt,

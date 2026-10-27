@@ -338,6 +338,52 @@ describe('native preview host policy', () => {
     })
   })
 
+  it('reports the D3D11 presenter cadence and latency, not the hidden proof surface', () => {
+    const current = surfaceStatus({
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface',
+      sourcePixelsPresent: true,
+      presentFps: 61,
+      intervalP95Ms: 16.8,
+      inputToPresentLatencyMs: 51,
+      inputToPresentLatencyP95Ms: 474
+    })
+    const backend = {
+      ...d3d11BackendStatus(),
+      presentFps: 59.9,
+      intervalP95Ms: 17.1,
+      intervalP99Ms: 18.2,
+      inputToPresentLatencyMs: 3,
+      inputToPresentLatencyP50Ms: 3,
+      inputToPresentLatencyP95Ms: 6,
+      inputToPresentLatencyP99Ms: 9
+    }
+    const input = { platform: 'win32' as const, previewWindowOpen: true, generation: 7 }
+    const canonical = reconcileWindowsD3d11PresenterStatus(current, backend, {
+      ...input,
+      trustedGeneration: 7
+    })
+    expect(canonical).toMatchObject({
+      nativePreviewHostKind: 'backend-d3d11-presenter',
+      presentFps: 59.9,
+      intervalP95Ms: 17.1,
+      intervalP99Ms: 18.2,
+      inputToPresentLatencyMs: 3,
+      inputToPresentLatencyP50Ms: 3,
+      inputToPresentLatencyP95Ms: 6,
+      inputToPresentLatencyP99Ms: 9
+    })
+
+    // Before the presenter has timing samples nothing is carried over.
+    const unmeasured = reconcileWindowsD3d11PresenterStatus(current, d3d11BackendStatus(), {
+      ...input,
+      trustedGeneration: 7
+    })
+    expect(unmeasured.presentFps).toBeUndefined()
+    expect(unmeasured.inputToPresentLatencyP95Ms).toBeUndefined()
+  })
+
   it('adopts the backend D3D11 triple only after all first-present evidence is true', () => {
     const current = surfaceStatus({
       transport: 'electron-proof-surface',
