@@ -420,7 +420,26 @@ describe('shipping phone remote states and semantics (plan 174 S3.20)', () => {
     const mic = keyNamed('Mic muted')
     expect(mic.dataset.on).toBe('false')
     expect(mic.dataset.accent).toBeUndefined()
+    expect(mic.dataset.lit).toBeUndefined()
     expect(mic.querySelector('.hint')!.textContent).toBe('Tap to unmute')
+  })
+
+  it('wears the desktop chrome: Record an LED, Go Live the primary, stop the lit LED (plan 208 D8)', () => {
+    const lit = (key: HTMLButtonElement) => key.dataset.lit !== undefined
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    stateUpdate({ sessionActive: false, sessionState: 'idle' })
+    expect(keyNamed('Record').dataset.accent).toBe('record')
+    expect(lit(keyNamed('Record'))).toBe(false)
+    stateUpdate({ streamEnabled: true })
+    expect(keyNamed('Go Live').dataset.accent).toBe('primary')
+    expect(lit(keyNamed('Go Live'))).toBe(false)
+    stateUpdate({ sessionActive: true, sessionState: 'streaming' })
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    // Nothing else is ever an LED: a scene that is on wears the plate.
+    expect(keyNamed('Screen only').dataset.accent).toBeUndefined()
+    expect(lit(keyNamed('Screen only'))).toBe(false)
   })
 
   it('marks keys that stay on with aria-pressed (I-12)', () => {

@@ -116,6 +116,8 @@ mod scheduled_x;
 mod scheduled_youtube;
 mod screen_capture;
 mod secrets;
+#[cfg(test)]
+mod served_page_palette;
 mod service_flags;
 mod session_audio;
 mod session_markers;
