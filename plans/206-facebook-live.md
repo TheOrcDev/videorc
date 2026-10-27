@@ -124,9 +124,11 @@ Owner calls are marked **OWNER**; the rest are settled.
   follow-up: a profile live defaults to friends-only visibility, tools get
   no comments unless the user makes it public, and it doubles the review
   surface. Stream-key mode already covers profiles.
-- **D6 (OWNER). The website.** Recommendation: list Facebook as a
-  destination on videorc.com when the Phase 1 release ships, since it works
-  for everyone with a key. The alternative is to wait for Phase 4.
+- **D6 (OWNER). The website.** DECIDED 2026-10-27: list Facebook as a
+  destination on videorc.com when the Phase 1 release ships, and say 7+
+  destinations instead of 6+ everywhere, OG images included. Web PR
+  TheOrcDev/videorc-web#97 does it; merge it with the release that ships
+  this phase.
 - **D7 (OWNER, after S6). How sign-in works.** Meta's code exchange needs
   the app secret, and the privacy page promises that platform tokens never
   touch our servers (`videorcweb app/privacy/page.tsx` ~l.284).
