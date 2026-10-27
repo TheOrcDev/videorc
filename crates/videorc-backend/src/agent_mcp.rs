@@ -942,6 +942,7 @@ impl rmcp::ServerHandler for VideorcMcp {
         rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
+                .enable_prompts()
                 .build(),
         )
         .with_instructions(catalog.instructions.clone())
@@ -983,6 +984,52 @@ impl rmcp::ServerHandler for VideorcMcp {
             tools,
             ..Default::default()
         })
+    }
+
+    /// S22: the fixed prompts ("Go-live checklist", "Stream recap"). The
+    /// bridge answers the same list offline from the same fixture.
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::result::Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
+        let prompts = crate::agent_prompts::prompts()
+            .prompts
+            .iter()
+            .map(|prompt| {
+                rmcp::model::Prompt::new(
+                    prompt.name.clone(),
+                    Some(prompt.description.clone()),
+                    None,
+                )
+                .with_title(prompt.title.clone())
+            })
+            .collect();
+        Ok(rmcp::model::ListPromptsResult {
+            prompts,
+            ..Default::default()
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: rmcp::model::GetPromptRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::result::Result<rmcp::model::GetPromptResponse, rmcp::ErrorData> {
+        let Some(prompt) = crate::agent_prompts::prompts().prompt(&request.name) else {
+            return Err(rmcp::ErrorData::invalid_params(
+                crate::agent_prompts::unknown_prompt(&request.name),
+                None,
+            ));
+        };
+        Ok(
+            rmcp::model::GetPromptResult::new(vec![rmcp::model::PromptMessage::new_text(
+                rmcp::model::Role::User,
+                prompt.text.clone(),
+            )])
+            .with_description(prompt.description.clone())
+            .into(),
+        )
     }
 
     async fn call_tool(
@@ -1219,6 +1266,7 @@ mod tests {
             crate::agent_tools::catalog().instructions
         );
         assert!(answer["result"]["capabilities"]["tools"].is_object());
+        assert!(answer["result"]["capabilities"]["prompts"].is_object());
 
         let answer: serde_json::Value = post(
             address,
@@ -1237,6 +1285,68 @@ mod tests {
         assert!(
             !raw.contains("runsIn") && !raw.contains("rateFamily"),
             "{raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompts_list_and_get_answer_from_the_fixture() {
+        let state = test_state();
+        let address = serve(&state).await;
+        let (_, token) = connect_agent(&state, "Claude Desktop");
+        let answer: serde_json::Value = post(
+            address,
+            Some(&token),
+            rpc(1, "prompts/list", serde_json::json!({})),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        // The same wire shape the bridge answers offline.
+        assert_eq!(
+            answer["result"]["prompts"],
+            serde_json::Value::Array(crate::agent_prompts::prompts().mcp_prompts())
+        );
+
+        for prompt in &crate::agent_prompts::prompts().prompts {
+            let answer: serde_json::Value = post(
+                address,
+                Some(&token),
+                rpc(2, "prompts/get", serde_json::json!({ "name": prompt.name })),
+            )
+            .await
+            .json()
+            .await
+            .unwrap();
+            let expected = prompt.mcp_get_result();
+            assert_eq!(answer["result"]["description"], expected["description"]);
+            assert_eq!(answer["result"]["messages"], expected["messages"]);
+        }
+
+        let answer: serde_json::Value = post(
+            address,
+            Some(&token),
+            rpc(
+                3,
+                "prompts/get",
+                serde_json::json!({ "name": "end_stream" }),
+            ),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(answer["error"]["code"], -32602, "{answer}");
+        assert_eq!(
+            answer["error"]["message"],
+            crate::agent_prompts::unknown_prompt("end_stream")
+        );
+        // A prompt is text, not an action: nothing lands in Activity.
+        assert!(
+            activity(&state, ActivityListParams::default())
+                .unwrap()
+                .entries
+                .is_empty()
         );
     }
 
