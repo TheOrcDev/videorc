@@ -52,6 +52,20 @@ try {
       )
     }
 
+    // Facebook (plan 206) is stream-key only until Meta approves Page
+    // sign-in: the backend refuses with the card's own words.
+    const facebookStart = await requestRaw(ws, timeoutMs, 'platformAccounts.oauth.startProvider', {
+      platform: 'facebook'
+    })
+    if (
+      facebookStart.ok ||
+      !String(facebookStart.error?.message).includes(
+        "Signing in with Facebook isn't available yet."
+      )
+    ) {
+      throw new Error(`Facebook sign-in should refuse to start: ${JSON.stringify(facebookStart)}`)
+    }
+
     const refreshedAccounts = await request(ws, timeoutMs, 'platformAccounts.refresh')
     if (!Array.isArray(refreshedAccounts)) {
       throw new Error(

@@ -61,7 +61,13 @@ import type {
   YouTubeChannel
 } from '@/lib/backend'
 import { AvatarCircle } from '@/lib/chat-avatar'
-import { oauthUnavailableReason, streamServerUrlIssue, videoPresets } from '@/lib/capture'
+import {
+  FACEBOOK_LIVE_PRODUCER_URL,
+  FACEBOOK_SIGN_IN_UNAVAILABLE,
+  oauthUnavailableReason,
+  streamServerUrlIssue,
+  videoPresets
+} from '@/lib/capture'
 import { useCopyText } from '@/lib/copy-text'
 import { destinationSetup } from '@/lib/destination-readiness'
 import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
@@ -226,7 +232,8 @@ export function DestinationCard({
   const fullUrl = target.urlMode === 'full-url'
   const nativeDestination = target.platform !== 'custom'
   const platformName = metadataPlatformLabel(target.platform)
-  // A platform that has no sign-in at all (TikTok, Instagram, Custom RTMP).
+  // A platform that has no sign-in at all (TikTok, Instagram, Custom RTMP), or
+  // none yet (Facebook, until Meta approves Page sign-in: plan 206).
   const keyOnlyPlatform = Boolean(oauthUnavailableReason(target.platform))
   const oauthUnavailableMessage =
     oauthUnavailableReason(target.platform) ??
@@ -451,9 +458,11 @@ export function DestinationCard({
 
             {nativeDestination && oauthUnavailableMessage ? (
               <p className="text-xs text-muted-foreground" data-slot="destination-key-only">
-                {keyOnlyPlatform
-                  ? `${platformName} uses a stream key.`
-                  : `Signing in to ${platformName} isn't available in this build. Use a stream key.`}
+                {target.platform === 'facebook'
+                  ? FACEBOOK_SIGN_IN_UNAVAILABLE
+                  : keyOnlyPlatform
+                    ? `${platformName} uses a stream key.`
+                    : `Signing in to ${platformName} isn't available in this build. Use a stream key.`}
               </p>
             ) : null}
 
@@ -757,6 +766,11 @@ export function manualKeyGuidance(platform: StreamPlatform): {
       return {
         copy: 'Instagram keys come from Live Producer (professional accounts). Start the stream here, then press "Go live" there.',
         link: { url: 'https://www.instagram.com/live/producer/', label: 'Live Producer' }
+      }
+    case 'facebook':
+      return {
+        copy: 'Facebook keys come from Live Producer: choose Streaming software, and turn on Persistent stream key to reuse it. Start the stream here, then press "Go live" there. Pages and professional profiles need 100 followers.',
+        link: { url: FACEBOOK_LIVE_PRODUCER_URL, label: 'Live Producer' }
       }
     default:
       return { copy: 'Your streaming server gives you its server URL and stream key.' }
