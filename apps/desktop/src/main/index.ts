@@ -23,6 +23,8 @@ import { openableChatLink } from '../shared/chat-link'
 import { parseClipLength } from '../shared/clip-lengths'
 import { WINDOW_NAMES } from '../shared/window-names'
 import type {
+  AgentAddApp,
+  AgentAddResult,
   Banner,
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
@@ -279,6 +281,7 @@ import {
   resolveAgentBridge,
   type AgentBridgeLocation
 } from './agent-bridge'
+import { AGENT_ADD_BRIDGE_MISSING, addAgentToApp } from './agent-config-install'
 import {
   requestMediaAccessWithRestart,
   requestScreenAccessWithWatch,
@@ -9040,6 +9043,26 @@ function resolveDevBackendBinary(root = workspaceRoot()): string {
   )
 }
 
+/** Plan 209 S22: "Add to …" for the app Connect just named (the IPC
+ * contract has already checked the app and the token's shape). */
+async function addAgentToInstalledApp(app: AgentAddApp, token: string): Promise<AgentAddResult> {
+  const bridge = await resolveAgentBridge(agentBridgeLocation(), true)
+  if (!bridge.exists) return { added: false, message: AGENT_ADD_BRIDGE_MISSING }
+  return addAgentToApp(
+    app,
+    { bridgePath: bridge.path, token },
+    {
+      platform: process.platform,
+      homeDir: homedir(),
+      appData: process.env.APPDATA,
+      xdgConfigHome: process.env.XDG_CONFIG_HOME,
+      codexHome: process.env.CODEX_HOME,
+      pathVariable: process.env.PATH ?? process.env.Path
+    },
+    { log: (message) => logBackend('warn', `[agents] ${message}`) }
+  )
+}
+
 /** Plan 209 S7: where this install's `videorc-mcp` bridge lives (D6, D20). */
 function agentBridgeLocation(): AgentBridgeLocation {
   return {
@@ -15396,6 +15419,11 @@ app.whenReady().then(async () => {
   // the config line; Connect (`install`) puts the Linux copy in place (D20).
   secureIpcHandle('agents:bridge', (_event, install: unknown) =>
     resolveAgentBridge(agentBridgeLocation(), install === true)
+  )
+  // "Add to …" (plan 209 S22): the app's own config gets the videorc entry,
+  // or `claude mcp add` runs. The path is main's, never the renderer's.
+  secureIpcHandle('agents:add-to-app', (_event, app: unknown, token: unknown) =>
+    addAgentToInstalledApp(app as AgentAddApp, token as string)
   )
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
   // The stream key never rides these payloads — obs:read strips it; the apply

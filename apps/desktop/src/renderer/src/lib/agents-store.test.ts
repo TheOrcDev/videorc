@@ -143,6 +143,7 @@ function setup(answers: Record<string, unknown> = {}) {
       path: install ? '/installed/videorc-mcp' : '/bundled/videorc-mcp',
       exists: true
     })),
+    addToApp: vi.fn(async (app: string) => ({ added: true, message: `Added to ${app}.` })),
     timers: time.timers
   })
   return {
@@ -259,6 +260,11 @@ describe('agents store (plan 209 S7)', () => {
     await expect(store.prepareBridge()).resolves.toEqual({
       path: '/installed/videorc-mcp',
       exists: true
+    })
+    // S22: "Add to …" goes to main as it is; nothing is kept.
+    await expect(store.addToApp('cursor', 'vrc_agent_x')).resolves.toEqual({
+      added: true,
+      message: 'Added to cursor.'
     })
   })
 

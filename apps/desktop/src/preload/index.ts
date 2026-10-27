@@ -221,6 +221,7 @@ const api: VideorcApi = {
   revealBackgroundAsset: (assetId) => invoke('resource:reveal-background', assetId),
   revealSupportBundle: (path) => invoke('resource:reveal-support-bundle', path),
   getAgentBridge: (install) => invoke('agents:bridge', install),
+  addAgentToApp: (app, token) => invoke('agents:add-to-app', app, token),
   obsDiscover: () => invoke('obs:discover'),
   obsRead: (collection, profile) => invoke('obs:read', collection, profile),
   obsReadStreamKey: (profile) => invoke('obs:read-stream-key', profile),
