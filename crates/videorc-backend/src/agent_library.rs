@@ -296,7 +296,7 @@ mod tests {
         assert!(!cloud_ai_consented(&state));
         state
             .agents
-            .renderer_sockets
+            .studio_sockets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         assert!(cloud_ai_consented(&state));
     }
