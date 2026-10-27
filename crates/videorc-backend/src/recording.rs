@@ -1141,7 +1141,7 @@ impl FfmpegProgressBeacon {
         self.media_micros.fetch_max(micros, Ordering::Relaxed);
     }
 
-    fn media_micros(&self) -> u64 {
+    pub(crate) fn media_micros(&self) -> u64 {
         self.media_micros.load(Ordering::Relaxed)
     }
 
@@ -1152,6 +1152,17 @@ impl FfmpegProgressBeacon {
     fn stop_escalated(&self) -> bool {
         self.stop_escalated.load(Ordering::Acquire)
     }
+}
+
+/// The running session's FFmpeg output clock, for the performance check's
+/// encoder pace.
+pub(crate) async fn active_ffmpeg_progress(state: &AppState) -> Option<FfmpegProgressBeacon> {
+    state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .map(|active| active.ffmpeg_progress.clone())
 }
 
 const FFMPEG_STDERR_TAIL_LINES: usize = 5;
