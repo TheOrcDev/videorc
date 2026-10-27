@@ -18,9 +18,21 @@ developers, and carries the leak argument AGENTS.md asks for (Security).
    Videorc**.
 2. Press **Connect an agent**, pick your app (Claude Desktop, Claude Code,
    Cursor, Codex, VS Code or Other) and give it a name.
-3. Copy the line Videorc shows into that app. The token in it is shown
-   **once**; Videorc keeps only a fingerprint of it. If you lose it, remove
-   the agent and connect it again.
+3. Press **Add to Claude Desktop** (or Cursor, VS Code, Codex, Claude
+   Code): Videorc writes its entry into that app's own settings and keeps a
+   backup of the old file beside it. Then restart the app (Claude Desktop,
+   Codex), start a new session (Claude Code) or turn videorc on in its MCP
+   settings (Cursor, VS Code). Or copy the line Videorc shows into the app
+   yourself. The token in it is shown **once**; Videorc keeps only a
+   fingerprint of it. If you lose it, remove the agent and connect it again.
+
+**Add to …** changes only the `videorc` entry: every other server and
+setting in the file stays as it was. If the file isn't something Videorc can
+read with certainty (JSON with comments, an unusual shape, a Codex
+`config.toml` that defines `videorc` some other way), or the app's settings
+folder isn't on this computer, Videorc leaves it alone and says to copy the
+line instead. Claude Code's button runs the same `claude mcp add` command
+the line shows, when Videorc finds the `claude` command.
 
 The agent shows up in the list with "Never used" until its first call. The
 line points the app at `videorc-mcp`, a small program inside Videorc:
@@ -56,6 +68,15 @@ Your agent app can start before Videorc does: it lists Videorc's tools
 without opening Videorc, and the first time the agent uses one, Videorc
 opens in the background. If Agents is off, the agent is told "Turn on Agents
 in Videorc → Settings → Remote."
+
+**Prompts.** Two ready-made requests show up in your agent app, as slash
+commands (Claude Code: `/mcp__videorc__go_live_checklist`) or in its prompt
+menu (Claude Desktop's "+"):
+
+- **Go-live checklist** checks your destinations, the picture viewers will
+  see and the sound, and changes nothing.
+- **Stream recap** sums up your last recording or livestream: its files,
+  markers, chat and viewers, with a title and description for posting it.
 
 ### What an agent can do
 
@@ -168,14 +189,60 @@ in a later release (docs/remote-control.md).
   `{protocol, pid, enabled, port?}`, never a secret. The bridge reads it
   (`VIDEORC_AGENTS_DISCOVERY` overrides its path, which the smoke uses).
 - **The bridge** (`src/bin/videorc_mcp.rs`, shipped as `videorc-mcp`)
-  speaks newline-delimited JSON-RPC on stdio, answers `initialize`, `ping`
-  and `tools/list` from its compiled-in catalog, forwards `tools/call` with
+  speaks newline-delimited JSON-RPC on stdio, answers `initialize`, `ping`,
+  `tools/list`, `prompts/list` and `prompts/get` from its compiled-in
+  catalog and prompts, forwards `tools/call` with
   `VIDEORC_AGENT_TOKEN`, opens Videorc on the first call when it isn't
   running (D7) and logs to stderr only. It pings every 15 s while alive, so
   the Session line knows the agent is there. An agent unheard from for 45 s
   is no longer connected: the backend publishes `agents.status` when that
   happens (one task sleeps until the next lapse while any agent is
   connected), so nothing in the renderer polls.
+- **Prompts** (S22, `protocol-fixtures/agent-prompts.json`, loaded by
+  `agent_prompts.rs` into the backend and the bridge): `name`, `title`,
+  `description`, the `tools` the text names (never on the wire; a test holds
+  each to the tool catalog, so renaming a tool fails until the prompt
+  follows) and the `text`, returned by `prompts/get` as one user message. No
+  arguments and no live data, so the bridge answers both methods offline and
+  without a token; the backend's `prompts/list` is the same list. Both
+  declare the `prompts` capability. A prompt is not an action: nothing lands
+  in Activity.
+- **Add to …** (S22, `main/agent-config-install.ts`, IPC
+  `agents:add-to-app`, main window only). The renderer sends the app and the
+  token Connect just minted; main resolves the bridge's path itself
+  (`resolveAgentBridge`, never a renderer path) and writes the entry the
+  line shows (`shared/agent-config-entry.ts`, one source for both):
+  - Claude Desktop's `claude_desktop_config.json` in its `Claude` settings
+    folder (macOS Application Support, Windows `%APPDATA%`, Linux
+    `$XDG_CONFIG_HOME` or `~/.config`), Cursor's `~/.cursor/mcp.json`, VS
+    Code's user `mcp.json` in `Code/User` (under `servers`, with
+    `type: stdio`), Codex's `$CODEX_HOME/config.toml` or `~/.codex/config.toml`;
+  - JSON is parsed and only `videorc` under the app's key is added or
+    replaced (key order kept, the file's indent kept); anything that isn't
+    plain JSON with an object there is refused;
+  - TOML goes through a line scanner (`main/agent-config-toml.ts`; no TOML
+    library ships): every `[mcp_servers.videorc…]` section is replaced in
+    place or the table is appended, and `videorc` written as dotted keys or
+    an inline table, `mcp_servers` as an inline table, an array of tables,
+    a duplicate, or anything unterminated is refused;
+  - the app's folder is never created; a timestamped backup
+    (`<file>.videorc-backup-<UTC stamp>`) is taken before every change; the
+    new file is written beside the old one and renamed over it, keeping its
+    mode (a new file is 0600); a symlinked file is written through to its
+    target; an unchanged entry writes nothing;
+  - Claude Code: `claude mcp remove --scope user videorc`, then the line's
+    `claude mcp add`, by `execFile` (no shell, 20 s timeout, stdin closed)
+    from the PATH plus the installers' folders a Finder-opened app's PATH
+    lacks. On Windows only `claude.exe` (Node won't run a `.cmd` without a
+    shell). The token rides the CLI's arguments, as in the line the
+    streamer would run; logs never carry them.
+- **The Claude Desktop extension** (S22, `pnpm build:mcpb`,
+  `scripts/build-mcpb.mjs`, `scripts/lib/mcpb.mjs`): `videorc.mcpb`, a zip
+  with an MCPB 0.3 `manifest.json` (`binary` server, the bridge under
+  `server/`, the token as a sensitive `user_config.agent_token` passed as
+  `VIDEORC_AGENT_TOKEN`, the app's version, every tool and prompt) and the
+  bridge for the building platform, executable. Not in the release
+  pipeline yet (plan 209 As built, S22).
 
 ### A call, start to finish
 

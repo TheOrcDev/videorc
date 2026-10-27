@@ -43,7 +43,7 @@
 | S19   | Buddy asks the planner and runs its tool calls                     | D   | PLANNED |
 | S20   | `/buddy` in the Stream Manager composer                            | D   | PLANNED |
 | S21   | `smoke:buddy-act` and the gates                                    | D   | PLANNED |
-| S22   | One-click Connect, Claude Desktop extension, MCP prompts           | E   | PLANNED |
+| S22   | One-click Connect, Claude Desktop extension, MCP prompts           | E   | DONE    |
 
 - **Status**: PLANNED 2026-10-27. The owner answered the four shaping
   questions the same day (see Owner answers). The remaining decisions below
@@ -1328,3 +1328,104 @@ warnings`, `cargo fmt --check --all`, `pnpm typecheck`, `pnpm lint` (the
   agent-notices, agents-section, agents-session-row, agents-view and
   agents-contract. Smokes not run (S16 runs the bundle); `smoke:agent-mcp`
   should still see `studioOpen: true` once the dev app's Studio listens.
+
+### S22 (2026-10-27)
+
+- **Prompts** (`protocol-fixtures/agent-prompts.json`, `agent_prompts.rs`):
+  `go_live_checklist` ("Go-live checklist": `get_status`,
+  `list_destinations`, `get_picture`, change nothing) and `stream_recap`
+  ("Stream recap": `list_recordings`, `get_recording`, chat quoted as data,
+  a suggested title and description). No arguments. The fixture's `tools`
+  stay off the wire; a Rust test holds each to the tool catalog and the
+  text to naming each. The backend declares `prompts` and answers
+  `prompts/list` and `prompts/get` through rmcp; unknown names are
+  `-32602`. **Deviation:** the bridge answers `prompts/get` offline too,
+  not only `prompts/list`: the text is fixed and compiled into it, so
+  forwarding would only add a token check and open Videorc (or fail with
+  Agents off) for a menu click. Prompts log no Activity.
+  `smoke:agent-mcp` step 1 now checks the bridge's offline prompts and
+  step 2 that the backend's `prompts/list` matches (not run here; S16).
+  `get_recording` has no transcript yet, so the recap doesn't ask for one.
+- **Add to …** (`main/agent-config-install.ts`, `main/agent-config-toml.ts`,
+  `shared/agent-config-entry.ts`, IPC `agents:add-to-app`, 151 channels,
+  `MAIN_ONLY`): the args are the app (not `other`) and a token of the
+  minted shape; main resolves the bridge (`install: true`) and refuses with
+  the bridge-missing sentence when it isn't there. Paths: Claude Desktop
+  `~/Library/Application Support/Claude/`, `%APPDATA%\Claude\`,
+  `$XDG_CONFIG_HOME` or `~/.config/Claude/`; Cursor `~/.cursor/mcp.json`;
+  VS Code `…/Code/User/mcp.json` (same three roots); Codex
+  `$CODEX_HOME/config.toml` or `~/.codex/config.toml`. Rules and refusals
+  are in `docs/agents-mcp.md`. No TOML library is in the deps, so Codex
+  uses a line scanner (strings of all four kinds, comments, bracket depth)
+  with 20 tests. Claude Code: `claude mcp remove --scope user videorc` then
+  the line's `add`, `execFile`, no shell, 20 s, stdin closed, searching the
+  PATH plus `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`,
+  `/usr/local/bin`; Windows only `claude.exe` (an npm `claude.cmd` gets the
+  copy line). The token rides the CLI's argv for the second it runs, as it
+  does when the streamer runs the line.
+- **The dialog**: "Add to <app>" is an outline footer button beside Done
+  (a dialog action at 28 px, per the design skill), not in the line's
+  label row: that row already holds Shown once, Show token and Copy at
+  24 px and the file name would truncate. The answer is an Alert under the
+  line (`success`, or `warning` with "… so Videorc left it alone. Copy the
+  line instead."). Other has no button. By eye, both themes, at 1180×780
+  and 960×660, initial, added and refused, through a scratch renderer-only
+  harness (Vite plus Electron `capturePage`, deleted).
+- **Risks for the owner's packaged run**: Claude Desktop may rewrite its
+  own config while running; check that the entry survives "Restart Claude
+  Desktop". VS Code users whose `mcp.json` has comments get the copy line
+  (JSONC is refused, never rewritten).
+- **The extension** (`pnpm build:mcpb`, `scripts/build-mcpb.mjs`,
+  `scripts/lib/mcpb.mjs`, 6 tests): MCPB manifest **0.3** (MANIFEST.md in
+  `modelcontextprotocol/mcpb`, dated 2025-12-02; 0.4 only adds the `uv`
+  type), `binary` server, `entry_point` `server/videorc-mcp` (`.exe` on
+  Windows, named explicitly), command `${__dirname}/server/…`,
+  `user_config.agent_token` (string, sensitive, required) as
+  `VIDEORC_AGENT_TOKEN`, name `videorc`, display name Videorc, the app's
+  version, every tool and prompt, `compatibility.platforms` the build's
+  own. The zip writer is ours (no dependency), deflated, a fixed timestamp
+  and Unix modes, so the bridge unpacks executable (checked with
+  `unzip -t` and an unpack). Built here from the debug bridge and run from
+  the unpacked bundle: `initialize`, `prompts/list` and `prompts/get`
+  answered offline. **Uncertain**: no `compatibility.claude_desktop`
+  minimum (none known for binary servers); no icon (the repo has only
+  `icon.icns`; `--icon <png>` adds one); whether Claude Desktop keeps the
+  exec bit is by the spec, not tried in Claude Desktop.
+- The bundled bridge is a **copy**: it never updates with the app, and its
+  offline `tools/list` is the catalog it was built with. On Windows it now
+  also looks for `%LOCALAPPDATA%\Programs\Videorc\Videorc.exe` when it
+  isn't inside an install (a custom install folder still needs Videorc
+  running first).
+- **What the release needs** (not wired): build one `.mcpb` per platform
+  from the **signed** bridge out of the packaged app (macOS: the notarized
+  app's `Contents/Resources/videorc-mcp`; Windows: the Authenticode-signed
+  `resources\videorc-mcp.exe`), optionally `mcpb sign` the bundle,
+  rebuild it every version (the catalog changes), upload
+  `videorc-<version>-<platform>.mcpb` and a stable `videorc.mcpb` alias to
+  R2 beside the app, link it on the download page and replace the
+  placeholder on `/agents`, and give Connect a "Copy token" for Claude
+  Desktop (the extension asks for the bare token; today the streamer
+  shows the token and selects it).
+- **Website** (videorcweb `plan-209-buddy-act`, `176a174b`, not pushed):
+  `/agents`, "Videorc for agents": what it is, the four Connect steps, the
+  extension with the placeholder link
+  `https://videorc.com/downloads/videorc.mcpb` (a TODO, labelled "Coming
+  with the next release"; it 404s until the release uploads it), the two
+  prompts, the tool groups, the safety story and Buddy. Sitemap (via
+  `lib/metadata.ts`), `llms.txt`, `llms-full`, the footer, and their tests.
+  `pnpm typecheck` and `pnpm lint` pass; `format:check` fails only on 59
+  files that were unformatted before. Not looked at in a browser by eye.
+- **Checks**: `cargo test -p videorc-backend` on both bins (the backend and
+  `videorc-mcp`), filtered to prompts, catalog, `initialize` and the bridge
+  (35 passed), then all 19 of the bridge's with the Windows fallback,
+  `cargo fmt --check --all`, vitest on the two new main suites (53),
+  agents-section, agents-store, agent-connect-lines, agent-bridge and the
+  IPC contract, `node --test scripts/lib/mcpb.test.mjs`, `pnpm typecheck`,
+  `pnpm lint` (the one pre-existing warning) and `pnpm build`.
+  `check:renderer-assets` fails at 2,001,884 eager raw bytes (budget
+  2,000,000), byte for byte the same at `d26a1eea` without S22: the S22
+  code is in lazy chunks (`settings-tab`, `use-agents`), and the eager set
+  crossed the line in PR A's integration fixes (S7 measured 1,997,285).
+  `cargo clippy -p videorc-backend --bins -- -D warnings` passes (it
+  first caught the prompt helpers being test-only in the backend; the
+  backend now builds rmcp's types from them, like `tools/list`).
