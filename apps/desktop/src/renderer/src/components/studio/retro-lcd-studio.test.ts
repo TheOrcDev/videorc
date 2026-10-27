@@ -41,6 +41,7 @@ function systemAudioProps(
       sessionActive: false,
       audioBusActive: false,
       confirmed: null,
+      joining: false,
       issue: null,
       ...input
     }),

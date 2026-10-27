@@ -8,6 +8,7 @@ import {
   SYSTEM_AUDIO_RESUME_EVENT,
   confirmedSystemAudioMix,
   systemAudioDevice,
+  systemAudioRowDevice,
   systemAudioIdleReason,
   systemAudioIssueCopy,
   systemAudioIssueFromHealthEvent,
@@ -15,6 +16,11 @@ import {
   systemAudioTarget,
   type SystemAudioSwitchInput
 } from './system-audio'
+import {
+  nextSystemAudioJoin,
+  systemAudioJoining,
+  type SystemAudioJoin
+} from './system-audio-session'
 
 const available: Pick<Device, 'status'> = { status: 'available' }
 
@@ -25,6 +31,7 @@ function view(overrides: Partial<SystemAudioSwitchInput>) {
     sessionActive: false,
     audioBusActive: false,
     confirmed: null,
+    joining: false,
     issue: null,
     ...overrides
   })
@@ -52,6 +59,30 @@ describe('systemAudioDevice', () => {
     const legacy = { ...device, id: 'system-audio:native-adapter-pending' }
     expect(systemAudioDevice({ devices: [mic, legacy], warnings: [] })).toBe(legacy)
     expect(systemAudioDevice({ devices: [mic], warnings: [] })).toBeUndefined()
+  })
+})
+
+describe('systemAudioRowDevice', () => {
+  const mic: Device = { id: 'mic:1', name: 'Mic', kind: 'microphone', status: 'available' }
+  const empty = { devices: [], warnings: [] }
+
+  it('stands in an Available device on a Mac until the first device list arrives', () => {
+    expect(systemAudioRowDevice(empty, 'darwin')).toEqual({ status: 'available' })
+    const waiting: Device = {
+      id: 'system-audio:default',
+      name: 'System audio',
+      kind: 'system-audio',
+      status: 'permission-required'
+    }
+    expect(systemAudioRowDevice({ devices: [mic, waiting], warnings: [] }, 'darwin')).toBe(waiting)
+    // A listed Mac without the row is a real answer, not a list still loading.
+    expect(systemAudioRowDevice({ devices: [mic], warnings: [] }, 'darwin')).toBeUndefined()
+  })
+
+  it('waits for the list where the device can be missing for good', () => {
+    for (const platform of ['win32', 'linux', undefined]) {
+      expect(systemAudioRowDevice(empty, platform)).toBeUndefined()
+    }
   })
 })
 
@@ -283,6 +314,89 @@ describe('systemAudioSwitchView', () => {
         issue: 'echo'
       })
     ).toMatchObject({ checked: true, issue: 'echo', meter: false, stateLabel: 'Paused' })
+  })
+})
+
+describe('a session joining the System audio it started with', () => {
+  type Step = { sessionId: string | null; requested: boolean; confirmed: boolean | null }
+
+  /** Folds statuses through the latch and draws the switch at each step. */
+  function run(steps: Step[], issue: SystemAudioSwitchInput['issue'] = null) {
+    let join: SystemAudioJoin | null = null
+    return steps.map((step) => {
+      join = nextSystemAudioJoin(join, { ...step, issue: issue !== null })
+      return view({
+        audioBusActive: step.sessionId !== null,
+        requested: step.requested,
+        confirmed: step.confirmed,
+        joining: systemAudioJoining(join, step.requested, step.confirmed),
+        issue: step.sessionId === null ? null : issue
+      })
+    })
+  }
+
+  it('keeps the row On at launch while Clips opens the capture (the blink)', () => {
+    // The packaged log: the ring runs at 47.66 s, System audio joins at 48.26 s.
+    const views = run([
+      { sessionId: null, requested: true, confirmed: null },
+      { sessionId: 'ring', requested: true, confirmed: false },
+      { sessionId: 'ring', requested: true, confirmed: false },
+      { sessionId: 'ring', requested: true, confirmed: true }
+    ])
+    for (const step of views) {
+      expect(step).toMatchObject({ visible: true, checked: true, pending: null, stateLabel: 'On' })
+    }
+    expect(views.map((step) => step.meter)).toEqual([false, false, false, true])
+  })
+
+  it('joins again on every new session, as a Clips restart or a recording', () => {
+    const views = run([
+      { sessionId: 'ring-1', requested: true, confirmed: true },
+      { sessionId: null, requested: true, confirmed: null },
+      { sessionId: 'ring-2', requested: true, confirmed: false }
+    ])
+    expect(views[2]).toMatchObject({ checked: true, pending: null, meter: false })
+  })
+
+  it('shows the confirmed state again once the session settles (plan 069 live toggles)', () => {
+    // Joined, then the user turns it Off and On again: that On waits for the mix.
+    const toggled = run([
+      { sessionId: 'ring', requested: true, confirmed: false },
+      { sessionId: 'ring', requested: true, confirmed: true },
+      { sessionId: 'ring', requested: false, confirmed: false },
+      { sessionId: 'ring', requested: true, confirmed: false }
+    ])
+    expect(toggled[3]).toMatchObject({ checked: false, pending: 'on', stateLabel: 'Turning on…' })
+    // A toggle before the first mix settles it too.
+    const early = run([
+      { sessionId: 'ring', requested: true, confirmed: false },
+      { sessionId: 'ring', requested: false, confirmed: false },
+      { sessionId: 'ring', requested: true, confirmed: false }
+    ])
+    expect(early[2]).toMatchObject({ checked: false, pending: 'on' })
+    // A session that started Off never joins.
+    const off = run([
+      { sessionId: 'ring', requested: false, confirmed: false },
+      { sessionId: 'ring', requested: true, confirmed: false }
+    ])
+    expect(off[1]).toMatchObject({ checked: false, pending: 'on' })
+  })
+
+  it('lets an issue explain a start that failed', () => {
+    const views = run([{ sessionId: 'ring', requested: true, confirmed: false }], 'unavailable')
+    expect(views[0]).toMatchObject({ checked: true, issue: 'unavailable', meter: false })
+  })
+
+  it('keeps the same latch while nothing changes, and drops it when no bus runs', () => {
+    const start = { sessionId: 'ring', requested: true, confirmed: false, issue: false }
+    const join = nextSystemAudioJoin(null, start)
+    expect(join).toEqual({ sessionId: 'ring', requested: true, settled: false })
+    expect(nextSystemAudioJoin(join, start)).toBe(join)
+    const settled = nextSystemAudioJoin(join, { ...start, confirmed: true })
+    expect(settled).toEqual({ sessionId: 'ring', requested: true, settled: true })
+    expect(nextSystemAudioJoin(settled, start)).toBe(settled)
+    expect(nextSystemAudioJoin(settled, { ...start, sessionId: null })).toBeNull()
+    expect(systemAudioJoining(null, true, false)).toBe(false)
   })
 })
 

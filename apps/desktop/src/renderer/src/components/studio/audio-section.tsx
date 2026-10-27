@@ -34,7 +34,7 @@ import { micSignalLabel, type MicMonitorState } from '@/lib/state-labels'
 import {
   SYSTEM_AUDIO_IDLE_LINE,
   requestSystemAudioResume,
-  systemAudioDevice,
+  systemAudioRowDevice,
   systemAudioIdleReason,
   systemAudioIssueCopy,
   systemAudioSwitchView,
@@ -80,6 +80,7 @@ export function AudioSection(): ReactElement {
     isSessionActive,
     audioBusActive,
     systemAudioConfirmed,
+    systemAudioJoining,
     systemAudioIssue
   } = useStudioCore()
   const { openSettings } = useWorkspaceNav()
@@ -95,11 +96,12 @@ export function AudioSection(): ReactElement {
   const setAudio = (update: (current: AudioSettings) => AudioSettings): void =>
     setCaptureConfig((current) => ({ ...current, audio: update(current.audio) }))
   const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
+    device: systemAudioRowDevice(deviceList, platform),
     requested: audio.systemAudioEnabled,
     sessionActive: isSessionActive,
     audioBusActive,
     confirmed: systemAudioConfirmed,
+    joining: systemAudioJoining,
     issue: systemAudioIssue
   })
 

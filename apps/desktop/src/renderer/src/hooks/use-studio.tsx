@@ -576,8 +576,11 @@ import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@
 import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
 import {
   confirmedSystemAudioMix,
+  nextSystemAudioJoin,
   systemAudioIssueFromHealthEvent,
-  type SystemAudioIssue
+  systemAudioJoining as isSystemAudioJoining,
+  type SystemAudioIssue,
+  type SystemAudioJoin
 } from '@/lib/system-audio-session'
 import {
   activeAudioProcessingUpdateParams,
@@ -1589,6 +1592,8 @@ export type StudioContextValue = {
   /** Whether the active session mixes system audio, from `recording.status`
    * `mixSources` (plan 069); null until the backend reports it. */
   systemAudioConfirmed: boolean | null
+  /** The session still opens the System audio it started with (`systemAudioJoining`). */
+  systemAudioJoining: boolean
   /** The newest system-audio health issue for the active session. */
   systemAudioIssue: SystemAudioIssue | null
   startBlockedReason: string | null
@@ -2468,6 +2473,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     issue: SystemAudioIssue
   } | null>(null)
   const [systemAudioRetry, retrySystemAudio] = useState(0)
+  // Which session is still opening the System audio it started with.
+  const [systemAudioJoin, setSystemAudioJoin] = useState<SystemAudioJoin | null>(null)
   const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null)
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
@@ -11476,15 +11483,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     systemAudioIssueEvent.sessionId === recording.sessionId
       ? systemAudioIssueEvent.issue
       : null
+  // A starting session (the Clips ring at launch, a recording) mixes the
+  // microphone alone until its capture opens; that is not the switch going
+  // Off. The latch outlives renders; the first mix, an issue or a toggle
+  // settles it.
+  const nextJoin = nextSystemAudioJoin(systemAudioJoin, {
+    sessionId: mixingSessionActive ? (recording.sessionId ?? null) : null,
+    requested: captureConfig.audio.systemAudioEnabled,
+    confirmed: systemAudioConfirmed,
+    issue: systemAudioIssue !== null
+  })
+  if (nextJoin !== systemAudioJoin) setSystemAudioJoin(nextJoin)
+  const systemAudioJoining = isSystemAudioJoining(
+    nextJoin,
+    captureConfig.audio.systemAudioEnabled,
+    systemAudioConfirmed
+  )
   // Plan 069 S6: what the shortcut and the remotes act on — the device status
   // and the state the switch shows (the confirmed mix, else the request).
   const systemAudioStatus = deviceList.devices.find(
     (device) => device.kind === 'system-audio'
   )?.status
-  // With an issue the switch stays as the user set it, so a toggle turns it
-  // Off (PR #477 review).
+  // With an issue, or while the session joins, the switch stays as the user
+  // set it, so a toggle turns it Off (PR #477 review).
   const systemAudioShown =
-    (systemAudioIssue ? null : systemAudioConfirmed) ?? captureConfig.audio.systemAudioEnabled
+    (systemAudioIssue || systemAudioJoining ? null : systemAudioConfirmed) ??
+    captureConfig.audio.systemAudioEnabled
   // A shortcut or remote request is sent even when it repeats the last one:
   // the retry after a failed start or a lost update.
   const setSystemAudioEnabled = (systemAudioEnabled: boolean): void => {
@@ -17265,6 +17289,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       isSessionActive,
       audioBusActive: mixingSessionActive,
       systemAudioConfirmed,
+      systemAudioJoining,
       systemAudioIssue,
       startBlockedReason,
       canStart,
@@ -17501,6 +17526,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       isSessionActive,
       mixingSessionActive,
       systemAudioConfirmed,
+      systemAudioJoining,
       systemAudioIssue,
       startBlockedReason,
       canStart,

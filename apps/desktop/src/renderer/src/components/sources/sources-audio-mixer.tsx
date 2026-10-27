@@ -89,7 +89,7 @@ import {
 } from '@/lib/source-status'
 import {
   SYSTEM_AUDIO_IDLE_LINE,
-  systemAudioDevice,
+  systemAudioRowDevice,
   requestSystemAudioResume,
   systemAudioIssueCopy,
   systemAudioSwitchView,
@@ -170,6 +170,7 @@ export function SourcesAudioMixer(): ReactElement {
     runtimeInfo,
     wsStatus,
     systemAudioConfirmed,
+    systemAudioJoining,
     systemAudioIssue
   } = useStudioCore()
   const { openSettings } = useWorkspaceNav()
@@ -184,11 +185,12 @@ export function SourcesAudioMixer(): ReactElement {
   const setAudio = (update: (current: AudioSettings) => AudioSettings): void =>
     setCaptureConfig((current) => ({ ...current, audio: update(current.audio) }))
   const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
+    device: systemAudioRowDevice(deviceList, platform),
     requested: audio.systemAudioEnabled,
     sessionActive: isSessionActive,
     audioBusActive,
     confirmed: systemAudioConfirmed,
+    joining: systemAudioJoining,
     issue: systemAudioIssue
   })
 

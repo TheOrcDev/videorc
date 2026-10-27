@@ -67,6 +67,7 @@ describe('systemAudioMeterInput (plan 093)', () => {
       audioBusActive: true,
       requested,
       confirmed,
+      joining: false,
       issue: null
     })
     expect(meterHasNoReading(systemAudioMeterInput({ ...live, mixed: view.meter }))).toBe(true)

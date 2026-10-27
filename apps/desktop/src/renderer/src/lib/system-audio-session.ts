@@ -22,6 +22,53 @@ export function confirmedSystemAudioMix(tracks: AudioTrack[] | undefined): boole
 }
 
 /**
+ * Whether a running session still brings up the System audio it started
+ * with. A session opens its capture on its own thread after the bus starts
+ * (about half a second on macOS), so its first statuses mix the microphone
+ * only. That is the capture opening, not the switch turning Off: until the
+ * session first mixes System audio, the switch keeps showing the request. A
+ * toggle during the session (the request changes) or an issue ends it, and
+ * the switch shows what the session confirms again (plan 069's live rule).
+ */
+export type SystemAudioJoin = Readonly<{
+  sessionId: string
+  /** The request when the session was first seen. */
+  requested: boolean
+  /** The session mixed System audio, the request changed, or an issue came. */
+  settled: boolean
+}>
+
+/** The next join state; the same object while nothing changes. */
+export function nextSystemAudioJoin(
+  current: SystemAudioJoin | null,
+  session: {
+    /** The mixing session, or null while no bus runs. */
+    sessionId: string | null
+    requested: boolean
+    confirmed: boolean | null
+    issue: boolean
+  }
+): SystemAudioJoin | null {
+  if (!session.sessionId) return null
+  const settles = session.confirmed === true || session.issue
+  if (current?.sessionId !== session.sessionId) {
+    return { sessionId: session.sessionId, requested: session.requested, settled: settles }
+  }
+  return current.settled || (!settles && session.requested === current.requested)
+    ? current
+    : { ...current, settled: true }
+}
+
+/** True while the session has not yet mixed the System audio it was asked for. */
+export function systemAudioJoining(
+  join: SystemAudioJoin | null,
+  requested: boolean,
+  confirmed: boolean | null
+): boolean {
+  return join !== null && !join.settled && requested && confirmed === false
+}
+
+/**
  * A system-audio health event, reduced to the one fact the UI shows. The
  * Windows bypass (plan 069 S8: the mic fell back to a direct input, so the
  * session cannot mix system audio) is inlined to keep the eager chunk small.
