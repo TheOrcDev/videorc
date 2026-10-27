@@ -10,6 +10,7 @@ mod agent_call;
 mod agent_chat;
 mod agent_look;
 mod agent_mcp;
+mod agent_prepare;
 mod agent_registry;
 mod agent_tools;
 mod atomic_file;

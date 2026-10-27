@@ -23,6 +23,8 @@ import { soundPlay, soundStop } from './sounds'
 import { windowFront } from './windows'
 // Plan 209 PR B, S13 to S15.
 import { setBuddy } from './buddy'
+import { setDestinations, updateStreamInfo } from './prepare'
+import { getSettings, updateSettings } from './settings'
 
 /** What an agent reads when a Studio tool refuses before any handler runs. */
 export const AGENT_TOOL_COPY = {
@@ -197,5 +199,9 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   open_window: openWindow,
   notify,
   // Plan 209 PR B, S13 to S15 (buddy.ts, prepare.ts, settings.ts, library.ts).
-  set_buddy: setBuddy
+  set_buddy: setBuddy,
+  update_stream_info: updateStreamInfo,
+  set_destinations: setDestinations,
+  get_settings: getSettings,
+  update_settings: updateSettings
 }

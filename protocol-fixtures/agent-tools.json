@@ -1625,6 +1625,466 @@
       "notice": null
     },
     {
+      "name": "update_stream_info",
+      "title": "Set the stream details",
+      "description": "Set the next livestream's details, like Stream details in Videorc: the title, description and privacy shared by every destination, a category for Twitch and Kick (by name), and per platform its own title, description, privacy or category. Saved only when Go Live would accept them. Waits while a session runs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "The shared title.",
+            "minLength": 1,
+            "maxLength": 140
+          },
+          "description": {
+            "type": "string",
+            "description": "The shared description.",
+            "maxLength": 5000
+          },
+          "privacy": {
+            "type": "string",
+            "description": "Who can watch, where the platform has a choice (YouTube).",
+            "enum": ["public", "unlisted", "private"]
+          },
+          "category": {
+            "type": "string",
+            "description": "A category name for Twitch and Kick, like Software and Game Development.",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "destinations": {
+            "type": "array",
+            "description": "Per platform: its own title, description, privacy or category.",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "type": "string",
+                  "enum": ["youtube", "twitch", "kick", "x"]
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 140
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 5000
+                },
+                "privacy": {
+                  "type": "string",
+                  "enum": ["public", "unlisted", "private"]
+                },
+                "category": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              },
+              "required": ["platform"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "privacy": {
+            "type": "string"
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "privacy": {
+                  "type": "string"
+                },
+                "ownTitle": {
+                  "type": "boolean"
+                },
+                "category": {
+                  "type": "string"
+                }
+              },
+              "required": ["platform", "title", "privacy", "ownTitle"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["title", "description", "privacy", "destinations"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_destinations",
+      "title": "Choose destinations",
+      "description": "Turn destinations on or off for the next livestream, like their switches in Videorc \u2192 Livestream. Use the ids list_destinations gives. Turning one on respects the plan's destination limit; nothing changes while a session runs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "A destination id from list_destinations.",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "on": {
+                  "type": "boolean",
+                  "description": "On for the next stream."
+                }
+              },
+              "required": ["id", "on"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["destinations"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "on": {
+                  "type": "boolean"
+                },
+                "ready": {
+                  "type": "boolean"
+                }
+              },
+              "required": ["id", "platform", "label", "on", "ready"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["destinations"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "schedule_stream",
+      "title": "Schedule a livestream",
+      "description": "Schedule an upcoming livestream on YouTube (default) or X, like Videorc \u2192 Upcoming: the platform lists it, and nothing goes live by itself. Give the start in the streamer's local time and IANA time zone. YouTube needs madeForKids; X gets a two-hour planned end unless one is given.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "start": {
+            "type": "string",
+            "description": "Local date and time, YYYY-MM-DDTHH:MM, like 2026-11-02T19:30.",
+            "minLength": 16,
+            "maxLength": 16
+          },
+          "timeZone": {
+            "type": "string",
+            "description": "An IANA time zone, like Europe/Madrid.",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "platform": {
+            "type": "string",
+            "enum": ["youtube", "x"]
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 5000
+          },
+          "privacy": {
+            "type": "string",
+            "description": "YouTube only. Default public.",
+            "enum": ["public", "unlisted", "private"]
+          },
+          "madeForKids": {
+            "type": "boolean",
+            "description": "YouTube asks whether the stream is made for kids."
+          },
+          "plannedEnd": {
+            "type": "string",
+            "description": "X only: local end, YYYY-MM-DDTHH:MM.",
+            "minLength": 16,
+            "maxLength": 16
+          },
+          "account": {
+            "type": "string",
+            "description": "The channel or account name, when more than one is connected.",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": ["title", "start", "timeZone"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "startsAt": {
+            "type": "string"
+          },
+          "scheduled": {
+            "type": "boolean"
+          },
+          "watchUrl": {
+            "type": "string"
+          }
+        },
+        "required": ["eventId", "platform", "title", "startsAt", "scheduled"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "get_settings",
+      "title": "Read the settings",
+      "description": "The settings an agent may change, as they stand: recording resolution and frame rate, Keep original recording, the recordings folder, separate source recordings, Clips, the captions language, Chat in Studio and the theme. Nothing about accounts, keys, permissions, Remote, Agents, updates, diagnostics or billing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "resolution": {
+            "type": "string"
+          },
+          "frameRate": {
+            "type": "number"
+          },
+          "keepOriginalRecording": {
+            "type": "boolean"
+          },
+          "recordingFolder": {
+            "type": "string"
+          },
+          "separateSourceRecordings": {
+            "type": "boolean"
+          },
+          "clips": {
+            "type": "boolean"
+          },
+          "captionsLanguage": {
+            "type": "string"
+          },
+          "chatInStudio": {
+            "type": "boolean"
+          },
+          "theme": {
+            "type": "string",
+            "enum": ["light", "dark", "system"]
+          }
+        },
+        "required": [
+          "resolution",
+          "frameRate",
+          "keepOriginalRecording",
+          "recordingFolder",
+          "separateSourceRecordings",
+          "clips",
+          "captionsLanguage",
+          "chatInStudio",
+          "theme"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "read",
+      "notice": null
+    },
+    {
+      "name": "update_settings",
+      "title": "Change settings",
+      "description": "Change one or more of the curated settings get_settings lists, through their own controls with the same locks: resolution and frame rate wait while a session runs and need Save a local recording on. The recordings folder can only go back to default; another folder is chosen in Videorc. Any other setting is refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resolution": {
+            "type": "string",
+            "description": "The recording's size, in the scene's orientation.",
+            "enum": ["720p", "1080p", "1440p", "4K"]
+          },
+          "frameRate": {
+            "type": "integer",
+            "description": "Frames per second.",
+            "minimum": 24,
+            "maximum": 60
+          },
+          "keepOriginalRecording": {
+            "type": "boolean",
+            "description": "Also keep the capture MKV beside each MP4."
+          },
+          "recordingFolder": {
+            "type": "string",
+            "description": "Only default: Videorc's own recordings folder.",
+            "enum": ["default"]
+          },
+          "separateSourceRecordings": {
+            "type": "boolean",
+            "description": "Also save a Screen file and a Camera file (Mac only)."
+          },
+          "clips": {
+            "type": "boolean",
+            "description": "Keep the last minute for Clips."
+          },
+          "captionsLanguage": {
+            "type": "string",
+            "description": "The spoken language for live captions.",
+            "enum": ["auto", "en", "es", "fr", "de", "pt", "it"]
+          },
+          "chatInStudio": {
+            "type": "boolean",
+            "description": "Show the livestream's chat in the Studio while on air."
+          },
+          "theme": {
+            "type": "string",
+            "enum": ["light", "dark", "system"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "changed": {
+            "type": "object",
+            "properties": {
+              "resolution": {
+                "type": "string"
+              },
+              "frameRate": {
+                "type": "number"
+              },
+              "keepOriginalRecording": {
+                "type": "boolean"
+              },
+              "recordingFolder": {
+                "type": "string"
+              },
+              "separateSourceRecordings": {
+                "type": "boolean"
+              },
+              "clips": {
+                "type": "boolean"
+              },
+              "captionsLanguage": {
+                "type": "string"
+              },
+              "chatInStudio": {
+                "type": "boolean"
+              },
+              "theme": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": ["changed"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
       "name": "open_window",
       "title": "Bring a window forward",
       "description": "Bring a Videorc window to the front of the streamer's screen: the Stream Manager (chat and activity), Notes, or the detached Preview. Use it when the streamer should look at something.",

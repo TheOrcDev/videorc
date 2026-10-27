@@ -133,6 +133,9 @@ pub fn backend_executor(name: &str) -> Option<BackendExecutor> {
         "buddy_say" => {
             Some(|state, agent, args| Box::pin(crate::agent_chat::buddy_say(state, agent, args)))
         }
+        "schedule_stream" => Some(|state, agent, args| {
+            Box::pin(crate::agent_prepare::schedule_stream(state, agent, args))
+        }),
         _ => None,
     }
 }

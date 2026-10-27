@@ -41,6 +41,7 @@ import {
   type SessionStopOrigin
 } from '@/lib/session-stop'
 import type { AgentsStatus, AppExitKind } from '@/lib/backend'
+import { useTheme } from 'next-themes'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -2400,6 +2401,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // source previews, the Preview window and the OS-global shortcuts wait for it
   // to close; the shell owns the flag.
   const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  // Plan 209 S14: `update_settings` sets the theme through next-themes, like
+  // Settings → General's control.
+  const { theme: appTheme, setTheme: setAppTheme } = useTheme()
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -16977,6 +16981,50 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const current = overlayLayoutRef.current
           await setOverlayLayout({ ...current, buddy: { ...current.buddy, showOnStream: on } })
         }
+      },
+      prepare: {
+        draft: streamMetadataDraft,
+        // Stream details' Save, after the executor ran its check.
+        saveDraft: async (draft) => {
+          const saved = await client.request<StreamMetadataDraft>(
+            'streamTargets.metadata.update',
+            draft
+          )
+          setStreamMetadataDraft(saved)
+          setStreamMetadataValidation({ valid: true, issues: [] })
+          return saved
+        },
+        searchCategories: async (platform, query) => {
+          const accountId = platformAccounts.find((item) => item.platform === platform)?.accountId
+          if (platform === 'kick') {
+            const found = await client.request<{ categories: KickCategory[] }>(
+              'streamTargets.kick.searchCategories',
+              { accountId, query, limit: 10 }
+            )
+            return found.categories
+          }
+          const found = await client.request<{ categories: TwitchCategory[] }>(
+            'streamTargets.twitch.searchCategories',
+            { accountId, query, first: 10 }
+          )
+          return found.categories
+        },
+        streaming: captureConfigRef.current.streaming,
+        entitlements,
+        goLivePending: goLiveConfirmationPending || Boolean(goLivePartialSetup),
+        patchTarget: patchStreamingTarget
+      },
+      settings: {
+        captureConfig: captureConfigRef.current,
+        settings,
+        theme: appTheme,
+        platform: runtimeInfo?.platform,
+        entitlements,
+        patchVideo,
+        setCaptureConfig,
+        setSettings,
+        setClipsEnabled: setReplayEnabled,
+        setTheme: setAppTheme
       }
     }
   }
