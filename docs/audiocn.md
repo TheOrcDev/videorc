@@ -10,21 +10,25 @@ Plan 196 (`plans/196-lcd-level-meter.md`) put every level on the LCD meter;
 plan 197 (`plans/197-retro-lcd-studio.md`) made that, and the Studio on LCD
 screens, the Retro LCD option (Settings → General, off by default). Plan 173 (`plans/173-sources-tab-rewrite.md`) rebuilt the Sources page: the
 controls stayed, the channel strips gave way to Sources rows.
+Plan 201 (`plans/201-studio-audio-balance.md`) put Microphone and System
+audio in the Studio's Audio section, on one Mixer scale, with the same Gain
+faders as Sources (`components/audio/gain-faders.tsx`). Retro LCD skins
+those faders from outside with `LCD_FADER` inside the Audio screen.
 
 ## What is installed
 
-| audiocn item                                                                                    | Files                       | Videorc home                                                                  |
-| ----------------------------------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------- |
-| `core`                                                                                          | `lib/audio/*.ts` (11 files) | Used by every item below                                                      |
-| `use-frame-source`, `use-clip-hold`, `use-audio-config`, `use-visibility`, `use-reduced-motion` | `hooks/`                    | Dependencies of the components (`use-reduced-motion` also serves the sidebar) |
-| `lcd-meter` with `lcd-display`                                                                  | `components/ui/`            | Retro LCD only: every level (`MicLevelMeter`) and the Studio screens (197)    |
-| `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Every level (`MicLevelMeter`'s segmented bar), and under `lcd-meter`          |
-| `bar-visualizer`                                                                                | `components/ui/`            | Session mic sliver                                                            |
-| `mixer`                                                                                         | `components/ui/`            | Sources Audio column: meter range, Cmd+Up/Down between rows (plans 093, 173)  |
-| `fader`                                                                                         | `components/ui/`            | Sources: Microphone Gain, System audio and Sounds Level, Assets → Sounds      |
-| `parameter-slider`                                                                              | `components/ui/`            | Sources: Microphone Sync                                                      |
-| `channel-toggle`                                                                                | `components/ui/`            | Sources: Microphone Mute (`MuteToggle`)                                       |
-| `sound-pad`                                                                                     | `components/ui/`            | Studio → Soundboard and the Stream Manager's Sounds popover (plan 189)        |
+| audiocn item                                                                                    | Files                       | Videorc home                                                                                                        |
+| ----------------------------------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `core`                                                                                          | `lib/audio/*.ts` (11 files) | Used by every item below                                                                                            |
+| `use-frame-source`, `use-clip-hold`, `use-audio-config`, `use-visibility`, `use-reduced-motion` | `hooks/`                    | Dependencies of the components (`use-reduced-motion` also serves the sidebar)                                       |
+| `lcd-meter` with `lcd-display`                                                                  | `components/ui/`            | Retro LCD only: every level (`MicLevelMeter`) and the Studio screens (197)                                          |
+| `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Every level (`MicLevelMeter`'s segmented bar), and under `lcd-meter`                                                |
+| `bar-visualizer`                                                                                | `components/ui/`            | Session mic sliver                                                                                                  |
+| `mixer`                                                                                         | `components/ui/`            | Sources Audio column and Studio Audio section: one meter range, Cmd/Ctrl+Up/Down between rows (plans 093, 173, 201) |
+| `fader`                                                                                         | `components/ui/`            | Sources and Studio: shared Microphone and System audio Gain faders; Sources Sounds Level and Assets → Sounds        |
+| `parameter-slider`                                                                              | `components/ui/`            | Sources: Microphone Sync                                                                                            |
+| `channel-toggle`                                                                                | `components/ui/`            | Sources: Microphone Mute (`MuteToggle`)                                                                             |
+| `sound-pad`                                                                                     | `components/ui/`            | Studio → Soundboard and the Stream Manager's Sounds popover (plan 189)                                              |
 
 Renderer paths are relative to `apps/desktop/src/renderer/src/`.
 
@@ -82,12 +86,12 @@ horizontal scale) with the LCD.
 
 - **Videorc's skin comes from outside.** Vendored files stay pristine; Videorc styles the parts it renders through `className`:
 
-  | audiocn default                                                       | Videorc override                                                                                 |
-  | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-  | Fader and ParameterSlider thumbs `bg-background ring-foreground/15`   | `bg-knob ring-knob-ring`, like every Videorc slider (`FaderThumb className`, and a `data-slot` selector on `ParameterSlider`) |
-  | `ChannelToggle` `rounded-lg`                                          | `rounded-chip` (controls are 6 px)                                                               |
-  | `MixerChannels` scrolls                                               | `scrollable={false}`: only `PaneBody` scrolls                                                    |
-  | `SoundPad` `rounded-xl`                                               | `rounded-row` (pads are cards, 8 px); the file is in `OFF_TIER_RADIUS_ALLOWLIST`                 |
+  | audiocn default                                                     | Videorc override                                                                                                              |
+  | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+  | Fader and ParameterSlider thumbs `bg-background ring-foreground/15` | `bg-knob ring-knob-ring`, like every Videorc slider (`FaderThumb className`, and a `data-slot` selector on `ParameterSlider`) |
+  | `ChannelToggle` `rounded-lg`                                        | `rounded-chip` (controls are 6 px)                                                                                            |
+  | `MixerChannels` scrolls                                             | `scrollable={false}`: only `PaneBody` scrolls                                                                                 |
+  | `SoundPad` `rounded-xl`                                             | `rounded-row` (pads are cards, 8 px); the file is in `OFF_TIER_RADIUS_ALLOWLIST`                                              |
 
 - **No control without a backend path.** Videorc has no pan, solo, monitoring or player, so `pan-control`, `SoloToggle`, `MonitorToggle` and `volume-control` stay out until the backend has something for them to drive (plan 093, D1 and D2).
 - **Values are whole numbers.** The renderer rounds stored audio settings (`clampNumber` in `lib/capture.ts`), so faders step 1 dB with no Alt sub-steps.
@@ -99,8 +103,9 @@ adapters that live outside the eager bundle:
 
 - `lib/mic-frame-sources.ts` turns the visual mic pipeline into audiocn frame sources: `createMicMeterSource` (peak and RMS with the configured mic gain added, silence while muted) and `createMicVisualSource` (bands and level history, raw).
 - `hooks/use-studio-mic-sources.ts` returns one stable source per pipeline. Only lazy chunks (the Studio dashboard, the Studio tab, Sources) import it.
-- `useMicrophoneMeter()` (same module) builds the microphone meter's input and state once, for the Studio Microphone section and the Sources Microphone row; `lib/mic-meter-input.ts` holds the pure choice (`micMeterInput`, `systemAudioMeterInput`) and `components/studio/mic-level-meter.tsx` draws it.
+- `useMicrophoneMeter()` (same module) builds the microphone meter's input and state once, for the Studio Audio section's Microphone row and the Sources Microphone row; `lib/mic-meter-input.ts` holds the pure choice (`micMeterInput`, `systemAudioMeterInput`) and `components/studio/mic-level-meter.tsx` draws it.
 - The Studio microphone meter runs whenever Studio is open, from the backend's own `audio.levels`, about 20 a second with the configured gain applied: from the session bus during a session (which also carries System audio and the mix as written), and from the warm microphone between sessions (microphone only, no `sessionId`). `lib/backend-audio-levels.ts` keeps them outside React (eager, no dependencies); `lib/backend-level-sources.ts` turns them into meter sources and reads the -120 dBFS wire floor as silence.
+- System audio's idle level comes from the Clips bus (`audioBusActive`), after Gain, while System audio is mixed and backend levels are live; Sources and the Studio use the same input, with no standby capture (plan 201 D3). With no bus and Clips off or given up, the meter rests with the Clips-off line; while Clips starts or restarts, it rests without the line.
 - Where the backend has no standby microphone (no CoreAudio, or Keep microphone warm off), the renderer analyser drives the meter; during a session the 1 Hz `diagnostics.stats` level is the last fallback, as a plain value with `vu` ballistics so one step a second glides.
 
 ## Updating
@@ -136,5 +141,7 @@ adapters that live outside the eager bundle:
 - `audio-player`, `track-list`, `waveform`, `spectrum`, the
   smooth and electric visualizers, every block, and the Web Audio hooks.
 
-Reasons, item by item: plans 092, 093 and 173. The Studio uses no mixer (owner
-call, 2026-10-02); the audio controls live on Sources only.
+Reasons, item by item: plans 092, 093 and 173. Plan 201 D1 (owner call,
+2026-10-26) replaces the 2026-10-02 no-mixer call: the Studio Audio section
+uses one Mixer and the shared Microphone and System audio Gain faders.
+Sources stays their home; the Studio edits the same state.

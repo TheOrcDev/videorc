@@ -1,7 +1,10 @@
 # Plan 201: balance the Microphone and System audio from the Studio
 
-**Status:** PLANNED 2026-10-26. Nothing is built; this file is the only
-change. **Priority:** P2. Owner request: "inside of our studio, a meter for
+**Status:** BUILT 2026-10-27. S0 to S4 are done, with the owner by-eye
+(including D5), the Sources idle meter check and the granted System audio
+and CPU runs owed. See the
+[acceptance record](../docs/acceptance/2026-10-27-studio-audio-balance.md).
+**Priority:** P2. Owner request: "inside of our studio, a meter for
 system audio as well and we need a volume meter for system audio and for the
 microphone so people can balance it out, we can use audiocn for that one for
 volume control." **Size:** M: one verification slice (S0), one renderer logic
@@ -245,7 +248,7 @@ site), tests next to each.
    bus runs, System audio is mixed with no change pending, and levels are
    live.
 4. New pure helper `systemAudioIdleReason({ audioBusActive, clipsArmed,
-   clipsState, checked })`: `'clips-off'` when System audio is On, no bus
+clipsState, checked })`: `'clips-off'` when System audio is On, no bus
    runs and Clips is off or gave up; `null` otherwise (including Clips
    starting or restarting). S2 shows the D6 line for `'clips-off'` only.
 5. Sources passes `audioBusActive`. Its meter now moves while Clips runs;
@@ -391,14 +394,14 @@ the CPU table shows no more than the second meter's cost (owner judges).
 
 ## Verification summary
 
-| Gate | Slices |
-| --- | --- |
-| `pnpm test:scripts` | S0 |
-| `pnpm smoke:system-audio` (macOS, Screen Recording grant) | S0 |
-| `pnpm typecheck`, `pnpm lint`, `pnpm format:check` | S1 to S3 |
-| `pnpm --filter @videorc/desktop test` | S1 to S3 |
-| `pnpm build`, `pnpm check:renderer-assets` | S2, S3 |
-| `pnpm smoke:preview-performance` (CPU, interleaved) | S4 |
+| Gate                                                      | Slices   |
+| --------------------------------------------------------- | -------- |
+| `pnpm test:scripts`                                       | S0       |
+| `pnpm smoke:system-audio` (macOS, Screen Recording grant) | S0       |
+| `pnpm typecheck`, `pnpm lint`, `pnpm format:check`        | S1 to S3 |
+| `pnpm --filter @videorc/desktop test`                     | S1 to S3 |
+| `pnpm build`, `pnpm check:renderer-assets`                | S2, S3   |
+| `pnpm smoke:preview-performance` (CPU, interleaved)       | S4       |
 
 `pnpm smoke:recording-studio` is not required: no capture, mixing,
 processing or encoding code changes, and the faders write through the
@@ -477,7 +480,7 @@ If those files moved, re-check "Verified facts" before S0.
   `VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS=3600000` completed the backend build.
   That run then failed before the app handshake because the host exports
   `ELECTRON_RUN_AS_NODE=1` (`Cannot read properties of undefined (reading
-  'getVersion')`). Retrying with `env -u ELECTRON_RUN_AS_NODE`; no audio
+'getVersion')`). Retrying with `env -u ELECTRON_RUN_AS_NODE`; no audio
   assertion was relaxed. The real app then failed the missing-grant check.
   The authorized rerun with
   `VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1` exited 0:
@@ -490,6 +493,7 @@ If those files moved, re-check "Verified facts" before S0.
   and the owner's supplied route. No audio case ran, so no S0 data-path STOP
   was observed. The owner owes the granted macOS run; continuing to S1 under
   the explicit missing-grant exception.
+
 - S1 (2026-10-27): Exposed core `audioBusActive: mixingSessionActive` and
   used it for the System audio switch and meter inputs on Sources and the
   Studio mirror. `isSessionActive` keeps its transport meaning. Exported
@@ -532,7 +536,7 @@ If those files moved, re-check "Verified facts" before S0.
   permission, lost, echo, bypassed, the S1 Clips-bus echo) moved to
   `audio-section.test.ts`. Retro LCD is unchanged until S3: `AudioSection`
   renders `RetroMicrophoneSectionView` (typed `Omit<MicrophoneRowProps,
-  'gainDb' | 'onGainChange'>`), and `RetroQuickSettings` keeps System audio.
+'gainDb' | 'onGainChange'>`), and `RetroQuickSettings` keeps System audio.
   Deviation: `use-studio-context-partition.test.ts` and
   `studio-mic-meter.integration.test.ts` needed the renamed path and
   component name (no assertion changed). Gates: typecheck passed; lint 0
@@ -577,3 +581,34 @@ If those files moved, re-check "Verified facts" before S0.
   Retro LCD on. No dev-app run. Owed: the owner's Retro by-eye in both
   themes (D5: if the faders read wrong on the screen, the fallback is an LCD
   value row with step buttons).
+- S4 (2026-10-27): Updated the design skill's binding owner calls, Devices
+  map and Audio controls mapping for D1: one Audio section, shared Gain
+  faders, and the Sources mirror with Screen and Camera. The 2026-10-26 call
+  explicitly replaces the 2026-10-02 no-mixer call. Updated `docs/audiocn.md`
+  for the shared faders and D3's Clips-bus idle level, added the plan index
+  entry and the
+  [acceptance record](../docs/acceptance/2026-10-27-studio-audio-balance.md).
+  It carries S0's exact missing-grant SKIP, the S0 to S3 gate output and
+  bundle figures from these notes, the CPU table and full failure output,
+  and the owner checklist. Historical UX/IA plan, acceptance and release
+  mentions were left alone. No product code, scripts or crates changed.
+  CPU: detached HEAD, `0438849f`, `13060516`, `0438849f`, `13060516`, with a
+  desktop build after each switch; the first smoke prebuilt the backend with
+  a 3,600,000 ms timeout, later runs reused it. Every smoke unset
+  `ELECTRON_RUN_AS_NODE` and required live Studio microphone visuals. Main 1:
+  renderer 9.70% average / 23.00% p95, GPU process 0.00% / 0.00%; S3 1:
+  renderer 7.75% / 11.90%, GPU process 0.18% / 0.00%. Both second runs have
+  no CPU summary. All four exited 1: main 1's fallback check and both first
+  runs' wire rate, main 2's eval-js timeout, S3 2's end geometry and idle
+  microphone. No assertion was relaxed or unrelated failure chased.
+  Restored `13060516` and rebuilt. Gates: all five desktop builds passed;
+  `pnpm format:check`, explicit Markdown Prettier check and diff check
+  passed. The requested copy/style guard command ran the full desktop suite:
+  524 files, 5486 passed, 1 skipped, including all 30 copy/style guards.
+  Deviation: `origin/main` fetched at `cb70d4ff`, so the comparison kept the
+  requested pinned `0438849f`. Clips stayed at its default On, but the dev
+  app has no Screen Recording grant, so System audio could not be On and
+  the second meter could not run live. No CPU acceptance claim. Owed: the
+  granted System audio smoke, the Sources idle meter check, the by-eye in
+  both looks and themes at the narrowest inspector width (including D5),
+  and the granted CPU comparison with Clips on and System audio On.

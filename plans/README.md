@@ -1,5 +1,15 @@
 # Implementation Plans
 
+- 2026-10-26: [Plan 201](201-studio-audio-balance.md), Balance the Microphone
+  and System audio from the Studio. One Audio section puts both levels on
+  one audiocn Mixer scale, each with the same Gain fader Sources uses, in
+  the default and Retro LCD looks. System audio's idle level comes from the
+  Clips bus; no new capture. The Sources mirror keeps Screen and Camera.
+  **BUILT** 2026-10-27: S0 to S4 done. Owed: the granted System audio smoke,
+  the Sources idle meter check, the owner's by-eye in both looks and themes
+  (including D5's LCD faders), and the granted CPU comparison. The four CPU
+  attempts and their failures are in the
+  [acceptance record](../docs/acceptance/2026-10-27-studio-audio-balance.md).
 - 2026-10-26: [Plan 200](200-better-recordings-export-separate-files-sound.md),
   Better recordings: exports, separate files and sound. Owner request: make
   exporting with separate sources, sound and system audio even better. Four
