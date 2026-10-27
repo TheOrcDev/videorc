@@ -41,12 +41,13 @@ describe('SourcePermissionAlertsView', () => {
     expect(markup).toMatch(/data-variant="warning"[^>]*data-permission="microphone"/)
     expect(markup).toContain('>Open Screen Recording settings<')
     expect(markup).toContain('>Open Microphone settings<')
-    expect(markup).toContain('then quit and reopen Videorc.')
+    // Plan 203 S2: capture restarts on its own after the grant.
+    expect(markup).toContain('then come back here.')
   })
 
-  it('shows the helper in the file manager with the folder icon (C-28)', () => {
+  it('names Videorc, never the capture helper (plan 203 S3; S0 confirms on a clean account)', () => {
     const markup = render(screenAndMicrophone)
-    expect(markup).toContain('Show helper in Finder')
+    expect(markup).not.toContain('Show helper in')
     expect(markup).not.toContain('Show Capture Helper')
   })
 
