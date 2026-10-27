@@ -28,6 +28,11 @@ const listenerBindMs = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_LISTENER_BIN
 const basePort = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_RTMP_PORT ?? 19721)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
+// Where the streamer clicks the message (plan 204): the Stream Manager's chat
+// (the default), or the Studio's Chat section (`smoke:studio-chat`), which
+// never opens the Stream Manager window.
+const surface =
+  process.env.VIDEORC_COMMENT_HIGHLIGHT_SURFACE === 'studio' ? 'studio' : 'stream-manager'
 // The fake chatter's avatar and emote (plan 095). The URLs are on allowlisted
 // CDN hosts so main's `avatars:cache` accepts them, but they are never
 // fetched: the smoke seeds the app's avatar cache with flat-colour PNGs under
@@ -128,21 +133,35 @@ const legacyScenario = {
 
 mkdirSync(outputDirectory, { recursive: true })
 
-await runScenarioGroup({
-  label: 'modern',
-  scenarios: modernScenarios.filter((scenario) => !unsupportedScenarios.has(scenario.label)),
-  indexOffset: 0
-})
-await runScenarioGroup({
-  label: 'legacy',
-  scenarios: [legacyScenario],
-  indexOffset: modernScenarios.filter((scenario) => !unsupportedScenarios.has(scenario.label))
-    .length
-})
+if (surface === 'studio') {
+  // Plan 204: the stream-only scenario, clicked in the Studio. The other
+  // output paths are the same highlight and stay with the default run.
+  await runScenarioGroup({
+    label: 'studio',
+    scenarios: modernScenarios.filter((scenario) => scenario.label === 'stream-only'),
+    // Its own port, so it never meets a default run's listener.
+    indexOffset: 10
+  })
+  console.log(
+    `Studio chat smoke PASS — Chat in Studio turned on in Settings, the fake message's row (avatar, name, words, platform) appeared under Session while on air, a click put the card on the RTMP stream with the chatter's avatar and emote, a second click took it off, Hide removed the section mid-stream and Undo brought it back, and the section left with the livestream; the Stream Manager window never opened. Evidence: ${outputDirectory}`
+  )
+} else {
+  await runScenarioGroup({
+    label: 'modern',
+    scenarios: modernScenarios.filter((scenario) => !unsupportedScenarios.has(scenario.label)),
+    indexOffset: 0
+  })
+  await runScenarioGroup({
+    label: 'legacy',
+    scenarios: [legacyScenario],
+    indexOffset: modernScenarios.filter((scenario) => !unsupportedScenarios.has(scenario.label))
+      .length
+  })
 
-console.log(
-  `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
-)
+  console.log(
+    `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
+  )
+}
 
 async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
   const groupStateDirectory = join(outputDirectory, `${label}-app-state`)
@@ -175,12 +194,24 @@ async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
         health?.ffmpeg?.message ?? 'FFmpeg is unavailable for comment-highlight stream smoke.'
       )
     }
-    const commentsWindow = await smokeCommand(smoke, 'comments-window-open')
-    if (!commentsWindow?.open) {
-      throw new Error(`Detached Comments window did not open: ${JSON.stringify(commentsWindow)}`)
+    if (surface === 'studio') {
+      await turnOnStudioChat(smoke)
+    } else {
+      const commentsWindow = await smokeCommand(smoke, 'comments-window-open')
+      if (!commentsWindow?.open) {
+        throw new Error(`Detached Comments window did not open: ${JSON.stringify(commentsWindow)}`)
+      }
     }
     for (const [index, scenario] of scenarios.entries()) {
       await runScenario(ws, smoke, scenario, indexOffset + index)
+    }
+    if (surface === 'studio') {
+      const windowState = await smokeCommand(smoke, 'comments-window-state')
+      if (windowState?.open) {
+        throw new Error(
+          `The Studio chat smoke opened the Stream Manager window: ${JSON.stringify(windowState)}`
+        )
+      }
     }
   } finally {
     ws?.close()
@@ -283,12 +314,20 @@ async function runScenario(ws, smoke, scenario, index) {
       }
     })
     const message = await waitForFakeComment(ws, sessionId, targetId)
-    await waitForDetachedComment(smoke, message)
-
-    const highlight = await selectAndWaitForHighlight(ws, smoke, {
-      sessionId,
-      messageId: message.id
-    })
+    let highlight
+    if (surface === 'studio') {
+      await waitForStudioComment(smoke, message)
+      highlight = await selectStudioRowAndWaitForHighlight(ws, smoke, {
+        sessionId,
+        messageId: message.id
+      })
+    } else {
+      await waitForDetachedComment(smoke, message)
+      highlight = await selectAndWaitForHighlight(ws, smoke, {
+        sessionId,
+        messageId: message.id
+      })
+    }
     if (highlight.disposition === 'highlight-unavailable' && !scenario.allowHighlightUnavailable) {
       throw new Error(`[${scenario.label}] modern stream path returned highlight-unavailable`)
     }
@@ -333,8 +372,14 @@ async function runScenario(ws, smoke, scenario, index) {
         `[${scenario.label}] backend highlight left live before capture completed: ${JSON.stringify(highlightBeforeStop)}`
       )
     }
+    if (surface === 'studio') {
+      // After the capture, so the card's frames are already in the stream.
+      await takeOffStudioRow(ws, smoke, message)
+      await hideAndUndoStudioChat(smoke)
+    }
     const stopped = await request(ws, timeoutMs, 'session.stop', {})
     sessionActive = false
+    if (surface === 'studio') await waitForStudioChatGone(smoke)
     await stopRtmpListener(listener)
     await stopRtmpListener(verticalListener)
 
@@ -578,6 +623,198 @@ async function waitForDetachedComment(smoke, message) {
   throw new Error(
     `Timed out waiting for ${message.id} in the detached Comments window: ${JSON.stringify(last)}`
   )
+}
+
+// Plan 204: the Studio's Chat section, driven in the main window. Every step
+// goes through the same controls a streamer uses: the Settings switch, the
+// row button, the hide button and the toast's Undo.
+
+const STUDIO_CHAT = '[data-testid="studio-chat"]'
+
+/** Main-window JS with the smoke helper kit (`waitFor`, `openTab`, `sleep`). */
+async function studioEval(smoke, code, params = {}) {
+  const response = await smokeCommand(smoke, 'eval-js', { ...params, code })
+  return response?.result
+}
+
+/** Settings → General → Chat in Studio, then back to the Studio. */
+async function turnOnStudioChat(smoke) {
+  const result = await studioEval(
+    smoke,
+    `await openTab('settings', '#studio-chat')
+     const toggle = document.querySelector('#studio-chat')
+     if (toggle.getAttribute('aria-checked') !== 'true') toggle.click()
+     await sleep(150)
+     const checked = document.querySelector('#studio-chat')?.getAttribute('aria-checked')
+     await openTab('studio')
+     return { checked, section: Boolean(document.querySelector(${JSON.stringify(STUDIO_CHAT)})) }`
+  )
+  if (result?.checked !== 'true') {
+    throw new Error(`Chat in Studio did not turn on: ${JSON.stringify(result)}`)
+  }
+  // Off air, the section never shows (D2).
+  if (result.section) {
+    throw new Error('The Studio Chat section showed before the livestream went on air')
+  }
+}
+
+/** The Studio row for one message: its words, its accessible name and its phase. */
+async function studioRowState(smoke, messageId) {
+  return studioEval(
+    smoke,
+    `const section = document.querySelector(${JSON.stringify(STUDIO_CHAT)})
+     if (!section) return { section: false }
+     const row = Array.from(section.querySelectorAll('[data-message-id]'))
+       .find((candidate) => candidate.getAttribute('data-message-id') === params.messageId)
+     if (!row) return { section: true, row: false, text: section.innerText }
+     const button = row.querySelector(':scope > button')
+     const name = (button?.getAttribute('aria-labelledby') ?? '')
+       .split(' ')
+       .map((id) => document.getElementById(id)?.textContent ?? '')
+       .join(' ')
+     return {
+       section: true,
+       row: true,
+       text: row.innerText,
+       name,
+       avatar: Boolean(row.querySelector('[data-slot="avatar"]')),
+       pressed: button?.getAttribute('aria-pressed') ?? null,
+       phase: row.getAttribute('data-highlight-phase'),
+       reason: row.querySelector('[data-testid="highlight-failed-reason"]')?.textContent ?? null
+     }`,
+    { messageId }
+  )
+}
+
+async function waitForStudioComment(smoke, message) {
+  const expectedText = (message.fragments ?? []).some((fragment) => fragment.imageUrl)
+    ? message.fragments
+        .filter((fragment) => !fragment.imageUrl)
+        .map((fragment) => fragment.text)
+        .join('')
+        .trim()
+    : message.messageText
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    last = await studioRowState(smoke, message.id)
+    if (last?.row && last.text?.includes(message.authorName) && last.text?.includes(expectedText)) {
+      if (!last.name?.includes(`${message.authorName} on YouTube:`)) {
+        throw new Error(`The Studio row is not named by who and where: ${JSON.stringify(last)}`)
+      }
+      if (!last.avatar) {
+        throw new Error(`The Studio row has no avatar: ${JSON.stringify(last)}`)
+      }
+      return last
+    }
+    await sleep(75)
+  }
+  throw new Error(
+    `Timed out waiting for ${message.id} in the Studio Chat section: ${JSON.stringify(last)}`
+  )
+}
+
+async function clickStudioRow(smoke, messageId) {
+  const clicked = await studioEval(
+    smoke,
+    `const row = Array.from(document.querySelectorAll(${JSON.stringify(`${STUDIO_CHAT} [data-message-id]`)}))
+       .find((candidate) => candidate.getAttribute('data-message-id') === params.messageId)
+     const button = row?.querySelector(':scope > button')
+     if (!button) return { clicked: false }
+     button.click()
+     return { clicked: true }`,
+    { messageId }
+  )
+  if (!clicked?.clicked) {
+    throw new Error(`The Studio row for ${messageId} has no button to click`)
+  }
+}
+
+async function selectStudioRowAndWaitForHighlight(ws, smoke, params) {
+  await clickStudioRow(smoke, params.messageId)
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const [state, row] = await Promise.all([
+      detailedRequest(ws, timeoutMs, 'comments.highlight.status', {}),
+      studioRowState(smoke, params.messageId)
+    ])
+    const disposition = classifyCommentHighlightResult(state)
+    last = { state, row }
+    if (
+      disposition === 'live' &&
+      state.sessionId === params.sessionId &&
+      state.messageId === params.messageId &&
+      row?.phase === 'live' &&
+      row.pressed === 'true'
+    ) {
+      return { disposition, state, ipc: { surface: 'studio', rowPhase: row.phase } }
+    }
+    if (row?.phase === 'failed') {
+      throw new Error(`The Studio click failed to show the message: ${JSON.stringify(last)}`)
+    }
+    await sleep(75)
+  }
+  throw new Error(
+    `Timed out waiting for the Studio click to reach backend live: ${JSON.stringify(last)}`
+  )
+}
+
+/** A click on the live row takes it off (owner call, D10). */
+async function takeOffStudioRow(ws, smoke, message) {
+  await clickStudioRow(smoke, message.id)
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const [state, row] = await Promise.all([
+      detailedRequest(ws, timeoutMs, 'comments.highlight.status', {}),
+      studioRowState(smoke, message.id)
+    ])
+    last = { state, row }
+    if (state.phase !== 'live' && row?.phase === 'idle' && row.pressed === 'false') return
+    await sleep(75)
+  }
+  throw new Error(`A second Studio click did not take the message off: ${JSON.stringify(last)}`)
+}
+
+/** Hide mid-stream: the section goes at once; the toast's Undo brings it back. */
+async function hideAndUndoStudioChat(smoke) {
+  const result = await studioEval(
+    smoke,
+    `document.querySelector('[data-testid="studio-chat-hide"]').click()
+     const deadline = Date.now() + 5000
+     while (document.querySelector(${JSON.stringify(STUDIO_CHAT)}) && Date.now() < deadline) await sleep(50)
+     const hidden = !document.querySelector(${JSON.stringify(STUDIO_CHAT)})
+     let undo = null
+     while (!undo && Date.now() < deadline) {
+       undo = Array.from(document.querySelectorAll('[data-sonner-toast] button'))
+         .find((button) => button.textContent?.trim() === 'Undo') ?? null
+       if (!undo) await sleep(50)
+     }
+     if (!undo) return { hidden, undo: false }
+     undo.click()
+     await waitFor(${JSON.stringify(STUDIO_CHAT)}, 5000)
+     return { hidden, undo: true, back: Boolean(document.querySelector(${JSON.stringify(STUDIO_CHAT)})) }`
+  )
+  if (!result?.hidden || !result.undo || !result.back) {
+    throw new Error(
+      `Hide and Undo did not take the section away and back: ${JSON.stringify(result)}`
+    )
+  }
+}
+
+/** The section leaves with the livestream (D2). */
+async function waitForStudioChatGone(smoke) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const state = await studioEval(
+      smoke,
+      `return Boolean(document.querySelector(${JSON.stringify(STUDIO_CHAT)}))`
+    )
+    if (state === false) return
+    await sleep(100)
+  }
+  throw new Error('The Studio Chat section stayed after the livestream ended')
 }
 
 async function selectAndWaitForHighlight(ws, smoke, params) {

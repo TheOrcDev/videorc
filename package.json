@@ -255,6 +255,7 @@
     "smoke:oauth-guards": "node scripts/smoke-oauth-guards-app.mjs",
     "smoke:live-chat-fake-providers": "node scripts/smoke-live-chat-fake-providers.mjs",
     "smoke:comment-highlight-stream": "node scripts/smoke-comment-highlight-stream-app.mjs",
+    "smoke:studio-chat": "node scripts/run-with-env.mjs VIDEORC_COMMENT_HIGHLIGHT_SURFACE=studio -- node scripts/smoke-comment-highlight-stream-app.mjs",
     "buddy:official": "node scripts/buddy-official-generate.mjs",
     "buddy:alive": "node scripts/buddy-alive-generate.mjs",
     "smoke:buddy-pet": "node scripts/smoke-buddy-pet-app.mjs",
