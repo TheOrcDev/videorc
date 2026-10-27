@@ -6,7 +6,10 @@ import {
   normalizeSavedBackground,
   normalizeSceneVisual,
   resolveSavedBackground,
+  sameSceneAudio,
   sameSceneVisual,
+  sceneAudio,
+  sceneMicrophone,
   galleryPresetIsActive,
   sceneGalleryReason,
   sceneNameError,
@@ -492,5 +495,102 @@ describe('saved scenes keep live backgrounds (plan 190)', () => {
         live: { id: 'plasma-wave', look: 'x', motion: 'normal' }
       })?.live
     ).toStrictEqual({ id: 'silk', look: 'champagne', motion: 'normal' })
+  })
+})
+
+describe('saved scenes keep the microphone and system audio (owner, 2026-10-27)', () => {
+  const microphones = [
+    {
+      id: 'mic:1',
+      name: 'Microphone 1',
+      kind: 'microphone' as const,
+      status: 'available' as const
+    },
+    {
+      id: 'mic:2',
+      name: 'Microphone 2',
+      kind: 'microphone' as const,
+      status: 'unavailable' as const
+    }
+  ]
+  it('round-trips the microphone and System audio through the library', () => {
+    const audio = sceneAudio(
+      { microphoneId: 'mic:1', microphoneName: 'Microphone 1', microphoneOff: true },
+      { systemAudioEnabled: true }
+    )
+    // A chosen microphone wins over a stale None, like the camera.
+    expect(audio).toStrictEqual({
+      microphoneId: 'mic:1',
+      microphoneName: 'Microphone 1',
+      microphoneOff: false,
+      systemAudioEnabled: true
+    })
+    const state = hydrateSceneLibrary(
+      JSON.parse(JSON.stringify({ version: 1, scenes: [{ ...saved(), audio }] }))
+    )
+    expect(state.library.scenes[0].audio).toStrictEqual(audio)
+    expect(state.error).toBeNull()
+  })
+  it('keeps a scene saved before scenes kept audio, with no opinion on audio', () => {
+    const state = hydrateSceneLibrary(JSON.parse(JSON.stringify({ version: 1, scenes: [saved()] })))
+    expect(state.library.scenes[0]).not.toHaveProperty('audio')
+    expect(
+      sameSceneAudio(undefined, sceneAudio({ microphoneId: 'mic:2' }, { systemAudioEnabled: true }))
+    ).toBe(true)
+  })
+  it.each([
+    null,
+    'on',
+    { microphoneOff: 'yes', systemAudioEnabled: true },
+    { microphoneOff: false }
+  ])('rejects an untrusted scene audio %j', (audio) => {
+    const state = hydrateSceneLibrary({ version: 1, scenes: [{ ...saved(), audio }] })
+    expect(state.library.scenes).toHaveLength(0)
+    expect(state.error).toBeTruthy()
+  })
+  it('marks the scene modified when the microphone or System audio changes', () => {
+    const saved = sceneAudio({ microphoneId: 'mic:1' }, { systemAudioEnabled: false })
+    expect(
+      sameSceneAudio(
+        saved,
+        sceneAudio(
+          { microphoneId: 'mic:1', microphoneName: 'Renamed' },
+          { systemAudioEnabled: false }
+        )
+      )
+    ).toBe(true)
+    expect(
+      sameSceneAudio(saved, sceneAudio({ microphoneId: 'mic:2' }, { systemAudioEnabled: false }))
+    ).toBe(false)
+    expect(
+      sameSceneAudio(saved, sceneAudio({ microphoneOff: true }, { systemAudioEnabled: false }))
+    ).toBe(false)
+    expect(
+      sameSceneAudio(saved, sceneAudio({ microphoneId: 'mic:1' }, { systemAudioEnabled: true }))
+    ).toBe(false)
+    // No microphone was ever chosen: only System audio counts.
+    const unchosen = sceneAudio({}, { systemAudioEnabled: false })
+    expect(
+      sameSceneAudio(unchosen, sceneAudio({ microphoneId: 'mic:2' }, { systemAudioEnabled: false }))
+    ).toBe(true)
+  })
+  it('switches to None or an available microphone, and keeps the current one otherwise', () => {
+    const audio = (sources: Parameters<typeof sceneAudio>[0]) =>
+      sceneAudio(sources, { systemAudioEnabled: false })
+    expect(
+      sceneMicrophone(audio({ microphoneId: 'mic:1', microphoneName: 'Microphone 1' }), microphones)
+    ).toStrictEqual({
+      microphoneId: 'mic:1',
+      microphoneName: 'Microphone 1',
+      microphoneOff: false
+    })
+    expect(sceneMicrophone(audio({ microphoneOff: true }), microphones)).toStrictEqual({
+      microphoneId: undefined,
+      microphoneName: undefined,
+      microphoneOff: true
+    })
+    expect(sceneMicrophone(audio({ microphoneId: 'mic:2' }), microphones)).toBeNull()
+    expect(sceneMicrophone(audio({ microphoneId: 'mic:gone' }), microphones)).toBeNull()
+    expect(sceneMicrophone(audio({}), microphones)).toBeNull()
   })
 })

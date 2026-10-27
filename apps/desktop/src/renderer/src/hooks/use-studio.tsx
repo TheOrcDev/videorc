@@ -50,7 +50,10 @@ import {
   visualSources,
   snapshotBackground,
   resolveSavedBackground,
+  sameSceneAudio,
   sameSceneVisual,
+  sceneAudio,
+  sceneMicrophone,
   sceneSourceProblems,
   sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
@@ -10220,10 +10223,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
     [captureConfig.layout, captureConfig.sources, workingBackground]
   )
+  const workingAudio = useMemo(
+    () => sceneAudio(captureConfig.sources, captureConfig.audio),
+    [captureConfig.sources, captureConfig.audio]
+  )
   const savedSceneModified = Boolean(
     activeSavedSceneId &&
     sceneLibrary.scenes.some(
-      (entry) => entry.id === activeSavedSceneId && !sameSceneVisual(entry.visual, workingVisual)
+      (entry) =>
+        entry.id === activeSavedSceneId &&
+        (!sameSceneVisual(entry.visual, workingVisual) ||
+          !sameSceneAudio(entry.audio, workingAudio))
     )
   )
   const canSaveScene =
@@ -10241,7 +10251,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const saveScene = useCallback(
     (name: string, updateId?: string): boolean => {
       if (!canSaveScene || layoutIntentAwaitingProofRef.current !== null) return false
-      const id = saveSceneEntry(name, workingVisual, updateId)
+      const id = saveSceneEntry(name, workingVisual, workingAudio, updateId)
       if (!id) return false
       activeSavedSceneIdRef.current = id
       workingOriginRef.current = 'saved'
@@ -10254,7 +10264,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
       return true
     },
-    [canSaveScene, saveSceneEntry, workingVisual, persistWorkingVisual]
+    [canSaveScene, saveSceneEntry, workingVisual, workingAudio, persistWorkingVisual]
   )
   const deleteSavedScene = useCallback(
     (id: string): boolean => {
@@ -10273,12 +10283,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [removeSceneEntry, persistWorkingVisual]
   )
+  // A shortcut or remote request is sent even when it repeats the last one:
+  // the retry after a failed start or a lost update.
+  const setSystemAudioEnabled = useCallback((systemAudioEnabled: boolean): void => {
+    if (liveAudioProcessingSyncRef.current)
+      liveAudioProcessingSyncRef.current.systemAudioSent = null
+    retrySystemAudio((count) => count + 1)
+    setCaptureConfig((current) => ({
+      ...current,
+      audio: { ...current.audio, systemAudioEnabled }
+    }))
+  }, [])
   const applySavedScene = useCallback(
     async (id: string, repaired?: SceneVisual): Promise<boolean> => {
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
       if (!saved) return false
       const visual = normalizeSceneVisual(repaired ?? saved.visual)
       const current = captureConfigRef.current
+      // Idle, the scene's microphone rides in its sources and the commit makes
+      // it the pick. A recording or livestream switches to it after the
+      // commit, and only the session's confirmation changes the pick.
+      const microphone = saved.audio
+        ? sceneMicrophone(saved.audio, deviceListRef.current.devices)
+        : null
+      const live = sessionOwnsTransport(recordingRef.current)
       const coupling = !isActiveRecordingState(recordingRef.current.state)
         ? verticalOrientationVideoPatch(
             current.layout.layoutPreset,
@@ -10287,8 +10315,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             current.verticalRestoreVideo
           )
         : null
-      return requestLayoutTransaction(visual.layout, {
-        sourcesOverride: { ...current.sources, ...visual.sources },
+      const applied = await requestLayoutTransaction(visual.layout, {
+        sourcesOverride: { ...current.sources, ...visual.sources, ...(live ? null : microphone) },
         backgroundOverride: resolveSavedBackground(visual.background),
         savedSceneId: id,
         origin: 'saved',
@@ -10303,8 +10331,65 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           : {})
       })
+      if (!applied || !saved.audio) return applied
+      if (saved.audio.systemAudioEnabled !== captureConfigRef.current.audio.systemAudioEnabled)
+        setSystemAudioEnabled(saved.audio.systemAudioEnabled)
+      if (!microphone) {
+        if (saved.audio.microphoneId)
+          toast.warning(
+            `${saved.audio.microphoneName ?? "The scene's microphone"} isn't available`,
+            {
+              id: 'saved-scene-microphone',
+              description:
+                'The scene kept your current microphone. Connect it, then choose the scene again.'
+            }
+          )
+        return applied
+      }
+      if (
+        live &&
+        sessionOwnsTransport(recordingRef.current) &&
+        microphone.microphoneId !== current.sources.microphoneId
+      ) {
+        // The commit moved the session's sources on, and a read already in
+        // flight may predate it: a switch carrying that would be refused.
+        await sourceSelectionController.refresh()
+        await sourceSelectionController.refresh()
+        const blocked = sourceSelectionController.reason('microphone')
+        if (blocked) {
+          toast.warning(blocked, {
+            id: 'source-switch-blocked',
+            description: 'The scene kept your current microphone.'
+          })
+          return applied
+        }
+        // Plan 0027: the session confirms only the device; None is renderer intent.
+        if (microphone.microphoneOff)
+          setCaptureConfig((latest) =>
+            latest.sources.microphoneOff
+              ? latest
+              : { ...latest, sources: { ...latest.sources, microphoneOff: true } }
+          )
+        try {
+          await sourceSelectionController.select(
+            'microphone',
+            microphone.microphoneId ?? null,
+            currentProtectedOverlayWindowIds(),
+            microphone.microphoneName
+          )
+        } catch (error) {
+          reportError(error, { action: 'switch', object: 'the microphone' })
+        }
+      }
+      return applied
     },
-    [sceneLibrary.scenes, requestLayoutTransaction]
+    [
+      sceneLibrary.scenes,
+      requestLayoutTransaction,
+      setSystemAudioEnabled,
+      sourceSelectionController,
+      reportError
+    ]
   )
 
   const applyCameraPreset = useCallback(
@@ -11695,17 +11780,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const systemAudioShown =
     (systemAudioIssue || systemAudioJoining ? null : systemAudioConfirmed) ??
     captureConfig.audio.systemAudioEnabled
-  // A shortcut or remote request is sent even when it repeats the last one:
-  // the retry after a failed start or a lost update.
-  const setSystemAudioEnabled = (systemAudioEnabled: boolean): void => {
-    if (liveAudioProcessingSyncRef.current)
-      liveAudioProcessingSyncRef.current.systemAudioSent = null
-    retrySystemAudio((count) => count + 1)
-    setCaptureConfig((current) => ({
-      ...current,
-      audio: { ...current.audio, systemAudioEnabled }
-    }))
-  }
   // Plan 076: Resume after the echo guard paused System audio, from its
   // toast or a mixer row (lazy chunks), re-sends On like a shortcut does.
   const resumeSystemAudio = useEffectEvent(() => setSystemAudioEnabled(true))
