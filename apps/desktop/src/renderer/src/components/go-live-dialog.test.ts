@@ -133,7 +133,7 @@ describe('Go Live output advice (plan 090)', () => {
   it('says what a stepped-down session will stream at, and that settings are kept', () => {
     const markup = renderToStaticMarkup(
       createElement(GoLiveOutputAdvice, {
-        advice: { kind: 'step-down', requested: stream, video: floor },
+        advice: { kind: 'step-down', reason: 'encoder', requested: stream, video: floor },
         recordEnabled: true,
         sharedVideo: null
       })
@@ -143,6 +143,33 @@ describe('Go Live output advice (plan 090)', () => {
     expect(markup).toContain('for the recording too')
     expect(markup).toContain('Your saved settings stay as they are.')
     expect(markup).not.toContain('data-variant="warning"')
+  })
+
+  it('says why a headroom step-down happened and how to keep the pick', () => {
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveOutputAdvice, {
+        advice: { kind: 'step-down', reason: 'go-live-headroom', requested: stream, video: floor },
+        recordEnabled: true,
+        sharedVideo: null
+      })
+    )
+    expect(markup).toContain('Streaming at 720p · 30 fps')
+    expect(markup).toContain('about twice the work of a recording')
+    expect(markup).toContain('Pick 1080p · 30 fps in Livestream')
+    expect(markup).toContain('The recording uses it too.')
+  })
+
+  it('warns about a picked stream quality without moving it', () => {
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveOutputAdvice, {
+        advice: { kind: 'go-live-heavy', requested: stream, video: floor },
+        recordEnabled: true,
+        sharedVideo: null
+      })
+    )
+    expect(markup).toContain('1080p · 30 fps may stutter while live')
+    expect(markup).toContain('720p · 30 fps holds steady.')
+    expect(markup).toContain('data-variant="warning"')
   })
 
   it('warns when nothing held steady instead of promising a step-down', () => {

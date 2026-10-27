@@ -16,7 +16,14 @@ import {
   performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from './performance-check'
-import { softwareStreamAdvice, streamingAtSteppedDownProfile } from './go-live-output'
+import {
+  GO_LIVE_CPU_COMPOSITOR_HEADROOM,
+  cpuCompositorStreamAdvice,
+  softwareStreamAdvice,
+  streamPerformanceAdvice,
+  streamQualityUntouched,
+  streamingAtSteppedDownProfile
+} from './go-live-output'
 import { performanceCheckLine } from './performance-check-line'
 
 function result(
@@ -277,6 +284,7 @@ describe('softwareStreamAdvice (plan 090)', () => {
       })
     ).toEqual({
       kind: 'step-down',
+      reason: 'encoder',
       requested: stream1080,
       video: videoPresets['tutorial-720p30']
     })
@@ -421,8 +429,181 @@ describe('540p30 floor (plan 090 D1)', () => {
       })
     ).toEqual({
       kind: 'step-down',
+      reason: 'encoder',
       requested: videoPresets['stream-safe-1080p30'],
       video: videoPresets['tutorial-540p30']
     })
+  })
+})
+
+describe('Go Live headroom on a CPU compositor (retest 153)', () => {
+  // ogre: i7-8750H, CPU compositor, VAAPI. A 1080p30 Record holds 30 fps, a
+  // 1080p30 Go Live runs at ~14: the check passes 1080p, Go Live can't.
+  const cpu = (
+    rungs: Array<[VideoPreset, PerformanceCheckRungVerdict]>,
+    recommended: VideoPreset,
+    compositorBackend: 'cpu' | 'metal' = 'cpu'
+  ): PerformanceCheckResult => {
+    const checked = result(rungs, recommended)
+    return {
+      ...checked,
+      rungs: checked.rungs.map((rung) => ({
+        ...rung,
+        compositorBackend,
+        encodeBackend: 'hardware-vaapi' as const
+      }))
+    }
+  }
+  const fresh = (checked: PerformanceCheckResult) => ({
+    running: false,
+    stale: false,
+    result: checked
+  })
+  const ogre = cpu(
+    [
+      ['tutorial-1080p30', 'passed'],
+      ['tutorial-720p30', 'passed']
+    ],
+    'tutorial-1080p30'
+  )
+  const untouched = defaultCaptureConfig.streaming
+  const picked = { ...untouched, defaultOutputPreset: 'stream-safe-1080p30' as const }
+  const stream1080 = videoPresets['stream-safe-1080p30']
+  const default720 = videoPresets['tutorial-720p30']
+
+  it('knows an untouched stream quality from a picked one', () => {
+    expect(streamQualityUntouched(untouched)).toBe(true)
+    expect(streamQualityUntouched(picked)).toBe(false)
+    const [first, ...rest] = untouched.targets
+    expect(
+      streamQualityUntouched({
+        ...untouched,
+        targets: [{ ...first, enabled: true, outputPreset: 'stream-safe-1080p30' }, ...rest]
+      })
+    ).toBe(false)
+    // A disabled destination's own quality doesn't count.
+    expect(
+      streamQualityUntouched({
+        ...untouched,
+        targets: [{ ...first, enabled: false, outputPreset: 'stream-safe-1080p30' }, ...rest]
+      })
+    ).toBe(true)
+  })
+
+  it('steps an untouched 1080p stream down to 720p30 when 1080p held only for a Record', () => {
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toEqual({
+      kind: 'step-down',
+      reason: 'go-live-headroom',
+      requested: stream1080,
+      video: default720
+    })
+  })
+
+  it('does the same when 1080p failed or was never measured', () => {
+    const failed = cpu(
+      [
+        ['tutorial-1440p30', 'failed'],
+        ['tutorial-1080p30', 'failed'],
+        ['tutorial-720p30', 'passed']
+      ],
+      'tutorial-720p30'
+    )
+    const only720 = cpu([['tutorial-720p30', 'passed']], 'tutorial-720p30')
+    for (const checked of [failed, only720]) {
+      expect(
+        cpuCompositorStreamAdvice({
+          streamVideo: stream1080,
+          streaming: untouched,
+          state: fresh(checked)
+        })
+      ).toMatchObject({ kind: 'step-down', video: default720 })
+    }
+  })
+
+  it('goes to the smaller output that held when 720p did not', () => {
+    const floor = cpu(
+      [
+        ['tutorial-720p30', 'failed'],
+        ['tutorial-540p30', 'passed']
+      ],
+      'tutorial-540p30'
+    )
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: untouched,
+        state: fresh(floor)
+      })
+    ).toMatchObject({ kind: 'step-down', video: videoPresets['tutorial-540p30'] })
+  })
+
+  it('only warns about a stream quality the user picked', () => {
+    expect(
+      cpuCompositorStreamAdvice({ streamVideo: stream1080, streaming: picked, state: fresh(ogre) })
+    ).toEqual({ kind: 'go-live-heavy', requested: stream1080, video: default720 })
+  })
+
+  it('leaves the stream alone with measured headroom, a GPU compositor or no trusted check', () => {
+    expect(GO_LIVE_CPU_COMPOSITOR_HEADROOM).toBe(1.5)
+    const headroom = cpu([['tutorial-1440p30', 'passed']], 'tutorial-1440p30')
+    const metal = cpu([['tutorial-1080p30', 'passed']], 'tutorial-1080p30', 'metal')
+    for (const state of [
+      fresh(headroom),
+      fresh(metal),
+      { running: false, stale: true, result: ogre },
+      undefined
+    ]) {
+      expect(
+        cpuCompositorStreamAdvice({ streamVideo: stream1080, streaming: untouched, state })
+      ).toBeNull()
+    }
+    // 720p is the default a CPU compositor lands on, so it is never moved.
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: default720,
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toBeNull()
+    // Portrait streams have their own ladder.
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: videoPresets['vertical-1080x1920'],
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toBeNull()
+  })
+
+  it('lets a software encoder step-down speak first', () => {
+    const weakCpu = cpu(
+      [
+        ['tutorial-1080p30', 'failed'],
+        ['tutorial-720p30', 'passed']
+      ],
+      'tutorial-720p30'
+    )
+    expect(
+      streamPerformanceAdvice({
+        streamVideo: stream1080,
+        encodeBackend: 'software-open-h264',
+        streaming: picked,
+        state: fresh(weakCpu)
+      })
+    ).toMatchObject({ kind: 'step-down', reason: 'encoder' })
+    expect(
+      streamPerformanceAdvice({
+        streamVideo: stream1080,
+        encodeBackend: 'hardware-vaapi',
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toMatchObject({ kind: 'step-down', reason: 'go-live-headroom' })
   })
 })
