@@ -3,12 +3,13 @@ import type { ReactElement, ReactNode } from 'react'
 
 import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
 import { DevicePicker } from '@/components/device-picker'
+import { LCD_MESSAGE, type StudioLook } from '@/components/lcd-panel'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SourceItem } from '@/components/sources/source-item'
 import { StatusBadge } from '@/components/status-badge'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
-import { RetroMicrophoneSectionView } from '@/components/studio/retro-lcd-studio'
+import { RetroAudioSectionView } from '@/components/studio/retro-lcd-studio'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -118,12 +119,10 @@ export function AudioSection(): ReactElement {
     onMutedChange: (microphoneMuted) => setAudio((current) => ({ ...current, microphoneMuted }))
   }
 
-  // Retro LCD keeps its Microphone screen, and System audio its row on the
-  // Sources screen, until plan 201 S3 draws this section there.
-  if (retro) return <RetroMicrophoneSectionView {...microphone} />
-
+  // Retro LCD (plan 201 S3) draws the same rows from the same props.
+  const View = retro ? RetroAudioSectionView : AudioSectionView
   return (
-    <AudioSectionView
+    <View
       microphone={microphone}
       systemAudio={
         systemAudio.visible
@@ -140,6 +139,7 @@ export function AudioSection(): ReactElement {
                 <SystemAudioClipsLine
                   audioBusActive={audioBusActive}
                   checked={systemAudio.checked}
+                  look={retro ? 'lcd' : 'default'}
                 />
               ),
               sessionActive: isSessionActive,
@@ -165,14 +165,17 @@ export function AudioSection(): ReactElement {
  */
 function SystemAudioClipsLine({
   audioBusActive,
-  checked
+  checked,
+  look
 }: {
   audioBusActive: boolean
   checked: boolean
+  look: StudioLook
 }): ReactElement | null {
   const clips = useStudioReplay()
   return (
     <SystemAudioIdleLine
+      look={look}
       reason={systemAudioIdleReason({
         audioBusActive,
         checked,
@@ -188,13 +191,19 @@ function SystemAudioClipsLine({
  * for a moment and comes back, so nothing jumps.
  */
 export function SystemAudioIdleLine({
-  reason
+  reason,
+  look = 'default'
 }: {
   reason: 'clips-off' | null
+  /** On a Retro LCD screen, a sentence in the screen's dim ink. */
+  look?: StudioLook
 }): ReactElement | null {
   if (reason !== 'clips-off') return null
   return (
-    <p className="text-xs text-muted-foreground" data-videorc-studio-system-audio-idle="">
+    <p
+      className={look === 'lcd' ? LCD_MESSAGE : 'text-xs text-muted-foreground'}
+      data-videorc-studio-system-audio-idle=""
+    >
       {SYSTEM_AUDIO_IDLE_LINE}
     </p>
   )

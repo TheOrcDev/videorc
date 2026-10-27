@@ -547,3 +547,33 @@ If those files moved, re-check "Verified facts" before S0.
   Screen Recording grant, and no audio was played. Owed: the owner's by-eye
   in both themes at the narrowest inspector width (idle with Clips on and
   off, muted, recording, live, permission missing, echo pause).
+- S3 (2026-10-27): `RetroAudioSectionView` replaces
+  `RetroMicrophoneSectionView` and takes `AudioSectionView`'s props, so
+  `AudioSection` picks the view by `settings.retroLcdStudio` and both looks
+  get the same rows. One `LcdPanel` headed "Audio" (the h2) holds the same
+  audiocn `Mixer` (−60 to 0 dB, two `channel-strip`s, so one scale and
+  Cmd/Ctrl+Up/Down). Microphone: an h3 with the mute key and its hotkey, the
+  LCD picker (row label "Device" under the Microphone title; its name stays
+  "Microphone"), the switch status, `MicLcdMeter scale={false}`, then Gain.
+  A dotted rule, then System audio: an h3 with `RetroSystemAudioValue`
+  (issue word, Resume, or Needs permission in place of the switch), and
+  while On the meter, D6's line (`SystemAudioIdleLine look="lcd"`, in
+  `LCD_MESSAGE`) and Gain. Without the grant, Gain shows disabled with no
+  level, as in the default look. D5 as recommended: the shared faders inside
+  the screen, skinned from a wrapper by the new `LCD_FADER` in
+  `lcd-panel.tsx` (track in the dim ink, range and knob lit, readout lit, the
+  Gain label dim); no vendored audiocn edit. The S2 data attributes are on
+  the Retro rows (`-system-audio`, `-system-audio-level`,
+  `-system-audio-issue`, `-system-audio-idle`, the mic probe hooks).
+  `RetroQuickSettings` drops System audio (Screen and Camera stay). Tests:
+  the Retro view's order, both rows on one screen and one Mixer, faders in
+  the ink with their readouts, Off, Clips-off line, permission, echo; the
+  Retro Sources screen has no System audio; `AudioSection` with Retro on
+  draws one screen. Gates: typecheck passed; lint 0 errors (the existing
+  `captureConfig` warning); format check passed; desktop tests 524 files,
+  5486 passed, 1 skipped; build passed; `check:renderer-assets` passed.
+  Eager JS against S2: 396,448 → 396,407 gzip (1,972,275 raw); entry
+  180,130 gzip; `audio-section` chunk 13.97 → 14.02 kB raw. No smoke turns
+  Retro LCD on. No dev-app run. Owed: the owner's Retro by-eye in both
+  themes (D5: if the faders read wrong on the screen, the fallback is an LCD
+  value row with step buttons).

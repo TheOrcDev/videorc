@@ -500,11 +500,17 @@ describe('AudioSection (plan 201 S2)', () => {
     expect(markup).not.toContain('data-videorc-studio-system-audio')
   })
 
-  it('keeps the Retro LCD Microphone screen until S3 draws Audio there', () => {
+  it('draws the same section on one Retro LCD screen, its idle line in the screen ink (S3)', () => {
     setCore({ settings: { retroLcdStudio: true } })
+    setClips(false, 'off')
     const markup = renderSection()
+    expect(markup.match(/data-slot="lcd-display"/g)).toHaveLength(1)
+    expect(markup).toMatch(/<h2[^>]*>Audio<\/h2>/)
     expect(markup).toContain('data-videorc-studio-mic-mute=""')
-    expect(markup).not.toContain('>Audio</h2>')
-    expect(markup).not.toContain('data-videorc-studio-system-audio')
+    expect(markup).toContain('data-videorc-studio-system-audio=""')
+    expect(markup).toContain('data-videorc-studio-system-audio-level=""')
+    const line = new RegExp(`<p[^>]*${IDLE_LINE}[^>]*>`).exec(markup)?.[0] ?? ''
+    expect(line).toContain('normal-case')
+    expect(line).not.toContain('text-muted-foreground')
   })
 })
