@@ -167,6 +167,8 @@ async function launch(name, env, userData) {
     env: {
       ...process.env,
       ...env,
+      VIDEORC_SMOKE_SKIP_FIRST_RUN:
+        env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? process.env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
       VIDEORC_USER_DATA_DIR: userData,
       VIDEORC_REMOTE_DEBUG_PORT: String(port)
     },

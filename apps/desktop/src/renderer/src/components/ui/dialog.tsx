@@ -20,16 +20,25 @@ import { CloseIcon } from '@/components/icons'
  * each side. It is a column, so a DialogBody between the header and the
  * footer takes what is left and scrolls; a dialog without one scrolls whole.
  */
+/**
+ * The dialog tier's surface and widths on their own, for the one surface on
+ * that tier which is not a dialog: first-run setup's card (plan 203, owner
+ * call D1). Everything else takes them through DialogContent.
+ */
+export const DIALOG_SURFACE_CLASS =
+  'rounded-panel border glass-float-dialog p-5 text-sm text-popover-foreground'
+export const DIALOG_SIZE_CLASS = {
+  sm: 'sm:max-w-sm',
+  md: 'sm:max-w-md',
+  lg: 'sm:max-w-xl',
+  xl: 'sm:max-w-3xl'
+} as const
+
 export const dialogContentVariants = cva(
-  'fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-5 overflow-y-auto rounded-panel border glass-float-dialog p-5 text-sm text-popover-foreground duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[0.98] data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-[0.98]',
+  `fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-5 overflow-y-auto ${DIALOG_SURFACE_CLASS} duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[0.98] data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-[0.98]`,
   {
     variants: {
-      size: {
-        sm: 'sm:max-w-sm',
-        md: 'sm:max-w-md',
-        lg: 'sm:max-w-xl',
-        xl: 'sm:max-w-3xl'
-      }
+      size: DIALOG_SIZE_CLASS
     },
     defaultVariants: { size: 'md' }
   }

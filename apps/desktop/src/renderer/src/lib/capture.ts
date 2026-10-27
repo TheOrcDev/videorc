@@ -629,6 +629,7 @@ export const STORAGE_KEYS = {
   settings: 'videorc.settings',
   captureConfig: 'videorc.captureConfig',
   onboarding: 'videorc.onboardingComplete',
+  firstRun: 'videorc.firstRun',
   theme: 'videorc.theme',
   backgroundAssets: 'videorc.backgroundAssets',
   // Set once the user picks an output themselves; from then on a performance
@@ -644,10 +645,9 @@ export const STORAGE_KEYS = {
   livestreamView: 'videorc.livestreamView'
 } as const
 
-// Permissions onboarding: ANY stored value means "seen/dismissed" — the gate
-// itself is permission state, not this flag. Older installs hold
-// 'creator-ux-v1' from the retired 4-step tour and stay suppressed; the UI
-// probe scripts seed that same value, which must keep working.
+// Legacy onboarding: ANY stored value marks an existing install. Older apps
+// and seeded smoke profiles keep working; first-run setup also writes this
+// flag when completed or skipped so a downgrade stays dismissed.
 export const ONBOARDING_DISMISSED_VALUE = 'permissions-v1'
 export const MICROPHONE_SYNC_OFFSET_MIN_MS = -1000
 export const MICROPHONE_SYNC_OFFSET_MAX_MS = 1000

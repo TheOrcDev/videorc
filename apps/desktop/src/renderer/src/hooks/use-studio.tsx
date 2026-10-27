@@ -1,3 +1,10 @@
+import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
+import { isReplacementPermissionClient } from '@/lib/permission-evidence'
+import {
+  mediaAccessStatusForPane,
+  systemAccessRows,
+  type SystemAccessContext
+} from '@/lib/system-access'
 import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
 import { createBannerImporter, type BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
@@ -92,6 +99,7 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
+import { replayStartWaitsForGrant } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -1354,6 +1362,7 @@ export type StudioContextValue = {
   audioMeterLoading: boolean
   /** Real OS camera/mic access status (null before the first read). */
   mediaAccess: MediaAccessSnapshot | null
+  systemAccessContext: SystemAccessContext
   // ai + jobs
   aiConsent: boolean
   /** Persists across launches (durable preference, not a per-launch answer). */
@@ -1795,6 +1804,9 @@ interface StudioShellContextValue {
   stopConfirmation: SessionStopConfirmation | null
   confirmStopSession: () => void
   cancelStopSession: () => void
+  /** First-run setup replaces the workspace (plan 203 S5): preview and global keys wait. */
+  firstRunSetupOpen: boolean
+  setFirstRunSetupOpen: (open: boolean) => void
 }
 
 const StudioShellContext = createContext<StudioShellContextValue | null>(null)
@@ -2382,6 +2394,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // every change (enable/disable/regenerate/deck connect), so nothing polls.
   const [remoteControlStatus, setRemoteControlStatus] = useState<RemoteControlStatus | null>(null)
   const [remoteLanStatus, setRemoteLanStatus] = useState<RemoteLanStatus | null>(null)
+  // Plan 203 S5: while first-run setup replaces the workspace the Studio is not
+  // mounted and the preview has no slot. Auto-preview capture, the native
+  // source previews, the Preview window and the OS-global shortcuts wait for it
+  // to close; the shell owns the flag.
+  const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -2430,7 +2447,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [aiQuota, setAiQuota] = useState<AiQuotaStatus | null>(null)
   const [aiReadinessError, setAiReadinessError] = useState<string | null>(null)
   const [aiReadinessLoading, setAiReadinessLoading] = useState(false)
-  const [deviceList, setDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  const [deviceList, commitDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  // A connection alone is not proof: only its published devices.list counts.
+  const [permissionEvidenceClient, setPermissionEvidenceClient] = useState<BackendClient | null>(
+    null
+  )
+  const setDeviceList = useCallback((nextDevices: DeviceList) => {
+    setPermissionEvidenceClient(clientRef.current)
+    commitDeviceList(nextDevices)
+  }, [])
   const previewDevicesSignature = useMemo(
     () => previewDeviceRefreshSignature(deviceList.devices),
     [deviceList.devices]
@@ -3814,7 +3839,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A fresh mic grant can defer its backend restart until capture becomes idle.
   // Remember the pre-grant client so proof can run only on the replacement.
   const [pendingMicrophonePermissionProof, setPendingMicrophonePermissionProof] = useState<
-    | (import('@/lib/system-permission-orchestration').MicrophonePermissionProof & {
+    | (MicrophonePermissionProof & {
         retry: number
       })
     | null
@@ -3825,6 +3850,78 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // This distinguishes never-asked from denied on macOS and is the only
   // truthful privacy-toggle signal on Windows.
   const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
+  const mediaAccessRef = useRef<MediaAccessSnapshot | null>(null)
+  const permissionGrantBoundariesRef = useRef<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  const [pendingPermissionPane, setPendingPermissionPane] = useState<SystemPermissionPane | null>(
+    null
+  )
+  const [permissionProofs, setPermissionProofs] = useState<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  // Retain inputs for the last chip, never a stored Waiting/Reopen state.
+  const [permissionEvidenceBeforeGrant, setPermissionEvidenceBeforeGrant] = useState<Pick<
+    Parameters<typeof systemAccessRows>[0],
+    'deviceList' | 'audioMeter' | 'platform' | 'mediaAccess' | 'pendingPane'
+  > | null>(null)
+  const lastPermissionStates = useMemo<SystemAccessContext['lastKnownStates']>(
+    () =>
+      permissionEvidenceBeforeGrant
+        ? Object.fromEntries(
+            systemAccessRows(permissionEvidenceBeforeGrant).map((row) => [row.id, row.state])
+          )
+        : {},
+    [permissionEvidenceBeforeGrant]
+  )
+  const notePermissionRestart = useCallback(
+    (pane: SystemPermissionPane, proof: MicrophonePermissionProof) => {
+      permissionGrantBoundariesRef.current[pane] = proof
+      setPermissionProofs((current) => ({ ...current, [pane]: proof }))
+    },
+    []
+  )
+  const screenGrantStale =
+    !permissionEvidenceClient ||
+    Boolean(
+      permissionProofs['screen-recording'] &&
+      !isReplacementPermissionClient(permissionEvidenceClient, permissionProofs['screen-recording'])
+    )
+  const captureRestarting = Object.values(permissionProofs).some(
+    (proof) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+  )
+  useEffect(() => {
+    if (
+      !Object.values(permissionProofs).some((proof) =>
+        isReplacementPermissionClient(permissionEvidenceClient, proof)
+      )
+    )
+      return
+    setPermissionProofs((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([, proof]) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+        )
+      )
+    )
+  }, [permissionEvidenceClient, permissionProofs])
+  const systemAccessContext = useMemo<SystemAccessContext>(
+    () => ({
+      pendingPane: pendingPermissionPane,
+      captureRestarting,
+      screenGrantStale,
+      lastKnownStates: lastPermissionStates
+    }),
+    [pendingPermissionPane, captureRestarting, screenGrantStale, lastPermissionStates]
+  )
+  const systemAccessContextRef = useRef(systemAccessContext)
+  systemAccessContextRef.current = systemAccessContext
+  const permissionPlatformRef = useRef(runtimeInfo?.platform)
+  permissionPlatformRef.current = runtimeInfo?.platform
+  const pendingPermissionPaneRef = useRef(pendingPermissionPane)
+  pendingPermissionPaneRef.current = pendingPermissionPane
+  const permissionEvidenceClientRef = useRef(permissionEvidenceClient)
+  permissionEvidenceClientRef.current = permissionEvidenceClient
   const refreshMediaAccess = useCallback(async (): Promise<MediaAccessSnapshot | null> => {
     const bridge = window.videorc?.getMediaAccessStatus
     if (!bridge) {
@@ -3832,6 +3929,63 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     try {
       const snapshot = await bridge()
+      const previous = mediaAccessRef.current
+      if (previous && permissionPlatformRef.current === 'darwin') {
+        const newlyGranted = (['screen-recording', 'camera', 'microphone'] as const).filter(
+          (pane) =>
+            ['not-determined', 'denied', 'restricted'].includes(
+              mediaAccessStatusForPane(previous, pane) ?? ''
+            ) && mediaAccessStatusForPane(snapshot, pane) === 'granted'
+        )
+        if (newlyGranted.length > 0) {
+          // An action may have begun before this grant. Its decision after
+          // the await must see the new restart boundary in the same turn.
+          systemAccessContextRef.current = {
+            ...systemAccessContextRef.current,
+            captureRestarting: true,
+            screenGrantStale:
+              newlyGranted.includes('screen-recording') ||
+              systemAccessContextRef.current.screenGrantStale
+          }
+          setPermissionEvidenceBeforeGrant({
+            deviceList: deviceListRef.current,
+            audioMeter: audioMeterRef.current,
+            platform: permissionPlatformRef.current,
+            mediaAccess: previous,
+            pendingPane: pendingPermissionPaneRef.current
+          })
+          setPermissionProofs((current) => {
+            const next = { ...current }
+            for (const pane of newlyGranted)
+              next[pane] ??= permissionGrantBoundariesRef.current[pane] ?? {
+                previousClient: permissionEvidenceClientRef.current
+              }
+            return next
+          })
+        }
+      }
+      setPermissionProofs((current) => {
+        const revoked = Object.keys(current).filter(
+          (pane) => mediaAccessStatusForPane(snapshot, pane as SystemPermissionPane) !== 'granted'
+        )
+        if (revoked.length === 0) return current
+        const next = { ...current }
+        for (const pane of revoked) delete next[pane as SystemPermissionPane]
+        return next
+      })
+      for (const pane of ['screen-recording', 'camera', 'microphone'] as const) {
+        if (mediaAccessStatusForPane(snapshot, pane) !== 'granted') {
+          const previousClient = clientRef.current
+          permissionGrantBoundariesRef.current[pane] = {
+            previousClient,
+            ...(previousClient ? { staleBackend: previousClient.connection } : {})
+          }
+        }
+      }
+      mediaAccessRef.current = snapshot
+      setPendingPermissionPane((pane) =>
+        pane && mediaAccessStatusForPane(snapshot, pane) === 'granted' ? null : pane
+      )
       setMediaAccess(snapshot)
       return snapshot
     } catch {
@@ -8650,6 +8804,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (options?: { fresh?: boolean }): Promise<void> =>
       focusRefreshCoordinatorRef.current[options?.fresh ? 'runFresh' : 'run'](
         async (generationIsCurrent) => {
+          await window.videorc?.recheckPermissionGrants?.()
           await refreshMediaAccess()
           const activeClient = clientRef.current
           // Multiple focus listeners intentionally share this one coordinator.
@@ -8788,6 +8943,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshAiReadinessForClient,
       refreshEntitlementsForClient,
       refreshMediaAccess,
+      setDeviceList,
       reportError
     ]
   )
@@ -8819,7 +8975,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }
       }),
-    [refreshMediaAccess, reportError]
+    [refreshMediaAccess, reportError, setDeviceList]
   )
 
   // Purchases and token expiry must not remain stale. App ready (first connect)
@@ -8942,9 +9098,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // regains focus, since grants flip in the OS Settings while we're backgrounded.
   useEffect(() => {
     const refresh = (): void => {
-      void refreshMediaAccess()
+      void (async () => {
+        await window.videorc?.recheckPermissionGrants?.()
+        await refreshMediaAccess()
+      })()
     }
-    refresh()
+    void refreshMediaAccess()
     window.addEventListener('focus', refresh)
     return () => {
       window.removeEventListener('focus', refresh)
@@ -10243,7 +10402,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewCameraStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewCameraStatusRef.current
     }
 
@@ -10310,6 +10473,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.sources,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -10321,7 +10485,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewScreenStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewScreenStatusRef.current
     }
 
@@ -10416,6 +10584,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.layout.layoutPreset,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -10877,6 +11046,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setPreviewWindow(next)
     }
   }, [])
+
+  // Plan 203 S5: no Preview window beside first-run setup. Main restores the
+  // window at launch before the renderer decides, so setup closes it through
+  // the same call as the Preview hint and opens it again when setup leaves, only if it
+  // closed it.
+  const reopenPreviewAfterSetupRef = useRef(false)
+  useEffect(() => {
+    if (firstRunSetupOpen) {
+      if (!previewWindow.open) return
+      reopenPreviewAfterSetupRef.current = true
+      void closePreviewWindow()
+      return
+    }
+    if (!reopenPreviewAfterSetupRef.current) return
+    reopenPreviewAfterSetupRef.current = false
+    void openPreviewWindow()
+  }, [closePreviewWindow, firstRunSetupOpen, openPreviewWindow, previewWindow.open])
 
   const setPreviewWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     const next = await window.videorc?.setPreviewWindowAlwaysOnTop?.(alwaysOnTop)
@@ -13004,7 +13190,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, reportError, streamMetadataDraft, wsStatus])
 
   useEffect(() => {
-    if (runtimeInfo?.disableAutoPreview) {
+    if (firstRunSetupOpen || runtimeInfo?.disableAutoPreview) {
       return
     }
     if (
@@ -13029,6 +13215,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     previewDevicesSignature,
     previewRefreshNonce,
     refreshPreview,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     wsStatus
   ])
@@ -15620,9 +15807,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   scheduleReplayReconcileRef.current = scheduleReplayReconcile
 
+  // Plan 203 S2: a buffer-only session opens the scene's devices like a
+  // recording does; on a never-asked Mac that was a cold OS prompt at launch.
+  // First-run setup holds the preview back, so a start would find no frames
+  // and say Clips couldn't start over setup: the ring waits for it too.
+  const replayGrantWait =
+    firstRunSetupOpen ||
+    replayStartWaitsForGrant({
+      mediaAccess,
+      sources: captureConfig.sources,
+      layoutPreset: captureConfig.layout.layoutPreset
+    })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
-    if (recordBlockedReason) {
+    if (recordBlockedReason || replayGrantWait) {
       // Not yet: a source or a permission is missing. The switch stays on
       // and the ring starts once the reason clears (the effect below), so a
       // launch before Sources settle never turns clips off.
@@ -15677,6 +15875,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyRecordingStatus,
     client,
     recordBlockedReason,
+    replayGrantWait,
     sceneEditMode,
     sceneWithBackground,
     scheduleReplayReconcile
@@ -15726,7 +15925,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     replayFailedStartsRef.current = 0
     rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
-  }, [recordBlockedReason, scheduleReplayReconcile])
+  }, [recordBlockedReason, replayGrantWait, scheduleReplayReconcile])
   // A source change while only the buffer-only session runs is an idle
   // change: stop the ring (it restarts empty) and re-arm with the new
   // sources, including the microphone Linux cannot swap mid-session.
@@ -16347,7 +16546,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelled = true
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
     }
-  }, [canSampleAudio, client, pendingMicrophonePermissionProof, reportError, wsStatus])
+  }, [
+    canSampleAudio,
+    client,
+    pendingMicrophonePermissionProof,
+    reportError,
+    setDeviceList,
+    wsStatus
+  ])
 
   const handleSystemPermission = useCallback(
     async (pane: SystemPermissionPane): Promise<void> => {
@@ -16355,6 +16561,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const { runSystemPermissionAction } = await import('@/lib/system-permission-orchestration')
         await runSystemPermissionAction({
           pane,
+          getAccessContext: () => systemAccessContextRef.current,
+          setPendingPane: setPendingPermissionPane,
+          onGrantRestart: notePermissionRestart,
           platform: runtimeInfo?.platform,
           refreshMediaAccess,
           getDeviceList: () => deviceListRef.current,
@@ -16378,7 +16587,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [openSystemPermissionSettings, refreshMediaAccess, reportError, runtimeInfo?.platform]
+    [
+      notePermissionRestart,
+      openSystemPermissionSettings,
+      refreshMediaAccess,
+      setDeviceList,
+      reportError,
+      runtimeInfo?.platform
+    ]
   )
 
   // Space lives on the Studio page (plan 174 S0.1, D1): StudioTab owns it, so
@@ -16765,6 +16981,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [reportError])
   globalShortcutsRegistrarRef.current?.sync(settings.globalShortcuts ?? {})
   const handleGlobalShortcut = useEffectEvent((action: GlobalShortcutAction) => {
+    // Plan 203 S5: no global key records, goes live or switches a scene while
+    // first-run setup is open.
+    if (firstRunSetupOpen) return
     const context: GlobalShortcutContext = {
       switchLayout: (layoutAction) => {
         const current = captureConfigRef.current
@@ -16864,10 +17083,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? stopConfirmation
           : null,
       confirmStopSession,
-      cancelStopSession
+      cancelStopSession,
+      firstRunSetupOpen,
+      setFirstRunSetupOpen
     }),
     [
       cancelStopSession,
+      firstRunSetupOpen,
       closeCommentsWindow,
       closeNotesWindow,
       commentsWindow.open,
@@ -17165,6 +17387,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,
@@ -17403,6 +17626,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,

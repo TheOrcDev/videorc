@@ -3,14 +3,20 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
+import { FIRST_RUN_SETUP_OPEN_EVENT, WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
 import { GeneralSettings } from './general-settings'
 
 // Plan 174 S3.17 (I-27): General ends with where every other setting lives.
 
-const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+const mocked = vi.hoisted(() => ({
+  core: {} as Record<string, unknown>,
+  recording: { state: 'idle' } as Record<string, unknown>
+}))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  useStudioRecordingState: () => ({ recording: mocked.recording })
+}))
 vi.mock('@/hooks/use-chat-emote-settings', () => ({
   useChatEmoteSettings: () => ({
     settings: { sevenTv: false, sevenTvStatus: { state: 'off' }, twitchGifs: 'animated' },
@@ -36,6 +42,7 @@ beforeEach(() => {
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
+  mocked.recording = { state: 'idle' }
   mocked.core = {
     settings: {},
     setSettings: vi.fn(),
@@ -56,9 +63,16 @@ const headings = (): string[] =>
   [...container.querySelectorAll('h2')].map((heading) => heading.textContent ?? '')
 
 describe('GeneralSettings', () => {
-  it('splits into Appearance, Stream Manager, Import, Privacy and Elsewhere', async () => {
+  it('splits into Appearance, Stream Manager, Setup, Import, Privacy and Elsewhere', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual(['Appearance', 'Stream Manager', 'Import', 'Privacy', 'Elsewhere'])
+    expect(headings()).toEqual([
+      'Appearance',
+      'Stream Manager',
+      'Setup',
+      'Import',
+      'Privacy',
+      'Elsewhere'
+    ])
     expect(container.textContent).toContain('Open Stream Manager when you go live')
   })
 
@@ -84,7 +98,34 @@ describe('GeneralSettings', () => {
       runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false }
     }
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual(['Appearance', 'Import', 'Privacy', 'Elsewhere'])
+    expect(headings()).toEqual(['Appearance', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
+  })
+
+  // Plan 203 S6 (D5): first-run setup again, back to Settings after.
+  const runSetupAgain = (): HTMLButtonElement | undefined =>
+    [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === 'Run setup again…'
+    )
+
+  it('runs first-run setup again and returns to Settings', async () => {
+    await act(async () => root.render(createElement(GeneralSettings)))
+    expect(container.textContent).toContain('First-run setup')
+    expect(container.textContent).toContain(
+      'Go through the welcome steps again, starting with permissions.'
+    )
+    const requests: unknown[] = []
+    const listen = (event: Event): void => void requests.push((event as CustomEvent).detail)
+    window.addEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    await act(async () => runSetupAgain()?.click())
+    window.removeEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    expect(requests).toEqual([{ returnTo: 'settings' }])
+  })
+
+  it('locks Run setup again… while a recording or livestream runs, and says why', async () => {
+    mocked.recording = { state: 'streaming' }
+    await act(async () => root.render(createElement(GeneralSettings)))
+    expect(runSetupAgain()?.disabled).toBe(true)
+    expect(container.innerHTML).toContain('Finish your recording or livestream first.')
   })
 
   it('opens the page that owns each setting', async () => {

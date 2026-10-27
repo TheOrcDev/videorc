@@ -16,11 +16,12 @@ import type {
 } from '@/lib/backend'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 import {
-  systemAccessAction,
-  systemAccessRows,
   type SystemAccessAction,
-  type SystemAccessRow
+  type SystemAccessRow,
+  mediaAccessStatusForPane,
+  systemAccessAction
 } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
@@ -67,16 +68,10 @@ export function PreviewStage({
     setPreviewWindowAlwaysOnTop,
     setPreviewWindowMode,
     captureConfig,
-    deviceList,
     mediaAccess,
     runtimeInfo
   } = useStudioCore()
-  const accessRows = systemAccessRows({
-    deviceList,
-    audioMeter: null,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  })
+  const accessRows = useSystemAccessRows()
   const permissionPane = previewPermissionPane(previewWindow.supervisor)
   const permissionRow = accessRows.find((candidate) => candidate.id === permissionPane)
   const permissionAccess: PreviewPermissionAccess | null = permissionPane
@@ -84,12 +79,10 @@ export function PreviewStage({
         row: permissionRow,
         action: systemAccessAction({
           pane: permissionPane,
+          checking: permissionRow?.checking,
           state: permissionRow?.state,
           platform: runtimeInfo?.platform,
-          mediaAccessStatus:
-            permissionPane === 'camera' || permissionPane === 'microphone'
-              ? mediaAccess?.[permissionPane]
-              : undefined
+          mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, permissionPane)
         })
       }
     : null

@@ -49,6 +49,7 @@ export interface RuntimeInfoInput {
       NodeJS.ProcessEnv,
       | 'VIDEORC_NATIVE_PREVIEW_SURFACE'
       | 'VIDEORC_SMOKE_PREVIEW_MOTION'
+      | 'VIDEORC_SMOKE_SKIP_FIRST_RUN'
       | 'VIDEORC_DISABLE_AUTO_PREVIEW'
       | 'VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW'
       | 'VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED'
@@ -133,6 +134,7 @@ export function buildRuntimeInfo({
     backendCrashes: [...backendCrashes],
     ...(windowGlass ? { windowGlass } : {}),
     isPackaged,
+    firstRunSuppressed: env.VIDEORC_SMOKE_SKIP_FIRST_RUN === '1',
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
     permissionTargetPath: targetPath,
     capturePermissionTargetName: permissionTargetName(captureTargetPath, 'Videorc capture helper'),

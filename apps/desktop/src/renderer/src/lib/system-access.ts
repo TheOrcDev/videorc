@@ -6,7 +6,7 @@ import type {
   MediaAccessStatus,
   SystemPermissionPane
 } from '@/lib/backend'
-import { appPlatform, osSettingsName, type AppPlatform } from '@/lib/platform'
+import { appPlatform, osSettingsName } from '@/lib/platform'
 
 // ST3 (Settings rework): live permission states for the System access rows.
 // Derived from the SAME signals the rest of the app already trusts (device
@@ -20,18 +20,48 @@ import { appPlatform, osSettingsName, type AppPlatform } from '@/lib/platform'
 // health after a grant. Windows has no per-app screen permission, so its row
 // set and recovery path differ.
 
-export type SystemAccessState = 'granted' | 'not-granted' | 'first-use' | 'device-issue'
+export type SystemAccessState =
+  | 'granted'
+  | 'not-granted'
+  | 'first-use'
+  | 'device-issue'
+  | 'waiting'
+  | 'needs-relaunch'
+  | 'not-required'
+  | 'unavailable'
+
+export type SystemAccessContext = {
+  pendingPane?: SystemPermissionPane | null
+  captureRestarting?: boolean
+  screenGrantStale?: boolean
+  lastKnownStates?: Partial<Record<SystemAccessRow['id'], SystemAccessState>>
+}
 
 export interface SystemAccessRow {
-  id: 'screen-recording' | 'camera' | 'microphone'
+  id: 'screen-recording' | 'system-audio' | 'camera' | 'microphone'
   label: string
   /** One line of why this permission matters. */
   purpose: string
   state: SystemAccessState
   detail: string
+  required: boolean
+  checking?: boolean
 }
 
-export type SystemAccessAction = 'request-media-access' | 'open-settings' | null
+export type SystemAccessAction = 'request-media-access' | 'open-settings' | 'relaunch' | null
+
+/** The exact OS status behind a row (plan 203 S2): the screen row reads the
+ * Screen & System Audio Recording grant, the others their own. Privacy has
+ * none. Snapshots from before S2 carry no `screen`, so it stays optional. */
+export function mediaAccessStatusForPane(
+  mediaAccess: Partial<MediaAccessSnapshot> | null | undefined,
+  pane: SystemPermissionPane | 'system-audio'
+): MediaAccessStatus | undefined {
+  if (!mediaAccess) return undefined
+  if (pane === 'camera' || pane === 'microphone') return mediaAccess[pane]
+  if (pane === 'screen-recording') return mediaAccess.screen
+  return undefined
+}
 
 export function isMediaAccessSnapshotReady(
   mediaAccess: MediaAccessSnapshot | null | undefined
@@ -113,15 +143,6 @@ export function mediaAccessToState(status: MediaAccessStatus | undefined): Syste
   }
 }
 
-// Linux (plan 052 S5): Electron has no getMediaAccessStatus there and no
-// OS-level camera/mic grant exists, so main answers 'not-applicable'. A row
-// for a permission the OS never asks about would only ever read first-use, so
-// the chip hides itself instead. Portal consent for screen capture is
-// per-capture, not a standing grant, so that row is omitted too.
-function mediaAccessNotApplicable(status: MediaAccessStatus | undefined): boolean {
-  return status === 'not-applicable'
-}
-
 function windowsMediaAccessState(
   status: MediaAccessStatus | undefined,
   backendState: SystemAccessState
@@ -154,13 +175,19 @@ export function systemAccessAction({
   pane,
   state,
   platform,
-  mediaAccessStatus
+  mediaAccessStatus,
+  checking = false
 }: {
-  pane: SystemPermissionPane
+  pane: SystemPermissionPane | 'system-audio'
+  checking?: boolean
   state?: SystemAccessState
   platform?: string
   mediaAccessStatus?: MediaAccessStatus
 }): SystemAccessAction {
+  if (pane === 'system-audio' || checking || mediaAccessStatus === 'restricted') return null
+  if (pane === 'screen-recording' && state === 'needs-relaunch') return 'relaunch'
+  if (state === 'not-required' || state === 'unavailable') return null
+  if (state === 'waiting') return 'open-settings'
   if (pane === 'privacy') {
     return 'open-settings'
   }
@@ -178,150 +205,167 @@ export function systemAccessAction({
   ) {
     return 'request-media-access'
   }
+  // Plan 203 S2: a never-asked screen is asked in place too. Until the
+  // request, Videorc isn't in the Screen & System Audio Recording list, so
+  // sending someone to System Settings strands them on a list without it.
+  // The backend lists a never-asked screen as permission-required (the row
+  // reads not-granted), so the exact TCC value decides here, not the state.
+  if (
+    appPlatform(platform) === 'darwin' &&
+    pane === 'screen-recording' &&
+    mediaAccessStatus === 'not-determined'
+  ) {
+    return 'request-media-access'
+  }
   return 'open-settings'
+}
+
+/** Darwin 24 is macOS 15, when Apple renamed the screen permission pane. */
+export function screenRecordingPaneName(osRelease?: string): string {
+  return Number.parseInt(osRelease ?? '', 10) >= 24
+    ? 'Screen & System Audio Recording'
+    : 'Screen Recording'
+}
+
+/** A restart must keep a useful chip, never a stale refusal from capture. */
+export function checkingAccessState(previous?: SystemAccessState): SystemAccessState {
+  return previous === 'not-granted' ? 'waiting' : (previous ?? 'first-use')
 }
 
 export function systemAccessRows({
   deviceList,
   audioMeter,
   platform,
-  mediaAccess
+  mediaAccess,
+  osRelease,
+  permissionTargetName = 'Videorc',
+  pendingPane,
+  captureRestarting = false,
+  screenGrantStale = false,
+  lastKnownStates
 }: {
   deviceList: DeviceList
   audioMeter: AudioMeterResult | null
   platform?: string
-  mediaAccess?: { camera: MediaAccessStatus; microphone: MediaAccessStatus } | null
-}): SystemAccessRow[] {
+  osRelease?: string
+  permissionTargetName?: string
+  mediaAccess?: Partial<MediaAccessSnapshot> | null
+} & SystemAccessContext): SystemAccessRow[] {
+  if (platform === 'linux') return []
   const os = appPlatform(platform)
+  const backendScreen = screenAccessState(deviceList)
   const backendCamera = cameraAccessState(deviceList)
-  const backendMicrophone = microphoneAccessState(audioMeter)
-  const macosMicrophoneHealth =
+  const backendMicrophone =
     audioMeter === null &&
-    backendMicrophone === 'first-use' &&
     deviceList.devices.some(
       (device) => device.kind === 'microphone' && device.status === 'available'
     )
       ? 'granted'
-      : backendMicrophone
-  const camera =
+      : microphoneAccessState(audioMeter)
+  const screen =
     os === 'win32'
-      ? windowsMediaAccessState(mediaAccess?.camera, backendCamera)
-      : os === 'darwin'
-        ? macosMediaAccessState(mediaAccess?.camera, backendCamera)
-        : backendCamera
+      ? 'not-required'
+      : mediaAccess?.screen === 'granted' && backendScreen === 'not-granted'
+        ? 'needs-relaunch'
+        : macosMediaAccessState(mediaAccess?.screen, backendScreen)
   const microphone =
     os === 'win32'
       ? windowsMediaAccessState(mediaAccess?.microphone, backendMicrophone)
-      : os === 'darwin'
-        ? macosMediaAccessState(mediaAccess?.microphone, macosMicrophoneHealth)
-        : backendMicrophone
-
-  const rows: SystemAccessRow[] = []
-
-  // Windows has no per-app screen-capture permission — the desktop is always
-  // capturable — and Linux consents per capture through the desktop portal,
-  // so neither shows a Screen Recording row. An unknown platform (before
-  // runtimeInfo arrives) keeps the macOS row set, as it always has.
-  if (os !== 'win32' && platform !== 'linux') {
-    const screen = screenAccessState(deviceList)
-    rows.push({
+      : macosMediaAccessState(mediaAccess?.microphone, backendMicrophone)
+  const camera =
+    os === 'win32'
+      ? windowsMediaAccessState(mediaAccess?.camera, backendCamera)
+      : macosMediaAccessState(mediaAccess?.camera, backendCamera)
+  const rows: SystemAccessRow[] = [
+    {
       id: 'screen-recording',
       label: 'Screen Recording',
-      purpose: 'Capture displays, app windows and system audio.',
+      purpose: 'Record your displays and app windows.',
       state: screen,
-      detail: accessDetail(screen, 'screen capture', os)
-    })
-  }
-
-  // No OS grant to show (Linux): the camera and microphone chips render nothing.
-  if (!mediaAccessNotApplicable(mediaAccess?.camera)) {
-    rows.push({
+      required: os !== 'win32',
+      detail: ''
+    },
+    {
+      id: 'system-audio',
+      label: 'System audio',
+      purpose:
+        os === 'win32'
+          ? 'The sound your PC plays: games, music and calls.'
+          : 'The sound your Mac plays: games, music and calls.',
+      state: screen,
+      required: false,
+      detail: ''
+    },
+    {
+      id: 'microphone',
+      label: 'Microphone',
+      purpose: 'Your voice in recordings, livestreams and captions.',
+      state: microphone,
+      required: true,
+      detail: ''
+    },
+    {
       id: 'camera',
       label: 'Camera',
-      purpose: 'Camera overlay in your scenes.',
+      purpose: 'Put yourself in your scenes.',
       state: camera,
-      detail:
-        os === 'darwin' && mediaAccess?.camera === 'restricted'
-          ? 'Camera access is restricted by macOS policy and may not be changeable here.'
-          : camera === 'device-issue'
-            ? 'Camera permission is granted, but no usable camera is currently available.'
-            : accessDetail(camera, 'the camera', os)
-    })
+      required: false,
+      detail: ''
+    }
+  ]
+  for (const row of rows) {
+    const pane = row.id === 'system-audio' ? 'screen-recording' : row.id
+    const status = mediaAccessStatusForPane(mediaAccess, pane)
+    row.checking =
+      os !== 'win32' &&
+      status === 'granted' &&
+      (captureRestarting || (pane === 'screen-recording' && screenGrantStale))
+    if (row.checking) {
+      row.state = checkingAccessState(lastKnownStates?.[row.id])
+      continue
+    }
+    if (os !== 'win32' && pendingPane === pane && status !== 'granted' && status !== 'restricted') {
+      row.state = 'waiting'
+    }
+    const paneName = pane === 'screen-recording' ? screenRecordingPaneName(osRelease) : row.label
+    if (row.state === 'waiting') {
+      row.detail = `Turn on ${permissionTargetName} in System Settings → Privacy & Security → ${paneName}, then come back here.`
+    } else if (row.state === 'needs-relaunch') {
+      row.detail = 'macOS turns this on after Videorc reopens.'
+    } else if (os === 'darwin' && status === 'restricted') {
+      row.detail = 'Restricted by macOS policy and may not be changeable here.'
+    } else if (os === 'win32' && row.state === 'not-required') {
+      row.detail = "Windows doesn't ask for this."
+    } else if (row.state === 'not-granted' && os !== 'win32') {
+      row.detail = `System Settings is blocking ${paneName}. Turn on ${permissionTargetName} in System Settings → Privacy & Security → ${paneName}.`
+    } else if (row.state === 'device-issue') {
+      row.detail =
+        row.id === 'camera'
+          ? 'Granted, but no camera is connected.'
+          : row.id === 'microphone'
+            ? 'Microphone permission is granted, but no usable input is currently available.'
+            : 'Granted, but no display or app window is available.'
+    } else if (row.state === 'granted' && row.id === 'camera') {
+      row.detail =
+        deviceList.devices.find(
+          (device) => device.kind === 'camera' && device.status === 'available'
+        )?.name ?? ''
+    } else if (os === 'win32' && (row.state === 'not-granted' || row.state === 'first-use')) {
+      const noun = row.id === 'camera' ? 'camera' : 'microphone'
+      row.detail = `In ${osSettingsName(platform)} → Privacy & security → ${row.label}, turn on access and “Let desktop apps access your ${noun}”. Videorc is a desktop app, so it isn’t listed by name.`
+    }
   }
-
-  if (mediaAccessNotApplicable(mediaAccess?.microphone)) {
-    return rows
+  const systemAudio = rows[1]
+  const audioDevice = deviceList.devices.find((device) => device.kind === 'system-audio')
+  if (
+    !systemAudio.checking &&
+    (os === 'win32' || mediaAccess?.screen === 'granted' || screen === 'granted') &&
+    audioDevice?.status === 'unavailable'
+  ) {
+    systemAudio.state = 'unavailable'
+    systemAudio.detail = audioDevice.detail ?? 'System audio is not available on this computer.'
+  } else if (!systemAudio.checking && os !== 'win32' && systemAudio.state !== 'granted') {
+    systemAudio.detail = 'Comes with Screen Recording.'
   }
-  rows.push({
-    id: 'microphone',
-    label: 'Microphone',
-    purpose: 'Voice audio and live captions.',
-    state: microphone,
-    detail:
-      os === 'darwin' && mediaAccess?.microphone === 'restricted'
-        ? 'Microphone access is restricted by macOS policy and may not be changeable here.'
-        : microphone === 'device-issue'
-          ? ((audioMeter?.status === 'permission-required' ? undefined : audioMeter?.message) ??
-            'Microphone permission is granted, but no usable input is currently available.')
-          : microphone === 'first-use'
-            ? 'Checked when you test the microphone or start recording.'
-            : accessDetail(microphone, 'the microphone', os)
-  })
-
   return rows
-}
-
-// Permissions onboarding gate: the dialog exists ONLY to collect grants, so it
-// shows iff a grant is missing — never for users whose Mac already has them
-// (TCC grants persist per bundle id, so reinstalls skip it too). `dismissed`
-// is a snooze, not the trigger: once the user continues or skips, gaps go back
-// to the Sources alerts and Settings chips. `backendReady` guards the boot
-// window where device enumeration hasn't arrived and every state would read
-// first-use — unknown backend or exact media state must never flash the dialog.
-export function shouldShowPermissionsOnboarding({
-  rows,
-  dismissed,
-  backendReady,
-  mediaAccessReady = true
-}: {
-  rows: SystemAccessRow[]
-  dismissed: boolean
-  backendReady: boolean
-  mediaAccessReady?: boolean
-}): boolean {
-  if (dismissed || !backendReady || !mediaAccessReady) {
-    return false
-  }
-  return rows.some((row) => row.state !== 'granted' && row.state !== 'device-issue')
-}
-
-function accessDetail(state: SystemAccessState, subject: string, os: AppPlatform): string {
-  const settings = osSettingsName(os === 'other' ? undefined : os)
-  if (os === 'win32' && (state === 'not-granted' || state === 'first-use')) {
-    // Windows gates desktop (non-Store) apps behind a single umbrella toggle
-    // and does NOT list them by name — the tester was hunting for "Videorc" in
-    // a list where it can never appear. Point at the two real levers instead.
-    return `In ${settings} → Privacy & security → ${windowsPrivacyPageName(subject)}, turn on access and “Let desktop apps access your ${windowsDeviceNoun(subject)}”. Videorc is a desktop app, so it isn’t listed by name.`
-  }
-  switch (state) {
-    case 'granted':
-      return 'Permission granted.'
-    case 'not-granted':
-      // The packaged-app nuance from the 0.9.1 incident: a missing grant is
-      // fixed in the OS Settings; a missing ENTITLEMENT can't be — but 0.9.2+
-      // ships the entitlements, so Settings is the right pointer.
-      return `${settings} is blocking ${subject}. Allow Videorc there.`
-    case 'first-use':
-      return `${settings} reports this on first use.`
-    case 'device-issue':
-      return "The device opened but didn't send audio frames."
-  }
-}
-
-function windowsPrivacyPageName(subject: string): string {
-  return subject.includes('camera') ? 'Camera' : 'Microphone'
-}
-
-function windowsDeviceNoun(subject: string): string {
-  return subject.includes('camera') ? 'camera' : 'microphone'
 }

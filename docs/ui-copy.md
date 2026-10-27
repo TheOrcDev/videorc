@@ -42,7 +42,7 @@ app. Two checks hold them (see [Guards](#guards)).
 - One character, "…", never three dots ("...").
 - On a command that opens a further step asking for a choice or input:
   "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go Live…", "Pair a
-  phone…", "Set up permissions…", "What's new…".
+  phone…", "Run setup again…", "What's new…".
 - Not on a command that acts at once, or one that only opens a page or a
   window: "Delete", "Open Output", "Open Stream Manager".
 - On every pending label: "Saving…", "Importing…", "Exporting…",

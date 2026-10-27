@@ -1,20 +1,19 @@
 import { FolderIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
-import { videoPermissionState } from '@/components/sources/video-sources'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
-import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import { sourcePermissionAlerts, type SourcePermissionAlert } from '@/lib/source-permissions'
 import { unknownDeviceWarnings } from '@/lib/source-status'
 import {
   isMediaAccessSnapshotReady,
   systemAccessAction,
-  systemAccessRows
+  mediaAccessStatusForPane
 } from '@/lib/system-access'
-import { systemAudioDevice } from '@/lib/system-audio'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 
 // Plan 174 S3.8 (C-8, C-14): the Sources page's one place for what blocks a
 // source. One flush warning Alert per missing permission, with its fix, and
@@ -97,20 +96,20 @@ export function SourcePermissionAlerts(): ReactElement | null {
     handleSystemPermission,
     revealPermissionTarget
   } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
   const platform = runtimeInfo?.platform
-  const targetName =
-    runtimeInfo?.capturePermissionTargetName ?? runtimeInfo?.permissionTargetName ?? 'Videorc'
-  const { screenPermissionRequired } = videoPermissionState({ deviceList, platform, mediaAccess })
-  const rows = systemAccessRows({ deviceList, audioMeter, platform, mediaAccess })
+  const targetName = runtimeInfo?.permissionTargetName ?? 'Videorc'
+  const rows = useSystemAccessRows()
+  const screen = rows.find((row) => row.id === 'screen-recording')
   // Before the OS has answered, "first use" is a guess: no alert on a guess.
   const accessKnown = isMediaAccessSnapshotReady(mediaAccess)
   const media = (pane: 'camera' | 'microphone', chosen: boolean) => {
     const state = accessKnown ? rows.find((row) => row.id === pane)?.state : undefined
     return {
       state,
+      detail: rows.find((row) => row.id === pane)?.detail,
       action: systemAccessAction({
         pane,
+        checking: rows.find((row) => row.id === pane)?.checking,
         state,
         platform,
         mediaAccessStatus: mediaAccess?.[pane]
@@ -122,8 +121,19 @@ export function SourcePermissionAlerts(): ReactElement | null {
     platform,
     targetName,
     // System audio rides on the same grant as the screen.
-    screenRecording:
-      screenPermissionRequired || systemAudioDevice(deviceList)?.status === 'permission-required',
+    screenRecording: false,
+    screen: screen
+      ? {
+          row: screen,
+          action: systemAccessAction({
+            pane: 'screen-recording',
+            state: screen.state,
+            checking: screen.checking,
+            platform,
+            mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, 'screen-recording')
+          })
+        }
+      : undefined,
     camera: media('camera', Boolean(captureConfig.sources.cameraId)),
     microphone: media('microphone', Boolean(captureConfig.sources.microphoneId))
   })

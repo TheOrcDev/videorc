@@ -8640,7 +8640,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'linux',
       getMediaAccessStatus: async () => ({
         camera: 'not-applicable',
-        microphone: 'not-applicable'
+        microphone: 'not-applicable',
+        screen: 'not-applicable'
       })
     })
     const testDom = installProviderTestEnvironment(api)
@@ -8704,7 +8705,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions
@@ -8767,7 +8769,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -9440,7 +9443,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -10332,7 +10336,7 @@ describe('real StudioProvider lifecycle', () => {
         if (!statusReadAvailable) {
           throw new Error('TCC status read failed')
         }
-        return { camera: 'not-determined', microphone: 'granted' }
+        return { camera: 'not-determined', microphone: 'granted', screen: 'granted' }
       },
       requestMediaAccess,
       openSystemPermissions
@@ -10397,7 +10401,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'denied' }),
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'denied',
+        screen: 'granted'
+      }),
       requestMediaAccess,
       openSystemPermissions
     })
@@ -10439,9 +10447,121 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(latest()?.audio.audioMeter).toBeNull()
+    expect(latest()?.core.systemAccessContext.pendingPane).toBe('microphone')
     expect(openSystemPermissions).toHaveBeenCalledWith('microphone')
     expect(requestMediaAccess).not.toHaveBeenCalled()
   })
+
+  it.each(['available', 'permission-required'] as const)(
+    'keeps screen grants checking until a replacement publishes %s devices',
+    async (replacementStatus) => {
+      const initial = new StudioBackend()
+      const screenDevices = (status: Device['status']): DeviceList => ({
+        devices: [{ id: 'screen:screencapturekit:1', kind: 'screen', name: 'Display', status }],
+        warnings: []
+      })
+      initial.deviceList = screenDevices('permission-required')
+      TestWebSocket.backend = initial
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      let screen: 'not-determined' | 'granted' = 'not-determined'
+      let emit: ((name: string, value: unknown) => void) | undefined
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => [],
+        platform: 'darwin',
+        backendConnection: { host: '127.0.0.1', port: 9988, pid: 401, token: 'initial' },
+        getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted', screen }),
+        registerEmitter: (nextEmit) => {
+          emit = nextEmit
+        }
+      })
+      api.requestScreenAccess = vi.fn(async () => {
+        screen = 'granted'
+        return {
+          granted: true,
+          status: screen,
+          restarted: false,
+          staleBackend: { port: 9988, pid: 401 }
+        }
+      })
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = () => observations.at(-1)!
+      const access = () =>
+        systemAccessRows({
+          ...latest().core.systemAccessContext,
+          deviceList: latest().core.deviceList,
+          audioMeter: latest().audio.audioMeter,
+          mediaAccess: latest().core.mediaAccess,
+          platform: 'darwin'
+        })[0]
+      await act(async () => {
+        root = createRoot(testDom.container)
+        root.render(
+          createElement(
+            BackgroundAssetsProvider,
+            null,
+            createElement(
+              StudioProvider,
+              null,
+              createElement(Probe, {
+                observe: (value) => {
+                  observations.push(value)
+                }
+              })
+            )
+          )
+        )
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          latest()?.core.mediaAccess?.screen === 'not-determined'
+      )
+      expect(access().state).toBe('first-use')
+      await act(async () => {
+        await latest().core.handleSystemPermission('screen-recording')
+      })
+      expect(latest().core.systemAccessContext.pendingPane).toBeNull()
+      expect(access()).toMatchObject({ checking: true })
+      expect(access().state).not.toBe('not-granted')
+      expect(access().state).not.toBe('needs-relaunch')
+
+      // A new renderer client on the retired process is not replacement proof.
+      act(() =>
+        emit?.('backend:connection', { host: '127.0.0.1', port: 9988, pid: 401, token: 'retired' })
+      )
+      await waitForObservation(
+        () => initial.commands.filter((command) => command.method === 'devices.list').length > 1
+      )
+      expect(access().checking).toBe(true)
+
+      const replacement = new StudioBackend()
+      replacement.deviceList = screenDevices(replacementStatus)
+      const releaseDevices = replacement.deferResponse('devices.list', replacement.deviceList)
+      TestWebSocket.backend = replacement
+      act(() =>
+        emit?.('backend:connection', {
+          host: '127.0.0.1',
+          port: 9991,
+          pid: 402,
+          token: 'replacement'
+        })
+      )
+      await waitForObservation(() =>
+        replacement.sentCommands.some((command) => command.method === 'devices.list')
+      )
+      expect(access().checking).toBe(true)
+      await act(async () => releaseDevices())
+      await waitForObservation(() => !access().checking)
+      expect(access().state).toBe(replacementStatus === 'available' ? 'granted' : 'needs-relaunch')
+      expect(latest().core.systemAccessContext.captureRestarting).toBe(false)
+      expect(latest().core.systemAccessContext.screenGrantStale).toBe(false)
+    }
+  )
 
   it('refreshes exact permission and devices through the reconnected backend after a grant', async () => {
     const initialBackend = new StudioBackend()
@@ -10472,7 +10592,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions,
@@ -10572,7 +10693,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 101 },
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10698,7 +10820,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10802,7 +10925,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 401 },
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -15424,7 +15548,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted' })
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'granted',
+        screen: 'granted'
+      })
     })
     const testDom = installProviderTestEnvironment(api)
     const audio = installVisualMicAudioEnvironment()
@@ -15666,6 +15794,7 @@ function createVideorcApi(options: {
         gpuDevices: [],
         hardwareAccelerationDisabled: false,
         isPackaged: false,
+        firstRunSuppressed: false,
         permissionTargetName: 'Videorc',
         permissionTargetPath: 'C:\\Videorc.exe',
         capturePermissionTargetName: 'Videorc',
@@ -15700,7 +15829,7 @@ function createVideorcApi(options: {
       getCaptionsWindowState: async () => idleCaptions,
       getMediaAccessStatus:
         options.getMediaAccessStatus ??
-        (async () => ({ camera: 'granted', microphone: 'granted' })),
+        (async () => ({ camera: 'granted', microphone: 'granted', screen: 'granted' })),
       requestMediaAccess: options.requestMediaAccess,
       openSystemPermissions: options.openSystemPermissions,
       getViewerSample: async () => null,

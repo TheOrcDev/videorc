@@ -155,6 +155,7 @@
     "smoke:linux-portal-capture": "node scripts/smoke-linux-portal-capture.mjs",
     "smoke:linux-portal-record": "node scripts/smoke-linux-portal-record.mjs",
     "smoke:portal-preview-proof": "node scripts/smoke-portal-preview-proof.mjs",
+    "smoke:first-run": "node scripts/smoke-first-run-app.mjs",
     "smoke:remote-control": "node scripts/smoke-remote-control-app.mjs",
     "smoke:replay-buffer": "node scripts/smoke-replay-buffer-app.mjs",
     "smoke:remote-lan": "node scripts/smoke-remote-lan-app.mjs",

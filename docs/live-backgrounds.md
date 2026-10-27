@@ -51,6 +51,7 @@ already exists, and says why in `CompositorStatus.liveBackground.reason`.
 | macOS preview, recording, stream (Metal)                     | Yes                 | MSL ports render a live frame; the compositor draws it like a picture. A record-and-stream session's stream leg draws the recording's frame from the same tick |
 | Windows recording and stream (D3D11 media session)           | Yes                 | HLSL ports, the same way                                                                                                                                       |
 | Windows idle preview, Linux preview (Electron proof surface) | Yes                 | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`)                                                                               |
+| Welcome screen, first-run setup (renderer WebGL2)            | Yes, unless still   | Shared player through `renderer/src/lib/live-background-player.ts`; poster first, 30 fps cap, reduced-motion and no-GPU stills                                 |
 | Linux recording and stream (CPU compositor)                  | Yes                 | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame                                                                             |
 | 4K60 and the bridge-off override (legacy FFmpeg graph)       | No, the poster      | `legacy-graph`, with a start notice                                                                                                                            |
 | Windows and macOS CPU fallbacks                              | No, the poster      | `cpu-fallback`                                                                                                                                                 |
@@ -58,6 +59,31 @@ already exists, and says why in `CompositorStatus.liveBackground.reason`.
 | Windows on WARP (no D3D11 session)                           | No, the poster      | `cpu-fallback`                                                                                                                                                 |
 | Linux without EGL/GLES or a usable render node               | No, the poster      | `no-gpu`, `quarantined-node`                                                                                                                                   |
 | Vertical simulcast leg, ISO legs, Clean cut                  | No, as for pictures | Windows' vertical leg draws the poster; the others draw no background                                                                                          |
+
+### Welcome screen
+
+First-run setup is the fourth place the WebGL player runs, beside the
+Windows idle preview and the Linux preview (plan 203). It is the only live
+background behind the app's own UI: Liquid Chrome, Polished, at Normal
+motion in both themes, dimmed 30% under dark. The permission card uses the
+dialog tier and carries all the text.
+
+`apps/desktop/src/renderer/src/lib/live-background-player.ts` lazily loads
+the shared player, clock and render data with setup. It shows the poster
+first, then fades in the first drawn frame. It caps drawing at 30 fps and
+bounds the canvas's long side to 1920 device pixels. Each player owns its
+canvas: disposal releases the GL context and removes the canvas, and a new
+player creates a new one. Reusing a canvas after losing its context broke
+motion under StrictMode; the ownership rule prevents that regression.
+
+Reduced motion, hardware acceleration off, no GPU, software GPU, shader
+compilation failure, context loss and the GPU budget guard keep the poster
+still. The reason is exposed through `data-first-run-backdrop-reason` and
+logged once. The guard checks median drawn-frame intervals over 3 s: above
+50 ms it drops to half size, then to a still if the next window stays slow.
+Hidden or minimized windows pause; closing setup disposes the player.
+`pnpm smoke:first-run` measures motion and the draw cap in the real app and
+fails on an unexpected still reason.
 
 ## Cost, and none when off
 
