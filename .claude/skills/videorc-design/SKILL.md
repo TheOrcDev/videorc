@@ -88,6 +88,11 @@ for the owner, not a design choice.
   (2026-09-23).
 - **The Buddy mark is the real artwork**, never a redrawn glyph (2026-10-04;
   see [Icons](#icons)).
+- **The Studio has one Audio section** (2026-10-26, plan 201 D1).
+  Microphone and System audio share one audiocn Mixer scale, each with its
+  level and Gain. The System audio switch lives here; the Sources mirror
+  keeps Screen and Camera. This replaces the 2026-10-02 call, "Studio keeps
+  the Microphone section, no mixer" (plans 092 and 093).
 - **Retro LCD is an option, off by default** (2026-10-25, plan 197). Settings
   → General → Appearance → Retro LCD draws the Studio inspector on audiocn
   LCD screens (`components/lcd-panel.tsx`, `studio/retro-lcd-studio.tsx`)
@@ -356,8 +361,9 @@ links home.
 - **Devices**: Sources is the home of every screen, window, camera,
   microphone and system audio source, with its gain and level. The Studio
   inspector mirrors the few needed mid-session: the Sources section (Screen,
-  Camera, System audio, with Open Sources) and the Microphone section
-  (picker, level, mute and its hotkey).
+  Camera, with Open Sources) and the Audio section: Microphone (picker,
+  level, Gain, mute and its hotkey) and System audio (switch, level, Gain),
+  on one audiocn Mixer scale (plan 201 D1).
 - **Takeovers**: Assets → Takeovers manages them (import, rename, reorder,
   delete). Studio's Takeover section puts one on stream and takes it off.
 - **Scenes**: the Scene page edits a scene; Studio's Scenes gallery switches
@@ -844,39 +850,44 @@ Words, numbers and navigation
 
 ## shadcn component mapping
 
-| Need                         | Use                                                        |
-| ---------------------------- | ---------------------------------------------------------- |
-| Page chrome                  | `Pane` + `Toolbar` (title only) + `PaneBody`               |
-| Page tabs or a pinned filter | `PageTabs` / `PaneStrip`                                   |
-| Single-pane window header    | `WindowHeader` in a `WindowFrame`                          |
-| Page sections                | `PanelSection` (flush)                                     |
-| Sets of like things          | `GroupedList` + `ListRow`                                  |
-| A settings row               | `SettingsRow` in `FieldGroup variant="grouped"`            |
-| Objects with a picture       | `MediaCard` (8 px, hairline, no shadow)                    |
-| Per-item actions             | `KebabMenu`                                                |
-| Global state and hints       | `StatusBar` + `StatusBarHint` / `StatusBarAction`          |
-| Palette / searchable list    | `Command` (+ `CommandDialog`), palette scale               |
-| Modals                       | `Dialog` with `size`, `DialogBody` for the scroll          |
-| Destructive confirmations    | `ConfirmDialog` (on `AlertDialog`)                         |
-| Segmented choice (2–4)       | `SegmentedControl` (the glass Tabs track)                  |
-| Views and page tabs          | `Tabs`                                                     |
-| Filter chips (multi-select)  | `ToggleGroup`                                              |
-| A boolean                    | `Switch`                                                   |
-| A screen, camera, microphone | `DevicePicker` (`trigger="lcd"` on a Retro LCD screen)     |
-| Buttons                      | `Button` ghost/outline/secondary; 28 px default            |
-| Why a control is disabled    | `DisabledReason`, or `SegmentedControl`'s `disabledReason` |
-| Locked controls              | `LockAlert` / `SessionLockAlert` / `OfflineAlert`          |
-| Inline status                | `Alert` (variant brings the icon)                          |
-| Nothing to show              | `Empty`                                                    |
-| Status, tags, counts         | `Badge`, `StatusBadge`, `StatusDot`                        |
-| Shortcut hints               | `ShortcutKeys` (draws `Kbd`), `ShortcutTooltip`            |
-| Keep a window on top         | `PinWindowButton`                                          |
-| Dividers                     | `Separator` or a `border-border` hairline                  |
-| Scroll regions               | `PaneBody` or `ScrollArea type="scroll"`                   |
-| Menus / popovers             | `DropdownMenu` / `Popover` on `glass-float`                |
-| Toasts                       | `toast` from `lib/toast.ts`; type colours the icon         |
-| Audio levels                 | `MicLevelMeter`: segmented bar; LCD meter with Retro LCD   |
-| Audio controls               | audiocn controls in Sources rows (`SourceItem`)            |
+| Need                         | Use                                                                         |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| Page chrome                  | `Pane` + `Toolbar` (title only) + `PaneBody`                                |
+| Page tabs or a pinned filter | `PageTabs` / `PaneStrip`                                                    |
+| Single-pane window header    | `WindowHeader` in a `WindowFrame`                                           |
+| Page sections                | `PanelSection` (flush)                                                      |
+| Sets of like things          | `GroupedList` + `ListRow`                                                   |
+| A settings row               | `SettingsRow` in `FieldGroup variant="grouped"`                             |
+| Objects with a picture       | `MediaCard` (8 px, hairline, no shadow)                                     |
+| Per-item actions             | `KebabMenu`                                                                 |
+| Global state and hints       | `StatusBar` + `StatusBarHint` / `StatusBarAction`                           |
+| Palette / searchable list    | `Command` (+ `CommandDialog`), palette scale                                |
+| Modals                       | `Dialog` with `size`, `DialogBody` for the scroll                           |
+| Destructive confirmations    | `ConfirmDialog` (on `AlertDialog`)                                          |
+| Segmented choice (2–4)       | `SegmentedControl` (the glass Tabs track)                                   |
+| Views and page tabs          | `Tabs`                                                                      |
+| Filter chips (multi-select)  | `ToggleGroup`                                                               |
+| A boolean                    | `Switch`                                                                    |
+| A screen, camera, microphone | `DevicePicker` (`trigger="lcd"` on a Retro LCD screen)                      |
+| Buttons                      | `Button` ghost/outline/secondary; 28 px default                             |
+| Why a control is disabled    | `DisabledReason`, or `SegmentedControl`'s `disabledReason`                  |
+| Locked controls              | `LockAlert` / `SessionLockAlert` / `OfflineAlert`                           |
+| Inline status                | `Alert` (variant brings the icon)                                           |
+| Nothing to show              | `Empty`                                                                     |
+| Status, tags, counts         | `Badge`, `StatusBadge`, `StatusDot`                                         |
+| Shortcut hints               | `ShortcutKeys` (draws `Kbd`), `ShortcutTooltip`                             |
+| Keep a window on top         | `PinWindowButton`                                                           |
+| Dividers                     | `Separator` or a `border-border` hairline                                   |
+| Scroll regions               | `PaneBody` or `ScrollArea type="scroll"`                                    |
+| Menus / popovers             | `DropdownMenu` / `Popover` on `glass-float`                                 |
+| Toasts                       | `toast` from `lib/toast.ts`; type colours the icon                          |
+| Audio levels                 | `MicLevelMeter`: segmented bar; LCD meter with Retro LCD                    |
+| Audio controls               | audiocn `fader` in Sources rows (`SourceItem`) and the Studio Audio section |
+
+The Microphone and System audio Gain faders have one definition for both
+pages, `components/audio/gain-faders.tsx`. Retro LCD skins them from outside
+with `LCD_FADER` in `components/lcd-panel.tsx`, inside the Audio screen
+(plan 201 D5).
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
 do not hand-roll it.

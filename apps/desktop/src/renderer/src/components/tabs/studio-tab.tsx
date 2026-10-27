@@ -52,9 +52,9 @@ const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
     .StudioDashboardBottomRow
 }))
-// The meter brings audiocn: its own chunk, so the inspector paints first.
-const MicrophoneSection = lazy(async () => ({
-  default: (await import('@/components/studio/microphone-section')).MicrophoneSection
+// The meters and faders bring audiocn: their own chunk, so the inspector paints first.
+const AudioSection = lazy(async () => ({
+  default: (await import('@/components/studio/audio-section')).AudioSection
 }))
 
 export function StudioTab(): ReactElement {
@@ -240,14 +240,16 @@ export function StudioTab(): ReactElement {
             onDismissStartFailure={dismissSessionStartFailure}
             onRetryStart={retrySessionStart}
           />
-          {/* The microphone and its live level, between Session and Inputs
-              (owner call, 2026-10-02): a check that runs all the time. */}
-          <Suspense fallback={<MicrophoneSectionFallback retro={retro} />}>
-            <MicrophoneSection />
+          {/* Audio: the Microphone and System audio levels on one scale, each
+              with its Gain, between Session and Sources (plan 201 D1; the
+              Microphone section since the owner call of 2026-10-02): a check
+              that runs all the time. */}
+          <Suspense fallback={<AudioSectionFallback retro={retro} />}>
+            <AudioSection />
           </Suspense>
-          {/* Sources (Screen, Camera, System audio) and Captions: compact
-              mirrors editing the same captureConfig, each with a way to its
-              page. Output is the Session row above (plan 174 S3.3, B-15). */}
+          {/* Sources (Screen and Camera) and Captions: compact mirrors editing
+              the same captureConfig, each with a way to its page. Output is
+              the Session row above (plan 174 S3.3, B-15). */}
           {retro ? <RetroQuickSettings /> : <QuickSettings />}
           {retro ? <RetroTakeoverSection /> : <TakeoverSection />}
         </aside>
@@ -267,10 +269,11 @@ function StudioDashboardBottomRowFallback(): ReactElement {
 }
 
 /**
- * The Microphone section's height while its chunk loads: the picker and the
- * level bar, or with Retro LCD one screen holding both (about 150 px).
+ * The Audio section's height while its chunk loads: the picker, two level
+ * bars and two Gain faders, or with Retro LCD the Microphone screen (about
+ * 150 px).
  */
-function MicrophoneSectionFallback({ retro }: { retro: boolean }): ReactElement {
+function AudioSectionFallback({ retro }: { retro: boolean }): ReactElement {
   if (retro) {
     return (
       <PanelSection>
@@ -279,8 +282,11 @@ function MicrophoneSectionFallback({ retro }: { retro: boolean }): ReactElement 
     )
   }
   return (
-    <PanelSection title="Microphone">
+    <PanelSection title="Audio">
       <Skeleton className="h-control rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
+      <Skeleton className="h-4 rounded-chip" />
       <Skeleton className="h-4 rounded-chip" />
     </PanelSection>
   )

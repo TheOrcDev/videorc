@@ -49,17 +49,18 @@ export function micMeterInput(input: {
 
 /**
  * System audio's meter input (plan 093): the bus measures System audio only
- * while a session mixes it. Outside one nothing measures it, and a source
- * would read silence, which is not the same as "no reading".
+ * while a recording, livestream or Clips ring mixes it. Outside a running
+ * bus nothing measures it, and a source would read silence, which is not the
+ * same as "no reading".
  */
 export function systemAudioMeterInput(input: {
-  sessionActive: boolean
+  audioBusActive: boolean
   /** `SystemAudioSwitchView.meter`: requested or confirmed, no change pending. */
   mixed: boolean
   backendLevelsLive: boolean
   source: FrameSource<MeterFrame>
 }): MeterInput {
-  return input.sessionActive && input.mixed && input.backendLevelsLive
+  return input.audioBusActive && input.mixed && input.backendLevelsLive
     ? { kind: 'source', source: input.source }
     : NO_READING
 }

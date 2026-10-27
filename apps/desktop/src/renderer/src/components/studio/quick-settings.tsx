@@ -1,10 +1,4 @@
-import {
-  type AppIcon,
-  CameraIcon,
-  CaptionsIcon,
-  DesktopIcon,
-  DisplayIcon
-} from '@/components/icons'
+import { type AppIcon, CameraIcon, CaptionsIcon, DisplayIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
@@ -14,34 +8,26 @@ import { PanelSection } from '@/components/panel-section'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
-import { InfoTooltip } from '@/components/ui/info-tooltip'
-import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
-import { captionsStatusLabel, systemAudioIssueLabel } from '@/lib/state-labels'
+import { captionsStatusLabel } from '@/lib/state-labels'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import {
-  systemAudioDevice,
-  requestSystemAudioResume,
-  systemAudioIssueCopy,
-  systemAudioSwitchView,
-  type SystemAudioSwitchView
-} from '@/lib/system-audio'
+import { systemAudioDevice, systemAudioSwitchView } from '@/lib/system-audio'
 
 /**
  * The Studio inspector's mirrors of controls that own their own pages (SD2):
- * Sources (Screen, Camera, System audio, with Open Sources as the way home),
- * then Captions on its own, because captions aren't a source (plan 174 S3.3,
+ * Sources (Screen and Camera, with Open Sources as the way home), then
+ * Captions on its own, because captions aren't a source (plan 174 S3.3,
  * B-15 and B-25). They edit the SAME captureConfig via the shared builders /
  * setters (one state). Device source edits use the shared session controller.
  * Output is one row, the Session section's. Scene switching lives in the
- * Scenes gallery; the microphone and its live level live in the Microphone
- * section above (plan 092), so no Mic row here.
+ * Scenes gallery; the microphone and System audio, with their levels and
+ * Gain, live in the Audio section above (plans 092 and 201), so no audio
+ * rows here.
  */
 export function QuickSettings(): ReactElement {
   const {
     captureConfig,
-    setCaptureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
     allowCaptureNone,
@@ -49,10 +35,7 @@ export function QuickSettings(): ReactElement {
     selectedCamera,
     isSessionActive,
     captionsStatus,
-    runtimeInfo,
-    openSettings,
     openStudioPanel,
-    systemAudio,
     discoveryPending,
     captureDevices,
     cameras,
@@ -126,24 +109,6 @@ export function QuickSettings(): ReactElement {
               }
             />
           </InspectorRow>
-
-          {/* SYSTEM AUDIO: plan 069 On/Off, live-safe; hidden where unsupported. */}
-          {systemAudio.visible ? (
-            <InspectorRow icon={DesktopIcon} label="System audio">
-              <SystemAudioInspectorValue
-                platform={runtimeInfo?.platform}
-                view={systemAudio}
-                onEnabledChange={(systemAudioEnabled) =>
-                  setCaptureConfig((current) => ({
-                    ...current,
-                    audio: { ...current.audio, systemAudioEnabled }
-                  }))
-                }
-                onOpenPermissions={() => openSettings('permissions')}
-                onResume={requestSystemAudioResume}
-              />
-            </InspectorRow>
-          ) : null}
         </GroupedList>
       </PanelSection>
 
@@ -166,67 +131,6 @@ export function QuickSettings(): ReactElement {
         </GroupedList>
       </PanelSection>
     </>
-  )
-}
-
-/**
- * Short state beside the switch; the full health copy is its tooltip and its
- * description, on hover and on focus (plan 174 S1.10).
- */
-export function SystemAudioInspectorValue({
-  view,
-  platform,
-  onEnabledChange,
-  onOpenPermissions,
-  onResume
-}: {
-  view: SystemAudioSwitchView
-  /** `runtimeInfo.platform`, so the health copy names this computer. */
-  platform?: string
-  onEnabledChange: (enabled: boolean) => void
-  onOpenPermissions: () => void
-  /** Plan 076: turn System audio on again after the echo guard paused it. */
-  onResume: () => void
-}): ReactElement {
-  // The Sources row's words for the same issue (plan 174 J2-4).
-  const status = view.issue ? systemAudioIssueLabel(view.issue) : view.stateLabel
-  return (
-    <div className="flex h-control min-w-0 items-center justify-end gap-2.5 px-2">
-      {view.permissionRequired ? (
-        // The row is narrow: the permission route replaces the (disabled)
-        // switch here; the mixer and Sources show both.
-        <InfoTooltip content="System audio needs Screen Recording permission." focusable={false}>
-          <Button className="min-w-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
-            <span className="truncate">Needs permission</span>
-          </Button>
-        </InfoTooltip>
-      ) : (
-        <>
-          {view.issue === 'echo' ? (
-            // The row is narrow: Resume replaces the status; its tooltip and
-            // description say why.
-            <InfoTooltip content={systemAudioIssueCopy('echo', platform)} focusable={false}>
-              <Button className="min-w-0" size="xs" variant="ghost" onClick={onResume}>
-                <span className="truncate">Resume</span>
-              </Button>
-            </InfoTooltip>
-          ) : (
-            <InfoTooltip
-              className="min-w-0"
-              content={view.issue ? systemAudioIssueCopy(view.issue, platform) : null}
-            >
-              <span className="min-w-0 truncate text-sm font-medium">{status}</span>
-            </InfoTooltip>
-          )}
-          <Switch
-            aria-label="System audio"
-            checked={view.checked}
-            disabled={view.disabled}
-            onCheckedChange={onEnabledChange}
-          />
-        </>
-      )}
-    </div>
   )
 }
 
@@ -259,7 +163,8 @@ function InspectorRow({
 
 /**
  * What the Studio's Sources rows show and act with: the same state for the
- * inspector's rows and the Retro LCD screen (plan 197).
+ * inspector's rows and the Retro LCD screen (plan 197), which keeps its
+ * System audio row until plan 201 S3 moves it to the Audio screen.
  */
 export function useStudioSources() {
   const {
@@ -272,6 +177,7 @@ export function useStudioSources() {
     selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
+    audioBusActive,
     captionsStatus,
     wsStatus,
     systemAudioConfirmed,
@@ -283,6 +189,7 @@ export function useStudioSources() {
     device: systemAudioDevice(deviceList),
     requested: captureConfig.audio.systemAudioEnabled,
     sessionActive: isSessionActive,
+    audioBusActive,
     confirmed: systemAudioConfirmed,
     issue: systemAudioIssue
   })

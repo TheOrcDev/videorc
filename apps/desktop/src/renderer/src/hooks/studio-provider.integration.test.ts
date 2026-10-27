@@ -7283,6 +7283,8 @@ describe('real StudioProvider lifecycle', () => {
     )
     await act(async () => latest()!.replay.setEnabled(true))
     await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+    expect(latest()?.core.audioBusActive).toBe(true)
+    expect(latest()?.core.isSessionActive).toBe(false)
     expect(latest()?.core.sourceSwitchReason('capture')).toBeNull()
     expect(latest()?.core.sourceSwitchReason('camera')).toBeNull()
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
@@ -7316,6 +7318,8 @@ describe('real StudioProvider lifecycle', () => {
       )
     })
     expect(latest()?.recording.recording.replayOnly).toBe(true)
+    expect(latest()?.core.audioBusActive).toBe(true)
+    expect(latest()?.core.isSessionActive).toBe(false)
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
   }, 15_000)
 

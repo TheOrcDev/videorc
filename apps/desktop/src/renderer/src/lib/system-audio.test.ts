@@ -8,6 +8,7 @@ import {
   SYSTEM_AUDIO_RESUME_EVENT,
   confirmedSystemAudioMix,
   systemAudioDevice,
+  systemAudioIdleReason,
   systemAudioIssueCopy,
   systemAudioIssueFromHealthEvent,
   systemAudioSwitchView,
@@ -22,6 +23,7 @@ function view(overrides: Partial<SystemAudioSwitchInput>) {
     device: available,
     requested: false,
     sessionActive: false,
+    audioBusActive: false,
     confirmed: null,
     issue: null,
     ...overrides
@@ -101,6 +103,62 @@ describe('systemAudioIssueFromHealthEvent', () => {
 })
 
 describe('systemAudioSwitchView', () => {
+  it('uses the Clips bus confirmation, pending and issue states without owning transport', () => {
+    const clips = { audioBusActive: true, sessionActive: false }
+    expect(view({ ...clips, requested: true, confirmed: true })).toMatchObject({
+      checked: true,
+      meter: true,
+      pending: null,
+      issue: null,
+      stateLabel: 'On'
+    })
+    expect(view({ ...clips, requested: true, confirmed: false })).toMatchObject({
+      checked: false,
+      meter: false,
+      pending: 'on',
+      stateLabel: 'Turning on…'
+    })
+    expect(view({ ...clips, requested: false, confirmed: true })).toMatchObject({
+      checked: true,
+      meter: false,
+      pending: 'off',
+      stateLabel: 'Turning off…'
+    })
+    expect(view({ ...clips, requested: true, confirmed: false, issue: 'echo' })).toMatchObject({
+      checked: true,
+      meter: false,
+      pending: null,
+      issue: 'echo',
+      stateLabel: 'Paused'
+    })
+    expect(view({ ...clips, requested: true, confirmed: false, issue: 'lost' })).toMatchObject({
+      checked: true,
+      meter: false,
+      pending: null,
+      issue: 'lost'
+    })
+  })
+
+  it('ignores old confirmation and issues without a running bus, including a transport start', () => {
+    for (const sessionActive of [false, true]) {
+      expect(
+        view({
+          audioBusActive: false,
+          sessionActive,
+          requested: true,
+          confirmed: false,
+          issue: 'lost'
+        })
+      ).toMatchObject({
+        checked: true,
+        pending: null,
+        issue: null,
+        meter: false,
+        stateLabel: 'On'
+      })
+    }
+  })
+
   it('hides the row when the device is missing or unsupported, never a permanent Unavailable', () => {
     expect(view({ device: undefined }).visible).toBe(false)
     expect(view({ device: { status: 'unavailable' }, requested: true }).visible).toBe(false)
@@ -131,7 +189,9 @@ describe('systemAudioSwitchView', () => {
   })
 
   it('falls back to the requested state until the session reports its mix', () => {
-    expect(view({ sessionActive: true, requested: true, confirmed: null })).toMatchObject({
+    expect(
+      view({ sessionActive: true, audioBusActive: true, requested: true, confirmed: null })
+    ).toMatchObject({
       checked: true,
       pending: null,
       meter: true,
@@ -140,25 +200,33 @@ describe('systemAudioSwitchView', () => {
   })
 
   it('shows the confirmed state, not the optimistic click, while a change is in flight', () => {
-    expect(view({ sessionActive: true, requested: true, confirmed: false })).toMatchObject({
+    expect(
+      view({ sessionActive: true, audioBusActive: true, requested: true, confirmed: false })
+    ).toMatchObject({
       checked: false,
       pending: 'on',
       meter: false,
       stateLabel: 'Turning on…'
     })
-    expect(view({ sessionActive: true, requested: false, confirmed: true })).toMatchObject({
+    expect(
+      view({ sessionActive: true, audioBusActive: true, requested: false, confirmed: true })
+    ).toMatchObject({
       checked: true,
       pending: 'off',
       meter: false,
       stateLabel: 'Turning off…'
     })
-    expect(view({ sessionActive: true, requested: true, confirmed: true })).toMatchObject({
+    expect(
+      view({ sessionActive: true, audioBusActive: true, requested: true, confirmed: true })
+    ).toMatchObject({
       checked: true,
       pending: null,
       meter: true,
       stateLabel: 'On'
     })
-    expect(view({ sessionActive: true, requested: false, confirmed: false })).toMatchObject({
+    expect(
+      view({ sessionActive: true, audioBusActive: true, requested: false, confirmed: false })
+    ).toMatchObject({
       checked: false,
       meter: false,
       stateLabel: 'Off'
@@ -167,24 +235,85 @@ describe('systemAudioSwitchView', () => {
 
   it('keeps the switch as the user set it when a health issue explains the missing mix', () => {
     expect(
-      view({ sessionActive: true, requested: true, confirmed: false, issue: 'lost' })
+      view({
+        sessionActive: true,
+        audioBusActive: true,
+        requested: true,
+        confirmed: false,
+        issue: 'lost'
+      })
     ).toMatchObject({ checked: true, pending: null, issue: 'lost', meter: false })
     expect(
-      view({ sessionActive: true, requested: true, confirmed: null, issue: 'unavailable' })
+      view({
+        sessionActive: true,
+        audioBusActive: true,
+        requested: true,
+        confirmed: null,
+        issue: 'unavailable'
+      })
     ).toMatchObject({ checked: true, issue: 'unavailable', meter: false })
     // A later confirmed attach or the user turning it Off retires the issue.
     expect(
-      view({ sessionActive: true, requested: true, confirmed: true, issue: 'lost' }).issue
+      view({
+        sessionActive: true,
+        audioBusActive: true,
+        requested: true,
+        confirmed: true,
+        issue: 'lost'
+      }).issue
     ).toBeNull()
     expect(
-      view({ sessionActive: true, requested: false, confirmed: false, issue: 'lost' }).issue
+      view({
+        sessionActive: true,
+        audioBusActive: true,
+        requested: false,
+        confirmed: false,
+        issue: 'lost'
+      }).issue
     ).toBeNull()
   })
 
   it('says Paused while the echo guard holds system audio out (plan 076)', () => {
     expect(
-      view({ sessionActive: true, requested: true, confirmed: false, issue: 'echo' })
+      view({
+        sessionActive: true,
+        audioBusActive: true,
+        requested: true,
+        confirmed: false,
+        issue: 'echo'
+      })
     ).toMatchObject({ checked: true, issue: 'echo', meter: false, stateLabel: 'Paused' })
+  })
+})
+
+describe('systemAudioIdleReason (plan 201)', () => {
+  const idle = {
+    audioBusActive: false,
+    clipsArmed: false,
+    clipsState: 'off',
+    checked: true
+  } as const
+
+  it('explains an enabled source with Clips off, refused or given up', () => {
+    expect(systemAudioIdleReason(idle)).toBe('clips-off')
+    expect(systemAudioIdleReason({ ...idle, clipsState: 'error' })).toBe('clips-off')
+    expect(systemAudioIdleReason({ ...idle, clipsArmed: true, clipsState: 'error' })).toBe(
+      'clips-off'
+    )
+  })
+
+  it('has no idle reason while a bus runs or System audio is Off', () => {
+    for (const clipsState of ['off', 'starting', 'on', 'error'] as const) {
+      expect(systemAudioIdleReason({ ...idle, clipsState, audioBusActive: true })).toBeNull()
+      expect(systemAudioIdleReason({ ...idle, clipsState, checked: false })).toBeNull()
+    }
+  })
+
+  it('stays quiet while an armed ring starts, restarts or awaits its bus status', () => {
+    for (const clipsState of ['off', 'starting', 'on'] as const) {
+      expect(systemAudioIdleReason({ ...idle, clipsArmed: true, clipsState })).toBeNull()
+    }
+    expect(systemAudioIdleReason({ ...idle, clipsState: 'starting' })).toBeNull()
   })
 })
 
