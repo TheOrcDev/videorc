@@ -78,6 +78,13 @@ export function windowsD3d11ScreenOnlyLayoutIntent({ intentId, screenId, video }
   }
 }
 
+export function windowsD3d11MediaReady(media) {
+  return (
+    media?.state === 'live' &&
+    !(typeof media.fallbackReason === 'string' && media.fallbackReason.trim())
+  )
+}
+
 /** Before its first device refresh the renderer does not know the screen yet. */
 export function windowsD3d11HarnessScreenNotListed(error) {
   return /could not select available screen/.test(String(error?.message ?? error))
@@ -98,22 +105,13 @@ export async function configureWindowsD3d11ProbeSources({
         `No DXGI screen is available for the Windows D3D11 preview probe: ${JSON.stringify(devices?.devices ?? [])}`
       )
     }
-    const deadline = Date.now() + timeoutMs
-    let state
-    for (;;) {
-      try {
-        state = await configureWindowsD3d11RendererSources(smokeCommand, screenId)
-        break
-      } catch (error) {
-        if (!windowsD3d11HarnessScreenNotListed(error) || Date.now() >= deadline) throw error
-        await new Promise((resolve) => setTimeout(resolve, 250))
-      }
-    }
-    const intent = windowsD3d11ScreenOnlyLayoutIntent({
-      intentId: Date.now(),
-      screenId,
-      video: state.video
+    // Commit the ScreenOnly scene before the renderer starts its session: a
+    // scene commit that restarts the screen capture under a live D3D11
+    // generation drops it to the BGRA upload route.
+    const { video } = await smokeCommand(WINDOWS_D3D11_PREVIEW_HARNESS_COMMAND, {
+      action: 'state'
     })
+    const intent = windowsD3d11ScreenOnlyLayoutIntent({ intentId: Date.now(), screenId, video })
     const status = await request(ws, timeoutMs, 'scene.layout.apply_preview', intent)
     if (
       status?.intentId !== intent.intentId ||
@@ -122,6 +120,27 @@ export async function configureWindowsD3d11ProbeSources({
       throw new Error(
         `Backend did not commit ScreenOnly layout intent ${intent.intentId}: ${JSON.stringify(status)}`
       )
+    }
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      try {
+        await configureWindowsD3d11RendererSources(smokeCommand, screenId)
+        break
+      } catch (error) {
+        if (!windowsD3d11HarnessScreenNotListed(error) || Date.now() >= deadline) throw error
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+    }
+    // Opening Preview before the generation is live leaves the proof surface
+    // polling until the claim, so the probes start from a live generation.
+    let media = null
+    while (Date.now() < deadline) {
+      media = (await request(ws, timeoutMs, 'diagnostics.stats', {}))?.windowsD3d11Media ?? null
+      if (windowsD3d11MediaReady(media)) break
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (!windowsD3d11MediaReady(media)) {
+      throw new Error(`Windows D3D11 media did not go live: ${JSON.stringify(media)}`)
     }
     return screenId
   } finally {

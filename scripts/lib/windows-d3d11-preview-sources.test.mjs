@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   windowsD3d11HarnessScreenNotListed,
   windowsD3d11HarnessStateFailures,
+  windowsD3d11MediaReady,
   windowsD3d11ProbeScreenId,
   windowsD3d11ScreenOnlyLayoutIntent
 } from './windows-d3d11-preview-sources.mjs'
@@ -69,4 +70,17 @@ test('the layout intent commits the probe screen alone in ScreenOnly', () => {
   assert.equal(intent.layout.layoutPreset, 'screen-only')
   assert.equal(intent.video, video)
   assert.equal(intent.background, null)
+})
+
+test('probes start only from a live D3D11 generation without a fallback', () => {
+  assert.equal(windowsD3d11MediaReady({ state: 'live' }), true)
+  assert.equal(windowsD3d11MediaReady({ state: 'starting' }), false)
+  assert.equal(
+    windowsD3d11MediaReady({
+      state: 'live',
+      fallbackReason: 'Live capture replacement uses the existing preview BGRA upload route.'
+    }),
+    false
+  )
+  assert.equal(windowsD3d11MediaReady(null), false)
 })
