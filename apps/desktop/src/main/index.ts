@@ -276,9 +276,11 @@ import {
 import { devBackendCargoProfile } from './dev-backend-profile'
 import {
   requestMediaAccessWithRestart,
+  requestScreenAccessWithWatch,
   type MediaAccessRestartResult,
   type MediaAccessResult
 } from './media-access'
+import { relaunchForPermissionWithInterruptionLease } from './permission-relaunch'
 import {
   BACKEND_CRASH_LOG_LIMIT,
   BackendStderrTail,
@@ -594,6 +596,9 @@ import type {
   PreviewSurfaceStatus,
   MediaAccessSnapshot,
   MediaAccessStatus,
+  PermissionRecheckResult,
+  RelaunchForPermissionResult,
+  ScreenAccessResult,
   PreviewPermissionStatus,
   PreviewSupervisorState,
   SceneSource,
@@ -2364,6 +2369,14 @@ function createWindow(): void {
   mainWindow.on('blur', () => {
     publishShortcutModifier(false)
     disarmShortcutRecorder(true)
+  })
+  // Plan 203 S2: a grant made in System Settings while Videorc was in the
+  // background, past the watcher's polling window, is noticed when the
+  // window comes back (the renderer re-reads the snapshot on focus too).
+  mainWindow.on('focus', () => {
+    void mediaPermissionGrantWatcher.recheck().catch((error) => {
+      logBackend('warn', `Could not re-check permission grants on focus: ${errorMessage(error)}`)
+    })
   })
   mainWindow.webContents.on('did-start-navigation', (details) => {
     if (details.isMainFrame && !details.isSameDocument) {
@@ -10157,38 +10170,82 @@ function logBackend(level: BackendLogEvent['level'], message: string): void {
   logger(`[backend:${level}] ${message}`)
 }
 
+// Plan 203 S2: launch only LOGS the Screen & System Audio Recording state.
+// It used to call desktopCapturer.getSources on a never-asked Mac, which
+// raised macOS's own prompt while the window was still loading. The request
+// now runs in place from `system:request-screen-access`, behind a button the
+// user pressed. Nothing here delays startBackend().
 async function primeScreenCapturePermission(): Promise<void> {
   if (!isMac) {
     return
   }
 
   try {
-    const info = await runtimeInfo()
     const status = systemPreferences.getMediaAccessStatus('screen')
     if (status === 'granted') {
       return
     }
-
-    if (status === 'not-determined') {
-      await desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: { width: 0, height: 0 }
-      })
-      const nextStatus = systemPreferences.getMediaAccessStatus('screen')
-      logBackend(
-        nextStatus === 'granted' ? 'info' : 'warn',
-        `Screen Recording permission request resolved as ${nextStatus} for ${info.permissionTargetName}; capture runs in ${info.capturePermissionTargetName}.`
-      )
-      return
-    }
-
+    const info = await runtimeInfo()
     logBackend(
-      'warn',
-      `Screen Recording permission is ${status} for ${info.permissionTargetName}; capture runs in ${info.capturePermissionTargetName}. Open Screen Recording settings, grant access, then quit and relaunch Videorc.`
+      status === 'not-determined' ? 'info' : 'warn',
+      status === 'not-determined'
+        ? `Screen Recording permission has not been asked for ${info.permissionTargetName} yet; capture runs in ${info.capturePermissionTargetName}. Setup asks in place.`
+        : `Screen Recording permission is ${status} for ${info.permissionTargetName}; capture runs in ${info.capturePermissionTargetName}. Grant it in System Settings.`
     )
   } catch (error) {
-    logBackend('warn', `Could not request Screen Recording permission: ${errorMessage(error)}`)
+    logBackend('warn', `Could not read Screen Recording permission: ${errorMessage(error)}`)
   }
+}
+
+// The in-place screen request (plan 203 S2). It is the same call the launch
+// prime made until plan 203 (desktopCapturer.getSources from the Electron
+// main process), because that is what registered the packaged app under
+// Privacy & Security → Screen & System Audio Recording until now. S0 (the
+// clean-account measurement) confirms the listed name is "Videorc" (the app
+// bundle) rather than the capture helper; if S0 finds the helper listed
+// instead, this request identity is the thing to change.
+async function requestScreenCaptureAccessFromMain(): Promise<void> {
+  await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: 0, height: 0 }
+  })
+}
+
+async function requestScreenAccessNative(): Promise<ScreenAccessResult> {
+  return requestScreenAccessWithWatch({
+    platform: process.platform,
+    getStatus: () => systemPreferences.getMediaAccessStatus('screen'),
+    requestAccess: requestScreenCaptureAccessFromMain,
+    watchGrant: (reason) => mediaPermissionGrantWatcher.watch('screen-recording', reason),
+    restartBackend: requestPermissionBackendRestart,
+    stopGrantWatcher: () => mediaPermissionGrantWatcher.stop(),
+    log: (level, message) => logBackend(level, message)
+  })
+}
+
+// Plan 203 S2: a grant noticed late (window focus after the watcher's polling
+// window, or the renderer asking from setup) restarts capture exactly once.
+async function recheckPermissionGrants(): Promise<PermissionRecheckResult> {
+  const restarted = await mediaPermissionGrantWatcher.recheck()
+  return { restarted }
+}
+
+// Plan 203 S2: Reopen Videorc. The same admission as Restart & install: the
+// sampled capture guard, then the backend's interruption lease; the relaunch
+// runs only while the lease is held. app.quit() takes the normal before-quit
+// path (the backend shuts down through its owned PIDs, never a process scan),
+// and Electron starts the new instance once this one exits.
+async function relaunchForPermission(): Promise<RelaunchForPermissionResult> {
+  return relaunchForPermissionWithInterruptionLease(
+    () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+    () => backendAdminConnection !== null,
+    () => acquireCurrentBackendInterruption('Reopening Videorc after a permission grant.'),
+    () => {
+      logBackend('info', 'Reopening Videorc after a permission grant.')
+      app.relaunch()
+      app.quit()
+    }
+  )
 }
 
 // Diagnostic tallies for probes: how chatty is main->renderer IPC really?
@@ -13571,7 +13628,7 @@ async function requestMediaAccessNative(pane: 'camera' | 'microphone'): Promise<
 // "not a function" on every IPC read) nor an OS-level grant to report: the
 // answer there is 'not-applicable', read without touching systemPreferences
 // and without a warning per call (plan 052 S5).
-function readMediaAccessStatus(pane: 'camera' | 'microphone'): MediaAccessStatus {
+function readMediaAccessStatus(pane: 'camera' | 'microphone' | 'screen'): MediaAccessStatus {
   if (process.platform === 'linux') {
     return 'not-applicable'
   }
@@ -13586,7 +13643,12 @@ function readMediaAccessStatus(pane: 'camera' | 'microphone'): MediaAccessStatus
 function mediaAccessSnapshot(): MediaAccessSnapshot {
   return {
     camera: readMediaAccessStatus('camera'),
-    microphone: readMediaAccessStatus('microphone')
+    microphone: readMediaAccessStatus('microphone'),
+    // Plan 203 S2: the screen grant is a macOS thing. Windows has no per-app
+    // screen permission (getMediaAccessStatus('screen') answers granted there,
+    // which would read as a grant that never existed), and Linux consents per
+    // capture through the portal.
+    screen: isMac ? readMediaAccessStatus('screen') : 'not-applicable'
   }
 }
 
@@ -15272,6 +15334,9 @@ app.whenReady().then(async () => {
     requestMediaAccessNative(pane)
   )
   secureIpcHandle('system:media-access-status', () => mediaAccessSnapshot())
+  secureIpcHandle('system:request-screen-access', () => requestScreenAccessNative())
+  secureIpcHandle('system:recheck-permission-grants', () => recheckPermissionGrants())
+  secureIpcHandle('app:relaunch-for-permission', () => relaunchForPermission())
   secureIpcHandle('system:reveal-permission-target', () => revealPermissionTarget())
   secureIpcHandle('resource:reveal-selection', (_event, capabilityId: unknown) =>
     revealSelectedResource(capabilityId)
@@ -16161,7 +16226,8 @@ app.whenReady().then(async () => {
   installApplicationMenu()
   createWindow()
   setDockIcon()
-  await primeScreenCapturePermission()
+  // Logs only; never awaited so the backend starts at once (plan 203 S2).
+  void primeScreenCapturePermission()
   startBackend()
   startSmokePreviewMotionServer()
 

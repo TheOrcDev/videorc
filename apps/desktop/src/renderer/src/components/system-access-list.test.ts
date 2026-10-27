@@ -38,7 +38,7 @@ const render = (): string =>
     createElement(SystemAccessList, {
       rows,
       platform: 'darwin',
-      mediaAccess: { camera: 'denied', microphone: 'not-determined' },
+      mediaAccess: { camera: 'denied', microphone: 'not-determined', screen: 'granted' },
       onAction: async () => undefined
     })
   )

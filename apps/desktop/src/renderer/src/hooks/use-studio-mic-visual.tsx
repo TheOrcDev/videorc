@@ -91,13 +91,19 @@ export function StudioMicVisualProvider({
   // session owns the device (start_session takes the warm source), so the
   // effect only re-arms once the session ends; every other change that turns
   // the gate off releases the device immediately.
-  const warmWanted = warmMicrophoneWanted({
-    keepWarm: settings.keepMicrophoneWarm !== false,
-    workspaceVisible: enabled,
-    documentVisible,
-    microphoneId: selectionKey,
-    muted: captureConfig.audio.microphoneMuted
-  })
+  // Plan 203 S2: the warm microphone is the backend opening the device at
+  // launch; on a never-asked Mac that raised the microphone prompt cold. It
+  // waits for the same exact grant the analyser waits for (granted, or an OS
+  // with no grant to give). Record still opens the microphone itself.
+  const warmWanted =
+    microphoneAccessOpen(permissionStatus) &&
+    warmMicrophoneWanted({
+      keepWarm: settings.keepMicrophoneWarm !== false,
+      workspaceVisible: enabled,
+      documentVisible,
+      microphoneId: selectionKey,
+      muted: captureConfig.audio.microphoneMuted
+    })
   const microphoneGainDb = captureConfig.audio.microphoneGainDb
   useEffect(() => {
     if (!warmWanted) {

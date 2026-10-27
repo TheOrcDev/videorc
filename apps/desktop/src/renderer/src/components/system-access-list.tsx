@@ -5,7 +5,11 @@ import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import type { MediaAccessSnapshot } from '@/lib/backend'
-import { systemAccessAction, type SystemAccessRow } from '@/lib/system-access'
+import {
+  mediaAccessStatusForPane,
+  systemAccessAction,
+  type SystemAccessRow
+} from '@/lib/system-access'
 import {
   systemAccessActionLabel,
   systemAccessStatus,
@@ -52,8 +56,7 @@ export function SystemAccessList({
             pane: row.id,
             state: row.state,
             platform,
-            mediaAccessStatus:
-              row.id === 'camera' || row.id === 'microphone' ? mediaAccess?.[row.id] : undefined
+            mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, row.id)
           }),
           platform
         )

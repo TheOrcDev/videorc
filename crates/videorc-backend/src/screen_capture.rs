@@ -400,7 +400,6 @@ mod macos {
     // as apparently-unused and broke the macOS build.
     use objc2_core_graphics::{
         CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMode, CGPreflightScreenCaptureAccess,
-        CGRequestScreenCaptureAccess,
     };
     use objc2_foundation::{NSError, NSString};
     use objc2_screen_capture_kit::{SCShareableContent, SCWindow};
@@ -535,8 +534,12 @@ mod macos {
         }
     }
 
+    // Preflight only (plan 203 S2). Device listing runs on every launch and
+    // every refresh; a request here raised macOS's own Screen Recording
+    // prompt before Videorc had explained anything. The in-place request now
+    // lives in the app (`system:request-screen-access`), behind a button.
     fn screen_capture_access_granted() -> bool {
-        CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
+        CGPreflightScreenCaptureAccess()
     }
 
     fn screen_capture_permission_message() -> String {

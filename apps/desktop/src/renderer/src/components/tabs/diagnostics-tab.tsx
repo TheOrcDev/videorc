@@ -49,7 +49,7 @@ import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/
 import { unknownDeviceWarnings } from '@/lib/source-status'
 import { previewSourceStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { mediaAccessStatusForPane, systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 
 // Health (plan 174 S3.18, I-4, I-25, V-7, D9): the page answers "is anything
@@ -103,8 +103,7 @@ export function DiagnosticsTab(): ReactElement {
       pane,
       state: accessRows.find((row) => row.id === pane)?.state,
       platform,
-      mediaAccessStatus:
-        pane === 'camera' || pane === 'microphone' ? mediaAccess?.[pane] : undefined
+      mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, pane)
     })
   const warnings = permissionWarnings(
     healthEvents,

@@ -3588,6 +3588,37 @@ export type MediaAccessStatus =
 export interface MediaAccessSnapshot {
   camera: MediaAccessStatus
   microphone: MediaAccessStatus
+  /** Screen & System Audio Recording (plan 203 S2): the exact TCC value on
+   * macOS; 'not-applicable' on Windows (no per-app screen grant) and Linux
+   * (portal consent per capture). */
+  screen: MediaAccessStatus
+}
+
+/** The screen request's outcome (plan 203 S2). macOS never answers the first
+ * Screen Recording prompt in place: the user flips the switch in System
+ * Settings, so `status` is usually still 'not-determined' right after the
+ * request and the grant watcher restarts capture when it lands. */
+export interface ScreenAccessResult {
+  status: MediaAccessStatus
+  granted: boolean
+  /** True only when a fresh grant already restarted the capture backend. */
+  restarted: boolean
+  staleBackend?: BackendRestartBoundary
+}
+
+/** `recheckPermissionGrants` (plan 203 S2): whether a late grant (noticed
+ * past the watcher's window, on focus) restarted capture just now. */
+export interface PermissionRecheckResult {
+  restarted: boolean
+}
+
+export type RelaunchForPermissionRefusal = 'capture-active' | 'backend-busy'
+
+/** `relaunchForPermission` (plan 203 S2): false with a reason when a recording,
+ * livestream or capture start is in flight; true once the app is relaunching. */
+export interface RelaunchForPermissionResult {
+  relaunched: boolean
+  reason?: RelaunchForPermissionRefusal
 }
 
 export interface HealthEvent {
@@ -4988,6 +5019,17 @@ export interface VideorcApi {
    * `restarted` is true only when a fresh grant restarted the capture backend
    * — callers probing a device right after must wait for reconnect first. */
   requestMediaAccess: (pane: 'camera' | 'microphone') => Promise<MediaAccessResult>
+  /** Plan 203 S2: ask macOS for Screen & System Audio Recording in place (the
+   * request main's launch prime used to make cold). Starts the grant watcher;
+   * elsewhere answers 'not-applicable'. */
+  requestScreenAccess: () => Promise<ScreenAccessResult>
+  /** Plan 203 S2: re-read the watched grant now (window focus, setup open past
+   * the watcher's window). A real not-granted → granted transition restarts
+   * capture exactly once. */
+  recheckPermissionGrants: () => Promise<PermissionRecheckResult>
+  /** Plan 203 S2: Reopen Videorc after a grant macOS only honours per launch.
+   * Refused while a recording, livestream or capture start is active. */
+  relaunchForPermission: () => Promise<RelaunchForPermissionResult>
   revealPermissionTarget: () => Promise<void>
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>

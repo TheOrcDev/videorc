@@ -9,6 +9,7 @@ import {
   microphoneAccessState,
   screenAccessState,
   shouldShowPermissionsOnboarding,
+  mediaAccessStatusForPane,
   systemAccessAction,
   systemAccessRows
 } from './system-access'
@@ -76,9 +77,13 @@ describe('microphoneAccessState', () => {
 
 describe('isMediaAccessSnapshotReady', () => {
   it('does not let automatic onboarding decide from an unknown OS snapshot', () => {
-    expect(isMediaAccessSnapshotReady({ camera: 'unknown', microphone: 'not-determined' })).toBe(
-      false
-    )
+    expect(
+      isMediaAccessSnapshotReady({
+        camera: 'unknown',
+        microphone: 'not-determined',
+        screen: 'not-determined'
+      })
+    ).toBe(false)
   })
 })
 
@@ -371,7 +376,8 @@ describe('systemAccessRows', () => {
         backendReady: true,
         mediaAccessReady: isMediaAccessSnapshotReady({
           camera: 'not-applicable',
-          microphone: 'not-applicable'
+          microphone: 'not-applicable',
+          screen: 'not-applicable'
         })
       })
     ).toBe(false)
@@ -459,5 +465,58 @@ describe('systemAccessAction', () => {
         mediaAccessStatus: 'unknown'
       })
     ).toBe('open-settings')
+  })
+
+  it('asks for a never-asked screen in place on macOS (plan 203 S2), Settings otherwise', () => {
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'not-granted',
+        platform: 'darwin',
+        mediaAccessStatus: 'not-determined'
+      })
+    ).toBe('request-media-access')
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'not-granted',
+        platform: 'darwin',
+        mediaAccessStatus: 'denied'
+      })
+    ).toBe('open-settings')
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'granted',
+        platform: 'darwin',
+        mediaAccessStatus: 'granted'
+      })
+    ).toBeNull()
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'not-granted',
+        platform: 'win32',
+        mediaAccessStatus: 'not-determined'
+      })
+    ).toBe('open-settings')
+  })
+})
+
+describe('mediaAccessStatusForPane', () => {
+  it('reads each row its own grant, the screen row the Screen Recording grant, privacy none', () => {
+    const snapshot = {
+      camera: 'granted',
+      microphone: 'denied',
+      screen: 'not-determined'
+    } as const
+    expect(mediaAccessStatusForPane(snapshot, 'camera')).toBe('granted')
+    expect(mediaAccessStatusForPane(snapshot, 'microphone')).toBe('denied')
+    expect(mediaAccessStatusForPane(snapshot, 'screen-recording')).toBe('not-determined')
+    expect(mediaAccessStatusForPane(snapshot, 'privacy')).toBeUndefined()
+    expect(mediaAccessStatusForPane(null, 'screen-recording')).toBeUndefined()
+    expect(
+      mediaAccessStatusForPane({ camera: 'granted', microphone: 'granted' }, 'screen-recording')
+    ).toBeUndefined()
   })
 })

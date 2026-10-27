@@ -92,6 +92,7 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
+import { replayStartWaitsForGrant } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -15620,9 +15621,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   scheduleReplayReconcileRef.current = scheduleReplayReconcile
 
+  // Plan 203 S2: a buffer-only session opens the scene's devices like a
+  // recording does; on a never-asked Mac that was a cold OS prompt at launch.
+  const replayGrantWait = replayStartWaitsForGrant({
+    mediaAccess,
+    sources: captureConfig.sources,
+    layoutPreset: captureConfig.layout.layoutPreset
+  })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
-    if (recordBlockedReason) {
+    if (recordBlockedReason || replayGrantWait) {
       // Not yet: a source or a permission is missing. The switch stays on
       // and the ring starts once the reason clears (the effect below), so a
       // launch before Sources settle never turns clips off.
@@ -15677,6 +15685,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyRecordingStatus,
     client,
     recordBlockedReason,
+    replayGrantWait,
     sceneEditMode,
     sceneWithBackground,
     scheduleReplayReconcile
@@ -15726,7 +15735,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     replayFailedStartsRef.current = 0
     rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
-  }, [recordBlockedReason, scheduleReplayReconcile])
+  }, [recordBlockedReason, replayGrantWait, scheduleReplayReconcile])
   // A source change while only the buffer-only session runs is an idle
   // change: stop the ring (it restarts empty) and re-arm with the new
   // sources, including the microphone Linux cannot swap mid-session.

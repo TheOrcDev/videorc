@@ -16,10 +16,11 @@ import type {
 } from '@/lib/backend'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 import {
-  systemAccessAction,
-  systemAccessRows,
   type SystemAccessAction,
-  type SystemAccessRow
+  type SystemAccessRow,
+  mediaAccessStatusForPane,
+  systemAccessAction,
+  systemAccessRows
 } from '@/lib/system-access'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
@@ -86,10 +87,7 @@ export function PreviewStage({
           pane: permissionPane,
           state: permissionRow?.state,
           platform: runtimeInfo?.platform,
-          mediaAccessStatus:
-            permissionPane === 'camera' || permissionPane === 'microphone'
-              ? mediaAccess?.[permissionPane]
-              : undefined
+          mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, permissionPane)
         })
       }
     : null

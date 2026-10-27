@@ -33,6 +33,19 @@ export interface SystemAccessRow {
 
 export type SystemAccessAction = 'request-media-access' | 'open-settings' | null
 
+/** The exact OS status behind a row (plan 203 S2): the screen row reads the
+ * Screen & System Audio Recording grant, the others their own. Privacy has
+ * none. Snapshots from before S2 carry no `screen`, so it stays optional. */
+export function mediaAccessStatusForPane(
+  mediaAccess: Partial<MediaAccessSnapshot> | null | undefined,
+  pane: SystemPermissionPane
+): MediaAccessStatus | undefined {
+  if (!mediaAccess) return undefined
+  if (pane === 'camera' || pane === 'microphone') return mediaAccess[pane]
+  if (pane === 'screen-recording') return mediaAccess.screen
+  return undefined
+}
+
 export function isMediaAccessSnapshotReady(
   mediaAccess: MediaAccessSnapshot | null | undefined
 ): mediaAccess is MediaAccessSnapshot {
@@ -178,6 +191,18 @@ export function systemAccessAction({
   ) {
     return 'request-media-access'
   }
+  // Plan 203 S2: a never-asked screen is asked in place too. Until the
+  // request, Videorc isn't in the Screen & System Audio Recording list, so
+  // sending someone to System Settings strands them on a list without it.
+  // The backend lists a never-asked screen as permission-required (the row
+  // reads not-granted), so the exact TCC value decides here, not the state.
+  if (
+    appPlatform(platform) === 'darwin' &&
+    pane === 'screen-recording' &&
+    mediaAccessStatus === 'not-determined'
+  ) {
+    return 'request-media-access'
+  }
   return 'open-settings'
 }
 
@@ -190,7 +215,11 @@ export function systemAccessRows({
   deviceList: DeviceList
   audioMeter: AudioMeterResult | null
   platform?: string
-  mediaAccess?: { camera: MediaAccessStatus; microphone: MediaAccessStatus } | null
+  mediaAccess?: {
+    camera: MediaAccessStatus
+    microphone: MediaAccessStatus
+    screen?: MediaAccessStatus
+  } | null
 }): SystemAccessRow[] {
   const os = appPlatform(platform)
   const backendCamera = cameraAccessState(deviceList)

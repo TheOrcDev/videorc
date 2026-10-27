@@ -8640,7 +8640,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'linux',
       getMediaAccessStatus: async () => ({
         camera: 'not-applicable',
-        microphone: 'not-applicable'
+        microphone: 'not-applicable',
+        screen: 'not-applicable'
       })
     })
     const testDom = installProviderTestEnvironment(api)
@@ -8704,7 +8705,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions
@@ -8767,7 +8769,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -9440,7 +9443,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -10332,7 +10336,7 @@ describe('real StudioProvider lifecycle', () => {
         if (!statusReadAvailable) {
           throw new Error('TCC status read failed')
         }
-        return { camera: 'not-determined', microphone: 'granted' }
+        return { camera: 'not-determined', microphone: 'granted', screen: 'granted' }
       },
       requestMediaAccess,
       openSystemPermissions
@@ -10397,7 +10401,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'denied' }),
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'denied',
+        screen: 'granted'
+      }),
       requestMediaAccess,
       openSystemPermissions
     })
@@ -10472,7 +10480,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions,
@@ -10572,7 +10581,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 101 },
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10698,7 +10708,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10802,7 +10813,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 401 },
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -15424,7 +15436,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted' })
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'granted',
+        screen: 'granted'
+      })
     })
     const testDom = installProviderTestEnvironment(api)
     const audio = installVisualMicAudioEnvironment()
@@ -15666,6 +15682,7 @@ function createVideorcApi(options: {
         gpuDevices: [],
         hardwareAccelerationDisabled: false,
         isPackaged: false,
+        firstRunSuppressed: false,
         permissionTargetName: 'Videorc',
         permissionTargetPath: 'C:\\Videorc.exe',
         capturePermissionTargetName: 'Videorc',
@@ -15700,7 +15717,7 @@ function createVideorcApi(options: {
       getCaptionsWindowState: async () => idleCaptions,
       getMediaAccessStatus:
         options.getMediaAccessStatus ??
-        (async () => ({ camera: 'granted', microphone: 'granted' })),
+        (async () => ({ camera: 'granted', microphone: 'granted', screen: 'granted' })),
       requestMediaAccess: options.requestMediaAccess,
       openSystemPermissions: options.openSystemPermissions,
       getViewerSample: async () => null,
