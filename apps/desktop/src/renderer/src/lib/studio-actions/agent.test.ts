@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   AGENT_INTENT_COPY,
+  BUDDY_AGENT_ID,
   executeAgentIntent,
   type AgentIntent,
   type AgentToolExecutor
@@ -130,5 +131,32 @@ describe('executeAgentIntent', () => {
       message: REMOTE_INTENT_COPY.alreadyRunning
     })
     expect(live.startRecording).not.toHaveBeenCalled()
+  })
+
+  it("never runs a tool outside Buddy's subset for a Buddy intent (plan 209 D15)", async () => {
+    const openWindow: AgentToolExecutor = vi.fn(async () => ({ ok: true }))
+    const notify: AgentToolExecutor = vi.fn(async () => ({ ok: true }))
+    const switchScene: AgentToolExecutor = vi.fn(async () => ({ ok: true }))
+    const executors = { open_window: openWindow, notify, switch_scene: switchScene }
+    const buddy = (tool: string): AgentIntent => ({
+      ...intent(tool),
+      agentId: BUDDY_AGENT_ID,
+      agentName: 'Buddy'
+    })
+    for (const tool of ['open_window', 'notify']) {
+      await expect(executeAgentIntent(buddy(tool), studioContext(), executors)).resolves.toEqual({
+        ok: false,
+        message: AGENT_INTENT_COPY.notBuddys
+      })
+    }
+    expect(openWindow).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
+    // Buddy's own tools run; an agent's call to the same tools is untouched.
+    await expect(
+      executeAgentIntent(buddy('switch_scene'), studioContext(), executors)
+    ).resolves.toEqual({ ok: true })
+    await expect(
+      executeAgentIntent(intent('open_window'), studioContext(), executors)
+    ).resolves.toEqual({ ok: true })
   })
 })

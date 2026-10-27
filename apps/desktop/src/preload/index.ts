@@ -109,6 +109,9 @@ const api: VideorcApi = {
   soundFromCommentsWindow: (command) => invoke('comments-window:sound', command),
   onSoundRequest: (callback) => subscribe('comments-window:sound-request', callback),
   pushSoundResult: (resolution) => invoke('comments-window:sound-result-push', resolution),
+  buddyActFromCommentsWindow: (command) => invoke('comments-window:buddy-act', command),
+  onBuddyActRequest: (callback) => subscribe('comments-window:buddy-act-request', callback),
+  pushBuddyActResult: (resolution) => invoke('comments-window:buddy-act-result-push', resolution),
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),

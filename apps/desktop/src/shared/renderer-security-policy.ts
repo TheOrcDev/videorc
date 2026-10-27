@@ -170,6 +170,10 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:sounds-push': MAIN_ONLY,
   'comments-window:sound': MAIN_AND_COMMENTS,
   'comments-window:sound-result-push': MAIN_ONLY,
+  // Plan 209 S20: `/buddy <words>` from the Stream Manager (its handler
+  // refuses any other sender); Studio replies with Buddy's answer.
+  'comments-window:buddy-act': MAIN_AND_COMMENTS,
+  'comments-window:buddy-act-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
   // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):

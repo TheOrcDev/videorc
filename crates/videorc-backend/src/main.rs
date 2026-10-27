@@ -19,6 +19,7 @@ mod backend_authority;
 mod banner_prepare;
 mod banner_timers;
 mod banners;
+mod buddy_act;
 mod buddy_animator;
 mod buddy_motion;
 mod buddy_overlay;
@@ -5642,6 +5643,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
+        // Plan 209 S20: answers at once; the planner and the tool calls run
+        // on their own task and report `cohost.act.result`.
+        | "cohost.act"
         | "cohost.utterance.approve"
         | "cohost.utterance.dismiss"
         | "cohost.utterance.say"
@@ -9911,6 +9915,20 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 209 S20: `/buddy <words>` from the Stream Manager. Answers at
+        // once (a gate's sentence, or `working`); the result follows as
+        // `cohost.act.result`. Never routed by the LAN listener.
+        "cohost.act" => {
+            match serde_json::from_value::<buddy_act::CohostActParams>(command.params) {
+                Ok(params) => match cohost::act_typed(state, params).await {
+                    Ok(answer) => ServerResponse::ok(command.id, answer),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         // Plan 164 Phase D: the Stream Manager's answers to the Buddy's
         // proposed cards, and the Say box. Never routed by the LAN listener.
         "cohost.utterance.approve" => {
@@ -14039,6 +14057,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     let mut greet_version: Option<Option<u32>> = None;
     // Plan 170 D9: the same read turns the account Buddy library on or off.
     let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
+    // Plan 209 S19: and whether Buddy's tool planner may be asked
+    // (`buddy.act`). Signed out or absent reads as off.
+    let mut buddy_act: Option<bool> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -14060,6 +14081,13 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.greet))
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                buddy_act = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(false),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.buddy_act_enabled())
                     }
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
@@ -14100,6 +14128,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     }
     if let Some(library) = buddy_library {
         cohost_library::set_capability(state, library).await;
+    }
+    if let Some(enabled) = buddy_act {
+        cohost::set_buddy_act_capability(state, enabled).await;
     }
 }
 
@@ -16574,6 +16605,9 @@ mod tests {
             "cohost.command.choose",
             "cohost.command.confirm",
             "cohost.command.cancel",
+            // Plan 209 S20: `/buddy` answers at once; the calls run on their
+            // own task and report `cohost.act.result`.
+            "cohost.act",
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(
@@ -16592,6 +16626,7 @@ mod tests {
             );
         }
         assert!(!crate::remote_lan::LAN_EVENTS.contains(&cohost::COHOST_STATE_EVENT));
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&buddy_act::ACT_RESULT_EVENT));
 
         for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
             let command = json!({

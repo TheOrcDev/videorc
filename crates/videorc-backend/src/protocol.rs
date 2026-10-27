@@ -6053,6 +6053,10 @@ pub struct AiCapabilities {
     /// whether avatar generation is on. Older servers omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cohost: Option<AiCapabilitiesCohost>,
+    /// Plan 209 S19, contract part F: Buddy's tool planner. Older servers
+    /// omit it, which reads as off: the old wake-word path stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buddy: Option<AiCapabilitiesBuddy>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -6060,6 +6064,22 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `buddy` from `GET /api/ai/capabilities` (plan 209 S19): `act` is 1 when
+/// this user may call `POST /api/ai/buddy/act`, 0 otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesBuddy {
+    #[serde(default)]
+    pub act: u32,
+}
+
+impl AiCapabilities {
+    /// Whether the planner may be asked: only an explicit `buddy.act: 1`.
+    pub fn buddy_act_enabled(&self) -> bool {
+        self.buddy.as_ref().is_some_and(|buddy| buddy.act == 1)
+    }
 }
 
 /// `cohost` from `GET /api/ai/capabilities` (plan 164): every field

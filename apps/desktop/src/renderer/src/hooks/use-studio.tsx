@@ -4925,6 +4925,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   const cohostGate = useMemo(() => liveCohostGate(entitlements), [entitlements])
+  // Plan 209 S20: `/buddy` reads the consent and Buddy's Premium gate when
+  // asked (a render-body mirror, like the refs above; no effect).
+  const buddyActGateRef = useRef({ consent: aiConsent, entitled: cohostGate.allowed })
+  buddyActGateRef.current = { consent: aiConsent, entitled: cohostGate.allowed }
   const cohostEnabled = cohostSettings?.enabled === true
   const cohostListen = cohostSettings?.listen === true
   const cohostLiveSessionId = liveChatSnapshot.sessionId ?? null
@@ -7021,15 +7025,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // Manager is closed. Events that arrive first wait for it.
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
+    let stopBuddyActRelay: (() => void) | null = null
     const moderationBacklog: ModerationOperation[] = []
     void import('@/lib/chat-moderation-relay')
-      .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
+      .then(({ startChatModerationRelay, startCohostCommandRelay, startBuddyActRelay }) => {
         if (!generationIsCurrent()) return
         // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
         stopCohostCommandRelay = startCohostCommandRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,
           commit: commitCohostState
+        })
+        // Plan 209 S20: `/buddy <words>` from the Stream Manager.
+        stopBuddyActRelay = startBuddyActRelay({
+          client: nextClient,
+          consent: () => buddyActGateRef.current.consent,
+          entitled: () => buddyActGateRef.current.entitled
         })
         moderation = startChatModerationRelay({
           client: nextClient,
@@ -8665,6 +8676,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       dashboardBacklog.length = 0
       moderation?.dispose()
       stopCohostCommandRelay?.()
+      stopBuddyActRelay?.()
       if (chatModerationRef.current === moderation) chatModerationRef.current = null
       moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
@@ -17073,7 +17085,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       notes: notesWindow.open,
       streamManager: commentsWindow.open,
       preview: previewWindow.open
-    }
+    },
+    // Plan 209 S19: Buddy's planner reads it too while Buddy may act.
+    buddyCanAct: cohostGate.allowed
   }
   agentSurfaceInputRef.current = agentSurfaceInput
   agentSurfacePublisherRef.current?.sync(agentSurfaceInput)

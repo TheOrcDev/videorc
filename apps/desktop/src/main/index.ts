@@ -225,6 +225,7 @@ import type {
   StarterSound,
   StarterSoundFile
 } from '../shared/sound-commands'
+import { BUDDY_ACT_RESULT_TIMEOUT_MS, type CohostActAnswer } from '../shared/buddy-act'
 import {
   SOUND_IMPORT_EXTENSIONS,
   STARTER_SOUNDS_MANIFEST,
@@ -16037,6 +16038,28 @@ app.whenReady().then(async () => {
     })
   })
   secureIpcHandle('comments-window:sound-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // `/buddy <words>` (plan 209 S20): the same relay. The MAIN renderer owns
+  // the backend socket and the Cloud AI consent, makes the `cohost.act` call
+  // and answers with Buddy's final words, which can take a planner call and
+  // up to three tool calls (going live waits up to 60 s).
+  secureIpcHandle('comments-window:buddy-act', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can ask Buddy here.'))
+    }
+    return commentsCommandBroker.request<CohostActAnswer>(
+      command.requestId,
+      () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:buddy-act-request', command)
+        return true
+      },
+      BUDDY_ACT_RESULT_TIMEOUT_MS + 5_000
+    )
+  })
+  secureIpcHandle('comments-window:buddy-act-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
   })

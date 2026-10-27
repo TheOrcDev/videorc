@@ -128,6 +128,7 @@ import {
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
 import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
+import type { CohostActAnswer } from '../../../../shared/buddy-act'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
@@ -306,6 +307,9 @@ export interface StreamManagerProps {
    */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /** Plan 209 S20: `/buddy <words>`, relayed to Studio; resolves to Buddy's
+   * final answer, which the composer shows. */
+  onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
@@ -417,6 +421,7 @@ export function StreamManager({
   onBanner,
   sounds,
   onSound,
+  onBuddy,
   markerContext,
   onMarker,
   onUndoMarker,
@@ -1252,6 +1257,7 @@ export function StreamManager({
             onBanner={inHistory ? undefined : onBanner}
             sounds={sounds}
             onSound={inHistory ? undefined : onSound}
+            onBuddy={inHistory ? undefined : onBuddy}
             onSend={onSend}
           />
         </div>
