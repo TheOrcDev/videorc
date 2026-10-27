@@ -315,6 +315,16 @@ describe('smoke command security', () => {
     ).not.toBeNull()
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('inspect-packaged-bundled-background')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-live-audio-harness')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-d3d11-preview-harness')).toBe(true)
+    expect(
+      validateSmokeCommandPayload({
+        command: 'windows-d3d11-preview-harness',
+        params: { action: 'configure', screenId: 'screen:dxgi:0000000000000001:1' }
+      })
+    ).not.toBeNull()
+    // The renderer's dev-only selectors stay out of packaged builds.
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('select-screen-device')).toBe(false)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('select-layout-preset')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-open')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-save-document')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('comments-window-open')).toBe(true)

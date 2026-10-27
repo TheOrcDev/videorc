@@ -1,5 +1,15 @@
 # Implementation Plans
 
+- 2026-10-26: [Plan 202](202-buddy-talks-in-its-bubble.md), Buddy talks in
+  its bubble. Owner request: a mode where Buddy talks only in its bubble, not
+  in chat, and a switch for whether Buddy shows on takeover screens. A fourth
+  mode, "Buddy talks: Off · Bubble · Suggest · Auto": greetings, answers and
+  banter speak only in the on-stream bubble and never post to chat. It needs
+  no posting consent, uses a settings field older apps survive, paces bubbles
+  so none is cut short, and answers start with "@name". "Show on takeovers"
+  in Layout → Buddy hides the pet and bubble while a takeover shows; it
+  starts off for everyone, so the release notes must say so. Four desktop
+  phases, no web change. **PLANNED**; owner answers recorded 2026-10-26.
 - 2026-10-26: [Plan 201](201-studio-audio-balance.md), Balance the Microphone
   and System audio from the Studio. One Audio section puts both levels on
   one audiocn Mixer scale, each with the same Gain fader Sources uses, in

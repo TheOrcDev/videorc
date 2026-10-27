@@ -463,36 +463,37 @@ export function ActivityPane({
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
         <div className={cn('min-w-0 flex-wrap items-center gap-1', 'flex', ABOVE_NARROW)}>
-          <ToggleGroup
-            aria-label="Filter activity"
-            className="flex-wrap justify-start"
-            type="single"
-            value={filter}
-            onValueChange={(value) => setFilter((value || 'all') as ActivityFilter | 'all')}
-          >
-            <ToggleGroupItem className="text-xs" value="all">
-              All
-            </ToggleGroupItem>
-            {/* A chip shows once it has rows, with its count: the pane's
-                old "This stream: …" sentence, where it can be clicked. */}
-            {shownFilters.map((option) => (
-              // ShortcutTooltip wraps the chip: a trigger's own data-state
-              // would overwrite the item's on/off state.
-              <ShortcutTooltip key={option.id} label={option.title}>
-                <ToggleGroupItem className="gap-1 text-xs" value={option.id}>
-                  {option.label}
-                  <span className="text-muted-foreground tabular-nums">{counts[option.id]}</span>
-                </ToggleGroupItem>
-              </ShortcutTooltip>
-            ))}
-          </ToggleGroup>
-          {/* The same platform filter as chat (plan 174 S3.16a, H-19). */}
+          {/* The same platform filter as chat (plan 174 S3.16a, H-19). Its
+              All chip is the row's only one: like chat's Questions and
+              Mentions, a kind chip clicked again turns back off. */}
           <PlatformFilter
             label="Show activity from"
             platforms={platforms}
             value={platform}
             onValueChange={setPlatform}
           />
+          {shownFilters.length > 0 ? (
+            <ToggleGroup
+              aria-label="Filter activity"
+              className="flex-wrap justify-start"
+              type="single"
+              value={filter === 'all' ? '' : filter}
+              onValueChange={(value) => setFilter((value || 'all') as ActivityFilter | 'all')}
+            >
+              {/* A chip shows once it has rows, with its count: the pane's
+                  old "This stream: …" sentence, where it can be clicked. */}
+              {shownFilters.map((option) => (
+                // ShortcutTooltip wraps the chip: a trigger's own data-state
+                // would overwrite the item's on/off state.
+                <ShortcutTooltip key={option.id} label={option.title}>
+                  <ToggleGroupItem className="gap-1 text-xs" value={option.id}>
+                    {option.label}
+                    <span className="text-muted-foreground tabular-nums">{counts[option.id]}</span>
+                  </ToggleGroupItem>
+                </ShortcutTooltip>
+              ))}
+            </ToggleGroup>
+          ) : null}
         </div>
         {/* Below 640 px the same filters live in one menu, like chat's. */}
         <DropdownMenu>

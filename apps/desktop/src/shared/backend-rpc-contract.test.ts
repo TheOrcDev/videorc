@@ -3121,10 +3121,20 @@ describe('banner backend wire contract (plan 186)', () => {
   })
 
   it('validates the secret-free Discord announcement surface (plan 187)', () => {
+    const webhook = {
+      id: '123456789012345678',
+      name: 'Stream alerts',
+      hint: '…/9xyz',
+      lastPost: {
+        at: '2026-10-22T18:02:00+00:00',
+        messageUrl: 'https://discord.com/channels/1/2/3',
+        state: 'live'
+      },
+      lastError: { code: 'unreachable', at: '2026-10-22T18:03:00+00:00' }
+    }
     const snapshot = {
-      webhookPresent: true,
-      webhookHint: '…/9xyz',
-      webhookName: 'Stream alerts',
+      // Several webhooks, one per server; a bare one has only its id and tail.
+      webhooks: [webhook, { id: '2', hint: '…/a1B2' }],
       enabled: true,
       ping: 'everyone',
       branding: true,
@@ -3139,13 +3149,7 @@ describe('banner backend wire contract (plan 186)', () => {
           avatarUrl: 'https://static-cdn.jtvnw.net/a.png'
         },
         { postAs: { kind: 'videorc' }, name: 'Orc' }
-      ],
-      lastPost: {
-        at: '2026-10-22T18:02:00+00:00',
-        messageUrl: 'https://discord.com/channels/1/2/3',
-        state: 'live'
-      },
-      lastError: { code: 'unreachable', at: '2026-10-22T18:03:00+00:00' }
+      ]
     }
     for (const method of [
       'discord.announce.get',
@@ -3160,15 +3164,49 @@ describe('banner backend wire contract (plan 186)', () => {
     )
     // Rust omits None; a null would mean the serde trap is back.
     expect(() =>
-      validateBackendRpcResult('discord.announce.get', { ...snapshot, webhookHint: null })
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, name: null }]
+      })
     ).toThrow()
-    // The webhook URL never travels back to the renderer.
+    // A webhook URL never travels back to the renderer, on the snapshot or a row.
     expect(() =>
       validateBackendRpcResult('discord.announce.get', {
         ...snapshot,
         webhookUrl: 'https://discord.com/api/webhooks/1/secret'
       })
     ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, url: 'https://discord.com/api/webhooks/1/secret' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, token: 'secret' }]
+      })
+    ).toThrow()
+    // Ten servers is the cap; the renderer never has to draw more.
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: Array.from({ length: 11 }, (_, index) => ({ id: String(index), hint: '…/a' }))
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ hint: '…/a1B2' }]
+      })
+    ).toThrow()
+    // Remove and the test name one webhook by its id.
+    expect(validateBackendRpcParams('discord.webhook.remove', { webhookId: '2' })).toStrictEqual({
+      webhookId: '2'
+    })
+    expect(() => validateBackendRpcParams('discord.webhook.remove', {})).toThrow()
+    expect(() => validateBackendRpcParams('discord.webhook.remove', undefined)).toThrow()
     expect(() =>
       validateBackendRpcParams('discord.announce.update', { url: 'https://discord.com/x' })
     ).toThrow()
@@ -3197,6 +3235,9 @@ describe('banner backend wire contract (plan 186)', () => {
         targets: [{ ...targets.targets[0], streamKey: 'live_123' }]
       })
     ).toThrow()
+    const test = { ...targets, webhookId: '123456789012345678' }
+    expect(validateBackendRpcParams('discord.webhook.sendTest', test)).toStrictEqual(test)
+    expect(() => validateBackendRpcParams('discord.webhook.sendTest', targets)).toThrow()
     const preview = {
       links: [
         { targetId: 'yt', label: 'YouTube · Vertical', linkKind: 'at-go-live', included: true },

@@ -112,6 +112,12 @@ const usePackagedWindowsScreen =
   (exerciseProofFramePolling ||
     windowsPreviewOptions.d3d11 ||
     windowsPreviewOptions.expectFallback === 'natural')
+// The renderer keeps its default camera scene unless it is told otherwise, and
+// every session it starts is then refused (the camera never starts here, and
+// the D3D11 scene map refuses the test pattern). The D3D11 presenter is only
+// configured by a running session, so the gate drives the renderer's own
+// sources to the real screen + ScreenOnly through the packaged bridge.
+const usePackagedWindowsD3d11Sources = usePackagedWindowsScreen && windowsPreviewOptions.d3d11
 const recordingProofPollingIntervalMs = 125
 const recordingProofPollingMaxWidth = 960
 const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
@@ -248,13 +254,16 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
       tab: 'studio',
       waitFor: '[data-videorc-preview-card]'
     })
+    if (usePackagedWindowsD3d11Sources) {
+      await configurePackagedWindowsD3d11RendererSources(smoke, packagedWindowsScreen.id)
+    }
     if (usePackagedWindowsScreen) {
       await applyPackagedWindowsScreenLayout(ws)
     }
     const bootstrap = await smokeCommand(smoke, 'inspect-native-preview-bootstrap')
     assertNativeBootstrap(bootstrap)
     await smokeCommand(smoke, 'preview-window-open')
-    await waitForPreviewWindowSurface(smoke)
+    await waitForPreviewWindowSurface(smoke, ws)
     const surfaceBefore = await waitForNativeSurface(ws)
     const nativeStage = await smokeCommand(smoke, 'inspect-native-preview-bootstrap', {
       requireNativePlaceholder: true
@@ -322,6 +331,26 @@ async function startPackagedWindowsScreenPreview(ws) {
   throw new Error(
     `No real Windows screen source could feed packaged preview polling: ${failures.join('; ') || 'no candidates'}`
   )
+}
+
+async function configurePackagedWindowsD3d11RendererSources(smoke, screenId) {
+  const state = await smokeCommand(smoke, 'windows-d3d11-preview-harness', {
+    action: 'configure',
+    screenId
+  })
+  if (
+    state?.sources?.screenId !== screenId ||
+    state.sources.cameraId !== undefined ||
+    state.sources.cameraOff !== true ||
+    state.sources.microphoneId !== undefined ||
+    state.sources.testPattern !== false ||
+    state.layout?.layoutPreset !== 'screen-only'
+  ) {
+    throw new Error(
+      `Packaged renderer did not select screen ${screenId} as its only ScreenOnly source: ${JSON.stringify(state)}`
+    )
+  }
+  console.log(`Native-preview recording smoke set renderer sources to ${screenId} + ScreenOnly.`)
 }
 
 async function applyPackagedWindowsScreenLayout(ws) {
@@ -883,7 +912,7 @@ async function waitForNativeSurface(ws, previousFrames = 0) {
   )
 }
 
-async function waitForPreviewWindowSurface(smoke) {
+async function waitForPreviewWindowSurface(smoke, ws = null) {
   const deadline = Date.now() + timeoutMs
   let lastEvidence = null
   while (Date.now() < deadline) {
@@ -906,8 +935,30 @@ async function waitForPreviewWindowSurface(smoke) {
     await sleep(150)
   }
   throw new Error(
-    `Preview window surface did not open as ${expectedSurfaceTransport}/${expectedSurfaceBacking}. Last evidence: ${JSON.stringify(lastEvidence)}`
+    `Preview window surface did not open as ${expectedSurfaceTransport}/${expectedSurfaceBacking}. Last evidence: ${JSON.stringify(lastEvidence)}${await backendPreviewEvidence(ws)}`
   )
+}
+
+// The Electron-side evidence alone cannot say whether the backend ever got a
+// surface, trusted bounds, a recording session or a D3D11 presenter.
+async function backendPreviewEvidence(ws) {
+  if (!ws) return ''
+  try {
+    const [surface, diagnostics, recording] = await Promise.all([
+      request(ws, timeoutMs, 'preview.surface.status'),
+      request(ws, timeoutMs, 'diagnostics.stats'),
+      request(ws, timeoutMs, 'recording.status')
+    ])
+    return `. Backend evidence: ${JSON.stringify({
+      surface,
+      recording: { state: recording?.state, sessionId: recording?.sessionId },
+      diagnosticsSessionId: diagnostics?.sessionId ?? null,
+      previewTransport: diagnostics?.previewTransport ?? null,
+      windowsD3d11Media: diagnostics?.windowsD3d11Media ?? null
+    })}`
+  } catch (error) {
+    return `. Backend evidence unavailable: ${errorMessage(error)}`
+  }
 }
 
 async function waitForHiddenNativeSurface(ws) {
@@ -1543,6 +1594,7 @@ function launchAndReadConnections() {
           ? { VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK: 'natural' }
           : {}),
         ...(usePackagedWindowsScreen ? { VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1' } : {}),
+        ...(usePackagedWindowsD3d11Sources ? { VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1' } : {}),
         ...(packagedSmokeCapability
           ? {
               VIDEORC_PACKAGED_SMOKE_TEST: '1',

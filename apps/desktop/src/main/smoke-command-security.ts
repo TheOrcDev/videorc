@@ -135,6 +135,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'window-bounds-storm',
   'window-glass-state',
   'windows-preview-os-input-probe',
+  'windows-d3d11-preview-harness',
   'windows-live-audio-harness'
 ])
 
@@ -307,6 +308,10 @@ export const PACKAGED_SMOKE_COMMAND_NAMES = new Set([
   'restore-window',
   'resume-native-preview-surface',
   'suspend-native-preview-surface',
+  // Renderer source selection for the packaged D3D11 preview gate. It only
+  // selects a screen the harness can already start over its own backend
+  // connection, and refuses outside VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE=1.
+  'windows-d3d11-preview-harness',
   'windows-live-audio-harness'
 ])
 

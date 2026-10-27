@@ -572,14 +572,49 @@ impl WindowsD3d11EncoderOwnershipState {
             return Err(WindowsD3d11EncoderContractError::new(
                 WindowsD3d11EncoderContractErrorCode::DrainTimedOut,
                 format!(
-                    "bounded drain expired with {} tracked surfaces",
-                    self.reserved.len().saturating_add(self.in_flight.len())
+                    "bounded drain expired with {} tracked surfaces (transform drain {})",
+                    self.reserved.len().saturating_add(self.in_flight.len()),
+                    if transform_complete {
+                        "complete"
+                    } else {
+                        "pending"
+                    }
                 ),
             ));
         }
         Ok(WindowsD3d11EncoderWaitStatus::Pending {
             in_flight: self.reserved.len().saturating_add(self.in_flight.len()),
         })
+    }
+
+    /// True once the transform has reported `METransformDrainComplete`.
+    pub(crate) const fn transform_drain_completed(&self) -> bool {
+        matches!(
+            self.phase,
+            WindowsD3d11EncoderPhase::Draining {
+                transform_complete: true,
+                ..
+            }
+        )
+    }
+
+    /// Closes a drain whose transform has completed and produced every
+    /// output while it still references some input surfaces. The NVIDIA
+    /// async H.264 MFT keeps its last input sample through drain and flush
+    /// and releases it only when it is torn down, so those leases stay
+    /// in flight (never recycled) until their tracked-sample callbacks.
+    /// Returns how many remain.
+    pub(crate) fn close_drain_with_transform_retained(
+        &mut self,
+    ) -> Result<usize, WindowsD3d11EncoderContractError> {
+        if !self.transform_drain_completed() || !self.reserved.is_empty() {
+            return Err(WindowsD3d11EncoderContractError::new(
+                WindowsD3d11EncoderContractErrorCode::InvalidPhase,
+                "only a completed transform drain can close with retained surfaces",
+            ));
+        }
+        self.phase = WindowsD3d11EncoderPhase::Closed;
+        Ok(self.in_flight.len())
     }
 
     pub(crate) fn begin_flush(
@@ -840,9 +875,11 @@ mod tests {
             submission(6, WindowsD3d11EncoderRole::Record, 1, 0),
         );
         state.begin_drain(100, 50).expect("begin drain");
+        assert!(!state.transform_drain_completed());
         state
             .note_transform_drain_complete()
             .expect("MFT drain event");
+        assert!(state.transform_drain_completed());
         assert_eq!(
             state.drain_status(120).expect("pending tracked callback"),
             WindowsD3d11EncoderWaitStatus::Pending { in_flight: 1 }
@@ -863,6 +900,44 @@ mod tests {
             state.drain_status(130).expect("drain after callback"),
             WindowsD3d11EncoderWaitStatus::Complete
         );
+
+        // A transform that keeps its last input after draining closes the
+        // drain, but the lease stays in flight until its own callback.
+        let mut held =
+            WindowsD3d11EncoderOwnershipState::new(8, WindowsD3d11EncoderRole::Record, 2)
+                .expect("valid state");
+        committed(
+            &mut held,
+            submission(8, WindowsD3d11EncoderRole::Record, 3, 0),
+        );
+        held.begin_drain(100, 50).expect("begin drain");
+        assert_eq!(
+            held.close_drain_with_transform_retained()
+                .expect_err("the transform has not drained yet")
+                .code,
+            WindowsD3d11EncoderContractErrorCode::InvalidPhase
+        );
+        held.note_transform_drain_complete()
+            .expect("MFT drain event");
+        assert_eq!(
+            held.close_drain_with_transform_retained()
+                .expect("drained transform closes"),
+            1
+        );
+        assert_eq!(held.diagnostics().current_in_flight, 1);
+        assert_eq!(
+            held.release_callback(WindowsD3d11EncoderReleaseCallback {
+                generation: 8,
+                role: WindowsD3d11EncoderRole::Record,
+                lease_id: 3,
+            }),
+            WindowsD3d11EncoderReleaseDisposition::Released(WindowsD3d11EncoderLeaseRelease {
+                generation: 8,
+                role: WindowsD3d11EncoderRole::Record,
+                lease_id: 3,
+            })
+        );
+        assert_eq!(held.diagnostics().current_in_flight, 0);
 
         let mut timed_out =
             WindowsD3d11EncoderOwnershipState::new(7, WindowsD3d11EncoderRole::Record, 1)
