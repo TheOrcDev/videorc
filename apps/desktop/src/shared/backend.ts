@@ -12,6 +12,7 @@ import type {
   BuddyReactionTable
 } from './buddy-pet'
 import type { BuddyLibraryId } from './buddy-library'
+import type { StreamPlatform } from './stream-platforms'
 export type { BackgroundImportResult } from './background-import'
 export type { TwitchGifMode } from './chat-gif'
 
@@ -1003,7 +1004,7 @@ export interface RtmpSettings {
 // Multi-platform streaming (per-target) model. Session start consumes it
 // (recording.rs reads params.streaming for the per-target fan-out); the legacy
 // single-RTMP fields remain only as the no-settings fallback.
-export type StreamPlatform = 'youtube' | 'twitch' | 'kick' | 'x' | 'tiktok' | 'instagram' | 'custom'
+export type { StreamPlatform }
 /**
  * Which composed leg a destination consumes in a dual-orientation session.
  * Explicit per-target property — never inferred from resolution equality.
@@ -2388,6 +2389,13 @@ export interface CompositorFramePipelineStatus {
   /** Plan 190: live background programs built and scratch bytes held (0 while off). */
   liveBackgroundPrograms?: number
   liveBackgroundScratchBytes?: number
+  /**
+   * Plan 205 S6: the Preview presents its own picture (the program leg)
+   * because the program differs from the primary leg: Clips at idle or a
+   * split record + stream with a stream-only item. Left off the wire while
+   * the primary leg is the program.
+   */
+  previewProgramLeg?: boolean
 }
 
 export interface CompositorStatus {
@@ -2448,6 +2456,8 @@ export type PreviewSurfaceSceneLayerKind =
   | 'screen-image'
   | 'background'
   | 'banner'
+  /** Plan 205 S9: the Buddy's frame-polled layer (`main/preview-surface-buddy.ts`). */
+  | 'buddy'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {

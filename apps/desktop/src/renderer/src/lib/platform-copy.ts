@@ -12,6 +12,7 @@ const PLATFORM_LABELS: Readonly<Record<StreamPlatform, string>> = {
   twitch: 'Twitch',
   kick: 'Kick',
   x: 'X',
+  facebook: 'Facebook',
   tiktok: 'TikTok',
   instagram: 'Instagram',
   custom: 'Custom RTMP'

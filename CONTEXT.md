@@ -57,10 +57,16 @@ _Avoid_: broadcast (except a platform's own object, like an X broadcast), live s
 What Videorc writes to a file, and each item in Library.
 _Avoid_: session (in copy), take, capture
 
+**Program**:
+What goes out: every layer at least one running output carries, and while
+nothing runs, every layer with a switch on. The Preview shows the program;
+Clips keeps what a recording would (each item's Show in recording).
+
 **Clips**:
 The Output section and its one switch, "Keep the last seconds" (plan 181,
-the owner's redesign): whenever Videorc is open it keeps the last minute of
-the program ready (plan 199), writing nothing permanent. The status bar
+the owner's redesign): whenever Videorc is open it keeps the last minute
+ready (plan 199), using each item's Show in recording switch and writing
+nothing permanent. The status bar
 reads "Clip · 1:00"; the ring is never "Recording" or "On air".
 _Avoid_: Replay buffer, instant replay, replay cache, buffer (alone)
 
@@ -231,11 +237,14 @@ _Avoid_: hook, integration, bot
 ### Windows and pages
 
 **First-run setup**:
-The welcome steps shown once on a fresh install, starting with permissions.
-Liquid Chrome fills the main window behind one card titled "Welcome to
-Videorc". Settings → General → Setup and ⌘K offer "Run setup again…";
-replaying returns to the page it opened from and preserves the first-run
-record. Existing installs skip setup on update.
+The welcome steps shown once on a fresh install: Permissions ("Welcome to
+Videorc"), What are you making?, Your look, Sound check, and Where you
+stream. Where you stream shows only for Livestreams or Both; Recordings
+has four steps. Liquid Chrome fills the main window behind one card; Your
+look's scene picture plays the chosen live background inside it. Settings
+→ General → Setup and ⌘K offer "Run setup again…"; replaying returns to the
+page it opened from and preserves the first-run record. Existing installs
+skip setup on update.
 _Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
 Livestream tab)
 

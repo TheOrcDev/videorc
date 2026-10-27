@@ -28,7 +28,7 @@ use crate::banner_prepare::{
 use crate::overlay_layout::{
     LANDSCAPE_EDGE_MARGIN, LANDSCAPE_SIDE_MARGIN, OVERLAY_RECT_MIN_SIZE, OverlayHorizontalGravity,
     OverlayOrientation, OverlayRect, OverlaySessionShape, OverlaySwitches, PORTRAIT_SIDE_MARGIN,
-    PORTRAIT_TOP_MARGIN, RECT_EPSILON, overlay_leg_plan, round6,
+    PORTRAIT_TOP_MARGIN, RECT_EPSILON, overlay_leg_plan, program_shows, round6,
 };
 use crate::protocol::{Banner, UpdateBannerParams};
 use crate::state::AppState;
@@ -987,20 +987,30 @@ impl BannerSet {
 pub(crate) enum BannerLeg {
     Primary,
     Auxiliary,
+    /// The Preview's own picture (plan 205 S6): the program, the union of the
+    /// running outputs' plans (`program_shows`), with the Preview's shape
+    /// (a buffer-only session is `None`, idle).
+    Program,
 }
 
 /// Whether `leg` carries `banner` (plan 186 "Which leg carries a banner").
 /// Idle (`shape` is `None`): the preview draws every banner with at least one
 /// switch on. In a session: the overlay leg plan, with the shared-leg
 /// fallback when the switches disagree on one shared leg, exactly as the
-/// highlight card and the Buddy.
+/// highlight card and the Buddy. The `Program` leg is the program for
+/// `shape` (plan 205), whatever the legs burn.
 pub(crate) fn banner_leg_carries(
     shape: Option<OverlaySessionShape>,
     leg: BannerLeg,
     banner: &Banner,
 ) -> bool {
     let Some(shape) = shape else {
-        return leg == BannerLeg::Primary && (banner.show_on_stream || banner.show_in_recording);
+        return match leg {
+            BannerLeg::Primary | BannerLeg::Program => {
+                banner.show_on_stream || banner.show_in_recording
+            }
+            BannerLeg::Auxiliary => false,
+        };
     };
     let plan = overlay_leg_plan(
         shape.record_enabled,
@@ -1017,6 +1027,9 @@ pub(crate) fn banner_leg_carries(
     match leg {
         BannerLeg::Primary => plan.primary,
         BannerLeg::Auxiliary => plan.aux,
+        BannerLeg::Program => {
+            program_shows(Some(shape), banner.show_on_stream, banner.show_in_recording)
+        }
     }
 }
 
@@ -1103,6 +1116,33 @@ pub(crate) fn show_banner_within_budget(
         }
     }
     database.show_banner(id, BANNER_MAX_SHOWN)
+}
+
+/// Plan 205 D3 (owner): a banner you add shows. `banners.importImage` shows
+/// the row `import_banner` just created (hidden, as its store tests pin)
+/// under the same gates as `banners.show`: the cap of four, the prepared
+/// bitmap budget for the compositor's current canvases, and a session that
+/// cannot draw a banner added after its start. A refusal keeps the banner
+/// hidden and is answered as `ok` with the hidden row; the list's show-limit
+/// copy says why. The caller republishes once for the import and the show.
+pub(crate) async fn show_imported_banner(state: &AppState, banner: Banner) -> Banner {
+    let canvases = crate::compositor::banner_prepare_canvases(state).await;
+    let session_accepts_banners = crate::recording::active_session_accepts_banners(state).await;
+    match show_banner(
+        &state.database,
+        &banner.id,
+        &canvases,
+        session_accepts_banners,
+    ) {
+        Ok(shown) => shown,
+        Err(error) => {
+            tracing::info!(
+                banner = %banner.id,
+                "The imported banner stays hidden: {error}"
+            );
+            banner
+        }
+    }
 }
 
 /// `banners.show` as one call, for Buddy voice (plan 186 S11): the cap and
@@ -1234,7 +1274,7 @@ pub(crate) async fn on_banners_changed(state: &AppState) -> Result<Vec<Banner>> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::overlay_layout::PORTRAIT_BOTTOM_MARGIN;
     use serde::Deserialize;
@@ -2255,7 +2295,9 @@ mod tests {
 
     // --- The compositor's set (S3) ------------------------------------------
 
-    fn sample_banner(id: &str, sort_order: i64) -> Banner {
+    /// A shown 2400x400 banner on both outputs at its default places; the
+    /// recording tests borrow it for the plan 205 D2 pin.
+    pub(crate) fn sample_banner(id: &str, sort_order: i64) -> Banner {
         let (horizontal, vertical) = banner_default_places(2400, 400);
         Banner {
             id: id.to_string(),
@@ -2410,6 +2452,12 @@ mod tests {
                 "idle primary on_stream={on_stream} in_recording={in_recording}"
             );
             assert!(!banner_leg_carries(None, BannerLeg::Auxiliary, &banner));
+            // Plan 205: the Program leg is `program_shows` for the shape.
+            assert_eq!(
+                banner_leg_carries(None, BannerLeg::Program, &banner),
+                on_stream || in_recording,
+                "idle program on_stream={on_stream} in_recording={in_recording}"
+            );
             for record in [false, true] {
                 for stream in [false, true] {
                     for aux_leg in [
@@ -2436,6 +2484,11 @@ mod tests {
                             ),
                             (expected.primary, expected.aux),
                             "{shape:?} on_stream={on_stream} in_recording={in_recording}"
+                        );
+                        assert_eq!(
+                            banner_leg_carries(Some(shape), BannerLeg::Program, &banner),
+                            program_shows(Some(shape), on_stream, in_recording),
+                            "program {shape:?} on_stream={on_stream} in_recording={in_recording}"
                         );
                     }
                 }

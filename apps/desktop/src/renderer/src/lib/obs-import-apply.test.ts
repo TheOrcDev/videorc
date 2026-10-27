@@ -130,6 +130,37 @@ describe('mergeObsImportIntoConfig', () => {
     })
     expect(next.streaming.enabledTargetIds).toContain('youtube')
   })
+
+  it('imports OBS Facebook Live into the Facebook card and its key migration (plan 206)', () => {
+    const next = mergeObsImportIntoConfig(
+      defaultCaptureConfig,
+      plan({
+        stream: {
+          kind: 'rtmp-platform',
+          platform: 'facebook',
+          serviceLabel: 'Facebook Live',
+          serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+          hasKey: true
+        }
+      }),
+      'facebook-key-from-obs',
+      '2026-10-27T00:00:00.000Z'
+    )
+    const facebook = next.streaming.targets.find((target) => target.id === 'facebook')
+    expect(facebook).toMatchObject({
+      platform: 'facebook',
+      enabled: true,
+      serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+      streamKey: 'facebook-key-from-obs',
+      authMode: 'manual-rtmp'
+    })
+    expect(facebook?.outputOrientation).not.toBe('vertical')
+    expect(next.streaming.enabledTargetIds).toContain('facebook')
+    expect(legacyStreamKeyMigrationCandidates(next)).toContainEqual({
+      targetId: 'facebook',
+      streamKey: 'facebook-key-from-obs'
+    })
+  })
 })
 
 describe('withObsBackground (plan 174, C-7)', () => {

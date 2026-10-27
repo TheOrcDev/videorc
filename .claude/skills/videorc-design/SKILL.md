@@ -90,16 +90,17 @@ for the owner, not a design choice.
     chrome primary. Delete, Remove and every other destructive action keep
     the quiet `destructive` tint, so a lit LED only ever means record or
     live.
-- **First-run setup paints Liquid Chrome** (2026-10-27, plans 203 and 208).
+- **First-run setup paints Liquid Chrome** (2026-10-27, plans 203, 207 and 208).
   The Welcome screen is the only place outside a scene where a live
   background runs, and the only place the chrome moves: Liquid Chrome,
   Polished, Normal motion, edge to edge. Under dark the shader dims it.
   Under light it is inverted (white liquid, black reflections) with no dim,
   and a CSS brightness of 0.85 after the invert only under Increase
-  Contrast. Setup sits in one centred card on the dialog tier. The backdrop
-  is opaque and covers the chrome ground, which is not drawn while setup is
-  open; it is decoration and never carries text. Every other window rule
-  stands.
+  Contrast. Setup sits in one centred card on the dialog tier, and Your
+  look's scene picture plays the chosen live background inside the card,
+  never inverted: it is the scene's own picture. The backdrop is opaque and
+  covers the chrome ground, which is not drawn while setup is open; it is
+  decoration and never carries text. Every other window rule stands.
 - **The toolbar holds only the page title** (2026-09-23). Record and Go
   Live… sit at the top of the Studio inspector, and a page's own actions sit
   in its body.

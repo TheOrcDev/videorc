@@ -614,6 +614,7 @@ html:has([data-first-run-backdrop], [data-first-run-surface]) [data-chrome-groun
   --color-platform-twitch: #9146ff;
   --color-platform-twitch-ink: #a970ff;
   --color-platform-instagram: #e1306c;
+  --color-platform-facebook: #0866ff;
   --color-platform-kick: #53fc18;
   --color-platform-kick-ink: #0b1a05;
 }

@@ -18,7 +18,8 @@ import type {
 import { isActivityOnlyEvent } from '../../../shared/backend'
 import { platformLabel } from './platform-copy'
 
-/** Platforms that can appear in the unified feed, in display order. */
+/** Platforms that can appear in the unified feed, in display order.
+ * Facebook joins with its connected Page (plan 206 S9). */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
 
 /** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
@@ -523,6 +524,7 @@ export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   twitch: platformLabel('twitch'),
   kick: platformLabel('kick'),
   x: platformLabel('x'),
+  facebook: platformLabel('facebook'),
   tiktok: platformLabel('tiktok'),
   instagram: platformLabel('instagram'),
   custom: platformLabel('custom')

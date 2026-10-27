@@ -171,6 +171,7 @@ import {
 } from './session-markers'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
+import { STREAM_PLATFORMS } from './stream-platforms'
 import {
   BANNER_MAX_COUNT,
   BANNER_OPACITY_MAX,
@@ -1078,19 +1079,11 @@ const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<StreamOutputTopologyProbeResult>
 
-// Every StreamPlatform on the wire (mirror of the shared union): TikTok and
-// Instagram are manual-key vertical destinations, so they show up in stream
-// target snapshots, OAuth callback results (refused, but typed) and co-host
-// question provenance exactly like the OAuth platforms.
-const STREAM_PLATFORMS = [
-  'youtube',
-  'twitch',
-  'kick',
-  'x',
-  'tiktok',
-  'instagram',
-  'custom'
-] as const
+// Every StreamPlatform on the wire: TikTok, Instagram and Facebook's stream-key
+// card are manual-key destinations, so they show up in stream target
+// snapshots, OAuth callback results (refused, but typed) and co-host question
+// provenance exactly like the OAuth platforms. Per-platform lists cap at
+// STREAM_PLATFORMS.length, never a literal.
 const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<StreamPlatform>
 
 // --- Discord go-live announcement (plan 187) ---
@@ -1279,7 +1272,7 @@ const audienceSnapshotSchema = objectSchema(
         },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     ),
     updatedAt: boundedString
   },
@@ -1294,7 +1287,7 @@ const viewerSampleSchema = objectSchema(
         { platform: streamPlatformSchema, count: numberSchema({ integer: true, min: 0 }) },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     ),
     total: numberSchema({ integer: true, min: 0 }),
     at: boundedString
@@ -3407,7 +3400,7 @@ const cohostQuestionSchema = objectSchema(
     text: stringSchema({ maxLength: 2000 }),
     messageIds: arraySchema(boundedString, { maxLength: 500 }),
     askers: arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 500 }),
-    platforms: arraySchema(streamPlatformSchema, { maxLength: 7 }),
+    platforms: arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length }),
     priority: enumSchema(['high', 'normal', 'low']),
     suggestedReply: stringSchema({ maxLength: 2000 }),
     fromNotes: booleanSchema,
@@ -3881,7 +3874,9 @@ const cohostReportQuestionSchema = objectSchema(
     id: boundedString,
     text: stringSchema({ maxLength: 2000 }),
     askers: optionalSchema(arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 5 })),
-    platforms: optionalSchema(arraySchema(streamPlatformSchema, { maxLength: 7 })),
+    platforms: optionalSchema(
+      arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length })
+    ),
     priority: enumSchema(['high', 'normal', 'low']),
     firstSeenAt: timestamp,
     outcome: cohostReportQuestionOutcomeSchema
@@ -4005,7 +4000,7 @@ const cohostReportPostSchema = objectSchema(
     at: timestamp,
     trigger: enumSchema(['greeting', 'answer', 'banter', 'manual']),
     text: stringSchema({ maxLength: 2000 }),
-    destinations: arraySchema(streamPlatformSchema, { maxLength: 7 }),
+    destinations: arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length }),
     result: enumSchema(['sent', 'partial', 'failed']),
     // Plan 192 S2.2: greetings only; absent on other posts and older rows.
     source: optionalSchema(enumSchema(['ai', 'line']))
@@ -4053,7 +4048,7 @@ const cohostReportChatSchema = objectSchema(
         { platform: streamPlatformSchema, messages: nonNegativeInteger },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     )
   },
   { allowUnknown: false }

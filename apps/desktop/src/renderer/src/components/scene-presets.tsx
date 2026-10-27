@@ -113,7 +113,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
           ) : null}
           {!savedScenes.length ? (
             <p className="text-xs text-muted-foreground">
-              Save your sources, framing and background together.
+              Save your screen, camera, microphone, system audio, framing and background together.
             </p>
           ) : null}
           <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
@@ -229,7 +229,7 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
             <DialogDescription>
               {action?.kind === 'repair'
                 ? 'Choose exact replacement sources. Repairs change the working scene; use Update to replace its saved snapshot.'
-                : 'Save the visual setup. Audio, recording and streaming settings stay separate.'}
+                : 'Save your screen, camera, microphone, system audio, framing and background. Levels, recording and streaming settings stay separate.'}
             </DialogDescription>
           </DialogHeader>
           {action?.kind === 'repair' && repair ? (

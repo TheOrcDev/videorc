@@ -11,6 +11,7 @@ import type {
 } from '../shared/backend'
 import { MAX_COMMENTS_SNAPSHOT_MESSAGES } from '../shared/comments-snapshot-delta'
 import { validateElectronInvokeArgs } from '../shared/electron-ipc-contract'
+import { isStreamPlatform } from '../shared/stream-platforms'
 import { parseCommentsViewMode } from './comments-command-broker'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
 
@@ -456,10 +457,7 @@ function validCommentsSendReceipt(
           'reason'
         ]) &&
         nonEmptyString(destination.destinationId) &&
-        typeof destination.platform === 'string' &&
-        ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom'].includes(
-          destination.platform
-        ) &&
+        isStreamPlatform(destination.platform) &&
         typeof destination.phase === 'string' &&
         ['pending', 'sent', 'failed', 'read-only', 'unavailable', 'timed-out-unknown'].includes(
           destination.phase

@@ -52,6 +52,7 @@ already exists, and says why in `CompositorStatus.liveBackground.reason`.
 | Windows recording and stream (D3D11 media session)           | Yes                 | HLSL ports, the same way                                                                                                                                       |
 | Windows idle preview, Linux preview (Electron proof surface) | Yes                 | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`)                                                                               |
 | Welcome screen, first-run setup (renderer WebGL2)            | Yes, unless still   | Shared player through `renderer/src/lib/live-background-player.ts`; poster first, 30 fps cap, reduced-motion and no-GPU stills; inverted in light              |
+| Your look scene picture, first-run setup (renderer WebGL2)   | Yes, unless still   | The same shared player, chosen live background and first look; same 30 fps cap, poster-first, still and disposal rules                                         |
 | Linux recording and stream (CPU compositor)                  | Yes                 | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame                                                                             |
 | 4K60 and the bridge-off override (legacy FFmpeg graph)       | No, the poster      | `legacy-graph`, with a start notice                                                                                                                            |
 | Windows and macOS CPU fallbacks                              | No, the poster      | `cpu-fallback`                                                                                                                                                 |
@@ -67,7 +68,7 @@ Windows idle preview and the Linux preview (plan 203). It is the only live
 background behind the app's own UI: Liquid Chrome, Polished, at Normal
 motion. Under dark the shader dims it 30% (50% under Increase Contrast).
 Under light it is the same look turned around (plan 208 D3): white liquid
-with black reflections. The permission card uses the dialog tier and
+with black reflections. The setup card uses the dialog tier and
 carries all the text.
 
 `apps/desktop/src/renderer/src/lib/live-background-player.ts` lazily loads
@@ -118,6 +119,30 @@ way around" exactly, so light is a CSS filter (plan 208 S5):
 - **The card.** In light the dialog tier has a deeper drop
   (`--glass-float-dialog-drop`), so the porcelain card separates from white
   crests without an overlay.
+
+### Your look scene picture
+
+Your look is the fifth place the shared WebGL player runs (plan 207),
+inside the setup card's read-only scene picture. It plays the chosen live
+background in its first look, behind the committed scene's boxes and
+camera mask; the boxes name devices rather than opening camera or screen
+capture. None allocates no player. The backdrop keeps Liquid Chrome.
+
+The picture uses `live-background-player.ts` with an optional background
+id and motion; its drawing, 30 fps cap, poster-first start, reduced-motion
+and GPU still rules are the Welcome screen's. Changing the background or
+leaving the step releases its context. Its DOM state is
+`data-first-run-look-picture="moving|still|starting|none"`. A still reason
+is logged as `[first-run] Your look's {id} shows its poster: {reason}`.
+
+While Your look shows, two players run. `pnpm smoke:first-run` counts each
+player's final default-framebuffer draws separately over at least 30 s,
+checks each against 31 fps (30 plus sampling tolerance), and records the
+GPU process CPU delta over the same interval. It requires the backdrop to
+stay moving on the acceptance Mac. A no-GPU picture records an explicit
+skip with the backdrop's still reason; an unexplained or budget-triggered
+still fails. See [plan 207 acceptance](acceptance/2026-10-27-first-run-steps.md)
+for the Mac numbers and the Windows measurement still owed.
 
 ### Chrome grounds (plan 208)
 

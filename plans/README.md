@@ -21,7 +21,49 @@
   glass for one release. Gates in the
   [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
   the owner's by-eye in both themes and a Windows pass are owed.
-
+- 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
+  steps 2 to 5. Owner request: after permissions, "What are you making?",
+  "Your look", "Sound check" and "Where you stream". The goal (Recordings,
+  Livestreams or Both) decides whether the streaming step shows. Your look
+  picks orientation, layout, camera shape and a live background on the
+  scene's own picture, with the background moving. Sound check is the
+  microphone, its level with a verdict, "Set level for me", and System
+  audio. Where you stream signs in to YouTube, Twitch, Kick or X and turns
+  each one on. Nothing in setup opens a capture device. It also fixes
+  "Clips couldn't start" on a fresh install without a screen. **BUILT IN PR**
+  (unmerged); owner acceptance and the final smoke bundle are still owed.
+  [Acceptance](../docs/acceptance/2026-10-27-first-run-steps.md).
+- 2026-10-27: [Plan 206](206-facebook-live.md), Facebook Live in the
+  Livestream tab. Owner request: a Facebook connector like the other
+  platforms, stream key first, the rest once Meta approves. Phase 1 (one
+  desktop PR, no Meta, no web change): a horizontal Facebook card after X,
+  server filled in, key from Live Producer, a Go Live reminder to press Go
+  live there; chat, viewers and title say they need sign-in. Phase 2: the
+  owner's Meta app and Business Verification, plus a spike that picks device
+  code or a website relay for sign-in. Phase 3 (dark in public builds):
+  connect a Page, Go Live with our title, comments, viewers. Phase 4: App
+  Review and the switch. Replaces plan 079 (#504, closed stale). **Phase 1
+  BUILT** (S0 to S5, one desktop PR; owner live take owed); Phases 2 to 4
+  wait on the owner's Meta setup (M1). Owner calls D6 (website) and D7
+  (sign-in, after S6) open.
+- 2026-10-27: [Plan 205](205-preview-is-the-source-of-truth.md), The
+  preview is the source of truth. Owner request: a banner and Buddy put on
+  the picture weren't visible in the preview; "our preview window should
+  actually be the source of truth". Root causes, checked on the owner's
+  profile: Clips (on by default) makes the idle preview a recording, so
+  Buddy set to stream only never draws. The idle preview never draws Buddy
+  at all, and draws it only while the Scene editor holds it. The banner
+  was placed while hidden, and on the docked live canvas no label says so.
+  One rule, "the Preview shows the program": every layer at least one
+  running output carries, and at idle every layer with a switch on. Phase
+  1 covers that rule in Rust and TS, Clips following Show in recording, "Hidden",
+  "Off" and "Stream only" on the Scene chips, and a dev-only Preview pixel
+  oracle with `smoke:preview-truth`. Phase 2 adds a macOS program leg for
+  Clips at idle and record + stream with a split stream leg (measured spike
+  first). Phase 3
+  covers the Windows media session's preview and Buddy on the proof
+  surface. **BUILT**, PR #880: S1 to S9. Owed: S10 (Windows tester pass,
+  Linux box), the owner's by-eye, the 4K idle program-leg cost call.
 - 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
   Owner request: live chat in the Studio in a small window, optional with a
   switch, a click putting a message on stream, less detail than the Stream

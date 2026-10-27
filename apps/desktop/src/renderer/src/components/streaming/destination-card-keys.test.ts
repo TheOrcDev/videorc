@@ -145,7 +145,15 @@ describe('destination row anatomy', () => {
 
 describe('where to find a stream key', () => {
   it('links every platform that takes a key, and says where a custom server keeps it', () => {
-    for (const platform of ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram'] as const) {
+    for (const platform of [
+      'youtube',
+      'twitch',
+      'kick',
+      'x',
+      'facebook',
+      'tiktok',
+      'instagram'
+    ] as const) {
       expect(manualKeyGuidance(platform).link?.url, platform).toMatch(/^https:\/\//)
     }
     expect(manualKeyGuidance('custom')).toEqual({

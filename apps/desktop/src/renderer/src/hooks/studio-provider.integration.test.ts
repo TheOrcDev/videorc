@@ -134,6 +134,7 @@ import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlement
 import type { SessionStopOrigin } from '../lib/session-stop'
 import {
   buildCameraSources,
+  buildCaptureSources,
   buildMicrophoneSources,
   defaultCaptureConfig,
   STORAGE_KEYS,
@@ -5785,6 +5786,175 @@ describe('real StudioProvider lifecycle', () => {
     )
     expect(latest().captureConfig.layout.cameraZoom).toBe(175)
   })
+
+  // Owner, 2026-10-27: a saved scene keeps its screen, microphone and System
+  // audio, and choosing it brings all three back, idle and while recording.
+  it('saves the screen, microphone and System audio with a scene and restores them', async () => {
+    const screen1 = 'screen:dxgi:0000000000000001:1'
+    const screen2 = 'screen:dxgi:0000000000000001:2'
+    const backend = new StudioBackend()
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: screen2,
+          name: 'Display 2',
+          kind: 'screen',
+          status: 'available',
+          width: 1920,
+          height: 1080
+        },
+        { id: 'mic:2', name: 'Microphone 2', kind: 'microphone', status: 'available' }
+      ]
+    }
+    backend.reportsActiveSceneRevision = true
+    const respond = backend.response.bind(backend)
+    backend.response = (command) => {
+      const result = respond(command)
+      if (command.method === 'scene.layout.apply_live') {
+        // Like the real backend: a live scene commit moves the session's
+        // source revision on, so a switch built before it is refused.
+        backend.confirmedSourceRevision += 1
+        queueMicrotask(() =>
+          backend.sockets[0]?.onmessage?.({
+            data: JSON.stringify({
+              event: 'session.sources.changed',
+              payload: backend.sourceSnapshot(backend.recordingSessionId ?? '')
+            })
+          })
+        )
+      }
+      return result
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest().canSaveScene &&
+        latest().captureConfig.sources.screenId === screen1 &&
+        latest().captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      expect(latest().saveScene('Desk')).toBe(true)
+    })
+    const desk = latest().savedScenes[0]
+    expect(desk.visual.sources.screenId).toBe(screen1)
+    expect(desk.audio).toStrictEqual({
+      microphoneId: 'mic:1',
+      microphoneName: 'Microphone 1',
+      microphoneOff: false,
+      systemAudioEnabled: false
+    })
+    expect(JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].audio).toMatchObject({
+      microphoneId: 'mic:1',
+      systemAudioEnabled: false
+    })
+
+    const devices = latest().deviceList.devices
+    const pickOthers = async (): Promise<void> => {
+      await act(async () =>
+        latest().switchSourceDeviceLive(
+          'microphone',
+          buildMicrophoneSources(
+            latest().captureConfig.sources,
+            devices.filter((device) => device.kind === 'microphone'),
+            'mic:2'
+          )
+        )
+      )
+      await act(async () =>
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, systemAudioEnabled: true }
+        }))
+      )
+    }
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'capture',
+        buildCaptureSources(
+          latest().captureConfig.sources,
+          devices.filter((device) => device.kind === 'screen'),
+          screen2
+        )
+      )
+    )
+    await pickOthers()
+    await waitForObservation(
+      () =>
+        latest().captureConfig.sources.screenId === screen2 &&
+        latest().captureConfig.sources.microphoneId === 'mic:2' &&
+        latest().captureConfig.audio.systemAudioEnabled
+    )
+    expect(latest().activeSavedSceneId).toBe(desk.id)
+    expect(latest().savedSceneModified).toBe(true)
+
+    const idleFrom = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(desk.id)).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        latest().layoutSwitchPending === null &&
+        latest().captureConfig.sources.microphoneId === 'mic:1' &&
+        !latest().captureConfig.audio.systemAudioEnabled
+    )
+    expect(latest().captureConfig.sources.screenId).toBe(screen1)
+    expect(latest().savedSceneModified).toBe(false)
+    const idleSent = backend.sentCommands.slice(idleFrom)
+    expect(
+      idleSent.find((command) => command.method.startsWith('scene.layout.apply'))?.params
+    ).toMatchObject({ sources: { screenId: screen1, microphoneId: 'mic:1' } })
+    expect(idleSent.some((command) => command.method === 'session.source.switch')).toBe(false)
+
+    // While recording, the session switches to the scene's microphone.
+    await act(async () => latest().startSession())
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.recording.recording.state === 'recording' &&
+        latest().sourceSelectionState.snapshot !== null
+    )
+    await pickOthers()
+    await waitForObservation(
+      () =>
+        backend.confirmedSources.microphoneId === 'mic:2' &&
+        latest().captureConfig.sources.microphoneId === 'mic:2' &&
+        latest().captureConfig.audio.systemAudioEnabled &&
+        latest().sourceSelectionState.pending === null
+    )
+    const liveFrom = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(desk.id)).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        backend.confirmedSources.microphoneId === 'mic:1' &&
+        latest().captureConfig.sources.microphoneId === 'mic:1' &&
+        latest().layoutSwitchPending === null
+    )
+    expect(latest().captureConfig.audio.systemAudioEnabled).toBe(false)
+    const switches = backend.sentCommands
+      .slice(liveFrom)
+      .filter((command) => command.method === 'session.source.switch')
+    expect(switches).toHaveLength(1)
+    expect(switches[0].params).toMatchObject({ kind: 'microphone', deviceId: 'mic:1' })
+    expect(latest().savedSceneModified).toBe(false)
+  }, 15_000)
 
   it('refreshes only the device list from Sources, and keeps it when other reads would fail (C-32)', async () => {
     const backend = new StudioBackend()

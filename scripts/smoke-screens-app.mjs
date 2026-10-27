@@ -451,7 +451,14 @@ function verifyOutput(outputPath, statuses, sessionId) {
     throw new Error(`Screens smoke output is empty: ${outputPath}`)
   }
 
-  const uniqueSessionIds = new Set(statuses.map((status) => status.sessionId).filter(Boolean))
+  // Clips re-arms its buffer-only session after each Stop and hands it over to
+  // the next start; only the smoke's own session counts.
+  const uniqueSessionIds = new Set(
+    statuses
+      .filter((status) => status.replayOnly !== true)
+      .map((status) => status.sessionId)
+      .filter(Boolean)
+  )
   if (uniqueSessionIds.size !== 1 || !uniqueSessionIds.has(sessionId)) {
     throw new Error(
       `Screen switching appears to have restarted the session: ${[...uniqueSessionIds].join(', ')}`

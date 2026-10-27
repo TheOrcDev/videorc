@@ -28,7 +28,8 @@ const CAPTURE_RUNTIME_DEPENDENCIES = [
   'apps/desktop/src/renderer/src/lib/platform-copy.ts',
   'apps/desktop/src/renderer/src/lib/platform.ts',
   'apps/desktop/src/shared/accelerator-format.ts',
-  'apps/desktop/src/shared/backend.ts'
+  'apps/desktop/src/shared/backend.ts',
+  'apps/desktop/src/shared/stream-platforms.ts'
 ]
 
 async function compileTo(source, output) {

@@ -188,7 +188,40 @@ Polished at Normal, the 30 fps cap, a 1920 × 1269 canvas.
 
 ## Gates
 
-_Filled in by the orchestrator after the final gate run._
+On the branch at `26bad307` (macOS, this Mac), `smoke:local-gates` step by
+step, each step run even if an earlier one failed:
+
+- **Green (28 of 34):** `check:text-files`, `typecheck`, `build`,
+  `check:renderer-assets`, `cargo test -p videorc-backend` (1,233 s),
+  `cargo clippy -D warnings`, `smoke:oauth`, `smoke:oauth-guards`,
+  `smoke:sources`, `smoke:session-ops`, `smoke:start-labels`,
+  `smoke:streaming-secrets`, `smoke:platform-lifecycle`,
+  `smoke:multistream`, `smoke:dev`, `smoke:record-latency:gate`,
+  `smoke:recording-matrix`, `smoke:remote-control`, `smoke:remote-lan`,
+  `smoke:provider-readiness`, `smoke:live-chat-fake-providers`,
+  `smoke:youtube-quota`, `smoke:buddy-commands`, `smoke:command-lanes`,
+  `smoke:backend-resilience`, `smoke:process-memory:sentinel`,
+  `smoke:session-decay:gate`, `smoke:capture-decay-soak:contract`.
+- **Red, not this plan:**
+  - `smoke:system-audio`: the dev app has no Screen Recording grant here.
+  - `smoke:repair-encoder`: the bundled ffmpeg is not built in this
+    worktree.
+  - `smoke:screens` ("screen switching appears to have restarted the
+    session") and `smoke:live-control-recycle` (the backend exited during
+    safe finalization): neither touches colour.
+  - `probe:comments-window`: the plan 208 check (Chat sits on the chrome
+    ground and follows the app theme) passed; only Copy link failed, with an
+    empty clipboard, as it has before on this Mac.
+- **Invalid, rerun owed:** `probe:ui-glass --gate --surfaces` threw its
+  capture out because another app's window (Wispr Flow) covered the main
+  window. It proved the ground during S3.
+
+The owner stopped the run in the 60-minute `smoke:capture-decay-soak:gate`
+and asked for the whole bundle on main after the merge instead, since
+several PRs merged before their CI finished. That run, including
+`cargo fmt`, `lint`, `format:check`, `test:scripts`, the desktop tests,
+`smoke:first-run`, both preview probes and `smoke:recording-studio`, is
+recorded in the PR.
 
 ## Owner by-eye owed
 

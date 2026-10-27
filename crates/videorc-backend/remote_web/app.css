@@ -509,6 +509,9 @@ main {
 .glyph[data-platform='instagram'] {
   background: #d6249f;
 }
+.glyph[data-platform='facebook'] {
+  background: #0866ff;
+}
 
 .meta {
   grid-column: 2;

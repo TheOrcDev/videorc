@@ -33,6 +33,7 @@ fn platform_label(platform: Option<StreamPlatform>) -> Option<&'static str> {
         StreamPlatform::Twitch => Some("Twitch"),
         StreamPlatform::Kick => Some("Kick"),
         StreamPlatform::X => Some("X"),
+        StreamPlatform::Facebook => Some("Facebook"),
         StreamPlatform::Tiktok => Some("TikTok"),
         StreamPlatform::Instagram => Some("Instagram"),
         StreamPlatform::Custom => None,

@@ -1,5 +1,5 @@
 import type { MediaAccessSnapshot } from '@/lib/backend'
-import type { CaptureConfig } from '@/lib/capture'
+import { layoutPresetNeedsScreen, type CaptureConfig } from '@/lib/capture'
 
 /**
  * Clips arm at launch (plan 199), and a buffer-only session opens the same
@@ -49,4 +49,33 @@ export function replayStartWaitsForGrant({
     return 'Microphone access has not been allowed yet.'
   }
   return null
+}
+
+/**
+ * Plan 207 S2: the default layout shows a screen, and a fresh profile with
+ * no Screen Recording grant chooses none. The backend still adds a visible
+ * Screen source with no device, so a start is refused ("the screen preview
+ * source(s) produced no frames") three times, then the ring gives up with a
+ * toast. A scene whose layout needs a screen that nobody has chosen waits
+ * the way it waits for a grant: no attempt, no retry, no toast. Screen set to
+ * None on purpose is `recordBlockedReason`'s (sceneSourceOffBlockedReason);
+ * a chosen screen that produces no frames is a real failure and still fails
+ * as today; Freeform shows only what it has; a test pattern stands in for
+ * the screen (the smokes' synthetic source).
+ */
+export const REPLAY_WAITS_FOR_SCREEN =
+  'No screen is chosen. Choose one in Sources to use this scene.'
+
+export function replayStartWaitsForScreen({
+  sources,
+  layout
+}: {
+  sources: Pick<CaptureConfig['sources'], 'screenId' | 'windowId' | 'captureOff' | 'testPattern'>
+  layout: Pick<CaptureConfig['layout'], 'layoutPreset' | 'arrangementMode'>
+}): string | null {
+  if (layout.arrangementMode === 'freeform') return null
+  if (!layoutPresetNeedsScreen(layout.layoutPreset)) return null
+  if (sources.captureOff === true) return null
+  if (sources.screenId || sources.windowId || sources.testPattern) return null
+  return REPLAY_WAITS_FOR_SCREEN
 }

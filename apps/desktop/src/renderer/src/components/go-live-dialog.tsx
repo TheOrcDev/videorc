@@ -58,7 +58,8 @@ const GO_LIVE_BLOCKED_REASON = 'Fix the items above, then go live.'
 /** The note under a destination left out of this livestream (B-8). */
 export const GO_LIVE_EXCLUDED_NOTE = 'Only for this livestream. Your destination stays on.'
 
-/** Platforms whose destinations sign in, so a Reconnect can fix them. */
+/** Platforms whose destinations sign in, so a Reconnect can fix them.
+ * Facebook joins with its connected Page (plan 206 S8). */
 const SIGN_IN_PLATFORMS: ReadonlySet<StreamPlatform> = new Set(['youtube', 'twitch', 'kick', 'x'])
 
 export type GoLiveResolution = 'exclude' | 'include' | 'manual-rtmp'
@@ -378,6 +379,7 @@ export function GoLiveConfirmationDialog({
             ) : null}
 
             {simulcast ? <GoLiveSimulcastAdvisory streaming={sentStreaming} /> : null}
+            <GoLiveProducerReminder streaming={sentStreaming} />
 
             <GoLiveOutputAdvice
               advice={streamPerformanceAdvice}
@@ -863,9 +865,8 @@ function capitalize(word: string): string {
 
 // Dual-orientation sessions double the encode count and the upstream
 // bandwidth: advice, never a block (per-target dropped-frame status is the
-// honest live signal). Instagram's manual publish step lives here because it
-// happens AT Go Live time, not while configuring the card. `streaming` is
-// what this Go Live sends (left-out destinations already off).
+// honest live signal). `streaming` is what this Go Live sends (left-out
+// destinations already off).
 function GoLiveSimulcastAdvisory({ streaming }: { streaming: StreamingSettings }): ReactElement {
   const enabled = streaming.targets.filter(
     (target) => target.enabled && streaming.enabledTargetIds.includes(target.id)
@@ -875,21 +876,54 @@ function GoLiveSimulcastAdvisory({ streaming }: { streaming: StreamingSettings }
     0
   )
   const mbps = Math.max(1, Math.round(totalKbps / 1000))
-  const hasInstagram = enabled.some((target) => target.platform === 'instagram')
   return (
     <Alert>
       <AlertTitle>Streaming both orientations</AlertTitle>
+      <AlertDescription>
+        The horizontal scene streams to your landscape destinations while the saved vertical scene
+        streams to the vertical ones, about {mbps} Mbps upstream across all legs.
+      </AlertDescription>
+    </Alert>
+  )
+}
+
+// Facebook (with a stream key) and Instagram publish from their Live
+// Producer, not from Videorc, so the step belongs AT Go Live time. Any
+// orientation (plan 206): it used to sit in the both-orientations advice,
+// which a horizontal-only Facebook session never shows.
+const LIVE_PRODUCER_STEPS: ReadonlyArray<{ platform: StreamPlatform; step: string }> = [
+  {
+    platform: 'facebook',
+    step: 'Facebook: once Videorc starts sending, press “Go live” in Facebook Live Producer to publish the stream.'
+  },
+  {
+    platform: 'instagram',
+    step: 'Instagram: once Videorc starts sending, press “Go live” in Instagram Live Producer to publish the stream to your profile.'
+  }
+]
+
+function GoLiveProducerReminder({
+  streaming
+}: {
+  streaming: StreamingSettings
+}): ReactElement | null {
+  const steps = LIVE_PRODUCER_STEPS.filter(({ platform }) =>
+    streaming.targets.some(
+      (target) =>
+        target.platform === platform &&
+        target.authMode === 'manual-rtmp' &&
+        target.enabled &&
+        streaming.enabledTargetIds.includes(target.id)
+    )
+  )
+  if (!steps.length) return null
+  return (
+    <Alert data-testid="go-live-producer-reminder">
+      <AlertTitle>Publish in Live Producer</AlertTitle>
       <AlertDescription className="flex flex-col gap-1">
-        <span>
-          The horizontal scene streams to your landscape destinations while the saved vertical scene
-          streams to the vertical ones, about {mbps} Mbps upstream across all legs.
-        </span>
-        {hasInstagram ? (
-          <span>
-            Instagram: once Videorc starts sending, press “Go live” in Instagram Live Producer to
-            publish the stream to your profile.
-          </span>
-        ) : null}
+        {steps.map(({ platform, step }) => (
+          <span key={platform}>{step}</span>
+        ))}
       </AlertDescription>
     </Alert>
   )

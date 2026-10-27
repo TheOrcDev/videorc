@@ -1,4 +1,5 @@
 import type {
+  AudioSettings,
   Device,
   EffectiveSceneBackground,
   LayoutSettings,
@@ -38,12 +39,27 @@ export type SceneVisual = {
   sources: VisualSources
   background: SavedSceneBackground | null
 }
+/**
+ * What a saved scene hears (owner, 2026-10-27): its microphone, None
+ * included, and System audio On or Off. Levels and mute stay with the mixer,
+ * like recording and streaming settings.
+ */
+export type SceneAudio = Pick<SourceSelection, 'microphoneId' | 'microphoneName'> & {
+  microphoneOff: boolean
+  systemAudioEnabled: boolean
+}
+export type SceneMicrophone = Pick<
+  SourceSelection,
+  'microphoneId' | 'microphoneName' | 'microphoneOff'
+>
 export type SavedScene = {
   id: string
   name: string
   createdAt: string
   updatedAt: string
   visual: SceneVisual
+  /** Absent on a scene saved before scenes kept audio: applying it leaves audio as it is. */
+  audio?: SceneAudio
 }
 export type ScenePresetLibrary = { version: 1; scenes: SavedScene[] }
 export type WorkingScene = {
@@ -68,6 +84,75 @@ export function visualSources(sources: VisualSources): VisualSources {
     windowId: sources.windowId,
     windowName: sources.windowName,
     testPattern: sources.testPattern === true
+  }
+}
+export function sceneAudio(
+  sources: SceneMicrophone,
+  audio: Pick<AudioSettings, 'systemAudioEnabled'>
+): SceneAudio {
+  return {
+    microphoneId: sources.microphoneId,
+    microphoneName: sources.microphoneName,
+    // Like cameraOff: a chosen microphone wins over a stale None.
+    microphoneOff: sources.microphoneOff === true && !sources.microphoneId,
+    systemAudioEnabled: audio.systemAudioEnabled === true
+  }
+}
+export function normalizeSceneAudio(raw: unknown): SceneAudio | undefined {
+  if (raw === undefined) return undefined
+  if (!raw || typeof raw !== 'object') throw new Error('Invalid scene audio')
+  const data = raw as SceneAudio
+  if (
+    data.microphoneId !== undefined &&
+    (typeof data.microphoneId !== 'string' || data.microphoneId.length === 0)
+  )
+    throw new Error('Invalid microphone identity')
+  if (data.microphoneName !== undefined && typeof data.microphoneName !== 'string')
+    throw new Error('Invalid microphone label')
+  if (typeof data.microphoneOff !== 'boolean' || typeof data.systemAudioEnabled !== 'boolean')
+    throw new Error('Invalid scene audio')
+  return sceneAudio(data, data)
+}
+/**
+ * Whether the working audio is what the saved scene keeps. A scene saved
+ * before scenes kept audio, or with no microphone ever chosen, holds no
+ * opinion on that part.
+ */
+export function sameSceneAudio(saved: SceneAudio | undefined, working: SceneAudio): boolean {
+  if (!saved) return true
+  const microphoneChosen = Boolean(saved.microphoneId) || saved.microphoneOff
+  return (
+    saved.systemAudioEnabled === working.systemAudioEnabled &&
+    (!microphoneChosen ||
+      (saved.microphoneId === working.microphoneId &&
+        saved.microphoneOff === working.microphoneOff))
+  )
+}
+/**
+ * The microphone a saved scene switches to: None, or its microphone while
+ * it is listed as available. Null keeps the current one: nothing was chosen,
+ * or the chosen one is gone (it can come back).
+ */
+export function sceneMicrophone(
+  audio: SceneAudio,
+  devices: readonly Device[]
+): SceneMicrophone | null {
+  if (audio.microphoneOff)
+    return { microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
+  if (
+    !audio.microphoneId ||
+    !devices.some(
+      (device) =>
+        device.id === audio.microphoneId &&
+        device.kind === 'microphone' &&
+        device.status === 'available'
+    )
+  )
+    return null
+  return {
+    microphoneId: audio.microphoneId,
+    microphoneName: audio.microphoneName,
+    microphoneOff: false
   }
 }
 export function snapshotBackground(
@@ -230,12 +315,14 @@ export function hydrateSceneLibrary(raw: unknown): {
         typeof entry.updatedAt !== 'string'
       )
         continue
+      const audio = normalizeSceneAudio(entry.audio)
       scenes.push({
         id: entry.id,
         name: entry.name.trim(),
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
-        visual: normalizeSceneVisual(entry.visual)
+        visual: normalizeSceneVisual(entry.visual),
+        ...(audio ? { audio } : {})
       })
     } catch {
       /* Reject only the malformed entry. */

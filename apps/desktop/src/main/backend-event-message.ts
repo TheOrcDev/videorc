@@ -2,6 +2,7 @@ import type {
   Banner,
   CompositorFrameReady,
   CompositorStatus,
+  OverlayLayout,
   PreviewSurfaceStatus,
   RecordingStatus,
   ServerEvent,
@@ -20,7 +21,10 @@ import {
  * through unvalidated here and their handler validates them at use, dropping
  * a bad one with a warning (plan 186: the banner list for the proof surface).
  */
-export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set(['banners.changed'])
+export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
+  'banners.changed',
+  'overlays.layout'
+])
 
 /** The privileged main-process socket uses the same bounded wire contract as the renderer. */
 export function parseMainBackendWireMessage(raw: string): ServerResponse | ServerEvent {
@@ -68,4 +72,14 @@ export function parseMainBannerList(payload: unknown): Banner[] {
 /** `banners.changed` event: the full list, strictly validated (plan 186). */
 export function parseMainBannersChangedEvent(payload: unknown): Banner[] {
   return validateBackendEventPayload('banners.changed', payload) as Banner[]
+}
+
+/** `overlays.layout.get` result: the proof surface's Buddy switches (plan 205 S9). */
+export function parseMainOverlayLayout(payload: unknown): OverlayLayout {
+  return validateBackendRpcResult('overlays.layout.get', payload) as OverlayLayout
+}
+
+/** `overlays.layout` event: the whole layout, strictly validated. */
+export function parseMainOverlayLayoutEvent(payload: unknown): OverlayLayout {
+  return validateBackendEventPayload('overlays.layout', payload) as OverlayLayout
 }
