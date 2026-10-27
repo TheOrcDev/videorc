@@ -69,8 +69,10 @@ describe('Electron IPC contract', () => {
     // system:recheck-permission-grants, app:relaunch-for-permission).
     // 149: plan 203 S5 adds app:workspace-shown (the launch Preview waits
     // for first-run setup).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(149)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(149)
+    // 150: plan 209 S7 adds agents:bridge (the agent bridge's path for
+    // Settings → Remote → Agents, and the Linux copy on Connect).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(150)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(150)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

@@ -241,6 +241,7 @@ export const electronInvokeApiMethods = {
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
   'resource:reveal-support-bundle': 'revealSupportBundle',
+  'agents:bridge': 'getAgentBridge',
   'resource:open-session': 'openSession',
   'media:grant-session': 'grantSessionMedia',
   'resource:trash-session-deletion': 'trashSessionDeletion',
@@ -1616,6 +1617,12 @@ const specificRuntimeInvokeContracts = {
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-support-bundle': invokeContract(tupleSchema([pathSchema])),
+  // Plan 209 S7: install (Connect) or not; the bridge's absolute path and
+  // whether this install has it. Never a token.
+  'agents:bridge': invokeContract(
+    tupleSchema([booleanSchema]),
+    objectSchema({ path: pathSchema, exists: booleanSchema }, { allowUnknown: false })
+  ),
   'resource:open-session': invokeContract(tupleSchema([boundedIdentifier])),
   'media:grant-session': invokeContract(
     tupleSchema([boundedIdentifier]),

@@ -4818,6 +4818,15 @@ export interface AgentSurfacePublishParams {
 export interface AgentAcknowledged {
   ok: true
 }
+
+/** Plan 209 S7 (D6, D20): the bridge an agent app runs, from Electron main.
+ * `path` is absolute: the app's own copy on macOS and Windows, the stable
+ * copy in `~/.local/share/videorc/bin` on Linux, the cargo build in dev. */
+export interface AgentBridgeInfo {
+  path: string
+  /** This install has the bridge; false means Connect can't work. */
+  exists: boolean
+}
 // --- end Agents (plan 209) ---
 
 export interface GlobalShortcutsConfig {
@@ -5163,6 +5172,9 @@ export interface VideorcApi {
   /** Shows an exported support bundle in Finder or Explorer (plan 174 S3.18).
    * Main reveals only a bundle file inside the backend's export folder. */
   revealSupportBundle: (path: string) => Promise<void>
+  /** Plan 209 S7: where `videorc-mcp` lives, for Settings → Remote → Agents'
+   * config lines. `install` (Connect) puts the Linux copy in place (D20). */
+  getAgentBridge: (install: boolean) => Promise<AgentBridgeInfo>
   obsDiscover?: () => Promise<ObsDiscovery>
   obsRead?: (collection: string, profile: string) => Promise<ObsSetup | null>
   obsReadStreamKey?: (profile: string) => Promise<string | null>
