@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import type { SystemAccessRow, SystemAccessState } from './system-access'
 import {
+  FIRST_RUN_ROWS_FALLBACK_MS,
   firstRunPrimary,
+  firstRunSetupDescription,
+  systemAccessRowsReady,
   systemAccessTag,
   systemAccessActionLabel,
   systemAccessStatus,
@@ -96,5 +99,34 @@ describe('firstRunPrimary and row tags', () => {
   it('labels the direct relaunch without an ellipsis and hides details while checking', () => {
     expect(systemAccessActionLabel('relaunch', 'darwin')).toBe('Reopen Videorc')
     expect(systemAccessVisibleDetail({ ...row('waiting'), checking: true })).toBeNull()
+  })
+})
+
+describe('first-run setup (plan 203 S5)', () => {
+  it("describes the step in the OS's words", () => {
+    expect(firstRunSetupDescription('darwin')).toBe(
+      'First, let Videorc record your Mac. macOS asks once for each, and you can change them later in Settings → Permissions.'
+    )
+    expect(firstRunSetupDescription('win32')).toBe(
+      'First, check that Windows lets Videorc use your camera and microphone. You can change this later in Settings → Permissions.'
+    )
+    expect(firstRunSetupDescription('linux')).toContain('nothing to grant here')
+  })
+
+  it('trusts the rows once the OS has answered and the devices are listed, or after the wait', () => {
+    expect(
+      systemAccessRowsReady({ mediaAccessReady: false, devicesListed: true, waitedLong: true })
+    ).toBe(false)
+    expect(
+      systemAccessRowsReady({ mediaAccessReady: true, devicesListed: false, waitedLong: false })
+    ).toBe(false)
+    expect(
+      systemAccessRowsReady({ mediaAccessReady: true, devicesListed: true, waitedLong: false })
+    ).toBe(true)
+    // A broken backend never blocks setup.
+    expect(
+      systemAccessRowsReady({ mediaAccessReady: true, devicesListed: false, waitedLong: true })
+    ).toBe(true)
+    expect(FIRST_RUN_ROWS_FALLBACK_MS).toBe(5000)
   })
 })

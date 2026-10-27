@@ -31,6 +31,7 @@ export const IPC_INVOKE_ROLES = {
   'system:request-screen-access': MAIN_ONLY,
   'system:recheck-permission-grants': MAIN_ONLY,
   'app:relaunch-for-permission': MAIN_ONLY,
+  'app:workspace-shown': MAIN_ONLY,
   'system:media-access-status': MAIN_ONLY,
   'system:reveal-permission-target': MAIN_ONLY,
   'resource:reveal-selection': MAIN_ONLY,

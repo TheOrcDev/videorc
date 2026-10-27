@@ -9,7 +9,13 @@ import {
 import { openBuddyTab } from '@/lib/buddy-tabs'
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import { openSettingsTab } from '@/lib/settings-tabs'
-import { WORKSPACE_NAVIGATE_EVENT, openWorkspaceTab } from './workspace-navigation'
+import { readFirstRunSetupRequest } from '@/components/workspace-nav'
+import {
+  FIRST_RUN_SETUP_OPEN_EVENT,
+  WORKSPACE_NAVIGATE_EVENT,
+  openFirstRunSetup,
+  openWorkspaceTab
+} from './workspace-navigation'
 
 // Plan 174 (I-NEW, I-PAT-12): pages opened from outside React go through one
 // typed call, and the shell reads back exactly the page that was asked for.
@@ -113,5 +119,25 @@ describe('openWorkspaceTab', () => {
     expect(readWorkspaceNavigation({ tab: 'library', sessionId: null })).toEqual({
       tab: 'library'
     })
+  })
+})
+
+describe('openFirstRunSetup (plan 203 S5)', () => {
+  it('asks the shell to replay setup, returning to Settings unless told otherwise', () => {
+    const target = new EventTarget()
+    const sent: unknown[] = []
+    target.addEventListener(FIRST_RUN_SETUP_OPEN_EVENT, (event) =>
+      sent.push((event as CustomEvent).detail)
+    )
+    vi.stubGlobal('window', target)
+    openFirstRunSetup()
+    openFirstRunSetup({ returnTo: 'studio' })
+    expect(sent).toEqual([{ returnTo: 'settings' }, { returnTo: 'studio' }])
+    expect(readFirstRunSetupRequest(sent[1])).toEqual({ returnTo: 'studio' })
+  })
+
+  it('returns to Settings when the request names no page it knows', () => {
+    expect(readFirstRunSetupRequest(null)).toEqual({ returnTo: 'settings' })
+    expect(readFirstRunSetupRequest({ returnTo: 'nowhere' })).toEqual({ returnTo: 'settings' })
   })
 })

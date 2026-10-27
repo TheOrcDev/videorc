@@ -2479,7 +2479,7 @@ function createWindow(): void {
   }
 
   mainWindow.webContents.once('did-finish-load', () => {
-    restorePreviewWindowOnLaunch()
+    // The Preview window waits for `app:workspace-shown` (plan 203 S5).
     restoreNotesWindowOnLaunch()
     restoreCommentsWindowOnLaunch()
     restoreCaptionsWindowOnLaunch()
@@ -2694,7 +2694,17 @@ function clampFrameToWorkArea(frame: Electron.Rectangle): Electron.Rectangle {
 const previewWindowAutoRestoreEnabled =
   process.env.VIDEORC_DISABLE_AUTO_PREVIEW !== '1' && !process.env.VIDEORC_SMOKE_OUTPUT_DIR
 
+// Plan 203 S5: on a fresh install first-run setup fills the main window and
+// holds capture back, so a Preview window restored at did-finish-load would
+// float over setup, empty. The renderer says when the workspace shows (at
+// once for an existing install); the first time restores it.
+let previewWindowLaunchRestorePending = true
+
 function restorePreviewWindowOnLaunch(): void {
+  if (!previewWindowLaunchRestorePending) {
+    return
+  }
+  previewWindowLaunchRestorePending = false
   if (!previewWindowAutoRestoreEnabled) {
     return
   }
@@ -15337,6 +15347,7 @@ app.whenReady().then(async () => {
   secureIpcHandle('system:request-screen-access', () => requestScreenAccessNative())
   secureIpcHandle('system:recheck-permission-grants', () => recheckPermissionGrants())
   secureIpcHandle('app:relaunch-for-permission', () => relaunchForPermission())
+  secureIpcHandle('app:workspace-shown', () => restorePreviewWindowOnLaunch())
   secureIpcHandle('system:reveal-permission-target', () => revealPermissionTarget())
   secureIpcHandle('resource:reveal-selection', (_event, capabilityId: unknown) =>
     revealSelectedResource(capabilityId)

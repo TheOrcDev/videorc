@@ -1804,6 +1804,9 @@ interface StudioShellContextValue {
   stopConfirmation: SessionStopConfirmation | null
   confirmStopSession: () => void
   cancelStopSession: () => void
+  /** First-run setup replaces the workspace (plan 203 S5): preview and global keys wait. */
+  firstRunSetupOpen: boolean
+  setFirstRunSetupOpen: (open: boolean) => void
 }
 
 const StudioShellContext = createContext<StudioShellContextValue | null>(null)
@@ -2391,6 +2394,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // every change (enable/disable/regenerate/deck connect), so nothing polls.
   const [remoteControlStatus, setRemoteControlStatus] = useState<RemoteControlStatus | null>(null)
   const [remoteLanStatus, setRemoteLanStatus] = useState<RemoteLanStatus | null>(null)
+  // Plan 203 S5: while first-run setup replaces the workspace the Studio is not
+  // mounted and the preview has no slot. Auto-preview capture, the native
+  // source previews, the Preview window and the OS-global shortcuts wait for it
+  // to close; the shell owns the flag.
+  const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -10394,7 +10402,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewCameraStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewCameraStatusRef.current
     }
 
@@ -10461,6 +10473,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.sources,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -10472,7 +10485,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return previewScreenStatusRef.current
     }
 
-    if (runtimeInfo?.disableAutoPreview || runtimeInfo?.disableAutoSourcePreview) {
+    if (
+      firstRunSetupOpen ||
+      runtimeInfo?.disableAutoPreview ||
+      runtimeInfo?.disableAutoSourcePreview
+    ) {
       return previewScreenStatusRef.current
     }
 
@@ -10567,6 +10584,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.layout.layoutPreset,
     captureConfig.video,
     client,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     runtimeInfo?.disableAutoSourcePreview,
     runtimeInfo?.previewSmokeMode,
@@ -11028,6 +11046,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setPreviewWindow(next)
     }
   }, [])
+
+  // Plan 203 S5: no Preview window beside first-run setup. Main restores the
+  // window at launch before the renderer decides, so setup closes it through
+  // the same call as the Preview hint and opens it again when setup leaves, only if it
+  // closed it.
+  const reopenPreviewAfterSetupRef = useRef(false)
+  useEffect(() => {
+    if (firstRunSetupOpen) {
+      if (!previewWindow.open) return
+      reopenPreviewAfterSetupRef.current = true
+      void closePreviewWindow()
+      return
+    }
+    if (!reopenPreviewAfterSetupRef.current) return
+    reopenPreviewAfterSetupRef.current = false
+    void openPreviewWindow()
+  }, [closePreviewWindow, firstRunSetupOpen, openPreviewWindow, previewWindow.open])
 
   const setPreviewWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     const next = await window.videorc?.setPreviewWindowAlwaysOnTop?.(alwaysOnTop)
@@ -13155,7 +13190,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, reportError, streamMetadataDraft, wsStatus])
 
   useEffect(() => {
-    if (runtimeInfo?.disableAutoPreview) {
+    if (firstRunSetupOpen || runtimeInfo?.disableAutoPreview) {
       return
     }
     if (
@@ -13180,6 +13215,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     previewDevicesSignature,
     previewRefreshNonce,
     refreshPreview,
+    firstRunSetupOpen,
     runtimeInfo?.disableAutoPreview,
     wsStatus
   ])
@@ -15773,11 +15809,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Plan 203 S2: a buffer-only session opens the scene's devices like a
   // recording does; on a never-asked Mac that was a cold OS prompt at launch.
-  const replayGrantWait = replayStartWaitsForGrant({
-    mediaAccess,
-    sources: captureConfig.sources,
-    layoutPreset: captureConfig.layout.layoutPreset
-  })
+  // First-run setup holds the preview back, so a start would find no frames
+  // and say Clips couldn't start over setup: the ring waits for it too.
+  const replayGrantWait =
+    firstRunSetupOpen ||
+    replayStartWaitsForGrant({
+      mediaAccess,
+      sources: captureConfig.sources,
+      layoutPreset: captureConfig.layout.layoutPreset
+    })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
     if (recordBlockedReason || replayGrantWait) {
@@ -16941,6 +16981,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [reportError])
   globalShortcutsRegistrarRef.current?.sync(settings.globalShortcuts ?? {})
   const handleGlobalShortcut = useEffectEvent((action: GlobalShortcutAction) => {
+    // Plan 203 S5: no global key records, goes live or switches a scene while
+    // first-run setup is open.
+    if (firstRunSetupOpen) return
     const context: GlobalShortcutContext = {
       switchLayout: (layoutAction) => {
         const current = captureConfigRef.current
@@ -17040,10 +17083,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? stopConfirmation
           : null,
       confirmStopSession,
-      cancelStopSession
+      cancelStopSession,
+      firstRunSetupOpen,
+      setFirstRunSetupOpen
     }),
     [
       cancelStopSession,
+      firstRunSetupOpen,
       closeCommentsWindow,
       closeNotesWindow,
       commentsWindow.open,

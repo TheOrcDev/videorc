@@ -1,4 +1,5 @@
 import { osSettingsName } from '@/lib/platform'
+import { platformCopy } from '@/lib/platform-copy'
 import type { SystemAccessAction, SystemAccessRow, SystemAccessState } from '@/lib/system-access'
 
 // Plan 174 S3.17 (I-10, A-16, V-11): how a system access row reads, in one
@@ -79,4 +80,37 @@ export function firstRunPrimary(rows: readonly SystemAccessRow[]): {
 
 export function systemAccessTag(row: SystemAccessRow): 'Needed to record' | 'Optional' | null {
   return row.required ? 'Needed to record' : row.id === 'camera' ? 'Optional' : null
+}
+
+/** The Welcome card's line under its title (plan 203 D1): what the step asks, in the OS's words. */
+export function firstRunSetupDescription(platform: string | undefined): string {
+  switch (platformCopy(platform).osName) {
+    case 'macOS':
+      return 'First, let Videorc record your Mac. macOS asks once for each, and you can change them later in Settings → Permissions.'
+    case 'Windows':
+      return 'First, check that Windows lets Videorc use your camera and microphone. You can change this later in Settings → Permissions.'
+    default:
+      return 'Linux keeps no capture permissions for apps, so there is nothing to grant here. Your desktop may ask when Videorc starts capturing the screen.'
+  }
+}
+
+/** How long setup waits for the first device list before trusting the OS snapshot alone. */
+export const FIRST_RUN_ROWS_FALLBACK_MS = 5000
+
+/**
+ * Setup shows Skeleton rows, never "Not asked yet" guesses, until the rows are
+ * trustworthy (plan 203 S5): the OS snapshot has answered and the first
+ * device list has arrived. After `FIRST_RUN_ROWS_FALLBACK_MS` the OS snapshot
+ * alone is enough, so a broken backend never blocks setup.
+ */
+export function systemAccessRowsReady({
+  mediaAccessReady,
+  devicesListed,
+  waitedLong
+}: {
+  mediaAccessReady: boolean
+  devicesListed: boolean
+  waitedLong: boolean
+}): boolean {
+  return mediaAccessReady && (devicesListed || waitedLong)
 }

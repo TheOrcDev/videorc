@@ -1,3 +1,5 @@
+import type { WorkspaceTab } from '@/components/workspace-nav'
+
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from './capture'
 
 export const FIRST_RUN_STEPS = ['permissions'] as const
@@ -142,3 +144,33 @@ export function createFirstRunStartup(store: FirstRunStorage = localStorage): {
     }
   }
 }
+
+export type FirstRunShellSurface = 'placeholder' | 'setup' | 'workspace'
+
+/**
+ * What the main window renders (plan 203 S5). Setup while it is open. Before
+ * the decision is final, a solid placeholder for an install that may be
+ * fresh or resuming, so neither the Studio nor a preview mounts and then
+ * vanishes behind setup. The workspace at once for everyone else: an
+ * existing install never waits on the decision.
+ */
+export function firstRunShellSurface({
+  snapshot,
+  decision,
+  setupOpen
+}: {
+  snapshot: FirstRunSnapshot
+  decision: FirstRunDecision | null
+  setupOpen: boolean
+}): FirstRunShellSurface {
+  if (setupOpen) return 'setup'
+  if (decision === null && (snapshot === 'fresh' || snapshot === 'resume')) return 'placeholder'
+  return 'workspace'
+}
+
+/**
+ * How setup was opened (plan 203 S5): the first launch writes the record and
+ * opens the Studio; a replay from Settings or ⌘K writes nothing and returns
+ * to `returnTo`.
+ */
+export type FirstRunSetupMode = { kind: 'first-run' } | { kind: 'replay'; returnTo: WorkspaceTab }

@@ -71,3 +71,51 @@ describe('SystemAccessList', () => {
     expect(markup).not.toContain('Screen Recording: ')
   })
 })
+
+// Plan 203 S5: the setup variant adds the tags and the microphone's proof.
+describe('SystemAccessList setup variant (plan 203 S5)', () => {
+  const setupRows = (microphone: SystemAccessRow['state']): SystemAccessRow[] => [
+    rows[0],
+    {
+      id: 'system-audio',
+      required: false,
+      label: 'System audio',
+      purpose: 'The sound your Mac plays. Comes with Screen Recording.',
+      state: 'granted',
+      detail: ''
+    },
+    { ...rows[2], state: microphone },
+    rows[1]
+  ]
+  const renderSetup = (microphone: SystemAccessRow['state'], variant?: 'setup'): string =>
+    renderToStaticMarkup(
+      createElement(SystemAccessList, {
+        rows: setupRows(microphone),
+        platform: 'darwin',
+        mediaAccess: { camera: 'denied', microphone: 'granted', screen: 'granted' },
+        onAction: async () => undefined,
+        variant,
+        microphoneProof: createElement('div', { 'data-proof': '' })
+      })
+    )
+
+  it('tags what recording needs and what is optional, in the setup variant only', () => {
+    const markup = renderSetup('granted', 'setup')
+    expect(markup.match(/Needed to record/g)).toHaveLength(2)
+    expect(markup.match(/>Optional</g)).toHaveLength(1)
+    const plain = renderSetup('granted')
+    expect(plain).not.toContain('Needed to record')
+    expect(plain).not.toContain('Optional')
+  })
+
+  it('shows the microphone proof only under a granted microphone', () => {
+    expect(renderSetup('granted', 'setup')).toContain('data-proof=""')
+    expect(renderSetup('first-use', 'setup')).not.toContain('data-proof=""')
+    expect(renderSetup('granted')).not.toContain('data-proof=""')
+  })
+
+  it('announces a chip that changes', () => {
+    const markup = renderSetup('granted', 'setup')
+    expect(markup.match(/aria-live="polite"/g)).toHaveLength(4)
+  })
+})

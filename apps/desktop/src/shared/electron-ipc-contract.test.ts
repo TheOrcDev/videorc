@@ -67,8 +67,10 @@ describe('Electron IPC contract', () => {
     // 148: plan 203 S2 adds the in-place screen request, the grant re-check
     // and Reopen Videorc (system:request-screen-access,
     // system:recheck-permission-grants, app:relaunch-for-permission).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(148)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(148)
+    // 149: plan 203 S5 adds app:workspace-shown (the launch Preview waits
+    // for first-run setup).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(149)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(149)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

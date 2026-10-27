@@ -46,9 +46,15 @@ const htmlPath = resolve(
 // and a start waits with plain copy when the scene shows a source turned off
 // (~280 bytes). Raise gzip to 400,000 (~1.3%); keep re-splitting the answer
 // for net-new UI.
+// Recalibrated 2026-10-27 (plan 203 S5): main measured 399,287 gzip (713 bytes
+// of headroom) and first-run setup's shell state (the surface switch, the
+// replay opener, the preview and global-key gate in the provider, ~790 bytes)
+// takes it to 400,072. The setup UI itself is lazy (its chunk is 308 KB raw,
+// ~43 KB gzip). Raise gzip to 405,000 (~1.2%); keep re-splitting the answer
+// for net-new UI.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 400_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 405_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

@@ -212,6 +212,7 @@ const api: VideorcApi = {
   requestScreenAccess: () => invoke('system:request-screen-access'),
   recheckPermissionGrants: () => invoke('system:recheck-permission-grants'),
   relaunchForPermission: () => invoke('app:relaunch-for-permission'),
+  workspaceShown: () => invoke('app:workspace-shown'),
   revealPermissionTarget: () => invoke('system:reveal-permission-target'),
   revealSelectedResource: (capabilityId) => invoke('resource:reveal-selection', capabilityId),
   authorizeOutputDirectory: (directoryHandleId) =>

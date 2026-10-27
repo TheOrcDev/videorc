@@ -246,7 +246,7 @@ describe('Settings layout', () => {
     expect(shellSource).not.toContain('onOpenPermissionsSetup')
     expect(panelSources.PermissionsSettings).toContain('<SystemAccessList')
     expect(panelSources.PermissionsSettings).not.toContain('Set up permissions')
-    expect(read('../permissions-onboarding-dialog.tsx')).toContain('<SystemAccessList')
+    expect(read('../first-run/permissions-step.tsx')).toContain('<SystemAccessList')
   })
 
   it('gives Remote control a one-line body when it is off, so it is never header-only', () => {

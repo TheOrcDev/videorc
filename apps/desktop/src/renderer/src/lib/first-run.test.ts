@@ -7,6 +7,7 @@ import {
   createFirstRunStartup,
   FIRST_RUN_STEPS,
   firstRunDecision,
+  firstRunShellSurface,
   parseFirstRunRecord,
   writeFirstRunRecord,
   type FirstRunRecord
@@ -215,7 +216,63 @@ describe('first-run startup ordering', () => {
     expect(shell).toContain('firstRunStartup?.finalize(runtimeInfo)')
     expect(shell).toContain('if (!runtimeInfo || firstRunVisibility !== null) return')
     expect(shell).toContain('firstRunVisibility === null ? undefined : runtimeInfo?.version')
-    expect(shell).toContain("whatsNew.open && firstRunVisibility === 'hide' && !onboardingOpen")
+    expect(shell).toContain("whatsNew.open && firstRunVisibility === 'hide' && !setupOpen")
     expect(shell).not.toContain('shouldShowPermissionsOnboarding')
+  })
+
+  it('renders setup or the placeholder in place of the workspace, and writes the record only on the first launch (plan 203 S5)', () => {
+    const shell = readFileSync(new URL('../components/app-shell.tsx', import.meta.url), 'utf8')
+    expect(shell).not.toContain('PermissionsOnboarding')
+    expect(shell).toContain("surface === 'setup' && setupMode")
+    expect(shell).toContain('<FirstRunPlaceholder />')
+    // A replay returns to its page before the record could be written.
+    const leave = shell.slice(
+      shell.indexOf('const leaveFirstRunSetup'),
+      shell.indexOf('[replay, setActive]')
+    )
+    expect(leave.indexOf('setActive(replay.returnTo)')).toBeGreaterThan(0)
+    expect(leave.indexOf('setActive(replay.returnTo)')).toBeLessThan(
+      leave.indexOf('firstRunStartup?.complete(completion)')
+    )
+    expect(leave).toContain("setActive('studio')")
+    // The shell's chords and command-digit navigation ask setup first, like a dialog.
+    expect(shell.match(/setupOpenRef\.current \|\| isModalOpen\(document\)/g)).toHaveLength(2)
+    expect(shell).toContain('setFirstRunSetupOpen(setupOpen)')
+  })
+})
+
+describe('firstRunShellSurface (plan 203 S5)', () => {
+  it.each(['fresh', 'resume'] as const)(
+    'holds a solid placeholder for a %s install until the decision is final',
+    (snapshot) => {
+      expect(firstRunShellSurface({ snapshot, decision: null, setupOpen: false })).toBe(
+        'placeholder'
+      )
+    }
+  )
+
+  it.each(['finished', 'existing-install'] as const)(
+    'shows the workspace at once for a %s install',
+    (snapshot) => {
+      expect(firstRunShellSurface({ snapshot, decision: null, setupOpen: false })).toBe('workspace')
+    }
+  )
+
+  it('shows setup while it is open, on the first launch and on a replay', () => {
+    expect(firstRunShellSurface({ snapshot: 'fresh', decision: 'show', setupOpen: true })).toBe(
+      'setup'
+    )
+    expect(firstRunShellSurface({ snapshot: 'finished', decision: 'hide', setupOpen: true })).toBe(
+      'setup'
+    )
+  })
+
+  it('shows the workspace once setup is left or hidden', () => {
+    expect(firstRunShellSurface({ snapshot: 'fresh', decision: 'hide', setupOpen: false })).toBe(
+      'workspace'
+    )
+    expect(firstRunShellSurface({ snapshot: 'resume', decision: 'hide', setupOpen: false })).toBe(
+      'workspace'
+    )
   })
 })

@@ -5030,6 +5030,9 @@ export interface VideorcApi {
   /** Plan 203 S2: Reopen Videorc after a grant macOS only honours per launch.
    * Refused while a recording, livestream or capture start is active. */
   relaunchForPermission: () => Promise<RelaunchForPermissionResult>
+  /** Plan 203 S5: the main window shows the workspace (not first-run setup):
+   * main restores the Preview window from its launch prefs, once per launch. */
+  workspaceShown: () => Promise<void>
   revealPermissionTarget: () => Promise<void>
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>

@@ -14,19 +14,22 @@ import { GoLiveDialogGate } from '@/components/go-live-dialog-gate'
 import {
   WorkspaceNavContext,
   isStudioPanel,
+  readFirstRunSetupRequest,
   readWorkspaceNavigation,
   workspaceTabLabel,
   workspaceWindowTitle,
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
-import { useStudioCore, useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
+import { useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import {
   createFirstRunStartup,
+  firstRunShellSurface,
   type FirstRunCompletion,
-  type FirstRunDecision
+  type FirstRunDecision,
+  type FirstRunSetupMode
 } from '@/lib/first-run'
 import {
   OPEN_CLEAN_CUT_EVENT,
@@ -50,7 +53,11 @@ import {
   type LivestreamViewId
 } from '@/lib/livestream-tabs'
 import { readLastSettingsTab, writeLastSettingsTab, type SettingsTabId } from '@/lib/settings-tabs'
-import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
+import {
+  FIRST_RUN_SETUP_OPEN_EVENT,
+  WORKSPACE_NAVIGATE_EVENT,
+  type FirstRunSetupRequest
+} from '@/lib/workspace-navigation'
 import { sessionOwnsTransport } from '../../../shared/capture-state'
 // Straight from the session view, not `state-labels`, so the other state
 // tables stay out of the eager bundle (plan 174 S2.3a).
@@ -59,7 +66,6 @@ import {
   sessionStatusPulses,
   sessionStatusTone
 } from '@/lib/studio-session-view'
-import { isMediaAccessSnapshotReady } from '@/lib/system-access'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // Workspace views are loaded only on first navigation, then retained by the
@@ -95,8 +101,10 @@ const SourcesTab = lazy(async () => ({ default: (await loadSourcesTab()).Sources
 const StreamingTab = lazy(async () => ({
   default: (await import('@/components/tabs/streaming-tab')).StreamingTab
 }))
-const PermissionsOnboardingDialog = lazy(async () => ({
-  default: (await import('@/components/permissions-onboarding-dialog')).PermissionsOnboardingDialog
+// First-run setup (plan 203): its backdrop, player and card load only when
+// setup opens, never in the eager bundle.
+const FirstRunSetup = lazy(async () => ({
+  default: (await import('@/components/first-run/first-run-setup')).FirstRunSetup
 }))
 const WhatsNewDialog = lazy(async () => ({
   default: (await import('@/components/whats-new-dialog')).WhatsNewDialog
@@ -130,39 +138,17 @@ function WorkspaceTabFallback(): ReactElement {
 const firstRunStartup =
   typeof localStorage === 'undefined' ? null : createFirstRunStartup(localStorage)
 
-function PermissionsOnboardingGate({
-  decision,
-  open,
-  onOpen,
-  onComplete
-}: {
-  decision: FirstRunDecision | null
-  open: boolean
-  onOpen: () => void
-  onComplete: (status: FirstRunCompletion) => void
-}): ReactElement {
-  const { wsStatus, deviceList, mediaAccess, runtimeInfo } = useStudioCore()
-  const evaluatedRef = useRef(false)
-  const dialogMountedRef = useRef(open)
-  const backendReady = wsStatus === 'connected' && deviceList.devices.length > 0
-  const mediaAccessReady = runtimeInfo !== null && isMediaAccessSnapshotReady(mediaAccess)
-
-  if (open) {
-    dialogMountedRef.current = true
-  }
-
-  useEffect(() => {
-    if (evaluatedRef.current || decision === null || !backendReady || !mediaAccessReady) return
-    evaluatedRef.current = true
-    if (decision === 'show') onOpen()
-  }, [backendReady, decision, mediaAccessReady, onOpen])
-
+/**
+ * The window before the first-run decision is final, and while the setup
+ * chunk loads (plan 203 S5): the solid tone and the title band. Nothing that
+ * could mount and then vanish behind setup.
+ */
+function FirstRunPlaceholder(): ReactElement {
+  // The band is empty, so it needs no traffic-light gutter: only the drag region.
   return (
-    <Suspense fallback={null}>
-      {dialogMountedRef.current ? (
-        <PermissionsOnboardingDialog open={open} onComplete={onComplete} />
-      ) : null}
-    </Suspense>
+    <div className="h-screen bg-glass-solid" data-first-run-surface="placeholder">
+      <div className="h-toolbar [-webkit-app-region:drag]" />
+    </div>
   )
 }
 
@@ -202,7 +188,8 @@ function AppShellContent(): ReactElement {
     toggleCaptionsWindow,
     stopConfirmation,
     confirmStopSession,
-    cancelStopSession
+    cancelStopSession,
+    setFirstRunSetupOpen
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
@@ -269,12 +256,42 @@ function AppShellContent(): ReactElement {
     setActiveTab('library')
   }, [])
   const [commandOpen, setCommandOpen] = useState(false)
-  const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [firstRunVisibility, setFirstRunVisibility] = useState<FirstRunDecision | null>(null)
   useEffect(() => {
     if (!runtimeInfo || firstRunVisibility !== null) return
     setFirstRunVisibility(firstRunStartup?.finalize(runtimeInfo) ?? 'hide')
   }, [firstRunVisibility, runtimeInfo])
+  // Plan 203 S5: setup opens as soon as the decision says so (its rows handle
+  // the backend still loading), and "Run setup again…" replays it over the
+  // workspace. While it is open the provider holds preview and global keys.
+  const [replay, setReplay] = useState<FirstRunSetupRequest | null>(null)
+  const setupMode: FirstRunSetupMode | null = replay
+    ? { kind: 'replay', returnTo: replay.returnTo }
+    : firstRunVisibility === 'show'
+      ? { kind: 'first-run' }
+      : null
+  const setupOpen = setupMode !== null
+  const setupOpenRef = useRef(setupOpen)
+  setupOpenRef.current = setupOpen
+  const surface = firstRunShellSurface({
+    snapshot: firstRunStartup?.snapshot ?? 'existing-install',
+    decision: firstRunVisibility,
+    setupOpen
+  })
+  useEffect(() => {
+    setFirstRunSetupOpen(setupOpen)
+  }, [setFirstRunSetupOpen, setupOpen])
+  // Main restores the launch Preview window only once the workspace shows,
+  // so it never floats over first-run setup (main ignores the repeats).
+  useEffect(() => {
+    if (surface === 'workspace') void window.videorc?.workspaceShown?.()
+  }, [surface])
+  useEffect(() => {
+    const onOpenSetup = (event: Event): void =>
+      setReplay(readFirstRunSetupRequest((event as CustomEvent<unknown>).detail))
+    window.addEventListener(FIRST_RUN_SETUP_OPEN_EVENT, onOpenSetup)
+    return () => window.removeEventListener(FIRST_RUN_SETUP_OPEN_EVENT, onOpenSetup)
+  }, [])
   // Do not let What's New write its first-launch marker until the setup
   // record has been persisted, or suppression has been confirmed.
   const whatsNew = useWhatsNew(
@@ -343,16 +360,22 @@ function AppShellContent(): ReactElement {
     [selectLivestreamView, setActive]
   )
 
-  const completeOnboarding = useCallback((status: FirstRunCompletion) => {
-    firstRunStartup?.complete(status)
-    setFirstRunVisibility('hide')
-    setOnboardingOpen(false)
-  }, [])
-
-  // Every fresh install sees setup, even with all grants already present.
-  const openPermissionsSetup = useCallback(() => {
-    setOnboardingOpen(true)
-  }, [])
+  // Continue or Skip for now, after the fade. The first launch writes the
+  // record (every fresh install sees setup once, D2) and opens the Studio; a
+  // replay writes nothing and returns to the page it came from.
+  const leaveFirstRunSetup = useCallback(
+    (completion: FirstRunCompletion) => {
+      if (replay) {
+        setReplay(null)
+        setActive(replay.returnTo)
+        return
+      }
+      firstRunStartup?.complete(completion)
+      setFirstRunVisibility('hide')
+      setActive('studio')
+    },
+    [replay, setActive]
+  )
 
   // The shell's chords (plan 174 S3.21): ⌘ on macOS, Ctrl elsewhere (A-17),
   // decided in shell-shortcuts.ts, and none of them from under a dialog or a
@@ -364,7 +387,7 @@ function AppShellContent(): ReactElement {
     const onKeyDown = (event: KeyboardEvent): void => {
       const action = shellShortcutAction(event, {
         platform: runtimeInfo?.platform,
-        modalOpen: isModalOpen(document),
+        modalOpen: setupOpenRef.current || isModalOpen(document),
         searchOpen: commandOpenRef.current,
         notesWindowEnabled: Boolean(runtimeInfo?.notesWindowEnabled),
         commentsWindowEnabled: Boolean(runtimeInfo?.commentsWindowEnabled)
@@ -404,7 +427,7 @@ function AppShellContent(): ReactElement {
   // key (plan 174 A-2).
   useEffect(() => {
     const off = window.videorc?.onShortcutNavigate?.((key) => {
-      const tab = navigationShortcutTab(key, isModalOpen(document))
+      const tab = navigationShortcutTab(key, setupOpenRef.current || isModalOpen(document))
       if (tab) setActive(tab)
     })
     return off
@@ -414,11 +437,11 @@ function AppShellContent(): ReactElement {
   // page title takes the focus, so the new page is announced and the next
   // Tab starts at its top (plan 174 A-18).
   useEffect(() => {
-    document.title = workspaceWindowTitle(active)
-    if (!titleFocusPendingRef.current) return
+    document.title = setupOpen ? 'Videorc' : workspaceWindowTitle(active)
+    if (setupOpen || !titleFocusPendingRef.current) return
     titleFocusPendingRef.current = false
     document.querySelector<HTMLElement>('[data-slot="toolbar"] h1')?.focus()
-  }, [active])
+  }, [active, setupOpen])
 
   // Pages opened from outside React arrive through `openWorkspaceTab`
   // (plan 174, I-PAT-12); a page id that does not exist is dropped here.
@@ -477,164 +500,171 @@ function AppShellContent(): ReactElement {
         openBuddy
       }}
     >
-      {/* The window family's shell (plan 050, D4): the sidebar sits on the
-          window coat, the content pane adds --glass-content, and both share
-          one 40 px header band with the traffic lights. Only PaneBody
-          scrolls. */}
-      <div
-        className="flex h-screen overflow-hidden text-foreground"
-        data-videorc-active-tab={active}
-      >
-        <Sidebar
-          active={active}
-          activeStudioPanel={isStudioPanel(active) ? active : null}
-          accountTier={entitlementTier}
-          // A click on a row keeps the focus on the row; every other way to
-          // a page moves it to the page title.
-          onSelect={(tab) => setActive(tab, { focusTitle: false })}
-          onSelectStudioPanel={(panel) => setActive(panel, { focusTitle: false })}
-          onOpenSettings={openSettings}
-          statusTone={statusTone}
-          statusLabel={statusLabel}
-          statusPulse={statusPulse}
-          sessionStartedAt={recording.startedAt}
-          live={live}
-          onOpenCommand={() => setCommandOpen(true)}
-          platform={runtimeInfo?.platform}
-        />
+      {surface === 'setup' && setupMode ? (
+        // First-run setup (plan 203, D1) is the whole window: the backdrop, the
+        // title band and the card, in place of the sidebar and the page. The
+        // solid placeholder holds the window while its chunk loads.
+        <Suspense fallback={<FirstRunPlaceholder />}>
+          <FirstRunSetup mode={setupMode} onLeave={leaveFirstRunSetup} />
+        </Suspense>
+      ) : surface === 'placeholder' ? (
+        <FirstRunPlaceholder />
+      ) : (
+        // The window family's shell (plan 050, D4): the sidebar sits on the
+        // window coat, the content pane adds --glass-content, and both share
+        // one 40 px header band with the traffic lights. Only PaneBody
+        // scrolls.
+        <div
+          className="flex h-screen overflow-hidden text-foreground"
+          data-videorc-active-tab={active}
+        >
+          <Sidebar
+            active={active}
+            activeStudioPanel={isStudioPanel(active) ? active : null}
+            accountTier={entitlementTier}
+            // A click on a row keeps the focus on the row; every other way to
+            // a page moves it to the page title.
+            onSelect={(tab) => setActive(tab, { focusTitle: false })}
+            onSelectStudioPanel={(panel) => setActive(panel, { focusTitle: false })}
+            onOpenSettings={openSettings}
+            statusTone={statusTone}
+            statusLabel={statusLabel}
+            statusPulse={statusPulse}
+            sessionStartedAt={recording.startedAt}
+            live={live}
+            onOpenCommand={() => setCommandOpen(true)}
+            platform={runtimeInfo?.platform}
+          />
 
-        <main className="flex min-w-0 flex-1 flex-col bg-glass-content">
-          <Pane>
-            <Toolbar title={workspaceTabLabel(active)} />
-            {/* A page that owns its scroll says so on its root (pinned tab
+          <main className="flex min-w-0 flex-1 flex-col bg-glass-content">
+            <Pane>
+              <Toolbar title={workspaceTabLabel(active)} />
+              {/* A page that owns its scroll says so on its root (pinned tab
                   strips, Library's pinned header): PaneBody stops scrolling
                   for it. Every other page scrolls as one. */}
-            <PaneBody>
-              {/* A page crash, or a page chunk that failed to load, stays
+              <PaneBody>
+                {/* A page crash, or a page chunk that failed to load, stays
                   inside the page (plan 174 A-7); keyed, so the next page
                   starts clean. */}
-              <PageErrorBoundary key={active}>
-                <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
-                  <Suspense fallback={<WorkspaceTabFallback />}>
-                    {active === 'studio' ? <StudioTab /> : null}
-                    {active === 'sources' ? <SourcesTab /> : null}
-                    {active === 'layouts' ? <LayoutTab /> : null}
-                    {active === 'assets' ? <AssetsTab /> : null}
-                    {active === 'live' ? (
-                      <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
-                    ) : null}
-                    {active === 'captions' ? <CaptionsTab /> : null}
-                    {active === 'recording' ? <RecordingTab /> : null}
-                    {active === 'library' ? (
-                      <LibraryTab
-                        focusSessionId={libraryFocusSessionId}
-                        onOpenCleanCut={(sessionId) =>
-                          openCleanCut({ sessionId, origin: 'library' })
-                        }
-                        onOpenBuddyReport={openBuddyReport}
-                      />
-                    ) : null}
-                    {active === 'ai' ? (
-                      <BuddyTab
-                        cleanCutRequest={cleanCutRequest}
-                        reportSessionId={buddyReportSessionId}
-                        tab={buddyTab}
-                        onOpenLibrarySession={openLibrarySession}
-                        onTabChange={selectBuddyTab}
-                      />
-                    ) : null}
-                    {active === 'diagnostics' ? <DiagnosticsTab /> : null}
-                    {active === 'settings' ? (
-                      <SettingsTab
-                        tab={settingsTab}
-                        onShowWhatsNew={whatsNew.showLatest}
-                        onTabChange={selectSettingsTab}
-                      />
-                    ) : null}
-                  </Suspense>
-                </StudioMicVisualProvider>
-              </PageErrorBoundary>
-            </PaneBody>
-          </Pane>
-          {/* State on the left, the shell's real shortcuts on the right:
+                <PageErrorBoundary key={active}>
+                  <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
+                    <Suspense fallback={<WorkspaceTabFallback />}>
+                      {active === 'studio' ? <StudioTab /> : null}
+                      {active === 'sources' ? <SourcesTab /> : null}
+                      {active === 'layouts' ? <LayoutTab /> : null}
+                      {active === 'assets' ? <AssetsTab /> : null}
+                      {active === 'live' ? (
+                        <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
+                      ) : null}
+                      {active === 'captions' ? <CaptionsTab /> : null}
+                      {active === 'recording' ? <RecordingTab /> : null}
+                      {active === 'library' ? (
+                        <LibraryTab
+                          focusSessionId={libraryFocusSessionId}
+                          onOpenCleanCut={(sessionId) =>
+                            openCleanCut({ sessionId, origin: 'library' })
+                          }
+                          onOpenBuddyReport={openBuddyReport}
+                        />
+                      ) : null}
+                      {active === 'ai' ? (
+                        <BuddyTab
+                          cleanCutRequest={cleanCutRequest}
+                          reportSessionId={buddyReportSessionId}
+                          tab={buddyTab}
+                          onOpenLibrarySession={openLibrarySession}
+                          onTabChange={selectBuddyTab}
+                        />
+                      ) : null}
+                      {active === 'diagnostics' ? <DiagnosticsTab /> : null}
+                      {active === 'settings' ? (
+                        <SettingsTab
+                          tab={settingsTab}
+                          onShowWhatsNew={whatsNew.showLatest}
+                          onTabChange={selectSettingsTab}
+                        />
+                      ) : null}
+                    </Suspense>
+                  </StudioMicVisualProvider>
+                </PageErrorBoundary>
+              </PaneBody>
+            </Pane>
+            {/* State on the left, the shell's real shortcuts on the right:
                 keyboard-first, only quieter than the old footer bar. */}
-          <StatusBar
-            leading={
-              <>
-                <StatusBarSessionState recording={recording} wsStatus={wsStatus} />
-                <StatusBarReplayState />
-              </>
-            }
-          >
-            <StatusBarHint
-              accelerator={shortcutAccelerator('search')}
-              label="Search"
-              onClick={() => setCommandOpen(true)}
-            />
-            <StatusBarHint
-              accelerator={shortcutAccelerator('preview-window')}
-              label={WINDOW_NAMES.preview}
-              pressed={previewWindowOpen}
-              onClick={() => void togglePreviewWindow()}
-            />
-            {/* Flags default ON and runtimeInfo lands async: treating null as
+            <StatusBar
+              leading={
+                <>
+                  <StatusBarSessionState recording={recording} wsStatus={wsStatus} />
+                  <StatusBarReplayState />
+                </>
+              }
+            >
+              <StatusBarHint
+                accelerator={shortcutAccelerator('search')}
+                label="Search"
+                onClick={() => setCommandOpen(true)}
+              />
+              <StatusBarHint
+                accelerator={shortcutAccelerator('preview-window')}
+                label={WINDOW_NAMES.preview}
+                pressed={previewWindowOpen}
+                onClick={() => void togglePreviewWindow()}
+              />
+              {/* Flags default ON and runtimeInfo lands async: treating null as
                   enabled keeps the bar at its final width from the first paint. */}
-            {runtimeInfo?.notesWindowEnabled !== false ? (
-              <StatusBarHint
-                accelerator={shortcutAccelerator('notes-window')}
-                label={WINDOW_NAMES.notes}
-                pressed={notesWindowOpen}
-                onClick={() => (notesWindowOpen ? void closeNotesWindow() : void openNotesWindow())}
-              />
-            ) : null}
-            {runtimeInfo?.commentsWindowEnabled !== false ? (
-              <StatusBarHint
-                accelerator={shortcutAccelerator('comments-window')}
-                label={WINDOW_NAMES.streamManager}
-                pressed={commentsWindowOpen}
-                onClick={() =>
-                  commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
-                }
-              />
-            ) : null}
-          </StatusBar>
-        </main>
+              {runtimeInfo?.notesWindowEnabled !== false ? (
+                <StatusBarHint
+                  accelerator={shortcutAccelerator('notes-window')}
+                  label={WINDOW_NAMES.notes}
+                  pressed={notesWindowOpen}
+                  onClick={() =>
+                    notesWindowOpen ? void closeNotesWindow() : void openNotesWindow()
+                  }
+                />
+              ) : null}
+              {runtimeInfo?.commentsWindowEnabled !== false ? (
+                <StatusBarHint
+                  accelerator={shortcutAccelerator('comments-window')}
+                  label={WINDOW_NAMES.streamManager}
+                  pressed={commentsWindowOpen}
+                  onClick={() =>
+                    commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
+                  }
+                />
+              ) : null}
+            </StatusBar>
+          </main>
+        </div>
+      )}
 
-        {/* The Go Live confirmation opens over every page, not only Studio
-            (plan 174 S0.6, B-5): Go Live can start from anywhere. */}
-        <GoLiveDialogGate />
+      {/* The Go Live confirmation opens over every page, not only Studio
+          (plan 174 S0.6, B-5): Go Live can start from anywhere. */}
+      <GoLiveDialogGate />
 
-        <Suspense fallback={null}>
-          {commandOpen ? <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} /> : null}
-        </Suspense>
-        <PermissionsOnboardingGate
-          decision={firstRunVisibility}
-          open={onboardingOpen}
-          onOpen={openPermissionsSetup}
-          onComplete={completeOnboarding}
-        />
-        {/* Post-update highlights; suppressed behind onboarding on first run
-            (first run initializes the last-seen version silently). */}
-        <Suspense fallback={null}>
-          {whatsNew.open && firstRunVisibility === 'hide' && !onboardingOpen ? (
-            <WhatsNewDialog
-              entry={whatsNew.entry}
-              open
-              skippedVersions={whatsNew.skippedVersions}
-              onClose={whatsNew.dismiss}
-            />
-          ) : null}
-        </Suspense>
-        <Suspense fallback={null}>
-          {stopConfirmation ? (
-            <EndLivestreamDialog
-              confirmation={stopConfirmation}
-              onCancel={cancelStopSession}
-              onConfirm={confirmStopSession}
-            />
-          ) : null}
-        </Suspense>
-      </div>
+      <Suspense fallback={null}>
+        {commandOpen ? <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} /> : null}
+      </Suspense>
+      {/* Post-update highlights; they wait behind first-run setup (first run
+            initializes the last-seen version silently). */}
+      <Suspense fallback={null}>
+        {whatsNew.open && firstRunVisibility === 'hide' && !setupOpen ? (
+          <WhatsNewDialog
+            entry={whatsNew.entry}
+            open
+            skippedVersions={whatsNew.skippedVersions}
+            onClose={whatsNew.dismiss}
+          />
+        ) : null}
+      </Suspense>
+      <Suspense fallback={null}>
+        {stopConfirmation ? (
+          <EndLivestreamDialog
+            confirmation={stopConfirmation}
+            onCancel={cancelStopSession}
+            onConfirm={confirmStopSession}
+          />
+        ) : null}
+      </Suspense>
     </WorkspaceNavContext.Provider>
   )
 }
