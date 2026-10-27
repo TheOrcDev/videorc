@@ -244,7 +244,8 @@ The live dashboard window: chat, activity, Buddy and the stats bar.
 _Avoid_: Chat window, Comments window, comments (for chat)
 
 **Chat**:
-The viewers' messages in Stream Manager.
+The viewers' messages, in Stream Manager and, while on air with Chat in
+Studio on, in the Studio's Chat section (plan 204).
 _Avoid_: comments
 
 **Captions reader**:

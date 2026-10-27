@@ -46,6 +46,7 @@ import {
   sessionStopControl
 } from '@/lib/studio-session-view'
 import { spaceShortcutBlocked } from '@/lib/studio-space-shortcut'
+import { studioChatShows } from '@/lib/studio-chat'
 import { connectionBlockedReason } from '@/lib/state-labels'
 
 const StudioDashboardBottomRow = lazy(async () => ({
@@ -55,6 +56,11 @@ const StudioDashboardBottomRow = lazy(async () => ({
 // The meters and faders bring audiocn: their own chunk, so the inspector paints first.
 const AudioSection = lazy(async () => ({
   default: (await import('@/components/studio/audio-section')).AudioSection
+}))
+// Chat in Studio (plan 204): the rows, the list and their imports are their
+// own chunk; the page holds only the gate (`lib/studio-chat.ts`).
+const StudioChatSection = lazy(async () => ({
+  default: (await import('@/components/studio/studio-chat')).StudioChatSection
 }))
 
 export function StudioTab(): ReactElement {
@@ -240,6 +246,17 @@ export function StudioTab(): ReactElement {
             onDismissStartFailure={dismissSessionStartFailure}
             onRetryStart={retrySessionStart}
           />
+          {/* Chat in Studio (plan 204, owner 2026-10-27): while on air and
+              switched on, the livestream's chat under Session, where the
+              streamer glances most, and a click puts a message on stream.
+              The same section in both looks (owner: no Retro LCD screen in
+              the first version). The inspector keeps its width, so the
+              docked preview's slot never moves when it appears. */}
+          {studioChatShows({ settings: studio.settings, recording }) ? (
+            <Suspense fallback={<StudioChatSectionFallback />}>
+              <StudioChatSection />
+            </Suspense>
+          ) : null}
           {/* Audio: the Microphone and System audio levels on one scale, each
               with its Gain, between Session and Sources (plan 201 D1; the
               Microphone section since the owner call of 2026-10-02): a check
@@ -265,6 +282,18 @@ function StudioDashboardBottomRowFallback(): ReactElement {
         <Skeleton className="h-24" />
       </PanelSection>
     </div>
+  )
+}
+
+/**
+ * The Chat section's height while its chunk loads: the header row and the
+ * fixed list area (`STUDIO_CHAT_LIST_HEIGHT`), so nothing under it jumps.
+ */
+function StudioChatSectionFallback(): ReactElement {
+  return (
+    <PanelSection title="Chat">
+      <Skeleton className="h-64 rounded-row" />
+    </PanelSection>
   )
 }
 

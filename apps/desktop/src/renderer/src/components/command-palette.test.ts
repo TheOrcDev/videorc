@@ -314,11 +314,34 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
 
   it('checks the look in use', async () => {
     await render()
-    expect(groupValues('Appearance')).toEqual(['Light theme', 'Dark theme', 'System theme'])
+    expect(groupValues('Appearance')).toEqual([
+      'Light theme',
+      'Dark theme',
+      'System theme',
+      'Chat in Studio'
+    ])
     expect(item('Dark theme').dataset.checked).toBe('true')
     expect(item('Light theme').dataset.checked).toBe('false')
     await act(async () => item('Light theme').click())
     expect(mocked.setTheme).toHaveBeenCalledWith('light')
+  })
+
+  // Plan 204 (D4): a mirror of Settings → General → Chat in Studio.
+  it('checks Chat in Studio while it is on, and turns it on and off', async () => {
+    mocked.core.setSettings = vi.fn()
+    await render()
+    expect(item('Chat in Studio').dataset.checked).toBe('false')
+    await act(async () => item('Chat in Studio').click())
+    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
+    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
+    expect(update({})).toEqual({ studioChat: true })
+    expect(update({ studioChat: true })).toEqual({ studioChat: false })
+  })
+
+  it('finds Chat in Studio by "chat" and "comments"', async () => {
+    await render()
+    await search('comments')
+    expect(values()).toContain('Chat in Studio')
   })
 })
 

@@ -1,13 +1,7 @@
-import {
-  chatDeliveryProgress,
-  deliveryCursor,
-  type ChatDelivery
-} from '../../../../shared/chat-delivery'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import type { ChatDelivery, ChatDeliveryMessage } from '../../../../shared/chat-delivery'
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -58,7 +52,8 @@ import {
   PlatformFilter,
   PlatformFilterMenuItems
 } from '@/components/stream-manager/platform-filter'
-import { AlertIcon, ArrowDownIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import { ChatJumpChip } from '@/components/chat-jump-chip'
+import { AlertIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -104,7 +99,7 @@ import {
   validateChatDraft,
   type ChatSendFailure
 } from '@/lib/chat-send'
-import { useChatFollow } from '@/hooks/use-chat-follow'
+import { useChatList } from '@/hooks/use-chat-list'
 import {
   chatPaneMessages,
   pickedSendProviders,
@@ -264,60 +259,27 @@ export function ChatPane({
     Number(filter.platform !== 'all') + Number(filter.questions) + Number(filter.mentions)
   const filtering = activeFilterCount > 0 || filter.search.trim() !== ''
 
-  const rootRef = useRef<HTMLDivElement>(null)
-  const [viewport, setViewport] = useState<HTMLDivElement | null>(null)
-  useLayoutEffect(() => {
-    setViewport(
-      rootRef.current?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null
-    )
-  }, [])
-  const virtualizer = useVirtualizer({
-    count: shown.length,
-    getScrollElement: () => viewport,
-    estimateSize: () => 58,
-    overscan: 10,
-    getItemKey: (index) => shown[index]?.id ?? index
-  })
-
-  const [unread, setUnread] = useState(0)
-  const [incomplete, setIncomplete] = useState(false)
-  const arrivalRef = useRef({ key: arrivalKey, cursor: deliveryCursor(delivery) })
-  // Newest at the bottom, and the list stays there (hooks/use-chat-follow.ts):
-  // only the streamer scrolling up stops it, and reaching the bottom (or the
-  // jump chip) follows again with nothing unread.
-  const clearUnread = useCallback((): void => {
-    setUnread(0)
-    setIncomplete(false)
-  }, [])
-  const { pinned, pinnedRef, stick, follow, release } = useChatFollow(viewport, {
-    onFollow: clearUnread
-  })
-
-  // Paint retention and filter refreshes are not delivery evidence.
-  useEffect(() => {
-    const prior = arrivalRef.current
-    const progress = chatDeliveryProgress(
-      delivery,
-      prior.key === arrivalKey ? prior.cursor : null,
-      (message) =>
-        chatPaneMessages([message], filter, { questionMessageIds, mentionNames }).length > 0
-    )
-    arrivalRef.current = { key: arrivalKey, cursor: progress.cursor }
-    if (progress.reset || pinnedRef.current) {
-      setUnread(0)
-      setIncomplete(false)
-    } else {
-      setUnread((value) => value + progress.count)
-      if (progress.incomplete) setIncomplete(true)
-    }
-  }, [arrivalKey, delivery, filter, mentionNames, pinnedRef, questionMessageIds])
-  // A new newest message while following: show it before the frame paints.
-  // The bottom of the viewport, not the virtualizer's index scroll, whose
-  // settle loop could pull a streamer who just scrolled up back down.
-  const newestId = shown.at(-1)?.id
-  useLayoutEffect(() => {
-    if (pinnedRef.current) stick()
-  }, [newestId, pinnedRef, shown.length, stick])
+  // The virtualized rows, the follow, the unread count and the roving tab
+  // stop (hooks/use-chat-list.ts, shared with the Studio's Chat section).
+  // Paint retention and filter refreshes are not delivery evidence: only a
+  // delivered message these filters would show counts as an arrival.
+  const countsAsArrival = useCallback(
+    (message: ChatDeliveryMessage): boolean =>
+      chatPaneMessages([message], filter, { questionMessageIds, mentionNames }).length > 0,
+    [filter, mentionNames, questionMessageIds]
+  )
+  const {
+    rootRef,
+    virtualizer,
+    pinned,
+    follow,
+    release,
+    unread,
+    incomplete,
+    activeIndex,
+    setActiveId,
+    focusRow
+  } = useChatList({ shown, delivery, arrivalKey, countsAsArrival, estimateSize: 58 })
 
   // Buddy's "jump to message": clear filters that hide it, then scroll there.
   // The streamer asked for it, so the list stops following until they come
@@ -348,37 +310,9 @@ export function ChatPane({
   // Esc on a row returns to the composer; ⌘L comes from the window.
   const [composerFocus, setComposerFocus] = useState(0)
 
-  // One tab stop with roving focus (plan 174 S3.16a, H-7): the active row
-  // (the newest until one is chosen) holds tabIndex 0, every other -1. A
-  // focused row answers ↑/↓, Home, End, R, C, ⇧⌫ and Esc; Enter and Space
-  // are its button's own click. A row that has scrolled out of the
-  // virtualized window is focused once it is rendered again.
-  const [activeId, setActiveId] = useState<string | null>(null)
-  const activeIndex = useMemo(() => {
-    const index = activeId ? shown.findIndex((message) => message.id === activeId) : -1
-    return index >= 0 ? index : shown.length - 1
-  }, [activeId, shown])
-  const pendingFocusRef = useRef<string | null>(null)
-  const focusPendingRow = useCallback((): void => {
-    const id = pendingFocusRef.current
-    if (!id || typeof CSS === 'undefined') return
-    const row = rootRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
-    const target = row?.matches('[tabindex]')
-      ? row
-      : row?.querySelector<HTMLElement>(':scope > button')
-    if (!target) return
-    pendingFocusRef.current = null
-    target.focus({ preventScroll: true })
-  }, [])
-  useEffect(focusPendingRow)
-  const focusRow = (index: number): void => {
-    const message = shown[index]
-    if (!message) return
-    setActiveId(message.id)
-    pendingFocusRef.current = message.id
-    virtualizer.scrollToIndex(index, { align: 'auto' })
-    focusPendingRow()
-  }
+  // One tab stop with roving focus (plan 174 S3.16a, H-7), from
+  // `useChatList`. A focused row answers ↑/↓, Home, End, R, C, ⇧⌫ and Esc;
+  // Enter and Space are its button's own click.
   /** The row's Remove from chat: the action, or why it is off (H-11). */
   const rowRemoval = (
     message: LiveChatMessage
@@ -640,21 +574,9 @@ export function ChatPane({
             </ol>
           )}
         </ScrollArea>
+        {/* Whenever the list is not on the newest message, one way back. */}
         {!pinned ? (
-          // Whenever the list is not on the newest message, one way back.
-          // A glass chip, not an ad-hoc pill (plan 174 H-17): the Badge is
-          // the button.
-          <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto">
-            <button
-              aria-label={`Chat paused: ${incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'reading back'}. Jump to the newest`}
-              data-testid="chat-paused"
-              type="button"
-              onClick={follow}
-            >
-              {incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'Latest'}
-              <ArrowDownIcon data-icon="inline-end" />
-            </button>
-          </Badge>
+          <ChatJumpChip incomplete={incomplete} unread={unread} onFollow={follow} />
         ) : null}
       </div>
 

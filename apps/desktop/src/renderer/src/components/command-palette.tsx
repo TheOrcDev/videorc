@@ -41,6 +41,7 @@ import { openLivestreamView } from '@/lib/livestream-tabs'
 import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { sessionStopControl } from '@/lib/studio-session-view'
+import { studioChatOn } from '@/lib/studio-chat'
 import { openFirstRunSetup } from '@/lib/workspace-navigation'
 import {
   STUDIO_PANELS,
@@ -125,6 +126,7 @@ export function CommandPalette({
     captureConfig,
     setCaptureConfig,
     settings,
+    setSettings,
     markClip,
     startRecording,
     startLivestream,
@@ -547,6 +549,21 @@ export function CommandPalette({
           >
             <DesktopIcon className="size-4" />
             System
+          </CommandItem>
+          {/* Chat in Studio (plan 204): a mirror of Settings → General →
+              Chat, checked while on. */}
+          <CommandItem
+            value="Chat in Studio"
+            keywords={['chat', 'comments', 'messages', 'studio']}
+            data-checked={studioChatOn(settings)}
+            onSelect={() =>
+              run(() =>
+                setSettings((current) => ({ ...current, studioChat: !studioChatOn(current) }))
+              )
+            }
+          >
+            <ChatIcon className="size-4" />
+            Chat in Studio
           </CommandItem>
         </CommandGroup>
       </CommandList>
