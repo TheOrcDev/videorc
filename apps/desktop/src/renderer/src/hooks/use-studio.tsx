@@ -61,15 +61,8 @@ import {
   type SavedScene
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
-import {
-  backgroundLibrarySyncDecision,
-  cameraShapeLayoutPatch,
-  firstRunBackgroundChoice,
-  firstRunLookPatch,
-  firstRunLookPreset,
-  firstRunLookWritesHeld,
-  type FirstRunLook
-} from '@/lib/first-run-look-apply'
+import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
+import type { FirstRunLook } from '@/lib/first-run-look'
 import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
@@ -10449,6 +10442,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // background), so no device opens while setup is open. The library sync
   // above sees the fingerprint already applied. Setup's changes start the
   // Studio with no undo history and no saved-scene origin (a built-in look).
+  // The setup chunk has already loaded the look's helpers when this runs.
   const applyFirstRunLook = useCallback(
     (look: FirstRunLook): void => {
       if (firstRunLookWritesHeld(recordingRef.current)) {
@@ -10456,21 +10450,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setFirstRunLookHold(look)
         return
       }
-      const current = captureConfigRef.current
-      if (current.layout.arrangementMode === 'freeform') noteLayoutLeavingFreeform(current.layout)
-      const next = firstRunLookPatch(current, look)
-      latestRequestedLayoutRef.current = next.layout.layoutPreset
-      workingOriginRef.current = 'builtin'
-      activeSavedSceneIdRef.current = null
-      setActiveSavedSceneId(null)
-      setCaptureConfig((latest) => firstRunLookPatch(latest, look))
-      const registry = backgroundRegistryRef.current
-      const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
-      const background = effectiveSceneBackground(nextRegistry)
-      libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
-      workingBackgroundRef.current = background
-      setWorkingBackground(background)
-      if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+      void import('@/lib/first-run-look').then(
+        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+          const current = captureConfigRef.current
+          if (current.layout.arrangementMode === 'freeform') {
+            noteLayoutLeavingFreeform(current.layout)
+          }
+          const next = firstRunLookPatch(current, look)
+          latestRequestedLayoutRef.current = next.layout.layoutPreset
+          workingOriginRef.current = 'builtin'
+          activeSavedSceneIdRef.current = null
+          setActiveSavedSceneId(null)
+          setCaptureConfig((latest) => firstRunLookPatch(latest, look))
+          const registry = backgroundRegistryRef.current
+          const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
+          const background = effectiveSceneBackground(nextRegistry)
+          libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
+          workingBackgroundRef.current = background
+          setWorkingBackground(background)
+          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+        }
+      )
     },
     [setBackgroundRegistry]
   )
@@ -10483,13 +10483,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!held) return
     firstRunLookHoldRef.current = null
     setFirstRunLookHold(null)
-    const registry = firstRunBackgroundChoice(backgroundRegistryRef.current, held.liveBackgroundId)
-    void requestCameraPresetTransaction(
-      {
-        layoutPreset: firstRunLookPreset(captureConfigRef.current, held),
-        ...cameraShapeLayoutPatch(held.cameraShape)
-      },
-      { backgroundOverride: effectiveSceneBackground(registry) }
+    void import('@/lib/first-run-look').then(
+      ({ cameraShapeLayoutPatch, firstRunBackgroundChoice, firstRunLookPreset }) => {
+        const registry = firstRunBackgroundChoice(
+          backgroundRegistryRef.current,
+          held.liveBackgroundId
+        )
+        void requestCameraPresetTransaction(
+          {
+            layoutPreset: firstRunLookPreset(captureConfigRef.current, held),
+            ...cameraShapeLayoutPatch(held.cameraShape)
+          },
+          { backgroundOverride: effectiveSceneBackground(registry) }
+        )
+      }
     )
   }, [firstRunSetupOpen, requestCameraPresetTransaction])
 

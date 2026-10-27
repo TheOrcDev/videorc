@@ -3,15 +3,14 @@ import { describe, expect, it } from 'vitest'
 import type { Device, MediaAccessSnapshot } from './backend'
 import { applyLiveBackground, createDefaultRegistry } from './background-assets'
 import { defaultCaptureConfig, videoPresets, type CaptureConfig } from './capture'
+import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from './first-run'
 import {
   FIRST_RUN_LOOK_REASONS,
-  backgroundLibrarySyncDecision,
   cameraShapeLayoutPatch,
   firstRunBackgroundChoice,
   firstRunLayoutOptions,
   firstRunLookPatch,
   firstRunLookPreset,
-  firstRunLookWritesHeld,
   registryLiveBackgroundId,
   shapeApplies
 } from './first-run-look'

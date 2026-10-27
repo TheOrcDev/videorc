@@ -303,3 +303,41 @@ export function firstRunReplayLocked(
     recording.state === 'stopping'
   )
 }
+
+/**
+ * Whether the look's writes must wait for setup to close (plan 207 edge
+ * case "Replay while Clips runs"). The idle reload is refused while any
+ * backend session runs (`commit_idle_scene_with_layout` bails with a session
+ * present), and the Clips ring is one: a replay of setup from Settings lets a
+ * running ring keep running (`firstRunReplayLocked`). The look is then held
+ * and applied through the Studio's own transaction once the workspace shows,
+ * where opening the layout's devices is what a Studio change does. On a first
+ * launch nothing runs (setup holds the ring's start), so writes land at once.
+ */
+export function firstRunLookWritesHeld(recording: { state: string }): boolean {
+  return (
+    recording.state === 'starting' ||
+    recording.state === 'recording' ||
+    recording.state === 'streaming' ||
+    recording.state === 'stopping'
+  )
+}
+
+export type BackgroundLibrarySyncDecision = 'skip' | 'hold' | 'apply'
+
+/**
+ * Whether the background library sync (a layout transaction that puts the
+ * library's background on the scene) may run: never for a background already
+ * applied, and never while setup is open (plan 207 S4: a transaction starts
+ * the scene's devices). A held change runs once the workspace shows, unless
+ * setup's own writes already carried it through the idle reload and kept the
+ * applied fingerprint in step.
+ */
+export function backgroundLibrarySyncDecision(input: {
+  setupOpen: boolean
+  fingerprint: string
+  applied: string
+}): BackgroundLibrarySyncDecision {
+  if (input.fingerprint === input.applied) return 'skip'
+  return input.setupOpen ? 'hold' : 'apply'
+}
