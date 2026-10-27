@@ -153,7 +153,7 @@ async fn live_destinations(state: &AppState) -> Vec<Value> {
             out.insert("label".into(), json!(target.label));
             out.insert(
                 "state".into(),
-                serde_json::to_value(&target.state).unwrap_or(json!("unknown")),
+                serde_json::to_value(target.state).unwrap_or(json!("unknown")),
             );
             if let Some(message) = target.message.as_deref() {
                 out.insert("message".into(), json!(scrub_addresses(message)));
