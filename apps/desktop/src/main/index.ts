@@ -138,6 +138,8 @@ import {
   nativePreviewPlacementOwnedByNativeSurface,
   nativePreviewPresentFailureDisposition,
   nativePreviewProofPollingSuppressed,
+  windowsD3d11ClaimPending,
+  WINDOWS_D3D11_CLAIM_PENDING_TIMEOUT_MS,
   reconcileWindowsD3d11PresenterStatus,
   nativePreviewSurfaceHasAttachedNativePixels,
   nativePreviewSupervisorFallbackReason,
@@ -865,6 +867,7 @@ let nativePreviewAppliedProofPollingProfile: string | null = null
 let nativePreviewProofPollingProfileSerial = 0
 let nativePreviewNativeOwnsProofPollingSuppression = false
 let nativePreviewNativeFailureFallbackActive = false
+let nativePreviewD3d11ClaimArmed: { generation: number; atMs: number } | null = null
 let nativePreviewAppliedProofPollingSuppression: boolean | null = null
 let nativePreviewProofAnimationSuspended: boolean | null = null
 let nativePreviewFramePollingSuppressionSerial = 0
@@ -5552,9 +5555,14 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         }
 
         function setFramePollingSuppressed(suppressed) {
+          const wasSuppressed = framePollingSuppressed;
           framePollingSuppressed = suppressed === true;
           if (framePollingSuppressed) {
             stopAllPollers();
+          } else if (wasSuppressed && scene) {
+            // Pollers only start from a scene; resume them now rather than
+            // waiting for the renderer's next scene push.
+            applyScene(scene);
           }
         }
 
@@ -6186,6 +6194,7 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
         return
       }
       await syncNativePreviewProofPollingProfile()
+      await armWindowsD3d11ClaimIfMediaLive(generation)
       const proofPollingSuppressed = nativePreviewProofPollingIsSuppressed()
       if (proofPollingSuppressed) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
@@ -7800,8 +7809,50 @@ function nativePreviewProofPollingIsSuppressed(): boolean {
   return nativePreviewProofPollingSuppressed({
     lifecycleSuppressed: nativePreviewSurfaceFramePollingSuppressed,
     nativeSurfaceOwnsPresentation: nativePreviewNativeOwnsProofPollingSuppression,
-    nativeFailureFallbackActive: nativePreviewNativeFailureFallbackActive
+    nativeFailureFallbackActive: nativePreviewNativeFailureFallbackActive,
+    nativeClaimPending: windowsD3d11ClaimPending({
+      armed: nativePreviewD3d11ClaimArmed,
+      generation: previewWindowSurfaceGeneration(),
+      nowMs: Date.now(),
+      presenterFallbackReason: nativePreviewSurfaceStatus.windowsD3d11Presenter?.fallbackReason
+    })
   })
+}
+
+/**
+ * Arms the pre-claim quiet period for a new proof surface when the backend
+ * already runs a live D3D11 media generation (see `windowsD3d11ClaimPending`).
+ */
+async function armWindowsD3d11ClaimIfMediaLive(generation: number): Promise<void> {
+  nativePreviewD3d11ClaimArmed = null
+  if (process.platform !== 'win32') {
+    return
+  }
+  let mediaLive = false
+  try {
+    const diagnostics = await requestBackendAdmin<{
+      windowsD3d11Media?: { state?: string } | null
+    }>('diagnostics.stats', {}, 1_500)
+    mediaLive = diagnostics?.windowsD3d11Media?.state === 'live'
+  } catch {
+    // Without evidence the proof surface keeps its normal fallback role.
+  }
+  if (!mediaLive || !previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return
+  }
+  const armed = { generation, atMs: Date.now() }
+  nativePreviewD3d11ClaimArmed = armed
+  setTimeout(() => {
+    if (nativePreviewD3d11ClaimArmed !== armed) {
+      return
+    }
+    void runNativePreviewSurfaceMutation(async () => {
+      await syncNativePreviewProofPollingSuppression()
+      return nativePreviewSurfaceStatus
+    }, 'windows-d3d11-claim-timeout').catch((error) => {
+      logBackend('warn', `D3D11 claim timeout resync failed: ${errorMessageText(error)}`)
+    })
+  }, WINDOWS_D3D11_CLAIM_PENDING_TIMEOUT_MS)
 }
 
 async function setNativePreviewProofAnimationSuspended(suspended: boolean): Promise<void> {
@@ -10556,7 +10607,9 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'windows-d3d11-preview-harness') {
-    if (!app.isPackaged || !packagedSmokeHarnessCapability || !windowsD3d11PreviewSmokeMode) {
+    // Dev builds already authorize the smoke server with its own capability;
+    // the preview probes run there and need the same screen-only scene.
+    if (!windowsD3d11PreviewSmokeMode || (app.isPackaged && !packagedSmokeHarnessCapability)) {
       throw new Error('Windows D3D11 preview harness is unavailable in this app mode.')
     }
     const request = validateWindowsD3d11PreviewSmokeRequest(params)

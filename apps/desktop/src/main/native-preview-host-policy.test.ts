@@ -12,6 +12,7 @@ import {
   nativePreviewHelperFallbackAllowed,
   nativePreviewLifecycleFramePollingSuppressed,
   nativePreviewProofPollingSuppressed,
+  windowsD3d11ClaimPending,
   reconcileWindowsD3d11PresenterStatus,
   nativePreviewSupervisorFallbackReason,
   nativePreviewSupervisorDisposition,
@@ -266,6 +267,40 @@ describe('native preview host policy', () => {
       nativePreviewProofPollingSuppressed({
         lifecycleSuppressed: true,
         nativeSurfaceOwnsPresentation: false
+      })
+    ).toBe(true)
+  })
+
+  it('keeps the proof surface quiet while a live D3D11 generation claims the window', () => {
+    const armed = { generation: 4, atMs: 1_000 }
+    const pending = (patch: Partial<Parameters<typeof windowsD3d11ClaimPending>[0]> = {}) =>
+      windowsD3d11ClaimPending({ armed, generation: 4, nowMs: 2_000, ...patch })
+
+    expect(pending()).toBe(true)
+    expect(
+      pending({ presenterFallbackReason: 'windows-d3d11-preview-waiting-trusted-window' })
+    ).toBe(true)
+    // A named failure, a newer generation or a stalled claim hands it back.
+    expect(
+      pending({ presenterFallbackReason: 'windows-d3d11-preview-window-stacking-failed' })
+    ).toBe(false)
+    expect(pending({ generation: 5 })).toBe(false)
+    expect(pending({ nowMs: 6_000 })).toBe(false)
+    expect(pending({ armed: null })).toBe(false)
+
+    expect(
+      nativePreviewProofPollingSuppressed({
+        lifecycleSuppressed: false,
+        nativeSurfaceOwnsPresentation: false,
+        nativeClaimPending: true
+      })
+    ).toBe(true)
+    expect(
+      nativePreviewProofPollingSuppressed({
+        lifecycleSuppressed: false,
+        nativeSurfaceOwnsPresentation: false,
+        nativeClaimPending: true,
+        nativeFailureFallbackActive: true
       })
     ).toBe(true)
   })

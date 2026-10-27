@@ -447,10 +447,51 @@ export function nativePreviewProofPollingSuppressed(input: {
   lifecycleSuppressed: boolean
   nativeSurfaceOwnsPresentation: boolean
   nativeFailureFallbackActive?: boolean
+  nativeClaimPending?: boolean
 }): boolean {
   return (
     input.nativeSurfaceOwnsPresentation ||
+    // A pending claim already excludes named presenter failures, and main
+    // marks the waiting proof surface as the active fallback.
+    input.nativeClaimPending === true ||
     (input.lifecycleSuppressed && input.nativeFailureFallbackActive !== true)
+  )
+}
+
+/** A stalled claim hands the window back to the proof surface after this. */
+export const WINDOWS_D3D11_CLAIM_PENDING_TIMEOUT_MS = 5_000
+
+const WINDOWS_D3D11_WAITING_FALLBACK_REASONS = new Set([
+  'windows-d3d11-preview-waiting-trusted-window'
+])
+
+/**
+ * When the Preview window opens over a live Windows D3D11 media generation,
+ * the backend presenter is about to claim it. Every BMP frame the proof
+ * surface asked for meanwhile would be refused, and plan 040 keeps a
+ * D3D11-native run at zero BMP requests, so the proof surface stays quiet
+ * until the claim. A named presenter failure, a new generation, or a stalled
+ * claim hands presentation back to it.
+ */
+export function windowsD3d11ClaimPending(input: {
+  armed: { generation: number; atMs: number } | null
+  generation: number
+  nowMs: number
+  presenterFallbackReason?: string
+  timeoutMs?: number
+}): boolean {
+  if (!input.armed || input.armed.generation !== input.generation) {
+    return false
+  }
+  if (
+    input.nowMs - input.armed.atMs >=
+    (input.timeoutMs ?? WINDOWS_D3D11_CLAIM_PENDING_TIMEOUT_MS)
+  ) {
+    return false
+  }
+  return (
+    input.presenterFallbackReason === undefined ||
+    WINDOWS_D3D11_WAITING_FALLBACK_REASONS.has(input.presenterFallbackReason)
   )
 }
 
