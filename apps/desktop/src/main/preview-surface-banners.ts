@@ -12,6 +12,7 @@ import type {
   SceneOutput
 } from '../shared/backend'
 import { VERTICAL_LAYOUT_PRESETS } from '../shared/backend'
+import { programShows, type OverlaySessionShape } from '../shared/preview-program'
 import { bannerAssetUrl } from '../shared/banner-assets'
 import { bannerDrawRect, bannerRectForCanvas } from '../shared/banner-geometry'
 
@@ -26,13 +27,17 @@ export const PREVIEW_SURFACE_BANNER_LAYER_KIND = 'banner'
 const DEFAULT_PREVIEW_CANVAS: PreviewSurfaceCanvas = { width: 1280, height: 720 }
 
 /**
- * Banners the preview draws: showing, with at least one "Appears in" switch
- * on (a banner with both off appears nowhere), in Assets order so a later
+ * Showing banners carried by the program, in Assets order so a later
  * banner draws on top.
  */
-export function previewSurfaceVisibleBanners(banners: readonly Banner[]): Banner[] {
+export function previewSurfaceVisibleBanners(
+  banners: readonly Banner[],
+  shape: OverlaySessionShape | null
+): Banner[] {
   return banners
-    .filter((banner) => banner.shown && (banner.showOnStream || banner.showInRecording))
+    .filter(
+      (banner) => banner.shown && programShows(shape, banner.showOnStream, banner.showInRecording)
+    )
     .sort((a, b) => a.sortOrder - b.sortOrder)
 }
 
@@ -40,11 +45,12 @@ export function previewSurfaceVisibleBanners(banners: readonly Banner[]): Banner
  * handed to the proof page as canvas fractions. */
 export function previewSurfaceBannerLayers(
   banners: readonly Banner[],
-  canvas: PreviewSurfaceCanvas
+  canvas: PreviewSurfaceCanvas,
+  shape: OverlaySessionShape | null = null
 ): PreviewSurfaceSceneLayer[] {
   const width = Math.max(1, Math.round(canvas.width))
   const height = Math.max(1, Math.round(canvas.height))
-  return previewSurfaceVisibleBanners(banners).map((banner) => {
+  return previewSurfaceVisibleBanners(banners, shape).map((banner) => {
     const rect = bannerDrawRect(
       banner.width,
       banner.height,
@@ -126,7 +132,8 @@ export function fallbackPreviewSurfaceCanvas(
  */
 export function withPreviewSurfaceBanners(
   scene: PreviewSurfaceSceneState,
-  banners: readonly Banner[]
+  banners: readonly Banner[],
+  shape: OverlaySessionShape | null = null
 ): PreviewSurfaceSceneState {
   const canvas = scene.bannerCanvas ?? fallbackPreviewSurfaceCanvas(scene.layout)
   return {
@@ -134,7 +141,7 @@ export function withPreviewSurfaceBanners(
     bannerCanvas: canvas,
     sources: [
       ...scene.sources.filter((layer) => layer.kind !== PREVIEW_SURFACE_BANNER_LAYER_KIND),
-      ...previewSurfaceBannerLayers(banners, canvas)
+      ...previewSurfaceBannerLayers(banners, canvas, shape)
     ]
   }
 }

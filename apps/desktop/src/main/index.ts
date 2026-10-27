@@ -613,8 +613,10 @@ import type {
   CommentsHistoryStats,
   SessionChatTotals,
   VideorcAccountSnapshot,
-  ViewerSample
+  ViewerSample,
+  RecordingStatus
 } from '../shared/backend'
+import { previewProgramShape } from '../shared/preview-program'
 import {
   COHOST_ACTION_KINDS,
   normalizeCommentHighlightAnchor,
@@ -888,6 +890,7 @@ let backendManagedAssetRoots: ManagedAssetRoots | null = null
 let backendAuthorityReady: Promise<void> = Promise.resolve()
 const mainResourceCapabilities = new MainResourceCapabilityRegistry()
 let mainCaptureState: MainCaptureState = 'unknown'
+let mainPreviewProgramShape: ReturnType<typeof previewProgramShape> = null
 // Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
 // the renderer's End livestream question (exit-guard.ts).
 const liveExitGuard = new LiveExitGuard()
@@ -5143,7 +5146,9 @@ function buildPreviewSurfaceScene(
     previewSurfaceCanvasFromOutputs(params.scene?.outputs) ??
     nativePreviewSurfaceScene?.bannerCanvas ??
     fallbackPreviewSurfaceCanvas(params.layout)
-  layers.push(...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas))
+  layers.push(
+    ...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas, mainPreviewProgramShape)
+  )
 
   return {
     revision: params.revision,
@@ -5200,7 +5205,9 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
     previewSurfaceCanvasFromCompositor(status) ??
     nativePreviewSurfaceScene?.bannerCanvas ??
     fallbackPreviewSurfaceCanvas(status.sceneLayout)
-  layers.push(...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas))
+  layers.push(
+    ...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas, mainPreviewProgramShape)
+  )
 
   return {
     revision: status.sceneRevision,
@@ -6800,7 +6807,7 @@ async function applyNativePreviewSurfaceBanners(generation: number): Promise<Pre
   if (!current || !nativePreviewPresentationAllowedForGeneration(generation)) {
     return nativePreviewSurfaceStatus
   }
-  const next = withPreviewSurfaceBanners(current, previewSurfaceBanners)
+  const next = withPreviewSurfaceBanners(current, previewSurfaceBanners, mainPreviewProgramShape)
   if (JSON.stringify(next.sources) === JSON.stringify(current.sources)) {
     return nativePreviewSurfaceStatus
   }
@@ -13742,7 +13749,16 @@ async function runPermissionBackendRestart(reason: string): Promise<MediaAccessR
   }
 }
 
-function updateMainCaptureState(payload: unknown): void {
+function updateMainCaptureState(payload: RecordingStatus): void {
+  // Plan 205: the proof surface draws the program's banners, so a session
+  // that starts or stops re-plans them; other status ticks change nothing.
+  const nextProgramShape = previewProgramShape(payload)
+  if (JSON.stringify(nextProgramShape) !== JSON.stringify(mainPreviewProgramShape)) {
+    mainPreviewProgramShape = nextProgramShape
+    void updateNativePreviewSurfaceBanners().catch((error) => {
+      logBackend('warn', `Preview program banners failed to update: ${errorMessageText(error)}`)
+    })
+  }
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
