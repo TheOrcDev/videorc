@@ -104,7 +104,11 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
-import { replayStartWaitsForGrant, replayStartWaitsForScreen } from '@/lib/replay-buffer-grants'
+import {
+  nextPortalShareGrant,
+  replayStartWaitsForGrant,
+  replayStartWaitsForScreen
+} from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -3868,6 +3872,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     useState<PreviewCameraStatus>(idlePreviewCameraStatus)
   const [previewScreenStatus, setPreviewScreenStatus] =
     useState<PreviewScreenStatus>(idlePreviewScreenStatus)
+  // Linux: the portal source whose share this run granted (Clips waits for it).
+  const [portalShareGrantedSourceId, setPortalShareGrantedSourceId] = useState<string | null>(null)
   const [scene, setScene] = useState<Scene | null>(null)
   const transformSceneRef = useRef<Scene | null>(null)
   const [sceneEditMode, setSceneEditMode] = useState(false)
@@ -6257,6 +6263,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const applyPreviewScreenStatus = useCallback((status: PreviewScreenStatus) => {
     previewScreenStatusRef.current = status
     setPreviewScreenStatus(status)
+    setPortalShareGrantedSourceId((current) => nextPortalShareGrant(current, status))
   }, [])
 
   const applyScene = useCallback((nextScene: Scene) => {
@@ -16155,6 +16162,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 207 S2: a layout that shows a screen nobody has chosen (a fresh
   // profile without Screen Recording) waits the same way; the Clips row says
   // what Sources says. A chosen screen without frames still fails as today.
+  // On Linux the portal placeholder is not a choice: the ring waits for this
+  // run's share to be granted, and never opens the share dialog itself.
   const replayGrantWait =
     firstRunSetupOpen ||
     replayStartWaitsForGrant({
@@ -16162,7 +16171,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sources: captureConfig.sources,
       layoutPreset: captureConfig.layout.layoutPreset
     }) ||
-    replayStartWaitsForScreen({ sources: captureConfig.sources, layout: captureConfig.layout })
+    replayStartWaitsForScreen({
+      sources: captureConfig.sources,
+      layout: captureConfig.layout,
+      portalShareGrantedSourceId,
+      previewScreen: previewScreenStatus
+    })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
     if (recordBlockedReason || replayGrantWait) {
