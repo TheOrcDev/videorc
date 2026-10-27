@@ -25,7 +25,7 @@
 | S2    | The Agent role, agents registry, loopback listener, activity log   | A   | DONE    |
 | S3    | The MCP endpoint: list and call, backend tools, Studio relay       | A   | DONE    |
 | S4    | `videorc-mcp`, the stdio bridge shipped inside the app             | A   | DONE    |
-| S5    | One Studio action executor for remotes and agents (refactor)       | A   | PLANNED |
+| S5    | One Studio action executor for remotes and agents (refactor)       | A   | DONE    |
 | S6    | First tools: look, plus everything a Stream Deck can do            | A   | PLANNED |
 | S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | PLANNED |
 | S8    | Docs, glossary, release note                                       | A   | PLANNED |
@@ -38,7 +38,7 @@
 | S14   | Prepare: stream info, destinations, schedule, settings             | B   | PLANNED |
 | S15   | Library: rename, delete, export, Clean cut, transcripts            | B   | PLANNED |
 | S16   | Smoke coverage for PR B and the gates                              | B   | PLANNED |
-| S17   | Web: the Buddy planner route (deploy first)                        | C   | PLANNED |
+| S17   | Web: the Buddy planner route (deploy first)                        | C   | DONE    |
 | S18   | Buddy's grammar commands run through the executor                  | D   | PLANNED |
 | S19   | Buddy asks the planner and runs its tool calls                     | D   | PLANNED |
 | S20   | `/buddy` in the Stream Manager composer                            | D   | PLANNED |

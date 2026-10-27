@@ -119,11 +119,8 @@ import type {
   GlobalShortcutContext,
   GlobalShortcutsRegistrar
 } from '@/lib/global-shortcuts'
-import type {
-  RemoteIntentContext,
-  RemoteSurfacePublisher,
-  RemoteSurfaceValues
-} from '@/lib/remote-surface'
+import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
+import type { StudioActionContext } from '@/lib/studio-actions'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
   commentsRefreshRevisionIsCurrent,
@@ -16813,12 +16810,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // ── Remote control (issue #143) ──────────────────────────────────────
   // Intents execute through the SAME handlers as the on-screen buttons —
   // no second session-start path, no validation bypass. Every intent is
-  // acked so deck keys can show failure reasons. An effect event: stable
-  // identity for the one-time client subscription, latest closure inside.
-  const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
-    if (!client) return
+  // acked so deck keys can show failure reasons. The executors live in
+  // lib/studio-actions (plan 209 S5); the Studio only assembles their
+  // context, per intent and from the latest render's handlers, so a deck
+  // key and (S6) an agent's tool call run against the same one.
+  const studioActionContext = (): StudioActionContext | null => {
+    if (!client) return null
     const knownLayoutPresets = [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS]
-    const context: RemoteIntentContext = {
+    return {
       client,
       sessionActive: sessionOwnsTransport(recordingRef.current),
       replayOn: replayStateRef.current.state === 'on',
@@ -16897,6 +16896,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
     }
+  }
+
+  // An effect event: stable identity for the one-time client subscription,
+  // latest closure inside.
+  const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
+    const context = studioActionContext()
+    if (!context) return
     const intentKind = (payload as { kind?: unknown } | null)?.kind
     if (intentKind === 'recordStart' || intentKind === 'streamStart') {
       noteRecordClick('start')
@@ -16906,7 +16912,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       noteRecordClick(context.sessionActive ? 'stop' : 'start')
     }
     try {
-      const { executeRemoteIntent } = await import('@/lib/remote-surface')
+      const { executeRemoteIntent } = await import('@/lib/studio-actions')
       await executeRemoteIntent(payload, context)
     } catch (error) {
       reportError(error)
