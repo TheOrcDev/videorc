@@ -154,7 +154,9 @@ in a later release (docs/remote-control.md).
   `/ws` never authenticates an agent token, and the role is admitted to no
   websocket method (`backend_authority.rs`).
 - **The listener** (`agent_mcp.rs`) binds `127.0.0.1`, the persisted port
-  first, then 7440 to 7449, and says so in Settings when all are busy. Its
+  first, then 7440 to 7449, and says so in Settings when it can't
+  (`agents.status` carries `bindErrorKind`, `ports-busy` or `other`, which
+  Settings branches on, and `bindError`, the OS's words). Its
   router serves `/mcp` and nothing else. It exists only while Agents is on.
   MCP framing is `rmcp` (Streamable HTTP, stateless, JSON answers, spec
   2025-11-25 negotiated by the bridge).
@@ -170,7 +172,10 @@ in a later release (docs/remote-control.md).
   and `tools/list` from its compiled-in catalog, forwards `tools/call` with
   `VIDEORC_AGENT_TOKEN`, opens Videorc on the first call when it isn't
   running (D7) and logs to stderr only. It pings every 15 s while alive, so
-  the Session line knows the agent is there.
+  the Session line knows the agent is there. An agent unheard from for 45 s
+  is no longer connected: the backend publishes `agents.status` when that
+  happens (one task sleeps until the next lapse while any agent is
+  connected), so nothing in the renderer polls.
 
 ### A call, start to finish
 
@@ -183,14 +188,18 @@ the app's own sentence, never protocol errors.
   `(&AppState, &AgentIdentity, Value) -> ToolOutcome`. The Look tools and
   `save_clip` live in `agent_look.rs`.
 - **Studio tools** become `agent.intent {intentId, agentId, agentName, tool,
-args}` to renderer sockets. The Studio runs them on the agents' lane of
+args}` to the Studio's socket: the one that sent `agent.intent.listen`
+  (renderer-only, per socket, on every connect). No other socket receives
+  an intent, whatever its event lists say, and only listening sockets count
+  as "the Studio is open". The Studio runs them on the agents' lane of
   `lib/remote-intent-queue.ts` through `executeAgentIntent`
   (`lib/studio-actions/agent.ts`), whose executors are in
   `lib/studio-actions/tools.ts`: each one runs the Stream Deck executor for
   the same action, then adds the sentence and the structured result. The
   Studio answers `agent.intent.ack {intentId, ok, message?, result?}`
-  (renderer-only). 15 s timeout; "Videorc's Studio isn't open." with no
-  renderer attached.
+  (renderer-only). 15 s timeout; "Videorc's Studio isn't open." at once
+  with no socket listening (the Agents store's own socket, or a Settings
+  row's client, never counts).
 - **`get_status` and the `list_*` tools** merge the backend's truth (the
   session, destinations' health while live, viewers, banners, the comment
   on stream, Clips) with the Studio's projection, which the renderer
@@ -215,7 +224,12 @@ args}` to renderer sockets. The Studio runs them on the agents' lane of
   catalog's `notice` (`{agent}` and `{field}` from the arguments, then the
   result: `stop` returns `{stopped: "livestream"}`) and puts it on the
   `agents.activity` event as `notice`. The stored row never carries it. The
-  Studio shows `notice` when present; `notify` shows nothing by itself.
+  Studio toasts `notice` when present and nothing otherwise
+  (`lib/agent-notices.ts`); `notify` shows nothing by itself, so its
+  "{agent}: {message}" shows once.
+- **Last action.** Settings shows each agent's last action and its age.
+  It lives in memory; after a restart `agents.status` seeds it from the
+  agent's newest Activity row (looked up once per agent).
 
 ### Adding a tool
 

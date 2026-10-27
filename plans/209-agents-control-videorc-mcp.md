@@ -1285,3 +1285,46 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
 warnings`, `cargo fmt --check --all`, `pnpm typecheck`, `pnpm lint` (one
   pre-existing warning), vitest on the agent files and
   `studio-provider.integration` (196), `node --test` on the client.
+
+### PR A integration fixes (2026-10-27)
+
+After S6 and S7 met on one branch:
+
+- **Notices come from the backend only.** `lib/agent-notices.ts` toasts the
+  `notice` on the `agents.activity` event as it came (no closing period,
+  one toast id per agent and tool) and nothing for a row without one. It no
+  longer reads `agent.intent` or the catalog; `stop`'s sentence needs the
+  result, which only the backend has. `notify` still shows exactly once: its
+  executor never toasts.
+- **Only the Studio's socket counts as "the Studio is open".** Event
+  inclusion could not say it: the Studio's socket never narrows its events
+  (it uses `events.setExcluded`), and about ten renderer hooks open their
+  own un-narrowed sockets (Discord, Buddy look, Clean cut and others), so
+  they would have counted like the Agents store's. Instead the Studio sends the
+  new renderer-only, per-socket `agent.intent.listen` on every
+  `backend.ready`. `agent.intent` reaches listening sockets and no other,
+  whatever their event lists say, and `studio_sockets` (was
+  `renderer_sockets`) counts exactly those, with a Drop guard. The store
+  asks for `agents.status` and `agents.activity` only.
+- **Presence lapses publish `agents.status`.** While any agent is
+  connected, one task sleeps until the next 45 s lapse and publishes when an
+  agent dropped out; it ends with the last agent (claimed and released under
+  the registry lock a touch takes). The store's 15 s poll is gone.
+- **`bindErrorKind`** (`ports-busy` when every port failed with
+  `AddrInUse`, else `other`) rides `agents.status` beside `bindError`
+  (`skip_serializing_if`, in the contract); Settings branches on it, with
+  its own copy for `other`.
+- **`lastAction` survives restarts**: `agents.status` seeds each agent's
+  last action from its newest Activity row, once per agent, never over a
+  newer live one.
+- **`get_status` stays as it was**: no agents count. Another agent's
+  presence (and when it comes and goes) is the streamer's business, not
+  this agent's; nothing in the answer names or counts other agents.
+- **Checks**: `cargo test -p videorc-backend agent` (incl. new tests for the
+  listening socket over the real `/ws`, the lapse publish, the bind kind and
+  the seeded last action), `cargo clippy -p videorc-backend -- -D
+warnings`, `cargo fmt --check --all`, `pnpm typecheck`, `pnpm lint` (the
+  one pre-existing warning), `pnpm format:check`, vitest on agents-store,
+  agent-notices, agents-section, agents-session-row, agents-view and
+  agents-contract. Smokes not run (S16 runs the bundle); `smoke:agent-mcp`
+  should still see `studioOpen: true` once the dev app's Studio listens.
