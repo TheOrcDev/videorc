@@ -993,18 +993,15 @@ impl rmcp::ServerHandler for VideorcMcp {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> std::result::Result<rmcp::model::ListPromptsResult, rmcp::ErrorData> {
+        // The bridge's own wire shape, so the two lists can't drift.
         let prompts = crate::agent_prompts::prompts()
-            .prompts
-            .iter()
+            .mcp_prompts()
+            .into_iter()
             .map(|prompt| {
-                rmcp::model::Prompt::new(
-                    prompt.name.clone(),
-                    Some(prompt.description.clone()),
-                    None,
-                )
-                .with_title(prompt.title.clone())
+                serde_json::from_value::<rmcp::model::Prompt>(prompt)
+                    .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))
             })
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rmcp::model::ListPromptsResult {
             prompts,
             ..Default::default()
@@ -1022,14 +1019,13 @@ impl rmcp::ServerHandler for VideorcMcp {
                 None,
             ));
         };
-        Ok(
-            rmcp::model::GetPromptResult::new(vec![rmcp::model::PromptMessage::new_text(
-                rmcp::model::Role::User,
-                prompt.text.clone(),
-            )])
-            .with_description(prompt.description.clone())
-            .into(),
+        let messages = serde_json::from_value::<Vec<rmcp::model::PromptMessage>>(
+            prompt.mcp_get_result()["messages"].clone(),
         )
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
+        Ok(rmcp::model::GetPromptResult::new(messages)
+            .with_description(prompt.description.clone())
+            .into())
     }
 
     async fn call_tool(
