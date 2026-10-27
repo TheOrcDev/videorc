@@ -173,10 +173,17 @@ try {
   if (socket) {
     socket.close()
   }
-  if (backend && backend.exitCode === null) {
+  if (backend && backend.exitCode === null && backend.signalCode === null) {
+    // Windows refuses to unlink the database while the backend still holds
+    // it open, so reap the owned child (bounded) before removing its state.
+    const exited = new Promise((resolve) => backend.once('exit', resolve))
     backend.kill('SIGTERM')
+    await withTimeout(exited, 10000, 'backend exit').catch(() => {
+      backend.kill('SIGKILL')
+      return withTimeout(exited, 5000, 'backend kill')
+    })
   }
-  await rm(stateRoot, { recursive: true, force: true })
+  await rm(stateRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
 }
 
 function withTimeout(promise, ms, label) {

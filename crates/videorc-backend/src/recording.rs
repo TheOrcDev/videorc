@@ -9860,6 +9860,20 @@ async fn stop_kill_fallback(
     let _ = send_process_signal(pid, "KILL").await;
 }
 
+/// Performance check only: ends the active benchmark session's FFmpeg without
+/// waiting for its encoder backlog. Nobody keeps a benchmark file, and a
+/// below-realtime software encoder can need 13 s to flush (UHD 620 field log)
+/// — longer than the user's Record waits for the capture slot. Refuses any
+/// session that is not a benchmark.
+pub(crate) async fn kill_benchmark_ffmpeg(state: &AppState) -> bool {
+    let pid = match state.recording.lock().await.as_ref() {
+        Some(active) if active.performance_check => active.pid,
+        _ => return false,
+    };
+    mark_ffmpeg_stop_escalated(state, pid).await;
+    send_process_signal(pid, "KILL").await.is_ok()
+}
+
 async fn mark_ffmpeg_stop_escalated(state: &AppState, pid: u32) {
     if let Some(active) = state.recording.lock().await.as_ref()
         && active.pid == pid
@@ -16832,13 +16846,10 @@ pub(crate) fn graphics_adapter_driver_identity() -> String {
 #[cfg(target_os = "windows")]
 fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIFactory1,
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIDevice,
+        IDXGIFactory1,
     };
-
-    // IID_ID3D11Device from d3d11.h. CheckInterfaceSupport only needs this
-    // GUID, so Plan 039 does not widen the windows crate feature set.
-    const IID_ID3D11_DEVICE: windows::core::GUID =
-        windows::core::GUID::from_u128(0xdb6f6ddb_ac77_4e88_8253_819df9bbf140);
+    use windows::core::Interface;
 
     let windows_error_code =
         |error: windows::core::Error| format!("hresult-{:08x}", error.code().0 as u32);
@@ -16857,7 +16868,11 @@ fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
         if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
             continue;
         }
-        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IID_ID3D11_DEVICE) }
+        // DXGI answers CheckInterfaceSupport only for IDXGIDevice and D3D10
+        // GUIDs; ID3D11Device always returns DXGI_ERROR_UNSUPPORTED, which made
+        // every identity a fresh non-cacheable UUID. Since WDDM 2.3 all UMDs in
+        // a driver package share this one version.
+        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
             .map_err(windows_error_code)?;
         identities.push(WindowsGraphicsAdapterDriverIdentity {
             adapter_luid: (u64::from(description.AdapterLuid.HighPart as u32) << 32)
@@ -29066,6 +29081,34 @@ mod tests {
             windows_graphics_adapter_driver_identity_material(Vec::new()),
             None
         );
+    }
+
+    /// UHD 620 field log: CheckInterfaceSupport(ID3D11Device) always returned
+    /// DXGI_ERROR_UNSUPPORTED, so every call minted a fresh UUID identity and
+    /// no MF rejection, perf-check verdict or Quick Sync detection ever held.
+    /// CI runners without a hardware adapter may still fail with
+    /// `no-hardware-dxgi-adapter`; only the unsupported-interface error is a bug.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_graphics_adapter_driver_identity_query_is_supported_and_stable() {
+        match query_windows_graphics_adapter_driver_identity() {
+            Ok(identity) => {
+                assert_eq!(
+                    graphics_adapter_driver_identity(),
+                    identity,
+                    "a queryable adapter identity must be stable across calls"
+                );
+                assert_eq!(
+                    crate::screen_capture::graphics_adapter_driver_identity(),
+                    identity,
+                    "screen capture and recording must key verdicts on the same identity"
+                );
+            }
+            Err(reason) => assert!(
+                !reason.contains("887a0004"),
+                "DXGI rejected the driver-version interface: {reason}"
+            ),
+        }
     }
 
     #[test]

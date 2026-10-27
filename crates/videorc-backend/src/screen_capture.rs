@@ -232,10 +232,9 @@ pub(crate) fn is_foreign_session_window_app(app_name: Option<&str>) -> bool {
 mod windows_native {
     use super::*;
     use windows::Win32::Foundation::{LUID, RECT};
-    use windows::Win32::Graphics::Direct3D11::ID3D11Device;
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1,
-        IDXGIFactory1,
+        IDXGIDevice, IDXGIFactory1,
     };
     use windows::core::Interface;
 
@@ -277,7 +276,9 @@ mod windows_native {
             if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
                 continue;
             }
-            let driver_version = unsafe { adapter.CheckInterfaceSupport(&ID3D11Device::IID) }
+            // ID3D11Device is unsupported here (DXGI_ERROR_UNSUPPORTED); see
+            // recording::query_windows_graphics_adapter_driver_identity.
+            let driver_version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
                 .map_err(windows_error_code)?;
             identities.push(WindowsAdapterDriverIdentity {
                 adapter_luid: adapter_luid_u64(description.AdapterLuid),
