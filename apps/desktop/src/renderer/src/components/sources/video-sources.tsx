@@ -162,10 +162,12 @@ export function VideoSourcesView({
  * permission. The page's alerts (`source-permission-alerts.tsx`) read it too.
  */
 export function videoPermissionState({
+  systemAccessContext,
   deviceList,
   platform,
   mediaAccess
 }: {
+  systemAccessContext?: import('@/lib/system-access').SystemAccessContext
   deviceList: DeviceList
   platform: Parameters<typeof systemAccessRows>[0]['platform']
   mediaAccess: Parameters<typeof systemAccessRows>[0]['mediaAccess']
@@ -176,6 +178,7 @@ export function videoPermissionState({
 } {
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameraAccess = systemAccessRows({
+    ...systemAccessContext,
     deviceList,
     audioMeter: null,
     platform,
@@ -194,7 +197,10 @@ export function videoPermissionState({
     // one way the system asks, Off must stay reachable, and the alert for a
     // chosen camera carries the fix.
     cameraPermissionRequired:
-      cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
+      !cameraAccess?.checking &&
+      (cameraAccess?.state === 'first-use' ||
+        cameraAccess?.state === 'not-granted' ||
+        cameraAccess?.state === 'waiting')
   }
 }
 
@@ -212,6 +218,7 @@ export function VideoSources(): ReactElement {
     allowCaptureNone,
     runtimeInfo,
     mediaAccess,
+    systemAccessContext,
     wsStatus
   } = useStudioCore()
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
@@ -222,6 +229,7 @@ export function VideoSources(): ReactElement {
   const selectedCaptureId = sources.screenId ?? sources.windowId
 
   const { screenLocked, cameraPermissionRequired } = videoPermissionState({
+    systemAccessContext,
     deviceList,
     platform: runtimeInfo?.platform,
     mediaAccess

@@ -11,7 +11,6 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
-  useStudioAudio,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
@@ -49,7 +48,8 @@ import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/
 import { unknownDeviceWarnings } from '@/lib/source-status'
 import { previewSourceStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
-import { mediaAccessStatusForPane, systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { mediaAccessStatusForPane, systemAccessAction } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 
 // Health (plan 174 S3.18, I-4, I-25, V-7, D9): the page answers "is anything
@@ -79,7 +79,6 @@ export function DiagnosticsTab(): ReactElement {
     runtimeInfo,
     health
   } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
   const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, recordLatency, streamHealth } =
@@ -96,11 +95,12 @@ export function DiagnosticsTab(): ReactElement {
     }
   }, [logSessionId, loadSessionDetails])
 
-  const accessRows = systemAccessRows({ deviceList, audioMeter, platform, mediaAccess })
+  const accessRows = useSystemAccessRows()
   const deviceWarnings = unknownDeviceWarnings(deviceList.warnings)
   const permissionAction = (pane: SystemPermissionPane) =>
     systemAccessAction({
       pane,
+      checking: accessRows.find((row) => row.id === pane)?.checking,
       state: accessRows.find((row) => row.id === pane)?.state,
       platform,
       mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, pane)

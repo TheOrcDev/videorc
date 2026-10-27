@@ -13,9 +13,10 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { platformCopy } from '@/lib/platform-copy'
-import { systemAccessRows } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
+import { firstRunPrimary } from '@/lib/system-access-view'
 import type { FirstRunCompletion } from '@/lib/first-run'
 
 // Permissions-only onboarding: the ONE thing a fresh install needs is the
@@ -32,9 +33,7 @@ export function PermissionsOnboardingDialog({
   open: boolean
   onComplete: (status: FirstRunCompletion) => void
 }): ReactElement {
-  const { deviceList, refreshBackend, handleSystemPermission, runtimeInfo, mediaAccess } =
-    useStudioCore()
-  const { audioMeter } = useStudioAudio()
+  const { refreshBackend, handleSystemPermission, runtimeInfo, mediaAccess } = useStudioCore()
 
   // Grants flip in System Settings or the native prompt while we may be
   // backgrounded — re-enumerate on focus so the chips stay honest (same
@@ -43,13 +42,19 @@ export function PermissionsOnboardingDialog({
     if (!open) {
       return
     }
-    const onFocus = (): void => void refreshBackend()
+    const onFocus = (): void => {
+      void (async () => {
+        await window.videorc?.recheckPermissionGrants?.()
+        await refreshBackend()
+      })()
+    }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [open, refreshBackend])
 
   const platform = runtimeInfo?.platform
-  const rows = systemAccessRows({ deviceList, audioMeter, platform, mediaAccess })
+  const rows = useSystemAccessRows()
+  const primary = firstRunPrimary(rows)
   // Plan 174 I-9: "capture your Mac" was said on Linux too.
   const { deviceNoun, osName, osSettingsName: settingsName } = platformCopy(platform)
 
@@ -92,11 +97,8 @@ export function PermissionsOnboardingDialog({
             Recordings stay on this {deviceNoun}. Cloud AI only runs after you opt in.
           </span>
           <div className="flex shrink-0 items-center gap-2">
-            <Button variant="ghost" onClick={() => onComplete('skipped')}>
-              Skip for now
-            </Button>
-            <Button onClick={() => onComplete('done')}>
-              Continue
+            <Button onClick={() => onComplete(primary.completion)}>
+              {primary.label}
               <ArrowRightIcon data-icon="inline-end" />
             </Button>
           </div>

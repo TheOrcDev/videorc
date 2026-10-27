@@ -23,7 +23,15 @@ export function systemAccessStatus(state: SystemAccessState): {
     case 'device-issue':
       return { label: 'Device issue', tone: 'warn' }
     case 'first-use':
-      return { label: 'Checked on first use', tone: 'neutral' }
+      return { label: 'Not asked yet', tone: 'neutral' }
+    case 'waiting':
+      return { label: 'Waiting', tone: 'neutral' }
+    case 'needs-relaunch':
+      return { label: 'Reopen needed', tone: 'warn' }
+    case 'not-required':
+      return { label: 'Ready', tone: 'good' }
+    case 'unavailable':
+      return { label: 'Not available', tone: 'neutral' }
   }
 }
 
@@ -38,7 +46,9 @@ export function systemAccessActionLabel(
 ): string | null {
   switch (action) {
     case 'request-media-access':
-      return 'Allow access…'
+      return 'Allow…'
+    case 'relaunch':
+      return 'Reopen Videorc'
     case 'open-settings':
       return `Open ${osSettingsName(platform)}…`
     default:
@@ -48,18 +58,25 @@ export function systemAccessActionLabel(
 
 /**
  * The detail under the purpose: what to do or what went wrong. A granted row
- * needs none (its chip already says so).
+ * needs none unless it names the camera (the chip already says granted).
  */
 export function systemAccessVisibleDetail(row: SystemAccessRow): string | null {
-  return row.state === 'granted' ? null : row.detail
+  if (row.checking || !row.detail) return null
+  return row.state === 'granted' && row.id !== 'camera' ? null : row.detail
 }
 
-/**
- * The first-run dialog's primary button (V-11): "Continue" unless the OS
- * refused a grant. A permission the OS asks for on first use is not missing.
- */
-export function permissionsOnboardingContinueLabel(
-  rows: readonly SystemAccessRow[]
-): 'Continue' | 'Skip for now' {
-  return rows.some((row) => row.state === 'not-granted') ? 'Skip for now' : 'Continue'
+/** The single primary always allows leaving setup. */
+export function firstRunPrimary(rows: readonly SystemAccessRow[]): {
+  label: 'Continue' | 'Skip for now'
+  completion: 'done' | 'skipped'
+} {
+  return rows.every(
+    (row) => !row.required || row.state === 'granted' || row.state === 'not-required'
+  )
+    ? { label: 'Continue', completion: 'done' }
+    : { label: 'Skip for now', completion: 'skipped' }
+}
+
+export function systemAccessTag(row: SystemAccessRow): 'Needed to record' | 'Optional' | null {
+  return row.required ? 'Needed to record' : row.id === 'camera' ? 'Optional' : null
 }

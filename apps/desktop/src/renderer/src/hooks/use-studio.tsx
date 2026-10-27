@@ -1,3 +1,10 @@
+import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
+import { isReplacementPermissionClient } from '@/lib/permission-evidence'
+import {
+  mediaAccessStatusForPane,
+  systemAccessRows,
+  type SystemAccessContext
+} from '@/lib/system-access'
 import { createTakeoverImporter, type TakeoverImportPhase } from '@/lib/takeover-import'
 import { createBannerImporter, type BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
@@ -1355,6 +1362,7 @@ export type StudioContextValue = {
   audioMeterLoading: boolean
   /** Real OS camera/mic access status (null before the first read). */
   mediaAccess: MediaAccessSnapshot | null
+  systemAccessContext: SystemAccessContext
   // ai + jobs
   aiConsent: boolean
   /** Persists across launches (durable preference, not a per-launch answer). */
@@ -2431,7 +2439,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [aiQuota, setAiQuota] = useState<AiQuotaStatus | null>(null)
   const [aiReadinessError, setAiReadinessError] = useState<string | null>(null)
   const [aiReadinessLoading, setAiReadinessLoading] = useState(false)
-  const [deviceList, setDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  const [deviceList, commitDeviceList] = useState<DeviceList>({ devices: [], warnings: [] })
+  // A connection alone is not proof: only its published devices.list counts.
+  const [permissionEvidenceClient, setPermissionEvidenceClient] = useState<BackendClient | null>(
+    null
+  )
+  const setDeviceList = useCallback((nextDevices: DeviceList) => {
+    setPermissionEvidenceClient(clientRef.current)
+    commitDeviceList(nextDevices)
+  }, [])
   const previewDevicesSignature = useMemo(
     () => previewDeviceRefreshSignature(deviceList.devices),
     [deviceList.devices]
@@ -3815,7 +3831,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A fresh mic grant can defer its backend restart until capture becomes idle.
   // Remember the pre-grant client so proof can run only on the replacement.
   const [pendingMicrophonePermissionProof, setPendingMicrophonePermissionProof] = useState<
-    | (import('@/lib/system-permission-orchestration').MicrophonePermissionProof & {
+    | (MicrophonePermissionProof & {
         retry: number
       })
     | null
@@ -3826,6 +3842,78 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // This distinguishes never-asked from denied on macOS and is the only
   // truthful privacy-toggle signal on Windows.
   const [mediaAccess, setMediaAccess] = useState<MediaAccessSnapshot | null>(null)
+  const mediaAccessRef = useRef<MediaAccessSnapshot | null>(null)
+  const permissionGrantBoundariesRef = useRef<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  const [pendingPermissionPane, setPendingPermissionPane] = useState<SystemPermissionPane | null>(
+    null
+  )
+  const [permissionProofs, setPermissionProofs] = useState<
+    Partial<Record<SystemPermissionPane, MicrophonePermissionProof>>
+  >({})
+  // Retain inputs for the last chip, never a stored Waiting/Reopen state.
+  const [permissionEvidenceBeforeGrant, setPermissionEvidenceBeforeGrant] = useState<Pick<
+    Parameters<typeof systemAccessRows>[0],
+    'deviceList' | 'audioMeter' | 'platform' | 'mediaAccess' | 'pendingPane'
+  > | null>(null)
+  const lastPermissionStates = useMemo<SystemAccessContext['lastKnownStates']>(
+    () =>
+      permissionEvidenceBeforeGrant
+        ? Object.fromEntries(
+            systemAccessRows(permissionEvidenceBeforeGrant).map((row) => [row.id, row.state])
+          )
+        : {},
+    [permissionEvidenceBeforeGrant]
+  )
+  const notePermissionRestart = useCallback(
+    (pane: SystemPermissionPane, proof: MicrophonePermissionProof) => {
+      permissionGrantBoundariesRef.current[pane] = proof
+      setPermissionProofs((current) => ({ ...current, [pane]: proof }))
+    },
+    []
+  )
+  const screenGrantStale =
+    !permissionEvidenceClient ||
+    Boolean(
+      permissionProofs['screen-recording'] &&
+      !isReplacementPermissionClient(permissionEvidenceClient, permissionProofs['screen-recording'])
+    )
+  const captureRestarting = Object.values(permissionProofs).some(
+    (proof) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+  )
+  useEffect(() => {
+    if (
+      !Object.values(permissionProofs).some((proof) =>
+        isReplacementPermissionClient(permissionEvidenceClient, proof)
+      )
+    )
+      return
+    setPermissionProofs((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([, proof]) => !isReplacementPermissionClient(permissionEvidenceClient, proof)
+        )
+      )
+    )
+  }, [permissionEvidenceClient, permissionProofs])
+  const systemAccessContext = useMemo<SystemAccessContext>(
+    () => ({
+      pendingPane: pendingPermissionPane,
+      captureRestarting,
+      screenGrantStale,
+      lastKnownStates: lastPermissionStates
+    }),
+    [pendingPermissionPane, captureRestarting, screenGrantStale, lastPermissionStates]
+  )
+  const systemAccessContextRef = useRef(systemAccessContext)
+  systemAccessContextRef.current = systemAccessContext
+  const permissionPlatformRef = useRef(runtimeInfo?.platform)
+  permissionPlatformRef.current = runtimeInfo?.platform
+  const pendingPermissionPaneRef = useRef(pendingPermissionPane)
+  pendingPermissionPaneRef.current = pendingPermissionPane
+  const permissionEvidenceClientRef = useRef(permissionEvidenceClient)
+  permissionEvidenceClientRef.current = permissionEvidenceClient
   const refreshMediaAccess = useCallback(async (): Promise<MediaAccessSnapshot | null> => {
     const bridge = window.videorc?.getMediaAccessStatus
     if (!bridge) {
@@ -3833,6 +3921,63 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     try {
       const snapshot = await bridge()
+      const previous = mediaAccessRef.current
+      if (previous && permissionPlatformRef.current === 'darwin') {
+        const newlyGranted = (['screen-recording', 'camera', 'microphone'] as const).filter(
+          (pane) =>
+            ['not-determined', 'denied', 'restricted'].includes(
+              mediaAccessStatusForPane(previous, pane) ?? ''
+            ) && mediaAccessStatusForPane(snapshot, pane) === 'granted'
+        )
+        if (newlyGranted.length > 0) {
+          // An action may have begun before this grant. Its decision after
+          // the await must see the new restart boundary in the same turn.
+          systemAccessContextRef.current = {
+            ...systemAccessContextRef.current,
+            captureRestarting: true,
+            screenGrantStale:
+              newlyGranted.includes('screen-recording') ||
+              systemAccessContextRef.current.screenGrantStale
+          }
+          setPermissionEvidenceBeforeGrant({
+            deviceList: deviceListRef.current,
+            audioMeter: audioMeterRef.current,
+            platform: permissionPlatformRef.current,
+            mediaAccess: previous,
+            pendingPane: pendingPermissionPaneRef.current
+          })
+          setPermissionProofs((current) => {
+            const next = { ...current }
+            for (const pane of newlyGranted)
+              next[pane] ??= permissionGrantBoundariesRef.current[pane] ?? {
+                previousClient: permissionEvidenceClientRef.current
+              }
+            return next
+          })
+        }
+      }
+      setPermissionProofs((current) => {
+        const revoked = Object.keys(current).filter(
+          (pane) => mediaAccessStatusForPane(snapshot, pane as SystemPermissionPane) !== 'granted'
+        )
+        if (revoked.length === 0) return current
+        const next = { ...current }
+        for (const pane of revoked) delete next[pane as SystemPermissionPane]
+        return next
+      })
+      for (const pane of ['screen-recording', 'camera', 'microphone'] as const) {
+        if (mediaAccessStatusForPane(snapshot, pane) !== 'granted') {
+          const previousClient = clientRef.current
+          permissionGrantBoundariesRef.current[pane] = {
+            previousClient,
+            ...(previousClient ? { staleBackend: previousClient.connection } : {})
+          }
+        }
+      }
+      mediaAccessRef.current = snapshot
+      setPendingPermissionPane((pane) =>
+        pane && mediaAccessStatusForPane(snapshot, pane) === 'granted' ? null : pane
+      )
       setMediaAccess(snapshot)
       return snapshot
     } catch {
@@ -8651,6 +8796,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (options?: { fresh?: boolean }): Promise<void> =>
       focusRefreshCoordinatorRef.current[options?.fresh ? 'runFresh' : 'run'](
         async (generationIsCurrent) => {
+          await window.videorc?.recheckPermissionGrants?.()
           await refreshMediaAccess()
           const activeClient = clientRef.current
           // Multiple focus listeners intentionally share this one coordinator.
@@ -8789,6 +8935,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshAiReadinessForClient,
       refreshEntitlementsForClient,
       refreshMediaAccess,
+      setDeviceList,
       reportError
     ]
   )
@@ -8820,7 +8967,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         }
       }),
-    [refreshMediaAccess, reportError]
+    [refreshMediaAccess, reportError, setDeviceList]
   )
 
   // Purchases and token expiry must not remain stale. App ready (first connect)
@@ -8943,9 +9090,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // regains focus, since grants flip in the OS Settings while we're backgrounded.
   useEffect(() => {
     const refresh = (): void => {
-      void refreshMediaAccess()
+      void (async () => {
+        await window.videorc?.recheckPermissionGrants?.()
+        await refreshMediaAccess()
+      })()
     }
-    refresh()
+    void refreshMediaAccess()
     window.addEventListener('focus', refresh)
     return () => {
       window.removeEventListener('focus', refresh)
@@ -16356,7 +16506,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelled = true
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
     }
-  }, [canSampleAudio, client, pendingMicrophonePermissionProof, reportError, wsStatus])
+  }, [
+    canSampleAudio,
+    client,
+    pendingMicrophonePermissionProof,
+    reportError,
+    setDeviceList,
+    wsStatus
+  ])
 
   const handleSystemPermission = useCallback(
     async (pane: SystemPermissionPane): Promise<void> => {
@@ -16364,6 +16521,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const { runSystemPermissionAction } = await import('@/lib/system-permission-orchestration')
         await runSystemPermissionAction({
           pane,
+          getAccessContext: () => systemAccessContextRef.current,
+          setPendingPane: setPendingPermissionPane,
+          onGrantRestart: notePermissionRestart,
           platform: runtimeInfo?.platform,
           refreshMediaAccess,
           getDeviceList: () => deviceListRef.current,
@@ -16387,7 +16547,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [openSystemPermissionSettings, refreshMediaAccess, reportError, runtimeInfo?.platform]
+    [
+      notePermissionRestart,
+      openSystemPermissionSettings,
+      refreshMediaAccess,
+      setDeviceList,
+      reportError,
+      runtimeInfo?.platform
+    ]
   )
 
   // Space lives on the Studio page (plan 174 S0.1, D1): StudioTab owns it, so
@@ -17174,6 +17341,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,
@@ -17412,6 +17580,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditMode,
       setSelectedSceneSourceId,
       mediaAccess,
+      systemAccessContext,
       aiConsent,
       setAiConsent,
       startRequestPending,

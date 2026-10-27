@@ -4,7 +4,7 @@ import { GroupedList } from '@/components/list-row'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
-import type { MediaAccessSnapshot } from '@/lib/backend'
+import type { MediaAccessSnapshot, SystemPermissionPane } from '@/lib/backend'
 import {
   mediaAccessStatusForPane,
   systemAccessAction,
@@ -33,11 +33,11 @@ export function SystemAccessList({
   platform: string | undefined
   mediaAccess: MediaAccessSnapshot | null | undefined
   /** Runs the row's action: the OS prompt, or its settings page. */
-  onAction: (pane: SystemAccessRow['id']) => Promise<void>
+  onAction: (pane: SystemPermissionPane) => Promise<void>
 }): ReactElement {
-  const [pending, setPending] = useState<SystemAccessRow['id'] | null>(null)
+  const [pending, setPending] = useState<SystemPermissionPane | null>(null)
 
-  const run = async (pane: SystemAccessRow['id']): Promise<void> => {
+  const run = async (pane: SystemPermissionPane): Promise<void> => {
     setPending(pane)
     try {
       await onAction(pane)
@@ -54,12 +54,14 @@ export function SystemAccessList({
         const actionLabel = systemAccessActionLabel(
           systemAccessAction({
             pane: row.id,
+            checking: row.checking,
             state: row.state,
             platform,
             mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, row.id)
           }),
           platform
         )
+        const pane = row.id === 'system-audio' ? null : row.id
         return (
           <div
             key={row.id}
@@ -71,16 +73,19 @@ export function SystemAccessList({
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-medium text-foreground">{row.label}</span>
                 <StatusBadge tone={status.tone} value={status.label} />
+                {row.checking || row.state === 'waiting' ? (
+                  <Spinner aria-label="Checking permission…" />
+                ) : null}
               </div>
               <p className="text-meta text-muted-foreground">{row.purpose}</p>
               {detail ? <p className="text-meta text-muted-foreground">{detail}</p> : null}
             </div>
-            {actionLabel ? (
+            {actionLabel && pane ? (
               <Button
                 aria-label={`${row.label}: ${actionLabel}`}
                 disabled={pending !== null}
                 variant="outline"
-                onClick={() => void run(row.id)}
+                onClick={() => void run(pane)}
               >
                 {pending === row.id ? <Spinner aria-hidden data-icon="inline-start" /> : null}
                 {actionLabel}

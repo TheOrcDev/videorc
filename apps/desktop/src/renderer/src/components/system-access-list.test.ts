@@ -12,6 +12,7 @@ import { SystemAccessList } from './system-access-list'
 const rows: SystemAccessRow[] = [
   {
     id: 'screen-recording',
+    required: true,
     label: 'Screen Recording',
     purpose: 'Capture displays, app windows and system audio.',
     state: 'granted',
@@ -19,6 +20,7 @@ const rows: SystemAccessRow[] = [
   },
   {
     id: 'camera',
+    required: false,
     label: 'Camera',
     purpose: 'Camera overlay in your scenes.',
     state: 'not-granted',
@@ -26,6 +28,7 @@ const rows: SystemAccessRow[] = [
   },
   {
     id: 'microphone',
+    required: true,
     label: 'Microphone',
     purpose: 'Voice audio and live captions.',
     state: 'first-use',
@@ -58,13 +61,13 @@ describe('SystemAccessList', () => {
     const markup = render()
     expect(markup).toMatch(/data-tone="good"[^>]*>.*?Granted</)
     expect(markup).toMatch(/data-tone="warn"[^>]*>.*?Not granted</)
-    expect(markup).toMatch(/data-tone="neutral"[^>]*>.*?Checked on first use</)
+    expect(markup).toMatch(/data-tone="neutral"[^>]*>.*?Not asked yet</)
   })
 
   it('offers the one action each open row supports, named for where it goes', () => {
     const markup = render()
     expect(markup).toContain('aria-label="Camera: Open System Settings…"')
-    expect(markup).toContain('aria-label="Microphone: Allow access…"')
+    expect(markup).toContain('aria-label="Microphone: Allow…"')
     expect(markup).not.toContain('Screen Recording: ')
   })
 })

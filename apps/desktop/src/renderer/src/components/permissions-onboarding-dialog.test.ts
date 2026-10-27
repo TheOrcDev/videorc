@@ -1,9 +1,11 @@
-import { Children, isValidElement, type ReactElement, type ReactNode } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { Children, isValidElement, useEffect, type ReactElement, type ReactNode } from 'react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { PermissionsOnboardingDialog } from './permissions-onboarding-dialog'
 import { Button } from './ui/button'
 import { DialogContent } from './ui/dialog'
+
+const bridgeSpies = vi.hoisted(() => ({ refreshBackend: vi.fn(async () => undefined) }))
 
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
@@ -12,7 +14,7 @@ vi.mock('react', async (importOriginal) => ({
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => ({
     deviceList: { devices: [] },
-    refreshBackend: vi.fn(),
+    refreshBackend: bridgeSpies.refreshBackend,
     handleSystemPermission: vi.fn(),
     runtimeInfo: { platform: 'linux' },
     mediaAccess: { camera: 'not-applicable', microphone: 'not-applicable' }
@@ -44,12 +46,43 @@ describe('permissions setup dismissal', () => {
     expect(onComplete).not.toHaveBeenCalled()
 
     const buttons = tree.filter((element) => element.type === Button)
-    expect(buttons).toHaveLength(2)
-    expect(buttons[0].props.variant).toBe('ghost')
-    expect(buttons[0].props.children).toBe('Skip for now')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].props.children).toContain('Continue')
     ;(buttons[0].props.onClick as () => void)()
-    expect(onComplete).toHaveBeenLastCalledWith('skipped')
-    ;(buttons[1].props.onClick as () => void)()
     expect(onComplete).toHaveBeenLastCalledWith('done')
+  })
+})
+
+describe('permission focus refresh', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  it('rechecks grants before reading capture evidence and removes its focus listener', async () => {
+    let releaseRecheck!: () => void
+    const recheck = vi.fn(
+      () =>
+        new Promise<{ restarted: boolean }>((resolve) => {
+          releaseRecheck = () => resolve({ restarted: true })
+        })
+    )
+    const addEventListener = vi.fn()
+    const removeEventListener = vi.fn()
+    vi.stubGlobal('window', {
+      videorc: { recheckPermissionGrants: recheck },
+      addEventListener,
+      removeEventListener
+    })
+    PermissionsOnboardingDialog({ open: true, onComplete: vi.fn() })
+    const cleanup = vi.mocked(useEffect).mock.calls.at(-1)![0]()
+    const onFocus = addEventListener.mock.calls[0][1] as () => void
+    onFocus()
+    expect(recheck).toHaveBeenCalledOnce()
+    expect(bridgeSpies.refreshBackend).not.toHaveBeenCalled()
+    releaseRecheck()
+    await vi.waitFor(() => expect(bridgeSpies.refreshBackend).toHaveBeenCalledOnce())
+    if (typeof cleanup === 'function') cleanup()
+    expect(removeEventListener).toHaveBeenCalledWith('focus', onFocus)
   })
 })

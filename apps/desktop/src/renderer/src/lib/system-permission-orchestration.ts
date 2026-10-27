@@ -10,10 +10,19 @@ import type {
   RuntimeInfo,
   SystemPermissionPane
 } from '@/lib/backend'
-import { mediaAccessStatusForPane, systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import {
+  mediaAccessStatusForPane,
+  systemAccessAction,
+  systemAccessRows,
+  type SystemAccessContext
+} from '@/lib/system-access'
 
 type SystemPermissionOrchestration = {
   pane: SystemPermissionPane
+  accessContext?: SystemAccessContext
+  getAccessContext?: () => SystemAccessContext
+  setPendingPane?: (pane: SystemPermissionPane | null) => void
+  onGrantRestart?: (pane: SystemPermissionPane, proof: MicrophonePermissionProof) => void
   platform: RuntimeInfo['platform'] | undefined
   refreshMediaAccess: () => Promise<MediaAccessSnapshot | null>
   getDeviceList: () => DeviceList
@@ -32,21 +41,8 @@ export type MicrophonePermissionProof = {
   staleBackend?: BackendRestartBoundary
 }
 
-function matchesStaleBackend(client: BackendClient, boundary: BackendRestartBoundary): boolean {
-  const { connection } = client
-  return (
-    connection.port === boundary.port &&
-    (boundary.pid === undefined || connection.pid === boundary.pid)
-  )
-}
-
-export function isReplacementPermissionClient(
-  client: BackendClient | null,
-  proof: MicrophonePermissionProof
-): client is BackendClient {
-  if (!client || client === proof.previousClient) return false
-  return !proof.staleBackend || !matchesStaleBackend(client, proof.staleBackend)
-}
+export { isReplacementPermissionClient } from '@/lib/permission-evidence'
+import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 
 export async function waitForPermissionCondition(
   condition: () => boolean,
@@ -95,6 +91,10 @@ export async function runMicrophonePermissionProof({
 
 export async function runSystemPermissionAction({
   pane,
+  accessContext,
+  getAccessContext,
+  setPendingPane,
+  onGrantRestart,
   platform,
   refreshMediaAccess,
   getDeviceList,
@@ -116,6 +116,7 @@ export async function runSystemPermissionAction({
     return
   }
   const row = systemAccessRows({
+    ...(getAccessContext?.() ?? accessContext),
     deviceList: getDeviceList(),
     audioMeter: getAudioMeter(),
     platform,
@@ -126,12 +127,27 @@ export async function runSystemPermissionAction({
     pane,
     state: row?.state,
     platform,
-    mediaAccessStatus
+    mediaAccessStatus,
+    checking: row?.checking
   })
 
   if (!action) {
     return
   }
+  if (action === 'relaunch') {
+    const result = await window.videorc.relaunchForPermission()
+    if (!result.relaunched) {
+      toast.warning("Couldn't reopen Videorc", {
+        id: 'permission-relaunch-refused',
+        description:
+          result.reason === 'capture-active'
+            ? 'Finish your recording or livestream first.'
+            : 'Videorc is busy. Try again in a moment.'
+      })
+    }
+    return
+  }
+  if (action === 'open-settings' || pane === 'screen-recording') setPendingPane?.(pane)
   if (action === 'open-settings') {
     if (pane === 'microphone') {
       clearMicrophoneEvidence()
@@ -153,6 +169,8 @@ export async function runSystemPermissionAction({
     try {
       const previousClient = getClient()
       const result = await requestScreenAccess()
+      if (result.granted)
+        onGrantRestart?.(pane, { previousClient, staleBackend: result.staleBackend })
       await refreshMediaAccess()
       if (!result.granted || !result.restarted) {
         return
@@ -179,6 +197,8 @@ export async function runSystemPermissionAction({
   try {
     const previousClient = getClient()
     const result = await requestMediaAccess(pane)
+    if (result.granted)
+      onGrantRestart?.(pane, { previousClient, staleBackend: result.staleBackend })
     await refreshMediaAccess()
     if (!result.granted) {
       return
