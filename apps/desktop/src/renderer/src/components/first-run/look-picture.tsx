@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { stageSourceShape } from '@/components/scene/stage-transform'
+import { Badge } from '@/components/ui/badge'
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useReducedMotion } from '@/hooks/use-reduced-motion'
 import type { CameraShape, Scene, SceneSource } from '@/lib/backend'
@@ -149,7 +150,7 @@ export function LookPicture({
     <div
       className={cn(
         'relative mx-auto overflow-hidden rounded-row border border-border bg-inset',
-        vertical ? 'h-64' : 'w-full'
+        vertical ? 'h-56' : 'w-full'
       )}
       data-first-run-look-picture={background ? backgroundState : 'none'}
       style={{ aspectRatio: `${aspect}` }}
@@ -161,6 +162,12 @@ export function LookPicture({
           hardwareAccelerationDisabled={hardwareAccelerationDisabled}
           onStateChange={setBackgroundState}
         />
+      ) : null}
+      {sources.length === 0 ? (
+        // Nothing to place yet: no camera or screen Videorc may use.
+        <p className="absolute inset-x-3 bottom-2 text-center text-meta text-muted-foreground">
+          Your camera and screen show here once Videorc can use them.
+        </p>
       ) : null}
       <svg
         aria-label="Your scene"
@@ -176,19 +183,15 @@ export function LookPicture({
             source.kind === 'camera' ? cameraShape : 'rectangle',
             cameraCornerRadiusPct
           )
+          // A light tint, so the background stays readable through the boxes.
           const paint = {
             className: cn(
               'stroke-foreground/40',
-              source.kind === 'camera' ? 'fill-foreground/25' : 'fill-background/70'
+              source.kind === 'camera' ? 'fill-foreground/15' : 'fill-foreground/5'
             ),
             strokeWidth: 1,
             vectorEffect: 'non-scaling-stroke' as const
           }
-          const name = source.kind === 'camera' ? names.camera : names.screen
-          const x = source.transform.x * PICTURE_W
-          const y = source.transform.y * height
-          const w = source.transform.width * PICTURE_W
-          const h = source.transform.height * height
           return (
             <g key={source.id} data-first-run-look-source={source.kind}>
               {shape.kind === 'circle' ? (
@@ -203,23 +206,34 @@ export function LookPicture({
                   {...paint}
                 />
               )}
-              {name && w > 120 && h > 60 ? (
-                // 36 units is about 13 px at the picture's narrowest width.
-                <text
-                  className="fill-foreground"
-                  dominantBaseline="middle"
-                  fontSize={36}
-                  textAnchor="middle"
-                  x={x + w / 2}
-                  y={y + h / 2}
-                >
-                  {name}
-                </text>
-              ) : null}
             </g>
           )
         })}
       </svg>
+      {/* The names sit over their boxes as chips, at the text scale whatever
+          the picture's size. */}
+      {sources.map((source) => {
+        const name =
+          (source.kind === 'camera' ? names.camera : names.screen) ??
+          (source.deviceId ? source.name : source.kind === 'camera' ? 'No camera' : 'No screen')
+        const { x, y, width, height: boxHeight } = source.transform
+        return (
+          <div
+            key={source.id}
+            className="pointer-events-none absolute flex items-center justify-center overflow-hidden p-1"
+            style={{
+              left: `${x * 100}%`,
+              top: `${y * 100}%`,
+              width: `${width * 100}%`,
+              height: `${boxHeight * 100}%`
+            }}
+          >
+            <Badge className="max-w-full truncate" variant="neutral">
+              {name}
+            </Badge>
+          </div>
+        )
+      })}
     </div>
   )
 }

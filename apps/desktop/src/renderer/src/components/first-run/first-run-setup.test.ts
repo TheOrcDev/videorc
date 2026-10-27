@@ -3,6 +3,7 @@ import { createElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { CaptureConfig } from '@/lib/capture'
 import type { FirstRunGoal, FirstRunSetupMode, FirstRunStep } from '@/lib/first-run'
 import type { SystemAccessRow } from '@/lib/system-access'
 
@@ -43,7 +44,7 @@ const studio = vi.hoisted(() => ({
         })),
         enabledTargetIds: [] as string[]
       }
-    },
+    } as unknown as CaptureConfig,
     setCaptureConfig: vi.fn(),
     selectedMicrophone: undefined,
     switchSourceDeviceLive: vi.fn(async () => undefined),
@@ -138,7 +139,7 @@ beforeEach(() => {
     ...studio.core.captureConfig,
     layout: defaultCaptureConfig.layout,
     video: defaultCaptureConfig.video
-  } as typeof studio.core.captureConfig
+  }
 })
 
 describe('FirstRunSetup', () => {
