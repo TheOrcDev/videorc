@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import { LIVE_BACKGROUND_DEFAULT_LOOKS, LIVE_BACKGROUND_IDS } from './live-background-ids'
+import { STREAM_PLATFORMS } from './stream-platforms'
 
 import type {
   Banner,
@@ -2253,14 +2254,47 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
 
-    // One question can gather askers from every platform, Kick included.
-    const everyPlatform = ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom']
+    // One question can gather askers from every platform, Kick included. The
+    // cap is the platform count, never a literal (plan 206: an 8th platform
+    // failed every audience, viewer and co-host event against `maxLength: 7`).
+    const everyPlatform = [...STREAM_PLATFORMS]
+    expect(everyPlatform).toContain('facebook')
     const widest = { ...state, questions: [{ ...state.questions[0], platforms: everyPlatform }] }
     expect(validateBackendEventPayload('cohost.state', widest)).toEqual(widest)
     expect(() =>
       validateBackendEventPayload('cohost.state', {
         ...state,
         questions: [{ ...state.questions[0], platforms: [...everyPlatform, 'kick'] }]
+      })
+    ).toThrow()
+    const audience = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({
+        platform,
+        metric: 'followers',
+        capability: 'unavailable'
+      })),
+      updatedAt: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('stream.audience.snapshot', audience)).toEqual(audience)
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...audience,
+        platforms: [...audience.platforms, audience.platforms[0]]
+      })
+    ).toThrow()
+    const viewers = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({ platform, count: 1 })),
+      total: everyPlatform.length,
+      at: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('sessions.viewers.list', { samples: [viewers] })).toEqual({
+      samples: [viewers]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', {
+        samples: [{ ...viewers, platforms: [...viewers.platforms, viewers.platforms[0]] }]
       })
     ).toThrow()
 

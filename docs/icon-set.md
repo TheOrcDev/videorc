@@ -26,6 +26,9 @@ Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
 
+Plan 206 (2026-10-27) added `FacebookIcon`, Phosphor's `FacebookLogo`: a
+seventh platform brand mark, outside the Nucleo count like the others.
+
 The Buddy page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
 a small picture opened larger to look at it, a meaning no slot had
 (`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
@@ -163,8 +166,9 @@ The 90 slots are the authoritative list — read them straight out of
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.
 
-Seven slots are **not** part of any icon-set migration. `BuddyIcon` is
-Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`, `KickIcon`,
+Eight slots are **not** part of any icon-set migration. `BuddyIcon` is
+Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`,
+`FacebookIcon` (Phosphor's `FacebookLogo`, plan 206), `KickIcon`,
 `XPlatformIcon` and `YoutubeIcon` are third-party brand marks with their own
 trademark rules, and the design language keeps app/source marks as the only
 full-colour icons on screen.

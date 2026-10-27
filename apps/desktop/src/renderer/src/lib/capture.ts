@@ -35,6 +35,7 @@ import {
   SYSTEM_AUDIO_GAIN_DB_MIN,
   VERTICAL_LAYOUT_PRESETS
 } from '../../../shared/backend'
+import { STREAM_PLATFORMS } from '../../../shared/stream-platforms'
 
 export type SettingsState = {
   /** Human-readable picker label only; never a filesystem path. */
@@ -675,22 +676,23 @@ export const rtmpDefaults: Record<RtmpPreset, string> = {
   custom: ''
 }
 
-// Fixed destination order for the Streaming tab (YouTube, Twitch, Kick, X, Custom).
-export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
-  'youtube',
-  'twitch',
-  'kick',
-  'x',
-  'tiktok',
-  'instagram',
-  'custom'
-]
+// Fixed platform order for the Streaming tab: YouTube, Twitch, Kick, X,
+// Facebook, TikTok, Instagram, Custom RTMP.
+export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = STREAM_PLATFORMS
+
+/**
+ * The RTMPS server Facebook Live Producer shows for "Streaming software"
+ * (plan 206). The card is stream-key only until Meta approves Page sign-in.
+ */
+export const FACEBOOK_STREAM_SERVER_URL = 'rtmps://live-api-s.facebook.com:443/rtmp/'
+/** Where the key comes from, and where the streamer presses Go live. */
+export const FACEBOOK_LIVE_PRODUCER_URL = 'https://www.facebook.com/live/producer'
 
 /**
  * The built-in destination cards, ID-keyed (two YouTube cards share one
- * platform): the horizontal group (YouTube, Twitch, Kick, X), the vertical trio (YouTube Vertical is a
- * SECOND broadcast on the same channel; TikTok and Instagram are manual-key
- * only), then Custom RTMP.
+ * platform): the horizontal group (YouTube, Twitch, Kick, X, Facebook), the
+ * vertical trio (YouTube Vertical is a SECOND broadcast on the same channel;
+ * TikTok and Instagram are manual-key only), then Custom RTMP.
  */
 export const STREAM_TARGET_DEFS: ReadonlyArray<{
   id: string
@@ -703,6 +705,12 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
   { id: 'kick', platform: 'kick', label: 'Kick', serverUrl: rtmpDefaults.kick },
   { id: 'x', platform: 'x', label: 'X', serverUrl: '' },
+  {
+    id: 'facebook',
+    platform: 'facebook',
+    label: 'Facebook',
+    serverUrl: FACEBOOK_STREAM_SERVER_URL
+  },
   {
     id: 'youtube-vertical',
     platform: 'youtube',
@@ -727,7 +735,14 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'custom', platform: 'custom', label: 'Custom RTMP', serverUrl: '' }
 ]
 
+/** The card's sign-in note; the backend refuses with the same words. */
+export const FACEBOOK_SIGN_IN_UNAVAILABLE =
+  "Signing in with Facebook isn't available yet. Use a stream key."
+
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
+  if (platform === 'facebook') {
+    return FACEBOOK_SIGN_IN_UNAVAILABLE
+  }
   if (platform === 'custom') {
     return "Custom RTMP uses a stream key. There's no account to sign in to."
   }
@@ -981,6 +996,15 @@ export const streamPlatformOutputCapabilities: Record<
     maxWidth: 1920,
     maxHeight: 1080,
     maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  // Facebook takes 1080p60 (up to 9,000 kbps); 6,000 kbps is the shared
+  // non-YouTube cap in recording.rs.
+  facebook: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 60,
     maxBitrateKbps: 6000,
     true4k: false
   },
@@ -2265,7 +2289,9 @@ export function bridgeStreamingToLegacy(config: CaptureConfig): CaptureConfig {
 
   if (primary) {
     const legacyPreset: RtmpPreset =
-      primary.platform === 'tiktok' || primary.platform === 'instagram'
+      primary.platform === 'facebook' ||
+      primary.platform === 'tiktok' ||
+      primary.platform === 'instagram'
         ? 'custom'
         : primary.platform
     return {

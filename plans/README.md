@@ -1,5 +1,18 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 206](206-facebook-live.md), Facebook Live in the
+  Livestream tab. Owner request: a Facebook connector like the other
+  platforms, stream key first, the rest once Meta approves. Phase 1 (one
+  desktop PR, no Meta, no web change): a horizontal Facebook card after X,
+  server filled in, key from Live Producer, a Go Live reminder to press Go
+  live there; chat, viewers and title say they need sign-in. Phase 2: the
+  owner's Meta app and Business Verification, plus a spike that picks device
+  code or a website relay for sign-in. Phase 3 (dark in public builds):
+  connect a Page, Go Live with our title, comments, viewers. Phase 4: App
+  Review and the switch. Replaces plan 079 (#504, closed stale). **Phase 1
+  BUILT** (S0 to S5, one desktop PR; owner live take owed); Phases 2 to 4
+  wait on the owner's Meta setup (M1). Owner calls D6 (website) and D7
+  (sign-in, after S6) open.
 - 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
   Owner request: live chat in the Studio in a small window, optional with a
   switch, a click putting a message on stream, less detail than the Stream

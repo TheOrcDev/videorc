@@ -152,6 +152,7 @@ export function removeMessagesReadiness(
       return holds(KICK_MODERATION_SCOPE) ? 'ready' : 'missing-scope'
     case 'x':
       return connected && options.xLiveAuthorized === true ? 'ready' : 'missing-scope'
+    case 'facebook':
     case 'tiktok':
     case 'instagram':
     case 'custom':
