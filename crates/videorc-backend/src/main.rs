@@ -8,6 +8,7 @@
 mod account;
 mod agent_call;
 mod agent_chat;
+mod agent_library;
 mod agent_look;
 mod agent_mcp;
 mod agent_prepare;

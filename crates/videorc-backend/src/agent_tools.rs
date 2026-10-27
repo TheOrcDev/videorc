@@ -911,6 +911,140 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_buddy_prepare_and_library_tools_keep_d11_d15_and_d16() {
+        let catalog = catalog();
+        // Plan 209 S12 to S15: where each runs, and whether Buddy may use it.
+        let tools = [
+            ("send_chat_message", AgentToolRunsIn::Backend, true),
+            ("remove_chat_message", AgentToolRunsIn::Backend, true),
+            ("buddy_say", AgentToolRunsIn::Backend, true),
+            ("set_buddy", AgentToolRunsIn::Studio, true),
+            ("update_stream_info", AgentToolRunsIn::Studio, true),
+            ("set_destinations", AgentToolRunsIn::Studio, false),
+            ("schedule_stream", AgentToolRunsIn::Backend, false),
+            ("get_settings", AgentToolRunsIn::Studio, false),
+            ("update_settings", AgentToolRunsIn::Studio, false),
+            ("rename_recording", AgentToolRunsIn::Backend, false),
+            ("delete_recording", AgentToolRunsIn::Studio, false),
+            ("export_recording", AgentToolRunsIn::Studio, false),
+            ("start_clean_cut", AgentToolRunsIn::Backend, false),
+        ];
+        for (name, runs_in, buddy) in tools {
+            let tool = catalog.tool(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(tool.runs_in, runs_in, "{name}");
+            assert_eq!(tool.buddy, buddy, "{name} (D15)");
+        }
+        assert!(!catalog.tool("get_recording").unwrap().buddy);
+        // D11: posting, removing and deleting show a notice naming the agent.
+        for name in [
+            "send_chat_message",
+            "remove_chat_message",
+            "delete_recording",
+        ] {
+            assert!(catalog.tool(name).unwrap().on_air, "{name}");
+        }
+        assert_eq!(
+            catalog.tool("delete_recording").unwrap().fill_notice(
+                "Claude Desktop",
+                &serde_json::json!({}),
+                None
+            ),
+            Some("Claude Desktop moved a recording to the Trash.".to_string())
+        );
+        assert_eq!(
+            catalog.tool("send_chat_message").unwrap().rate_family,
+            AgentRateFamily::Chat
+        );
+        assert_eq!(
+            catalog.tool("remove_chat_message").unwrap().rate_family,
+            AgentRateFamily::Removal
+        );
+        for name in ["remove_chat_message", "delete_recording"] {
+            assert!(
+                catalog.tool(name).unwrap().annotations.destructive_hint,
+                "{name}"
+            );
+        }
+        for name in [
+            "send_chat_message",
+            "remove_chat_message",
+            "buddy_say",
+            "schedule_stream",
+        ] {
+            assert!(
+                catalog.tool(name).unwrap().annotations.open_world_hint,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_settings_takes_the_curated_list_and_refuses_everything_else() {
+        let tool = catalog().tool("update_settings").unwrap();
+        let mut curated: Vec<&str> = tool.input_schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        curated.sort_unstable();
+        // D16, and the Studio executor's `CURATED_SETTINGS`.
+        assert_eq!(
+            curated,
+            [
+                "captionsLanguage",
+                "chatInStudio",
+                "clips",
+                "frameRate",
+                "keepOriginalRecording",
+                "recordingFolder",
+                "resolution",
+                "separateSourceRecordings",
+                "theme",
+            ]
+        );
+        for name in [
+            "streamKey",
+            "outputDirectory",
+            "accounts",
+            "youtubeChannel",
+            "permissions",
+            "remoteControl",
+            "phoneRemote",
+            "agents",
+            "agentsEnabled",
+            "autoUpdate",
+            "updates",
+            "diagnostics",
+            "usageStats",
+            "billing",
+            "premium",
+            "globalShortcuts",
+        ] {
+            assert_eq!(
+                tool.validate_arguments(&serde_json::json!({ name: true })),
+                Err(format!("arguments has no field `{name}`.")),
+                "{name}"
+            );
+        }
+        assert!(
+            tool.validate_arguments(&serde_json::json!({ "theme": "light", "frameRate": 60 }))
+                .is_ok()
+        );
+        assert!(
+            tool.validate_arguments(&serde_json::json!({ "recordingFolder": "/tmp" }))
+                .is_err()
+        );
+        assert!(
+            catalog()
+                .tool("get_settings")
+                .unwrap()
+                .annotations
+                .read_only_hint
+        );
+    }
+
+    #[test]
     fn mcp_tool_shape_keeps_catalog_fields_inside_videorc() {
         let catalog = catalog();
         let notify = catalog.tool("notify").unwrap();

@@ -774,7 +774,7 @@
     {
       "name": "get_recording",
       "title": "Get a recording",
-      "description": "One take from the Library: its files with full paths on this computer (a separate-source take has its combined, screen and camera files), its markers, chat totals, peak viewers and Buddy's reports. Use an id from list_recordings.",
+      "description": "One take from the Library: its files with full paths on this computer (a separate-source take has its combined, screen and camera files), its markers, chat totals, peak viewers, Buddy's reports and each Clean cut's progress. includeTranscript adds the transcript, when a Clean cut has made one. Use an id from list_recordings.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -783,6 +783,10 @@
             "description": "The take's id from list_recordings.",
             "minLength": 1,
             "maxLength": 128
+          },
+          "includeTranscript": {
+            "type": "boolean",
+            "description": "Also return the transcript, as timed sentences, when a Clean cut has made one."
           }
         },
         "required": ["recordingId"],
@@ -866,6 +870,68 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "cleanCuts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "jobId": {
+                  "type": "string"
+                },
+                "recordingId": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "progress": {
+                  "type": "number"
+                },
+                "step": {
+                  "type": "string"
+                },
+                "cutRecordingId": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": ["jobId", "recordingId", "mode", "state", "progress"]
+            }
+          },
+          "transcript": {
+            "type": ["object", "null"],
+            "properties": {
+              "language": {
+                "type": "string"
+              },
+              "segments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "startSeconds": {
+                      "type": "number"
+                    },
+                    "endSeconds": {
+                      "type": "number"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["startSeconds", "endSeconds", "text"]
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
             }
           }
         },
@@ -2079,6 +2145,212 @@
         "openWorldHint": false
       },
       "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "rename_recording",
+      "title": "Rename a recording",
+      "description": "Give a recording in the Library a new title, like Rename in its menu. Use an id from list_recordings. The files keep their names; the Library shows the new title.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "title": {
+            "type": "string",
+            "description": "The new title, 1 to 120 characters.",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": ["recordingId", "title"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": ["recordingId", "title"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "backend",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "delete_recording",
+      "title": "Delete a recording",
+      "description": "Delete a recording from the Library, like Delete in its menu: its files go to the Trash (Recycle Bin on Windows), where the streamer can put them back. Use an id from list_recordings. Refused while recording or live.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": ["recordingId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string"
+          },
+          "trashed": {
+            "type": "boolean"
+          }
+        },
+        "required": ["recordingId", "trashed"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": true,
+      "rateFamily": "action",
+      "notice": "{agent} moved a recording to the Trash."
+    },
+    {
+      "name": "export_recording",
+      "title": "Export a recording",
+      "description": "Make the MP4 of a finished recording that only has its capture file, like Export MP4 in the Library menu (exact frame times, chapters from markers). A long take keeps exporting after the answer; get_recording shows the file when it is done. A recording that is already an MP4 answers with its path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": ["recordingId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string"
+          },
+          "exported": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": ["recordingId", "exported"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "start_clean_cut",
+      "title": "Start a Clean cut",
+      "description": "Start a Clean cut of a recording, like the Clean cut button in the Library: Videorc's Cloud AI transcribes it and makes a cut list without the silences and filler words (condensed: a shorter cut). Premium, and the streamer must have allowed Cloud AI. Progress and the transcript show in get_recording.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "mode": {
+            "type": "string",
+            "description": "clean (default) or condensed.",
+            "enum": ["clean", "condensed"]
+          },
+          "targetMinutes": {
+            "type": "integer",
+            "description": "Condensed only: about how long the cut should be.",
+            "minimum": 2,
+            "maximum": 60
+          }
+        },
+        "required": ["recordingId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string"
+          },
+          "recordingId": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "number"
+          },
+          "step": {
+            "type": "string"
+          },
+          "cutRecordingId": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": ["jobId", "recordingId", "mode", "state", "progress"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "backend",
       "buddy": false,
       "onAir": false,
       "rateFamily": "action",

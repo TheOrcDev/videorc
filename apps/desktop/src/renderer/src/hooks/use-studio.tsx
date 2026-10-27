@@ -7381,6 +7381,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('agents.status', (payload) => {
         noteAgentsEnabled((payload as AgentsStatus).enabled)
       }),
+      // Plan 209 S15: an agent renamed a recording in the backend; the
+      // Library shows the new title like its own rename does.
+      nextClient.on('agents.activity', (payload) => {
+        const entry = payload as { tool?: string; outcome?: string } | null
+        if (entry?.outcome === 'ok' && entry.tool === 'rename_recording') {
+          void refreshSessions(nextClient)
+        }
+      }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
       }),
@@ -15765,7 +15773,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // at the original path can therefore never cross the backend-check/Electron-
   // use boundary and be trashed by mistake.
   const deleteSessions = useCallback(
-    async (targets: SessionSummary[]): Promise<void> => {
+    async (targets: readonly Pick<SessionSummary, 'id'>[]): Promise<void> => {
       if (!client) {
         throw offlineError()
       }
@@ -17025,6 +17033,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setSettings,
         setClipsEnabled: setReplayEnabled,
         setTheme: setAppTheme
+      },
+      library: {
+        recordings: sessions,
+        deleteRecordings: (ids) => deleteSessions(ids.map((id) => ({ id }))),
+        // Export MP4's request; the Library row refreshes like the menu's.
+        exportMp4: async (id) => {
+          const exported = await client.request<{ mp4Path?: string } | null>('session.remux_mp4', {
+            sessionId: id
+          })
+          await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
+          return exported?.mp4Path ?? null
+        }
       }
     }
   }
@@ -17134,7 +17154,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       notes: notesWindow.open,
       streamManager: commentsWindow.open,
       preview: previewWindow.open
-    }
+    },
+    cloudAiConsent: aiConsent
   }
   agentSurfaceInputRef.current = agentSurfaceInput
   agentSurfacePublisherRef.current?.sync(agentSurfaceInput)

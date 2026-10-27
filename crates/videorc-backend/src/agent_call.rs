@@ -136,6 +136,12 @@ pub fn backend_executor(name: &str) -> Option<BackendExecutor> {
         "schedule_stream" => Some(|state, agent, args| {
             Box::pin(crate::agent_prepare::schedule_stream(state, agent, args))
         }),
+        "rename_recording" => Some(|state, agent, args| {
+            Box::pin(crate::agent_library::rename_recording(state, agent, args))
+        }),
+        "start_clean_cut" => Some(|state, agent, args| {
+            Box::pin(crate::agent_library::start_clean_cut(state, agent, args))
+        }),
         _ => None,
     }
 }

@@ -23,6 +23,7 @@ import { soundPlay, soundStop } from './sounds'
 import { windowFront } from './windows'
 // Plan 209 PR B, S13 to S15.
 import { setBuddy } from './buddy'
+import { deleteRecording, exportRecording } from './library'
 import { setDestinations, updateStreamInfo } from './prepare'
 import { getSettings, updateSettings } from './settings'
 
@@ -203,5 +204,7 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   update_stream_info: updateStreamInfo,
   set_destinations: setDestinations,
   get_settings: getSettings,
-  update_settings: updateSettings
+  update_settings: updateSettings,
+  delete_recording: deleteRecording,
+  export_recording: exportRecording
 }
