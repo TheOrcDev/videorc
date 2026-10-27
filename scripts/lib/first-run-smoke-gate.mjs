@@ -6,6 +6,9 @@ export const FIRST_RUN_SMOKE_LIMITS = Object.freeze({
   minimumChangedFrames: 10,
   maximumDrawFps: 31,
   whatsNewWatchMs: 1000,
+  // Plan 208 S5: a theme change while Welcome is open turns the chrome at
+  // once (a React render on the theme or media change), never on a reload.
+  toneFlipWithinMs: 250,
   lookSampleAtLeastMs: 30000,
   clipsWatchMs: 10000
 })
@@ -27,6 +30,10 @@ export function firstRunSourceStartLines(lines) {
 
 const STEPS = ['permissions', 'goal', 'look', 'sound', 'destinations']
 const STILL_REASONS = ['no-gpu', 'software-gpu', 'hardware-acceleration-off']
+
+// Plan 208 D3: light turns the Polished chrome around, a CSS invert over the
+// picture; under more contrast a brightness after it, so the card separates.
+const LIGHT_FILTER = { normal: 'invert(1)', moreContrast: 'invert(1) brightness(0.85)' }
 
 export function evaluateFirstRunSmokeStep(step, observation = {}) {
   const failures = []
@@ -97,6 +104,46 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
         `backdrop draw rate ${o.drawFps ?? 'missing'} fps exceeds ${FIRST_RUN_SMOKE_LIMITS.maximumDrawFps} fps or is missing`
       )
       break
+    case 'tone': {
+      const expected = o.theme === 'light' ? 'inverse' : o.theme === 'dark' ? 'normal' : null
+      check(
+        o.setup === 'open' && typeof o.backdrop === 'string',
+        'tone checked without the Welcome backdrop'
+      )
+      check(expected !== null, `unknown theme ${o.theme ?? 'missing'}`)
+      check(o.tone === expected, `${o.theme} theme wants tone ${expected}, got ${o.tone ?? 'none'}`)
+      if (expected === 'inverse') {
+        const wanted = o.moreContrast === true ? LIGHT_FILTER.moreContrast : LIGHT_FILTER.normal
+        check(
+          o.pictureFilter === wanted,
+          `light picture filter ${o.pictureFilter} is not ${wanted}`
+        )
+        // The shader takes no Dim under light, so the poster takes none either.
+        check(o.posterFilter === 'none', `light poster is dimmed (${o.posterFilter})`)
+      }
+      if (expected === 'normal') {
+        check(o.pictureFilter === 'none', `dark picture is filtered (${o.pictureFilter})`)
+        check(
+          /^brightness\(0\.\d+\)$/.test(o.posterFilter ?? ''),
+          `dark poster lost the shader's Dim (${o.posterFilter})`
+        )
+      }
+      if ('toneFlipMs' in o)
+        check(
+          Number.isFinite(o.toneFlipMs) &&
+            o.toneFlipMs >= 0 &&
+            o.toneFlipMs <= FIRST_RUN_SMOKE_LIMITS.toneFlipWithinMs,
+          `tone must turn within ${FIRST_RUN_SMOKE_LIMITS.toneFlipWithinMs} ms of the theme change (observed ${o.toneFlipMs ?? 'missing'})`
+        )
+      if ('tonesSeen' in o)
+        check(
+          Array.isArray(o.tonesSeen) &&
+            o.tonesSeen.length > 0 &&
+            o.tonesSeen.every((tone) => tone === expected),
+          `the other theme's tone showed on open (${JSON.stringify(o.tonesSeen)})`
+        )
+      break
+    }
     case 'reduced-motion':
       check(
         o.backdrop === 'still' && o.reason === 'reduced-motion',

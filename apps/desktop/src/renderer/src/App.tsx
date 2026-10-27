@@ -7,8 +7,9 @@ import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
 import { StudioProvider } from '@/hooks/use-studio'
 import { STORAGE_KEYS } from '@/lib/capture'
 
-// The OS vibrancy material tints by nativeTheme, not by our CSS class; keep
-// it in step with the app theme so the glass blur always matches.
+// Main repaints every window's opaque base (and, under the clear glass, the
+// OS vibrancy material) from nativeTheme, not from our CSS class; keep it in
+// step with the app theme so the window always matches.
 function NativeThemeSync(): null {
   const { resolvedTheme } = useTheme()
   useEffect(() => {

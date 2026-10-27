@@ -1,4 +1,8 @@
-// probe:ui-glass: real composited glass checks for every Videorc window.
+// probe:ui-glass: chrome ground by default; VIDEORC_GLASS=clear runs the
+// original real-composited glass A/B checks. Ground mode requires no native
+// effect views, exact pixel stability in every maintained chrome sample,
+// the loaded theme asset, and captured worst-pixel contrast for all S2 tiers.
+// --dom-only collects DOM/native diagnostics without claiming capture acceptance.
 //
 // Launches the dev app with isolated user data, puts a stand-in wallpaper
 // behind each window (the smoke backdrop; the user's real desktop is never
@@ -76,6 +80,13 @@ import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import {
+  backgroundExtremes,
+  evaluateGround,
+  groundDomChecks,
+  isClearGlassRun,
+  pixelStability
+} from './lib/chrome-ground-checks.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import {
   belowSheen,
@@ -221,6 +232,7 @@ const extraAppEnv = {
   ...(process.env.VIDEORC_UI_GLASS_APP_ENV ? JSON.parse(process.env.VIDEORC_UI_GLASS_APP_ENV) : {}),
   ...(style ? { VIDEORC_GLASS_STYLE: style } : {})
 }
+const clearRequested = isClearGlassRun(process.env, extraAppEnv)
 const outputRoot = process.env.VIDEORC_UI_GLASS_OUTPUT_DIR ?? tmpdir()
 mkdirSync(outputRoot, { recursive: true })
 // Never overwrite a previous run's report or raw shots, including invalid ones.
@@ -354,6 +366,7 @@ function measure(file, bounds, role) {
     }
     return {
       name: sample.name,
+      extremes: backgroundExtremes(image, rect),
       mean: regionMean(image, rect),
       sharpness: laplacianVariance(image, rect)
     }
@@ -447,6 +460,42 @@ async function readCoats(devtoolsHost, role) {
     coats[sample] = stack.map((selector) => parseCssColor(computed[selector]))
   }
   return { computed, coats }
+}
+
+// Read real computed text-tier colours rather than the pre-208 chromatic constants.
+async function readGround(devtoolsHost, role) {
+  const target = await pageTarget(devtoolsHost, role)
+  if (!target) return null
+  return cdpEvaluate(
+    target.webSocketDebuggerUrl,
+    `(() => {
+    const root = document.documentElement;
+    const ground = document.querySelector('[data-chrome-ground]');
+    const visible = (el) => el && getComputedStyle(el).display !== 'none'
+      && getComputedStyle(el).visibility !== 'hidden' && Number(getComputedStyle(el).opacity) > 0;
+    const tiers = Object.fromEntries(['foreground', 'muted-foreground', 'subtle'].map(name => {
+      const el = document.createElement('span');
+      el.style.color = 'var(--' + name + ')';
+      el.textContent = 'Contrast sample';
+      document.body.appendChild(el);
+      const color = getComputedStyle(el).color;
+      el.remove();
+      return [name, color];
+    }));
+    return {
+      ground: root.dataset.ground,
+      mounted: !!ground,
+      visible: !!visible(ground),
+      reducedTransparency: matchMedia('(prefers-reduced-transparency: reduce)').matches,
+      firstRun: !!document.querySelector('[data-first-run-backdrop], [data-first-run-surface]'),
+      images: Array.from(document.querySelectorAll('[data-chrome-ground-image]')).map(el => ({
+        theme: el.dataset.chromeGroundImage, visible: !!visible(el),
+        loaded: el.complete, width: el.naturalWidth, height: el.naturalHeight, src: el.currentSrc
+      })),
+      tiers
+    };
+  })()`
+  )
 }
 
 // Plan 091: zero (or restore) the window coats in the role's page, so a shot
@@ -593,7 +642,13 @@ async function measureSurfaces(smoke, devtoolsHost, theme, role, bounds) {
   const results = []
   const patch = centredRect(SAMPLES[role][0].rect(bounds), 160, 18)
   const surfaceRect = growRect(patch, SURFACE_OVERHANG, bounds)
-  const text = TEXT[theme]
+  const ground = await readGround(devtoolsHost, role)
+  const text = clearRequested
+    ? TEXT[theme]
+    : {
+        primary: parseCssColor(ground.tiers.foreground),
+        secondary: parseCssColor(ground.tiers['muted-foreground'])
+      }
   const scored = {}
   for (const kind of ['float', 'dialog', 'tooltip', 'control']) {
     const computed = await showSurface(devtoolsHost, role, bounds, surfaceRect, kind, theme)
@@ -893,7 +948,32 @@ async function runPersistence(smoke, devtoolsHost, theme) {
   return { rows, layerTrees: { before: recreated.before ?? null, after: recreated.after ?? null } }
 }
 
-function evaluate(theme, role, shots, glassState, pageDark, neutrality, parity = {}) {
+function evaluate(
+  theme,
+  role,
+  shots,
+  glassState,
+  pageDark,
+  neutrality,
+  parity = {},
+  ground = null
+) {
+  if (!clearRequested) {
+    return SAMPLES[role].map((sample, index) => ({
+      theme,
+      role,
+      sample: sample.name,
+      ...evaluateGround({
+        theme,
+        role,
+        glassState,
+        pageDark,
+        ground,
+        samples: Object.values(shots).map((rows) => rows[index]),
+        stability: parity.stability[index]
+      })
+    }))
+  }
   const results = []
   const byName = (variant) => shots[variant]
   const styleRequested = glassState?.styleRequested ?? 'material'
@@ -1077,6 +1157,32 @@ async function main() {
       await placeOnPrimaryDisplay(smoke, role, index)
     }
 
+    // Run DOM/native preflight independently of capture permissions or overlays.
+    report.dom = []
+    for (const theme of themes) {
+      await applyTheme(devtoolsHost, theme)
+      for (const role of roles) {
+        const ground = await readGround(devtoolsHost, role)
+        const state = await requestSmokeCommand(smoke, 'window-glass-state', { role })
+        const pageDark = await pageDarkClass(devtoolsHost, role)
+        const checks = clearRequested
+          ? { noGround: !ground?.mounted }
+          : {
+              ...(role === 'preview'
+                ? { solid: state.applied?.mode?.kind === 'solid' }
+                : groundDomChecks({ theme, pageDark, ground })),
+              noVibrancy: Array.isArray(state.effectViews) && state.effectViews.length === 0
+            }
+        report.dom.push({ theme, role, ground, state, checks })
+        console.log(
+          `DOM ${Object.values(checks).every(Boolean) ? 'OK' : 'FAIL'} ${theme} ${role} ${JSON.stringify(checks)}`
+        )
+      }
+    }
+    if (flag('dom-only'))
+      throw new Error(
+        'DOM-only diagnostics: captures not attempted; no opacity or contrast verdict.'
+      )
     for (const theme of themes) {
       await applyTheme(devtoolsHost, theme)
       for (const role of roles) {
@@ -1086,12 +1192,9 @@ async function main() {
         let bounds = null
         const references = {}
         for (const variant of BACKDROPS) {
-          const { raised, file, referenceMean } = await shootWithReference(
-            smoke,
-            theme,
-            role,
-            variant
-          )
+          const { raised, file, referenceMean } = await (
+            clearRequested ? shootWithReference : shoot
+          )(smoke, theme, role, variant)
           shots[variant] = measure(file, raised.bounds, role)
           files[variant] = file
           bounds = raised.bounds
@@ -1106,13 +1209,39 @@ async function main() {
         const pageDark = await pageDarkClass(devtoolsHost, role)
         const coatsRead = await readCoats(devtoolsHost, role)
         if (coatsRead) report.coats[`${theme}-${role}`] = coatsRead.computed
-        const neutrality = await measureNeutrality(smoke, devtoolsHost, theme, role)
+        const ground = await readGround(devtoolsHost, role)
+        report.grounds ??= {}
+        report.grounds[`${theme}-${role}`] = ground
+        const stability = clearRequested
+          ? []
+          : SAMPLES[role].map((sample) => {
+              const images = Object.values(files).map((file) => decodePng(readFileSync(file)))
+              const scale = images[0].width / bounds.width
+              const rect = sample.rect(bounds)
+              return pixelStability(
+                images,
+                Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, value * scale]))
+              )
+            })
+        const neutrality = clearRequested
+          ? await measureNeutrality(smoke, devtoolsHost, theme, role)
+          : null
         await assertTheme(devtoolsHost, theme)
         report.results.push(
-          ...evaluate(theme, role, shots, glassState, pageDark, neutrality, {
-            references,
-            coats: coatsRead?.coats ?? null
-          })
+          ...evaluate(
+            theme,
+            role,
+            shots,
+            glassState,
+            pageDark,
+            neutrality,
+            {
+              references,
+              coats: coatsRead?.coats ?? null,
+              stability
+            },
+            ground
+          )
         )
         if (frostCheck && role === 'main') {
           const frost = await measureFrostBleed(smoke, devtoolsHost, theme, bounds)
@@ -1134,7 +1263,7 @@ async function main() {
         }
       }
     }
-    if (persistence && roles.includes('main')) {
+    if (clearRequested && persistence && roles.includes('main')) {
       const theme = themes[themes.length - 1]
       await assertTheme(devtoolsHost, theme)
       const walked = await runPersistence(smoke, devtoolsHost, theme)
@@ -1146,6 +1275,8 @@ async function main() {
     await sleep(20_000)
     report.windowServerCpu = sampleWindowServerCpu()
   } catch (error) {
+    report.error = String(error?.stack ?? error)
+    console.error(report.error)
     report.validity.status = 'INVALID'
     const diagnostic =
       error instanceof InvalidGlassEvidenceError
@@ -1177,7 +1308,7 @@ async function main() {
     }
   }
 
-  const persistenceGated = (report.styleRequested ?? style) === 'clear'
+  const persistenceGated = clearRequested && (report.styleRequested ?? style) === 'clear'
   const outcome = finalizeGlassEvidence(report, { gate, persistenceGated })
   report = outcome.report
   report.contactSheet = writeContactSheet(looks)

@@ -92,3 +92,7 @@ name = "buddy_pack"
 # Dev-only (plan 172): kept out of `cargo test -p videorc-backend`, whose
 # macOS CI compile already runs close to the job limit.
 required-features = ["buddy-pack-example"]
+
+[[example]]
+name = "chrome-grounds"
+test = true

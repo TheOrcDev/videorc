@@ -1,5 +1,26 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
+  colours. Owner request: redesign Videorc's colour after the Welcome
+  screen's Liquid Chrome, metallic black with its shine, and the other way
+  around in light mode. Owner calls from a rendered mockup:
+  - every window sits on a solid, frosted still of Liquid Chrome under the
+    coats, with no desktop showing through, the same on every platform;
+  - polished chrome controls and edges (primary buttons, beads, plates, a
+    red LED Record) while panels, menus and text stay flat;
+  - light mode is the crisp pixel invert;
+  - the phone remote and the OAuth page come along.
+
+  Eight slices, from before pictures through the ground assets, opaque
+  windows, the probe, controls, the Welcome invert and the served pages, to
+  docs and gates. **EXECUTED** 2026-10-27 (S0 to S7) on
+  `plan-208-liquid-chrome-colour`, PR #883: every window sits on the
+  chrome ground, controls wear chrome, Record is the red LED, light
+  Welcome is the invert, and the phone remote and OAuth page follow; the
+  design skill is rewritten for it. `VIDEORC_GLASS=clear` keeps the old
+  glass for one release. Gates in the
+  [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
+  the owner's by-eye in both themes and a Windows pass are owed.
 - 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
   steps 2 to 5. Owner request: after permissions, "What are you making?",
   "Your look", "Sound check" and "Where you stream". The goal (Recordings,

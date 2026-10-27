@@ -29,17 +29,21 @@ export type BackdropStillReason =
 /**
  * Plan 203 D8: Liquid Chrome in its first look, Polished, the one a click on
  * its tile applies, at Normal motion: the owner's by-eye (2026-10-27) found
- * Mercury at Calm too slow to read as live. The same look in both themes.
- * Dim only under dark, so the card's rim reads against the chrome; more under
- * `prefers-contrast: more`.
+ * Mercury at Calm too slow to read as live. Under dark the shader's Dim
+ * darkens it so the card's rim reads against the chrome, more under
+ * `prefers-contrast: more`. Under light the same look is turned around (plan
+ * 208 D3): its pixels inverted, white liquid with black reflections. The
+ * shader's Dim darkens before that invert, so after it it would wash the
+ * chrome out: light takes no Dim, and its tone is a CSS brightness after the
+ * invert, none (the owner's crisp invert) unless more contrast is asked for.
  */
 export const WELCOME_BACKDROP = {
   id: 'liquid-chrome',
   look: 'polished' as WelcomeBackdropLook,
   motion: 'normal',
   dimDark: 0.3,
-  dimLight: 0,
-  moreContrastDim: 0.2
+  moreContrastDim: 0.2,
+  moreContrastBrightnessLight: 0.85
 } as const
 
 /** Decoration never needs more than 30 frames a second. */
@@ -56,17 +60,43 @@ export const BACKDROP_MAX_CANVAS_SIDE = 1920
 export const BACKDROP_GUARD_WINDOW_MS = 3000
 export const BACKDROP_GUARD_SLOW_INTERVAL_MS = 50
 
-/** Dim as the shaders take it (`u[1].z`), clamped like the proof surface's. */
+/** `normal` draws the chrome as it is; `inverse` turns it around (light, plan 208 D3). */
+export type WelcomeBackdropTone = 'normal' | 'inverse'
+
+export interface WelcomeBackdropDim {
+  tone: WelcomeBackdropTone
+  /** Dim as the shaders take it (`u[1].z`), before any CSS. Dark only. */
+  shader: number
+  /** A CSS `brightness()` after the invert; 1 is none. Light only. */
+  brightness: number
+}
+
+/**
+ * The backdrop's tone for a theme: the shader's Dim (clamped like the proof
+ * surface's) under dark, the invert and a brightness after it under light.
+ */
 export function welcomeBackdropDim({
   dark,
   moreContrast
 }: {
   dark: boolean
   moreContrast: boolean
-}): number {
-  const base = dark ? WELCOME_BACKDROP.dimDark : WELCOME_BACKDROP.dimLight
-  const dim = base + (moreContrast ? WELCOME_BACKDROP.moreContrastDim : 0)
-  return Math.min(0.8, Math.max(0, dim))
+}): WelcomeBackdropDim {
+  if (!dark) {
+    return {
+      tone: 'inverse',
+      shader: 0,
+      brightness: moreContrast ? WELCOME_BACKDROP.moreContrastBrightnessLight : 1
+    }
+  }
+  const dim = WELCOME_BACKDROP.dimDark + (moreContrast ? WELCOME_BACKDROP.moreContrastDim : 0)
+  return { tone: 'normal', shader: Math.min(0.8, Math.max(0, dim)), brightness: 1 }
+}
+
+/** The CSS filter on the picture (poster and canvas together) for a tone; none under dark. */
+export function welcomeBackdropPictureFilter(dim: WelcomeBackdropDim): string | undefined {
+  if (dim.tone !== 'inverse') return undefined
+  return dim.brightness < 1 ? `invert(1) brightness(${dim.brightness})` : 'invert(1)'
 }
 
 /** A still before any GL work: the system asked for it, or there's no GPU to ask. */

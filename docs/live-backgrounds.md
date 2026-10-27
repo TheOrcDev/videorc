@@ -51,7 +51,7 @@ already exists, and says why in `CompositorStatus.liveBackground.reason`.
 | macOS preview, recording, stream (Metal)                     | Yes                 | MSL ports render a live frame; the compositor draws it like a picture. A record-and-stream session's stream leg draws the recording's frame from the same tick |
 | Windows recording and stream (D3D11 media session)           | Yes                 | HLSL ports, the same way                                                                                                                                       |
 | Windows idle preview, Linux preview (Electron proof surface) | Yes                 | The GLSL in a WebGL2 canvas (`apps/desktop/src/shared/live-background-webgl.js`)                                                                               |
-| Welcome screen, first-run setup (renderer WebGL2)            | Yes, unless still   | Shared player through `renderer/src/lib/live-background-player.ts`; poster first, 30 fps cap, reduced-motion and no-GPU stills                                 |
+| Welcome screen, first-run setup (renderer WebGL2)            | Yes, unless still   | Shared player through `renderer/src/lib/live-background-player.ts`; poster first, 30 fps cap, reduced-motion and no-GPU stills; inverted in light              |
 | Your look scene picture, first-run setup (renderer WebGL2)   | Yes, unless still   | The same shared player, chosen live background and first look; same 30 fps cap, poster-first, still and disposal rules                                         |
 | Linux recording and stream (CPU compositor)                  | Yes                 | The GLSL through EGL/GLES on its own thread; the compositor takes the newest frame                                                                             |
 | 4K60 and the bridge-off override (legacy FFmpeg graph)       | No, the poster      | `legacy-graph`, with a start notice                                                                                                                            |
@@ -66,8 +66,10 @@ already exists, and says why in `CompositorStatus.liveBackground.reason`.
 First-run setup is the fourth place the WebGL player runs, beside the
 Windows idle preview and the Linux preview (plan 203). It is the only live
 background behind the app's own UI: Liquid Chrome, Polished, at Normal
-motion in both themes, dimmed 30% under dark. The setup card uses the
-dialog tier and carries all the text.
+motion. Under dark the shader dims it 30% (50% under Increase Contrast).
+Under light it is the same look turned around (plan 208 D3): white liquid
+with black reflections. The setup card uses the dialog tier and
+carries all the text.
 
 `apps/desktop/src/renderer/src/lib/live-background-player.ts` lazily loads
 the shared player, clock and render data with setup. It shows the poster
@@ -85,6 +87,38 @@ logged once. The guard checks median drawn-frame intervals over 3 s: above
 Hidden or minimized windows pause; closing setup disposes the player.
 `pnpm smoke:first-run` measures motion and the draw cap in the real app and
 fails on an unexpected still reason.
+
+#### Light is an invert, not a look
+
+The Liquid Chrome shader is dark only: a black studio with white lamps. A
+light look would need new lighting in all four renderers, plus posters and
+goldens. Turning the dark look's pixels around gives the owner's "the other
+way around" exactly, so light is a CSS filter (plan 208 S5):
+
+- **Where.** An inner wrapper around the poster `<img>` and the canvas host
+  (`data-first-run-backdrop-picture`) takes `filter: invert(1)`, so the
+  still and the motion always match. The backdrop root's solid is never
+  inverted, and dark has no filter.
+- **Tone.** The shader's Dim darkens before the invert, so after it, Dim
+  would lift the blacks and wash the chrome out. Light takes no shader Dim.
+  Its tone is a CSS `brightness()` after the invert: none by default (the
+  crisp invert), and 0.85 under `prefers-contrast: more` so the porcelain
+  card separates. `welcomeBackdropDim` returns the split (`tone`, `shader`,
+  `brightness`), and `welcomeBackdropPictureFilter` turns it into the
+  filter.
+- **DOM contract.** The root carries
+  `data-first-run-backdrop-tone="normal|inverse"`, and it follows the theme
+  at once while Welcome is open. `smoke:first-run` asserts it per theme,
+  with a follow-system flip while open and a cold open in light that never
+  shows the dark tone.
+- **Cost.** The invert is a compositor filter over a 30 fps canvas. Over
+  30 s light held 30 fps with the same p50, p95 and p99 frame interval as
+  dark, and the GPU process used 7.0% CPU against 5.2% (indicative; the
+  numbers are in `docs/acceptance/2026-10-27-liquid-chrome-colours.md`).
+  The budget guard still drops to the poster if it gets slow.
+- **The card.** In light the dialog tier has a deeper drop
+  (`--glass-float-dialog-drop`), so the porcelain card separates from white
+  crests without an overlay.
 
 ### Your look scene picture
 
@@ -109,6 +143,44 @@ stay moving on the acceptance Mac. A no-GPU picture records an explicit
 skip with the backdrop's still reason; an unexplained or budget-triggered
 still fails. See [plan 207 acceptance](acceptance/2026-10-27-first-run-steps.md)
 for the Mac numbers and the Windows measurement still owed.
+
+### Chrome grounds (plan 208)
+
+The opaque window grounds are a still of Liquid Chrome's Polished look at
+its catalogue poster phase (1.2), rendered by the existing WebGL2 poster
+runner at 1280 × 720 with Dim 0. The Rust `chrome-grounds` example applies
+`image::imageops::blur` with Gaussian σ 24 to sRGB bytes. For light, it
+inverts each channel (`255 - v`) **before** blurring.
+
+Every window's `ChromeGround` (`components/chrome-ground.tsx`, plan 208 S2)
+paints them under its coats, and the phone remote's LAN router serves the
+same files at `/chrome-ground-{dark,light}.webp` (`include_bytes!`, never a
+copy; S6). `chrome-ground-contrast.test.ts` reads the stats file, so a
+regenerated ground re-proves the windows' text contrast.
+
+Regenerate from the repository root (requires Rust, desktop Electron and
+libwebp's `cwebp` on PATH):
+
+```sh
+PATH=/opt/homebrew/bin:$PATH env -u ELECTRON_RUN_AS_NODE pnpm probe:live-background-cost -- --mode grounds
+```
+
+The helper encodes with `cwebp -q 90` (lossy), enforcing 40,000 bytes per
+asset. The existing `image` lossless WebP encoder exceeded that budget;
+using the installed encoder adds no dependency to the app. Outputs live in
+`assets/backgrounds/chrome-ground-{dark,light}.webp` and
+`chrome-ground.stats.json`. Never hand-edit them; rerun the generator.
+Stats measure decoded shipping pixels: Rec.709 weighted luma of
+gamma-encoded sRGB (`(0.2126 R + 0.7152 G + 0.0722 B) / 255`), without
+linearization. This grey is not WCAG relative luminance; contrast tests
+must linearize the composited sRGB values separately. JSON uses stable
+field order and records generator version, inputs and encoding.
+
+Verify the committed pixels and stats with:
+
+```sh
+cargo test -p videorc-backend --example chrome-grounds chrome_ground_stats_match_committed_webps
+```
 
 ## Cost, and none when off
 
