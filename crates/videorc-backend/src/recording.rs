@@ -3761,6 +3761,39 @@ fn replay_auto_start_requested(replay_only: bool, params: &StartSessionParams) -
     replay_only && params.replay.as_ref().is_some_and(|replay| replay.auto)
 }
 
+/// An automatic ring on the bridge waits for a visible camera's first frame:
+/// the bridge refuses a scene source with no frames, and the ring is the one
+/// start nobody pressed, so it can wait instead of failing.
+fn automatic_ring_waits_for_camera(
+    automatic_ring: bool,
+    bridge_ruled_out: bool,
+    scene: &Scene,
+    has_camera_frame: bool,
+) -> bool {
+    automatic_ring
+        && !bridge_ruled_out
+        && !has_camera_frame
+        && scene
+            .sources
+            .iter()
+            .any(|source| source.visible && source.kind == SceneSourceKind::Camera)
+}
+
+/// The scene a session composes: the request's own, else the one its capture
+/// config describes.
+fn requested_session_scene(params: &StartSessionParams) -> Scene {
+    params.scene.clone().unwrap_or_else(|| {
+        scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: params.sources.clone(),
+            layout: params.layout.clone(),
+            video: Some(params.output.video.clone()),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        })
+    })
+}
+
 /// Plan 181: a buffer-only session composes exactly like a record-only
 /// session (same bridge, encoder posture, overlay plan) and writes no file;
 /// the replay ring is its only output. The request shape is kept in the
@@ -3792,6 +3825,17 @@ async fn start_session_with_timeline(
         replay_only.then(|| crate::replay_buffer::begin_start_in_flight(&state));
     if let Some(replay) = params.replay.as_mut() {
         replay.seconds = crate::replay_buffer::clamp_seconds(replay.seconds);
+    }
+    // Decided before admission, the probes and the microphone: an automatic
+    // ring whose camera has no frame yet would be refused at the bridge's
+    // source wait anyway, after holding the ordered lane for seconds.
+    if automatic_ring_waits_for_camera(
+        replay_auto_start_requested(replay_only, &params),
+        compositor_encoder_bridge_ruled_out(&params),
+        &requested_session_scene(&params),
+        preview_camera_latest_frame_info(&state).await.is_some(),
+    ) {
+        return Err(crate::replay_buffer::AutoStartSourcesNotReady.into());
     }
     // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
     // over here, so no caller meets "A capture session is already running"
@@ -16771,16 +16815,7 @@ async fn should_use_compositor_encoder_bridge(
     if compositor_encoder_bridge_ruled_out(params) {
         return Ok(false);
     }
-    let scene = params.scene.clone().unwrap_or_else(|| {
-        scene_from_capture_config(SceneConfigParams {
-            transition_ms: None,
-            sources: params.sources.clone(),
-            layout: params.layout.clone(),
-            video: Some(params.output.video.clone()),
-            background: None,
-            protected_overlay_window_ids: Vec::new(),
-        })
-    });
+    let scene = requested_session_scene(params);
     let screen_image_usable = stream_screen_image_usable(active_screen);
     #[cfg(target_os = "windows")]
     let d3d11_screen_source_authoritative = windows_d3d11_screen_preflight_candidate(
@@ -17842,13 +17877,25 @@ async fn resolve_windows_recordable_video(
     if !params.output.record_enabled || params.output.stream_enabled {
         return None;
     }
+    resolve_windows_record_only_video(state, ffmpeg_path, &params.output.video).await
+}
+
+/// The record-only canvas for `requested`, cached per profile. A record-only
+/// session's encoder topology is the one shared profile, so the probe needs
+/// nothing else from the request (the startup prewarm calls this directly).
+#[cfg(target_os = "windows")]
+async fn resolve_windows_record_only_video(
+    state: &AppState,
+    ffmpeg_path: &str,
+    requested: &VideoSettings,
+) -> Option<WindowsRecordableVideo> {
     if !matches!(
         recording_encoder_bridge_video_output(true, false),
         EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
         return None;
     }
-    let requested = params.output.video.clone();
+    let requested = requested.clone();
     let identity = graphics_adapter_driver_identity();
     // Plan 195 S5: this machine's own measured verdict, when it has one.
     let verdict_cap =
@@ -17895,15 +17942,11 @@ async fn resolve_windows_recordable_video(
     let mut candidates = vec![requested.clone()];
     candidates.extend(windows_recordable_video_rungs(&requested));
     for candidate in candidates {
-        let mut candidate_params = params.clone();
-        candidate_params.output.video = candidate.clone();
-        let accepted = match encoder_output_topology_plan_from_session(&candidate_params) {
-            Ok(plan) => matches!(
-                probe_windows_media_foundation_topology(ffmpeg_path, &plan, &identity).await,
-                MediaFoundationTopologyProbe::Passed { .. }
-            ),
-            Err(_) => false,
-        };
+        let plan = EncoderOutputTopologyPlan::shared(candidate.clone());
+        let accepted = matches!(
+            probe_windows_media_foundation_topology(ffmpeg_path, &plan, &identity).await,
+            MediaFoundationTopologyProbe::Passed { .. }
+        );
         verdicts.push((candidate, accepted));
         if accepted {
             break;
@@ -18277,6 +18320,65 @@ struct WindowsMfRejectionStore {
 #[cfg(target_os = "windows")]
 static WINDOWS_MF_PERSISTED_REJECTIONS: std::sync::OnceLock<WindowsMfRejectionStore> =
     std::sync::OnceLock::new();
+
+/// The profile the launch replay ring most likely asks for: the remembered
+/// capture's (Record and Go Live save it), else the renderer's default 1080p30.
+#[cfg(any(test, target_os = "windows"))]
+fn replay_ring_prewarm_video(remembered: Option<&StartSessionParams>) -> VideoSettings {
+    remembered.map_or_else(
+        || video_preset_defaults(VideoPreset::Tutorial1080p30),
+        |params| params.output.video.clone(),
+    )
+}
+
+/// The replay ring starts on its own at launch (plan 181), and its first
+/// start paid the cold Windows encoder probes while it held the ordered
+/// command lane: the recordable-video probe and the first in-process Media
+/// Foundation encoder open (3.3 s against 1.55 s warm on a GTX 1650, right
+/// behind the camera start). Warm both in the background at startup, through
+/// the same caches the start reads: the record-only canvas, then the ring's
+/// encoded-bridge decision for it. Best effort: a start that lands first
+/// probes for itself, and another profile simply misses the cache.
+#[cfg(target_os = "windows")]
+pub(crate) fn spawn_windows_replay_ring_prewarm(state: &AppState) {
+    let remembered = state
+        .database
+        .load_setting::<StartSessionParams>("last_capture_session")
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                "Could not load the remembered capture for the encoder prewarm: {error}"
+            );
+            None
+        });
+    let requested = replay_ring_prewarm_video(remembered.as_ref());
+    let state = state.clone();
+    tokio::spawn(async move {
+        let started = Instant::now();
+        let ffmpeg_path = resolve_ffmpeg_path(None);
+        let Some(selected) =
+            resolve_windows_record_only_video(&state, &ffmpeg_path, &requested).await
+        else {
+            return;
+        };
+        let decision = resolve_windows_encoded_bridge_decision(
+            &ffmpeg_path,
+            &EncoderOutputTopologyPlan::shared(selected.video.clone()),
+            recording_encoder_bridge_video_output(true, false),
+        )
+        .await;
+        tracing::info!(
+            "[encoder-prewarm] replay ring profile {}x{}@{} warmed in {}ms ({})",
+            selected.video.width,
+            selected.video.height,
+            selected.video.fps,
+            started.elapsed().as_millis(),
+            match &decision {
+                Ok(decision) => format!("{:?}", decision.effective_encode_backend),
+                Err(error) => format!("decision failed: {error}"),
+            }
+        );
+    });
+}
 
 #[cfg(target_os = "windows")]
 pub(crate) fn load_windows_mf_rejection_store(database: &Database) {
@@ -39308,6 +39410,97 @@ mod tests {
                 .is_none()
         );
         assert!(session_start_failed_logs(&database, session_id).is_empty());
+    }
+
+    #[test]
+    fn the_ring_prewarm_uses_the_remembered_profile_else_the_default_1080p30() {
+        let default = replay_ring_prewarm_video(None);
+        assert_eq!(
+            (
+                default.width,
+                default.height,
+                default.fps,
+                default.bitrate_kbps
+            ),
+            (1920, 1080, 30, 6000),
+            "the renderer's default profile (tutorial-1080p30)"
+        );
+        let mut remembered = base_params(true, false);
+        remembered.output.video = video_preset_defaults(VideoPreset::Tutorial1440p30);
+        assert_eq!(
+            replay_ring_prewarm_video(Some(&remembered)),
+            remembered.output.video
+        );
+    }
+
+    #[test]
+    fn a_record_only_session_probes_the_one_shared_profile() {
+        // The startup prewarm builds this plan from the profile alone; it must
+        // be the plan a record-only start builds from the full request.
+        let params = base_params(true, false);
+        assert_eq!(
+            encoder_output_topology_plan_from_session(&params).unwrap(),
+            EncoderOutputTopologyPlan::shared(params.output.video.clone())
+        );
+    }
+
+    #[test]
+    fn only_an_automatic_bridge_ring_waits_for_a_visible_cameras_first_frame() {
+        let mut params = base_params(true, false);
+        let camera_scene = requested_session_scene(&params);
+        assert!(automatic_ring_waits_for_camera(
+            true,
+            false,
+            &camera_scene,
+            false
+        ));
+        assert!(
+            !automatic_ring_waits_for_camera(true, false, &camera_scene, true),
+            "a camera with a frame starts the ring"
+        );
+        assert!(
+            !automatic_ring_waits_for_camera(false, false, &camera_scene, false),
+            "Record and a ring the user turned on keep the bridge's own source wait"
+        );
+        assert!(
+            !automatic_ring_waits_for_camera(true, true, &camera_scene, false),
+            "the legacy path captures the camera itself"
+        );
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        assert!(
+            !automatic_ring_waits_for_camera(true, false, &requested_session_scene(&params), false),
+            "a scene without a visible camera never waits for one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_automatic_ring_without_camera_frames_is_refused_before_admission() {
+        let state = test_state();
+        let mut params = base_params(true, false);
+        params.output.record_enabled = false;
+        params.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: true,
+        });
+        let error = start_session(state.clone(), params)
+            .await
+            .expect_err("the camera has no frame");
+        assert!(
+            error
+                .downcast_ref::<crate::replay_buffer::AutoStartSourcesNotReady>()
+                .is_some(),
+            "typed so the renderer waits instead of counting a failed start: {error:#}"
+        );
+        assert!(state.recording.lock().await.is_none());
+        assert!(
+            state
+                .database
+                .list_session_items_page(None, 20)
+                .unwrap()
+                .items
+                .is_empty(),
+            "no Library row for a start that never ran"
+        );
     }
 
     #[test]
