@@ -17354,8 +17354,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setSourceVisible: async (sourceId, visible) => {
           await setSceneSourceVisible(sourceId, visible)
           return (
-            transformSceneRef.current?.sources.find((source) => source.id === sourceId)
-              ?.visible === visible
+            transformSceneRef.current?.sources.find((source) => source.id === sourceId)?.visible ===
+            visible
           )
         }
       },
