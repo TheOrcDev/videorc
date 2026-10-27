@@ -16318,6 +16318,20 @@ mod tests {
     }
 
     #[test]
+    fn camera_start_replies_inside_its_mutation_execution_contract() {
+        // A slow camera must get a Starting reply, never a backend restart.
+        let command =
+            json!({ "id": "camera", "method": "preview.camera.start", "params": {} }).to_string();
+        let contract = websocket_command_mutation_max_execution_age(command.as_str())
+            .expect("preview.camera.start runs under a mutation execution contract");
+        assert!(
+            preview_camera::CAMERA_COMMAND_RESPONSE_BUDGET < contract,
+            "camera start replies after {:?}, past its {contract:?} execution contract",
+            preview_camera::CAMERA_COMMAND_RESPONSE_BUDGET
+        );
+    }
+
+    #[test]
     fn websocket_handler_execution_policy_inventory_is_exhaustive() {
         for method in [
             "screens.active",
