@@ -13,6 +13,22 @@
   BUILT** (S0 to S5, one desktop PR; owner live take owed); Phases 2 to 4
   wait on the owner's Meta setup (M1). Owner calls D6 (website) and D7
   (sign-in, after S6) open.
+- 2026-10-27: [Plan 205](205-preview-is-the-source-of-truth.md), The
+  preview is the source of truth. Owner request: a banner and Buddy put on
+  the picture weren't visible in the preview; "our preview window should
+  actually be the source of truth". Root causes, checked on the owner's
+  profile: Clips (on by default) makes the idle preview a recording, so
+  Buddy set to stream only never draws. The idle preview never draws Buddy
+  at all, and draws it only while the Scene editor holds it. The banner
+  was placed while hidden, and on the docked live canvas no label says so.
+  One rule, "the Preview shows the program": every layer at least one
+  running output carries, and at idle every layer with a switch on. Phase
+  1 covers that rule in Rust and TS, Clips keeping the program, "Hidden",
+  "Off" and "Stream only" on the Scene chips, and a dev-only Preview pixel
+  oracle with `smoke:preview-truth`. Phase 2 adds a macOS program leg for
+  record + stream with a split stream leg (measured spike first). Phase 3
+  covers the Windows media session's preview and Buddy on the proof
+  surface. **PLANNED**; D1 to D6 pre-filled, owner review pending.
 - 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
   Owner request: live chat in the Studio in a small window, optional with a
   switch, a click putting a message on stream, less detail than the Stream
