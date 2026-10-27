@@ -34,12 +34,14 @@ import {
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
+import { firstRunReplayLocked } from '@/lib/first-run'
 import { GO_LIVE_COMMAND, START_RECORDING_COMMAND } from '@/lib/go-live-copy'
 import { HEALTH_SEARCH_KEYWORDS } from '@/lib/health-door'
 import { openLivestreamView } from '@/lib/livestream-tabs'
 import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { sessionStopControl } from '@/lib/studio-session-view'
+import { openFirstRunSetup } from '@/lib/workspace-navigation'
 import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
@@ -115,7 +117,7 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
+  const { active, setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
   const {
     runtimeInfo,
     savedScenes,
@@ -500,6 +502,19 @@ export function CommandPalette({
               {tab.id === 'shortcuts' ? shortcut(shortcutAccelerator('shortcuts-page')) : null}
             </CommandItem>
           ))}
+          {/* Plan 203 S6: setup again, back to this page after. Setup holds
+              capture back, so a session hides it (Settings says why). */}
+          {firstRunReplayLocked(recording) ? null : (
+            <CommandItem
+              value="Run setup again…"
+              keywords={['first-run', 'welcome', 'onboarding', 'permissions', 'setup']}
+              onSelect={() => run(() => openFirstRunSetup({ returnTo: active }))}
+            >
+              <SettingsIcon className="size-4" />
+              Run setup again…
+              <Context>Settings</Context>
+            </CommandItem>
+          )}
         </CommandGroup>
 
         <CommandSeparator />

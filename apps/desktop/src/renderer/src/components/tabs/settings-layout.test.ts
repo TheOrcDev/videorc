@@ -28,7 +28,8 @@ const panelSources = Object.fromEntries(
 /** Sections rendered by a component that carries its own title prop. */
 const SECTION_COMPONENTS: Record<string, string> = {
   PhoneRemoteSection: 'Phone remote',
-  AboutAndUpdates: 'About & updates'
+  AboutAndUpdates: 'About & updates',
+  SetupSection: 'Setup'
 }
 
 /** Files rendered only under Settings that carry their own `PanelSection`. */
@@ -116,7 +117,7 @@ describe('Settings layout', () => {
     expect(
       Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
     ).toEqual({
-      general: ['Appearance', 'Stream Manager', 'Import', 'Elsewhere'],
+      general: ['Appearance', 'Stream Manager', 'Setup', 'Import', 'Elsewhere'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
       remote: ['Remote control', 'Phone remote'],
@@ -222,14 +223,15 @@ describe('Settings layout', () => {
     }
   })
 
-  it('splits General into two columns of two sections: the pair holds exactly two children', () => {
+  it('splits General into two columns: the pair holds exactly two children', () => {
     // Plan 174 S3.17 (I-27): Appearance over Stream Manager, Import over
-    // Elsewhere. Each column is one PageStack, so the pair keeps its two
-    // stretched cells and the column rule runs the full height.
+    // Elsewhere; plan 203 S6 puts Setup under Stream Manager. Each column is
+    // one PageStack, so the pair keeps its two stretched cells and the column
+    // rule runs the full height.
     const general = exportedBody(panelSources.GeneralSettings as string, 'GeneralSettings')
     expect(general.match(/<PageStack\b/g)).toHaveLength(2)
     const [first, second] = general.split(/<PageStack\b/).slice(1)
-    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Stream Manager'])
+    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Stream Manager', 'Setup'])
     expect(sectionTitles(second as string)).toEqual(['Import', 'Elsewhere'])
   })
 

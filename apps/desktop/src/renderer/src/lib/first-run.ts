@@ -1,5 +1,7 @@
 import type { WorkspaceTab } from '@/components/workspace-nav'
 
+import type { RecordingStatus } from '../../../shared/backend'
+import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from './capture'
 
 export const FIRST_RUN_STEPS = ['permissions'] as const
@@ -174,3 +176,23 @@ export function firstRunShellSurface({
  * to `returnTo`.
  */
 export type FirstRunSetupMode = { kind: 'first-run' } | { kind: 'replay'; returnTo: WorkspaceTab }
+
+/** Why "Run setup again…" is off (plan 203 D5): setup holds capture back. */
+export const FIRST_RUN_REPLAY_LOCKED_REASON = 'Finish your recording or livestream first.'
+
+/**
+ * "Run setup again…" waits while a recording or livestream starts, runs or
+ * stops (plan 203 S6). The Clips ring alone is no session: setup only holds
+ * its start, and a running ring keeps running.
+ */
+export function firstRunReplayLocked(
+  recording: Pick<RecordingStatus, 'state' | 'replayOnly'>
+): boolean {
+  if (sessionIsReplayOnly(recording)) return false
+  return (
+    recording.state === 'starting' ||
+    recording.state === 'recording' ||
+    recording.state === 'streaming' ||
+    recording.state === 'stopping'
+  )
+}

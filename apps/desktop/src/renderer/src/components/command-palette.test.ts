@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WorkspaceNavContext } from '@/components/workspace-nav'
+import { FIRST_RUN_SETUP_OPEN_EVENT } from '@/lib/workspace-navigation'
 
 import { CommandPalette } from './command-palette'
 
@@ -428,5 +429,26 @@ describe('CommandPalette sounds (plan 189 S10)', () => {
     mocked.soundboard.sounds = []
     await render()
     expect(headings()).not.toContain('Sounds')
+  })
+
+  it('runs setup again and comes back to the page it was opened from (plan 203 S6)', async () => {
+    await render()
+    const requests: unknown[] = []
+    const listen = (event: Event): void => void requests.push((event as CustomEvent).detail)
+    window.addEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    await act(async () => item('Run setup again…').click())
+    window.removeEventListener(FIRST_RUN_SETUP_OPEN_EVENT, listen)
+    expect(requests).toEqual([{ returnTo: 'library' }])
+  })
+
+  it('hides Run setup again… while a recording or livestream runs, not for the Clips ring', async () => {
+    for (const state of ['starting', 'recording', 'streaming', 'stopping']) {
+      mocked.recording = { state }
+      await render()
+      expect(values(), state).not.toContain('Run setup again…')
+    }
+    mocked.recording = { state: 'recording', replayOnly: true }
+    await render()
+    expect(values()).toContain('Run setup again…')
   })
 })
