@@ -1225,7 +1225,8 @@ const moderationOperationIpcSchema = boundedSemanticValue(
       sessionId: boundedIdentifier,
       messageId: boundedIdentifier,
       // A saved wire value (plan 170 D22): never rename 'orcle-voice'.
-      source: enumSchema(['manual', 'orcle-voice']),
+      // 'agent': an AI agent's removal (plan 209 S12).
+      source: enumSchema(['manual', 'orcle-voice', 'agent']),
       phase: enumSchema(MODERATION_PHASES)
     },
     { allowUnknown: true }

@@ -69,6 +69,8 @@ export interface AgentSurface {
   }
   destinations: AgentSurfaceDestination[]
   windows: { notes: boolean; streamManager: boolean; preview: boolean }
+  /** The streamer allowed Cloud AI (plan 209 S15: `start_clean_cut` needs it). */
+  cloudAiConsent: boolean
 }
 
 /** What the Studio hands over each render: references, built lazily. */
@@ -95,6 +97,8 @@ export interface AgentSurfaceInput {
   streaming: StreamingSettings
   streamMetadataDraft: StreamMetadataDraft | null
   windows: { notes: boolean; streamManager: boolean; preview: boolean }
+  /** The renderer-local Cloud AI consent. */
+  cloudAiConsent: boolean
 }
 
 const CAPTIONS_RUNNING = new Set(['starting', 'listening', 'reconnecting', 'degraded'])
@@ -208,7 +212,8 @@ export function buildAgentSurface(
     },
     sources: { devices, chosen },
     destinations: destinationProjection(input.streaming, input.streamMetadataDraft),
-    windows: { ...input.windows }
+    windows: { ...input.windows },
+    cloudAiConsent: input.cloudAiConsent
   }
 }
 

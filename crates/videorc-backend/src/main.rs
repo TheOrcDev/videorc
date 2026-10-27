@@ -7,8 +7,11 @@
 
 mod account;
 mod agent_call;
+mod agent_chat;
+mod agent_library;
 mod agent_look;
 mod agent_mcp;
+mod agent_prepare;
 mod agent_registry;
 mod agent_tools;
 mod atomic_file;
@@ -12081,6 +12084,14 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<live_chat_moderation::ModerationRequestParams>(
                 command.params,
             ) {
+                // Plan 209 S12: only the Agents endpoint makes agent removals.
+                Ok(params) if params.source == live_chat_moderation::ModerationSource::Agent => {
+                    ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "Agent removals come from the Agents endpoint only.",
+                    )
+                }
                 Ok(params) => match live_chat_moderation::request(state, params.into()).await {
                     Ok(operation) => ServerResponse::ok(command.id, operation),
                     Err(refusal) => {

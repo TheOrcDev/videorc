@@ -5,8 +5,9 @@
 // structured result. A parity test holds this record to the catalog: one
 // executor per Studio tool and none besides.
 //
-// Nothing here toasts. D11 notices (`stop`, `notify`) are the Studio's,
-// from the `notice` the backend puts on the `agents.activity` event.
+// Nothing here toasts. D11 notices (`stop`, `notify`, `delete_recording`) are
+// the Studio's, from the `notice` the backend puts on the `agents.activity`
+// event.
 
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { soundboard } from '@/lib/soundboard-store'
@@ -28,6 +29,11 @@ import { getSceneLayout, moveOnScene, setSceneItem } from './scene-layout'
 import { recordStart, recordStop } from './session'
 import { soundPlay, soundStop } from './sounds'
 import { windowFront } from './windows'
+// Plan 209 PR B, S13 to S15.
+import { setBuddy } from './buddy'
+import { deleteRecording, exportRecording } from './library'
+import { setDestinations, updateStreamInfo } from './prepare'
+import { getSettings, updateSettings } from './settings'
 
 /** What an agent reads when a Studio tool refuses before any handler runs. */
 export const AGENT_TOOL_COPY = {
@@ -180,5 +186,13 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   set_background: setBackground,
   get_scene_layout: getSceneLayout,
   move_on_scene: moveOnScene,
-  set_scene_item: setSceneItem
+  set_scene_item: setSceneItem,
+  // Plan 209 PR B, S13 to S15 (buddy.ts, prepare.ts, settings.ts, library.ts).
+  set_buddy: setBuddy,
+  update_stream_info: updateStreamInfo,
+  set_destinations: setDestinations,
+  get_settings: getSettings,
+  update_settings: updateSettings,
+  delete_recording: deleteRecording,
+  export_recording: exportRecording
 }

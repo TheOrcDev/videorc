@@ -4311,10 +4311,12 @@ export interface CommentsSendOperation {
 // Wire mirror of crates/videorc-backend/src/live_chat_moderation.rs. Every
 // removal is a durable, audited operation; the backend owns the timers. The
 // event `liveChat.moderationOperation` carries a ModerationOperation on every
-// change. Manual removal is free; `orcle-voice` needs Premium.
+// change. Manual removal is free; `orcle-voice` needs Premium. `agent` is an AI
+// agent on this computer (plan 209 S12): free, at once, except on YouTube,
+// where it waits for the streamer's click on the removal card.
 
 // The value stays 'orcle-voice' (plan 170 D22): saved reports and older apps carry it.
-export type ModerationSource = 'manual' | 'orcle-voice'
+export type ModerationSource = 'manual' | 'orcle-voice' | 'agent'
 export type RemoveConfirmMode = 'confirm' | 'countdown'
 export type ModerationPhase =
   | 'pending-confirm'
@@ -4368,7 +4370,8 @@ export interface ModerationRequestParams {
   operationId: string
   /** The app message id (`LiveChatMessage.id`). */
   messageId: string
-  source: ModerationSource
+  /** `agent` is never asked for by a renderer: the Agents endpoint owns it. */
+  source: Exclude<ModerationSource, 'agent'>
   reason?: string
   confirmMode?: RemoveConfirmMode
 }

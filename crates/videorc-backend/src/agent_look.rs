@@ -1097,9 +1097,22 @@ pub async fn get_recording(state: &AppState, _agent: &AgentIdentity, args: Value
         .filter_map(|kind| serde_json::to_value(kind).ok())
         .collect();
     out.insert("reports".into(), Value::Array(reports));
+    // Plan 209 S15: each Clean cut's progress, and its transcript when asked.
+    let clean_cuts = crate::agent_library::clean_cuts(state, &item.id);
+    if !clean_cuts.is_empty() {
+        out.insert("cleanCuts".into(), Value::Array(clean_cuts));
+    }
+    let mut transcript_note = "";
+    if bool_of(&args, "includeTranscript") == Some(true) {
+        let transcript = crate::agent_library::transcript(state, &item.id).await;
+        if transcript.is_none() {
+            transcript_note = " No transcript yet: a Clean cut makes one.";
+        }
+        out.insert("transcript".into(), transcript.unwrap_or(Value::Null));
+    }
     let file_count = out["files"].as_array().map_or(0, Vec::len);
     let text = format!(
-        "\"{}\": {file_count} file{}, {marker_count} marker{}.",
+        "\"{}\": {file_count} file{}, {marker_count} marker{}.{transcript_note}",
         item.title,
         if file_count == 1 { "" } else { "s" },
         if marker_count == 1 { "" } else { "s" },

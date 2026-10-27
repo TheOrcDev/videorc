@@ -124,6 +124,26 @@ pub fn backend_executor(name: &str) -> Option<BackendExecutor> {
         "set_banner" => Some(|state, agent, args| Box::pin(set_banner(state, agent, args))),
         // PR B (plan 209 S11).
         "edit_banner" => Some(|state, agent, args| Box::pin(edit_banner(state, agent, args))),
+        // Plan 209 PR B, S12 to S15 (agent_chat.rs, agent_prepare.rs,
+        // agent_library.rs).
+        "send_chat_message" => Some(|state, agent, args| {
+            Box::pin(crate::agent_chat::send_chat_message(state, agent, args))
+        }),
+        "remove_chat_message" => Some(|state, agent, args| {
+            Box::pin(crate::agent_chat::remove_chat_message(state, agent, args))
+        }),
+        "buddy_say" => {
+            Some(|state, agent, args| Box::pin(crate::agent_chat::buddy_say(state, agent, args)))
+        }
+        "schedule_stream" => Some(|state, agent, args| {
+            Box::pin(crate::agent_prepare::schedule_stream(state, agent, args))
+        }),
+        "rename_recording" => Some(|state, agent, args| {
+            Box::pin(crate::agent_library::rename_recording(state, agent, args))
+        }),
+        "start_clean_cut" => Some(|state, agent, args| {
+            Box::pin(crate::agent_library::start_clean_cut(state, agent, args))
+        }),
         _ => None,
     }
 }

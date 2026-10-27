@@ -106,6 +106,7 @@ function input(overrides: Partial<AgentSurfaceInput> = {}): AgentSurfaceInput {
       updatedAt: '2026-10-27T10:00:00Z'
     } as never,
     windows: { notes: false, streamManager: true, preview: false },
+    cloudAiConsent: false,
     ...overrides
   }
 }
@@ -165,6 +166,9 @@ describe('buildAgentSurface', () => {
     ])
     expect(surface.liveBlockedReason).toBe('Turn on a destination in Livestream.')
     expect(surface).not.toHaveProperty('recordBlockedReason')
+    // Plan 209 S15: Clean cut needs the streamer's own Cloud AI consent.
+    expect(surface.cloudAiConsent).toBe(false)
+    expect(buildAgentSurface(input({ cloudAiConsent: true }), []).cloudAiConsent).toBe(true)
   })
 
   it('names the saved scene when one is active, and says a picture background is a picture', () => {

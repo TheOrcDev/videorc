@@ -130,7 +130,9 @@ import {
   type LibraryFilter,
   type LibraryPickModifier,
   type LibrarySelection,
-  type LibrarySort
+  type LibrarySort,
+  CAPTURE_HOLD_REASON,
+  canExportMp4 as sessionCanExportMp4
 } from '@/lib/library-view'
 import {
   activeNoiseCleanupSourceIds,
@@ -153,9 +155,6 @@ const SessionMarkersDialog = lazy(async () => ({
 /** The table's columns: select, name, scene, duration, size, file, actions. */
 const LIBRARY_COLUMNS =
   'grid grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_8rem] items-center gap-2 px-gutter min-[1280px]:grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_13rem]'
-
-/** Why file actions wait while a recording or a livestream runs. */
-const CAPTURE_HOLD_REASON = 'Available when you stop recording or end the livestream.'
 
 /** A click that lands on one of the row's own controls is that control's, not the row's. */
 function fromRowControl(event: MouseEvent<HTMLElement>): boolean {
@@ -1218,12 +1217,7 @@ function useSessionMenu({
   // Plan 198: a stopped Screen or Camera file exports what it recorded, and
   // nothing when it recorded nothing.
   const fileStopped = separateFileStopped(session)
-  const canExportMp4 =
-    Boolean(
-      session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
-    ) &&
-    !finalizing &&
-    fileStopped?.exportable !== false
+  const canExportMp4 = sessionCanExportMp4(session)
   const canOpenComments = session.commentCount > 0
   const cleanupJob = latestNoiseCleanupJobForSession(noiseCleanupJobs, session.id)
   const cleanupView = withNoiseCleanupConnectionState(

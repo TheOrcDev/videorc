@@ -96,6 +96,24 @@ called intro done, then stop", "Give me the file of my last recording".
 | `move_on_scene`     | Move or resize an item to where the Scene canvas's snaps would put it         |
 | `set_scene_item`    | Show or hide the camera or screen, its shape, and the overlays' output switch |
 
+Chat and Buddy, the next stream, settings and the Library:
+
+| Tool                  | What it does                                                                       |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `send_chat_message`   | Post in chat as you, on every chat that takes posts or the ones named              |
+| `remove_chat_message` | Remove a viewer's message; on YouTube it waits for your click on the card          |
+| `buddy_say`           | Buddy says a line in its bubble, and in chat when its chat mode is Auto            |
+| `set_buddy`           | Buddy Live on or off, its chat posting mode, and whether it is on stream           |
+| `update_stream_info`  | The next stream's title, description, privacy and category, shared or per platform |
+| `set_destinations`    | Turn destinations on or off for the next stream                                    |
+| `schedule_stream`     | Schedule an upcoming livestream on YouTube or X                                    |
+| `get_settings`        | The settings agents may change, as they stand                                      |
+| `update_settings`     | Change those settings (resolution, frame rate, Clips, theme and a few more)        |
+| `rename_recording`    | Give a recording a new title                                                       |
+| `delete_recording`    | Move a recording's files to the Trash, where you can put them back                 |
+| `export_recording`    | Make the MP4 of a finished recording, like Export MP4 in the Library               |
+| `start_clean_cut`     | Start a Clean cut (Premium); its progress and transcript show in `get_recording`   |
+
 Every action goes through the same code as the button you would press, so
 an agent can't start anything the Studio would refuse; it gets Videorc's own
 sentence back instead ("Choose a screen or a camera first.").
@@ -104,10 +122,17 @@ sentence back instead ("Choose a screen or a camera first.").
 
 - **Activity** in Settings → Remote → Agents lists every call: when, which
   agent, which tool and how it ended.
-- **Notices.** Going live, ending the livestream or recording, and `notify`,
-  show a notice in Videorc naming the agent ("Claude Desktop started the
+- **Notices.** Going live, ending the livestream or recording, posting in
+  chat, removing a chat message, deleting a recording, and `notify`, show a
+  notice in Videorc naming the agent ("Claude Desktop started the
   livestream."). Everything else shows only in Activity, so a busy agent
   doesn't bury you in notices.
+- **Asked, never assumed.** An agent can't sign in, connect a platform,
+  allow Cloud AI or choose a folder for you. YouTube asks you to confirm
+  every removal, so an agent's YouTube removal waits on the removal card for
+  your click. Settings agents can change are a short fixed list: never
+  accounts, keys, permissions, Remote, Agents, updates, diagnostics or
+  billing.
 - **Stop.** While an agent is connected, the Studio's Session section shows
   "Claude Desktop connected · Stop". Stop disconnects every agent at once and
   turns Agents off. ⌘K has "Stop agents" too.
@@ -255,6 +280,21 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
   `viewerText` and `viewerName`, pages with a `since` cursor (a message id;
   an unknown cursor starts over at the newest), and with `waitSeconds` (at
   most 25) waits for the next `liveChat` message.
+- **Chat (S12).** `send_chat_message` is the Stream Manager's send with an
+  operation id minted per call (1 post per 2 s and 20 a minute per agent),
+  answered per destination. `remove_chat_message` is chat moderation with
+  `ModerationSource::Agent` (wire `agent`): at once like the row menu,
+  except on YouTube, where it starts in `pending-confirm` with
+  `requiresExplicitConfirm` and shows the existing removal card (10 a
+  minute). The fake chat connectors (`FakeChatConfig`) delete on every
+  platform, and `echoSends: true` makes a fake show an accepted post back in
+  chat as the streamer's own row, as YouTube and Twitch do, so a smoke can
+  read a post back.
+- **Settings (S14, D16).** `update_settings`' input schema is the curated
+  list, with `additionalProperties: false`, so the backend refuses any other
+  name before the Studio sees it; the Studio executor (`CURATED_SETTINGS`)
+  refuses it again. Each change goes through its own control's setter, with
+  its locks and gates.
 - **Notices (D11).** For a successful `onAir` call the backend fills the
   catalog's `notice` (`{agent}` and `{field}` from the arguments, then the
   result: `stop` returns `{stopped: "livestream"}`) and puts it on the

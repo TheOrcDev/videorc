@@ -68,20 +68,13 @@ import {
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { SESSION_LOCK_REASON, unlockActionForGate } from '@/lib/lock-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
+import { CAPTION_LANGUAGES } from '@/lib/caption-languages'
 import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
-const LANGUAGES = [
-  { id: 'auto', label: 'Auto-detect' },
-  { id: 'en', label: 'English' },
-  { id: 'es', label: 'Spanish' },
-  { id: 'fr', label: 'French' },
-  { id: 'de', label: 'German' },
-  { id: 'pt', label: 'Portuguese' },
-  { id: 'it', label: 'Italian' }
-] as const
+const LANGUAGES = CAPTION_LANGUAGES
 
 const CAPTION_TEXT_SIZE_OPTIONS: SegmentedControlOption<CaptionTextSize>[] = [
   { value: 's', label: 'Small' },

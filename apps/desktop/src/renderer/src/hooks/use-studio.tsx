@@ -41,6 +41,7 @@ import {
   type SessionStopOrigin
 } from '@/lib/session-stop'
 import type { AgentsStatus, AppExitKind } from '@/lib/backend'
+import { useTheme } from 'next-themes'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -2445,6 +2446,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // source previews, the Preview window and the OS-global shortcuts wait for it
   // to close; the shell owns the flag.
   const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  // Plan 209 S14: `update_settings` sets the theme through next-themes, like
+  // Settings → General's control.
+  const { theme: appTheme, setTheme: setAppTheme } = useTheme()
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -7434,6 +7438,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('agents.status', (payload) => {
         noteAgentsEnabled((payload as AgentsStatus).enabled)
+      }),
+      // Plan 209 S15: an agent renamed a recording in the backend; the
+      // Library shows the new title like its own rename does.
+      nextClient.on('agents.activity', (payload) => {
+        const entry = payload as { tool?: string; outcome?: string } | null
+        if (entry?.outcome === 'ok' && entry.tool === 'rename_recording') {
+          void refreshSessions(nextClient)
+        }
       }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
@@ -15912,7 +15924,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // at the original path can therefore never cross the backend-check/Electron-
   // use boundary and be trashed by mistake.
   const deleteSessions = useCallback(
-    async (targets: SessionSummary[]): Promise<void> => {
+    async (targets: readonly Pick<SessionSummary, 'id'>[]): Promise<void> => {
       if (!client) {
         throw offlineError()
       }
@@ -17379,6 +17391,82 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             message: error instanceof Error ? error.message : "Couldn't mark the clip."
           }
         }
+      },
+      // Plan 209 PR B, S13 to S15: what the Buddy, Prepare and Library tools
+      // need, each through the control the streamer would use.
+      buddy: {
+        settings: cohostSettingsRef.current,
+        entitled: cohostGate.allowed,
+        entitlementReason: cohostGate.allowed ? null : cohostGate.reason,
+        consented: aiConsent,
+        showOnStream: overlayLayoutRef.current.buddy.showOnStream,
+        // The Stream Manager's enable command's save (`cohostEnableRelayPatch`).
+        saveSettings: async (patch) => {
+          const next = await client.request<CohostSettings>('cohost.settings.set', patch)
+          setCohostSettings(next)
+          return next
+        },
+        // The Stream Manager header's "on stream" switch.
+        setShowOnStream: async (on) => {
+          const current = overlayLayoutRef.current
+          await setOverlayLayout({ ...current, buddy: { ...current.buddy, showOnStream: on } })
+        }
+      },
+      prepare: {
+        draft: streamMetadataDraft,
+        // Stream details' Save, after the executor ran its check.
+        saveDraft: async (draft) => {
+          const saved = await client.request<StreamMetadataDraft>(
+            'streamTargets.metadata.update',
+            draft
+          )
+          setStreamMetadataDraft(saved)
+          setStreamMetadataValidation({ valid: true, issues: [] })
+          return saved
+        },
+        searchCategories: async (platform, query) => {
+          const accountId = platformAccounts.find((item) => item.platform === platform)?.accountId
+          if (platform === 'kick') {
+            const found = await client.request<{ categories: KickCategory[] }>(
+              'streamTargets.kick.searchCategories',
+              { accountId, query, limit: 10 }
+            )
+            return found.categories
+          }
+          const found = await client.request<{ categories: TwitchCategory[] }>(
+            'streamTargets.twitch.searchCategories',
+            { accountId, query, first: 10 }
+          )
+          return found.categories
+        },
+        streaming: captureConfigRef.current.streaming,
+        entitlements,
+        goLivePending: goLiveConfirmationPending || Boolean(goLivePartialSetup),
+        patchTarget: patchStreamingTarget
+      },
+      settings: {
+        captureConfig: captureConfigRef.current,
+        settings,
+        theme: appTheme,
+        platform: runtimeInfo?.platform,
+        entitlements,
+        patchVideo,
+        setCaptureConfig,
+        setSettings,
+        setClipsEnabled: setReplayEnabled,
+        setTheme: setAppTheme
+      },
+      library: {
+        recordings: sessions,
+        deleteRecordings: (ids) => deleteSessions(ids.map((id) => ({ id }))),
+        // Export MP4's request; the Library row refreshes like the menu's.
+        exportMp4: async (id) => {
+          const exported = await client.request<{ mp4Path?: string } | null>('session.remux_mp4', {
+            sessionId: id
+          })
+          await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
+          return exported?.mp4Path ?? null
+        }
       }
     }
   }
@@ -17488,7 +17576,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       notes: notesWindow.open,
       streamManager: commentsWindow.open,
       preview: previewWindow.open
-    }
+    },
+    cloudAiConsent: aiConsent
   }
   agentSurfaceInputRef.current = agentSurfaceInput
   agentSurfacePublisherRef.current?.sync(agentSurfaceInput)

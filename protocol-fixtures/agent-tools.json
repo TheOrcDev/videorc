@@ -774,7 +774,7 @@
     {
       "name": "get_recording",
       "title": "Get a recording",
-      "description": "One take from the Library: its files with full paths on this computer (a separate-source take has its combined, screen and camera files), its markers, chat totals, peak viewers and Buddy's reports. Use an id from list_recordings.",
+      "description": "One take from the Library: its files with full paths on this computer (a separate-source take has its combined, screen and camera files), its markers, chat totals, peak viewers, Buddy's reports and each Clean cut's progress. includeTranscript adds the transcript, when a Clean cut has made one. Use an id from list_recordings.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -783,6 +783,10 @@
             "description": "The take's id from list_recordings.",
             "minLength": 1,
             "maxLength": 128
+          },
+          "includeTranscript": {
+            "type": "boolean",
+            "description": "Also return the transcript, as timed sentences, when a Clean cut has made one."
           }
         },
         "required": ["recordingId"],
@@ -866,6 +870,68 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "cleanCuts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "jobId": {
+                  "type": "string"
+                },
+                "recordingId": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "progress": {
+                  "type": "number"
+                },
+                "step": {
+                  "type": "string"
+                },
+                "cutRecordingId": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": ["jobId", "recordingId", "mode", "state", "progress"]
+            }
+          },
+          "transcript": {
+            "type": ["object", "null"],
+            "properties": {
+              "language": {
+                "type": "string"
+              },
+              "segments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "startSeconds": {
+                      "type": "number"
+                    },
+                    "endSeconds": {
+                      "type": "number"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["startSeconds", "endSeconds", "text"]
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
             }
           }
         },
@@ -1411,6 +1477,921 @@
       },
       "runsIn": "studio",
       "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "send_chat_message",
+      "title": "Post in chat",
+      "description": "Post a message in the livestream's chat as the streamer's own account: on every chat that can take it, or only on the destinations named. Viewers see it, so post only what the streamer asked for. The answer says, per destination, whether it was posted.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The message, 1 to 200 characters.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "destinations": {
+            "type": "array",
+            "description": "Only these chats: destination ids from list_destinations, or platform names like twitch. Left out: every chat that can take a post.",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "minItems": 1,
+            "maxItems": 8
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["sending", "sent", "partial", "failed", "delivery-unknown"]
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": ["id", "platform", "label", "state"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["operationId", "state", "destinations"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": true,
+      "rateFamily": "chat",
+      "notice": "{agent} posted in chat."
+    },
+    {
+      "name": "remove_chat_message",
+      "title": "Remove a chat message",
+      "description": "Remove one viewer's message from chat for everyone, like Remove from chat in the Stream Manager. Most platforms remove it at once. YouTube asks the streamer to confirm first: the answer then says it is waiting, and the removal card shows in Videorc. Use a message id from read_chat.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "description": "The message's id from read_chat.",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "reason": {
+            "type": "string",
+            "description": "A short reason for the record, like spam. At most 40 characters.",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "required": ["messageId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "viewerName": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": ["pending-confirm", "executing", "removed", "hidden-locally"]
+          },
+          "waitingForYou": {
+            "type": "boolean"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": ["operationId", "messageId", "platform", "viewerName", "phase", "summary"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": true,
+      "rateFamily": "removal",
+      "notice": "{agent} {summary}."
+    },
+    {
+      "name": "buddy_say",
+      "title": "Buddy says a line",
+      "description": "Buddy says a line in its speech bubble on the picture, like the Stream Manager's Say box, and posts it in chat too when its chat mode is Auto. Viewers see it. Refused when Buddy is off the picture and its chat mode doesn't post, since nobody would see it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "What Buddy says, 1 to 200 characters.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "mood": {
+            "type": "string",
+            "description": "How Buddy looks while it says it. Default talk.",
+            "enum": ["talk", "laugh", "think"]
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "bubble": {
+            "type": "boolean"
+          },
+          "chat": {
+            "type": "boolean"
+          },
+          "chatMode": {
+            "type": "string",
+            "enum": ["off", "suggest", "auto"]
+          }
+        },
+        "required": ["bubble", "chat", "chatMode"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "chat",
+      "notice": null
+    },
+    {
+      "name": "set_buddy",
+      "title": "Set up Buddy",
+      "description": "Turn Buddy Live on or off, choose how Buddy posts in chat (off: never, suggest: a card the streamer approves, auto: by itself), and put Buddy on the stream or take it off, like the Stream Manager's Buddy controls. Turning Buddy on needs Premium and the streamer's Cloud AI consent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean",
+            "description": "Buddy Live on or off."
+          },
+          "chatMode": {
+            "type": "string",
+            "description": "How Buddy posts in chat.",
+            "enum": ["off", "suggest", "auto"]
+          },
+          "onStream": {
+            "type": "boolean",
+            "description": "Buddy shows on the stream's picture."
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          },
+          "chatMode": {
+            "type": "string",
+            "enum": ["off", "suggest", "auto"]
+          },
+          "onStream": {
+            "type": "boolean"
+          }
+        },
+        "required": ["on", "chatMode", "onStream"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "update_stream_info",
+      "title": "Set the stream details",
+      "description": "Set the next livestream's details, like Stream details in Videorc: the title, description and privacy shared by every destination, a category for Twitch and Kick (by name), and per platform its own title, description, privacy or category. Saved only when Go Live would accept them. Waits while a session runs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "The shared title.",
+            "minLength": 1,
+            "maxLength": 140
+          },
+          "description": {
+            "type": "string",
+            "description": "The shared description.",
+            "maxLength": 5000
+          },
+          "privacy": {
+            "type": "string",
+            "description": "Who can watch, where the platform has a choice (YouTube).",
+            "enum": ["public", "unlisted", "private"]
+          },
+          "category": {
+            "type": "string",
+            "description": "A category name for Twitch and Kick, like Software and Game Development.",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "destinations": {
+            "type": "array",
+            "description": "Per platform: its own title, description, privacy or category.",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "type": "string",
+                  "enum": ["youtube", "twitch", "kick", "x"]
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 140
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 5000
+                },
+                "privacy": {
+                  "type": "string",
+                  "enum": ["public", "unlisted", "private"]
+                },
+                "category": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                }
+              },
+              "required": ["platform"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "privacy": {
+            "type": "string"
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "privacy": {
+                  "type": "string"
+                },
+                "ownTitle": {
+                  "type": "boolean"
+                },
+                "category": {
+                  "type": "string"
+                }
+              },
+              "required": ["platform", "title", "privacy", "ownTitle"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["title", "description", "privacy", "destinations"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_destinations",
+      "title": "Choose destinations",
+      "description": "Turn destinations on or off for the next livestream, like their switches in Videorc \u2192 Livestream. Use the ids list_destinations gives. Turning one on respects the plan's destination limit; nothing changes while a session runs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "A destination id from list_destinations.",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "on": {
+                  "type": "boolean",
+                  "description": "On for the next stream."
+                }
+              },
+              "required": ["id", "on"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["destinations"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "on": {
+                  "type": "boolean"
+                },
+                "ready": {
+                  "type": "boolean"
+                }
+              },
+              "required": ["id", "platform", "label", "on", "ready"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["destinations"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "schedule_stream",
+      "title": "Schedule a livestream",
+      "description": "Schedule an upcoming livestream on YouTube (default) or X, like Videorc \u2192 Upcoming: the platform lists it, and nothing goes live by itself. Give the start in the streamer's local time and IANA time zone. YouTube needs madeForKids; X gets a two-hour planned end unless one is given.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "start": {
+            "type": "string",
+            "description": "Local date and time, YYYY-MM-DDTHH:MM, like 2026-11-02T19:30.",
+            "minLength": 16,
+            "maxLength": 16
+          },
+          "timeZone": {
+            "type": "string",
+            "description": "An IANA time zone, like Europe/Madrid.",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "platform": {
+            "type": "string",
+            "enum": ["youtube", "x"]
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 5000
+          },
+          "privacy": {
+            "type": "string",
+            "description": "YouTube only. Default public.",
+            "enum": ["public", "unlisted", "private"]
+          },
+          "madeForKids": {
+            "type": "boolean",
+            "description": "YouTube asks whether the stream is made for kids."
+          },
+          "plannedEnd": {
+            "type": "string",
+            "description": "X only: local end, YYYY-MM-DDTHH:MM.",
+            "minLength": 16,
+            "maxLength": 16
+          },
+          "account": {
+            "type": "string",
+            "description": "The channel or account name, when more than one is connected.",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": ["title", "start", "timeZone"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "startsAt": {
+            "type": "string"
+          },
+          "scheduled": {
+            "type": "boolean"
+          },
+          "watchUrl": {
+            "type": "string"
+          }
+        },
+        "required": ["eventId", "platform", "title", "startsAt", "scheduled"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "get_settings",
+      "title": "Read the settings",
+      "description": "The settings an agent may change, as they stand: recording resolution and frame rate, Keep original recording, the recordings folder, separate source recordings, Clips, the captions language, Chat in Studio and the theme. Nothing about accounts, keys, permissions, Remote, Agents, updates, diagnostics or billing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "resolution": {
+            "type": "string"
+          },
+          "frameRate": {
+            "type": "number"
+          },
+          "keepOriginalRecording": {
+            "type": "boolean"
+          },
+          "recordingFolder": {
+            "type": "string"
+          },
+          "separateSourceRecordings": {
+            "type": "boolean"
+          },
+          "clips": {
+            "type": "boolean"
+          },
+          "captionsLanguage": {
+            "type": "string"
+          },
+          "chatInStudio": {
+            "type": "boolean"
+          },
+          "theme": {
+            "type": "string",
+            "enum": ["light", "dark", "system"]
+          }
+        },
+        "required": [
+          "resolution",
+          "frameRate",
+          "keepOriginalRecording",
+          "recordingFolder",
+          "separateSourceRecordings",
+          "clips",
+          "captionsLanguage",
+          "chatInStudio",
+          "theme"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "read",
+      "notice": null
+    },
+    {
+      "name": "update_settings",
+      "title": "Change settings",
+      "description": "Change one or more of the curated settings get_settings lists, through their own controls with the same locks: resolution and frame rate wait while a session runs and need Save a local recording on. The recordings folder can only go back to default; another folder is chosen in Videorc. Any other setting is refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resolution": {
+            "type": "string",
+            "description": "The recording's size, in the scene's orientation.",
+            "enum": ["720p", "1080p", "1440p", "4K"]
+          },
+          "frameRate": {
+            "type": "integer",
+            "description": "Frames per second.",
+            "minimum": 24,
+            "maximum": 60
+          },
+          "keepOriginalRecording": {
+            "type": "boolean",
+            "description": "Also keep the capture MKV beside each MP4."
+          },
+          "recordingFolder": {
+            "type": "string",
+            "description": "Only default: Videorc's own recordings folder.",
+            "enum": ["default"]
+          },
+          "separateSourceRecordings": {
+            "type": "boolean",
+            "description": "Also save a Screen file and a Camera file (Mac only)."
+          },
+          "clips": {
+            "type": "boolean",
+            "description": "Keep the last minute for Clips."
+          },
+          "captionsLanguage": {
+            "type": "string",
+            "description": "The spoken language for live captions.",
+            "enum": ["auto", "en", "es", "fr", "de", "pt", "it"]
+          },
+          "chatInStudio": {
+            "type": "boolean",
+            "description": "Show the livestream's chat in the Studio while on air."
+          },
+          "theme": {
+            "type": "string",
+            "enum": ["light", "dark", "system"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "changed": {
+            "type": "object",
+            "properties": {
+              "resolution": {
+                "type": "string"
+              },
+              "frameRate": {
+                "type": "number"
+              },
+              "keepOriginalRecording": {
+                "type": "boolean"
+              },
+              "recordingFolder": {
+                "type": "string"
+              },
+              "separateSourceRecordings": {
+                "type": "boolean"
+              },
+              "clips": {
+                "type": "boolean"
+              },
+              "captionsLanguage": {
+                "type": "string"
+              },
+              "chatInStudio": {
+                "type": "boolean"
+              },
+              "theme": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": ["changed"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "rename_recording",
+      "title": "Rename a recording",
+      "description": "Give a recording in the Library a new title, like Rename in its menu. Use an id from list_recordings. The files keep their names; the Library shows the new title.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "title": {
+            "type": "string",
+            "description": "The new title, 1 to 120 characters.",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": ["recordingId", "title"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": ["recordingId", "title"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "backend",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "delete_recording",
+      "title": "Delete a recording",
+      "description": "Delete a recording from the Library, like Delete in its menu: its files go to the Trash (Recycle Bin on Windows), where the streamer can put them back. Use an id from list_recordings. Refused while recording or live.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": ["recordingId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string"
+          },
+          "trashed": {
+            "type": "boolean"
+          }
+        },
+        "required": ["recordingId", "trashed"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": true,
+      "rateFamily": "action",
+      "notice": "{agent} moved a recording to the Trash."
+    },
+    {
+      "name": "export_recording",
+      "title": "Export a recording",
+      "description": "Make the MP4 of a finished recording that only has its capture file, like Export MP4 in the Library menu (exact frame times, chapters from markers). A long take keeps exporting after the answer; get_recording shows the file when it is done. A recording that is already an MP4 answers with its path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": ["recordingId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string"
+          },
+          "exported": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": ["recordingId", "exported"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": false,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "start_clean_cut",
+      "title": "Start a Clean cut",
+      "description": "Start a Clean cut of a recording, like the Clean cut button in the Library: Videorc's Cloud AI transcribes it and makes a cut list without the silences and filler words (condensed: a shorter cut). Premium, and the streamer must have allowed Cloud AI. Progress and the transcript show in get_recording.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordingId": {
+            "type": "string",
+            "description": "The take's id from list_recordings.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "mode": {
+            "type": "string",
+            "description": "clean (default) or condensed.",
+            "enum": ["clean", "condensed"]
+          },
+          "targetMinutes": {
+            "type": "integer",
+            "description": "Condensed only: about how long the cut should be.",
+            "minimum": 2,
+            "maximum": 60
+          }
+        },
+        "required": ["recordingId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string"
+          },
+          "recordingId": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "number"
+          },
+          "step": {
+            "type": "string"
+          },
+          "cutRecordingId": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": ["jobId", "recordingId", "mode", "state", "progress"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "backend",
+      "buddy": false,
       "onAir": false,
       "rateFamily": "action",
       "notice": null
