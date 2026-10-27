@@ -6,10 +6,11 @@
 // that needs more than a key does (a notice, a headless Go Live) adds its
 // field here, and the Studio fills it in the one place the context is built.
 
-import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import type { Device, DeviceStatus, LayoutPreset, SourceSelection } from '@/lib/backend'
 import type { HeadlessGoLiveOutcome, HeadlessGoLiveRequest } from '@/lib/go-live-headless'
 import type { BannerSummary } from '../../../../shared/banner-commands'
 import type { ClipLength } from '../../../../shared/clip-lengths'
+import type { LiveBackgroundId } from '../../../../shared/live-background-ids'
 
 export interface StudioActionClient {
   request<T>(method: string, params?: unknown): Promise<T>
@@ -93,4 +94,34 @@ export interface StudioActionContext {
   /** Go live without the dialog (D13): the dialog's own preflight, gate and
    * confirm. A deck's or a phone's `streamStart` never calls it (D2, D19). */
   goLive?: (request: HeadlessGoLiveRequest) => Promise<HeadlessGoLiveOutcome>
+  // (plan 209 S11)
+  /** The Sources tab's pickers: the sources chosen and what each offers. */
+  sourcePicker?: {
+    sources: SourceSelection
+    capture: readonly Device[]
+    cameras: readonly Device[]
+    microphones: readonly Device[]
+  }
+  /** The Sources tab's own switch (`switchSourceDeviceLive`): idle it saves
+   * the pick, while recording or live it switches the running session. A
+   * refusal is the picker's own reason. */
+  switchSource?: (
+    kind: 'capture' | 'camera' | 'microphone',
+    sources: SourceSelection
+  ) => Promise<StudioActionOutcome>
+  /** The Gain faders: whole dB, written to captureConfig.audio as they do. */
+  setAudioGain?: (patch: { microphoneGainDb?: number; systemAudioGainDb?: number }) => void
+  /** The Live captions switch, and why it can't turn on. */
+  captions?: {
+    enabled: boolean
+    pending: boolean
+    blockedReason: string | null
+    set: (enabled: boolean) => void
+  }
+  /** Assets → Backgrounds: what is on the scene, and a live tile's click. */
+  background?: {
+    liveId: string | null
+    picture: boolean
+    apply: (liveId: LiveBackgroundId | null) => Promise<boolean>
+  }
 }

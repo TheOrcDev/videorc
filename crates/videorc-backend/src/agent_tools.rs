@@ -922,12 +922,38 @@ mod tests {
     #[test]
     fn the_pr_b_run_the_show_and_arrange_tools_run_where_the_plan_says() {
         let catalog = catalog();
-        let expected: &[(&str, AgentToolRunsIn, AgentRateFamily, bool)] = &[(
-            "go_live",
-            AgentToolRunsIn::Studio,
-            AgentRateFamily::Session,
-            true,
-        )];
+        let expected: &[(&str, AgentToolRunsIn, AgentRateFamily, bool)] = &[
+            (
+                "go_live",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Session,
+                true,
+            ),
+            (
+                "set_sources",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "set_captions",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "set_background",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "edit_banner",
+                AgentToolRunsIn::Backend,
+                AgentRateFamily::Action,
+                false,
+            ),
+        ];
         for (name, runs_in, rate_family, on_air) in expected {
             let tool = catalog
                 .tool(name)

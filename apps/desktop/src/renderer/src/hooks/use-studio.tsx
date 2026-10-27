@@ -150,6 +150,8 @@ import {
   bridgeStreamingToLegacy,
   buildCameraSources,
   areEnabledStreamTargetsStartReady,
+  capturePickerDevices,
+  microphonePickerDevices,
   coerceVideoToOrientation,
   defaultSettings,
   isPlatformOAuthAvailable,
@@ -511,6 +513,7 @@ import { sceneVisibilityIdentity } from '@/lib/scene-visibility-identity'
 import { streamingWithoutTargets, updateGoLiveExclusions } from '@/lib/go-live-exclusions'
 import type { GoLivePhase } from '@/lib/go-live-dialog-view'
 import {
+  cloudAiUploadGate,
   goLiveEntitlementGate,
   liveCohostGate,
   videoProfileEntitlementGate,
@@ -4622,6 +4625,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     checking: false,
     error: null
   })
+  // The controller's latest state the moment it publishes, for an agent's
+  // switch that must say how it ended before React renders (plan 209 S11).
+  const sourceSelectionStateRef = useRef(sourceSelectionState)
   const [sourceSelectionController] = useState(
     () =>
       new LazyLiveSourceSelectionController({
@@ -4634,7 +4640,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (!clientRef.current) throw offlineError()
           return clientRef.current.requestTyped('session.source.switch', request)
         },
-        changed: setSourceSelectionState,
+        changed: (next) => {
+          sourceSelectionStateRef.current = next
+          setSourceSelectionState(next)
+        },
         failed: (requestId, message, source) =>
           toast.error(sourceSwitchFailedTitle(source, deviceListRef.current.devices), {
             id: `source-switch-${requestId}`,
@@ -10284,13 +10293,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 190: put a live background on the scene (null takes it off). Its
   // look, motion and style come from the registry; changing them edits the
   // registry, and the library sync below applies the edit.
+  // Resolves whether the scene committed (an agent's `set_background` reads
+  // it, plan 209 S11); the tile ignores it.
   const applyLiveBackground = useCallback(
-    (id: LiveBackgroundId | null): void => {
+    (id: LiveBackgroundId | null): Promise<boolean> => {
       const registry = backgroundRegistryRef.current
       const background = id
         ? effectiveSceneBackground(applyLiveBackgroundToRegistry(registry, id))
         : null
-      void requestLayoutTransaction(captureConfigRef.current.layout, {
+      return requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false,
         backgroundOverride: background
       })
@@ -17259,6 +17270,44 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Plan 209 PR B: what the Run the show and Arrange tools add. A deck
       // key never reads them.
       goLive: goLiveWithoutDialog,
+      sourcePicker: {
+        sources: captureConfigRef.current.sources,
+        capture: capturePickerDevices(deviceListRef.current.devices),
+        cameras: deviceListRef.current.devices.filter((device) => device.kind === 'camera'),
+        microphones: microphonePickerDevices(deviceListRef.current.devices)
+      },
+      switchSource: async (kind, sources) => {
+        // The picker is disabled with this reason; the switch would only toast it.
+        const blocked = sourceSwitchReason(kind)
+        if (blocked) return { ok: false, message: blocked }
+        await switchSourceDeviceLive(kind, sources)
+        const state = sourceSelectionStateRef.current
+        return state.error && state.errorKind === kind
+          ? { ok: false, message: state.error }
+          : { ok: true }
+      },
+      setAudioGain: (patch) =>
+        setCaptureConfig((current) => ({ ...current, audio: { ...current.audio, ...patch } })),
+      captions: {
+        enabled: captureConfigRef.current.captions.enabled,
+        pending: captionsCommandPending,
+        blockedReason: (() => {
+          const gate = cloudAiUploadGate(entitlements)
+          return gate.allowed ? captionsPlatformUnavailable : gate.reason
+        })(),
+        // The switch's own patch: only `enabled` changes.
+        set: (enabled) =>
+          setCaptureConfig((current) =>
+            current.captions.enabled === enabled
+              ? current
+              : { ...current, captions: { ...current.captions, enabled } }
+          )
+      },
+      background: {
+        liveId: activeSceneBackground?.live?.id ?? null,
+        picture: Boolean(activeSceneBackground && !activeSceneBackground.live),
+        apply: applyLiveBackground
+      },
       markClip: async (seconds) => {
         try {
           const event = await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })

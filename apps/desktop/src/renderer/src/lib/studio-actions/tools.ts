@@ -9,14 +9,20 @@
 // from the `notice` the backend puts on the `agents.activity` event.
 
 import { layoutPresetLabel } from '@/lib/layout-labels'
-import { destinationLabel } from '@/lib/platform-copy'
 import { soundboard } from '@/lib/soundboard-store'
 import type { LayoutPreset } from '@/lib/backend'
 import type { AgentToolExecutor } from './agent'
-import { micMute, micUnmute, systemAudioOff, systemAudioOn } from './audio'
 import { commentHighlight, commentHighlightClear } from './comments'
 import type { StudioActionFields } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
+import {
+  RUN_THE_SHOW_COPY,
+  goLive,
+  setAudio,
+  setBackground,
+  setCaptions,
+  setSources
+} from './run-the-show'
 import { sceneApply, takeoverHide, takeoverShow } from './scene'
 import { recordStart, recordStop } from './session'
 import { soundPlay, soundStop } from './sounds'
@@ -24,7 +30,7 @@ import { windowFront } from './windows'
 
 /** What an agent reads when a Studio tool refuses before any handler runs. */
 export const AGENT_TOOL_COPY = {
-  setAudioEmpty: 'Say what to change: microphone or systemAudio.',
+  setAudioEmpty: RUN_THE_SHOW_COPY.setAudioEmpty,
   notifyEmpty: 'Say what the notice should say: message.',
   sceneMissing: REMOTE_INTENT_COPY.sceneMissing,
   sceneFailed: REMOTE_INTENT_COPY.sceneFailed
@@ -91,34 +97,6 @@ const switchScene: AgentToolExecutor = async (context, args) => {
   }
 }
 
-const setAudio: AgentToolExecutor = async (context, args) => {
-  const microphone = args.microphone as { muted?: unknown } | undefined
-  const systemAudio = args.systemAudio as { on?: unknown } | undefined
-  const muted = typeof microphone?.muted === 'boolean' ? microphone.muted : undefined
-  const on = typeof systemAudio?.on === 'boolean' ? systemAudio.on : undefined
-  if (muted === undefined && on === undefined) {
-    return { ok: false, message: AGENT_TOOL_COPY.setAudioEmpty }
-  }
-  const result: Record<string, unknown> = {}
-  const said: string[] = []
-  if (muted !== undefined) {
-    const outcome = await (muted ? micMute : micUnmute)(context, {})
-    if (!outcome.ok) return outcome
-    result.microphone = { muted }
-    said.push(muted ? 'The microphone is muted.' : 'The microphone is on.')
-  }
-  if (on !== undefined) {
-    const outcome = await (on ? systemAudioOn : systemAudioOff)(context, {})
-    if (!outcome.ok) {
-      // A microphone change above stays; say both.
-      return { ok: false, message: [...said, outcome.message].filter(Boolean).join(' ') }
-    }
-    result.systemAudio = { on }
-    said.push(on ? 'System audio is on.' : 'System audio is off.')
-  }
-  return { ok: true, message: said.join(' '), result }
-}
-
 const setTakeover: AgentToolExecutor = async (context, args) => {
   const takeoverId = args.takeoverId
   if (takeoverId === null) {
@@ -173,38 +151,6 @@ const openWindow: AgentToolExecutor = async (context, args) => {
   return outcome.ok ? { ok: true, message: 'It is in front.', result: { window } } : outcome
 }
 
-// --- Run the show, PR B (plan 209 S10) -------------------------------------
-
-/** Go live without the dialog (D13). The Studio runs the dialog's own
- * preflight, gate and confirm; a refusal is the dialog's own sentence. */
-const goLive: AgentToolExecutor = async (context, args) => {
-  if (context.sessionActive) return { ok: false, message: REMOTE_INTENT_COPY.alreadyRunning }
-  if (!context.goLive) return { ok: false, message: REMOTE_INTENT_COPY.unsupported }
-  const destinations = Array.isArray(args.destinations)
-    ? args.destinations.filter((value): value is string => typeof value === 'string')
-    : undefined
-  const outcome = await context.goLive({
-    destinations,
-    title: text(args, 'title'),
-    allowPartial: args.allowPartial === true,
-    withoutCaptions: args.withoutCaptions === true
-  })
-  if (!outcome.ok) return outcome
-  const names = outcome.destinations.map((destination) => destinationLabel(destination.label))
-  return {
-    ok: true,
-    message: `You're live on ${names.join(', ')}.${outcome.recording ? ' Recording too.' : ''}`,
-    result: {
-      live: true,
-      destinations: outcome.destinations.map((destination) => ({
-        ...destination,
-        label: destinationLabel(destination.label)
-      })),
-      recording: outcome.recording
-    }
-  }
-}
-
 /** The notice itself is the Studio's D11 notice, filled from the catalog's
  * `{agent}: {message}` onto the `agents.activity` event; this only checks
  * there is something to show. */
@@ -227,5 +173,8 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   open_window: openWindow,
   notify,
   // PR B (plan 209 S10, S11, S11b)
-  go_live: goLive
+  go_live: goLive,
+  set_sources: setSources,
+  set_captions: setCaptions,
+  set_background: setBackground
 }

@@ -275,7 +275,11 @@ describe('the agent tool catalog (plan 209 S1)', () => {
   // earns a notice here) and the rate families.
   it('runs the PR B Run the show and Arrange tools where the plan says', () => {
     const expected: Record<string, ['backend' | 'studio', string, boolean]> = {
-      go_live: ['studio', 'session', true]
+      go_live: ['studio', 'session', true],
+      set_sources: ['studio', 'action', false],
+      set_captions: ['studio', 'action', false],
+      set_background: ['studio', 'action', false],
+      edit_banner: ['backend', 'action', false]
     }
     for (const [name, [runsIn, rateFamily, onAir]] of Object.entries(expected)) {
       const tool = agentTool(name)
@@ -286,5 +290,15 @@ describe('the agent tool catalog (plan 209 S1)', () => {
       expect(tool!.buddy, name).toBe(true)
     }
     expect(agentTool('go_live')!.notice).toBe('{agent} started the livestream.')
+    // S11: set_audio's objects take gain and the microphone beside S6's switches.
+    const audio = agentTool('set_audio')!.inputSchema as {
+      properties: Record<string, { properties: Record<string, unknown> }>
+    }
+    expect(Object.keys(audio.properties.microphone!.properties)).toEqual([
+      'muted',
+      'gainDb',
+      'deviceId'
+    ])
+    expect(Object.keys(audio.properties.systemAudio!.properties)).toEqual(['on', 'gainDb'])
   })
 })

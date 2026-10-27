@@ -122,6 +122,8 @@ pub fn backend_executor(name: &str) -> Option<BackendExecutor> {
         "save_clip" => Some(|state, agent, args| Box::pin(look::save_clip(state, agent, args))),
         "add_marker" => Some(|state, agent, args| Box::pin(add_marker(state, agent, args))),
         "set_banner" => Some(|state, agent, args| Box::pin(set_banner(state, agent, args))),
+        // PR B (plan 209 S11).
+        "edit_banner" => Some(|state, agent, args| Box::pin(edit_banner(state, agent, args))),
         _ => None,
     }
 }
@@ -369,6 +371,149 @@ async fn set_banner(state: &AppState, _agent: &AgentIdentity, args: Value) -> To
             ToolOutcome::ok(text, Some(banners_projection(&banners)))
         }
         Err(error) => ToolOutcome::refused(banner_sentence(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR B: editing banners (plan 209 S11)
+// ---------------------------------------------------------------------------
+
+/// One agent import at a time: the Studio's imports ride their socket's
+/// AssetImport lane, an agent's ride this (decode and scale are heavy).
+static AGENT_BANNER_IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub const EDIT_BANNER_EMPTY: &str = "Say what to do: path imports an image on this computer as a banner, bannerId with name renames one.";
+pub const EDIT_BANNER_BOTH: &str =
+    "Say one thing: path imports an image, bannerId with name renames a banner.";
+pub const EDIT_BANNER_NAME_MISSING: &str = "Say the banner's new name: name.";
+pub const EDIT_BANNER_RELATIVE: &str = "Give the image's full path on this computer.";
+pub const EDIT_BANNER_NO_FILE: &str = "There's no image file at that path.";
+pub const EDIT_BANNER_SAVE_FAILED: &str = "Videorc couldn't save that banner.";
+
+/// A banner as an agent reads it (D9): never its files or where they live.
+fn banner_projection(banner: &crate::protocol::Banner) -> Value {
+    json!({
+        "id": banner.id,
+        "name": banner.name,
+        "shown": banner.shown,
+        "width": banner.width,
+        "height": banner.height,
+    })
+}
+
+/// An import's refusal in the import's own words, except that a sentence
+/// naming Videorc's own Banners folder (app data, D9) is never passed on.
+fn banner_import_sentence(error: &anyhow::Error, assets_dir: &std::path::Path) -> String {
+    let text = error.to_string();
+    let dir = assets_dir.to_string_lossy();
+    if !dir.is_empty() && text.contains(dir.as_ref()) {
+        EDIT_BANNER_SAVE_FAILED.to_string()
+    } else {
+        text
+    }
+}
+
+fn text_argument<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// `edit_banner`: import an image on this computer as a banner (the
+/// Assets page's Import, `banners::import_banner`), or rename one (its
+/// rename, `banners.update`'s update). Banners are images; an imported one
+/// is hidden until it is shown.
+async fn edit_banner(state: &AppState, _agent: &AgentIdentity, args: Value) -> ToolOutcome {
+    let path = text_argument(&args, "path");
+    let banner_id = text_argument(&args, "bannerId");
+    let name = text_argument(&args, "name");
+    match (path, banner_id) {
+        (Some(_), Some(_)) => ToolOutcome::refused(EDIT_BANNER_BOTH),
+        (None, None) => ToolOutcome::refused(EDIT_BANNER_EMPTY),
+        (Some(path), None) => {
+            import_banner_image(state, std::path::PathBuf::from(path), name).await
+        }
+        (None, Some(banner_id)) => {
+            let Some(name) = name else {
+                return ToolOutcome::refused(EDIT_BANNER_NAME_MISSING);
+            };
+            match rename_banner(state, banner_id, name) {
+                Ok(banner) => {
+                    let _ = crate::banners::on_banners_changed(state).await;
+                    ToolOutcome::ok(
+                        format!("The banner is now called {}.", banner.name),
+                        Some(json!({ "banner": banner_projection(&banner) })),
+                    )
+                }
+                Err(error) => ToolOutcome::refused(banner_sentence(error)),
+            }
+        }
+    }
+}
+
+fn rename_banner(
+    state: &AppState,
+    banner_id: &str,
+    name: &str,
+) -> anyhow::Result<crate::protocol::Banner> {
+    let update = crate::banners::BannerUpdate {
+        name: Some(crate::banners::normalize_banner_name(name)?),
+        ..Default::default()
+    };
+    state.database.update_banner(banner_id, update)
+}
+
+async fn import_banner_image(
+    state: &AppState,
+    source: std::path::PathBuf,
+    name: Option<&str>,
+) -> ToolOutcome {
+    if !source.is_absolute() {
+        return ToolOutcome::refused(EDIT_BANNER_RELATIVE);
+    }
+    if !std::fs::metadata(&source).is_ok_and(|metadata| metadata.is_file()) {
+        return ToolOutcome::refused(EDIT_BANNER_NO_FILE);
+    }
+    let _turn = AGENT_BANNER_IMPORT.lock().await;
+    let database = state.database.clone();
+    let assets_dir = database.banner_assets_dir();
+    let imported =
+        tokio::task::spawn_blocking(move || crate::banners::import_banner(&database, &source))
+            .await
+            .unwrap_or_else(|error| Err(anyhow::anyhow!("Image import worker failed: {error}")));
+    let mut banner = match imported {
+        Ok(banner) => banner,
+        Err(error) => return ToolOutcome::refused(banner_import_sentence(&error, &assets_dir)),
+    };
+    if let Some(name) = name {
+        match rename_banner(state, &banner.id, name) {
+            Ok(renamed) => banner = renamed,
+            Err(error) => {
+                let _ = crate::banners::on_banners_changed(state).await;
+                return ToolOutcome::refused(format!(
+                    "Imported {}, but {}",
+                    banner.name,
+                    lowercase_first(&error.to_string())
+                ));
+            }
+        }
+    }
+    let _ = crate::banners::on_banners_changed(state).await;
+    ToolOutcome::ok(
+        format!(
+            "Imported {} as a banner. It stays hidden until it is shown.",
+            banner.name
+        ),
+        Some(json!({ "banner": banner_projection(&banner) })),
+    )
+}
+
+fn lowercase_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -746,5 +891,134 @@ mod tests {
         assert!(long.ends_with('…'));
         assert_eq!(clock(0.0), "0:00");
         assert_eq!(clock(125.4), "2:05");
+    }
+
+    // PR B (plan 209 S11): edit_banner imports an image on this computer as a
+    // banner and renames one, through the Assets page's own functions, and
+    // never names a file Videorc keeps.
+    #[tokio::test]
+    async fn edit_banner_imports_an_image_and_renames_a_banner() {
+        let dir = std::env::temp_dir().join(format!(
+            "videorc-agent-edit-banner-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let state = AppState::new(
+            "renderer-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
+        );
+        let agent = AgentIdentity {
+            id: "agent-1".to_string(),
+            name: "Claude Code".to_string(),
+        };
+        let image = dir.join("Sponsor strip.png");
+        image::RgbaImage::from_pixel(1200, 200, image::Rgba([240, 80, 40, 255]))
+            .save(&image)
+            .unwrap();
+
+        let imported =
+            edit_banner(&state, &agent, json!({ "path": image.to_string_lossy() })).await;
+        assert_eq!(
+            imported.outcome,
+            AgentActivityOutcome::Ok,
+            "{}",
+            imported.text
+        );
+        assert_eq!(
+            imported.text,
+            "Imported Sponsor strip as a banner. It stays hidden until it is shown."
+        );
+        let banner = imported.structured.clone().unwrap()["banner"].clone();
+        assert_eq!(banner["name"], "Sponsor strip");
+        assert_eq!(banner["shown"], false);
+        assert_eq!(banner["width"], 1200);
+        // D9: an id and a name, never the stored file or its folder.
+        let wire = imported.structured.unwrap().to_string();
+        assert!(!wire.contains(".png"), "{wire}");
+        assert!(!wire.contains(&dir.to_string_lossy().to_string()), "{wire}");
+        let id = banner["id"].as_str().unwrap().to_string();
+        assert_eq!(state.database.list_banners().unwrap().len(), 1);
+
+        // Rename, the Assets page's own rename.
+        let renamed = edit_banner(
+            &state,
+            &agent,
+            json!({ "bannerId": id, "name": "  Sponsor  " }),
+        )
+        .await;
+        assert_eq!(
+            renamed.outcome,
+            AgentActivityOutcome::Ok,
+            "{}",
+            renamed.text
+        );
+        assert_eq!(renamed.text, "The banner is now called Sponsor.");
+        assert_eq!(state.database.list_banners().unwrap()[0].name, "Sponsor");
+
+        // An import can carry its name too.
+        let named = edit_banner(
+            &state,
+            &agent,
+            json!({ "path": image.to_string_lossy(), "name": "Sponsor 2" }),
+        )
+        .await;
+        assert_eq!(named.outcome, AgentActivityOutcome::Ok, "{}", named.text);
+        assert_eq!(named.structured.unwrap()["banner"]["name"], "Sponsor 2");
+
+        // Refusals, each in its own sentence.
+        for (args, sentence) in [
+            (json!({}), EDIT_BANNER_EMPTY.to_string()),
+            (
+                json!({ "path": image.to_string_lossy(), "bannerId": "x" }),
+                EDIT_BANNER_BOTH.to_string(),
+            ),
+            (
+                json!({ "bannerId": "x" }),
+                EDIT_BANNER_NAME_MISSING.to_string(),
+            ),
+            (
+                json!({ "path": "Sponsor strip.png" }),
+                EDIT_BANNER_RELATIVE.to_string(),
+            ),
+            (
+                json!({ "path": dir.to_string_lossy() }),
+                EDIT_BANNER_NO_FILE.to_string(),
+            ),
+            (
+                json!({ "bannerId": "gone", "name": "New" }),
+                "That banner isn't available anymore.".to_string(),
+            ),
+        ] {
+            let outcome = edit_banner(&state, &agent, args.clone()).await;
+            assert_eq!(outcome, ToolOutcome::refused(sentence), "{args}");
+        }
+        // A file that isn't an image is refused in the import's own words.
+        let text = dir.join("notes.txt");
+        std::fs::write(&text, "not an image").unwrap();
+        let refused = edit_banner(&state, &agent, json!({ "path": text.to_string_lossy() })).await;
+        assert_eq!(refused.outcome, AgentActivityOutcome::Refused);
+        assert!(!refused.text.contains("Banners"), "{}", refused.text);
+        assert_eq!(state.database.list_banners().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_banner_import_never_names_videorc_s_banner_folder() {
+        let assets = std::path::Path::new("/Users/me/Library/Application Support/Videorc/Banners");
+        let named = anyhow::anyhow!(
+            "Could not create /Users/me/Library/Application Support/Videorc/Banners"
+        );
+        assert_eq!(
+            banner_import_sentence(&named, assets),
+            EDIT_BANNER_SAVE_FAILED
+        );
+        let own = anyhow::anyhow!("Could not open /Users/me/Desktop/logo.png");
+        assert_eq!(
+            banner_import_sentence(&own, assets),
+            "Could not open /Users/me/Desktop/logo.png"
+        );
     }
 }

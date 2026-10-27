@@ -1094,7 +1094,7 @@
     {
       "name": "set_audio",
       "title": "Set the microphone or System audio",
-      "description": "Mute or unmute the microphone, and turn System audio (the computer's own sound) on or off, like the Studio's switches. Pass only what should change. Works while recording or live.",
+      "description": "Change the microphone (mute, gain, which microphone) and System audio, the computer's own sound (on or off, gain), like the Studio's switches, Gain faders and microphone picker. Pass only what should change. Works while recording or live; a microphone switch then switches the running session.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1104,9 +1104,27 @@
               "muted": {
                 "type": "boolean",
                 "description": "true mutes the microphone, false unmutes it."
+              },
+              "gainDb": {
+                "type": "number",
+                "description": "Microphone gain in dB, -24 to 24, in whole steps like the fader.",
+                "minimum": -24,
+                "maximum": 24
+              },
+              "deviceId": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "A microphone id from list_sources, or null for no microphone."
               }
             },
-            "required": ["muted"],
             "additionalProperties": false
           },
           "systemAudio": {
@@ -1115,9 +1133,14 @@
               "on": {
                 "type": "boolean",
                 "description": "true mixes the computer's sound in, false leaves it out."
+              },
+              "gainDb": {
+                "type": "number",
+                "description": "System audio gain in dB, -24 to 12, in whole steps like the fader.",
+                "minimum": -24,
+                "maximum": 12
               }
             },
-            "required": ["on"],
             "additionalProperties": false
           }
         },
@@ -1131,18 +1154,35 @@
             "properties": {
               "muted": {
                 "type": "boolean"
+              },
+              "gainDb": {
+                "type": "number"
+              },
+              "deviceId": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "name": {
+                "type": "string"
               }
-            },
-            "required": ["muted"]
+            }
           },
           "systemAudio": {
             "type": "object",
             "properties": {
               "on": {
                 "type": "boolean"
+              },
+              "gainDb": {
+                "type": "number"
               }
-            },
-            "required": ["on"]
+            }
           }
         }
       },
@@ -1530,6 +1570,266 @@
       "onAir": true,
       "rateFamily": "session",
       "notice": "{agent} started the livestream."
+    },
+    {
+      "name": "set_sources",
+      "title": "Choose the screen, window or camera",
+      "description": "Choose which screen or window is captured and which camera is used, like the pickers on the Sources page. Use ids from list_sources; cameraId null turns the camera off. Works while recording or live, where it switches the running session's source.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "screenId": {
+            "type": "string",
+            "description": "A screen id from list_sources.",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "windowId": {
+            "type": "string",
+            "description": "A window id from list_sources.",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "cameraId": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A camera id from list_sources, or null for no camera."
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "screen": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "name"],
+            "additionalProperties": false
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "name"],
+            "additionalProperties": false
+          },
+          "camera": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["id", "name"],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_captions",
+      "title": "Turn live captions on or off",
+      "description": "Turn live captions on or off, like the Live captions switch. Captions transcribe the microphone onto the picture during a recording or livestream. Turning them on needs what the switch needs, such as Videorc Premium; off always works.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean",
+            "description": "true turns live captions on, false off."
+          }
+        },
+        "required": ["on"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          }
+        },
+        "required": ["on"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_background",
+      "title": "Choose the live background",
+      "description": "Put a live background behind the scene, like its tile in Assets, or take the background off with liveId null. Use an id from list_assets' backgrounds. Viewers see it change at once while live.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "liveId": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A live background id from list_assets, or null for no background."
+          }
+        },
+        "required": ["liveId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "liveId": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["liveId"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "edit_banner",
+      "title": "Import or rename a banner",
+      "description": "Import an image file on this computer as a new banner (path, its full path; PNG, JPEG or WebP), or rename a banner (bannerId and name). Banners are images. A new banner stays hidden until set_banner shows it. Nothing about Videorc's own files comes back.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The image's full path on this computer, to import it as a banner.",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "bannerId": {
+            "type": "string",
+            "description": "The banner to rename, by its id from list_assets.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "name": {
+            "type": "string",
+            "description": "The banner's name, 1 to 40 characters.",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "banner": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "shown": {
+                "type": "boolean"
+              },
+              "width": {
+                "type": "integer"
+              },
+              "height": {
+                "type": "integer"
+              }
+            },
+            "required": ["id", "name", "shown", "width", "height"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["banner"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
     }
   ]
 }
