@@ -23,7 +23,7 @@ import {
 import { PanelSection } from '@/components/panel-section'
 import { STATUS_TONE_CLASS } from '@/components/status-badge'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
-import type { MicrophoneSectionViewProps } from '@/components/studio/microphone-section'
+import type { MicrophoneRowProps } from '@/components/studio/audio-section'
 import { useStudioSources } from '@/components/studio/quick-settings'
 import {
   CohostSessionRow,
@@ -303,7 +303,7 @@ export function RetroMicrophoneSectionView({
   platform,
   onChange,
   onMutedChange
-}: MicrophoneSectionViewProps): ReactElement {
+}: Omit<MicrophoneRowProps, 'gainDb' | 'onGainChange'>): ReactElement {
   return (
     <PanelSection>
       <LcdPanel>

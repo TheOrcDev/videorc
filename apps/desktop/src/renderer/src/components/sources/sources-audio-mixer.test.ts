@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
+import { gainReset } from '@/components/audio/gain-faders'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { createFrameEmitter } from '@/lib/audio/frame-source'
 import type { MeterFrame } from '@/lib/audio/types'
@@ -11,7 +12,6 @@ import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system
 import {
   applySyncChange,
   keepMicrophoneReadyHint,
-  gainReset,
   MicrophoneChannel,
   SyncCalibrationView,
   syncOffsetTag,

@@ -507,3 +507,43 @@ If those files moved, re-check "Verified facts" before S0.
   dev-app Sources idle meter check, like S0's native run, is owed by the owner
   because this dev app has no Screen Recording grant. No product scope
   deviations.
+- S2 (2026-10-27): `microphone-section.tsx` became `audio-section.tsx`
+  (`AudioSection`, `AudioSectionView`). One `PanelSection` "Audio" holds one
+  audiocn `Mixer` (−60 to 0 dB, `MixerChannels scrollable={false}`) over a
+  `GroupedList` of two `SourceItem` rows, each in a `channel-strip`, so
+  Cmd/Ctrl+Up/Down moves between them. Microphone: Muted chip, mute key chip
+  and `MuteToggle` in the header; picker, meter (every probe attribute kept)
+  and `MicrophoneGainFader` in the body. System audio (only while
+  `systemAudio.visible`): Sources' state words (`systemAudioStatus`, without
+  its "Turn it on above" hint, which points at the Sources page alert), the
+  `Switch` in a `ShortcutTooltip` (`systemAudioToggle`), or in a
+  `DisabledReason` without the grant; while On, the meter
+  (`data-videorc-studio-system-audio-level`), the D6 line for `'clips-off'`
+  only, and `SystemAudioGainFader`; issues as a warning `Alert` with their one
+  action (Resume for the echo pause, Open Permissions without the grant or
+  for a failed start on macOS). Without the grant the Gain fader shows
+  disabled with no reset and no meter. The D6 copy is one constant,
+  `SYSTEM_AUDIO_IDLE_LINE` in `lib/system-audio.ts`, used by both pages. The
+  line is rendered by a leaf on the Clips context, because the ring ticks once
+  a second and only the leaf should re-render. New `components/audio/gain-faders.tsx`
+  (`MicrophoneGainFader`, `SystemAudioGainFader`, `gainReset`, `FADER_THUMB`)
+  replaces Sources' inline faders. `QuickSettings` drops its System audio row
+  and the now-unused `SystemAudioInspectorValue`; its cases (Off/On,
+  permission, lost, echo, bypassed, the S1 Clips-bus echo) moved to
+  `audio-section.test.ts`. Retro LCD is unchanged until S3: `AudioSection`
+  renders `RetroMicrophoneSectionView` (typed `Omit<MicrophoneRowProps,
+  'gainDb' | 'onGainChange'>`), and `RetroQuickSettings` keeps System audio.
+  Deviation: `use-studio-context-partition.test.ts` and
+  `studio-mic-meter.integration.test.ts` needed the renamed path and
+  component name (no assertion changed). Gates: typecheck passed; lint 0
+  errors (the existing `captureConfig` warning); format check passed; desktop
+  tests 524 files, 5481 passed, 1 skipped; build passed;
+  `check:renderer-assets` passed. Eager JS against S1 (`81ebc5e6`):
+  1,972,397 → 1,972,336 raw, 396,471 → 396,448 gzip; entry 180,196 → 180,173
+  gzip. Studio chunk: `microphone-section` 6.82 kB → `audio-section`
+  13.97 kB raw (3.9 kB gzip), and Rollup split a shared `mixer` chunk
+  (26.46 kB raw, 6.6 kB gzip) out of `sources-tab` (56.57 → 44.04 kB), which
+  the Studio now also loads. No dev-app run: the System audio rows need the
+  Screen Recording grant, and no audio was played. Owed: the owner's by-eye
+  in both themes at the narrowest inspector width (idle with Clips on and
+  off, muted, recording, live, permission missing, echo pause).

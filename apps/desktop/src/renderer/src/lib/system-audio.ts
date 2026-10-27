@@ -119,6 +119,9 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
   }
 }
 
+/** Plan 201 D6: when a resting System audio level moves, on Sources and the Studio. */
+export const SYSTEM_AUDIO_IDLE_LINE = 'Level shows while you record, go live, or keep Clips on.'
+
 /**
  * Plan 201: explain an idle level only when Clips is off or failed. An armed
  * ring that is off for a moment is starting or restarting, so keep the slot

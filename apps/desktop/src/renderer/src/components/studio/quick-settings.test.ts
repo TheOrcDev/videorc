@@ -4,95 +4,13 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { Device, SourceSelection } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
-import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
-import { QuickSettings, SystemAudioInspectorValue } from './quick-settings'
+import { QuickSettings } from './quick-settings'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn() })
 }))
-
-const noop = (): void => {}
-
-function render(input: Partial<SystemAudioSwitchInput>): string {
-  const view = systemAudioSwitchView({
-    device: { status: 'available' },
-    requested: false,
-    sessionActive: false,
-    audioBusActive: false,
-    confirmed: null,
-    issue: null,
-    ...input
-  })
-  return renderToStaticMarkup(
-    createElement(SystemAudioInspectorValue, {
-      view,
-      onEnabledChange: noop,
-      onOpenPermissions: noop,
-      onResume: noop
-    })
-  )
-}
-
-describe('Studio Sources System audio row (plan 069)', () => {
-  it('shows Off and On beside a labelled switch', () => {
-    expect(render({})).toContain('>Off<')
-    expect(render({})).toContain('aria-label="System audio"')
-    expect(render({ requested: true })).toContain('>On<')
-    expect(render({ requested: true })).toContain('aria-checked="true"')
-  })
-
-  it('offers the permission route instead of a switch without Screen Recording', () => {
-    const markup = render({ device: { status: 'permission-required' }, requested: true })
-    expect(markup).toContain('Needs permission')
-    expect(markup).not.toContain('role="switch"')
-  })
-
-  it('keeps a lost source On with a short status and the full copy on hover', () => {
-    const markup = render({
-      requested: true,
-      sessionActive: true,
-      audioBusActive: true,
-      confirmed: false,
-      issue: 'lost'
-    })
-    expect(markup).toContain('>Stopped<')
-    // The full copy is the status's description, never a native title (S1.10).
-    expect(markup).toContain('System audio stopped. Your recording or livestream keeps going.')
-    expect(markup).toContain('data-slot="info-tooltip"')
-    expect(markup).not.toMatch(/\btitle="/)
-    expect(markup).toContain('aria-checked="true"')
-  })
-
-  it('puts Resume where the status goes when the echo guard paused it (plan 076)', () => {
-    const markup = render({
-      requested: true,
-      sessionActive: true,
-      audioBusActive: true,
-      confirmed: false,
-      issue: 'echo'
-    })
-    expect(markup).toContain('>Resume<')
-    expect(markup).toContain('coming back as an echo')
-    expect(markup).toContain('aria-checked="true"')
-  })
-
-  it('says a fallback microphone keeps system audio out until you stop', () => {
-    const markup = render({
-      requested: true,
-      sessionActive: true,
-      audioBusActive: true,
-      confirmed: false,
-      issue: 'bypassed'
-    })
-    expect(markup).toContain('>Off until you stop<')
-    expect(markup).toContain(
-      'System audio is off until you stop, because the microphone is on a fallback input.'
-    )
-    expect(markup).not.toMatch(/\btitle="/)
-  })
-})
 
 describe('Studio Sources rows (plan 080 S4)', () => {
   const display: Device = { id: 'screen:2', name: 'Display 2', kind: 'screen', status: 'available' }
@@ -133,34 +51,7 @@ describe('Studio Sources rows (plan 080 S4)', () => {
       (match) => match[1] as string
     )
 
-  it('uses the running Clips bus for the System audio state while transport stays idle', () => {
-    renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, [
-      display,
-      camera,
-      {
-        id: 'system-audio:default',
-        name: 'System audio',
-        kind: 'system-audio',
-        status: 'available'
-      }
-    ])
-    mocked.core = {
-      ...mocked.core,
-      captureConfig: {
-        ...defaultCaptureConfig,
-        audio: { ...defaultCaptureConfig.audio, systemAudioEnabled: true }
-      },
-      audioBusActive: true,
-      systemAudioConfirmed: false,
-      systemAudioIssue: 'echo'
-    }
-    const markup = renderToStaticMarkup(createElement(QuickSettings))
-    expect(markup).toContain('>Resume<')
-    expect(markup).toContain('coming back as an echo')
-    expect(mocked.core.isSessionActive).toBe(false)
-  })
-
-  it('gives screen and camera their own rows, in order', () => {
+  it('gives screen and camera their own rows, in order, and leaves audio to the Audio section', () => {
     const systemAudio: Device = {
       id: 'system-audio',
       name: 'System audio',
@@ -172,10 +63,12 @@ describe('Studio Sources rows (plan 080 S4)', () => {
       camera,
       systemAudio
     ])
-    // The microphone has one home, the Microphone section above (plan 092);
-    // Output is the Session row (plan 174 S3.3, B-15).
+    // The microphone and System audio live in the Audio section above (plans
+    // 092 and 201); Output is the Session row (plan 174 S3.3, B-15).
     // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
-    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio'])
+    expect(rowLabels(markup)).toEqual(['Screen', 'Camera'])
+    expect(markup).not.toContain('System audio')
+    expect(markup).not.toContain('role="switch"')
     expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
     expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
