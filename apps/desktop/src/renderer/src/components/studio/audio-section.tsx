@@ -42,6 +42,13 @@ import {
 } from '@/lib/system-audio'
 import { cn } from '@/lib/utils'
 
+/**
+ * The rows' bodies span the inspector's width (owner 2026-10-27): the
+ * inspector is narrow, so the picker, meters and faders don't indent to the
+ * title as Sources rows do.
+ */
+const AUDIO_ROW_BODY = 'pl-3'
+
 /** Why the System audio switch and Gain are off on macOS without the grant. */
 const SYSTEM_AUDIO_PERMISSION_REASON = 'System audio needs Screen Recording permission.'
 
@@ -291,6 +298,7 @@ function MicrophoneRow({
 }: MicrophoneRowProps): ReactElement {
   return (
     <SourceItem
+      bodyClassName={AUDIO_ROW_BODY}
       control={
         // D16: the mute, with its hotkey when one is bound, and a muted
         // microphone says so in words: flat bars alone read as a dead
@@ -429,6 +437,7 @@ function SystemAudioRow({
 
   return (
     <SourceItem
+      bodyClassName={AUDIO_ROW_BODY}
       control={
         view.permissionRequired ? (
           <DisabledReason reason={SYSTEM_AUDIO_PERMISSION_REASON}>{toggle}</DisabledReason>
