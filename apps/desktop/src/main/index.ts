@@ -275,6 +275,11 @@ import {
 } from './runtime-info'
 import { devBackendCargoProfile } from './dev-backend-profile'
 import {
+  refreshAgentBridgeCopy,
+  resolveAgentBridge,
+  type AgentBridgeLocation
+} from './agent-bridge'
+import {
   requestMediaAccessWithRestart,
   requestScreenAccessWithWatch,
   type MediaAccessRestartResult,
@@ -9035,6 +9040,18 @@ function resolveDevBackendBinary(root = workspaceRoot()): string {
   )
 }
 
+/** Plan 209 S7: where this install's `videorc-mcp` bridge lives (D6, D20). */
+function agentBridgeLocation(): AgentBridgeLocation {
+  return {
+    packaged: app.isPackaged,
+    platform: process.platform,
+    resourcesPath: process.resourcesPath,
+    workspaceRoot: workspaceRoot(),
+    cargoProfile: devBackendCargoProfile(),
+    homeDir: homedir()
+  }
+}
+
 function resolveBackendPermissionTargetPath(): string {
   if (backendPermissionTargetPath) {
     return backendPermissionTargetPath
@@ -15266,6 +15283,11 @@ app.whenReady().then(async () => {
   installRendererSessionPermissions(session.defaultSession)
   moveLegacyBuddyAssetsOnce()
   scheduleStaleHttpCacheCleanup()
+  // Plan 209 D20: a Linux agent app runs the bridge copied out of the
+  // AppImage; after an update that copy is the old version, so refresh it.
+  void refreshAgentBridgeCopy(agentBridgeLocation()).catch((error: unknown) =>
+    logBackend('warn', `Couldn't refresh the agent bridge copy: ${errorMessage(error)}`)
+  )
 
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
@@ -15369,6 +15391,11 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('resource:reveal-support-bundle', (_event, path: unknown) =>
     revealSupportBundle(path)
+  )
+  // Settings → Remote → Agents (plan 209 S7): the bridge's absolute path for
+  // the config line; Connect (`install`) puts the Linux copy in place (D20).
+  secureIpcHandle('agents:bridge', (_event, install: unknown) =>
+    resolveAgentBridge(agentBridgeLocation(), install === true)
   )
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
   // The stream key never rides these payloads — obs:read strips it; the apply

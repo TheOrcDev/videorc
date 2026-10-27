@@ -23,6 +23,7 @@ import {
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
 import { STATUS_TONE_CLASS } from '@/components/status-badge'
+import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
 import { useStudioSources } from '@/components/studio/quick-settings'
@@ -279,6 +280,7 @@ export function RetroSessionPanel({ live = false, ...notices }: SessionPanelProp
         {live ? <LiveDestinationRows look="lcd" /> : null}
         {live ? <LiveStreamHealthRow look="lcd" /> : null}
         {live ? <CohostSessionRow look="lcd" /> : null}
+        <AgentsSessionRow look="lcd" />
       </LcdPanel>
       <SessionNotices {...notices} />
     </PanelSection>

@@ -13,6 +13,7 @@ import { useContext, useEffect, useState, type ReactElement, type ReactNode } fr
 
 import { LCD_STATUS_DOT, LcdPanelNavRow, type StudioLook } from '@/components/lcd-panel'
 import { CohostPresenceDot } from '@/components/cohost-status'
+import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow, NavigableRowHintLines } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
@@ -353,6 +354,8 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
             session fact, knowable without the Stream Manager; a recording
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
+        {/* Plan 209 D12: which agents are connected, with Stop. */}
+        <AgentsSessionRow />
       </GroupedList>
       <SessionNotices {...notices} />
     </PanelSection>

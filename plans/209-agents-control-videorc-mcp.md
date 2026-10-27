@@ -27,7 +27,7 @@
 | S4    | `videorc-mcp`, the stdio bridge shipped inside the app             | A   | DONE    |
 | S5    | One Studio action executor for remotes and agents (refactor)       | A   | DONE    |
 | S6    | First tools: look, plus everything a Stream Deck can do            | A   | PLANNED |
-| S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | PLANNED |
+| S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | DONE    |
 | S8    | Docs, glossary, release note                                       | A   | PLANNED |
 | S9    | `smoke:agent-mcp` and the gates                                    | A   | PLANNED |
 | S10   | `go_live` without the dialog                                       | B   | PLANNED |
@@ -1100,3 +1100,63 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
   under `win-unpacked` and checks each signature; the unsigned staging
   manifest now requires `resources/videorc-mcp.exe`, so that pass provably
   covers it. Not yet run: a packaged, signed build (the orchestrator's).
+
+### S7 (2026-10-27)
+
+- **Settings → Remote** is two columns, like General: Remote control over
+  Phone remote, then **Agents** (`components/settings/agents-section.tsx`);
+  stacked, Agents follows Phone remote. The section keeps its neighbours'
+  shape: the switch in the header (`aria-label` "Let AI agents control
+  Videorc", off by default) with the S7 help sentence, then a line that says
+  what turning it on does. On: "Agent apps" with **Connect an agent…**, the
+  agents (name, last action, its age, a quiet presence dot, Remove… behind a
+  confirmation) and **Activity** (the newest 100, an agent filter, time,
+  agent, what, outcome, then the arguments or the refusal). Off with agents
+  (after Stop), the list and Activity stay readable. Errors in place: all
+  ports busy (`bindError`, shown in copy, the OS text to the console) and
+  the bridge missing (Connect disabled with the reason).
+- **Connect** (`connect-agent-dialog.tsx`): the app (six), the name (the
+  app's; "My agent" for Other), then the line for that app
+  (`lib/agent-connect-lines.ts`): `mcpServers` JSON for Claude Desktop and
+  Cursor, VS Code's `servers` with `type: stdio`,
+  `claude mcp add --scope user videorc --env VIDEORC_AGENT_TOKEN=… -- <path>`
+  for Claude Code (so every project reaches Videorc), a
+  `[mcp_servers.videorc]` TOML table for Codex, and the plain command and
+  variable for Other. Copy copies the whole line; the token is drawn masked
+  until "Show token" (Settings may be on stream), with "Shown once" beside
+  it. Connect prepares the bridge before it mints a token, and turns Agents
+  on when it was off (the ⌘K way in). A disk-image or translocated macOS
+  path warns before connecting.
+- **The bridge path** comes from Electron main over one new IPC,
+  `agents:bridge` (`getAgentBridge(install)`, main-window only;
+  `main/agent-bridge.ts`): the app's own `videorc-mcp` on macOS and Windows,
+  `target/<profile>/videorc-mcp` in development, and on Linux
+  `~/.local/share/videorc/bin/videorc-mcp`, copied out of the AppImage on
+  Connect (staged and renamed over, so a running agent keeps its file) and
+  refreshed at startup after an update when the copy exists.
+- **State** lives in an external store (`lib/agents-store.ts`,
+  `hooks/use-agents.ts`), not the Studio provider: its own backend socket,
+  narrowed with `events.setIncluded` to `agents.status`, `agents.activity`
+  and `agent.intent`, reconnecting with main's connection. "Connected" is
+  the backend's `connected` (heard from in the last 45 s); since the backend
+  publishes nothing when that lapses, the store re-reads `agents.status`
+  every 15 s while one is connected. No new effects.
+- **The Session line** (`components/studio/agents-session-row.tsx`, D12):
+  "Claude Desktop connected · Stop" or "2 agents connected · Stop" in both
+  looks (the Retro LCD line shortens before Stop leaves the screen). Stop
+  calls `agents.stop` at once.
+- **⌘K**: "Stop agents" in Session while Agents is on; "Connect an agent…"
+  in Settings opens Settings → Remote with the dialog.
+- **D11 notices** (`lib/agent-notices.ts`, mounted lazily by
+  `components/agents-watcher.tsx` on every page): a neutral `info` toast
+  from each `agents.activity` row whose tool is `onAir`, outcome `ok`, in the
+  catalog's `notice` sentence; arguments come from the matching
+  `agent.intent` (the row's summary is clipped at 160 characters). One toast
+  id per agent and tool. The S6 `notify` executor must not toast as well.
+- **Checks**: typecheck, lint, format, the full desktop suite (one
+  host-load timeout in `icons.test.ts`, green alone), `pnpm build` and
+  `check:renderer-assets` (eager 1,997,285 raw / 401,949 gzip; only the
+  watcher's lazy stub is eager). Both themes by eye at 1180×780 and
+  960×660 through a renderer-only harness (the dev app's backend compile was
+  out of reach on the loaded host); the packaged by-eye of step 10 is owed.
+
