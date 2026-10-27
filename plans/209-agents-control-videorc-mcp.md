@@ -25,7 +25,7 @@
 | S2    | The Agent role, agents registry, loopback listener, activity log   | A   | PLANNED |
 | S3    | The MCP endpoint: list and call, backend tools, Studio relay       | A   | PLANNED |
 | S4    | `videorc-mcp`, the stdio bridge shipped inside the app             | A   | PLANNED |
-| S5    | One Studio action executor for remotes and agents (refactor)       | A   | PLANNED |
+| S5    | One Studio action executor for remotes and agents (refactor)       | A   | DONE    |
 | S6    | First tools: look, plus everything a Stream Deck can do            | A   | PLANNED |
 | S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | PLANNED |
 | S8    | Docs, glossary, release note                                       | A   | PLANNED |

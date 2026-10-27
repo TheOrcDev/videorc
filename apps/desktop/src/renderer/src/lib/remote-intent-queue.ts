@@ -8,7 +8,14 @@
 // the take. Sound presses keep their order among themselves (a stop never
 // overtakes its play) but never wait behind another kind of intent, and one
 // that still waited too long is refused rather than played at the wrong time.
-// Pure apart from the injected runner and clock, so the rules are tested in node.
+//
+// Agent intents (plan 209 S5) get a third lane: an agent's tool calls run in
+// arrival order among themselves, never wait behind a key or a sound press,
+// and never hold one back. A tool call is never refused for waiting; what its
+// runner resolves is the body of the `agent.intent.ack` the caller sends.
+// Pure apart from the injected runners and clock, so the rules are tested in node.
+
+import type { AgentIntent, AgentIntentOutcome } from './studio-actions/agent'
 
 /** A sound press older than this when its turn comes is refused, not played. */
 export const REMOTE_SOUND_INTENT_STALE_MS = 1_000
@@ -33,6 +40,8 @@ export interface RemoteIntentQueueOptions {
   run: (payload: unknown) => Promise<void>
   /** Acks a sound press that waited past the stale budget, without running it. */
   refuseStale: (payload: unknown) => Promise<void>
+  /** Runs one agent intent to its outcome (`executeAgentIntent` in lib/studio-actions). */
+  runAgent?: (intent: AgentIntent) => Promise<AgentIntentOutcome>
   now?: () => number
   staleMs?: number
 }
@@ -40,16 +49,22 @@ export interface RemoteIntentQueueOptions {
 export interface RemoteIntentQueue {
   /** Queues the intent on its lane; resolves when it has run (or was refused). */
   enqueue: (payload: unknown) => Promise<void>
+  /** Queues an agent's tool call on the agents' lane; resolves to what the
+   * caller acks with `agent.intent.ack`. Rejects when the queue was built
+   * without a `runAgent`. */
+  enqueueAgent: (intent: AgentIntent) => Promise<AgentIntentOutcome>
 }
 
 export function createRemoteIntentQueue({
   run,
   refuseStale,
+  runAgent,
   now = () => Date.now(),
   staleMs = REMOTE_SOUND_INTENT_STALE_MS
 }: RemoteIntentQueueOptions): RemoteIntentQueue {
   let tail: Promise<void> = Promise.resolve()
   let soundTail: Promise<void> = Promise.resolve()
+  let agentTail: Promise<void> = Promise.resolve()
   return {
     enqueue(payload) {
       const sound = isSoundIntent(payload)
@@ -63,6 +78,20 @@ export function createRemoteIntentQueue({
       )
       if (sound) soundTail = settled
       else tail = settled
+      return turn
+    },
+    enqueueAgent(intent) {
+      const runner = runAgent
+      if (!runner) {
+        return Promise.reject(
+          new Error('This queue was built without runAgent, so it cannot take agent intents.')
+        )
+      }
+      const turn = agentTail.catch(() => undefined).then(() => runner(intent))
+      agentTail = turn.then(
+        () => undefined,
+        () => undefined
+      )
       return turn
     }
   }
