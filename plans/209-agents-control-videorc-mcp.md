@@ -33,10 +33,10 @@
 | S10   | `go_live` without the dialog                                       | B   | PLANNED |
 | S11   | Sources, audio, captions, backgrounds, banner editing              | B   | PLANNED |
 | S11b  | Arrange the picture: move Buddy, banners, camera and overlays      | B   | PLANNED |
-| S12   | Chat: send and remove                                              | B   | PLANNED |
-| S13   | Buddy tools: say and set                                           | B   | PLANNED |
-| S14   | Prepare: stream info, destinations, schedule, settings             | B   | PLANNED |
-| S15   | Library: rename, delete, export, Clean cut, transcripts            | B   | PLANNED |
+| S12   | Chat: send and remove                                              | B   | DONE    |
+| S13   | Buddy tools: say and set                                           | B   | DONE    |
+| S14   | Prepare: stream info, destinations, schedule, settings             | B   | DONE    |
+| S15   | Library: rename, delete, export, Clean cut, transcripts            | B   | DONE    |
 | S16   | Smoke coverage for PR B and the gates                              | B   | PLANNED |
 | S17   | Web: the Buddy planner route (deploy first)                        | C   | DONE    |
 | S18   | Buddy's grammar commands run through the executor                  | D   | PLANNED |
@@ -1285,3 +1285,90 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
 warnings`, `cargo fmt --check --all`, `pnpm typecheck`, `pnpm lint` (one
   pre-existing warning), vitest on the agent files and
   `studio-provider.integration` (196), `node --test` on the client.
+
+### S12 to S15 (2026-10-28)
+
+- **Tools** (13, plus `get_recording`'s additions): backend
+  `send_chat_message`, `remove_chat_message`, `buddy_say`, `schedule_stream`,
+  `rename_recording`, `start_clean_cut`; studio `set_buddy`,
+  `update_stream_info`, `set_destinations`, `get_settings`, `update_settings`,
+  `delete_recording`, `export_recording`. The catalog holds 35 tools with
+  these (one contiguous block before `open_window`). `buddy` (D15) is true
+  for the two chat tools, `buddy_say`, `set_buddy` and `update_stream_info`
+  only. `onAir` (D11): `send_chat_message` ("{agent} posted in chat."),
+  `remove_chat_message` ("{agent} {summary}.", the result says "removed a
+  message from Twitch chat" or "wants to remove a YouTube message: confirm
+  it in Videorc") and `delete_recording` ("{agent} moved a recording to the
+  Trash."). Rate families: `chat` for the post and `buddy_say`, `removal`
+  for the removal, `action` for the rest, `read` for `get_settings`.
+- **S12 chat** (`agent_chat.rs`): the post is `send_live_chat_message` with
+  an operation id minted per call, to every chat whose write state is
+  ready (a read-only chat is not a miss) or the destinations named (by
+  `list_destinations` id or platform), answered per destination with
+  provider text address-scrubbed. The removal is a new
+  `ModerationSource::Agent` (wire `agent`): free, no Buddy kill switch, at
+  once like Manual, except YouTube: `pending-confirm`,
+  `requiresExplicitConfirm`, `confirmBy` 20 s out, and the answer "Waiting
+  for you to confirm in Videorc." The renderer's removal card and its
+  main-window toast now show for `agent` as for `orcle-voice`
+  (`chat-removal-view.ts`); the moderation types and both contracts gained
+  the value (the renderer request schema still sends only `manual` and
+  `orcle-voice`, and the backend RPC refuses `agent` from a renderer).
+  `docs/buddy-commands-contract.md` part A has the variant.
+- **The fakes**: the in-process fake chat connectors already deleted on
+  every platform (plan 140 S9: `delete` scripted, or mirroring `send`). New:
+  `FakeChatConfig.echoSends` makes a fake show an accepted post back in chat
+  as the streamer's own row (author "You", role `broadcaster`, the fake
+  send's provider id), as YouTube and Twitch do. A per-destination task
+  delivers it: delivering from the send path itself made rustc's `Send`
+  check a cycle through Buddy's auto-chat pump.
+- **S13 Buddy**: `buddy_say` is `cohost::say_utterance` (the Say box) with
+  the running chat session, refused when Buddy is off the picture and its
+  mode doesn't post. `set_buddy` (`studio-actions/buddy.ts`) saves through
+  `mergeAutoChatRelayPatch` and `cohostEnableRelayPatch`, never `listen`,
+  and puts Buddy on stream through the header switch's overlay save. Turning
+  Buddy on needs Premium and the streamer's Cloud AI consent
+  (`BUDDY_CONSENT_OFF_REASON`); off always works. **Deviation**: the chat
+  modes are Off, Suggest and Auto (there is no "Bubble" mode; Off is
+  bubble-only).
+- **S14 Prepare** (`studio-actions/prepare.ts`, `settings.ts`,
+  `agent_prepare.rs`): `update_stream_info` builds the next Go Live draft
+  (shared title, description, privacy; a category by name for Twitch and
+  Kick through the Stream details search, the exact name else the first
+  match; per platform its own title like the Own title switch), validates it
+  with `streamTargets.metadata.validate` and saves only a valid draft, like
+  Save. `set_destinations` turns switches through `patchStreamingTarget`
+  behind `streamingDestinationEnableGate`, all or nothing.
+  `schedule_stream` resolves the time with `resolve_time`, then the Upcoming
+  form's two operations (save draft, schedule) through the scheduling
+  service, waiting up to 40 s; YouTube needs `madeForKids`, X gets a two-hour
+  planned end. **Deviations**: `scheduledStreams.candidates` is only the
+  recovery list, so it isn't used; the Go Live draft has no tags, so there
+  are none to set. `get_settings`/`update_settings`: D16's list is
+  `update_settings`' input schema (`additionalProperties: false`) and
+  `CURATED_SETTINGS`: `resolution` (720p to 4K in the scene's orientation),
+  `frameRate`, `keepOriginalRecording` (the only recording-format choice:
+  every recording is an MP4), `recordingFolder` (only `default`: another
+  folder needs the picker), `separateSourceRecordings` (Mac only), `clips`
+  (Clips has no length since plan 199), `captionsLanguage`, `chatInStudio`,
+  `theme`. Each goes through its control's setter with its locks and gates;
+  the caption languages moved to `lib/caption-languages.ts` unchanged.
+- **S15 Library** (`agent_library.rs`, `studio-actions/library.ts`):
+  `rename_recording` is the Library's rename (1 to 120 characters); the
+  Studio refreshes the Library on that `agents.activity` row.
+  `delete_recording` is the Library's two-phase delete to the Trash, held
+  while a capture runs. `export_recording` is Export MP4 (`canExportMp4`,
+  moved to `library-view.ts`; plan 200's options are the backend's own),
+  answering after 10 s that a long export runs on. `start_clean_cut`
+  refuses in the button's order and words (signed out, the Cloud AI
+  capability's own reason, then consent, read from a new
+  `cloudAiConsent` field on the agent surface), then `clean_cut::start`.
+  `get_recording` gains `cleanCuts` (job, mode, state, progress, the cut's
+  recording id; never its working files) and, with `includeTranscript`, the
+  Clean cut transcript as timed sentences (at most 120,000 characters).
+- **Tests run**: `cargo test -p videorc-backend -- agent_
+  live_chat_moderation live_chat::tests`, `cargo check`, rustfmt on the
+  touched files; `pnpm typecheck`, `pnpm lint` (the one pre-existing
+  warning), vitest on `studio-actions/`, `shared/agent-tools.test.ts`,
+  `agent-surface.test.ts` and `chat-removal-view.test.ts`. No dev-app smoke
+  (S16).
