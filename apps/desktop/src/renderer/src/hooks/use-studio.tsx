@@ -62,6 +62,15 @@ import {
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
 import {
+  backgroundLibrarySyncDecision,
+  cameraShapeLayoutPatch,
+  firstRunBackgroundChoice,
+  firstRunLookPatch,
+  firstRunLookPreset,
+  firstRunLookWritesHeld,
+  type FirstRunLook
+} from '@/lib/first-run-look'
+import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
   restoreLayoutUndo,
@@ -1404,6 +1413,14 @@ export type StudioContextValue = {
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   applyCameraPreset: (patch: Partial<LayoutSettings>) => void
+  /**
+   * Plan 207 S4: the look chosen in first-run setup, written as state only so
+   * the idle scene reload commits it without opening a device. While a
+   * backend session runs (the Clips ring during a replay of setup) the look
+   * is held here and applied through one transaction when setup closes.
+   */
+  firstRunLookHold: FirstRunLook | null
+  applyFirstRunLook: (look: FirstRunLook) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
   savedScenePendingId: string | null
@@ -2409,6 +2426,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // source previews, the Preview window and the OS-global shortcuts wait for it
   // to close; the shell owns the flag.
   const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  // Plan 207 S4: a look chosen in setup while a session holds the idle
+  // reload back (the Clips ring in a replay); applied once setup closes.
+  const [firstRunLookHold, setFirstRunLookHold] = useState<FirstRunLook | null>(null)
+  const firstRunLookHoldRef = useRef<FirstRunLook | null>(null)
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -10012,15 +10033,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
+  // Plan 207 S4: held while first-run setup is open (the transaction starts
+  // the scene's devices), and run once when the workspace shows. Setup's own
+  // background choice goes through the idle reload and keeps the applied
+  // fingerprint in step, so the held sync usually finds nothing to do.
   useEffect(() => {
     const fingerprint = JSON.stringify(snapshotBackground(desiredLibraryBackground))
-    if (fingerprint === libraryBackgroundFingerprintRef.current) return
+    if (
+      backgroundLibrarySyncDecision({
+        setupOpen: firstRunSetupOpen,
+        fingerprint,
+        applied: libraryBackgroundFingerprintRef.current
+      }) !== 'apply'
+    )
+      return
     libraryBackgroundFingerprintRef.current = fingerprint
     void requestLayoutTransaction(captureConfigRef.current.layout, {
       pendingIndicator: false,
       backgroundOverride: desiredLibraryBackground
     })
-  }, [desiredLibraryBackground, requestLayoutTransaction])
+  }, [desiredLibraryBackground, firstRunSetupOpen, requestLayoutTransaction])
 
   const applyLayoutPatch = useCallback(
     (patch: Partial<LayoutSettings>) => {
@@ -10098,7 +10130,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [requestLayoutTransaction])
 
   const requestCameraPresetTransaction = useCallback(
-    (patch: Partial<LayoutSettings>) => {
+    (
+      patch: Partial<LayoutSettings>,
+      options?: { backgroundOverride?: Scene['background'] | null }
+    ) => {
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
       if (patch.layoutPreset !== undefined) {
@@ -10170,6 +10205,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           captureConfigPatch,
           ...(patch.layoutPreset !== undefined
             ? { savedSceneId: null, origin: 'builtin' as const }
+            : {}),
+          ...(options && 'backgroundOverride' in options
+            ? { backgroundOverride: options.backgroundOverride }
             : {})
         }
       )
@@ -10405,6 +10443,55 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [requestCameraPresetTransaction]
   )
+
+  // Plan 207 S4: "Your look" writes state only. The scene reload commits it
+  // idle (`scene.load_from_capture_config` starts nothing and carries the
+  // background), so no device opens while setup is open. The library sync
+  // above sees the fingerprint already applied. Setup's changes start the
+  // Studio with no undo history and no saved-scene origin (a built-in look).
+  const applyFirstRunLook = useCallback(
+    (look: FirstRunLook): void => {
+      if (firstRunLookWritesHeld(recordingRef.current)) {
+        firstRunLookHoldRef.current = look
+        setFirstRunLookHold(look)
+        return
+      }
+      const current = captureConfigRef.current
+      if (current.layout.arrangementMode === 'freeform') noteLayoutLeavingFreeform(current.layout)
+      const next = firstRunLookPatch(current, look)
+      latestRequestedLayoutRef.current = next.layout.layoutPreset
+      workingOriginRef.current = 'builtin'
+      activeSavedSceneIdRef.current = null
+      setActiveSavedSceneId(null)
+      setCaptureConfig((latest) => firstRunLookPatch(latest, look))
+      const registry = backgroundRegistryRef.current
+      const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
+      const background = effectiveSceneBackground(nextRegistry)
+      libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
+      workingBackgroundRef.current = background
+      setWorkingBackground(background)
+      if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+    },
+    [setBackgroundRegistry]
+  )
+  // A look held behind a running session lands when setup closes, through
+  // the Studio's own transaction: one commit with the preset, the shape and
+  // the background. It may open the layout's devices, as a Studio change does.
+  useEffect(() => {
+    if (firstRunSetupOpen) return
+    const held = firstRunLookHoldRef.current
+    if (!held) return
+    firstRunLookHoldRef.current = null
+    setFirstRunLookHold(null)
+    const registry = firstRunBackgroundChoice(backgroundRegistryRef.current, held.liveBackgroundId)
+    void requestCameraPresetTransaction(
+      {
+        layoutPreset: firstRunLookPreset(captureConfigRef.current, held),
+        ...cameraShapeLayoutPatch(held.cameraShape)
+      },
+      { backgroundOverride: effectiveSceneBackground(registry) }
+    )
+  }, [firstRunSetupOpen, requestCameraPresetTransaction])
 
   const switchSourceDeviceLive = useCallback(
     async (sourceKind: LiveSourceDeviceSwitchPending, sources: SourceSelection) => {
@@ -17540,6 +17627,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       savedScenes: sceneLibrary.scenes,
       activeSavedSceneId,
       savedScenePendingId,
@@ -17779,6 +17868,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       sceneLibrary.scenes,
       sceneLibrary.error,
       sceneLibrary.rename,
