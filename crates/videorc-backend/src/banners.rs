@@ -1105,6 +1105,33 @@ pub(crate) fn show_banner_within_budget(
     database.show_banner(id, BANNER_MAX_SHOWN)
 }
 
+/// Plan 205 D3 (owner): a banner you add shows. `banners.importImage` shows
+/// the row `import_banner` just created (hidden, as its store tests pin)
+/// under the same gates as `banners.show`: the cap of four, the prepared
+/// bitmap budget for the compositor's current canvases, and a session that
+/// cannot draw a banner added after its start. A refusal keeps the banner
+/// hidden and is answered as `ok` with the hidden row; the list's show-limit
+/// copy says why. The caller republishes once for the import and the show.
+pub(crate) async fn show_imported_banner(state: &AppState, banner: Banner) -> Banner {
+    let canvases = crate::compositor::banner_prepare_canvases(state).await;
+    let session_accepts_banners = crate::recording::active_session_accepts_banners(state).await;
+    match show_banner(
+        &state.database,
+        &banner.id,
+        &canvases,
+        session_accepts_banners,
+    ) {
+        Ok(shown) => shown,
+        Err(error) => {
+            tracing::info!(
+                banner = %banner.id,
+                "The imported banner stays hidden: {error}"
+            );
+            banner
+        }
+    }
+}
+
 /// `banners.show` as one call, for Buddy voice (plan 186 S11): the cap and
 /// budget refusals, the row, then the compositor and `banners.changed`.
 pub(crate) async fn show_banner_and_publish(state: &AppState, id: &str) -> Result<Banner> {
@@ -1234,7 +1261,7 @@ pub(crate) async fn on_banners_changed(state: &AppState) -> Result<Vec<Banner>> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::overlay_layout::PORTRAIT_BOTTOM_MARGIN;
     use serde::Deserialize;
@@ -2255,7 +2282,9 @@ mod tests {
 
     // --- The compositor's set (S3) ------------------------------------------
 
-    fn sample_banner(id: &str, sort_order: i64) -> Banner {
+    /// A shown 2400x400 banner on both outputs at its default places; the
+    /// recording tests borrow it for the plan 205 D2 pin.
+    pub(crate) fn sample_banner(id: &str, sort_order: i64) -> Banner {
         let (horizontal, vertical) = banner_default_places(2400, 400);
         Banner {
             id: id.to_string(),

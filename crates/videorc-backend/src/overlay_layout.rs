@@ -255,7 +255,8 @@ impl Default for OverlayLayout {
     /// Highlight: the pre-plan-164 default corner (bottom left), on both
     /// outputs. Captions: the bottom bar; their switches mirror the shipped
     /// `burnTarget` default (`off`), so a fresh install burns nothing until
-    /// the streamer turns captions on. Buddy: bottom right, on both.
+    /// the streamer turns captions on. Buddy: bottom right, off for both
+    /// outputs (opt-in: the streamer turns it on per output).
     fn default() -> Self {
         Self {
             highlight: snapped_item(
@@ -561,6 +562,42 @@ pub fn overlay_layout_needs_split(shape: OverlaySessionShape, layout: &OverlayLa
         )
         .needs_split
     })
+}
+
+// --- The program (plan 205) ---------------------------------------------------
+
+/// Whether the program carries an item with these switches. The program is
+/// the picture that goes out, and the Preview shows it (plan 205 D1): every
+/// layer at least one running output carries; while nothing runs, every
+/// layer with either switch on. Pure; `overlay_leg_plan` keeps meaning what
+/// each output carries, and this is the union of the running outputs' plans.
+///
+/// | what runs                                | the program carries the item when |
+/// |------------------------------------------|-----------------------------------|
+/// | nothing (`None`, or neither output)      | on_stream OR in_recording         |
+/// | record only                              | in_recording                      |
+/// | stream only                              | on_stream                         |
+/// | record + stream (any aux leg)            | on_stream OR in_recording         |
+///
+/// A buffer-only (Clips) session is planned as `None` by the Preview's
+/// callers: the ring keeps the recording plan (D2), the Preview shows the
+/// program. The shared fixture `protocol-fixtures/preview-program.json`
+/// pins every row for Rust and the TS twin.
+pub fn program_shows(
+    shape: Option<OverlaySessionShape>,
+    show_on_stream: bool,
+    show_in_recording: bool,
+) -> bool {
+    match shape {
+        Some(OverlaySessionShape {
+            record_enabled,
+            stream_enabled,
+            ..
+        }) if record_enabled || stream_enabled => {
+            (record_enabled && show_in_recording) || (stream_enabled && show_on_stream)
+        }
+        _ => show_on_stream || show_in_recording,
+    }
 }
 
 /// What a start notice names: one of the three placeable items, or every
@@ -1012,6 +1049,111 @@ mod tests {
             plan(false, false, false).shared_leg_fallback(),
             OverlayLegPlan::NONE
         );
+    }
+
+    /// Plan 205: the program across the exhaustive table. With an output
+    /// running it is exactly the resolved leg plan's union (the item burns on
+    /// some leg); with none it is either switch, whatever the aux leg says.
+    #[test]
+    fn program_shows_is_the_union_of_the_running_outputs_plans() {
+        use OverlayAuxLeg::{None, Stream, VerticalSimulcast};
+        let switches = [(false, false), (true, false), (false, true), (true, true)];
+        for (on_stream, in_rec) in switches {
+            assert_eq!(
+                program_shows(Option::None, on_stream, in_rec),
+                on_stream || in_rec,
+                "no session on_stream={on_stream} in_rec={in_rec}"
+            );
+            for record in [false, true] {
+                for stream in [false, true] {
+                    for aux_leg in [None, Stream, VerticalSimulcast] {
+                        let shape = shape(record, stream, aux_leg);
+                        let plan = overlay_leg_plan(record, stream, aux_leg, on_stream, in_rec);
+                        let resolved = if plan.needs_split {
+                            plan.shared_leg_fallback()
+                        } else {
+                            plan
+                        };
+                        let expected = if record || stream {
+                            resolved.burns_anywhere()
+                        } else {
+                            on_stream || in_rec
+                        };
+                        assert_eq!(
+                            program_shows(Some(shape), on_stream, in_rec),
+                            expected,
+                            "{shape:?} on_stream={on_stream} in_rec={in_rec}"
+                        );
+                    }
+                }
+            }
+        }
+        // The rows the owner's reports turn on: a stream-only item is in the
+        // program while nothing runs and while recording + streaming, and
+        // out of it while only recording.
+        assert!(program_shows(Option::None, true, false));
+        assert!(program_shows(Some(shape(true, true, Stream)), true, false));
+        assert!(!program_shows(Some(shape(true, false, None)), true, false));
+        assert!(!program_shows(Some(shape(false, true, None)), false, true));
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ProgramFixtureShape {
+        record_enabled: bool,
+        stream_enabled: bool,
+        aux_leg: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ProgramFixtureCase {
+        name: String,
+        shape: Option<ProgramFixtureShape>,
+        show_on_stream: bool,
+        show_in_recording: bool,
+        expected: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ProgramFixture {
+        schema_version: u32,
+        cases: Vec<ProgramFixtureCase>,
+    }
+
+    /// Plan 205 S1/S2: `program_shows` and the TS `programShows` reproduce
+    /// the one shared table, every row of it (4 session-less rows plus
+    /// 4 outputs x 3 aux legs x 4 switch pairs).
+    #[test]
+    fn preview_program_fixture_is_reproduced_by_program_shows() {
+        let fixture: ProgramFixture = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/preview-program.json"
+        ))
+        .expect("protocol-fixtures/preview-program.json is valid JSON");
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.cases.len(), 4 + 4 * 3 * 4);
+        for case in fixture.cases {
+            let shape = case.shape.map(|shape| OverlaySessionShape {
+                record_enabled: shape.record_enabled,
+                stream_enabled: shape.stream_enabled,
+                aux_leg: match shape.aux_leg.as_str() {
+                    "none" => OverlayAuxLeg::None,
+                    "stream" => OverlayAuxLeg::Stream,
+                    "vertical-simulcast" => OverlayAuxLeg::VerticalSimulcast,
+                    other => panic!(
+                        "fixture case {:?} names an unknown aux leg {other:?}",
+                        case.name
+                    ),
+                },
+            });
+            assert_eq!(
+                program_shows(shape, case.show_on_stream, case.show_in_recording),
+                case.expected,
+                "program_shows drifted from the fixture case {:?}",
+                case.name
+            );
+        }
     }
 
     #[test]

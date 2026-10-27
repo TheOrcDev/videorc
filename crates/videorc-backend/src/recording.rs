@@ -3043,6 +3043,13 @@ impl ActiveRecording {
     pub(crate) fn accepts_banners(&self) -> bool {
         self.accepts_banners
     }
+
+    /// A stub session that cannot draw a banner added after its start, for
+    /// the RPC tests of the show gate (`banners.show`, `banners.importImage`).
+    #[cfg(test)]
+    pub(crate) fn set_accepts_banners_for_test(&mut self, accepts: bool) {
+        self.accepts_banners = accepts;
+    }
 }
 
 /// Whether a session can take a banner shown after it started (plan 186 S4).
@@ -23387,25 +23394,35 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
 /// place. Captions keep their start-time plan (their burn target is a session
 /// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
 /// start-time overlay input, which is said in the log rather than hidden.
+/// With no session, the idle preview run follows the layout instead
+/// (plan 205, `apply_overlay_layout_to_idle_preview`).
 pub async fn apply_overlay_layout_to_active_session(
     state: &AppState,
     layout: &crate::overlay_layout::OverlayLayout,
 ) {
-    let (session_id, plans, d3d11) = {
+    let session = {
         let mut recording = state.recording.lock().await;
-        let Some(active) = recording.as_mut() else {
-            return;
-        };
-        let Some(shape) = active.overlay_session_shape else {
-            return;
-        };
-        let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
-        active.comment_highlight_available = plans.highlight.burns_anywhere();
-        #[cfg(target_os = "windows")]
-        let d3d11 = active.windows_d3d11_media.is_some();
-        #[cfg(not(target_os = "windows"))]
-        let d3d11 = false;
-        (active.session_id.clone(), plans, d3d11)
+        match recording.as_mut() {
+            None => None,
+            Some(active) => {
+                // A session without a compositor shape (the legacy FFmpeg
+                // graph) applies its switches at the next start.
+                let Some(shape) = active.overlay_session_shape else {
+                    return;
+                };
+                let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+                active.comment_highlight_available = plans.highlight.burns_anywhere();
+                #[cfg(target_os = "windows")]
+                let d3d11 = active.windows_d3d11_media.is_some();
+                #[cfg(not(target_os = "windows"))]
+                let d3d11 = false;
+                Some((active.session_id.clone(), plans, d3d11))
+            }
+        }
+    };
+    let Some((session_id, plans, d3d11)) = session else {
+        apply_overlay_layout_to_idle_preview(state, layout).await;
+        return;
     };
     let swapped = crate::compositor::update_overlay_flags(
         state,
@@ -23450,6 +23467,32 @@ pub async fn apply_overlay_layout_to_active_session(
             "Overlay layout changed mid-session; the Windows D3D11 media path applies output switches at the next session start.",
         );
     }
+}
+
+/// Plan 205 (S1): a layout saved while nothing runs swaps the idle preview
+/// run's flags to the program (`OverlayLegFlags::idle`): a Buddy turned on
+/// for an output joins the picture at once, and one turned off for both
+/// leaves it. A run a capture holds is refused by
+/// `update_idle_overlay_flags` and keeps the session's plan (the session
+/// lands in `state.recording` after its lease is armed).
+async fn apply_overlay_layout_to_idle_preview(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let flags = crate::compositor::OverlayLegFlags::idle(layout);
+    let swapped = crate::compositor::update_idle_overlay_flags(state, flags).await;
+    if swapped {
+        let canvases = crate::compositor::banner_prepare_canvases(state).await;
+        if let Some(primary) = canvases.first() {
+            crate::compositor::prepare_idle_buddy(state, flags, *primary);
+        }
+    }
+    tracing::info!(
+        highlight_primary = flags.highlight_on_primary,
+        buddy_primary = flags.buddy_on_primary,
+        swapped,
+        "overlay layout changed while nothing runs"
+    );
 }
 
 /// A session can put a comment card on stream only when the compositor bridge
@@ -34640,6 +34683,81 @@ mod tests {
         assert!(!normalize_replay_only_params(&mut record));
         assert_eq!(record.output.separate_source_recordings, separate);
         assert!(crate::source_iso::armed_plan(&record.output).is_some());
+    }
+
+    /// Plan 205 D2 (owner): a buffer-only (Clips) session keeps planning
+    /// every item by "Show in recording", exactly as a recording does. Its
+    /// shape is record-only, so a stream-only Buddy and a stream-only banner
+    /// burn on neither leg of the ring, and a record-only session drops them
+    /// the same way. The program (what the Preview shows) still has both:
+    /// Phase 2 gives the Preview its own picture while the ring runs.
+    #[test]
+    fn a_buffer_only_session_burns_neither_a_stream_only_buddy_nor_banner() {
+        use crate::banners::{BannerLeg, banner_leg_carries};
+        use crate::overlay_layout::{OverlayAuxLeg, OverlaySessionShape, program_shows};
+
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        layout.buddy.show_in_recording = false;
+        let mut banner = crate::banners::tests::sample_banner("stream-only", 0);
+        banner.show_on_stream = true;
+        banner.show_in_recording = false;
+
+        let mut buffer = base_params(false, false);
+        buffer.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(normalize_replay_only_params(&mut buffer));
+        // The shape `start_session` builds for it: a recording with no stream
+        // and no auxiliary leg.
+        let shape = OverlaySessionShape {
+            record_enabled: buffer.output.record_enabled,
+            stream_enabled: buffer.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(
+            shape,
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: OverlayAuxLeg::None,
+            }
+        );
+        let plans = crate::overlay_layout::overlay_session_plans(shape, &layout);
+        assert!(!plans.buddy.primary && !plans.buddy.aux);
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Primary,
+            &banner
+        ));
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Auxiliary,
+            &banner
+        ));
+        assert!(!program_shows(Some(shape), true, false));
+
+        // A real recording plans the same.
+        let mut record = base_params(true, false);
+        assert!(!normalize_replay_only_params(&mut record));
+        let record_shape = OverlaySessionShape {
+            record_enabled: record.output.record_enabled,
+            stream_enabled: record.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(record_shape, shape);
+        assert!(
+            !crate::overlay_layout::overlay_session_plans(record_shape, &layout)
+                .buddy
+                .primary
+        );
+
+        // The program while nothing runs has both (the Preview's half; on
+        // macOS it needs Phase 2's program leg while the ring runs).
+        assert!(program_shows(None, true, false));
+        assert!(banner_leg_carries(None, BannerLeg::Primary, &banner));
+        assert!(crate::compositor::OverlayLegFlags::idle(&layout).buddy_on_primary);
     }
 
     /// Plan 181: the replay ring output on every FFmpeg arg builder.

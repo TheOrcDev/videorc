@@ -662,11 +662,64 @@ pub struct OverlayLegFlags {
     pub buddy_on_aux: bool,
 }
 
+impl OverlayLegFlags {
+    /// The idle preview run's flags (plan 205 D1): the program while nothing
+    /// runs, every item with either switch on (`program_shows(None, …)`), on
+    /// the primary leg. The idle run has no auxiliary leg.
+    pub fn idle(layout: &crate::overlay_layout::OverlayLayout) -> Self {
+        let shows = |item: &crate::overlay_layout::OverlayItemLayout| {
+            crate::overlay_layout::program_shows(None, item.show_on_stream, item.show_in_recording)
+        };
+        Self {
+            highlight_on_primary: shows(&layout.highlight),
+            highlight_on_aux: false,
+            buddy_on_primary: shows(&layout.buddy),
+            buddy_on_aux: false,
+        }
+    }
+}
+
+/// The idle preview run's flags for the layout as it is stored right now
+/// (`OverlayLegFlags::idle`): what a preview run starts with, and what a
+/// lease release returns the run to.
+pub(crate) fn idle_overlay_flags(state: &AppState) -> OverlayLegFlags {
+    OverlayLegFlags::idle(&crate::overlay_layout::load_overlay_layout(&state.database))
+}
+
+/// Plan 205: when the program draws the Buddy on the idle run, start building
+/// the pet's atlas for the run's canvas now, so its first frame is not late
+/// (`leg_frame_at` asks too; this only shortens the wait).
+pub(crate) fn prepare_idle_buddy(state: &AppState, flags: OverlayLegFlags, canvas: (u32, u32)) {
+    if flags.buddy_on_primary {
+        state.buddy_sprite.prepare(&[(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (canvas.0.max(1), canvas.1.max(1)),
+        )]);
+    }
+}
+
 /// Plan 164 (S-B3.4, S-C1): swap the highlight and Buddy flags of the live
 /// run in place when `overlays.layout.set` lands mid-session. Returns false
 /// when no run is live; the next session reads the stored layout at start.
 pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
     let compositor = state.compositor.lock().await;
+    send_overlay_flags(&compositor, flags)
+}
+
+/// Plan 205 (S1): swap the idle preview run's flags in place when the layout
+/// is saved while nothing runs. A run a capture holds keeps the session's
+/// plan and answers false: the session is inserted into `state.recording`
+/// after its lease is armed, so this is the one check that tells the idle
+/// run from a session's, under the same lock the arm takes.
+pub async fn update_idle_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
+    let compositor = state.compositor.lock().await;
+    if compositor.capture_lease.is_some() {
+        return false;
+    }
+    send_overlay_flags(&compositor, flags)
+}
+
+fn send_overlay_flags(compositor: &CompositorRuntime, flags: OverlayLegFlags) -> bool {
     let Some(config_tx) = compositor.loop_config_tx.as_ref() else {
         return false;
     };
@@ -682,6 +735,19 @@ pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> b
         return true;
     }
     config_tx.send(next).is_ok()
+}
+
+/// The live run's loop configuration, for tests that read the overlay flags
+/// a start, a layout save or a lease release left on it.
+#[cfg(test)]
+pub(crate) async fn loop_config_for_test(state: &AppState) -> Option<CompositorLoopConfig> {
+    state
+        .compositor
+        .lock()
+        .await
+        .loop_config_tx
+        .as_ref()
+        .map(|config_tx| *config_tx.borrow())
 }
 
 // --- Banners (plan 186 S3) ---------------------------------------------------
@@ -3544,9 +3610,10 @@ enum CompositorLeaseRelease {
 
 /// Returns an armed run to preview ownership. With a live preview surface the
 /// loop is switched back to preview fps/consumer at the surface's current
-/// dimensions and the reconciler re-adopts the same run id; without one the
-/// run is stopped exactly like a retired preview run. A missing or foreign
-/// lease is a no-op.
+/// dimensions, with the overlay flags of the program for the layout stored
+/// now (plan 205), and the reconciler re-adopts the same run id; without one
+/// the run is stopped exactly like a retired preview run. A missing or
+/// foreign lease is a no-op.
 pub async fn release_compositor_capture_lease(
     state: &AppState,
     session_id: &str,
@@ -3554,6 +3621,10 @@ pub async fn release_compositor_capture_lease(
     // Read the surface before taking compositor ownership: the resize path
     // never awaits the surface under the compositor lock, and neither may we.
     let surface = crate::preview_surface::preview_surface_status(state).await;
+    // Plan 205: the idle run returns to the program of the layout as it is
+    // stored NOW, not the flags the run had when the capture armed. A layout
+    // saved during the session re-planned the session, never the idle run.
+    let idle_overlays = idle_overlay_flags(state);
     let release = {
         let _lifecycle = state.compositor_lifecycle.lock().await;
         let mut compositor = state.compositor.lock().await;
@@ -3582,6 +3653,10 @@ pub async fn release_compositor_capture_lease(
         } else {
             let restored = CompositorLoopConfig {
                 target_fps: surface.target_fps.clamp(30, 120),
+                highlight_overlay_on_primary: idle_overlays.highlight_on_primary,
+                highlight_overlay_on_aux: idle_overlays.highlight_on_aux,
+                buddy_overlay_on_primary: idle_overlays.buddy_on_primary,
+                buddy_overlay_on_aux: idle_overlays.buddy_on_aux,
                 ..lease.preview_config
             };
             let config_sent = compositor
@@ -3611,12 +3686,15 @@ pub async fn release_compositor_capture_lease(
     match release {
         CompositorLeaseRelease::Restored(status) => {
             let status = *status;
+            prepare_idle_buddy(state, idle_overlays, (status.width, status.height));
             tracing::info!(
-                "compositor {} released to preview after session {session_id}: {}x{} @ {} fps",
+                "compositor {} released to preview after session {session_id}: {}x{} @ {} fps, highlight {} buddy {}",
                 status.run_id.as_deref().unwrap_or("unknown-run"),
                 status.width,
                 status.height,
-                status.target_fps
+                status.target_fps,
+                idle_overlays.highlight_on_primary,
+                idle_overlays.buddy_on_primary
             );
             state.emit_event("compositor.status", status.clone());
             crate::preview_surface::reconcile_preview_after_capture_release(state).await;
@@ -8730,14 +8808,12 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
-    // The Scene editor holding or dragging the Buddy on the idle preview: the
-    // pet draws on the primary leg where it will land, though no session
-    // carries it. A buffer-only run (the Clips ring, on by default) draws it
-    // too: like the other drafts and their chrome, it lands in the ring while
-    // the editor holds it (plan 181), and without it the default Buddy (on
-    // no output) would never show on the live canvas.
-    let buddy_edit = buddy_editor_place(editor_draft);
-    let buddy_on_primary = buddy_overlay_on_primary || buddy_edit.is_some();
+    // Plan 205 D4: the primary leg draws the Buddy only while its plan
+    // carries it (the idle run's plan is the program, so a Buddy on for an
+    // output shows on the live canvas). The Scene editor holding or dragging
+    // the Buddy moves that pet; it never draws one no output carries.
+    let primary_buddy_place = primary_buddy_place(buddy_overlay_on_primary, editor_draft);
+    let buddy_on_primary = primary_buddy_place.is_some();
     // Plan 168 S-B1: the pet on each leg that carries the Buddy, drawn from
     // the sprite slot once per composed frame at `published_at` (both legs
     // share the clock; the atlas is built off this thread).
@@ -8746,7 +8822,7 @@ async fn publish_compositor_frame(
     } else {
         0.0
     };
-    let primary_buddy = buddy_on_primary.then(|| {
+    let primary_buddy = primary_buddy_place.map(|place| {
         buddy_leg_frame(
             state,
             crate::buddy_sprite::BuddySpriteLeg::Primary,
@@ -8760,7 +8836,7 @@ async fn publish_compositor_frame(
             highlight_overlay
                 .as_ref()
                 .filter(|_| highlight_overlay_on_primary),
-            buddy_edit.flatten(),
+            place,
         )
     });
     // Plan 186 S3: the banners each leg carries, fades at `published_at`
@@ -9682,7 +9758,7 @@ fn buddy_leg_frame(
 /// `overlayStageId('buddy')`).
 pub(crate) const BUDDY_DRAFT_ID: &str = "overlay:buddy";
 
-/// Where the idle preview draws the Buddy for the Scene editor, if it does:
+/// What the Scene editor says about the Buddy's place, if it holds it:
 /// `Some(None)` while a chrome-only draft holds the Buddy's selection (its
 /// saved place), `Some(Some(rect))` while a draft drags it or holds its
 /// dropped rect until the layout save lands. `None` for any other draft.
@@ -9691,6 +9767,18 @@ fn buddy_editor_place(draft: Option<&EditorDraft>) -> Option<Option<OverlayRect>
     Some(draft.transform.map(|transform| {
         OverlayRect::new(transform.x, transform.y, transform.width, transform.height)
     }))
+}
+
+/// Where the primary leg draws the Buddy this tick, if it does (plan 205
+/// D4): `None` unless the leg's plan carries it, whatever the editor holds;
+/// otherwise the editor's dragged rect (`Some(Some(rect))`) or the saved
+/// place (`Some(None)`). The editor moves a Buddy that is on; it never
+/// draws one that is off for every output.
+fn primary_buddy_place(
+    buddy_overlay_on_primary: bool,
+    draft: Option<&EditorDraft>,
+) -> Option<Option<OverlayRect>> {
+    buddy_overlay_on_primary.then(|| buddy_editor_place(draft).flatten())
 }
 
 /// `render_compositor_yuv420p_frame` plus the editor chrome quads blended
@@ -16988,6 +17076,160 @@ mod tests {
         );
     }
 
+    /// Plan 205 (S1, D1/D2): the idle run draws the program, so a stream-only
+    /// Buddy is on its primary; a buffer-only (Clips) lease keeps the
+    /// session's recording plan, which drops it, and a layout saved while
+    /// the lease holds the run re-plans by the session, never by the idle
+    /// rule.
+    #[tokio::test]
+    async fn the_idle_run_draws_the_programs_buddy_and_a_buffer_only_lease_keeps_the_record_plan() {
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        assert_eq!(
+            OverlayLegFlags::idle(&layout),
+            OverlayLegFlags {
+                highlight_on_primary: true,
+                highlight_on_aux: false,
+                buddy_on_primary: false,
+                buddy_on_aux: false,
+            },
+            "the shipped layout: highlight on both, Buddy off"
+        );
+        layout.buddy.show_on_stream = true;
+        let idle = OverlayLegFlags::idle(&layout);
+        assert!(
+            idle.buddy_on_primary,
+            "a stream-only Buddy is in the idle program"
+        );
+        assert!(!idle.buddy_on_aux);
+
+        let state = test_state();
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                highlight_overlay_on_primary: idle.highlight_on_primary,
+                buddy_overlay_on_primary: idle.buddy_on_primary,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        let started = loop_config_for_test(&state).await.expect("live run");
+        assert!(started.buddy_overlay_on_primary && started.highlight_overlay_on_primary);
+
+        // Clips arms the run with the recording plan (D2): the ring is a
+        // recording, so the stream-only Buddy leaves the primary.
+        let ring = crate::overlay_layout::overlay_session_plans(
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+            },
+            &layout,
+        );
+        assert!(!ring.buddy.primary);
+        arm_compositor_for_capture(
+            &state,
+            "clips",
+            CompositorArmParams {
+                replay_only: true,
+                highlight_overlay_on_primary: ring.highlight.primary,
+                buddy_overlay_on_primary: ring.buddy.primary,
+                ..arm_params(128, 72)
+            },
+        )
+        .await
+        .expect("preview run arms in place");
+        let leased = loop_config_for_test(&state).await.expect("leased run");
+        assert!(!leased.buddy_overlay_on_primary);
+        // The idle rule never reaches a leased run; the session's re-plan does.
+        assert!(!update_idle_overlay_flags(&state, idle).await);
+        assert!(
+            !loop_config_for_test(&state)
+                .await
+                .expect("leased run")
+                .buddy_overlay_on_primary
+        );
+        layout.buddy.show_in_recording = true;
+        let replanned = crate::overlay_layout::overlay_session_plans(
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+            },
+            &layout,
+        );
+        assert!(
+            update_overlay_flags(
+                &state,
+                OverlayLegFlags {
+                    highlight_on_primary: replanned.highlight.primary,
+                    highlight_on_aux: replanned.highlight.aux,
+                    buddy_on_primary: replanned.buddy.primary,
+                    buddy_on_aux: replanned.buddy.aux,
+                }
+            )
+            .await
+        );
+        assert!(
+            loop_config_for_test(&state)
+                .await
+                .expect("leased run")
+                .buddy_overlay_on_primary,
+            "a Buddy turned on for the recording joins the ring mid-session"
+        );
+        release_compositor_capture_lease(&state, "clips").await;
+        stop_compositor(&state).await;
+    }
+
+    /// Plan 205 (S1): `overlays.layout.set` while nothing runs swaps the idle
+    /// run's flags in place, both ways, and leaves fps and the consumer alone.
+    #[tokio::test]
+    async fn a_layout_saved_at_idle_swaps_the_idle_runs_flags() {
+        let state = test_state();
+        let idle = idle_overlay_flags(&state);
+        assert!(!idle.buddy_on_primary);
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                highlight_overlay_on_primary: idle.highlight_on_primary,
+                buddy_overlay_on_primary: idle.buddy_on_primary,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        let before = loop_config_for_test(&state).await.expect("live run");
+        assert!(!before.buddy_overlay_on_primary);
+
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let joined = loop_config_for_test(&state).await.expect("live run");
+        assert!(
+            joined.buddy_overlay_on_primary,
+            "the pet joins the idle run"
+        );
+        assert!(joined.highlight_overlay_on_primary);
+        assert_eq!(
+            (joined.target_fps, joined.frame_consumer),
+            (before.target_fps, before.frame_consumer)
+        );
+
+        layout.buddy.show_on_stream = false;
+        layout.highlight.show_on_stream = false;
+        layout.highlight.show_in_recording = false;
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let left = loop_config_for_test(&state).await.expect("live run");
+        assert!(
+            !left.buddy_overlay_on_primary,
+            "and leaves when both switches go off"
+        );
+        assert!(!left.highlight_overlay_on_primary);
+        stop_compositor(&state).await;
+    }
+
     #[tokio::test]
     async fn arm_compositor_for_capture_refuses_non_preview_runs() {
         let state = test_state();
@@ -20518,13 +20760,21 @@ mod buddy_sprite_tests {
         }
     }
 
-    /// The Scene editor's Buddy on the idle preview: a chrome-only hold of
-    /// `overlay:buddy` draws the pet at its saved place, a draft with a rect
-    /// draws it at the dragged place (the picture follows the pointer, not
-    /// only the frame), and any other draft leaves the Buddy alone.
+    /// The Scene editor's Buddy on the idle preview, with the Buddy on for an
+    /// output (plan 205 D4: the primary's plan carries it): a chrome-only
+    /// hold of `overlay:buddy` draws the pet at its saved place, a draft with
+    /// a rect draws it at the dragged place (the picture follows the pointer,
+    /// not only the frame), and any other draft leaves the Buddy alone.
     #[test]
     fn a_buddy_draft_draws_the_pet_where_the_editor_drags_it() {
-        let layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        let mut layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        layout.show_on_stream = true;
+        let on = crate::overlay_layout::program_shows(
+            None,
+            layout.show_on_stream,
+            layout.show_in_recording,
+        );
+        assert!(on, "a stream-only Buddy is in the idle program");
         let saved = layout.horizontal;
         let dragged = OverlayRect::new(0.1, 0.1, saved.w, saved.h);
         let dragged_transform = CameraTransform {
@@ -20553,6 +20803,28 @@ mod buddy_sprite_tests {
             None
         );
         assert_eq!(buddy_editor_place(None), None);
+        // On, the primary draws the pet: at its saved place with no draft or
+        // a chrome-only hold, at the dragged place while a draft moves it,
+        // and at its saved place under any other draft.
+        assert_eq!(primary_buddy_place(on, None), Some(None));
+        assert_eq!(
+            primary_buddy_place(on, Some(&editor_draft(BUDDY_DRAFT_ID, None))),
+            Some(None)
+        );
+        assert_eq!(
+            primary_buddy_place(
+                on,
+                Some(&editor_draft(BUDDY_DRAFT_ID, Some(dragged_transform)))
+            ),
+            Some(Some(dragged))
+        );
+        assert_eq!(
+            primary_buddy_place(
+                on,
+                Some(&editor_draft("overlay:highlight", Some(dragged_transform)))
+            ),
+            Some(None)
+        );
 
         let slot = crate::buddy_sprite::BuddySpriteSlot::new(
             &crate::cohost::CohostPersona::default(),
@@ -20614,6 +20886,80 @@ mod buddy_sprite_tests {
                 assert_ne!(centre_luma(&metal, held.buddy_box), pet);
             }
         }
+    }
+
+    /// Plan 205 D4: a Buddy off for both outputs is in no program, so the
+    /// primary leg draws nothing for it even while the Scene editor holds or
+    /// drags it (the 2026-10-27 exception is gone). Deselecting changes
+    /// nothing either: the picture never had the pet.
+    #[test]
+    fn an_off_buddy_held_by_the_editor_draws_nothing() {
+        let layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        assert!(!layout.show_on_stream && !layout.show_in_recording);
+        let on = crate::overlay_layout::program_shows(
+            None,
+            layout.show_on_stream,
+            layout.show_in_recording,
+        );
+        assert!(!on);
+        let saved = layout.horizontal;
+        let dragged = OverlayRect::new(0.1, 0.1, saved.w, saved.h);
+        let dragged_transform = CameraTransform {
+            x: dragged.x,
+            y: dragged.y,
+            width: dragged.w,
+            height: dragged.h,
+        };
+        // The editor's draft still names the Buddy…
+        assert_eq!(
+            buddy_editor_place(Some(&editor_draft(BUDDY_DRAFT_ID, Some(dragged_transform)))),
+            Some(Some(dragged))
+        );
+        // …but the primary draws no pet for it: not held, not dragged, not
+        // without a draft.
+        assert_eq!(
+            primary_buddy_place(on, Some(&editor_draft(BUDDY_DRAFT_ID, None))),
+            None
+        );
+        assert_eq!(
+            primary_buddy_place(
+                on,
+                Some(&editor_draft(BUDDY_DRAFT_ID, Some(dragged_transform)))
+            ),
+            None
+        );
+        assert_eq!(primary_buddy_place(on, None), None);
+        // The frame composed with no Buddy leg has no pet at either place.
+        let slot = crate::buddy_sprite::BuddySpriteSlot::new(
+            &crate::cohost::CohostPersona::default(),
+            layout,
+            None,
+        );
+        slot.install_atlas_for_test(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::buddy_sprite::tests::parity_atlas(64),
+        );
+        let would_be = slot.leg_frame_at(
+            crate::buddy_sprite::BuddyLegRequest {
+                leg: crate::buddy_sprite::BuddySpriteLeg::Primary,
+                canvas: (WIDTH, HEIGHT),
+                now_seconds: 2.0,
+                highlight_rect: None,
+                caption_rect: None,
+            },
+            Some(dragged),
+        );
+        let centre_luma = |frame: &[u8], [x, y, w, h]: [f32; 4]| {
+            frame[(y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize]
+        };
+        let pet = rgb_to_yuv(230, 40, 40).0;
+        let cpu = cpu_frame(inputs(1, None, None, None, None));
+        assert_ne!(centre_luma(&cpu, would_be.buddy_box), pet);
+        assert_ne!(
+            centre_luma(&cpu, crate::buddy_sprite::buddy_box(saved, WIDTH, HEIGHT)),
+            pet
+        );
     }
 }
 
