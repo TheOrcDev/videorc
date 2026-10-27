@@ -12,7 +12,7 @@ import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import { captionsStatusLabel } from '@/lib/state-labels'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
-import { systemAudioDevice, systemAudioSwitchView } from '@/lib/system-audio'
+import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
 
 /**
  * The Studio inspector's mirrors of controls that own their own pages (SD2):
@@ -181,16 +181,18 @@ export function useStudioSources() {
     captionsStatus,
     wsStatus,
     systemAudioConfirmed,
+    systemAudioJoining,
     systemAudioIssue,
     runtimeInfo
   } = useStudioCore()
   const { openSettings, openStudioPanel } = useWorkspaceNav()
   const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
+    device: systemAudioRowDevice(deviceList, runtimeInfo?.platform),
     requested: captureConfig.audio.systemAudioEnabled,
     sessionActive: isSessionActive,
     audioBusActive,
     confirmed: systemAudioConfirmed,
+    joining: systemAudioJoining,
     issue: systemAudioIssue
   })
   // Q6 (plan 022): before the backend reports devices, selects say "Finding

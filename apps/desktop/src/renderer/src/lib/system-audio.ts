@@ -27,6 +27,26 @@ export function systemAudioDevice(deviceList: DeviceList): Device | undefined {
   )
 }
 
+/** An Available device for the rows to draw before the first device list. */
+const MAC_STAND_IN: Pick<Device, 'status'> = Object.freeze({ status: 'available' })
+
+/**
+ * The device the System audio rows draw. A Mac always lists it (Available,
+ * or waiting on the Screen Recording grant), so until the first device list
+ * arrives the rows stand in an Available one: the row is there from launch
+ * with the Microphone's instead of popping in seconds later. Elsewhere it can
+ * be missing for good (Linux, Windows before build 20348), so those rows wait.
+ */
+export function systemAudioRowDevice(
+  deviceList: DeviceList,
+  platform: string | undefined
+): Pick<Device, 'status'> | undefined {
+  return (
+    systemAudioDevice(deviceList) ??
+    (deviceList.devices.length === 0 && platform === 'darwin' ? MAC_STAND_IN : undefined)
+  )
+}
+
 export interface SystemAudioSwitchInput {
   device: Pick<Device, 'status'> | undefined
   /** captureConfig.audio.systemAudioEnabled: what the user asked for. */
@@ -39,6 +59,11 @@ export interface SystemAudioSwitchInput {
   confirmed: boolean | null
   /** The newest system-audio health issue for the active session. */
   issue: SystemAudioIssue | null
+  /**
+   * The running session is still opening the capture it started with
+   * (`systemAudioJoining`): its unmixed status is not the switch turning Off.
+   */
+  joining: boolean
 }
 
 export interface SystemAudioSwitchView {
@@ -98,6 +123,13 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
       issue,
       stateLabel: issue === 'echo' ? 'Paused' : 'On'
     }
+  }
+
+  // A session that starts (a Clips ring at launch, a recording) mixes the
+  // microphone for a moment before its capture opens. The switch stays On
+  // and the meter rests until the level comes, so the row never blinks Off.
+  if (input.joining && input.requested && input.confirmed === false) {
+    return { ...hidden, visible: true, checked: true, disabled: false, stateLabel: 'On' }
   }
 
   const mixed = input.confirmed ?? input.requested

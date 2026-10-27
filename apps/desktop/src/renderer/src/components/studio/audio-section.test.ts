@@ -79,6 +79,7 @@ function systemAudioProps(
       sessionActive: false,
       audioBusActive: false,
       confirmed: null,
+      joining: false,
       issue: null,
       ...input
     }),
@@ -447,6 +448,7 @@ describe('AudioSection (plan 201 S2)', () => {
       isSessionActive: false,
       audioBusActive: false,
       systemAudioConfirmed: null,
+      systemAudioJoining: false,
       systemAudioIssue: null,
       ...overrides
     }
@@ -491,6 +493,31 @@ describe('AudioSection (plan 201 S2)', () => {
     expect(markup).toContain('>Paused</span>')
     expect(markup).toContain('>Resume</button>')
     expect(mocked.core.isSessionActive).toBe(false)
+  })
+
+  it('keeps System audio On, its level and Gain in place, while the ring opens it at launch', () => {
+    // The ring's first status mixes the microphone alone: the capture opens
+    // half a second after the bus. That used to blink the row Off.
+    setCore({ audioBusActive: true, systemAudioConfirmed: false, systemAudioJoining: true })
+    setClips(true, 'on')
+    const markup = row(renderSection(), 'studio-system-audio')
+    expect(markup).toContain('aria-checked="true"')
+    expect(markup).toContain('>On</span>')
+    expect(markup).not.toContain('Turning on…')
+    expect(markup).toContain('data-videorc-studio-system-audio-level=""')
+    expect(markup).toContain('aria-label="System audio gain"')
+  })
+
+  it('shows System audio from launch on a Mac, before the device list arrives', () => {
+    const loading = { deviceList: { devices: [], warnings: [] }, selectedMicrophone: undefined }
+    setCore(loading)
+    setClips(true, 'starting')
+    const markup = row(renderSection(), 'studio-system-audio')
+    expect(markup).toContain('aria-checked="true"')
+    expect(markup).toContain('data-videorc-studio-system-audio-level=""')
+    // Where the device can be missing for good, the row waits for the list.
+    setCore({ ...loading, runtimeInfo: { platform: 'win32' } })
+    expect(renderSection()).not.toContain('data-videorc-studio-system-audio')
   })
 
   it('shows the Microphone only where System audio is not listed', () => {
