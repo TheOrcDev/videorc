@@ -69,7 +69,7 @@ import {
   firstRunLookPreset,
   firstRunLookWritesHeld,
   type FirstRunLook
-} from '@/lib/first-run-look'
+} from '@/lib/first-run-look-apply'
 import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
