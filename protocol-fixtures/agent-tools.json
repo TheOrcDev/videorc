@@ -1451,6 +1451,85 @@
       "onAir": true,
       "rateFamily": "action",
       "notice": "{agent}: {message}"
+    },
+    {
+      "name": "go_live",
+      "title": "Go live",
+      "description": "Start the livestream now, without the Go Live dialog, on the destinations that are on or the ones named. Viewers see the stream start. Refused in Videorc's own words when something isn't ready: allowPartial goes live on the ready destinations, withoutCaptions skips captions that can't start. It records too when Output's recording is on.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "description": "Destination ids from list_destinations (or platform names) to go live on. The other destinations that are on sit this livestream out. Leave it out for all of them.",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "minItems": 1,
+            "maxItems": 16
+          },
+          "title": {
+            "type": "string",
+            "description": "The stream title for this livestream, as the dialog's Title field.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "allowPartial": {
+            "type": "boolean",
+            "description": "true goes live on the ready destinations when some aren't ready."
+          },
+          "withoutCaptions": {
+            "type": "boolean",
+            "description": "true goes live without captions when they can't start."
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "live": {
+            "type": "boolean"
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": ["id", "platform", "label"],
+              "additionalProperties": false
+            }
+          },
+          "recording": {
+            "type": "boolean"
+          }
+        },
+        "required": ["live", "destinations", "recording"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": true,
+      "rateFamily": "session",
+      "notice": "{agent} started the livestream."
     }
   ]
 }

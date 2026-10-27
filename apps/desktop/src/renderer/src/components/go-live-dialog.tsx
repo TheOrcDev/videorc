@@ -31,13 +31,12 @@ import type {
   StreamingSettings,
   VideoSettings
 } from '@/lib/backend'
-import { broadcastInfoIssues } from '@/lib/broadcast-info'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
 import { unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { GO_LIVE_DIALOG_TITLE, goLiveConfirmLabel, goLiveOnReadyLabel } from '@/lib/go-live-copy'
 import {
-  goLiveDialogView,
+  goLiveConfirmGate,
   goLivePendingLabel,
   type GoLiveDestinationView,
   type GoLivePhase
@@ -175,27 +174,18 @@ export function GoLiveConfirmationDialog({
           state: performanceCheck
         })
       : null
-  const sentTargets = sentStreaming.targets.filter((target) => target.enabled)
-  const hasScheduledTargets = sentTargets.some((target) => target.scheduledEventId)
-  // The instant draft's details apply to every destination not tied to a
-  // saved event; privacy reaches YouTube only.
-  const hasInstantTargets = sentTargets.some((target) => !target.scheduledEventId)
-  const instantYouTube = sentTargets.some(
-    (target) => !target.scheduledEventId && target.platform === 'youtube'
-  )
-  const titleIssues =
-    hasInstantTargets && draft ? broadcastInfoIssues(draft, { titleRequired: true }) : null
-  const view = goLiveDialogView(preflight, {
-    titleField: hasInstantTargets,
-    titleMissing: hasInstantTargets && (!draft || draft.title.trim() === '')
-  })
-  const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
-  const blocked =
-    Boolean(entitlementBlocker) ||
-    captionsReadiness.blocksStart ||
-    Boolean(titleIssues?.title || titleIssues?.description) ||
-    (hasInstantTargets && !draft) ||
-    !view.destinationsReady
+  // What the primary waits on, in one pure function an agent's `go_live`
+  // shares (plan 209 S10), so a Go Live without this dialog refuses exactly
+  // what the dialog holds back.
+  const {
+    sentTargets,
+    hasScheduledTargets,
+    hasInstantTargets,
+    instantYouTube,
+    view,
+    entitlementBlocker,
+    blocked
+  } = goLiveConfirmGate({ preflight, draft, sentStreaming, captionsReadiness, entitlementGate })
   const canConfirm = !pending && Boolean(preflight) && !blocked
   const canContinuePartial =
     !pending && !entitlementBlocker && !captionsReadiness.blocksStart && Boolean(partialSetup)

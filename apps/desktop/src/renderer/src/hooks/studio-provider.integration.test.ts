@@ -411,6 +411,9 @@ class StudioBackend {
     startUtc: string
   } | null = null
   scheduledConfirmationTargetId = 'youtube'
+  /** Plan 209 S10: answer the Go Live check with a ready row per destination
+   * sent, as the backend does, so a Go Live without the dialog sees rows. */
+  confirmationRowsFromStreaming = false
   sockets: TestWebSocket[] = []
   performanceCheck: PerformanceCheckState = { running: false, stale: false }
   commands: BackendCommand[] = []
@@ -1125,6 +1128,28 @@ class StudioBackend {
       case 'streamTargets.metadata.validate':
         return { valid: true, issues: [] }
       case 'streamTargets.confirmation.validate':
+        if (this.confirmationRowsFromStreaming) {
+          const sent = (params.streaming as StreamingSettings).targets.filter(
+            (target) => target.enabled
+          )
+          return {
+            valid: true,
+            destinations: sent.map((target) => ({
+              targetId: target.id,
+              platform: target.platform,
+              label: target.label,
+              authMode: target.authMode,
+              ready: true,
+              title: 'Live',
+              description: '',
+              message: 'Ready for Go Live confirmation.',
+              chatRead: 'ready',
+              chatWrite: 'ready',
+              chatMessage: ''
+            })),
+            issues: []
+          }
+        }
         return {
           valid: true,
           destinations: this.scheduledConfirmation
@@ -12753,6 +12778,141 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.goLiveExcludedTargetIds.length === 0
     )
     expect(savedX()?.enabled).toBe(true)
+  })
+
+  // Plan 209 S10 (D13): an agent's go_live runs the dialog's own preflight,
+  // gate and confirm with no dialog, and refuses what the dialog would hold.
+  it('goes live from an agent without the Go Live dialog, through its own checks', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    backend.xPrepareFailuresRemaining = 1
+    backend.confirmationRowsFromStreaming = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      latest()!.core.setCaptureConfig(youtubeAndXOauthStreamCaptureConfig())
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+        latest()?.core.startBlockedReason === null
+    )
+    const pushIntent = async (intentId: string, args: Record<string, unknown>): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({
+            event: 'agent.intent',
+            payload: { intentId, agentId: 'agent-1', agentName: 'Claude', tool: 'go_live', args }
+          })
+        })
+        await Promise.resolve()
+      })
+    }
+    const ack = (intentId: string) =>
+      backend.sentCommands
+        .filter((command) => command.method === 'agent.intent.ack')
+        .map(
+          (command) =>
+            command.params as { intentId: string; ok: boolean; message?: string; result?: unknown }
+        )
+        .find((params) => params.intentId === intentId)
+    const starts = () =>
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+
+    const sentTargets = (index: number): string[] =>
+      (starts()[index]!.params as { streaming: StreamingSettings }).streaming.targets
+        .filter((target) => target.enabled)
+        .map((target) => target.id)
+    const stop = async (): Promise<void> => {
+      await act(async () => {
+        await latest()!.core.stopSession()
+      })
+      await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    }
+
+    // Naming YouTube leaves X out of this livestream only, like the dialog's
+    // "Go live without X": X is never prepared and stays on. The title is
+    // the dialog's Title field, saved before the check.
+    await pushIntent('go-1', { destinations: ['youtube'], title: 'Building an MCP live' })
+    await waitForObservation(() => ack('go-1') !== undefined)
+    expect(ack('go-1')).toMatchObject({
+      ok: true,
+      message: "You're live on YouTube.",
+      result: { live: true, destinations: [{ id: 'youtube', platform: 'youtube' }] }
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(starts()).toHaveLength(1)
+    expect(sentTargets(0)).toEqual(['youtube'])
+    expect(
+      (starts()[0]!.params as { streaming: StreamingSettings }).streaming.enabledTargetIds
+    ).toEqual(['youtube'])
+    expect(backend.xPrepareCount).toBe(0)
+    expect(
+      latest()!.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.enabled
+    ).toBe(true)
+    const savedDraft = backend.sentCommands
+      .filter((command) => command.method === 'streamTargets.metadata.update')
+      .at(-1)?.params as { title?: string } | undefined
+    expect(savedDraft?.title).toBe('Building an MCP live')
+
+    // Already live: the same refusal a deck reads.
+    await pushIntent('go-2', {})
+    await waitForObservation(() => ack('go-2') !== undefined)
+    expect(ack('go-2')).toMatchObject({ ok: false, message: "You're already recording or live." })
+    await stop()
+
+    // X fails its platform setup: without allowPartial the agent is told the
+    // dialog's words and nothing starts...
+    backend.xPrepareFailuresRemaining = 1
+    await pushIntent('go-3', {})
+    await waitForObservation(() => ack('go-3') !== undefined)
+    expect(ack('go-3')).toMatchObject({ ok: false })
+    expect(ack('go-3')?.message).toContain("Some destinations couldn't be set up")
+    expect(ack('go-3')?.message).toContain('Ready: YouTube')
+    expect(ack('go-3')?.message).toContain('allowPartial')
+    expect(starts()).toHaveLength(1)
+
+    // ...and with allowPartial it goes live on the ready one, as "Go live on
+    // YouTube" does.
+    await act(async () => {
+      latest()!.core.setCaptureConfig(youtubeAndXOauthStreamCaptureConfig())
+    })
+    await waitForObservation(() => latest()?.core.startBlockedReason === null)
+    backend.xPrepareFailuresRemaining = 1
+    await pushIntent('go-4', { allowPartial: true })
+    await waitForObservation(() => ack('go-4') !== undefined)
+    expect(ack('go-4')).toMatchObject({
+      ok: true,
+      result: { destinations: [{ id: 'youtube' }] }
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(starts()).toHaveLength(2)
+    expect(sentTargets(1)).toEqual(['youtube'])
+    // Never once through the dialog.
+    expect(observations.some((value) => value.core.goLiveConfirmationOpen)).toBe(false)
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
   })
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {

@@ -7,6 +7,7 @@
 // field here, and the Studio fills it in the one place the context is built.
 
 import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import type { HeadlessGoLiveOutcome, HeadlessGoLiveRequest } from '@/lib/go-live-headless'
 import type { BannerSummary } from '../../../../shared/banner-commands'
 import type { ClipLength } from '../../../../shared/clip-lengths'
 
@@ -88,4 +89,8 @@ export interface StudioActionContext {
   applySavedScene?: (id: string) => Promise<boolean>
   /** Each built-in layout's name; `layoutPresetLabel` when left out. */
   layoutLabels?: Readonly<Record<string, string>>
+  // Run the show, PR B (plan 209 S10). Optional: a remote key never reads them.
+  /** Go live without the dialog (D13): the dialog's own preflight, gate and
+   * confirm. A deck's or a phone's `streamStart` never calls it (D2, D19). */
+  goLive?: (request: HeadlessGoLiveRequest) => Promise<HeadlessGoLiveOutcome>
 }

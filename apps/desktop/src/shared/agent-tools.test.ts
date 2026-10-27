@@ -228,7 +228,8 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     const where = Object.fromEntries(
       AGENT_TOOL_CATALOG.tools.map((tool) => [tool.name, tool.runsIn])
     )
-    expect(where).toEqual({
+    // PR B adds tools beside these (their own test below); these stay put.
+    expect(where).toMatchObject({
       get_status: 'backend',
       get_picture: 'backend',
       list_scenes: 'backend',
@@ -254,10 +255,9 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     })
     expect(buddyAgentTools().map((tool) => tool.name)).not.toContain('get_recording')
     expect(buddyAgentTools().map((tool) => tool.name)).not.toContain('open_window')
-    expect(AGENT_TOOL_CATALOG.tools.filter((tool) => tool.onAir).map((tool) => tool.name)).toEqual([
-      'stop',
-      'notify'
-    ])
+    expect(AGENT_TOOL_CATALOG.tools.filter((tool) => tool.onAir).map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(['stop', 'notify'])
+    )
     for (const tool of AGENT_TOOL_CATALOG.tools) {
       expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.rateFamily === 'read')
     }
@@ -269,5 +269,22 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     expect(fields).toEqual(expect.arrayContaining(['viewerText', 'viewerName']))
     expect(fields).not.toContain('messageText')
     expect(fields).not.toContain('authorName')
+  })
+  // Plan 209 PR B, Run the show and Arrange the picture (S10, S11, S11b):
+  // where each runs, D15 (Buddy may use all of them), D11 (only go_live
+  // earns a notice here) and the rate families.
+  it('runs the PR B Run the show and Arrange tools where the plan says', () => {
+    const expected: Record<string, ['backend' | 'studio', string, boolean]> = {
+      go_live: ['studio', 'session', true]
+    }
+    for (const [name, [runsIn, rateFamily, onAir]] of Object.entries(expected)) {
+      const tool = agentTool(name)
+      expect(tool, name).toBeDefined()
+      expect(tool!.runsIn, name).toBe(runsIn)
+      expect(tool!.rateFamily, name).toBe(rateFamily)
+      expect(tool!.onAir, name).toBe(onAir)
+      expect(tool!.buddy, name).toBe(true)
+    }
+    expect(agentTool('go_live')!.notice).toBe('{agent} started the livestream.')
   })
 })

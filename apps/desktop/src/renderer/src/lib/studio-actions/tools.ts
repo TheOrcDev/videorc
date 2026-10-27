@@ -9,6 +9,7 @@
 // from the `notice` the backend puts on the `agents.activity` event.
 
 import { layoutPresetLabel } from '@/lib/layout-labels'
+import { destinationLabel } from '@/lib/platform-copy'
 import { soundboard } from '@/lib/soundboard-store'
 import type { LayoutPreset } from '@/lib/backend'
 import type { AgentToolExecutor } from './agent'
@@ -172,6 +173,38 @@ const openWindow: AgentToolExecutor = async (context, args) => {
   return outcome.ok ? { ok: true, message: 'It is in front.', result: { window } } : outcome
 }
 
+// --- Run the show, PR B (plan 209 S10) -------------------------------------
+
+/** Go live without the dialog (D13). The Studio runs the dialog's own
+ * preflight, gate and confirm; a refusal is the dialog's own sentence. */
+const goLive: AgentToolExecutor = async (context, args) => {
+  if (context.sessionActive) return { ok: false, message: REMOTE_INTENT_COPY.alreadyRunning }
+  if (!context.goLive) return { ok: false, message: REMOTE_INTENT_COPY.unsupported }
+  const destinations = Array.isArray(args.destinations)
+    ? args.destinations.filter((value): value is string => typeof value === 'string')
+    : undefined
+  const outcome = await context.goLive({
+    destinations,
+    title: text(args, 'title'),
+    allowPartial: args.allowPartial === true,
+    withoutCaptions: args.withoutCaptions === true
+  })
+  if (!outcome.ok) return outcome
+  const names = outcome.destinations.map((destination) => destinationLabel(destination.label))
+  return {
+    ok: true,
+    message: `You're live on ${names.join(', ')}.${outcome.recording ? ' Recording too.' : ''}`,
+    result: {
+      live: true,
+      destinations: outcome.destinations.map((destination) => ({
+        ...destination,
+        label: destinationLabel(destination.label)
+      })),
+      recording: outcome.recording
+    }
+  }
+}
+
 /** The notice itself is the Studio's D11 notice, filled from the catalog's
  * `{agent}: {message}` onto the `agents.activity` event; this only checks
  * there is something to show. */
@@ -192,5 +225,7 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   stop_sounds: stopSounds,
   set_highlight: setHighlight,
   open_window: openWindow,
-  notify
+  notify,
+  // PR B (plan 209 S10, S11, S11b)
+  go_live: goLive
 }
