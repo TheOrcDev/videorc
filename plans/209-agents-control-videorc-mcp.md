@@ -20,11 +20,11 @@
 
 | Slice | What                                                               | PR  | State   |
 | ----- | ------------------------------------------------------------------ | --- | ------- |
-| S0    | Drift check, MCP library spike, spec revision recorded             | A   | PLANNED |
-| S1    | The tool catalog: one JSON file, Rust and TS loaders, parity tests | A   | PLANNED |
-| S2    | The Agent role, agents registry, loopback listener, activity log   | A   | PLANNED |
-| S3    | The MCP endpoint: list and call, backend tools, Studio relay       | A   | PLANNED |
-| S4    | `videorc-mcp`, the stdio bridge shipped inside the app             | A   | PLANNED |
+| S0    | Drift check, MCP library spike, spec revision recorded             | A   | DONE    |
+| S1    | The tool catalog: one JSON file, Rust and TS loaders, parity tests | A   | DONE    |
+| S2    | The Agent role, agents registry, loopback listener, activity log   | A   | DONE    |
+| S3    | The MCP endpoint: list and call, backend tools, Studio relay       | A   | DONE    |
+| S4    | `videorc-mcp`, the stdio bridge shipped inside the app             | A   | DONE    |
 | S5    | One Studio action executor for remotes and agents (refactor)       | A   | PLANNED |
 | S6    | First tools: look, plus everything a Stream Deck can do            | A   | PLANNED |
 | S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | PLANNED |
@@ -1006,3 +1006,97 @@ On the packaged app, with a test channel:
    in PR A?
 4. **D11**: notices for the six big actions only. Or one for every agent
    action, or none?
+
+## As built
+
+### S0 (2026-10-27)
+
+- **Drift check**: none of the anchor files changed between `dc1309cb` and
+  the branch base `a0ac3cde`. `origin/main` has since gained #877 (Facebook
+  Live), which touches `main.rs`, `backend.ts` and
+  `backend-rpc-contract.ts` elsewhere. A test merge auto-merges all three;
+  only `plans/README.md` (the plan commit's row) conflicts.
+- **Library**: `rmcp` **3.8.0** (`default-features = false`, features
+  `server` and `transport-streamable-http-server`). It runs inside our axum
+  0.8 router (`nest_service("/mcp", StreamableHttpService)`) on our tokio
+  1.48 with no shim: stateless (`NeverSessionManager`), JSON answers
+  (`with_json_response(true)`), legacy session mode off, a 256 KiB body cap,
+  and our own guard middleware in front. No STOP, no hand-rolled server on
+  the backend side. New crates: `rmcp`, `schemars` 1.2 (+ derive,
+  `dyn-clone`, `ref-cast`, `serde_derive_internals`), `sse-stream`,
+  `tokio-stream`, `tokio-util`, `pastey`, `base64` 0.23; all MIT or
+  Apache-2.0. `pnpm audit:rust` passes (385 crates, no advisory).
+- **Spec revision**: **2025-11-25**, the newest revision with an
+  `initialize` handshake. The bridge answers `initialize` itself and
+  negotiates 2025-11-25, 2025-06-18, 2025-03-26 or 2024-11-05 (any other
+  request gets 2025-11-25); bridge-to-backend requests carry
+  `MCP-Protocol-Version: 2025-06-18`. rmcp also knows 2026-07-28 (no
+  `initialize`, per-request `_meta`); we do not use it.
+- **Annotations and structured output**: both supported end to end. `Tool`
+  carries `title`, `outputSchema` and `annotations` (`readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`); `CallToolResult`
+  carries `structuredContent` and `isError`. The catalog's own fields
+  (`runsIn`, `buddy`, `onAir`, `rateFamily`, `notice`) never reach the wire.
+- **The bridge** (`videorc-mcp`) hand-rolls its stdio loop (about 500
+  lines: newline-delimited JSON-RPC in, `reqwest` to the listener out); it
+  links no rmcp code. Release size on macOS arm64
+  (`CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --bin
+videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
+  with local symbols stripped. The debug build is 6.3 MB.
+- **Release build**: `pnpm package:backend` (Windows, Linux) builds every
+  bin target, so `videorc-mcp` comes along; `pnpm package:backend:macos`
+  names its bins and now adds `--bin videorc-mcp`. The bin is declared in
+  `Cargo.toml` (`[[bin]] name = "videorc-mcp"`) so the shipped file has the
+  hyphen.
+- **Not done in S0**: driving the endpoint with the MCP Inspector and Claude
+  Code by hand. The Rust tests drive `initialize`, `tools/list` and
+  `tools/call` through the real router over HTTP, and the bridge's tests
+  answer offline and forward to a listener; S9's `smoke:agent-mcp` and the
+  owner acceptance (step 1) cover the real clients.
+
+### S1 to S4
+
+- **Catalog** (`protocol-fixtures/agent-tools.json`): `add_marker` and
+  `set_banner` (backend), `notify` (studio). Fields per tool: `name`,
+  `title`, `description`, `inputSchema`, `outputSchema`, `annotations`,
+  `runsIn`, `buddy`, `onAir`, `rateFamily` (`read`, `action`, `chat`,
+  `removal`, `session`), `notice` (null unless `onAir`). Both loaders
+  (`agent_tools.rs`, `shared/agent-tools.ts`) reject unknown fields, schema
+  keywords outside the subset, names that are not snake_case, duplicates,
+  more than 45 tools and descriptions outside 40 to 400 characters. The
+  "every studio tool has exactly one renderer executor" parity test is S6's.
+- **Backend tool executors**: `agent_call::backend_executor` (a `match` on
+  the tool name); a test holds it to the catalog's `runsIn: backend` list.
+- **Role and admission**: `BackendRole::Agent` is refused every websocket
+  method first, before the smoke-method branches; `/ws` never authenticates
+  an agent token (`authenticate_backend_token` knows only the renderer and
+  admin tokens). `agent.intent.ack` and `agent.surface.publish` are
+  renderer-only (`MethodAdmissionError::RendererOnly`).
+- **Registry**: agents live in the secret store (`agents.registry`) as id,
+  name, client, SHA-256 token hash, created and last used. Tokens are
+  `vrc_agent_` plus 64 hex characters and exist in the clear only in
+  `agents.create`'s answer. At most 16 agents.
+- **Events**: `agents.status`, `agents.activity` and `agent.intent` reach
+  renderer sockets only (`ConnectionEventFilter.renderer`, set from the role
+  and out of reach of `events.setIncluded`).
+- **Listener**: 127.0.0.1, the persisted port first, then 7440 to 7449, an
+  explicit `bindError` when all are busy. Guards in order: Host (421),
+  Origin (403), POST only (405), Bearer (401), Agents off while draining
+  (503). Hardened headers, never a CORS header.
+- **Discovery**: `agents.json` next to the database (macOS
+  `~/Library/Application Support/Videorc/agents.json`, Windows
+  `%APPDATA%\Videorc\agents.json`, Linux `~/.videorc/agents.json`), 0600,
+  `{protocol, pid, enabled, port?}`. Written at backend start and on every
+  switch, removed at shutdown.
+- **Bridge environment**: `VIDEORC_AGENT_TOKEN` (required for calls),
+  `VIDEORC_AGENTS_DISCOVERY` (the file's path; else beside
+  `VIDEORC_DATABASE_PATH`, else the default above), `VIDEORC_APP_PATH`
+  (Linux launcher override), `VIDEORC_MCP_DEBUG` (more stderr).
+- **Packaging**: `extraResources` on macOS, Windows and Linux. macOS has no
+  `binaries` list in `electron-builder.yml`: `@electron/osx-sign` signs every
+  Mach-O under `Contents/Resources`, and `sign-macos-local-app.mjs`, the
+  release entitlement check and the performance payload name the bridge
+  explicitly. Windows: the signing job Authenticode-signs every `*.exe`
+  under `win-unpacked` and checks each signature; the unsigned staging
+  manifest now requires `resources/videorc-mcp.exe`, so that pass provably
+  covers it. Not yet run: a packaged, signed build (the orchestrator's).

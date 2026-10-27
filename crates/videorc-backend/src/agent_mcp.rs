@@ -804,9 +804,10 @@ impl rmcp::ServerHandler for VideorcMcp {
         )
         .with_instructions(catalog.instructions.clone())
         .with_server_info(
+            // The app's own version (the crate stays at 0.9.0).
             rmcp::model::Implementation::new(
                 catalog.server_name.clone(),
-                env!("CARGO_PKG_VERSION"),
+                crate::performance_check::desktop_app_version(),
             )
             .with_title(catalog.server_title.clone()),
         )
