@@ -47,6 +47,37 @@ export async function configureWindowsD3d11RendererSources(smokeCommand, screenI
   return state
 }
 
+/**
+ * The renderer's capture config alone does not retire the backend's committed
+ * camera scene; a scene with a camera and no camera frames marks every
+ * preview frame source-stalled, so the presenter never claims.
+ */
+export function windowsD3d11ScreenOnlyLayoutIntent({ intentId, screenId, video }) {
+  return {
+    intentId,
+    sources: { screenId, testPattern: false },
+    layout: {
+      layoutPreset: 'screen-only',
+      cameraTransformMode: 'preset',
+      cameraTransform: null,
+      cameraCorner: 'bottom-right',
+      cameraSize: 'medium',
+      cameraShape: 'rectangle',
+      cameraMargin: 32,
+      cameraFit: 'fill',
+      cameraMirror: false,
+      cameraZoom: 100,
+      cameraOffsetX: 0,
+      cameraOffsetY: 0,
+      sideBySideSplit: '70-30',
+      sideBySideCameraSide: 'right'
+    },
+    video,
+    background: null,
+    protectedOverlayWindowIds: []
+  }
+}
+
 /** Before its first device refresh the renderer does not know the screen yet. */
 export function windowsD3d11HarnessScreenNotListed(error) {
   return /could not select available screen/.test(String(error?.message ?? error))
@@ -68,15 +99,31 @@ export async function configureWindowsD3d11ProbeSources({
       )
     }
     const deadline = Date.now() + timeoutMs
+    let state
     for (;;) {
       try {
-        await configureWindowsD3d11RendererSources(smokeCommand, screenId)
-        return screenId
+        state = await configureWindowsD3d11RendererSources(smokeCommand, screenId)
+        break
       } catch (error) {
         if (!windowsD3d11HarnessScreenNotListed(error) || Date.now() >= deadline) throw error
         await new Promise((resolve) => setTimeout(resolve, 250))
       }
     }
+    const intent = windowsD3d11ScreenOnlyLayoutIntent({
+      intentId: Date.now(),
+      screenId,
+      video: state.video
+    })
+    const status = await request(ws, timeoutMs, 'scene.layout.apply_preview', intent)
+    if (
+      status?.intentId !== intent.intentId ||
+      status?.compositorStatus?.sceneLayout?.layoutPreset !== 'screen-only'
+    ) {
+      throw new Error(
+        `Backend did not commit ScreenOnly layout intent ${intent.intentId}: ${JSON.stringify(status)}`
+      )
+    }
+    return screenId
   } finally {
     ws.close()
   }

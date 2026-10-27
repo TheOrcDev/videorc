@@ -4,7 +4,8 @@ import test from 'node:test'
 import {
   windowsD3d11HarnessScreenNotListed,
   windowsD3d11HarnessStateFailures,
-  windowsD3d11ProbeScreenId
+  windowsD3d11ProbeScreenId,
+  windowsD3d11ScreenOnlyLayoutIntent
 } from './windows-d3d11-preview-sources.mjs'
 
 const SCREEN = 'screen:dxgi:0000000000010e89:0'
@@ -58,4 +59,14 @@ test('only a not-yet-listed screen is retried', () => {
     ),
     false
   )
+})
+
+test('the layout intent commits the probe screen alone in ScreenOnly', () => {
+  const video = { preset: 'p1080', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+  const intent = windowsD3d11ScreenOnlyLayoutIntent({ intentId: 7, screenId: SCREEN, video })
+  assert.equal(intent.intentId, 7)
+  assert.deepEqual(intent.sources, { screenId: SCREEN, testPattern: false })
+  assert.equal(intent.layout.layoutPreset, 'screen-only')
+  assert.equal(intent.video, video)
+  assert.equal(intent.background, null)
 })

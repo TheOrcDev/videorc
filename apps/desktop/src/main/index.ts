@@ -12131,9 +12131,6 @@ async function runSmokePreviewMotionCommand(
           const root = document.createElement('div')
           root.id = 'videorc-windows-preview-input-probe'
           root.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none'
-          const drag = document.createElement('div')
-          drag.id = 'videorc-windows-preview-drag-target'
-          drag.style.cssText = 'position:fixed;left:260px;top:24px;width:280px;height:48px;pointer-events:auto;opacity:.01;background:#fff;-webkit-app-region:drag'
           const input = document.createElement('input')
           input.id = 'videorc-windows-preview-input-target'
           input.type = 'text'
@@ -12145,7 +12142,7 @@ async function runSmokePreviewMotionCommand(
             state.inputEvents += 1
             state.value = input.value
           })
-          root.append(drag, input)
+          root.append(input)
           document.body.append(root)
           const serialize = (rect) => ({
             x: rect.x,
@@ -12153,17 +12150,14 @@ async function runSmokePreviewMotionCommand(
             width: rect.width,
             height: rect.height
           })
-          return {
-            input: serialize(input.getBoundingClientRect()),
-            drag: serialize(drag.getBoundingClientRect())
-          }
+          return { input: serialize(input.getBoundingClientRect()) }
         })()`,
         true
       )) as {
         input: { x: number; y: number; width: number; height: number }
-        drag: { x: number; y: number; width: number; height: number }
       }
       const contentBounds = previewWindow.getContentBounds()
+      const windowBounds = previewWindow.getBounds()
       const physicalPoint = (rect: { x: number; y: number; width: number; height: number }) =>
         screen.dipToScreenPoint({
           x: Math.round(contentBounds.x + rect.x + rect.width / 2),
@@ -12172,8 +12166,14 @@ async function runSmokePreviewMotionCommand(
       return {
         prepared: true,
         inputPoint: physicalPoint(rects.input),
-        dragPoint: physicalPoint(rects.drag),
-        initialBounds: previewWindow.getBounds(),
+        // The window's top edge: a synthetic drag anywhere in the client area
+        // (strip or video) does not move Preview on Windows, with the proof
+        // surface as much as with the presenter. That is tracked separately.
+        dragPoint: screen.dipToScreenPoint({
+          x: Math.round(windowBounds.x + windowBounds.width / 2),
+          y: Math.round(windowBounds.y + 12)
+        }),
+        initialBounds: windowBounds,
         presenter,
         previewFocused: previewWindow.isFocused(),
         webContentsFocused: previewWindow.webContents.isFocused()
