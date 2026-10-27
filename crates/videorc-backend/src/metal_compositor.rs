@@ -1224,6 +1224,53 @@ impl MetalCompositorTargetPixelBuffer {
         let iosurface = CVPixelBufferGetIOSurface(Some(self.pixel_buffer.as_ref()))?;
         Some(iosurface.id())
     }
+
+    /// Plan 209 S6 (`get_picture`): the target's pixels as tightly packed,
+    /// top-down BGRA rows. Holds the slot in flight while it reads, so the
+    /// compositor never renders into the rows being copied.
+    pub fn copy_bgra(&self) -> Option<Vec<u8>> {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let _in_flight = self.begin_in_flight();
+        let pixel_buffer: &CVPixelBuffer = &self.pixel_buffer;
+        let row_bytes = self.width.checked_mul(4)?;
+        let expected_len = row_bytes.checked_mul(self.height)?;
+        // SAFETY: a retained pixel buffer, locked read-only for the copy and
+        // unlocked on every path below.
+        if unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly) }
+            != 0
+        {
+            return None;
+        }
+        let copied = (|| {
+            let stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
+            let base = CVPixelBufferGetBaseAddress(pixel_buffer);
+            if stride < row_bytes || base.is_null() {
+                return None;
+            }
+            let mut bytes = vec![0_u8; expected_len];
+            for row in 0..self.height {
+                // SAFETY: `row < height` and `stride >= row_bytes`, inside
+                // the locked buffer's `stride * height` bytes.
+                let source = unsafe {
+                    std::slice::from_raw_parts(
+                        base.cast::<u8>().add(row.checked_mul(stride)?),
+                        row_bytes,
+                    )
+                };
+                let start = row * row_bytes;
+                bytes[start..start + row_bytes].copy_from_slice(source);
+            }
+            Some(bytes)
+        })();
+        // SAFETY: paired with the lock above.
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
+        }
+        copied
+    }
 }
 
 // SAFETY: The wrapper owns a retained CoreVideo pixel buffer whose IOSurface-backed storage

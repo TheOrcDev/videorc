@@ -40,7 +40,7 @@ import {
   type SessionStopConfirmation,
   type SessionStopOrigin
 } from '@/lib/session-stop'
-import type { AppExitKind } from '@/lib/backend'
+import type { AgentsStatus, AppExitKind } from '@/lib/backend'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -119,8 +119,9 @@ import type {
   GlobalShortcutContext,
   GlobalShortcutsRegistrar
 } from '@/lib/global-shortcuts'
+import type { AgentSurfaceInput, AgentSurfacePublisher } from '@/lib/agent-surface'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
-import type { StudioActionContext } from '@/lib/studio-actions'
+import type { AgentIntent, AgentIntentOutcome, StudioActionContext } from '@/lib/studio-actions'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
   commentsRefreshRevisionIsCurrent,
@@ -2404,6 +2405,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
+  // Plan 209 S6: the agents' projection, the same lazy latest-value bridge.
+  const agentSurfacePublisherRef = useRef<AgentSurfacePublisher | null>(null)
+  const agentSurfaceInputRef = useRef<AgentSurfaceInput | null>(null)
   const globalShortcutsRegistrarRef = useRef<GlobalShortcutsRegistrar | null>(null)
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -7276,10 +7280,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch((error: unknown) => {
         if (!disposed) reportError(error)
       })
+    // Plan 209 S6: the agents' projection, published only while Agents is on.
+    let agentSurfaceConnected = false
+    let agentsEnabled = false
+    let agentSurfacePublisher: AgentSurfacePublisher | null = null
+    void import('@/lib/agent-surface')
+      .then(({ AgentSurfacePublisher }) => {
+        if (disposed) return
+        agentSurfacePublisher = new AgentSurfacePublisher()
+        agentSurfacePublisherRef.current = agentSurfacePublisher
+        agentSurfacePublisher.attach(nextClient)
+        agentSurfacePublisher.setEnabled(agentsEnabled)
+        const input = agentSurfaceInputRef.current
+        if (input) agentSurfacePublisher.sync(input)
+        if (agentSurfaceConnected) agentSurfacePublisher.markConnected()
+      })
+      .catch((error: unknown) => {
+        if (!disposed) reportError(error)
+      })
+    const noteAgentsEnabled = (enabled: boolean): void => {
+      agentsEnabled = enabled
+      agentSurfacePublisher?.setEnabled(enabled)
+    }
     const remoteIntents = createRemoteIntentQueue({
       run: async (payload) => {
         if (!disposed) await handleRemoteIntent(payload)
       },
+      // Plan 209 S5/S6: an agent's tool call, on its own lane.
+      runAgent: (intent) =>
+        disposed
+          ? Promise.resolve({ ok: false, message: "Videorc's Studio went away." })
+          : handleAgentIntent(intent),
       refuseStale: async (payload) => {
         const intentId = (payload as { intentId?: unknown } | null)?.intentId
         if (disposed || typeof intentId !== 'string') return
@@ -7302,6 +7333,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // The backend's remote surface slate is blank on (re)connect.
         remoteSurfaceConnected = true
         remoteSurfacePublisher?.markConnected()
+        agentSurfaceConnected = true
+        agentSurfacePublisher?.markConnected()
+        // Non-fatal: the next `agents.status` event turns the projection on.
+        void nextClient
+          .request<AgentsStatus>('agents.status')
+          .then((status) => noteAgentsEnabled(status.enabled))
+          .catch((error: unknown) => console.warn('[agents] status unavailable', error))
         // Seed the pushed remote-control status; every later change arrives
         // as a remote.control.status event.
         void nextClient
@@ -7321,6 +7359,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         remoteIntents.enqueue(payload).catch((error: unknown) => {
           if (!disposed) reportError(error)
         })
+      }),
+      // Plan 209 S6: an agent's Studio tool, relayed by the backend, runs on
+      // the agents' lane through lib/studio-actions and is always acked: the
+      // agent is waiting on the answer.
+      nextClient.on('agent.intent', (payload) => {
+        const intent = payload as AgentIntent
+        const ack = (outcome: AgentIntentOutcome): Promise<unknown> =>
+          nextClient
+            .request('agent.intent.ack', { intentId: intent.intentId, ...outcome })
+            .catch(() => undefined)
+        remoteIntents.enqueueAgent(intent).then(ack, (error: unknown) => {
+          if (!disposed) reportError(error)
+          return ack({ ok: false, message: 'Something went wrong in Videorc.' })
+        })
+      }),
+      nextClient.on('agents.status', (payload) => {
+        noteAgentsEnabled((payload as AgentsStatus).enabled)
       }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
@@ -8642,6 +8697,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       remoteSurfacePublisher?.detach()
       if (remoteSurfacePublisherRef.current === remoteSurfacePublisher) {
         remoteSurfacePublisherRef.current = null
+      }
+      agentSurfacePublisher?.detach()
+      if (agentSurfacePublisherRef.current === agentSurfacePublisher) {
+        agentSurfacePublisherRef.current = null
       }
       setRemoteControlStatus(null)
       soundboard.disconnect(nextClient)
@@ -16881,6 +16940,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       },
       banners: bannerListRef.current ?? NO_BANNERS,
+      // Plan 209 S6: what agent tools read beside a deck key's fields.
+      sessionLive: sessionIsLive(recordingRef.current),
+      savedScenes: sceneLibrary.scenes,
+      applySavedScene: (id) => applySavedScene(id),
       markClip: async (seconds) => {
         try {
           const event = await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
@@ -16918,6 +16981,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       reportError(error)
     }
   })
+
+  // Plan 209 S6: an agent's Studio tool call, through the same context as a
+  // deck key. Resolves to the body of its `agent.intent.ack`.
+  const handleAgentIntent = useEffectEvent(
+    async (intent: AgentIntent): Promise<AgentIntentOutcome> => {
+      const context = studioActionContext()
+      if (!context) return { ok: false, message: "Videorc's Studio isn't connected yet." }
+      if (intent.tool === 'start_recording') noteRecordClick('start')
+      else if (intent.tool === 'stop') noteRecordClick('stop')
+      const { executeAgentIntent } = await import('@/lib/studio-actions')
+      return executeAgentIntent(intent, context)
+    }
+  )
 
   // The state projection deck keys render (types in lib/remote-surface.ts).
   // Minimal by design and the ONLY payload remote sockets receive — never
@@ -16960,6 +17036,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // reconnect, and retries failures on its own timeline — no effect.
   remoteSurfaceValuesRef.current = remoteSurfaceValues
   remoteSurfacePublisherRef.current?.syncValues(remoteSurfaceValues)
+
+  // Plan 209 S6: the agents' projection (lib/agent-surface.ts), handed over
+  // the same way. Only references here: the publisher builds the allowlisted
+  // surface after the commit, and only while Agents is on.
+  const agentSurfaceInput: AgentSurfaceInput = {
+    recordBlockedReason,
+    liveStreamBlockedReason,
+    layoutPreset: captureConfig.layout.layoutPreset,
+    layoutPresets: remoteSurfaceValues[10],
+    activeSavedSceneId,
+    savedSceneModified,
+    savedScenes: sceneLibrary.scenes,
+    microphoneMuted: remoteSurfaceMicrophoneMuted,
+    sources: captureConfig.sources,
+    devices: deviceList.devices,
+    systemAudioStatus,
+    systemAudioShown,
+    activeTakeoverId: activeScreen?.id ?? null,
+    takeovers: screens,
+    background: activeSceneBackground,
+    captionsEnabled: captureConfig.captions.enabled,
+    captionsStatus,
+    cohostSettings,
+    cohostState,
+    streaming: captureConfig.streaming,
+    streamMetadataDraft,
+    windows: {
+      notes: notesWindow.open,
+      streamManager: commentsWindow.open,
+      preview: previewWindow.open
+    }
+  }
+  agentSurfaceInputRef.current = agentSurfaceInput
+  agentSurfacePublisherRef.current?.sync(agentSurfaceInput)
 
   const remoteControlRequest = useCallback(
     async (method: string): Promise<RemoteControlStatus | null> => {

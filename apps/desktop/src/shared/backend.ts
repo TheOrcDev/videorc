@@ -4770,6 +4770,13 @@ export interface AgentActivityEntry {
   summary: string
   outcome: AgentActivityOutcome
   message?: string
+  /**
+   * D11 (plan 209 S6): on the `agents.activity` event only, the filled
+   * catalog notice of a successful onAir call ("Claude Desktop ended the
+   * livestream."). The Studio shows it; `agents.activity.list` rows never
+   * carry it.
+   */
+  notice?: string
 }
 
 export interface AgentsActivityListParams {

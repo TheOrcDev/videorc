@@ -1251,7 +1251,10 @@ const agentActivityEntrySchema = objectSchema(
     tool: agentToolNameSchema,
     summary: stringSchema({ maxLength: 512 }),
     outcome: agentActivityOutcomeSchema,
-    message: optionalSchema(stringSchema({ maxLength: 2048 }))
+    message: optionalSchema(stringSchema({ maxLength: 2048 })),
+    // Plan 209 S6 (D11): the filled notice of a successful onAir call, on
+    // the `agents.activity` event only; stored rows never carry it.
+    notice: optionalSchema(stringSchema({ minLength: 1, maxLength: 2048 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<AgentActivityEntry>

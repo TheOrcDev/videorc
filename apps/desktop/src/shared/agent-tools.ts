@@ -42,7 +42,8 @@ export interface AgentTool {
   /** D11: the Studio shows a notice naming the agent when it runs. */
   onAir: boolean
   rateFamily: AgentRateFamily
-  /** The notice sentence, with `{agent}` and `{argument}` placeholders. */
+  /** The notice sentence, with `{agent}` and `{field}` placeholders filled
+   * from the call's arguments, then its structured result (`agentToolNotice`). */
   notice: string | null
 }
 
@@ -302,12 +303,24 @@ export function validateAgentToolArguments(tool: AgentTool, args: unknown): stri
   return validateAgentToolValue(tool.inputSchema, args, 'arguments')
 }
 
-/** D11: the notice sentence with the agent's name and the call's arguments filled in. */
-export function agentToolNotice(tool: AgentTool, agentName: string, args: unknown): string | null {
+/**
+ * D11: the notice sentence with the agent's name filled in, then every
+ * `{field}` from the call's arguments and, after them, its structured result
+ * (`stop` names what it stopped). The Rust twin is `AgentTool::fill_notice`;
+ * the backend fills the same sentence onto the `agents.activity` event as
+ * `notice`.
+ */
+export function agentToolNotice(
+  tool: AgentTool,
+  agentName: string,
+  args: unknown,
+  result?: unknown
+): string | null {
   if (tool.notice === null) return null
   let text = tool.notice.replaceAll('{agent}', agentName)
-  if (isRecord(args)) {
-    for (const [key, value] of Object.entries(args)) {
+  for (const fields of [args, result]) {
+    if (!isRecord(fields)) continue
+    for (const [key, value] of Object.entries(fields)) {
       const placeholder = `{${key}}`
       if (!text.includes(placeholder)) continue
       const shown = typeof value === 'string' ? value : value === null ? '' : JSON.stringify(value)

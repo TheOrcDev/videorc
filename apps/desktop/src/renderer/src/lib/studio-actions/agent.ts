@@ -5,6 +5,7 @@
 // subscription in hooks/use-studio.tsx does, with the catalog's notice.
 
 import type { StudioActionContext, StudioActionFields, StudioActionOutcome } from './context'
+import { STUDIO_AGENT_TOOLS } from './tools'
 
 /** One tool call as the backend relays it. */
 export interface AgentIntent {
@@ -37,8 +38,9 @@ export const AGENT_INTENT_COPY = {
   failed: 'Something went wrong in Videorc.'
 } as const
 
-/** The Studio's tools by catalog name. S6 fills it; until then every call is refused. */
-export const AGENT_TOOL_EXECUTORS: Readonly<Record<string, AgentToolExecutor>> = {}
+/** The Studio's tools by catalog name (tools.ts); a call to any other name
+ * is refused. */
+export const AGENT_TOOL_EXECUTORS: Readonly<Record<string, AgentToolExecutor>> = STUDIO_AGENT_TOOLS
 
 /** Runs one agent intent to the body of its ack. Never throws. */
 export async function executeAgentIntent(

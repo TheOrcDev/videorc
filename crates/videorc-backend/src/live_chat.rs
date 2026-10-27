@@ -1886,6 +1886,11 @@ pub struct FakeChatConfig {
     /// "Test Viewer N", so a smoke can say a name ("coders_x", plan 140 S9).
     #[serde(default)]
     pub authors: Vec<String>,
+    /// Message texts to rotate through (`texts[seq % len]`) instead of "Fake
+    /// chat message #N", so a smoke can seed a line (plan 209 S9 reads an
+    /// injection attempt back as `viewerText`).
+    #[serde(default)]
+    pub texts: Vec<String>,
     /// A scripted removal outcome for this destination (plan 140 S9). Absent:
     /// the removal mirrors `send` (sent removes, failed fails, timeout hangs).
     #[serde(default)]
@@ -3965,10 +3970,13 @@ fn fake_message_for(config: &FakeChatConfig, session_id: &str, seq: u32) -> Live
         message.author_id = Some(format!("fake-author-{}", author.to_lowercase()));
         message.author_name = author.clone();
     }
+    if !config.texts.is_empty() {
+        message.message_text = config.texts[seq as usize % config.texts.len()].clone();
+    }
     message
 }
 
-fn fake_message(
+pub(crate) fn fake_message(
     session_id: &str,
     platform: StreamPlatform,
     target_id: Option<&str>,

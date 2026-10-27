@@ -82,6 +82,18 @@ describe('Agents contract (plan 209)', () => {
     expect(() =>
       validateBackendEventPayload('agents.activity', { ...entry, outcome: 'maybe' })
     ).toThrow()
+    // S6 (D11): a successful onAir call's notice rides the event.
+    const noticed = {
+      ...entry,
+      tool: 'stop',
+      summary: '',
+      message: 'The livestream ended.',
+      notice: 'Claude Desktop ended the livestream.'
+    }
+    expect(validateBackendEventPayload('agents.activity', noticed)).toEqual(noticed)
+    expect(() =>
+      validateBackendEventPayload('agents.activity', { ...noticed, notice: null })
+    ).toThrow()
 
     const intent = {
       intentId: 'ai-1',

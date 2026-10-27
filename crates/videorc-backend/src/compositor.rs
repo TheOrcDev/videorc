@@ -4023,6 +4023,111 @@ pub(crate) async fn test_install_source_iso_frame_stores(
 /// startup barrier to seed from.
 pub const COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN: usize = 8;
 
+/// Plan 209 S6 (`get_picture`, D8): the program picture, the latest frame
+/// the compositor published, as top-down RGB. CPU frames carry planar
+/// YUV 4:2:0 (BT.709, video range); a Metal frame carries a BGRA target.
+/// `None` while nothing composes, and on a path whose frames carry no pixels
+/// the backend can read (the metadata-only preview, a D3D11 texture).
+pub(crate) struct ProgramPicture {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
+pub(crate) async fn latest_program_picture(state: &AppState) -> Option<ProgramPicture> {
+    let frame = {
+        let compositor = state.compositor.lock().await;
+        compositor
+            .frame_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()?
+    };
+    tokio::task::spawn_blocking(move || program_picture_from_frame(&frame))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn program_picture_from_frame(
+    frame: &FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>,
+) -> Option<ProgramPicture> {
+    let (width, height) = (frame.width, frame.height);
+    match frame.pixel_format {
+        CompositorPixelFormat::Yuv420p {
+            export: CompositorFrameExportKind::CpuYuv420p,
+        } => yuv420p_to_rgb(width, height, &frame.bytes).map(|rgb| ProgramPicture {
+            width,
+            height,
+            rgb,
+        }),
+        CompositorPixelFormat::Yuv420p {
+            export: CompositorFrameExportKind::MetalIosurfaceTarget { .. },
+        } => {
+            #[cfg(target_os = "macos")]
+            {
+                let target = frame.metadata.metal_target.as_ref()?;
+                let (width, height) = (target.width() as u32, target.height() as u32);
+                let bgra = target.copy_bgra()?;
+                Some(ProgramPicture {
+                    width,
+                    height,
+                    rgb: bgra_to_rgb(&bgra),
+                })
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        }
+        CompositorPixelFormat::D3d11Bgra8 { .. } | CompositorPixelFormat::D3d11Nv12 { .. } => None,
+    }
+}
+
+/// Planar I420 (BT.709, video range) to packed RGB. `None` when the bytes
+/// are shorter than the planes.
+pub(crate) fn yuv420p_to_rgb(width: u32, height: u32, bytes: &[u8]) -> Option<Vec<u8>> {
+    let (width, height) = (width as usize, height as usize);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let luma_len = width.checked_mul(height)?;
+    let chroma_len = chroma_width.checked_mul(chroma_height)?;
+    if bytes.len() < luma_len + 2 * chroma_len {
+        return None;
+    }
+    let (luma, chroma) = bytes.split_at(luma_len);
+    let (cb_plane, cr_plane) = chroma.split_at(chroma_len);
+    let mut rgb = vec![0_u8; luma_len * 3];
+    for y in 0..height {
+        for x in 0..width {
+            let luma_value = f32::from(luma[y * width + x]) - 16.0;
+            let chroma_index = (y / 2) * chroma_width + x / 2;
+            let cb = f32::from(cb_plane[chroma_index]) - 128.0;
+            let cr = f32::from(cr_plane[chroma_index]) - 128.0;
+            let scaled = 1.164_383_6 * luma_value;
+            let out = (y * width + x) * 3;
+            rgb[out] = (scaled + 1.792_741_1 * cr).round().clamp(0.0, 255.0) as u8;
+            rgb[out + 1] = (scaled - 0.213_248_6 * cb - 0.532_909_3 * cr)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+            rgb[out + 2] = (scaled + 2.112_401_8 * cb).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Some(rgb)
+}
+
+/// Packed BGRA to packed RGB (alpha dropped).
+pub(crate) fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);
+    for pixel in bgra.chunks_exact(4) {
+        rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
+    rgb
+}
+
 pub async fn compositor_latest_frame_evidence(state: &AppState) -> Option<CompositorFrameEvidence> {
     state.compositor.lock().await.frame_evidence.back().copied()
 }

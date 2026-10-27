@@ -218,5 +218,56 @@ describe('the agent tool catalog (plan 209 S1)', () => {
       })
     ).toBe('Claude Desktop: the sponsor banner is up')
     expect(agentToolNotice(agentTool('add_marker')!, 'Claude', {})).toBeNull()
+    // `stop` names what it stopped from its result, like the Rust filler.
+    expect(agentToolNotice(agentTool('stop')!, 'Cursor', {}, { stopped: 'livestream' })).toBe(
+      'Cursor ended the livestream.'
+    )
+  })
+
+  it('runs every PR A tool where the plan says, with D15 and D11 kept', () => {
+    const where = Object.fromEntries(
+      AGENT_TOOL_CATALOG.tools.map((tool) => [tool.name, tool.runsIn])
+    )
+    expect(where).toEqual({
+      get_status: 'backend',
+      get_picture: 'backend',
+      list_scenes: 'backend',
+      list_sources: 'backend',
+      list_assets: 'backend',
+      read_chat: 'backend',
+      list_destinations: 'backend',
+      list_recordings: 'backend',
+      get_recording: 'backend',
+      start_recording: 'studio',
+      stop: 'studio',
+      save_clip: 'backend',
+      add_marker: 'backend',
+      switch_scene: 'studio',
+      set_audio: 'studio',
+      set_banner: 'backend',
+      set_takeover: 'studio',
+      play_sound: 'studio',
+      stop_sounds: 'studio',
+      set_highlight: 'studio',
+      open_window: 'studio',
+      notify: 'studio'
+    })
+    expect(buddyAgentTools().map((tool) => tool.name)).not.toContain('get_recording')
+    expect(buddyAgentTools().map((tool) => tool.name)).not.toContain('open_window')
+    expect(AGENT_TOOL_CATALOG.tools.filter((tool) => tool.onAir).map((tool) => tool.name)).toEqual([
+      'stop',
+      'notify'
+    ])
+    for (const tool of AGENT_TOOL_CATALOG.tools) {
+      expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.rateFamily === 'read')
+    }
+    // D18: chat comes back under viewer-named fields only.
+    const chat = agentTool('read_chat')!.outputSchema as {
+      properties: { messages: { items: { properties: Record<string, unknown> } } }
+    }
+    const fields = Object.keys(chat.properties.messages.items.properties)
+    expect(fields).toEqual(expect.arrayContaining(['viewerText', 'viewerName']))
+    expect(fields).not.toContain('messageText')
+    expect(fields).not.toContain('authorName')
   })
 })

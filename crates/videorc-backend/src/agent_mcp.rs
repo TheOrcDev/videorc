@@ -395,6 +395,11 @@ pub fn activity(state: &AppState, params: ActivityListParams) -> Result<Activity
 
 /// Every action lands here: the row, the `agents.activity` event and the
 /// agent's last action for Settings.
+///
+/// `notice` (D11) is the filled catalog sentence of a successful `onAir`
+/// call ("Claude Desktop ended the livestream."). It rides the event only,
+/// never the stored row: the Studio shows it once, as it happens, and the
+/// Activity list already says what ran.
 pub fn log_activity(
     state: &AppState,
     agent: &AgentIdentity,
@@ -402,6 +407,7 @@ pub fn log_activity(
     summary: String,
     outcome: AgentActivityOutcome,
     message: Option<String>,
+    notice: Option<String>,
 ) {
     let entry = AgentActivityEntry {
         id: uuid::Uuid::new_v4().to_string(),
@@ -424,7 +430,16 @@ pub fn log_activity(
             outcome,
         },
     );
-    state.emit_event("agents.activity", entry);
+    let notice = notice
+        .filter(|_| outcome == AgentActivityOutcome::Ok)
+        .map(|text| clip_chars(&text, ACTIVITY_MESSAGE_MAX_CHARS));
+    match (notice, serde_json::to_value(&entry)) {
+        (Some(notice), Ok(serde_json::Value::Object(mut fields))) => {
+            fields.insert("notice".to_string(), serde_json::Value::String(notice));
+            state.emit_event("agents.activity", serde_json::Value::Object(fields));
+        }
+        _ => state.emit_event("agents.activity", entry),
+    }
 }
 
 /// The strict contract bounds an activity row (`backend-rpc-contract.ts`):
@@ -1295,6 +1310,7 @@ mod tests {
                 format!("{{\"message\":\"{index}\"}}"),
                 AgentActivityOutcome::Ok,
                 None,
+                None,
             );
         }
         let page = activity(&state, ActivityListParams::default()).unwrap();
@@ -1388,6 +1404,7 @@ mod tests {
             String::new(),
             AgentActivityOutcome::Refused,
             Some("z".repeat(5_000)),
+            Some("never shown for a refusal".to_string()),
         );
         let row = &activity(&state, ActivityListParams::default())
             .unwrap()

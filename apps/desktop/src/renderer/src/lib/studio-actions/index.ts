@@ -12,9 +12,9 @@
 //   `remote.intent.ack`, through `REMOTE_INTENT_EXECUTORS`, keyed by kind.
 // - `executeAgentIntent` (agent.ts): an agent's `{intentId, agentId,
 //   agentName, tool, args}` to `{ok, message?, result?}`, through
-//   `AGENT_TOOL_EXECUTORS`, keyed by the catalog's tool name. S6 fills that
-//   record (`start_recording: recordStart`, ...; a remote executor fits as it
-//   is, a tool that answers adds `result`), hands the agents' lane of
+//   `AGENT_TOOL_EXECUTORS`, keyed by the catalog's tool name: the Studio
+//   tools in tools.ts (S6), each a remote executor plus the sentence and
+//   result the agent reads. hooks/use-studio.tsx hands the agents' lane of
 //   lib/remote-intent-queue.ts a `runAgent` that builds the context and calls
 //   `executeAgentIntent`, and acks what the lane resolves with
 //   `agent.intent.ack`.
@@ -53,4 +53,5 @@ export { REMOTE_INTENT_EXECUTORS, executeRemoteIntent } from './remote'
 export { sceneApply, takeoverHide, takeoverShow } from './scene'
 export { recordStart, recordStop, recordToggle, streamStart, streamStop } from './session'
 export { soundPlay, soundStop } from './sounds'
+export { AGENT_TOOL_COPY, STUDIO_AGENT_TOOLS } from './tools'
 export { windowFront } from './windows'

@@ -7,6 +7,7 @@
 
 mod account;
 mod agent_call;
+mod agent_look;
 mod agent_mcp;
 mod agent_registry;
 mod agent_tools;

@@ -34,6 +34,9 @@ pub struct ToolOutcome {
     pub outcome: AgentActivityOutcome,
     pub text: String,
     pub structured: Option<Value>,
+    /// MCP image content after the text (`get_picture`): base64 and its
+    /// MIME type.
+    pub image: Option<(String, String)>,
 }
 
 impl ToolOutcome {
@@ -42,35 +45,41 @@ impl ToolOutcome {
             outcome: AgentActivityOutcome::Ok,
             text: text.into(),
             structured,
+            image: None,
         }
     }
 
     pub fn refused(text: impl Into<String>) -> Self {
-        Self {
-            outcome: AgentActivityOutcome::Refused,
-            text: text.into(),
-            structured: None,
-        }
+        Self::without_result(AgentActivityOutcome::Refused, text)
     }
 
     pub fn failed(text: impl Into<String>) -> Self {
-        Self {
-            outcome: AgentActivityOutcome::Failed,
-            text: text.into(),
-            structured: None,
-        }
+        Self::without_result(AgentActivityOutcome::Failed, text)
     }
 
     pub fn timeout(text: impl Into<String>) -> Self {
+        Self::without_result(AgentActivityOutcome::Timeout, text)
+    }
+
+    fn without_result(outcome: AgentActivityOutcome, text: impl Into<String>) -> Self {
         Self {
-            outcome: AgentActivityOutcome::Timeout,
+            outcome,
             text: text.into(),
             structured: None,
+            image: None,
         }
     }
 
+    pub fn with_image(mut self, base64: String, mime_type: &str) -> Self {
+        self.image = Some((base64, mime_type.to_string()));
+        self
+    }
+
     pub fn into_result(self) -> CallToolResult {
-        let content = vec![ContentBlock::text(self.text)];
+        let mut content = vec![ContentBlock::text(self.text)];
+        if let Some((data, mime_type)) = self.image {
+            content.push(ContentBlock::image(data, mime_type));
+        }
         let mut result = if self.outcome == AgentActivityOutcome::Ok {
             CallToolResult::success(content)
         } else {
@@ -91,7 +100,26 @@ pub type BackendExecutor = for<'a> fn(
 /// The backend executors by tool name. Adding a backend tool to the catalog
 /// means adding its arm here; a test holds the two lists together.
 pub fn backend_executor(name: &str) -> Option<BackendExecutor> {
+    use crate::agent_look as look;
     match name {
+        "get_status" => Some(|state, agent, args| Box::pin(look::get_status(state, agent, args))),
+        "get_picture" => Some(|state, agent, args| Box::pin(look::get_picture(state, agent, args))),
+        "list_scenes" => Some(|state, agent, args| Box::pin(look::list_scenes(state, agent, args))),
+        "list_sources" => {
+            Some(|state, agent, args| Box::pin(look::list_sources(state, agent, args)))
+        }
+        "list_assets" => Some(|state, agent, args| Box::pin(look::list_assets(state, agent, args))),
+        "read_chat" => Some(|state, agent, args| Box::pin(look::read_chat(state, agent, args))),
+        "list_destinations" => {
+            Some(|state, agent, args| Box::pin(look::list_destinations(state, agent, args)))
+        }
+        "list_recordings" => {
+            Some(|state, agent, args| Box::pin(look::list_recordings(state, agent, args)))
+        }
+        "get_recording" => {
+            Some(|state, agent, args| Box::pin(look::get_recording(state, agent, args)))
+        }
+        "save_clip" => Some(|state, agent, args| Box::pin(look::save_clip(state, agent, args))),
         "add_marker" => Some(|state, agent, args| Box::pin(add_marker(state, agent, args))),
         "set_banner" => Some(|state, agent, args| Box::pin(set_banner(state, agent, args))),
         _ => None,
@@ -111,12 +139,18 @@ pub async fn call_tool(
         .map(Value::Object)
         .unwrap_or_else(|| json!({}));
     let summary = summarize_arguments(&arguments);
-    let outcome = match agent_tools::catalog().tool(&name) {
-        Some(tool) => run_tool(state, agent, tool, arguments).await,
+    let tool = agent_tools::catalog().tool(&name);
+    let outcome = match tool {
+        Some(tool) => run_tool(state, agent, tool, arguments.clone()).await,
         None => ToolOutcome::refused(format!(
             "Videorc has no tool named `{name}`. Call tools/list for the tools it has."
         )),
     };
+    // D11: a successful onAir call carries its filled notice on the
+    // `agents.activity` event; the Studio shows it.
+    let notice = tool
+        .filter(|tool| tool.on_air && outcome.outcome == AgentActivityOutcome::Ok)
+        .and_then(|tool| tool.fill_notice(&agent.name, &arguments, outcome.structured.as_ref()));
     agent_mcp::log_activity(
         state,
         agent,
@@ -124,6 +158,7 @@ pub async fn call_tool(
         summary,
         outcome.outcome,
         Some(outcome.text.clone()),
+        notice,
     );
     outcome.into_result()
 }
@@ -237,7 +272,7 @@ pub fn summarize_arguments(arguments: &Value) -> String {
     agent_mcp::clip_chars(&text, SUMMARY_MAX_CHARS)
 }
 
-fn clock(seconds: f64) -> String {
+pub(crate) fn clock(seconds: f64) -> String {
     let whole = seconds.max(0.0).round() as u64;
     format!("{}:{:02}", whole / 60, whole % 60)
 }
@@ -253,12 +288,10 @@ async fn add_marker(state: &AppState, _agent: &AgentIdentity, args: Value) -> To
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(str::to_string);
-    let session_id = state
-        .recording
-        .lock()
-        .await
-        .as_ref()
-        .map(|active| active.session_id.clone());
+    // A session that only feeds the Clips ring (plan 181) records nothing a
+    // marker could land in.
+    let status = crate::current_recording_status(state).await;
+    let session_id = status.session_id.filter(|_| !status.replay_only);
     let Some(session_id) = session_id else {
         return ToolOutcome::refused("Start a recording or livestream before making a marker.");
     };
@@ -575,6 +608,7 @@ mod tests {
             seen.expect("the renderer saw the intent")
         });
 
+        let mut events = state.events.subscribe();
         let answer: Value = post(
             address,
             Some(&token),
@@ -615,6 +649,20 @@ mod tests {
             page.entries[0].message.as_deref(),
             Some("Shown: the sponsor banner is up")
         );
+        // D11: the onAir call's filled notice rides the activity event (and
+        // never the stored row).
+        let mut notices = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == "agents.activity" {
+                notices.push(event.payload["notice"].clone());
+            }
+        }
+        assert_eq!(
+            notices,
+            vec![json!("Claude Desktop: the sponsor banner is up")]
+        );
+        let stored = serde_json::to_value(&page.entries[0]).unwrap();
+        assert!(stored.get("notice").is_none());
     }
 
     #[tokio::test]

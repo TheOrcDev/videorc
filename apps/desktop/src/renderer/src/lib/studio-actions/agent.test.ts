@@ -94,8 +94,9 @@ describe('executeAgentIntent', () => {
       })
     }
     expect(startRecording).not.toHaveBeenCalled()
-    // The shipped registry starts empty, so the same refusal until S6 fills it.
-    await expect(executeAgentIntent(intent('start_recording'), context)).resolves.toEqual({
+    // The shipped registry refuses a backend tool the same way: it never
+    // reaches the Studio, and a name Videorc does not know never runs.
+    await expect(executeAgentIntent(intent('get_status'), context)).resolves.toEqual({
       ok: false,
       message: AGENT_INTENT_COPY.unknownTool
     })

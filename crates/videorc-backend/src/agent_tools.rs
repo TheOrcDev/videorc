@@ -56,7 +56,8 @@ pub struct AgentTool {
     /// D11: the Studio shows a notice naming the agent when it runs.
     pub on_air: bool,
     pub rate_family: AgentRateFamily,
-    /// The notice sentence, with `{agent}` and `{argument}` placeholders.
+    /// The notice sentence, with `{agent}` and `{field}` placeholders filled
+    /// from the call's arguments, then its structured result (`fill_notice`).
     pub notice: Option<String>,
 }
 
@@ -193,6 +194,37 @@ impl AgentTool {
     /// the argument so an agent can fix the call.
     pub fn validate_arguments(&self, arguments: &Value) -> Result<(), String> {
         validate_value(&self.input_schema, arguments, "arguments")
+    }
+
+    /// D11: the notice sentence with `{agent}` and every `{field}` filled,
+    /// fields from the call's arguments first, then its structured result
+    /// (`stop` names what it stopped). `None` for a tool without a notice.
+    /// The TypeScript twin is `agentToolNotice`.
+    pub fn fill_notice(
+        &self,
+        agent: &str,
+        arguments: &Value,
+        result: Option<&Value>,
+    ) -> Option<String> {
+        let mut text = self.notice.as_ref()?.replace("{agent}", agent);
+        for fields in [Some(arguments), result].into_iter().flatten() {
+            let Some(fields) = fields.as_object() else {
+                continue;
+            };
+            for (key, value) in fields {
+                let placeholder = format!("{{{key}}}");
+                if !text.contains(&placeholder) {
+                    continue;
+                }
+                let shown = match value {
+                    Value::String(text) => text.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                text = text.replace(&placeholder, &shown);
+            }
+        }
+        Some(text)
     }
 }
 
@@ -778,6 +810,105 @@ mod tests {
         );
         assert!(compile_schema(&serde_json::json!({ "description": "no type" })).is_err());
         assert!(compile_schema(&serde_json::json!({ "type": "string", "pattern": "x" })).is_err());
+    }
+
+    #[test]
+    fn notices_fill_the_agent_the_arguments_and_the_result() {
+        let catalog = catalog();
+        let notify = catalog.tool("notify").unwrap();
+        assert_eq!(
+            notify.fill_notice(
+                "Claude Desktop",
+                &serde_json::json!({ "message": "the sponsor banner is up" }),
+                None
+            ),
+            Some("Claude Desktop: the sponsor banner is up".to_string())
+        );
+        let stop = catalog.tool("stop").unwrap();
+        assert!(stop.on_air);
+        assert_eq!(
+            stop.fill_notice(
+                "Cursor",
+                &serde_json::json!({}),
+                Some(&serde_json::json!({ "stopped": "livestream" }))
+            ),
+            Some("Cursor ended the livestream.".to_string())
+        );
+        assert_eq!(
+            catalog
+                .tool("add_marker")
+                .unwrap()
+                .fill_notice("Cursor", &serde_json::json!({}), None),
+            None
+        );
+    }
+
+    #[test]
+    fn the_pr_a_tools_run_where_the_plan_says() {
+        let catalog = catalog();
+        let backend = [
+            "get_status",
+            "get_picture",
+            "list_scenes",
+            "list_sources",
+            "list_assets",
+            "read_chat",
+            "list_destinations",
+            "list_recordings",
+            "get_recording",
+            "save_clip",
+            "add_marker",
+            "set_banner",
+        ];
+        let studio = [
+            "start_recording",
+            "stop",
+            "switch_scene",
+            "set_audio",
+            "set_takeover",
+            "play_sound",
+            "stop_sounds",
+            "set_highlight",
+            "open_window",
+            "notify",
+        ];
+        for name in backend {
+            assert_eq!(
+                catalog.tool(name).map(|tool| tool.runs_in),
+                Some(AgentToolRunsIn::Backend),
+                "{name}"
+            );
+        }
+        for name in studio {
+            assert_eq!(
+                catalog.tool(name).map(|tool| tool.runs_in),
+                Some(AgentToolRunsIn::Studio),
+                "{name}"
+            );
+        }
+        assert_eq!(catalog.tools.len(), backend.len() + studio.len());
+        // D15: Buddy never reads one take's files, never opens windows.
+        for name in ["get_recording", "open_window", "notify"] {
+            assert!(!catalog.tool(name).unwrap().buddy, "{name}");
+        }
+        // D11: the two PR A tools that earn a notice.
+        let on_air: Vec<&str> = catalog
+            .tools
+            .iter()
+            .filter(|tool| tool.on_air)
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert_eq!(on_air, ["stop", "notify"]);
+        // Every read is a read, honestly hinted.
+        for tool in &catalog.tools {
+            assert_eq!(
+                tool.annotations.read_only_hint,
+                tool.rate_family == AgentRateFamily::Read,
+                "{}",
+                tool.name
+            );
+        }
+        assert!(catalog.tool("stop").unwrap().annotations.destructive_hint);
     }
 
     #[test]

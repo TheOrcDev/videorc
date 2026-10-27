@@ -79,4 +79,13 @@ export interface StudioActionContext {
   /** Plan 189 S10: the board `soundPlay` and `soundStop` act on; the
    * soundboard store's own when left out. */
   sounds?: readonly { id: string }[]
+  // Agent tools (plan 209 S6). Optional: a remote key never reads them.
+  /** A livestream runs now (it may also record): what `stop` ends. */
+  sessionLive?: boolean
+  /** The streamer's saved scenes, by id and name (`switch_scene`). */
+  savedScenes?: readonly { id: string; name: string }[]
+  /** Applies a saved scene exactly as clicking it in the Studio does. */
+  applySavedScene?: (id: string) => Promise<boolean>
+  /** Each built-in layout's name; `layoutPresetLabel` when left out. */
+  layoutLabels?: Readonly<Record<string, string>>
 }

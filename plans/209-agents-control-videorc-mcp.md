@@ -26,7 +26,7 @@
 | S3    | The MCP endpoint: list and call, backend tools, Studio relay       | A   | DONE    |
 | S4    | `videorc-mcp`, the stdio bridge shipped inside the app             | A   | DONE    |
 | S5    | One Studio action executor for remotes and agents (refactor)       | A   | DONE    |
-| S6    | First tools: look, plus everything a Stream Deck can do            | A   | PLANNED |
+| S6    | First tools: look, plus everything a Stream Deck can do            | A   | DONE    |
 | S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | PLANNED |
 | S8    | Docs, glossary, release note                                       | A   | PLANNED |
 | S9    | `smoke:agent-mcp` and the gates                                    | A   | PLANNED |
@@ -1100,3 +1100,73 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
   under `win-unpacked` and checks each signature; the unsigned staging
   manifest now requires `resources/videorc-mcp.exe`, so that pass provably
   covers it. Not yet run: a packaged, signed build (the orchestrator's).
+
+### S6 (2026-10-27)
+
+- **Tools** (22 in PR A): backend `get_status`, `get_picture`,
+  `list_scenes`, `list_sources`, `list_assets`, `read_chat`,
+  `list_destinations`, `list_recordings`, `get_recording`, `save_clip`,
+  `add_marker`, `set_banner`; studio `start_recording`, `stop`,
+  `switch_scene`, `set_audio`, `set_takeover`, `play_sound`, `stop_sounds`,
+  `set_highlight`, `open_window`, `notify`. `buddy` is false for
+  `get_recording`, `open_window` and `notify` (D15). `onAir`: `stop`
+  ("{agent} ended the {stopped}.") and `notify` ("{agent}: {message}").
+  Rate families: reads `read`, `stop` `session`, the rest `action`
+  (`start_recording` is `action`, so record then stop inside 10 s works).
+- **Backend tools**: the Look tools and `save_clip` are in `agent_look.rs`,
+  each built field by field from an allowlist. `save_clip` is
+  `clip_marks::mark_manual` (the `clip.mark` RPC's function). `add_marker`
+  now also refuses a Clips-only session (the ring's session records nothing
+  a marker could land in).
+- **Studio tools**: `lib/studio-actions/tools.ts`, `STUDIO_AGENT_TOOLS`
+  (= `AGENT_TOOL_EXECUTORS`). Each runs the S5 remote executor, then adds the
+  agent's sentence and the structured result. `StudioActionContext` gained
+  optional `sessionLive`, `savedScenes`, `applySavedScene`, `layoutLabels`;
+  remote intents never read them. `switch_scene` takes one `sceneId`: a
+  saved scene's id (the Studio's `applySavedScene`) or a layout id.
+  `set_audio` is `{microphone?: {muted}, systemAudio?: {on}}` (PR B adds
+  gain and device in the same objects). `stop` uses the remote stop origin
+  (`remote-control`): agents stop at once, D2.
+- **Wiring** (`use-studio.tsx`): `agent.intent` goes on the agents' lane of
+  the S5 queue (`runAgent` → `handleAgentIntent`, a `useEffectEvent`) and is
+  always acked with `agent.intent.ack`. `start_recording`/`stop` feed
+  `noteRecordClick` like the remote keys. No new effect.
+- **The surface** (`lib/agent-surface.ts`, `AgentSurfacePublisher`): lazy,
+  latest-value, deduped, 150 ms debounce, republish on reconnect, bounded
+  retry, and published only while Agents is on (`agents.status`, seeded on
+  `backend.ready`). Fields: `version`, `recordBlockedReason?`,
+  `liveBlockedReason?`, `scene {id, name, kind, modified}`, `scenes [{id,
+  name, kind}]`, `microphone {muted, name?}`, `systemAudio {on, available}`,
+  `takeoverId?`, `takeovers [{id, name}]`, `sounds [{id, name, playing}]`,
+  `background? {liveId, look} | {picture: true}`, `captions {on, state}`,
+  `buddy {on, status?}`, `sources {devices [{id, name, kind, available}],
+  chosen {screenId?, windowId?, cameraId?, microphoneId?}}`, `destinations
+  [{id, platform, label, on, ready, reason?, title?, category?}]`, `windows
+  {notes, streamManager, preview}`. Never a key, server URL, account id,
+  device detail or path (a test seeds each and scans). The backend reads the
+  surface only while a renderer socket is attached.
+- **Notices (D11)**: the backend fills the catalog `notice` for a
+  successful `onAir` call (`{agent}`, then `{field}` from the arguments,
+  then from the structured result) and puts it on the `agents.activity`
+  event as `notice` (event only; the stored row and `agents.activity.list`
+  never carry it). S7 shows `notice` when present. The `notify` executor
+  itself shows nothing: its notice is that one.
+- **`get_picture`**: `compositor::latest_program_picture` reads the frame
+  store's latest frame (CPU I420, BT.709 video range, or the Metal BGRA
+  target read under an in-flight guard), then the JPEG polling preview's
+  frame as a fallback; scaled to at most 1280 px wide, JPEG quality 80, MCP
+  image content after the text. A D3D11 (Windows) frame is not read back
+  yet: the answer is the no-picture sentence. No `orientation` argument yet
+  (the primary leg only).
+- **`read_chat`**: `remote_lan::project_chat_messages` (follows dropped),
+  renamed to `viewerText`/`viewerName`/`at`/`kind`, fragments and author ids
+  dropped. `since` is a message id; an unknown cursor starts over at the
+  newest `limit`. The long poll subscribes before reading and wakes on
+  `liveChat.message`, `.snapshot` or `.cleared`.
+- **Library**: `list_recordings` pages with the Library's own cursor; a
+  `query` scans at most 1,000 rows. `get_recording` finds the row (and its
+  separate-source siblings by `takeId`) in the newest 5,000 rows, with
+  markers, chat totals, peak viewers and Buddy's ready report kinds.
+- **Smoke input**: `FakeChatConfig.texts` (deserialize-only) rotates fake
+  message texts, so S9 can seed an injection line.
+
