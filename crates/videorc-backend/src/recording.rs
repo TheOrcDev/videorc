@@ -4678,6 +4678,25 @@ async fn start_session_with_timeline(
                     d3d11_overlay_plans.highlight.primary,
                     d3d11_overlay_plans.highlight.aux,
                 );
+                // Plan 205 S8: the session's Preview draws the program. A
+                // buffer-only session's ring keeps the recording plan (D2;
+                // `normalize_replay_only_params` raised `record_enabled`)
+                // while its Preview shows the idle program, so its program
+                // shape is `None`; every other session's is its own shape.
+                // The Buddy and highlight switches still apply at the next
+                // start on this path (`apply_overlay_layout_to_active_session`
+                // says so in the log).
+                let d3d11_program_shape = (!replay_only).then_some(d3d11_overlay_shape);
+                let highlight_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.highlight.show_on_stream,
+                    overlay_layout.highlight.show_in_recording,
+                );
+                let buddy_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.buddy.show_on_stream,
+                    overlay_layout.buddy.show_in_recording,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
@@ -4689,13 +4708,28 @@ async fn start_session_with_timeline(
                     highlight_on_auxiliary,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
+                    highlight_in_program,
+                    buddy_in_program,
                     // Plan 186 S4: banners follow this session's leg plan
                     // live, from the compositor's banner set.
                     banner_shape: d3d11_overlay_shape,
+                    program_shape: d3d11_program_shape,
                     banner_prepare: state.banner_prepare.clone(),
                 };
+                // The pet's atlases for the legs that draw it, including the
+                // primary canvas when only the Preview does (plan 205 S8):
+                // the Preview is composed on the primary's canvas.
+                let buddy_sprite_targets = crate::windows_d3d11_session::windows_d3d11_item_targets(
+                    d3d11_overlay_plans.buddy.primary,
+                    d3d11_overlay_plans.buddy.aux,
+                    buddy_in_program,
+                );
                 state.buddy_sprite.prepare(&buddy_sprite_legs(
-                    d3d11_overlay_plans.buddy,
+                    crate::overlay_layout::OverlayLegPlan {
+                        primary: buddy_sprite_targets.primary_canvas.is_some(),
+                        aux: buddy_sprite_targets.auxiliary_canvas.is_some(),
+                        needs_split: false,
+                    },
                     (plan.primary.width, plan.primary.height),
                     plan.auxiliary.map(|video| (video.width, video.height)),
                 ));
