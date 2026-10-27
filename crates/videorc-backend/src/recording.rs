@@ -3696,6 +3696,12 @@ async fn start_session_with_timeline(
     // over here, so no caller meets "A capture session is already running"
     // because of the buffer. The new session carries its own ring.
     if !replay_only {
+        // A request that will be refused anyway must not stop the clip buffer
+        // first: the ring that re-arms after the refusal starts empty
+        // (retest 152: 24 s buffered -> 2 s). The same checks run again below.
+        if replay_hand_over_pending(&state).await {
+            refuse_invalid_request(&state, &params)?;
+        }
         hand_over_replay_only_session(&state).await?;
     }
     // Once armed at the Starting edge this guard owns the admission itself, so
@@ -19776,6 +19782,33 @@ fn append_replay_segment_output(
 /// the ordinary path (bounded, no finalization: it has no file), then wait
 /// for the pieces the admission checks below need, so the Record that
 /// follows is not refused for a microphone still closing.
+/// A buffer-only session runs, or one is starting, so this start would hand
+/// over from it.
+async fn replay_hand_over_pending(state: &AppState) -> bool {
+    state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| active.replay_only)
+        || crate::replay_buffer::start_in_flight(state)
+}
+
+/// The refusals `start_session` makes from the request alone, on a copy of it.
+fn refuse_invalid_request(state: &AppState, params: &StartSessionParams) -> Result<()> {
+    let mut params = params.clone();
+    hydrate_stream_key_secret_refs(state, &mut params)?;
+    normalize_stream_only_output_video(&mut params)?;
+    validate_session_entitlements(&params, &entitlements::current_entitlements())?;
+    validate_outputs(&params)?;
+    if let Some(scene) = params.scene.as_ref()
+        && let Err(message) = validate_scene_background(scene)
+    {
+        bail!(message);
+    }
+    Ok(())
+}
+
 async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
     // The ring re-arms right after every Stop (redesign R2), so the next
     // press can land while that buffer-only start is still between admission
@@ -29844,6 +29877,35 @@ mod tests {
         let mut streaming = base_params(true, true);
         streaming.output.video.fps = 60;
         assert!(!record_only_bridge_60fps_eligible(&streaming));
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_is_refused_before_the_clip_buffer_hands_over() {
+        // Retest 152: separate files refused on Linux, but only after Record
+        // had stopped the clip buffer, so the re-armed ring started empty.
+        // A ring start in flight makes the hand-over wait up to its 5 s
+        // timeout and fail with "Clips are still starting"; the request's
+        // own refusal must come first.
+        let state = test_state();
+        let _ring_starting = crate::replay_buffer::begin_start_in_flight(&state);
+        let mut params = base_params(true, false);
+        params.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: false,
+            });
+        let started = Instant::now();
+        let error = format!(
+            "{:#}",
+            start_session(state.clone(), params).await.unwrap_err()
+        );
+        assert!(error.contains("separate-source-recordings-"), "{error}");
+        assert!(
+            started.elapsed() < REPLAY_HANDOVER_CLEANUP_TIMEOUT / 5,
+            "refused after {:?}",
+            started.elapsed()
+        );
+        assert!(state.recording.lock().await.is_none());
     }
 
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
