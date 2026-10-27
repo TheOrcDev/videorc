@@ -30,9 +30,9 @@
 | S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | DONE    |
 | S8    | Docs, glossary, release note                                       | A   | DONE    |
 | S9    | `smoke:agent-mcp` and the gates                                    | A   | DONE    |
-| S10   | `go_live` without the dialog                                       | B   | PLANNED |
-| S11   | Sources, audio, captions, backgrounds, banner editing              | B   | PLANNED |
-| S11b  | Arrange the picture: move Buddy, banners, camera and overlays      | B   | PLANNED |
+| S10   | `go_live` without the dialog                                       | B   | DONE    |
+| S11   | Sources, audio, captions, backgrounds, banner editing              | B   | DONE    |
+| S11b  | Arrange the picture: move Buddy, banners, camera and overlays      | B   | DONE    |
 | S12   | Chat: send and remove                                              | B   | PLANNED |
 | S13   | Buddy tools: say and set                                           | B   | PLANNED |
 | S14   | Prepare: stream info, destinations, schedule, settings             | B   | PLANNED |
@@ -1285,3 +1285,163 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
 warnings`, `cargo fmt --check --all`, `pnpm typecheck`, `pnpm lint` (one
   pre-existing warning), vitest on the agent files and
   `studio-provider.integration` (196), `node --test` on the client.
+
+### S10 (2026-10-27)
+
+- **The extraction** (`hooks/use-studio.tsx`): the dialog's preflight is
+  `runGoLivePreflight(intent, streaming, draft)` (the previous livestream
+  settled, the start gate, the output check, the draft saved and validated,
+  `streamTargets.confirmation.validate`, captions' readiness), its confirm is
+  `runGoLiveConfirmation(headless?)` and "Go live on {ready}" is
+  `startOnReadyDestinations(headless?)`. `openGoLiveConfirmation`,
+  `confirmGoLive` and `continueGoLiveWithReadyDestinations` are now thin
+  callers and behave as before (the 196 `studio-provider.integration` tests
+  pass unchanged). The dialog's `blocked` gate moved, unchanged, out of the
+  component into `goLiveConfirmGate` (`lib/go-live-dialog-view.ts`); the
+  dialog reads it.
+- **`go_live`** (`goLiveWithoutDialog` in the Studio, decisions in
+  `lib/go-live-headless.ts`, lazy): the B-14 guards (a Go Live in flight, the
+  dialog open), `destinations` (ids or platform names) narrow this livestream
+  like "Go live without …" and never turn a destination on, `title` is the
+  Title field, the dialog's preflight, then the dialog's gate. `allowPartial`
+  presses "Go live without {destination}" for every row that isn't ready and
+  checks again (as `resolveGoLiveBlocker` does), and continues after a
+  partial platform setup; `withoutCaptions` folds "Go live without captions"
+  into captions' readiness. The confirm is the dialog's own. A refusal is the
+  dialog's sentence; a refused partial setup is cleaned up as Cancel does.
+  Records only when Output's recording is on (`livestreamIntent`).
+- **No render in the middle**: the headless path passes what it decided (the
+  exclusions, the draft, the preflight, captions) explicitly, and
+  `settleStreamOutputTopology` and `runStartSession` take an optional
+  captions override (absent for every other caller), so nothing waits for
+  React to re-render between steps.
+- **Not skipped (no STOP)**: every check the dialog's primary waits on
+  (entitlement, captions, title and description, a draft, every destination
+  ready and no general error) is `goLiveConfirmGate`, and every check in its
+  confirm is the confirm itself. The dialog's advice (chat limits, simulcast,
+  Live Producer, overlays) is advisory there and here.
+- **Relay**: `GO_LIVE_INTENT_TIMEOUT` is 60 s (`agent_mcp.rs`), checked.
+- **Catalog**: `go_live`, studio, O, `session`, Buddy yes, `onAir` with
+  "{agent} started the livestream.". Stream Deck and the phone are unchanged.
+- **Tests**: `lib/go-live-headless.test.ts` (ready, partial refused and with
+  `allowPartial`, captions refused and with `withoutCaptions`, a sign-in
+  blocker refused with the dialog's sentence even with `allowPartial`, title,
+  Premium, no destination, the destination list, partial setup),
+  `studio-actions/run-the-show.test.ts`, and a provider integration test
+  through a pushed `agent.intent` (X fails setup: refused, then live on
+  YouTube with `allowPartial`; `destinations: ['youtube']` never prepares X
+  and keeps it saved on; the dialog never opens).
+
+### S11 (2026-10-27)
+
+- **Studio tools** (`lib/studio-actions/run-the-show.ts`): `set_sources`
+  (`screenId`, `windowId`, `cameraId` or null) builds the pick with the
+  Sources tab's builders and runs its own switch, `switchSourceDeviceLive`
+  (the live source switch, `session.source.switch`, while recording or live),
+  refusing with `sourceSwitchReason`, a device the picker doesn't list, or
+  one that isn't available. `set_audio` keeps S6's `{microphone?,
+systemAudio?}` and adds `microphone.gainDb` (-24 to 24), `deviceId` (or
+  null) and `systemAudio.gainDb` (-24 to 12), whole dB like the faders; the
+  microphone switch is the picker's. `set_captions` is the Live captions
+  switch (Premium and Linux refusals, off always works). `set_background`
+  (`liveId` or null) is the live tile's `applyLiveBackground`, which now
+  resolves whether the scene committed.
+- **`scene.source.device.switch`** is no longer called by the renderer (the
+  Sources tab uses `session.source.switch`), so neither does `set_sources`.
+- **Backend tool** `edit_banner` (`agent_call.rs`): `path` imports with
+  `banners::import_banner` on a blocking worker (one agent import at a time)
+  and publishes with `on_banners_changed`; `bannerId` + `name` renames with
+  the `banners.update` rename. The path must be absolute and a file; a raw
+  path is what the admin role may send today, and the agent runs as the user
+  on this computer (D2). The result is `{id, name, shown, width, height}`; a
+  sentence naming Videorc's own Banners folder is replaced (D9).
+- **Tests**: `run-the-show.test.ts` (each tool and its refusals),
+  `agent_call` Rust tests (import, rename, import with a name, every refusal,
+  a non-image, the folder sentence).
+
+### S11b (2026-10-27)
+
+- **One place rule**: `overlayPlaceOrigin` / `overlayPlaceRect` in
+  `lib/overlay-layout.ts` (the 3×3 grid, 4 % landscape margin, portrait safe
+  area; a middle row is centred between the margins). `overlaySnapRect` and
+  `bannerSnapRect` are now built on it; their existing tests pass unchanged.
+- **Moved out of the Scene page, unchanged** (and the page points at them):
+  `lib/scene-edits.ts` (`sceneCameraControls`, `cameraShapePatch`,
+  `withOverlaySwitches`, `SCENE_VISIBILITY_LOCK_REASON`) and
+  `freeformEntryPatch` in `lib/freeform-memory.ts`. The clamp is the
+  canvas's own (`stageRectToOverlay`, and for sources `MIN_SOURCE_FRACTION`
+  and `roundRectForCommit`), imported where it lives.
+- **New**: `bannerDefaultPlaces`, the TS twin of Rust
+  `banner_default_places` (a banner's `medium`), pinned to the shared
+  fixture and the Rust values.
+- **Tools** (`lib/studio-actions/scene-layout.ts`, all studio):
+  `get_scene_layout` (read), `move_on_scene`, `set_scene_item` (action).
+  Overlays save with `overlays.layout.set`, banners with `banners.update`,
+  the camera corner with the preset's own corner transaction, any other
+  source move with the Freeform entry then the released-drag transform
+  update. Results carry `rects` and `previous` per orientation (sources: the
+  scene's), the overlap list, and for sources `arrangement`. Input `rects`
+  (per orientation) takes `previous` back, so "put it back" is one call.
+- **Decisions inside D22**:
+  - A place keeps the item's size. At its default size an overlay lands on
+    the inspector's snap to the last digit, and `size: "medium"` is the
+    snap for any current size. A resized overlay at a place keeps its size
+    at the same margins, which the inspector's snap (default size) would
+    reset: flip `overlayPlacement`'s default to `medium` if the owner wants
+    the inspector's size too.
+  - Sizes: `small` 0.75×, `medium` the default, `large` 1.5×, or a width
+    fraction. Buddy keeps its default (square) shape, a banner its image's
+    shape, the card and captions bar their current shape for a fraction.
+  - A camera or screen move off a corner while recording or live is refused,
+    as the canvas drags no source then; the corner works live.
+  - A named `size` on the camera in an inset scene goes freeform, as the
+    plan says (the inspector's preset Size control would keep the preset;
+    not used).
+  - Overlaps count only what an output draws (a visible source, an overlay
+    shown on an output, a showing banner) on the canvases drawn (the
+    program's, and the vertical stream's while armed); full-canvas items are
+    a frame, not news. The moved item counts whatever its switches say.
+  - Windows D3D11 sessions answer "Saved. On this PC it shows from your next
+    recording or stream." for overlays and banners; captions' switches
+    mid-session say they apply from the next session (their start-time
+    plan).
+- **No STOP**: every place the inspector has gives its rect (tested for every
+  overlay and banner snap, both orientations), and every save is a path the
+  canvas uses.
+- **Tests**: `scene-layout.test.ts` (19: every snap for every item in both
+  orientations, the grid's other places, size keeps Buddy square and a
+  banner's shape, the clamp, the corner keeps the preset, other places enter
+  freeform then drag, live refusals, `previous` and put-back, overlaps,
+  Windows, `set_scene_item`, `get_scene_layout`), `scene-edits.test.ts`,
+  `banner-place.test.ts` (default places), `freeform-memory.test.ts`, and a
+  provider integration test (Buddy to top left and the banner to bottom left
+  through a pushed `agent.intent`, compared with the editor's snap
+  functions, then read back).
+
+### What S16's smoke should do for S10, S11 and S11b
+
+- **`go_live`**: seed one manual-RTMP destination pointing at the local sink
+  `scripts/smoke-multistream-app.mjs` starts, call `go_live` with a `title`,
+  expect `{live: true}`, the dialog never opened, a `session.start` with
+  that destination, ingest bytes at the sink, and the "started the
+  livestream" notice on `agents.activity`; then `stop`. Also: a second
+  destination that isn't ready is refused without `allowPartial` (the
+  dialog's sentence) and goes live on the ready one with it. Never a real
+  channel.
+- **`set_audio` microphone switch during a recording**: `start_recording`,
+  `set_audio {microphone: {deviceId}}` to the other input from
+  `list_sources`, wait, `stop`, ffprobe the artifact and find audio after
+  the switch; skip with a sentence when the host has one input.
+- **Arrange**: `move_on_scene {item: "buddy", place: "top-left"}` and
+  `{item: "banner:<id>", place: "bottom-left"}` (after `edit_banner` imports
+  a fixture PNG and `set_banner` shows it); `overlays.layout.get` must equal
+  `overlaySnapRect("buddy", o, "top-left")` for both orientations and
+  `banners.list` must equal `bannerSnapRect(banner, banner[o], o, aspect,
+"bottom-left")`; `get_picture` shows banner pixels in the bottom-left
+  region.
+- **Camera corner during a recording**: `start_recording`, `move_on_scene
+{item: "camera", place: "top-left"}`, expect `arrangement: "preset"`, the
+  same `sessionId` before and after, no second `session.start`, then `stop`
+  and the analyzer passes. The dev app seeds a screen-only scene without a
+  camera grant, so this needs a scene with a camera source (the packaged
+  app, or a synthetic camera) or it skips and says so.

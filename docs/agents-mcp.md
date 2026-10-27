@@ -79,7 +79,7 @@ called intro done, then stop", "Give me the file of my last recording".
 | `save_clip`         | Save the last 30 or 60 seconds, like the Clip button                          |
 | `add_marker`        | A named marker on the running recording or livestream                         |
 | `switch_scene`      | A saved scene or a built-in layout                                            |
-| `set_audio`         | Mute or unmute the microphone; System audio on or off                         |
+| `set_audio`         | Microphone: mute, gain, which one; System audio: on or off, gain              |
 | `set_banner`        | Show or hide a banner                                                         |
 | `set_takeover`      | Show a takeover (BRB, Starting soon) or take it down                          |
 | `play_sound`        | Press a soundboard sound                                                      |
@@ -87,6 +87,14 @@ called intro done, then stop", "Give me the file of my last recording".
 | `set_highlight`     | Put a chat message on stream, or take it down                                 |
 | `open_window`       | Bring the Stream Manager, Notes or Preview to the front                       |
 | `notify`            | Show you a short notice in Videorc, signed with the agent's name              |
+| `go_live`           | Go live without the Go Live dialog, through the dialog's own checks           |
+| `set_sources`       | Choose the screen, window or camera, like the Sources pickers                 |
+| `set_captions`      | Live captions on or off                                                       |
+| `set_background`    | Put a live background on, or take the background off                          |
+| `edit_banner`       | Import an image on this computer as a banner, or rename one                   |
+| `get_scene_layout`  | Everything on the picture and where it sits, per orientation                  |
+| `move_on_scene`     | Move or resize an item to where the Scene canvas's snaps would put it         |
+| `set_scene_item`    | Show or hide the camera or screen, its shape, and the overlays' output switch |
 
 Every action goes through the same code as the button you would press, so
 an agent can't start anything the Studio would refuse; it gets Videorc's own
@@ -96,8 +104,8 @@ sentence back instead ("Choose a screen or a camera first.").
 
 - **Activity** in Settings → Remote → Agents lists every call: when, which
   agent, which tool and how it ended.
-- **Notices.** Ending the livestream or recording, and `notify`, show a
-  notice in Videorc naming the agent ("Claude Desktop ended the
+- **Notices.** Going live, ending the livestream or recording, and `notify`,
+  show a notice in Videorc naming the agent ("Claude Desktop started the
   livestream."). Everything else shows only in Activity, so a busy agent
   doesn't bury you in notices.
 - **Stop.** While an agent is connected, the Studio's Session section shows
@@ -123,8 +131,35 @@ sentence back instead ("Choose a screen or a camera first.").
 ### Stream Deck and the phone
 
 They are unchanged. A Stream Deck key or the phone still asks you to finish
-going live on your computer; only agents will go live without the dialog,
-in a later release (docs/remote-control.md).
+going live on your computer; only agents go live without the dialog
+(`go_live`, docs/remote-control.md).
+
+### Going live from an agent
+
+`go_live` runs exactly what the Go Live dialog runs, without showing it: the
+same checks of your destinations, title, captions and plan, and the same
+start. When the dialog would hold you back, the agent gets the dialog's own
+words instead ("YouTube: Sign in to YouTube in Livestream → Setup, then go
+live."). The agent may pass `allowPartial` to go live on the destinations
+that are ready (the dialog's "Go live without …") and `withoutCaptions` to
+skip captions that can't start; anything only you can fix, such as signing
+in, a missing stream key or Premium, is always refused. It records too only
+when Output's recording is on, as the dialog does.
+
+### Arranging the picture
+
+"Move Buddy to the top left and the sponsor banner to the bottom left" are
+two `move_on_scene` calls. Each place is one of nine on a 3×3 grid (and the
+full frame for a banner) inside the same margins and safe area the Scene
+inspector's snaps use, so Top left from an agent is Top left from the
+inspector. A move keeps the item's size unless the agent asks for `small`,
+`medium` (the default size), `large` or a fraction of the width; banners
+keep their image's shape. The camera in a Screen + camera scene goes to a
+corner without leaving the scene, even while live; any other camera or
+screen move switches the scene to freeform, as a drag does, and waits until
+the recording or livestream ends, as the canvas does. Every move answers
+with where the item was (`previous`, which puts it back in one call) and
+what it now covers.
 
 ## For developers
 
@@ -189,8 +224,8 @@ args}` to renderer sockets. The Studio runs them on the agents' lane of
   `lib/studio-actions/tools.ts`: each one runs the Stream Deck executor for
   the same action, then adds the sentence and the structured result. The
   Studio answers `agent.intent.ack {intentId, ok, message?, result?}`
-  (renderer-only). 15 s timeout; "Videorc's Studio isn't open." with no
-  renderer attached.
+  (renderer-only). 15 s timeout (60 s for `go_live`); "Videorc's Studio
+  isn't open." with no renderer attached.
 - **`get_status` and the `list_*` tools** merge the backend's truth (the
   session, destinations' health while live, viewers, banners, the comment
   on stream, Clips) with the Studio's projection, which the renderer
