@@ -29,7 +29,7 @@
 | S6    | First tools: look, plus everything a Stream Deck can do            | A   | DONE    |
 | S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | PLANNED |
 | S8    | Docs, glossary, release note                                       | A   | DONE    |
-| S9    | `smoke:agent-mcp` and the gates                                    | A   | PLANNED |
+| S9    | `smoke:agent-mcp` and the gates                                    | A   | DONE    |
 | S10   | `go_live` without the dialog                                       | B   | PLANNED |
 | S11   | Sources, audio, captions, backgrounds, banner editing              | B   | PLANNED |
 | S11b  | Arrange the picture: move Buddy, banners, camera and overlays      | B   | PLANNED |
@@ -1197,3 +1197,32 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
   Remote → Agents, connect your app, and ask it to switch scenes, play
   sounds, record, read chat or find your recordings. Off by default, and
   nothing listens on the network."
+
+### S9 (2026-10-27)
+
+- `scripts/smoke-agent-mcp-app.mjs` (`pnpm smoke:agent-mcp`, in
+  `smoke:local-gates` after `smoke:remote-lan`) and
+  `scripts/lib/agent-mcp-client.mjs` (the stdio JSON-RPC client for the real
+  `target/<profile>/videorc-mcp`, plus raw HTTP for the guards; unit tests in
+  `agent-mcp-client.test.mjs`). It covers steps 1 to 9 above.
+- **Isolation**: the launcher's isolated profile (`VIDEORC_SMOKE_STATE_DIR`),
+  so `agents.json`, the database and the JSON secret store are the smoke's;
+  the bridge gets a clean environment with `VIDEORC_AGENTS_DISCOVERY` and
+  stand-ins for `open` and `videorc` first on its PATH, so it can never open
+  the installed Videorc, and the smoke fails if it tried. It never goes live.
+- **Canaries** for the leak scan: a manual stream key stored through the
+  backend, two fake OAuth tokens written into the isolated secret store
+  before launch, and the renderer, remote and both agent tokens. The admin
+  token is main's and never reaches a smoke, so it is not in the scan.
+- **Step 9** checks the remote and LAN allowlists live (a paired remote is
+  refused `agents.*`, `agent.intent.ack`, `health.ping` and widening its
+  events, and never sees an agent event) and in source (the
+  `remote_allowed_method` and `LAN_EVENTS` text, as the D19 Rust test does).
+- **First run, 2026-10-27, this Mac, dev app**: PASS. Picture 1280×720 from
+  the Metal target; record → marker → stop gave a 1920×1080, 3.57 s artifact
+  that passed the analyzer; 40 answers scanned for 7 canaries.
+- Gates run for S6 to S9: `cargo test -p videorc-backend agent` (47, incl.
+  12 new `agent_look` tests), `cargo clippy -p videorc-backend -- -D
+warnings`, `cargo fmt --check --all`, `pnpm typecheck`, `pnpm lint` (one
+  pre-existing warning), vitest on the agent files and
+  `studio-provider.integration` (196), `node --test` on the client.
