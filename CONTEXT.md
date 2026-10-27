@@ -237,11 +237,14 @@ _Avoid_: hook, integration, bot
 ### Windows and pages
 
 **First-run setup**:
-The welcome steps shown once on a fresh install, starting with permissions.
-Liquid Chrome fills the main window behind one card titled "Welcome to
-Videorc". Settings → General → Setup and ⌘K offer "Run setup again…";
-replaying returns to the page it opened from and preserves the first-run
-record. Existing installs skip setup on update.
+The welcome steps shown once on a fresh install: Permissions ("Welcome to
+Videorc"), What are you making?, Your look, Sound check, and Where you
+stream. Where you stream shows only for Livestreams or Both; Recordings
+has four steps. Liquid Chrome fills the main window behind one card; Your
+look's scene picture plays the chosen live background inside it. Settings
+→ General → Setup and ⌘K offer "Run setup again…"; replaying returns to the
+page it opened from and preserves the first-run record. Existing installs
+skip setup on update.
 _Avoid_: onboarding (in copy), Setup alone (also a sidebar group and a
 Livestream tab)
 
