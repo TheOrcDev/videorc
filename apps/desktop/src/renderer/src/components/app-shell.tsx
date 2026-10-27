@@ -20,15 +20,14 @@ import {
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
-import {
-  useStudioAudio,
-  useStudioCore,
-  useStudioRecordingState,
-  useStudioShell
-} from '@/hooks/use-studio'
+import { useStudioCore, useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
-import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
+import {
+  createFirstRunStartup,
+  type FirstRunCompletion,
+  type FirstRunDecision
+} from '@/lib/first-run'
 import {
   OPEN_CLEAN_CUT_EVENT,
   readCleanCutOpenRequest,
@@ -60,11 +59,7 @@ import {
   sessionStatusPulses,
   sessionStatusTone
 } from '@/lib/studio-session-view'
-import {
-  isMediaAccessSnapshotReady,
-  shouldShowPermissionsOnboarding,
-  systemAccessRows
-} from '@/lib/system-access'
+import { isMediaAccessSnapshotReady } from '@/lib/system-access'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // Workspace views are loaded only on first navigation, then retained by the
@@ -130,17 +125,23 @@ function WorkspaceTabFallback(): ReactElement {
   )
 }
 
+// Snapshot before the first render, before What's New can initialize its key.
+// Writes wait for runtime info so suppressed smoke profiles remain untouched.
+const firstRunStartup =
+  typeof localStorage === 'undefined' ? null : createFirstRunStartup(localStorage)
+
 function PermissionsOnboardingGate({
+  decision,
   open,
   onOpen,
   onComplete
 }: {
+  decision: FirstRunDecision | null
   open: boolean
   onOpen: () => void
-  onComplete: () => void
+  onComplete: (status: FirstRunCompletion) => void
 }): ReactElement {
   const { wsStatus, deviceList, mediaAccess, runtimeInfo } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
   const evaluatedRef = useRef(false)
   const dialogMountedRef = useRef(open)
   const backendReady = wsStatus === 'connected' && deviceList.devices.length > 0
@@ -151,29 +152,10 @@ function PermissionsOnboardingGate({
   }
 
   useEffect(() => {
-    if (evaluatedRef.current || !backendReady || !mediaAccessReady) {
-      return
-    }
+    if (evaluatedRef.current || decision === null || !backendReady || !mediaAccessReady) return
     evaluatedRef.current = true
-    const dismissed = localStorage.getItem(STORAGE_KEYS.onboarding) !== null
-    const rows = systemAccessRows({
-      deviceList,
-      audioMeter,
-      platform: runtimeInfo?.platform,
-      mediaAccess
-    })
-    if (shouldShowPermissionsOnboarding({ rows, dismissed, backendReady, mediaAccessReady })) {
-      onOpen()
-    }
-  }, [
-    audioMeter,
-    backendReady,
-    deviceList,
-    mediaAccess,
-    mediaAccessReady,
-    onOpen,
-    runtimeInfo?.platform
-  ])
+    if (decision === 'show') onOpen()
+  }, [backendReady, decision, mediaAccessReady, onOpen])
 
   return (
     <Suspense fallback={null}>
@@ -288,7 +270,17 @@ function AppShellContent(): ReactElement {
   }, [])
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
-  const whatsNew = useWhatsNew(runtimeInfo?.version, runtimeInfo?.platform)
+  const [firstRunVisibility, setFirstRunVisibility] = useState<FirstRunDecision | null>(null)
+  useEffect(() => {
+    if (!runtimeInfo || firstRunVisibility !== null) return
+    setFirstRunVisibility(firstRunStartup?.finalize(runtimeInfo) ?? 'hide')
+  }, [firstRunVisibility, runtimeInfo])
+  // Do not let What's New write its first-launch marker until the setup
+  // record has been persisted, or suppression has been confirmed.
+  const whatsNew = useWhatsNew(
+    firstRunVisibility === null ? undefined : runtimeInfo?.version,
+    runtimeInfo?.platform
+  )
 
   // Keep first paint Studio-only, then warm the three most common setup pages
   // from local app assets once Chromium is idle. Navigation stays instant
@@ -351,13 +343,13 @@ function AppShellContent(): ReactElement {
     [selectLivestreamView, setActive]
   )
 
-  const completeOnboarding = useCallback(() => {
-    localStorage.setItem(STORAGE_KEYS.onboarding, ONBOARDING_DISMISSED_VALUE)
+  const completeOnboarding = useCallback((status: FirstRunCompletion) => {
+    firstRunStartup?.complete(status)
+    setFirstRunVisibility('hide')
     setOnboardingOpen(false)
   }, [])
 
-  // The first-run gate opens the dialog when a grant is missing; closing it
-  // re-dismisses. Settings → Permissions shows the same rows (plan 174 S3.17).
+  // Every fresh install sees setup, even with all grants already present.
   const openPermissionsSetup = useCallback(() => {
     setOnboardingOpen(true)
   }, [])
@@ -616,6 +608,7 @@ function AppShellContent(): ReactElement {
           {commandOpen ? <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} /> : null}
         </Suspense>
         <PermissionsOnboardingGate
+          decision={firstRunVisibility}
           open={onboardingOpen}
           onOpen={openPermissionsSetup}
           onComplete={completeOnboarding}
@@ -623,7 +616,7 @@ function AppShellContent(): ReactElement {
         {/* Post-update highlights; suppressed behind onboarding on first run
             (first run initializes the last-seen version silently). */}
         <Suspense fallback={null}>
-          {whatsNew.open && !onboardingOpen ? (
+          {whatsNew.open && firstRunVisibility === 'hide' && !onboardingOpen ? (
             <WhatsNewDialog
               entry={whatsNew.entry}
               open

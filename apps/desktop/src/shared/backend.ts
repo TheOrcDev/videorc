@@ -4152,6 +4152,8 @@ export interface RuntimeInfo {
     styleRequested: 'clear' | 'material'
   }
   isPackaged: boolean
+  /** Suppresses first-run setup without changing its persisted record (smokes). */
+  firstRunSuppressed: boolean
   permissionTargetName: string
   permissionTargetPath: string
   capturePermissionTargetName: string

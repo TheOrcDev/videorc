@@ -19,6 +19,7 @@ const runtimeInfo = (overrides: Partial<RuntimeInfo> = {}): RuntimeInfo => ({
     retryAttempts: 0
   },
   isPackaged: true,
+  firstRunSuppressed: false,
   permissionTargetName: 'Videorc',
   permissionTargetPath: 'C:\\Program Files\\Videorc\\Videorc.exe',
   capturePermissionTargetName: 'videorc-backend.exe',
