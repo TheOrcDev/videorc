@@ -43,9 +43,12 @@ const streamMs = Math.max(
 )
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500)
 
+// Facebook sits third so the default three-target run streams to it (plan
+// 206): the backend must parse the platform and fan the leg out like any key.
 const PLATFORMS = [
   { id: 'youtube', label: 'YouTube' },
   { id: 'twitch', label: 'Twitch' },
+  { id: 'facebook', label: 'Facebook' },
   { id: 'kick', label: 'Kick' },
   { id: 'x', label: 'X / Twitter' },
   { id: 'custom', label: 'Custom RTMP' }
@@ -55,7 +58,7 @@ const targets = Array.from({ length: targetCount }, (_, index) => {
   const port = basePort + index
   const platform = PLATFORMS[index % PLATFORMS.length]
   const streamKey = `smoke${index}`
-  // Beyond the five built-in platforms the cap is filled with extra rows of
+  // Beyond the built-in platforms the cap is filled with extra rows of
   // the same platforms; target ids must stay unique per session.
   const round = Math.floor(index / PLATFORMS.length)
   return {
