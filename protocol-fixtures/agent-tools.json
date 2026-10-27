@@ -1830,6 +1830,479 @@
       "onAir": false,
       "rateFamily": "action",
       "notice": null
+    },
+    {
+      "name": "get_scene_layout",
+      "title": "Read where everything sits on the picture",
+      "description": "List everything on the picture and where it sits: the camera, the screen, Buddy, the highlight card, the captions bar and each banner, with names, switches and rects per orientation as fractions of the canvas from the top left. Use it before moving things, and to find a banner's id by its name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "orientation": {
+            "type": "string",
+            "enum": ["horizontal", "vertical"]
+          },
+          "verticalStream": {
+            "type": "boolean"
+          },
+          "layoutId": {
+            "type": "string"
+          },
+          "arrangement": {
+            "type": "string",
+            "enum": ["preset", "freeform"]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "item": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": ["camera", "screen", "overlay", "banner"]
+                },
+                "rects": {
+                  "type": "object",
+                  "properties": {
+                    "horizontal": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        },
+                        "width": {
+                          "type": "number"
+                        },
+                        "height": {
+                          "type": "number"
+                        }
+                      },
+                      "required": ["x", "y", "width", "height"],
+                      "additionalProperties": false
+                    },
+                    "vertical": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        },
+                        "width": {
+                          "type": "number"
+                        },
+                        "height": {
+                          "type": "number"
+                        }
+                      },
+                      "required": ["x", "y", "width", "height"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "shown": {
+                  "type": "boolean"
+                },
+                "showOnStream": {
+                  "type": "boolean"
+                },
+                "showInRecording": {
+                  "type": "boolean"
+                },
+                "corner": {
+                  "type": "string",
+                  "enum": ["top-left", "top-right", "bottom-left", "bottom-right"]
+                },
+                "shape": {
+                  "type": "string",
+                  "enum": ["rectangle", "rounded", "circle"]
+                }
+              },
+              "required": ["item", "name", "kind", "rects"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["orientation", "verticalStream", "layoutId", "arrangement", "items"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "read",
+      "notice": null
+    },
+    {
+      "name": "move_on_scene",
+      "title": "Move or resize something on the picture",
+      "description": "Move or resize one item where the Scene canvas's own snaps would put it: a place on the 3×3 grid (full-frame for banners), a size, or an exact rect. A place writes both orientations. The camera at a corner keeps its scene; other source moves switch to freeform. The result has the old rects (pass them back as rects to undo) and what it now covers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "description": "camera, screen, buddy, highlight, captions, or banner:<id> from get_scene_layout.",
+            "minLength": 1,
+            "maxLength": 140
+          },
+          "place": {
+            "type": "string",
+            "enum": [
+              "top-left",
+              "top-center",
+              "top-right",
+              "middle-left",
+              "center",
+              "middle-right",
+              "bottom-left",
+              "bottom-center",
+              "bottom-right",
+              "full-frame"
+            ],
+            "description": "Where on the canvas, inside its margins and safe area."
+          },
+          "size": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": ["small", "medium", "large"]
+              },
+              {
+                "type": "number",
+                "minimum": 0.02,
+                "maximum": 1
+              }
+            ],
+            "description": "small, medium (the default size), large, or a fraction of the canvas width. Left out, the size stays."
+          },
+          "rect": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "width": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "height": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": ["x", "y", "width", "height"],
+            "additionalProperties": false,
+            "description": "An exact rect, clamped inside the canvas like a drag."
+          },
+          "rects": {
+            "type": "object",
+            "description": "Exact rects per orientation, such as a result's previous.",
+            "properties": {
+              "horizontal": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "y": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "width": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "height": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              },
+              "vertical": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "y": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "width": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "height": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "orientation": {
+            "type": "string",
+            "enum": ["horizontal", "vertical", "both"],
+            "description": "Which orientation to change. A place defaults to both, a rect to horizontal."
+          }
+        },
+        "required": ["item"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "rects": {
+            "type": "object",
+            "properties": {
+              "horizontal": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              },
+              "vertical": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "previous": {
+            "type": "object",
+            "properties": {
+              "horizontal": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              },
+              "vertical": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "overlaps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "item": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": ["item", "name"],
+              "additionalProperties": false
+            }
+          },
+          "arrangement": {
+            "type": "string",
+            "enum": ["preset", "freeform"]
+          },
+          "corner": {
+            "type": "string",
+            "enum": ["top-left", "top-right", "bottom-left", "bottom-right"]
+          }
+        },
+        "required": ["item", "name", "rects", "previous", "overlaps"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_scene_item",
+      "title": "Show, hide or shape something on the picture",
+      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for Buddy, the highlight card, the captions bar and banners. Use set_banner to show or hide a banner itself.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "description": "camera, screen, buddy, highlight, captions, or banner:<id> from get_scene_layout.",
+            "minLength": 1,
+            "maxLength": 140
+          },
+          "shown": {
+            "type": "boolean",
+            "description": "Camera or screen: true shows it, false hides it."
+          },
+          "shape": {
+            "type": "string",
+            "enum": ["rectangle", "rounded", "circle"],
+            "description": "The camera's shape."
+          },
+          "showOnStream": {
+            "type": "boolean",
+            "description": "Buddy, highlight, captions or a banner: shown on the livestream."
+          },
+          "showInRecording": {
+            "type": "boolean",
+            "description": "Buddy, highlight, captions or a banner: shown in the recording."
+          }
+        },
+        "required": ["item"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "shown": {
+            "type": "boolean"
+          },
+          "shape": {
+            "type": "string",
+            "enum": ["rectangle", "rounded", "circle"]
+          },
+          "showOnStream": {
+            "type": "boolean"
+          },
+          "showInRecording": {
+            "type": "boolean"
+          }
+        },
+        "required": ["item", "name"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
     }
   ]
 }

@@ -74,7 +74,13 @@ import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
-import { freeformEntryOverrides, peekLayoutUndo, rememberedFreeform } from '@/lib/freeform-memory'
+import { freeformEntryPatch, peekLayoutUndo } from '@/lib/freeform-memory'
+import {
+  SCENE_VISIBILITY_LOCK_REASON,
+  cameraShapePatch,
+  sceneCameraControls,
+  withOverlaySwitches
+} from '@/lib/scene-edits'
 import { isLayoutUndoShortcut, layoutUndoShortcutBlocked } from '@/lib/layout-undo-shortcut'
 import {
   OVERLAY_ITEM_LABELS,
@@ -97,7 +103,6 @@ const CHROMA_KEY_BLUE = '#0000FF'
 // its lens still change live, so the copy names only what is locked.
 export const SCENE_POSITION_LOCK_REASON =
   "Position and size are locked while you're recording or live."
-export const SCENE_VISIBILITY_LOCK_REASON = "Visibility is locked while you're recording or live."
 const ORIENTATION_LOCK_REASON =
   "The canvas is fixed while you're recording or live. Stop to switch orientation."
 
@@ -411,10 +416,9 @@ export function LayoutTab(): ReactElement {
     patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>
   ): void => {
     if (!selectedOverlayItem) return
-    void setOverlayLayout({
-      ...overlayLayout,
-      [selectedOverlayItem]: { ...overlayLayout[selectedOverlayItem], ...patch }
-    }).catch(reportError)
+    void setOverlayLayout(withOverlaySwitches(overlayLayout, selectedOverlayItem, patch)).catch(
+      reportError
+    )
   }
   const snapSelectedOverlay = (snap: OverlaySnap): void => {
     if (!selectedOverlayItem) return
@@ -439,15 +443,15 @@ export function LayoutTab(): ReactElement {
     layout.layoutPreset === 'vertical-camera-top' ||
     layout.layoutPreset === 'vertical-camera-bottom' ||
     layout.layoutPreset === 'vertical-split'
-  const showOverlayControls =
-    layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
-  const isFreeform = layout.arrangementMode === 'freeform'
   // Corner/size/margin place the camera inside a preset scene; in freeform the
-  // stage and the numeric fields own position and size instead.
-  const showCameraCornerControls = showOverlayControls && !isFreeform
-  // The mask (shape/radius/aspect) and the precise fields apply wherever the
-  // camera is a user-owned bubble: the inset scenes and freeform.
-  const showCameraBubbleControls = showOverlayControls || isFreeform
+  // stage and the numeric fields own position and size instead. The mask
+  // (shape/radius/aspect) and the precise fields apply wherever the camera is
+  // a user-owned bubble: the inset scenes and freeform (lib/scene-edits).
+  const cameraControls = sceneCameraControls(layout)
+  const showOverlayControls = cameraControls.inset
+  const isFreeform = cameraControls.freeform
+  const showCameraCornerControls = cameraControls.corner
+  const showCameraBubbleControls = cameraControls.bubble
 
   // Entering freeform restores the arrangement a preset last replaced in this
   // orientation (plan 174, C-4); a source with no memory is seeded from the
@@ -456,12 +460,7 @@ export function LayoutTab(): ReactElement {
     if (!scene) {
       return
     }
-    const sourceTransformOverrides = freeformEntryOverrides(
-      rememberedFreeform(),
-      orientation,
-      scene.sources
-    )
-    applyCameraPreset({ arrangementMode: 'freeform', sourceTransformOverrides })
+    applyCameraPreset(freeformEntryPatch(orientation, scene.sources))
   }
   // The orientation control re-enters each mode where it was left; the
   // orientation ⇄ canvas coupling in applyCameraPreset flips the output
@@ -1208,17 +1207,8 @@ function CameraInspector({
             className="w-full"
             options={CAMERA_SHAPE_OPTIONS}
             value={layout.cameraShape}
-            onValueChange={(cameraShape) =>
-              onApplyLayoutPatch(
-                // Rounded means a rounded SQUARE by default (owner decision
-                // 2026-07-06): picking it snaps the aspect to square in the
-                // same gesture; the Aspect control below still allows the
-                // original or portrait afterwards.
-                cameraShape === 'rounded'
-                  ? { cameraShape: 'rounded', cameraAspect: 'square' }
-                  : { cameraShape }
-              )
-            }
+            // Rounded means a rounded SQUARE by default (lib/scene-edits).
+            onValueChange={(cameraShape) => onApplyLayoutPatch(cameraShapePatch(cameraShape))}
           />
         </Field>
       </div>

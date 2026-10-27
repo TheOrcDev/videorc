@@ -564,6 +564,7 @@ import {
   type NativePreviewRendererTimingFields
 } from '@/lib/native-preview-present-policy'
 import { isPremiumUpgradeMessage, premiumRequiredIssueMessage } from '@/lib/premium-upgrade'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
 import {
   reconcileSessionStartResponse,
   reduceSessionStartFailure,
@@ -10121,13 +10122,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [desiredLibraryBackground, requestLayoutTransaction])
 
+  // Resolves whether the layout committed (an agent's `set_scene_item` reads
+  // it, plan 209 S11b); the inspector ignores it.
   const applyLayoutPatch = useCallback(
-    (patch: Partial<LayoutSettings>) => {
-      void requestLayoutTransaction({
+    (patch: Partial<LayoutSettings>): Promise<boolean> =>
+      requestLayoutTransaction({
         ...captureConfigRef.current.layout,
         ...patch
-      })
-    },
+      }),
     [requestLayoutTransaction]
   )
 
@@ -17307,6 +17309,55 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         liveId: activeSceneBackground?.live?.id ?? null,
         picture: Boolean(activeSceneBackground && !activeSceneBackground.live),
         apply: applyLiveBackground
+      },
+      // Plan 209 S11b (D22): the Scene canvas, read fresh at every step.
+      arrange: {
+        read: () => {
+          const config = captureConfigRef.current
+          const orientation = overlayOrientationForCanvas(config.video.width, config.video.height)
+          const verticalLeg = simulcastLegLiveRequest(config)
+          // The stage's own shapes: the Output, or the vertical stream's 9:16.
+          const programAspect = config.video.width / Math.max(1, config.video.height)
+          const sessionActive = sessionOwnsTransport(recordingRef.current)
+          return {
+            scene: transformSceneRef.current,
+            layout: config.layout,
+            overlayLayout: overlayLayoutRef.current,
+            banners: bannerListRef.current ?? NO_BANNERS,
+            canvasAspect: {
+              horizontal: orientation === 'horizontal' ? programAspect : 16 / 9,
+              vertical:
+                orientation === 'vertical'
+                  ? programAspect
+                  : verticalLeg?.video
+                    ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+                    : 9 / 16
+            },
+            orientation,
+            verticalStream: Boolean(verticalLeg),
+            sessionActive,
+            startTimeOverlays: sessionActive && runtimeInfo?.platform === 'win32',
+            blockedReason:
+              wsStatusRef.current !== 'connected'
+                ? OFFLINE_LOCK_REASON
+                : layoutSwitchPending !== null || savedScenePendingId !== null
+                  ? 'The scene is changing.'
+                  : null
+          }
+        },
+        setOverlayLayout,
+        updateBanner: async (id, patch) => (await updateBanner(id, patch)) !== null,
+        applyCameraPreset: requestCameraPresetTransaction,
+        applyLayoutPatch,
+        setSourceTransform: async (sourceId, rect) =>
+          (await setSceneSourceTransform(sourceId, rect)).ok,
+        setSourceVisible: async (sourceId, visible) => {
+          await setSceneSourceVisible(sourceId, visible)
+          return (
+            transformSceneRef.current?.sources.find((source) => source.id === sourceId)
+              ?.visible === visible
+          )
+        }
       },
       markClip: async (seconds) => {
         try {

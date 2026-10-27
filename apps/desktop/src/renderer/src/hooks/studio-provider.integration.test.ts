@@ -105,7 +105,8 @@ import type {
   VideorcApi
 } from '../../../shared/backend'
 import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
-import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
+import { DEFAULT_OVERLAY_LAYOUT, overlaySnapRect } from '@/lib/overlay-layout'
+import { bannerSnapRect } from '@/lib/banner-place'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
 import { useStudioMicVisualSource } from './use-studio-mic-sources'
@@ -2323,6 +2324,75 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().banners.selectedBannerId).toBe('logo')
     await act(async () => emitBanners(backend, [sponsor]))
     expect(latest().banners.selectedBannerId).toBeNull()
+  })
+
+  // Plan 209 S11b (D22): an agent arranges the picture through the Studio's
+  // own saves, landing where the Scene inspector's snaps would.
+  it('moves Buddy and a banner from an agent with the editor snaps, and reads them back', async () => {
+    const { backend, latest } = await mountBannerProvider([testBanner('sponsor', 0)])
+    await waitForObservation(() => latest().core.wsStatus === 'connected')
+    const pushIntent = async (intentId: string, tool: string, args: Record<string, unknown>) => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({
+            event: 'agent.intent',
+            payload: { intentId, agentId: 'agent-1', agentName: 'Claude', tool, args }
+          })
+        })
+        await Promise.resolve()
+      })
+    }
+    const ack = (intentId: string) =>
+      backend.sentCommands
+        .filter((command) => command.method === 'agent.intent.ack')
+        .map((command) => command.params as { intentId: string; ok: boolean; result?: unknown })
+        .find((params) => params.intentId === intentId)
+
+    await pushIntent('move-1', 'move_on_scene', { item: 'buddy', place: 'top-left' })
+    await waitForObservation(() => ack('move-1') !== undefined)
+    expect(ack('move-1')).toMatchObject({ ok: true })
+    expect(backend.overlayLayout.buddy.horizontal).toEqual(
+      overlaySnapRect('buddy', 'horizontal', 'top-left')
+    )
+    expect(backend.overlayLayout.buddy.vertical).toEqual(
+      overlaySnapRect('buddy', 'vertical', 'top-left')
+    )
+
+    const sponsor = testBanner('sponsor', 0)
+    const video = latest().core.captureConfig.video
+    await pushIntent('move-2', 'move_on_scene', { item: 'banner:sponsor', place: 'bottom-left' })
+    await waitForObservation(() => ack('move-2') !== undefined)
+    expect(ack('move-2')).toMatchObject({ ok: true })
+    const update = backend.commands.filter((command) => command.method === 'banners.update').at(-1)
+    expect(update?.params).toEqual({
+      id: 'sponsor',
+      horizontal: bannerSnapRect(
+        sponsor,
+        sponsor.horizontal,
+        'horizontal',
+        video.width / video.height,
+        'bottom-left'
+      ),
+      vertical: bannerSnapRect(sponsor, sponsor.vertical, 'vertical', 9 / 16, 'bottom-left')
+    })
+
+    await pushIntent('set-1', 'set_scene_item', { item: 'buddy', showOnStream: true })
+    await waitForObservation(() => ack('set-1') !== undefined)
+    expect(backend.overlayLayout.buddy.showOnStream).toBe(true)
+
+    await pushIntent('read-1', 'get_scene_layout', {})
+    await waitForObservation(() => ack('read-1') !== undefined)
+    const items = (ack('read-1')?.result as { items: { item: string; rects: unknown }[] }).items
+    expect(items.find((item) => item.item === 'buddy')?.rects).toEqual({
+      horizontal: {
+        x: overlaySnapRect('buddy', 'horizontal', 'top-left').x,
+        y: overlaySnapRect('buddy', 'horizontal', 'top-left').y,
+        width: overlaySnapRect('buddy', 'horizontal', 'top-left').w,
+        height: overlaySnapRect('buddy', 'horizontal', 'top-left').h
+      },
+      vertical: expect.any(Object)
+    })
+    expect(items.map((item) => item.item)).toContain('banner:sponsor')
   })
 
   it('shows, hides, renames and reorders through the backend without a success toast', async () => {

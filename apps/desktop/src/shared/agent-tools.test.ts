@@ -279,7 +279,10 @@ describe('the agent tool catalog (plan 209 S1)', () => {
       set_sources: ['studio', 'action', false],
       set_captions: ['studio', 'action', false],
       set_background: ['studio', 'action', false],
-      edit_banner: ['backend', 'action', false]
+      edit_banner: ['backend', 'action', false],
+      get_scene_layout: ['studio', 'read', false],
+      move_on_scene: ['studio', 'action', false],
+      set_scene_item: ['studio', 'action', false]
     }
     for (const [name, [runsIn, rateFamily, onAir]] of Object.entries(expected)) {
       const tool = agentTool(name)

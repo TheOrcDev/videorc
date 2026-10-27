@@ -24,6 +24,7 @@ import {
   setSources
 } from './run-the-show'
 import { sceneApply, takeoverHide, takeoverShow } from './scene'
+import { getSceneLayout, moveOnScene, setSceneItem } from './scene-layout'
 import { recordStart, recordStop } from './session'
 import { soundPlay, soundStop } from './sounds'
 import { windowFront } from './windows'
@@ -176,5 +177,8 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   go_live: goLive,
   set_sources: setSources,
   set_captions: setCaptions,
-  set_background: setBackground
+  set_background: setBackground,
+  get_scene_layout: getSceneLayout,
+  move_on_scene: moveOnScene,
+  set_scene_item: setSceneItem
 }

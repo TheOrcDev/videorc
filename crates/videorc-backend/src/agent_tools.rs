@@ -953,6 +953,24 @@ mod tests {
                 AgentRateFamily::Action,
                 false,
             ),
+            (
+                "get_scene_layout",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Read,
+                false,
+            ),
+            (
+                "move_on_scene",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "set_scene_item",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
         ];
         for (name, runs_in, rate_family, on_air) in expected {
             let tool = catalog

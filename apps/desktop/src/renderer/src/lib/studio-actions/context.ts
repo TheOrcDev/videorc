@@ -6,7 +6,17 @@
 // that needs more than a key does (a notice, a headless Go Live) adds its
 // field here, and the Studio fills it in the one place the context is built.
 
-import type { Device, DeviceStatus, LayoutPreset, SourceSelection } from '@/lib/backend'
+import type {
+  Banner,
+  Device,
+  DeviceStatus,
+  LayoutPreset,
+  LayoutSettings,
+  OverlayLayout,
+  OverlayOrientation,
+  Scene,
+  SourceSelection
+} from '@/lib/backend'
 import type { HeadlessGoLiveOutcome, HeadlessGoLiveRequest } from '@/lib/go-live-headless'
 import type { BannerSummary } from '../../../../shared/banner-commands'
 import type { ClipLength } from '../../../../shared/clip-lengths'
@@ -124,4 +134,51 @@ export interface StudioActionContext {
     picture: boolean
     apply: (liveId: LiveBackgroundId | null) => Promise<boolean>
   }
+  // Arrange the picture (plan 209 S11b, D22).
+  /** The Scene page's canvas and inspector: what is where, and the saves a
+   * drag, a snap or a switch makes. lib/studio-actions/scene-layout.ts. */
+  arrange?: SceneArrangeContext
+}
+
+/** What the Scene canvas shows, read fresh for each step of an Arrange tool. */
+export interface SceneArrangeSnapshot {
+  /** The committed scene: its sources and where each is drawn. */
+  scene: Scene | null
+  layout: LayoutSettings
+  overlayLayout: OverlayLayout
+  banners: readonly Banner[]
+  /** Each orientation's canvas shape (width / height), as the stage draws it. */
+  canvasAspect: Readonly<Record<OverlayOrientation, number>>
+  /** The program canvas's orientation. */
+  orientation: OverlayOrientation
+  /** A vertical stream is armed beside the program (its own 9:16 rects). */
+  verticalStream: boolean
+  sessionActive: boolean
+  /** The Windows D3D11 pump keeps the overlay input it started with
+   * (docs/overlays.md): a change mid-session shows from the next one. */
+  startTimeOverlays: boolean
+  /** Why the canvas takes no edit now (offline, a scene switching), or null. */
+  blockedReason: string | null
+}
+
+export interface SceneArrangeContext {
+  read: () => SceneArrangeSnapshot
+  /** `overlays.layout.set`, as the canvas's overlay gestures and switches. */
+  setOverlayLayout: (layout: OverlayLayout) => Promise<void>
+  /** `banners.update`; false when it failed (the Studio said why). */
+  updateBanner: (
+    id: string,
+    patch: Partial<Pick<Banner, 'horizontal' | 'vertical' | 'showOnStream' | 'showInRecording'>>
+  ) => Promise<boolean>
+  /** The camera preset controls' transaction (corner, Freeform). */
+  applyCameraPreset: (patch: Partial<LayoutSettings>) => Promise<boolean>
+  /** The inspector's layout patch (the camera's Shape). */
+  applyLayoutPatch: (patch: Partial<LayoutSettings>) => Promise<boolean>
+  /** A released source drag in freeform (`scene.source.transform.update`). */
+  setSourceTransform: (
+    sourceId: string,
+    rect: { x: number; y: number; width: number; height: number }
+  ) => Promise<boolean>
+  /** The inspector's Visible switch; false when it did not land. */
+  setSourceVisible: (sourceId: string, visible: boolean) => Promise<boolean>
 }
