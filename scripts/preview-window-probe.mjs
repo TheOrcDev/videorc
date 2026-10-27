@@ -1021,7 +1021,7 @@ async function runWindowsD3d11WindowProbe() {
   const inputProbe = await smokeCommand('windows-preview-os-input-probe', {
     action: 'prepare'
   })
-  // Focus is read before the drag, which moves it to the window frame.
+  // Focus is read before the drag, which starts the OS move loop.
   runWindowsOsInputProbe(inputProbe, 'type')
   const inputResult = await waitFor(
     async () => smokeCommand('windows-preview-os-input-probe', { action: 'read' }),
@@ -1046,7 +1046,7 @@ async function runWindowsD3d11WindowProbe() {
   )
   assertProbe(
     dragResult.ok,
-    'input: a real Win32 drag on the window frame moves Preview with the presenter claimed',
+    'input: a real Win32 drag in the video moves Preview with the presenter claimed',
     JSON.stringify(dragResult.last)
   )
   if (inputResult.last) {
