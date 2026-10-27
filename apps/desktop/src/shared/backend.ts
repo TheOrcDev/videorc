@@ -2455,6 +2455,8 @@ export type PreviewSurfaceSceneLayerKind =
   | 'screen-image'
   | 'background'
   | 'banner'
+  /** Plan 205 S9: the Buddy's frame-polled layer (`main/preview-surface-buddy.ts`). */
+  | 'buddy'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {

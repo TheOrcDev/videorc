@@ -128,7 +128,8 @@ fn context<'a>(
     card: Option<[f32; 4]>,
 ) -> BuddySpriteLegContext<'a> {
     let (canvas, buddy_box) = match leg {
-        BuddySpriteLeg::Primary => (PRIMARY_CANVAS, PRIMARY_BOX),
+        // The Preview leg (plan 205 S9) draws the primary's picture.
+        BuddySpriteLeg::Primary | BuddySpriteLeg::Preview => (PRIMARY_CANVAS, PRIMARY_BOX),
         BuddySpriteLeg::Auxiliary => (AUX_CANVAS, AUX_BOX),
     };
     BuddySpriteLegContext {

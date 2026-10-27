@@ -94,6 +94,7 @@ mod platform_stream_watch;
 mod posters;
 mod preflight;
 mod preview_bmp;
+mod preview_buddy_layer;
 mod preview_camera;
 mod preview_screen;
 mod preview_surface;
@@ -604,6 +605,11 @@ async fn run_backend() -> Result<()> {
         .route("/preview/screen/live.png", get(live_screen_frame_handler))
         .route("/preview/camera/latest.bmp", get(live_camera_bmp_handler))
         .route("/preview/screen/latest.bmp", get(live_screen_bmp_handler))
+        // Plan 205 S9: the Buddy's layer for the Electron proof surface.
+        .route(
+            "/preview/buddy/latest.bmp",
+            get(preview_buddy_layer::latest_bmp_handler),
+        )
         .route("/preview/{id}", get(preview_handler))
         .route("/sessions/{id}/poster", get(session_poster_handler))
         .route("/compositor/status", get(compositor_status_handler))
