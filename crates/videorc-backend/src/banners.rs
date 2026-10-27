@@ -28,7 +28,7 @@ use crate::banner_prepare::{
 use crate::overlay_layout::{
     LANDSCAPE_EDGE_MARGIN, LANDSCAPE_SIDE_MARGIN, OVERLAY_RECT_MIN_SIZE, OverlayHorizontalGravity,
     OverlayOrientation, OverlayRect, OverlaySessionShape, OverlaySwitches, PORTRAIT_SIDE_MARGIN,
-    PORTRAIT_TOP_MARGIN, RECT_EPSILON, overlay_leg_plan, round6,
+    PORTRAIT_TOP_MARGIN, RECT_EPSILON, overlay_leg_plan, program_shows, round6,
 };
 use crate::protocol::{Banner, UpdateBannerParams};
 use crate::state::AppState;
@@ -987,20 +987,30 @@ impl BannerSet {
 pub(crate) enum BannerLeg {
     Primary,
     Auxiliary,
+    /// The Preview's own picture (plan 205 S6): the program, the union of the
+    /// running outputs' plans (`program_shows`), with the Preview's shape
+    /// (a buffer-only session is `None`, idle).
+    Program,
 }
 
 /// Whether `leg` carries `banner` (plan 186 "Which leg carries a banner").
 /// Idle (`shape` is `None`): the preview draws every banner with at least one
 /// switch on. In a session: the overlay leg plan, with the shared-leg
 /// fallback when the switches disagree on one shared leg, exactly as the
-/// highlight card and the Buddy.
+/// highlight card and the Buddy. The `Program` leg is the program for
+/// `shape` (plan 205), whatever the legs burn.
 pub(crate) fn banner_leg_carries(
     shape: Option<OverlaySessionShape>,
     leg: BannerLeg,
     banner: &Banner,
 ) -> bool {
     let Some(shape) = shape else {
-        return leg == BannerLeg::Primary && (banner.show_on_stream || banner.show_in_recording);
+        return match leg {
+            BannerLeg::Primary | BannerLeg::Program => {
+                banner.show_on_stream || banner.show_in_recording
+            }
+            BannerLeg::Auxiliary => false,
+        };
     };
     let plan = overlay_leg_plan(
         shape.record_enabled,
@@ -1017,6 +1027,9 @@ pub(crate) fn banner_leg_carries(
     match leg {
         BannerLeg::Primary => plan.primary,
         BannerLeg::Auxiliary => plan.aux,
+        BannerLeg::Program => {
+            program_shows(Some(shape), banner.show_on_stream, banner.show_in_recording)
+        }
     }
 }
 
@@ -2439,6 +2452,12 @@ pub(crate) mod tests {
                 "idle primary on_stream={on_stream} in_recording={in_recording}"
             );
             assert!(!banner_leg_carries(None, BannerLeg::Auxiliary, &banner));
+            // Plan 205: the Program leg is `program_shows` for the shape.
+            assert_eq!(
+                banner_leg_carries(None, BannerLeg::Program, &banner),
+                on_stream || in_recording,
+                "idle program on_stream={on_stream} in_recording={in_recording}"
+            );
             for record in [false, true] {
                 for stream in [false, true] {
                     for aux_leg in [
@@ -2465,6 +2484,11 @@ pub(crate) mod tests {
                             ),
                             (expected.primary, expected.aux),
                             "{shape:?} on_stream={on_stream} in_recording={in_recording}"
+                        );
+                        assert_eq!(
+                            banner_leg_carries(Some(shape), BannerLeg::Program, &banner),
+                            program_shows(Some(shape), on_stream, in_recording),
+                            "program {shape:?} on_stream={on_stream} in_recording={in_recording}"
                         );
                     }
                 }

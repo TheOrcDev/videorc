@@ -50,9 +50,11 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
   live except deleting a banner that is showing.
 
 The Preview shows the program: a showing banner appears whenever a running
-output carries it, or either switch is on while nothing runs. On macOS,
-Clips at idle and split record + stream still show the primary leg until
-plan 205 Phase 2 ([overlays.md](overlays.md)).
+output carries it, or either switch is on while nothing runs. That holds
+in every row, Clips at idle and split record + stream included, where the
+Preview composes its own picture, the program leg
+([overlays.md](overlays.md)); a clip saved while nothing runs still holds
+what the recording would (**Show in recording**).
 
 ## For developers
 

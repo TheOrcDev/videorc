@@ -840,5 +840,89 @@ tester pass in S10.
 
 ## As built
 
-(Fill in per phase: commits, PRs, the S5 numbers and the decision, gate
-results, owner-owed checks.)
+### Phase 2 (S5, S6, S7), 2026-10-27, uncommitted in `~/projects/videorc-wt-205`
+
+**What was built (the twin, at the primary's size).** `preview_needs_program_leg`
+(`compositor.rs`, pure, table-tested) is true when some item is in the
+program and not on the primary leg: a buffer-only Clips lease at idle or a
+split stream leg, with a stream-only highlight, Buddy, banner or an
+aux-only caption bar. While it is true and a Preview surface is live, the
+run composes the program leg last in the tick on its own lazily built
+`GpuCompositor` and 3-slot IOSurface ring into `program_frame_store`:
+the same snapshot (editor draft and chrome included), sources, sequence,
+`captured_at`/`published_at`, the primary's same-tick live frame, the
+program's items (`BannerLeg::Program`, the Buddy from the Primary atlas at
+the primary's canvas, captions/bubble from the Primary raster or the
+Auxiliary one), at the primary's canvas, so every prepared bitmap is
+shared. `presented_frame_store` (the lease and the oracle) returns the
+program store while its frame is current (this tick or the one before),
+the primary's else; `preview.frameReady` carries the twin's handoff. The
+first tick the trigger is false the twin's compositor is dropped and its
+store emptied, so nothing runs on the GPU and the lease falls back to the
+primary's surface without a dropped or blank frame. Status:
+`framePipeline.previewProgramLeg` (left off the wire while false; TS type
+updated; the contract test covers it inside the bounded payload).
+`VIDEORC_PREVIEW_PROGRAM_LEG=0` keeps the primary leg, said once in the
+log. The program verdict travels as `OverlayLegFlags::{highlight,buddy}_on_program`
+(`for_session(shape, replay_only, layout)`), `CompositorLoopConfig` and
+`CompositorArmParams`; a fresh run derives it as primary OR aux (the one
+edge: a buffer-only session whose in-place arm was refused runs on a fresh
+run and keeps the recording plan in the Preview, as before this plan).
+
+**S5 numbers (this Mac, dev app, test-pattern scene, a stream-only Buddy and
+a stream-only banner, 40 s samples, medians).** Whole tick = the loop's
+render time per tick (`compositor.status.frameTimeP95Ms`); twin = the
+program leg's own compose (`Preview program leg cost` log line, per 2 s
+window); encoder = `encoderBridge*InputFps` / dropped frames.
+
+| Session | Twin | Tick p50 | Tick p95 (max) | Twin p50 | Twin p95 | Primary GPU p95 | Encoder fps / dropped | Present fps | Frame age |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| Clips 4K30 idle, run 1 | on | 3.63 | 7.59 (10.4) | 1.25 to 1.46 | 2.50 to 6.17 | 4.66 | 30.00 / 0 | 32.0 | 2 ms |
+| Clips 4K30 idle, run 1 | off | 1.68 | 4.45 (9.0) | | | 5.12 | 29.99 / 0 | 31.0 | 1 ms |
+| Clips 4K30 idle, run 2 (busier host) | on | 7.50 | 18.1 (25.2) | 1.42 to 5.88 | 7.5 to 12.7 | 8.92 | 29.98 / 0 | 31.0 | 9 ms |
+| Clips 4K30 idle, run 2 | off | 1.61 | 7.66 (9.8) | | | 7.05 | 30.00 / 0 | 28.5 | 1 ms |
+| Split 1080p30 record + stream | on | 3.65 | 7.06 (15.5) | 0.47 to 0.59 | 0.81 to 4.52 (typ. 1.0) | 5.24 | 30.00 + 30.00 / 0 | 32.0 | 2 ms |
+| Split 1080p30 record + stream | off | 2.18 | 6.43 (27.5) | | | 4.54 | 29.99 + 30.00 / 0 | 28.5 | 3 ms |
+
+Extra IOSurface memory: three slots at the primary's size, 99.5 MB at 4K
+(`compositorMetalTargetRingSlotsLiveCount` 3 → 6), 24.9 MB at 1080p
+(6 → 9). Host GPU load is uncontrolled (run 2 shows it); the encoder never
+lost a frame in any run and the Preview's present rate did not move.
+
+**Against the bar (+2 ms p95 per tick, no encoder frame).** The split
+1080p30 session passes (+0.6 ms tick p95, twin p95 about 1 ms). Clips at
+idle at 4K30, the owner's default, misses it on the quiet run (+3.1 ms tick
+p95; the twin's own p95 2.5 to 6.2 ms, p50 1.3 ms) and by more on the busy
+run, with the encoder untouched. The cost is the fill rate of one more 4K
+target per tick (clear plus draw, then the command wait), so it does not
+shrink without a smaller target.
+
+**Decision as built: the twin at the primary's size, on in every row, with
+the kill switch; the owner decides whether the 4K idle cost stands.** The
+drawable-size twin (the plan's fallback) was not built because two things
+make it more than a canvas change: the bubble, caption and highlight
+rasters are made for the primary's canvas and `overlay_blit_layout` crops
+a raster wider than its canvas rather than scaling it (a 4K bubble on a
+1080p twin would be cut), so the Metal overlay placement needs a scaled
+path; and a twin canvas that differs from the primary's needs its own Buddy
+atlas slot whenever the primary draws the pet too (one slot per leg,
+keyed by canvas), i.e. S9's `BuddySpriteLeg::Preview` or a fallback to the
+primary's size in that case. Both are contained follow-ups (an estimate: a
+1080p-class twin costs about what the split twin costs here, 0.5 ms p50).
+The plate was not prototyped (addon blend pipeline, second texture, new
+handoff fields across Rust, TS and the addon) for the same reason: it is
+only worth building if the owner wants the last millisecond at 4K.
+
+**Gates run (Phase 2):** see the handoff report; `cargo test` filters
+`preview_program`, `program_leg`, `overlay`, `banner`, `buddy`, `lease`,
+`replay`, `preview_debug`, `preview_surface`; clippy and rustfmt (the
+other agent's files excluded); `pnpm typecheck` (blocked by the S9
+agent's in-progress `main/index.ts` edit at the time), the contract
+tests, `pnpm lint`, prettier; `pnpm smoke:preview-truth` (cases 1 to 4 and
+6 to 9; 5 stays a named skip), `pnpm probe:preview-lifecycle`.
+
+**Owner-owed:** by eye on the owner's profile (Clips on, Buddy stream only:
+the pet is in the Preview and not in a saved clip; record + stream at 4K30
+with a stream-only banner: the banner is in the Preview and the stream,
+not the recording); the 4K idle cost call above; the packaged app with a
+real camera.

@@ -4730,6 +4730,9 @@ async fn start_session_with_timeline(
                         aux: buddy_sprite_targets.auxiliary_canvas.is_some(),
                         needs_split: false,
                     },
+                    // The D3D11 session draws the program itself (S8); its
+                    // targets above already include it.
+                    false,
                     (plan.primary.width, plan.primary.height),
                     plan.auxiliary.map(|video| (video.width, video.height)),
                 ));
@@ -5019,11 +5022,20 @@ async fn start_session_with_timeline(
     };
     let overlay_plans =
         crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    // Plan 205 S6: the same plans plus the program's verdict for the Preview
+    // (idle for a buffer-only session, D2), which the Preview's own picture
+    // draws when the primary leg does not.
+    let overlay_flags = crate::compositor::OverlayLegFlags::for_session(
+        overlay_session_shape,
+        replay_only,
+        &overlay_layout,
+    );
     // Plan 168 S-B1: the pet's atlases start building now (off this task),
     // so the session's first frame already has the Buddy.
     if use_encoder_bridge {
         state.buddy_sprite.prepare(&buddy_sprite_legs(
             overlay_plans.buddy,
+            overlay_flags.buddy_on_program,
             (params.output.video.width, params.output.video.height),
             encoder_bridge_stream_output
                 .as_ref()
@@ -5271,6 +5283,8 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        highlight_overlay_on_program: overlay_flags.highlight_on_program,
+                        buddy_overlay_on_program: overlay_flags.buddy_on_program,
                     },
                 )
                 .await
@@ -23450,47 +23464,55 @@ pub async fn apply_overlay_layout_to_active_session(
                 let d3d11 = active.windows_d3d11_media.is_some();
                 #[cfg(not(target_os = "windows"))]
                 let d3d11 = false;
-                Some((active.session_id.clone(), plans, d3d11))
+                // Plan 205 S6: the program's verdict too, idle for a
+                // buffer-only session (D2), so the Preview's own picture
+                // re-plans with the legs.
+                let flags = crate::compositor::OverlayLegFlags::for_session(
+                    shape,
+                    active.replay_only,
+                    layout,
+                );
+                Some((active.session_id.clone(), plans, flags, d3d11))
             }
         }
     };
-    let Some((session_id, plans, d3d11)) = session else {
+    let Some((session_id, plans, flags, d3d11)) = session else {
         apply_overlay_layout_to_idle_preview(state, layout).await;
         return;
     };
-    let swapped = crate::compositor::update_overlay_flags(
-        state,
-        crate::compositor::OverlayLegFlags {
-            highlight_on_primary: plans.highlight.primary,
-            highlight_on_aux: plans.highlight.aux,
-            buddy_on_primary: plans.buddy.primary,
-            buddy_on_aux: plans.buddy.aux,
-        },
-    )
-    .await;
+    let swapped = crate::compositor::update_overlay_flags(state, flags).await;
     // Plan 168 S-B1, mid-session: the pet's atlases for a leg it just joined
     // start building now, as they do at session start. The first frames
     // after the swap draw it as soon as the atlas exists (`leg_frame` asks
-    // too, so this only shortens the wait).
-    let buddy_canvases = if swapped && (plans.buddy.primary || plans.buddy.aux) {
-        let canvases = crate::compositor::banner_prepare_canvases(state).await;
-        match canvases.first() {
-            Some(primary) => {
-                let legs = buddy_sprite_legs(plans.buddy, *primary, canvases.get(1).copied());
-                state.buddy_sprite.prepare(&legs);
-                legs.len()
+    // too, so this only shortens the wait). Plan 205: the program's Buddy
+    // (the Preview's own picture) prepares the Primary atlas the same way.
+    let buddy_canvases =
+        if swapped && (plans.buddy.primary || plans.buddy.aux || flags.buddy_on_program) {
+            let canvases = crate::compositor::banner_prepare_canvases(state).await;
+            match canvases.first() {
+                Some(primary) => {
+                    let legs = buddy_sprite_legs(
+                        plans.buddy,
+                        flags.buddy_on_program,
+                        *primary,
+                        canvases.get(1).copied(),
+                    );
+                    state.buddy_sprite.prepare(&legs);
+                    legs.len()
+                }
+                None => 0,
             }
-            None => 0,
-        }
-    } else {
-        0
-    };
+        } else {
+            0
+        };
     tracing::info!(
         session = %session_id,
         highlight_primary = plans.highlight.primary,
         highlight_aux = plans.highlight.aux,
         buddy_primary = plans.buddy.primary,
         buddy_aux = plans.buddy.aux,
+        highlight_program = flags.highlight_on_program,
+        buddy_program = flags.buddy_on_program,
         buddy_legs_prepared = buddy_canvases,
         swapped,
         "overlay layout changed mid-session"
@@ -23539,13 +23561,19 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
 
 /// The legs (and their canvases) the Buddy's pet draws on in a session
 /// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
+/// The Buddy atlases a session wants (plan 168 S-B1): the Primary atlas at
+/// the primary canvas when the primary leg burns the pet, or (plan 205 S6)
+/// when the program carries it and the Preview's own picture draws it at
+/// that same canvas; the Auxiliary atlas at the aux canvas when that leg
+/// burns it.
 fn buddy_sprite_legs(
     plan: crate::overlay_layout::OverlayLegPlan,
+    program: bool,
     primary: (u32, u32),
     auxiliary: Option<(u32, u32)>,
 ) -> Vec<(crate::buddy_sprite::BuddySpriteLeg, (u32, u32))> {
     let mut legs = Vec::with_capacity(2);
-    if plan.primary {
+    if plan.primary || program {
         legs.push((crate::buddy_sprite::BuddySpriteLeg::Primary, primary));
     }
     if plan.aux

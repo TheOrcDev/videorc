@@ -1,8 +1,10 @@
-// Plan 205 S4: compare the Preview's actual frame with every local output.
+// Plan 205 S4 and S7: compare the Preview's actual frame with every local
+// output, including the two rows where the Preview composes its own picture
+// (Clips at idle, and a split record + stream).
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
@@ -35,7 +37,6 @@ const rects = [
   pet
 ]
 const rows = [
-  { case: '2 Preview half', result: 'SKIP', reason: 'plan 205 Phase 2' },
   // Unreachable here: a Custom stream is at most 1080p, and at 1080p60 or
   // below the VideoToolbox bridge always runs a separate stream leg. The
   // shared-leg row (D13 fallback) is pinned by the Rust program table.
@@ -43,9 +44,13 @@ const rows = [
     case: '5 Record + stream shared leg',
     result: 'SKIP',
     reason: 'no shared leg on the macOS bridge with a Custom stream'
-  },
-  { case: '9 Record + stream split leg', result: 'SKIP', reason: 'plan 205 Phase 2' }
+  }
 ]
+// A, B, C and Buddy: A is stream only, B recording only, C hidden, Buddy
+// stream only. The program is A, B and Buddy.
+const PROGRAM = [true, true, false, true]
+const RECORDING = [false, true, false, false]
+const STREAM = [true, false, false, true]
 const evidence = []
 const logs = []
 const receivers = []
@@ -114,14 +119,65 @@ async function setReplay(armed) {
 }
 async function importBanner(path) {
   const cap = await command('authorize-smoke-resource', { path, kind: 'input-file' })
-  return rpc('banners.importImage', { sourceCapability: cap.capabilityId })
+  // One import at a time process-wide (the AssetImport lane): its permit is
+  // released just after the previous answer, so a back-to-back import can
+  // meet "already being imported". The contract says try again; do so.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await rpc('banners.importImage', { sourceCapability: cap.capabilityId })
+    } catch (error) {
+      if (attempt >= 20 || !/already being imported/.test(error?.message ?? '')) throw error
+      await sleep(100)
+    }
+  }
 }
 async function artifact(path, expected, label) {
   // Sample several fully established frames, never just file size.
   for (const seconds of [1, 1.5, 2])
     check(sampleRects(path, seconds, rects), expected, `${label} ${seconds}s`)
 }
-async function session(record, stream) {
+/**
+ * Whether the status says the Preview presents its program leg. The bit
+ * travels with `framePipeline`, republished on the compositor's diagnostic
+ * window (a couple of seconds), so wait for it rather than read once.
+ */
+async function waitForProgramLeg(expected, label, deadlineMs = 8000) {
+  const until = Date.now() + deadlineMs
+  let status
+  do {
+    status = await rpc('compositor.status')
+    if ((status.framePipeline?.previewProgramLeg === true) === expected) break
+    await sleep(200)
+  } while (Date.now() < until)
+  evidence.push({ label: `${label} framePipeline`, framePipeline: status.framePipeline })
+  assert.equal(
+    status.framePipeline?.previewProgramLeg === true,
+    expected,
+    `${label}: the Preview must${expected ? '' : ' not'} present its program leg (framePipeline=${JSON.stringify(status.framePipeline)})`
+  )
+}
+/** The program leg is on: the status says so and the backend log said why. */
+async function expectProgramLeg(label, logMark) {
+  await waitForProgramLeg(true, label)
+  const on = logs.slice(logMark).find((line) => /Preview program leg on/.test(line))
+  assert(on, `${label}: the backend log must say the program leg turned on`)
+}
+/** The backend's "overlay leg plan" line for the session started after `logMark`. */
+function overlayLegPlanLine(logMark) {
+  const fromStdout = logs.slice(logMark).find((line) => /overlay leg plan/.test(line))
+  if (fromStdout) return fromStdout
+  const backendLog = join(userDataDir, 'logs', 'backend.log')
+  if (!existsSync(backendLog)) return null
+  const lines = readFileSync(backendLog, 'utf8').split('\n')
+  return lines.reverse().find((line) => /overlay leg plan/.test(line)) ?? null
+}
+/**
+ * One session with per-output expectations: `preview` is what the oracle
+ * must see while it runs, `recording` what the file carries, `onAir` what
+ * the local RTMP listener received. `splitLeg` demands a separate stream
+ * leg (the backend's `overlay leg plan ... aux=true`) and the program leg.
+ */
+async function session({ label, record, stream, video, preview, recording, onAir, splitLeg }) {
   await layout()
   const cap = await command('authorize-smoke-resource', {
     path: outputDirectory,
@@ -130,12 +186,13 @@ async function session(record, stream) {
   const params = sessionParams(cap.capabilityId)
   params.output.recordEnabled = record
   params.output.streamEnabled = stream
+  if (video) params.output.video = { ...params.output.video, ...video }
   let receiver
   if (stream) {
     const target = {
       serverUrl: 'rtmp://127.0.0.1:13939/live',
       streamKey: 'preview-truth',
-      recvPath: join(outputDirectory, `stream-${record}.flv`)
+      recvPath: join(outputDirectory, `stream-${label.replace(/\W+/g, '-')}.flv`)
     }
     receiver = startReceiver(target)
     receivers.push(receiver)
@@ -151,20 +208,29 @@ async function session(record, stream) {
       streamKey: target.streamKey
     }
   }
+  const logMark = logs.length
   const started = await rpc('session.start', params)
-  const expected = record ? [false, true, false, false] : [true, false, false, true]
-  await oracle(expected, 'running Preview')
+  await oracle(preview, `${label} running Preview`)
+  if (splitLeg) {
+    const plan = overlayLegPlanLine(logMark)
+    evidence.push({ label: `${label} overlay leg plan`, line: plan })
+    assert(
+      plan && /\baux=true\b/.test(plan),
+      `${label}: expected a split stream leg (overlay leg plan ... aux=true), got ${plan ?? 'no overlay leg plan line'}`
+    )
+    await expectProgramLeg(label, logMark)
+  }
   await sleep(3500) // Deliberate artifact coverage, not readiness.
   const stopped = await rpc('session.stop')
   if (record)
     await artifact(
       await resolveFinalRecordingPath({ started, stopped, timeoutMs }),
-      expected,
-      'recording'
+      recording,
+      `${label} recording`
     )
   if (receiver) {
     await waitForExit(receiver, 15000)
-    await artifact(receiver.path, expected, 'local RTMP')
+    await artifact(receiver.path, onAir, `${label} local RTMP`)
   }
 }
 try {
@@ -271,18 +337,20 @@ try {
     }
   })
   await layout()
-  await runCase('1 Clips off, idle', () => oracle([true, true, false, true], 'idle'))
-  await runCase('2 Clips on, saved clip', async () => {
+  await runCase('1 Clips off, idle', () => oracle(PROGRAM, 'idle'))
+  await runCase('2 Clips on: Preview shows the program, the clip the recording', async () => {
+    const logMark = logs.length
     await setReplay(true)
+    // Plan 205 Phase 2: the ring is a recording (D2), so the Preview composes
+    // its own picture with A, B and Buddy while the ring keeps B only.
+    await oracle(PROGRAM, 'Clips idle Preview')
+    await expectProgramLeg('Clips idle', logMark)
     const until = Date.now() + 45000
     while ((await rpc('replay.status')).bufferedSeconds < 30) {
       assert(Date.now() < until, 'ring never filled 30 seconds')
       await sleep(250)
     }
-    evidence.push({
-      label: 'Clips Preview assertion skipped: plan 205 Phase 2',
-      frame: await rpc('preview.debug.sample', { rects })
-    })
+    await oracle(PROGRAM, 'Clips idle Preview after 30 s')
     const saved = new Promise((resolveSave, reject) => {
       const timer = setTimeout(() => reject(new Error('clip save timed out')), timeoutMs)
       const handler = (event) => {
@@ -302,11 +370,42 @@ try {
       clip.complete && clip.coveredSeconds >= 29.5,
       `Expected a full 30-second clip: ${JSON.stringify(clip)}`
     )
-    await artifact(clip.path, [false, true, false, false], 'saved clip')
+    await artifact(clip.path, RECORDING, 'saved clip')
     await setReplay(false)
+    // Off again: the Preview is the primary leg once more, still the program.
+    await oracle(PROGRAM, 'idle after Clips')
+    await waitForProgramLeg(false, 'idle after Clips')
   })
-  await runCase('3 Record only', () => session(true, false))
-  await runCase('4 Stream only (local RTMP)', () => session(false, true))
+  await runCase('3 Record only', () =>
+    session({
+      label: 'record only',
+      record: true,
+      stream: false,
+      preview: RECORDING,
+      recording: RECORDING
+    })
+  )
+  await runCase('4 Stream only (local RTMP)', () =>
+    session({
+      label: 'stream only',
+      record: false,
+      stream: true,
+      preview: STREAM,
+      onAir: STREAM
+    })
+  )
+  await runCase('9 Record + stream split leg (1080p30)', () =>
+    session({
+      label: 'split 1080p30',
+      record: true,
+      stream: true,
+      video: { width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
+      preview: PROGRAM,
+      recording: RECORDING,
+      onAir: STREAM,
+      splitLeg: true
+    })
+  )
   await runCase('6 Buddy off and selected', async () => {
     await layout(false)
     const selected = { x: pet.x, y: pet.y, width: pet.w, height: pet.h }

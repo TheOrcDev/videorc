@@ -41,15 +41,29 @@ a recording would, using each item's **Show in recording** switch.
 | What runs                         | The Preview draws the item when | The primary leg burns it when |
 | --------------------------------- | ------------------------------- | ----------------------------- |
 | Nothing (Clips off)               | either switch                   | either switch (no output)     |
-| Clips only                        | either switch (Phase 2)         | Show in recording             |
+| Clips only                        | either switch                   | Show in recording             |
 | Record only                       | Show in recording               | Show in recording             |
 | Stream only                       | Show on stream                  | Show on stream                |
 | Record + stream, one shared leg   | either switch                   | either switch                 |
-| Record + stream, split stream leg | either switch (Phase 2)         | Show in recording             |
+| Record + stream, split stream leg | either switch                   | Show in recording             |
 | Record + vertical stream          | either switch (horizontal)      | either switch                 |
 
-On macOS, the Preview's half of Clips at idle and split record + stream
-lands in plan 205 Phase 2. Until then, it presents the primary leg.
+The Preview shows the program in every row. On macOS, the native Preview
+presents the primary leg's IOSurface whenever that leg is the program. In
+the two rows where it is not (Clips at idle, and a split record + stream)
+and some item is in the program but not on the primary leg, the run
+composes the Preview's own picture, the **program leg**, after the encoded
+legs in the same tick: the same snapshot (the Scene editor's draft and
+chrome included), the same sources, the same live background frame and
+the program's items, at the primary's canvas, so every prepared bitmap is
+the one the legs already hold. The Preview lease and the pixel oracle
+present that picture while it is current; the ring, the recording and the
+stream are untouched. While the primary leg is the program nothing extra
+runs on the GPU. `compositor.status.framePipeline.previewProgramLeg` says
+when the program leg is on; `VIDEORC_PREVIEW_PROGRAM_LEG=0` keeps the
+Preview on the primary leg (a measurement and support switch, said in
+the log). The pure trigger is `preview_needs_program_leg` in
+`compositor.rs`.
 
 ## Placing them: the Live Scene canvas
 
@@ -73,10 +87,9 @@ to open its inspector on the right:
   here under "Placement and output".
 
 When the switches differ, the item's label carries a **stream only** or
-**recording only** badge. The docked native preview shows the primary
-composite, so a stream-only item does not appear there during a split; the
-canvas rect shows its place. This caveat also covers Clips at idle until
-plan 205 Phase 2 supplies the Preview’s program leg.
+**recording only** badge. The docked native preview shows the program, so
+a stream-only item appears there during a split and under Clips at idle
+(the program leg above), in the place it will appear on the stream.
 
 When a vertical destination is armed (dual-orientation streaming), an
 **Overlays on** control above the stage switches between Horizontal and

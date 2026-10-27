@@ -1,17 +1,19 @@
 //! Read-only development oracle for the frame handed to the Preview.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::compositor::CompositorFrameStore;
 use crate::compositor::preview_frame_lease::presented_frame_store;
 use crate::state::AppState;
 
-#[derive(Clone, Copy, Deserialize)]
+/// A rectangle in canvas fractions; the oracle reads its middle fifth.
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Rect {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
+pub(crate) struct Rect {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) w: f64,
+    pub(crate) h: f64,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +124,17 @@ pub(crate) async fn sample(state: &AppState, params: Value) -> Result<Value, Str
         return Err("At most 32 rectangles may be sampled.".into());
     }
     let store = presented_frame_store(&*state.compositor.lock().await);
+    sample_frame_store(&store, &params.rects)
+}
+
+/// The mean colour of each rect's middle fifth in `store`'s latest frame:
+/// the IOSurface on Metal (locked read-only), else the CPU yuv420p frame.
+/// The oracle reads the presented store; the compositor's own tests read
+/// one leg's store each (plan 205 S6).
+pub(crate) fn sample_frame_store(
+    store: &CompositorFrameStore,
+    rects: &[Rect],
+) -> Result<Value, String> {
     // A transient FrameHandle retains storage, never the connection's lease
     // permit. Release the store lock before touching pixels.
     let frame = store
@@ -154,7 +167,7 @@ pub(crate) async fn sample(state: &AppState, params: Value) -> Result<Value, Str
                     stride,
                     width,
                     height,
-                    &params.rects,
+                    rects,
                 )
             };
             CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly);
@@ -163,7 +176,7 @@ pub(crate) async fn sample(state: &AppState, params: Value) -> Result<Value, Str
             );
         }
     }
-    let samples = yuv420p(&frame.bytes, width, height, &params.rects)?;
+    let samples = yuv420p(&frame.bytes, width, height, rects)?;
     Ok(json!({"frameId":frame.sequence,"width":width,"height":height,"samples":samples}))
 }
 
