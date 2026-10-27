@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { DestinationsStep } from '@/components/first-run/destinations-step'
 import { GoalStep } from '@/components/first-run/goal-step'
+import { LookStep } from '@/components/first-run/look-step'
 import { PermissionsStep } from '@/components/first-run/permissions-step'
 import { SoundStep } from '@/components/first-run/sound-step'
 import {
@@ -31,6 +32,7 @@ export const FIRST_RUN_LEAVE_MS = 150
 const STEP_SIZES: Partial<Record<FirstRunStep, FirstRunCardSize>> = {
   permissions: 'lg',
   goal: 'lg',
+  look: 'xl',
   sound: 'lg',
   destinations: 'lg'
 }
@@ -181,6 +183,8 @@ export function FirstRunSetup({
             >
               {step === 'goal' ? (
                 <GoalStep key={step} goal={goal} onPick={pickGoal} />
+              ) : step === 'look' ? (
+                <LookStep key={step} />
               ) : step === 'sound' ? (
                 <SoundStep key={step} />
               ) : step === 'destinations' ? (

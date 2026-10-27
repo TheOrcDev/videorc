@@ -194,19 +194,22 @@ function sharedGlobals(): { player: RunnerGlobal; clock: ClockGlobal } | null {
     : null
 }
 
-/** The look's clock constants from the backend's export (the poster phase and rate). */
-export function welcomeBackdropClockSpec(look: WelcomeBackdropLook): ClockSpec | null {
-  const background = render().backgrounds.find((entry) => entry.id === WELCOME_BACKDROP.id)
+/** A live background's clock constants from the backend's export (the poster phase and rate). */
+export function liveBackgroundClockSpec(
+  id: string,
+  look: string,
+  motion: string
+): ClockSpec | null {
+  const background = render().backgrounds.find((entry) => entry.id === id)
   const entry = background?.looks.find((candidate) => candidate.id === look)
   return entry
-    ? {
-        id: WELCOME_BACKDROP.id,
-        look: entry.id,
-        motion: WELCOME_BACKDROP.motion,
-        rate: entry.rate,
-        posterPhase: entry.posterPhase
-      }
+    ? { id, look: entry.id, motion, rate: entry.rate, posterPhase: entry.posterPhase }
     : null
+}
+
+/** The look's clock constants from the backend's export (the poster phase and rate). */
+export function welcomeBackdropClockSpec(look: WelcomeBackdropLook): ClockSpec | null {
+  return liveBackgroundClockSpec(WELCOME_BACKDROP.id, look, WELCOME_BACKDROP.motion)
 }
 
 const CONTEXT_OPTIONS: WebGLContextAttributes = {
@@ -265,7 +268,9 @@ export interface BackdropPlayerHandle {
 }
 
 /**
- * Draws Liquid Chrome into a canvas of its own inside `host` until disposed.
+ * Draws a live background (Liquid Chrome unless `background` names another,
+ * plan 207 S5: Your look's scene picture) into a canvas of its own inside
+ * `host` until disposed.
  * `onFirstFrame` fires once the first frame is on the canvas (the host can
  * fade in over the poster without a jump: the clock starts at the poster
  * phase). `onStill` fires at most once, after which nothing is left
@@ -276,12 +281,15 @@ export interface BackdropPlayerHandle {
 export function startBackdropPlayer({
   host,
   look,
+  background,
   dim: initialDim,
   onFirstFrame,
   onStill
 }: {
   host: HTMLElement
-  look: WelcomeBackdropLook
+  look: string
+  /** Another live background and its motion; the welcome backdrop when absent. */
+  background?: { id: string; motion: string }
   dim: number
   onFirstFrame: () => void
   onStill: (reason: BackdropStillReason, detail?: string) => void
@@ -297,7 +305,8 @@ export function startBackdropPlayer({
   let runner: Runner | null = null
   let clock: Clock | null = null
   const globals = sharedGlobals()
-  const spec = welcomeBackdropClockSpec(look)
+  const id = background?.id ?? WELCOME_BACKDROP.id
+  const spec = liveBackgroundClockSpec(id, look, background?.motion ?? WELCOME_BACKDROP.motion)
   const canvas = document.createElement('canvas')
   canvas.className = 'block size-full'
   host.append(canvas)
@@ -344,7 +353,7 @@ export function startBackdropPlayer({
     const level = guard.level === 'half' ? 'half' : 'full'
     try {
       runner.draw({
-        id: WELCOME_BACKDROP.id,
+        id,
         look,
         phase: globals.clock.phaseAt(clock, nowMs / 1000),
         dim,

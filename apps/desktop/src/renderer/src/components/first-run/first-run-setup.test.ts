@@ -61,12 +61,20 @@ const studio = vi.hoisted(() => ({
     patchStreamingTarget: vi.fn(),
     xNativeCapability: null,
     refreshXNativeCapability: vi.fn(async () => undefined),
-    authorizeXLive: vi.fn(async () => undefined)
+    authorizeXLive: vi.fn(async () => undefined),
+    // Your look (plan 207 S5): the committed scene and the look hold.
+    scene: null as unknown,
+    firstRunLookHold: null,
+    applyFirstRunLook: vi.fn()
   },
-  rows: [] as SystemAccessRow[]
+  rows: [] as SystemAccessRow[],
+  registry: null as unknown
 }))
 
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => studio.core }))
+vi.mock('@/hooks/use-background-assets', () => ({
+  useBackgroundAssets: () => ({ registry: studio.registry })
+}))
 vi.mock('@/hooks/use-system-access-rows', () => ({ useSystemAccessRows: () => studio.rows }))
 vi.mock('@/hooks/use-studio-mic-sources', () => ({
   useMicrophoneMeter: () => ({ meter: { kind: 'value', peakDb: -20 } })
@@ -78,6 +86,9 @@ vi.mock('@/components/studio/mic-level-meter', () => ({
   MicLevelMeter: (props: { 'aria-label': string }) =>
     createElement('div', { 'data-mic-level-meter': '', 'aria-label': props['aria-label'] })
 }))
+
+import { createDefaultRegistry } from '@/lib/background-assets'
+import { defaultCaptureConfig } from '@/lib/capture'
 
 import { FirstRunSetup } from './first-run-setup'
 
@@ -121,6 +132,13 @@ beforeEach(() => {
   studio.rows = allGranted()
   studio.core.platformAccounts = []
   studio.core.oauthProviderCredentials = []
+  studio.registry = createDefaultRegistry()
+  studio.core.captureConfig = {
+    ...defaultCaptureConfig,
+    ...studio.core.captureConfig,
+    layout: defaultCaptureConfig.layout,
+    video: defaultCaptureConfig.video
+  } as typeof studio.core.captureConfig
 })
 
 describe('FirstRunSetup', () => {
@@ -354,5 +372,52 @@ describe('FirstRunSetup', () => {
   it('skips Where you stream for Recordings: Sound check is the last step', () => {
     const markup = render({ kind: 'first-run' }, { initialStep: 'sound', initialGoal: 'record' })
     expect(markup).toMatch(/data-first-run-primary=""[^>]*>Open Studio</)
+  })
+
+  it('Your look: the picture, orientation, layouts, shape and backgrounds at the xl width (plan 207 S5)', () => {
+    studio.core.deviceList = {
+      devices: [
+        { id: 'mic', kind: 'microphone', status: 'available' },
+        { id: 'cam', kind: 'camera', status: 'available' },
+        { id: 'display', kind: 'screen', status: 'available' },
+        SYSTEM_AUDIO
+      ]
+    }
+    studio.core.captureConfig = {
+      ...studio.core.captureConfig,
+      sources: { ...studio.core.captureConfig.sources, cameraId: 'cam', screenId: 'display' }
+    }
+    const markup = render({ kind: 'first-run' }, { initialStep: 'look', initialGoal: 'record' })
+    expect(markup).toContain('data-first-run-step="look"')
+    expect(markup).toMatch(/<main[^>]*class="[^"]*sm:max-w-3xl[^"]*"/)
+    expect(markup).toMatch(/<h1[^>]*id="first-run-title"[^>]*>Your look<\/h1>/)
+    expect(markup).toContain('data-first-run-look-picture="none"')
+    expect(markup).toContain('data-first-run-look-layout="screen-camera"')
+    expect(markup).toContain('data-first-run-look-orientation="horizontal"')
+    expect(markup.match(/data-first-run-look-option="/g)).toHaveLength(4)
+    expect(markup).toContain('aria-label="Camera shape"')
+    expect(markup).toContain('Vertical is for Shorts, Reels and TikTok.')
+    expect(markup.match(/data-first-run-look-background-option="/g)).toHaveLength(11)
+    expect(markup).toContain('Liquid Chrome')
+    expect(markup).toMatch(/data-first-run-primary=""[^>]*>Continue</)
+  })
+
+  it('Your look: a layout without its screen says why, and the shape hides where it never draws', () => {
+    studio.core.mediaAccess = { camera: 'granted', microphone: 'granted', screen: 'denied' }
+    studio.core.deviceList = {
+      devices: [
+        { id: 'mic', kind: 'microphone', status: 'available' },
+        { id: 'cam', kind: 'camera', status: 'available' }
+      ]
+    }
+    studio.core.captureConfig = {
+      ...studio.core.captureConfig,
+      layout: { ...studio.core.captureConfig.layout, layoutPreset: 'camera-only' },
+      sources: { ...studio.core.captureConfig.sources, cameraId: 'cam' }
+    }
+    const markup = render({ kind: 'first-run' }, { initialStep: 'look', initialGoal: 'record' })
+    expect(markup).toContain('Allow Screen Recording first.')
+    expect(markup).toMatch(/data-first-run-look-option="screen-only"[\s\S]*?disabled=""/)
+    expect(markup).not.toContain('aria-label="Camera shape"')
   })
 })
