@@ -1,7 +1,9 @@
 # Plan 207: first-run setup, steps 2 to 5
 
-**Status:** PLANNED 2026-10-27. Owner decisions D1 to D12 below carry
-recommendations; the executor uses them unless the owner changes them.
+**Status:** BUILT IN PR (unmerged), 2026-10-27. S1 to S7 are committed;
+S8 extends the smoke and records acceptance. Owner checks and the final
+orchestrator smoke bundle remain owed. See
+[acceptance](../docs/acceptance/2026-10-27-first-run-steps.md).
 **Priority:** P1. Every new user meets these steps right after permissions.
 **Owner request:** after plan 203's permissions step, add the next setup
 steps: "What are you making?", "Your look", "Sound check" and "Where you
@@ -927,4 +929,59 @@ is owed.
 
 ## Execution notes
 
-None yet.
+S1 to S7, in `git log --oneline dc1309cb..HEAD` order at S8 handoff:
+
+```text
+9a13f3de fix(first-run): Your look fits the window, says why a layout is off, and labels its boxes (plan 207 S5)
+dfbe8acc feat(first-run): Your look, the scene picture with its live background moving (plan 207 S5)
+be51b97f feat(first-run): apply the look as state, never opening a device during setup (plan 207 S4)
+18aa265c fix(clips): wait quietly while the scene shows a screen nobody has chosen (plan 207 S2)
+256030a2 feat(first-run): Where you stream, signing in turns the destination on (plan 207 S7)
+1e55bd1e feat(first-run): Sound check, with a level verdict and Set level for me (plan 207 S6)
+236d69cb feat(first-run): the step frame and "What are you making?" (plan 207 S3)
+818b1e54 feat(first-run): record v2 with the step and goal, and the step list (plan 207 S1)
+feadeb2f docs(plans): plan 207, first-run setup steps 2 to 5
+```
+
+- S2, S4 and S5 were finished by the orchestrator (Opus 5.5) after Fable
+  5.1 hit the API rate limit on three accounts; the owner chose that.
+- S1 left `firstRunPrimary` alone; S3 made both permission labels advance.
+  Linux drops the permissions step entirely, so its replay starts at
+  "What are you making?" (D1 said after "Nothing to grant here").
+- S5 draws a read-only scene picture
+  (`components/first-run/look-picture.tsx`: the committed scene's boxes
+  and camera mask, device names as Badge chips, "No screen"/"No camera" in
+  empty boxes) instead of `SceneStage`, which is an editor with a toolbar
+  and footer. The picture follows the committed scene, so it lags a choice
+  by the idle scene reload (about 0.3 s).
+- Your look: picture + orientation beside camera shape + background tiles
+  (thumbnails, names as button names and tooltips, the chosen name in a
+  line under them); layouts in a full-width row with the gallery's reason
+  line and "Back to permissions".
+- `lib/live-background-player.ts` gained an optional `background` (id,
+  motion); the welcome backdrop is unchanged.
+- The frame gained `goTo` and `leaveTo`; `FirstRunLeave` lives in
+  `lib/first-run.ts`.
+- `YouTubeConsentDialog` was extracted from the destination card with its
+  words byte-identical, and `SignInPending` exported; setup's sign-in turns
+  its destination on through `setupDestinationsToTurnOn`.
+- S4's idle scene reload already carries the chosen background and updates
+  the applied fingerprint. The library sync stays held while setup is
+  open; on workspace entry it applies only an outstanding change. The
+  normal setup path needs no redundant layout transaction. Setup starts
+  the Studio without undo history; the state-only apply path intentionally
+  does not create transaction undo entries or saved-scene origin changes.
+- This host has no camera/mic/screen grants for dev Electron and no OAuth
+  client ids. Granted paths (a moving camera box, a real sign-in, the
+  verdict with a real voice) are owner-owed. The picture names devices;
+  live camera capture inside setup remains out of scope.
+- S8 keeps plan 203's smoke checks and adds three actual isolated profiles,
+  saved-step reload, every-step replay, light/dark screenshots, the
+  open-to-close source-start log scan and 30 s two-player cost sample.
+  Reload normalizes absent source-off flags to false; resume checks the
+  chosen layout, audio and background, while replay still requires raw
+  record and captureConfig byte identity.
+- S8 makes no app-source changes, adds no DOM attributes and leaves its
+  changes uncommitted for orchestrator review. The orchestrator owns the
+  broader recording/preview gates and runs `smoke:local-gates` once at the
+  end; S8's exact results and owner checklist are in the acceptance doc.

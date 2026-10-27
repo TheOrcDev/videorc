@@ -9,8 +9,9 @@
   microphone, its level with a verdict, "Set level for me", and System
   audio. Where you stream signs in to YouTube, Twitch, Kick or X and turns
   each one on. Nothing in setup opens a capture device. It also fixes
-  "Clips couldn't start" on a fresh install without a screen. **PLANNED**,
-  D1 to D12 recommended, owner review pending.
+  "Clips couldn't start" on a fresh install without a screen. **BUILT IN PR**
+  (unmerged); owner acceptance and the final smoke bundle are still owed.
+  [Acceptance](../docs/acceptance/2026-10-27-first-run-steps.md).
 - 2026-10-27: [Plan 206](206-facebook-live.md), Facebook Live in the
   Livestream tab. Owner request: a Facebook connector like the other
   platforms, stream key first, the rest once Meta approves. Phase 1 (one
