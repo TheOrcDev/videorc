@@ -8,18 +8,25 @@ import {
   FIRST_RUN_STEPS,
   firstRunDecision,
   firstRunShellSurface,
+  firstRunStepPosition,
+  firstRunStepsFor,
+  nextFirstRunStep,
+  previousFirstRunStep,
   parseFirstRunRecord,
   writeFirstRunRecord,
-  type FirstRunRecord
+  type FirstRunGoal,
+  type FirstRunRecord,
+  type FirstRunSetupMode
 } from './first-run'
 import { checkWhatsNew, WHATS_NEW_STORAGE_KEY } from './whats-new'
 import { validateElectronInvokeResult } from '../../../shared/electron-ipc-contract'
 
 const updatedAt = '2026-10-27T12:00:00.000Z'
 const record = (status: FirstRunRecord['status']): FirstRunRecord => ({
-  version: 1,
+  version: 2,
   status,
   step: 'permissions',
+  goal: null,
   updatedAt
 })
 const runtime = { platform: 'darwin', firstRunSuppressed: false }
@@ -41,7 +48,7 @@ describe('first-run record', () => {
       const store = storage()
       expect(writeFirstRunRecord(status, store, updatedAt)).toEqual(record(status))
       expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))).toEqual(record(status))
-      expect(FIRST_RUN_STEPS).toEqual(['permissions'])
+      expect(FIRST_RUN_STEPS).toEqual(['permissions', 'goal', 'look', 'sound', 'destinations'])
     }
   )
 
@@ -53,14 +60,63 @@ describe('first-run record', () => {
     '[]',
     '1',
     '{}',
-    JSON.stringify({ ...record('done'), version: 2 }),
+    JSON.stringify({ ...record('done'), version: 3 }),
     JSON.stringify({ ...record('done'), status: 'unknown' }),
     JSON.stringify({ ...record('done'), status: ['done'] }),
-    JSON.stringify({ ...record('done'), step: 'unknown' }),
     JSON.stringify({ ...record('done'), updatedAt: 123 }),
     JSON.stringify({ ...record('done'), updatedAt: 'invalid' })
   ])('treats an invalid or unknown record as absent: %s', (value) => {
     expect(parseFirstRunRecord(value)).toBeNull()
+  })
+
+  it.each(['in-progress', 'done', 'skipped', 'existing-install'] as const)(
+    'normalizes a v1 %s record to v2 without reopening finished setup',
+    (status) => {
+      const legacy = { version: 1, status, step: 'permissions', updatedAt }
+      const parsed = parseFirstRunRecord(JSON.stringify(legacy))
+      expect(parsed).toEqual(record(status))
+      const store = storage({ [STORAGE_KEYS.firstRun]: JSON.stringify(legacy) })
+      const startup = createFirstRunStartup(store)
+      expect(startup.snapshot).toBe(status === 'in-progress' ? 'resume' : 'finished')
+      expect(startup.step).toBe('permissions')
+      expect(startup.goal).toBeNull()
+      expect(startup.finalize(runtime)).toBe(status === 'in-progress' ? 'show' : 'hide')
+    }
+  )
+
+  it.each(['in-progress', 'done', 'skipped', 'existing-install'] as const)(
+    'keeps %s and falls back to permissions for an unknown v2 step',
+    (status) => {
+      expect(
+        parseFirstRunRecord(JSON.stringify({ ...record(status), step: 'unknown', goal: 'both' }))
+      ).toEqual({ ...record(status), goal: 'both' })
+    }
+  )
+
+  it.each(['record', 'stream', 'both'] as const)('parses the %s goal', (goal) => {
+    expect(parseFirstRunRecord(JSON.stringify({ ...record('in-progress'), goal }))?.goal).toBe(goal)
+  })
+
+  it.each([undefined, null, 'unknown', 1, ['record'], {}])(
+    'normalizes an unknown goal to null: %s',
+    (goal) => {
+      expect(parseFirstRunRecord(JSON.stringify({ ...record('in-progress'), goal }))).toEqual(
+        record('in-progress')
+      )
+    }
+  )
+
+  it.each(['done', 'skipped'] as const)('preserves progress when completing as %s', (status) => {
+    const progress = { step: 'sound', goal: 'record' } as const
+    const store = storage()
+    writeFirstRunRecord('in-progress', store, updatedAt, progress)
+    completeFirstRun(status, store)
+    expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))).toMatchObject({
+      version: 2,
+      status,
+      ...progress
+    })
+    expect(store.getItem(STORAGE_KEYS.onboarding)).toBe(ONBOARDING_DISMISSED_VALUE)
   })
 
   it.each(['done', 'skipped'] as const)('completes as %s and dismisses older apps', (status) => {
@@ -68,6 +124,57 @@ describe('first-run record', () => {
     completeFirstRun(status, store)
     expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))?.status).toBe(status)
     expect(store.getItem(STORAGE_KEYS.onboarding)).toBe(ONBOARDING_DISMISSED_VALUE)
+  })
+})
+
+describe('first-run step logic', () => {
+  const modes: FirstRunSetupMode[] = [
+    { kind: 'first-run' },
+    { kind: 'replay', returnTo: 'settings' }
+  ]
+  const goals: (FirstRunGoal | null)[] = [null, 'record', 'stream', 'both']
+  for (const mode of modes) {
+    for (const platform of ['darwin', 'win32', 'linux', undefined]) {
+      it.each(goals)(`${mode.kind} on ${platform} walks the applicable steps for %s`, (goal) => {
+        const context = { goal, platform, mode }
+        const expected = [
+          ...(platform === 'linux' ? [] : ['permissions']),
+          'goal',
+          'look',
+          'sound',
+          ...(goal === 'record' ? [] : ['destinations'])
+        ]
+        expect(firstRunStepsFor(context)).toEqual(expected)
+        firstRunStepsFor(context).forEach((step, index) => {
+          expect(firstRunStepPosition(step, context)).toEqual({
+            index: index + 1,
+            count: expected.length
+          })
+          expect(nextFirstRunStep(step, context)).toBe(expected[index + 1] ?? null)
+          expect(previousFirstRunStep(step, context)).toBe(expected[index - 1] ?? null)
+        })
+      })
+    }
+  }
+
+  it('counts five steps before a goal is picked and four for recordings', () => {
+    const context = { goal: null, platform: 'darwin', mode: modes[0] }
+    expect(firstRunStepPosition('look', context)).toEqual({ index: 3, count: 5 })
+    expect(firstRunStepPosition('sound', { ...context, goal: 'record' })).toEqual({
+      index: 4,
+      count: 4
+    })
+    expect(nextFirstRunStep('sound', { ...context, goal: 'record' })).toBeNull()
+  })
+
+  it('handles saved steps excluded by the current platform or goal', () => {
+    const context = { goal: 'record', platform: 'linux', mode: modes[1] } as const
+    expect(nextFirstRunStep('permissions', context)).toBe('goal')
+    expect(previousFirstRunStep('permissions', context)).toBeNull()
+    expect(firstRunStepPosition('permissions', context)).toEqual({ index: 1, count: 3 })
+    expect(nextFirstRunStep('destinations', context)).toBeNull()
+    expect(previousFirstRunStep('destinations', context)).toBe('sound')
+    expect(firstRunStepPosition('destinations', context)).toEqual({ index: 3, count: 3 })
   })
 })
 
@@ -186,8 +293,122 @@ describe('first-run startup ordering', () => {
     const startup = createFirstRunStartup(store)
     expect(startup.finalize({ ...runtime, firstRunSuppressed: true })).toBe('hide')
     expect(startup.finalize(runtime)).toBe('hide')
+    startup.enterStep('look')
+    startup.setGoal('record')
+    startup.complete('done')
     expect(store.setItem).not.toHaveBeenCalled()
   })
+
+  it.each(FIRST_RUN_STEPS)('resumes at %s with the chosen goal', (step) => {
+    const store = storage()
+    const startup = createFirstRunStartup(store)
+    startup.finalize(runtime)
+    startup.setGoal('both')
+    startup.enterStep(step)
+    expect(startup.step).toBe(step)
+    expect(startup.goal).toBe('both')
+    const resumed = createFirstRunStartup(store)
+    expect(resumed.snapshot).toBe('resume')
+    expect(resumed.step).toBe(step)
+    expect(resumed.goal).toBe('both')
+    expect(resumed.finalize(runtime)).toBe('show')
+    expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))).toMatchObject({
+      version: 2,
+      status: 'in-progress',
+      step,
+      goal: 'both'
+    })
+  })
+
+  it('saves a new goal without losing the current step, including after going back', () => {
+    const store = storage()
+    const startup = createFirstRunStartup(store)
+    startup.finalize(runtime)
+    startup.enterStep('look')
+    startup.setGoal('stream')
+    expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))).toMatchObject({
+      step: 'look',
+      goal: 'stream'
+    })
+    startup.enterStep('goal')
+    startup.setGoal('record')
+    startup.complete('done')
+    expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))).toMatchObject({
+      status: 'done',
+      step: 'goal',
+      goal: 'record'
+    })
+  })
+
+  it.each(['in-progress', 'done', 'skipped', 'existing-install'] as const)(
+    'replay leaves a %s record and legacy keys byte-identical',
+    (status) => {
+      const saved = { ...record(status), step: 'sound', goal: 'stream' }
+      const raw = JSON.stringify(saved)
+      const store = storage({
+        [STORAGE_KEYS.firstRun]: raw,
+        [STORAGE_KEYS.onboarding]: 'legacy-marker',
+        [WHATS_NEW_STORAGE_KEY]: '1.0.0'
+      })
+      const startup = createFirstRunStartup(store)
+      startup.finalize(runtime)
+      const mode = { kind: 'replay', returnTo: 'settings' } as const
+      startup.enterStep('look', mode)
+      startup.setGoal('record', mode)
+      startup.complete('skipped', mode)
+      expect(store.setItem).not.toHaveBeenCalled()
+      expect(store.getItem(STORAGE_KEYS.firstRun)).toBe(raw)
+      expect(startup.step).toBe('sound')
+      expect(startup.goal).toBe('stream')
+    }
+  )
+
+  it('writes nothing before finalization or after suppression or completion', () => {
+    const store = storage()
+    const startup = createFirstRunStartup(store)
+    startup.enterStep('look')
+    startup.setGoal('record')
+    startup.complete('done')
+    expect(store.setItem).not.toHaveBeenCalled()
+    startup.finalize({ ...runtime, firstRunSuppressed: true })
+    startup.enterStep('sound')
+    startup.setGoal('both')
+    startup.complete('skipped')
+    expect(store.setItem).not.toHaveBeenCalled()
+    const active = createFirstRunStartup(store)
+    active.finalize(runtime)
+    active.complete('done')
+    store.setItem.mockClear()
+    active.enterStep('goal')
+    active.setGoal('stream')
+    active.complete('skipped')
+    expect(store.setItem).not.toHaveBeenCalled()
+  })
+
+  it.each([STORAGE_KEYS.onboarding, WHATS_NEW_STORAGE_KEY])(
+    'a malformed record still migrates the existing install holding %s',
+    (key) => {
+      for (const malformed of [
+        'garbage',
+        '{}',
+        JSON.stringify({ ...record('done'), version: 3 }),
+        JSON.stringify({ ...record('done'), updatedAt: 'invalid' }),
+        JSON.stringify({ ...record('done'), status: 'unknown' })
+      ]) {
+        const store = storage({ [key]: '', [STORAGE_KEYS.firstRun]: malformed })
+        const startup = createFirstRunStartup(store)
+        expect(startup.snapshot).toBe('existing-install')
+        expect(startup.finalize(runtime)).toBe('hide')
+        expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))).toMatchObject({
+          version: 2,
+          status: 'existing-install'
+        })
+        expect(store.setItem).toHaveBeenCalledTimes(1)
+        expect(createFirstRunStartup(store).finalize(runtime)).toBe('hide')
+        expect(store.setItem).toHaveBeenCalledTimes(1)
+      }
+    }
+  )
 
   it('does not start setup on a fresh Linux profile', () => {
     const store = storage()
@@ -225,6 +446,10 @@ describe('first-run startup ordering', () => {
     expect(shell).not.toContain('PermissionsOnboarding')
     expect(shell).toContain("surface === 'setup' && setupMode")
     expect(shell).toContain('<FirstRunPlaceholder />')
+    expect(shell).toContain("initialStep={replay ? 'permissions' : firstRunStartup?.step}")
+    expect(shell).toContain('initialGoal={firstRunStartup?.goal ?? null}')
+    expect(shell).toContain('onEnterStep={(step) => firstRunStartup?.enterStep(step, setupMode)}')
+    expect(shell).toContain('onGoalChange={(goal) => firstRunStartup?.setGoal(goal, setupMode)}')
     // A replay returns to its page before the record could be written.
     const leave = shell.slice(
       shell.indexOf('const leaveFirstRunSetup'),

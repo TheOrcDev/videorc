@@ -15,7 +15,7 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
   }
   const o = observation
   const validRecord = (status) =>
-    o.record?.version === 1 &&
+    [1, 2].includes(o.record?.version) &&
     o.record?.step === 'permissions' &&
     status.includes(o.record?.status) &&
     typeof o.record?.updatedAt === 'string' &&

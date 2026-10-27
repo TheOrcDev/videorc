@@ -115,3 +115,23 @@ test('Continue writes done, with the same completion checks as Skip for now', ()
 test('unknown steps fail closed', () => {
   assert.equal(evaluateFirstRunSmokeStep('typo').pass, false)
 })
+
+for (const step of ['fresh', 'finish', 'reload', 'existing-install', 'resume']) {
+  test(`${step}: accepts the v2 record alongside legacy v1 smoke seeds`, () => {
+    const observation = observations[step]
+    assert.equal(
+      evaluateFirstRunSmokeStep(step, {
+        ...observation,
+        record: { ...observation.record, version: 2, goal: null }
+      }).pass,
+      true
+    )
+    assert.equal(
+      evaluateFirstRunSmokeStep(step, {
+        ...observation,
+        record: { ...observation.record, version: 3 }
+      }).pass,
+      false
+    )
+  })
+}

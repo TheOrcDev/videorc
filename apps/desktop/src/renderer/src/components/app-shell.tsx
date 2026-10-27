@@ -505,7 +505,14 @@ function AppShellContent(): ReactElement {
         // title band and the card, in place of the sidebar and the page. The
         // solid placeholder holds the window while its chunk loads.
         <Suspense fallback={<FirstRunPlaceholder />}>
-          <FirstRunSetup mode={setupMode} onLeave={leaveFirstRunSetup} />
+          <FirstRunSetup
+            mode={setupMode}
+            initialStep={replay ? 'permissions' : firstRunStartup?.step}
+            initialGoal={firstRunStartup?.goal ?? null}
+            onEnterStep={(step) => firstRunStartup?.enterStep(step, setupMode)}
+            onGoalChange={(goal) => firstRunStartup?.setGoal(goal, setupMode)}
+            onLeave={leaveFirstRunSetup}
+          />
         </Suspense>
       ) : surface === 'placeholder' ? (
         <FirstRunPlaceholder />

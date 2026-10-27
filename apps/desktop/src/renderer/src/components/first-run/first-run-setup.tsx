@@ -5,7 +5,12 @@ import { WelcomeBackdrop } from '@/components/first-run/welcome-backdrop'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import { useStudioCore } from '@/hooks/use-studio'
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
-import type { FirstRunCompletion, FirstRunSetupMode } from '@/lib/first-run'
+import type {
+  FirstRunCompletion,
+  FirstRunGoal,
+  FirstRunSetupMode,
+  FirstRunStep
+} from '@/lib/first-run'
 import { cn } from '@/lib/utils'
 
 /** The fade of the card and the backdrop on Continue or Skip for now (the skill's motion scale). */
@@ -24,6 +29,11 @@ export function FirstRunSetup({
   onLeave
 }: {
   mode: FirstRunSetupMode
+  /** Saved progress for the multi-step frame (plan 207 S3). */
+  initialStep?: FirstRunStep
+  initialGoal?: FirstRunGoal | null
+  onEnterStep?: (step: FirstRunStep) => void
+  onGoalChange?: (goal: FirstRunGoal) => void
   /** After the fade: write the record (first run) or return (replay). */
   onLeave: (completion: FirstRunCompletion) => void
 }): ReactElement {
