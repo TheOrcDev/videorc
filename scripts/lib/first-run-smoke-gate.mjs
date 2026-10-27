@@ -258,10 +258,14 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
           )
         }
       }
-      check(
-        Number.isFinite(o.gpuCpuPercent) && o.gpuCpuPercent >= 0,
-        'missing GPU process CPU measurement'
-      )
+      if (o.gpuCpuPercent === null && o.reason === 'no-gpu') {
+        skipped.push('GPU process CPU: no-gpu')
+      } else {
+        check(
+          Number.isFinite(o.gpuCpuPercent) && o.gpuCpuPercent >= 0,
+          'missing GPU process CPU measurement'
+        )
+      }
       break
     }
     case 'sound':

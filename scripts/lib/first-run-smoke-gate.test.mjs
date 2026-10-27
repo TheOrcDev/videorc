@@ -359,6 +359,26 @@ test('known no-GPU posters report skipped motion; unexpected stills fail', () =>
   assert.equal(result.skipped.length, 2)
 })
 
+test('a no-GPU host has no GPU process to sample; other stills still need the measurement', () => {
+  const stills = {
+    ...observations['look-motion'],
+    backdrop: 'still',
+    picture: 'still',
+    backdropDrawCount: 0,
+    pictureDrawCount: 0,
+    backdropDrawFps: 0,
+    pictureDrawFps: 0,
+    gpuCpuPercent: null
+  }
+  const result = evaluateFirstRunSmokeStep('look-motion', { ...stills, reason: 'no-gpu' })
+  assert.equal(result.pass, true)
+  assert.match(result.skipped.at(-1), /GPU process CPU: no-gpu/)
+  assert.equal(
+    evaluateFirstRunSmokeStep('look-motion', { ...stills, reason: 'software-gpu' }).pass,
+    false
+  )
+})
+
 test('resume at Sound check preserves its config and saved step', () => {
   const observation = {
     ...setup,

@@ -134,8 +134,9 @@ export function FirstRunSetup({
   }, [leaving, onLeave])
 
   // A new step takes the keyboard: its marked control, else its first
-  // button, else the primary. The first step places its own focus.
-  const shownStep = useRef(step)
+  // button, else the primary. Permissions places its own focus once its
+  // rows are real; setup resumed at a later step focuses it here.
+  const shownStep = useRef<FirstRunStep | null>(step === 'permissions' ? step : null)
   useEffect(() => {
     if (shownStep.current === step) return
     shownStep.current = step

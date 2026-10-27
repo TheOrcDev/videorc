@@ -10450,6 +10450,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setFirstRunLookHold(look)
         return
       }
+      // The session that held an earlier look has ended: this write wins.
+      if (firstRunLookHoldRef.current) {
+        firstRunLookHoldRef.current = null
+        setFirstRunLookHold(null)
+      }
       void import('@/lib/first-run-look').then(
         ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
           const current = captureConfigRef.current
