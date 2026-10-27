@@ -19,7 +19,8 @@ import {
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 import {
   nativePreviewSurfaceStatusReady,
-  previewWindowSurfaceReady
+  previewWindowSurfaceReady,
+  windowsD3d11SurfaceReady
 } from './lib/native-preview-window-gates.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
@@ -264,7 +265,7 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
     assertNativeBootstrap(bootstrap)
     await smokeCommand(smoke, 'preview-window-open')
     await waitForPreviewWindowSurface(smoke, ws)
-    const surfaceBefore = await waitForNativeSurface(ws)
+    const surfaceBefore = await waitForNativeSurface(ws, smoke)
     const nativeStage = await smokeCommand(smoke, 'inspect-native-preview-bootstrap', {
       requireNativePlaceholder: true
     })
@@ -477,7 +478,7 @@ async function runNativePreviewRecordingScenario(
       )
       try {
         assertNativeMeasurement(scenario, measurement, {
-          armedInPlace: compositorPath.path === 'armed'
+          armedInPlace: compositorPath.path === 'armed' || expectWindowsD3d11Preview
         })
       } catch (error) {
         measurementFailure = errorMessage(error)
@@ -486,7 +487,7 @@ async function runNativePreviewRecordingScenario(
     }
 
     surfaceDuring = expectsPreview
-      ? await waitForNativeSurface(ws, previousSurface.framesRendered)
+      ? await waitForNativeSurface(ws, smoke, previousSurface.framesRendered)
       : await waitForHiddenNativeSurface(ws)
   } catch (error) {
     scenarioFailure = error
@@ -654,7 +655,7 @@ async function showNativePreviewSurface(ws, smoke, samples) {
     requireNativePlaceholder: true
   })
   assertNativeBootstrap(nativeStage, { requireNativePreview: true })
-  const surface = await waitForNativeSurface(ws)
+  const surface = await waitForNativeSurface(ws, smoke)
   await waitForNativePreviewDiagnostics(samples)
   return surface
 }
@@ -888,27 +889,36 @@ function fullFrameTransform() {
   }
 }
 
-async function waitForNativeSurface(ws, previousFrames = 0) {
+async function waitForNativeSurface(ws, smoke, previousFrames = 0) {
   const deadline = Date.now() + timeoutMs
   let lastStatus = null
+  let lastHostStatus = null
   while (Date.now() < deadline) {
     lastStatus = await request(ws, timeoutMs, 'preview.surface.status')
-    if (
+    if (expectWindowsD3d11Preview) {
+      lastHostStatus = await smokeCommand(smoke, 'native-preview-surface-status')
+      if (
+        windowsD3d11SurfaceReady(
+          { backendStatus: lastStatus, hostStatus: lastHostStatus },
+          { previousFrames }
+        )
+      ) {
+        return lastStatus
+      }
+    } else if (
       nativePreviewSurfaceStatusReady(lastStatus, {
         expectedTransport: expectedSurfaceTransport,
         expectedBacking: expectedSurfaceBacking,
         expectedHostKind: expectedNativePreviewHostKind,
         previousFrames
-      }) &&
-      (!expectWindowsD3d11Preview ||
-        (lastStatus.firstFrameContract === 'met' && lastStatus.framePollingSuppressed === true))
+      })
     ) {
       return lastStatus
     }
     await sleep(150)
   }
   throw new Error(
-    `Native preview surface did not become live. Last status: ${JSON.stringify(lastStatus)}`
+    `Native preview surface did not become live. Last status: ${JSON.stringify(lastStatus)}${lastHostStatus ? `. Electron host status: ${JSON.stringify(lastHostStatus)}` : ''}`
   )
 }
 
@@ -1007,7 +1017,7 @@ async function waitForNativePreviewDiagnostics(samples) {
       if (
         sample.previewTransport === expectedSurfaceTransport &&
         sample.previewSurfaceBacking === expectedSurfaceBacking &&
-        (sample.previewPresentFps ?? 0) >= minPreviewFps &&
+        (sample.previewPresentFps ?? 0) >= previewDiagnosticsMinFps(sample) &&
         windowsD3d11DiagnosticsHealthy(sample)
       ) {
         return sample
@@ -1179,6 +1189,14 @@ function compositorPathForSession(sessionLogs, sessionId) {
     path: entry.code === 'recording-compositor-armed' ? 'armed' : 'restarted',
     detail: entry.message ?? null
   }
+}
+
+// The unified D3D11 path presents every frame its media generation composes,
+// so its preview runs at the session cadence, like an armed compositor.
+function previewDiagnosticsMinFps(sample) {
+  return expectWindowsD3d11Preview && Number.isFinite(sample.targetFps)
+    ? sample.targetFps * 0.9
+    : minPreviewFps
 }
 
 function nativeMeasurementMinFps(scenario, armedInPlace = false) {
