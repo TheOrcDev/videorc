@@ -287,6 +287,17 @@ describe('activityCapabilityNote for X', () => {
   })
 })
 
+// Plan 206: a stream-key Facebook live shares no comments or viewers.
+describe('activityCapabilityNote for key-only destinations', () => {
+  it('names Facebook with a stream key beside the platforms that have no live API', () => {
+    const expected =
+      "Facebook with a stream key, TikTok, Instagram and custom RTMP don't share comments or viewers."
+    expect(activityCapabilityNote(['facebook'])).toBe(expected)
+    expect(activityCapabilityNote(['tiktok'])).toBe(expected)
+    expect(activityCapabilityNote(['twitch'])).toBeNull()
+  })
+})
+
 // Plan 095, S2: Activity says what is on stream, with chat's own badge.
 describe('ActivityPane on stream', () => {
   const rows: ActivityItem[] = [

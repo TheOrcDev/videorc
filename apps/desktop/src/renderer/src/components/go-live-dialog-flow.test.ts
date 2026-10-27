@@ -295,6 +295,42 @@ describe('Go Live dialog destinations (B-8, B-12, D-7)', () => {
     expect(dialog().textContent).not.toContain('Streaming both orientations')
   })
 
+  it('reminds a Facebook stream-key session to press Go live in Live Producer, in any orientation', () => {
+    // Plan 206: a horizontal-only session never shows the both-orientations
+    // advice, so the reminder can't live there.
+    mocked.captureConfig = {
+      ...withTargets((target) =>
+        target.platform === 'facebook' ? { ...target, enabled: true } : target
+      ),
+      streamEnabled: true
+    }
+    render()
+    expect(dialog().textContent).not.toContain('Streaming both orientations')
+    const reminder = dialog().querySelector('[data-testid=go-live-producer-reminder]')!
+    expect(reminder.textContent).toContain('press “Go live” in Facebook Live Producer')
+    expect(reminder.textContent).not.toContain('Instagram')
+    // Left out of this livestream: nothing to publish there.
+    render({
+      excludedTargets: defaultCaptureConfig.streaming.targets.filter(
+        (target) => target.platform === 'facebook'
+      )
+    })
+    expect(dialog().querySelector('[data-testid=go-live-producer-reminder]')).toBeNull()
+  })
+
+  it('reminds an Instagram session to press Go live in Live Producer without a second orientation', () => {
+    mocked.captureConfig = {
+      ...withTargets((target) =>
+        target.platform === 'instagram' ? { ...target, enabled: true } : target
+      ),
+      streamEnabled: true
+    }
+    render()
+    expect(
+      dialog().querySelector('[data-testid=go-live-producer-reminder]')?.textContent
+    ).toContain('press “Go live” in Instagram Live Producer')
+  })
+
   it('offers Reconnect for a signed-in destination, then Check again', () => {
     const props = render({
       preflight: {

@@ -85,6 +85,7 @@ export const DEFAULT_STAT_ORDER: readonly StatId[] = [
 ]
 
 const TIP_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube'])
+// Facebook joins with its connected Page (plan 206 S10); a key shares none.
 const VIEWER_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube', 'kick', 'x'])
 
 /** The ON AIR clock: the one timecode (plan 174 S1.4). */

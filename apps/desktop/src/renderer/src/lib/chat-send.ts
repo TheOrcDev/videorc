@@ -22,7 +22,9 @@ export const CHAT_SEND_PLATFORM_MAX_CHARS: Record<StreamPlatform, number> = {
   // Kick chat takes 500 graphemes (plan 063); the backend checks it too.
   kick: 500,
   x: 140,
-  // No public chat API — never reached by a send, kept for the strict Record.
+  // No chat API (Facebook: not until Page sign-in, plan 206 S9) — never
+  // reached by a send, kept for the strict Record.
+  facebook: CHAT_SEND_MAX_CHARS,
   tiktok: CHAT_SEND_MAX_CHARS,
   instagram: CHAT_SEND_MAX_CHARS,
   custom: CHAT_SEND_MAX_CHARS

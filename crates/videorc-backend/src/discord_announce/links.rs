@@ -153,7 +153,10 @@ fn auto_link(target: &LinkTarget, accounts: &[PlatformAccount]) -> AutoLink {
                 AutoLink::None
             }
         }
+        // A stream-key Facebook live has no address we can know; a connected
+        // Page gets its watch link in plan 206 S8.
         StreamPlatform::X
+        | StreamPlatform::Facebook
         | StreamPlatform::Tiktok
         | StreamPlatform::Instagram
         | StreamPlatform::Custom => AutoLink::None,

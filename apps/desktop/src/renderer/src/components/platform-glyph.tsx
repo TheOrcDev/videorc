@@ -1,5 +1,6 @@
 import {
   type AppIcon,
+  FacebookIcon,
   InstagramIcon,
   KickIcon,
   LivestreamIcon,
@@ -18,6 +19,7 @@ type TiledPlatform = Exclude<StreamPlatform, 'youtube' | 'x'>
 const PLATFORM_ICON: Record<TiledPlatform, AppIcon> = {
   twitch: TwitchIcon,
   kick: KickIcon,
+  facebook: FacebookIcon,
   tiktok: TiktokIcon,
   instagram: InstagramIcon,
   custom: LivestreamIcon
@@ -32,6 +34,7 @@ const PLATFORM_GLYPH_TINT: Record<TiledPlatform, string> = {
   // A solid brand-green tile with the glyph in dark ink (the K shows through
   // in green): a 15% green wash would vanish in light mode.
   kick: 'bg-platform-kick text-platform-kick-ink',
+  facebook: 'bg-platform-facebook/15 text-platform-facebook',
   tiktok: 'bg-foreground/10 text-foreground',
   instagram: 'bg-platform-instagram/15 text-platform-instagram',
   custom: 'bg-foreground/10 text-muted-foreground'

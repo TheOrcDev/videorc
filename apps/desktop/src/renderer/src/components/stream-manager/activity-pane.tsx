@@ -146,8 +146,13 @@ export function activityCapabilityNote(
   if (twitchNeedsFollowNames(platforms, audience)) {
     notes.push('Twitch names each follower once you allow it.')
   }
-  if (platforms.some((platform) => ['tiktok', 'instagram', 'custom'].includes(platform))) {
-    notes.push('TikTok, Instagram and custom RTMP have no public live API.')
+  // Facebook has a live API, but not for a stream key (plan 206).
+  if (
+    platforms.some((platform) => ['facebook', 'tiktok', 'instagram', 'custom'].includes(platform))
+  ) {
+    notes.push(
+      "Facebook with a stream key, TikTok, Instagram and custom RTMP don't share comments or viewers."
+    )
   }
   return notes.length ? notes.join(' ') : null
 }

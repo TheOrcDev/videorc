@@ -20,6 +20,7 @@ pub enum StreamPlatform {
     Twitch,
     Kick,
     X,
+    Facebook,
     Tiktok,
     Instagram,
     Custom,
@@ -462,6 +463,7 @@ pub(crate) fn stream_platform_id(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Twitch => "twitch",
         StreamPlatform::Kick => "kick",
         StreamPlatform::X => "x",
+        StreamPlatform::Facebook => "facebook",
         StreamPlatform::Tiktok => "tiktok",
         StreamPlatform::Instagram => "instagram",
         StreamPlatform::Custom => "custom",
@@ -474,6 +476,7 @@ pub(crate) fn stream_platform_from_id(platform: &str) -> Option<StreamPlatform> 
         "twitch" => Some(StreamPlatform::Twitch),
         "kick" => Some(StreamPlatform::Kick),
         "x" => Some(StreamPlatform::X),
+        "facebook" => Some(StreamPlatform::Facebook),
         "tiktok" => Some(StreamPlatform::Tiktok),
         "instagram" => Some(StreamPlatform::Instagram),
         "custom" => Some(StreamPlatform::Custom),
@@ -510,7 +513,8 @@ pub fn default_stream_metadata_draft(updated_at: String) -> StreamMetadataDraft 
 }
 
 /// The native platforms every draft carries a row for, in the order the
-/// Livestream page lists them.
+/// Livestream page lists them. Facebook joins once a connected Page can set a
+/// title (plan 206 S8); its stream-key card has no metadata API.
 const STREAM_METADATA_PLATFORMS: [StreamPlatform; 4] = [
     StreamPlatform::Youtube,
     StreamPlatform::Twitch,
@@ -575,6 +579,7 @@ pub(crate) fn stream_platform_label(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Twitch => "Twitch",
         StreamPlatform::Kick => "Kick",
         StreamPlatform::X => "X",
+        StreamPlatform::Facebook => "Facebook",
         StreamPlatform::Tiktok => "TikTok",
         StreamPlatform::Instagram => "Instagram",
         StreamPlatform::Custom => "Custom RTMP",
@@ -590,6 +595,9 @@ pub(crate) fn stream_platform_from_preset(preset: &RtmpPreset) -> StreamPlatform
         RtmpPreset::Custom => StreamPlatform::Custom,
     }
 }
+
+/// The RTMPS server Facebook Live Producer shows for "Streaming software".
+pub(crate) const FACEBOOK_STREAM_SERVER_URL: &str = "rtmps://live-api-s.facebook.com:443/rtmp/";
 
 fn default_stream_target(
     platform: StreamPlatform,
@@ -645,10 +653,11 @@ fn default_stream_target_with_id(
 }
 
 /// The fixed built-in destinations in display order: the horizontal group
-/// (YouTube, Twitch, Kick, X), the vertical trio (YouTube Vertical — a SECOND
+/// (YouTube, Twitch, Kick, X, Facebook), the vertical trio (YouTube Vertical — a SECOND
 /// broadcast on the same channel — TikTok, Instagram), then Custom RTMP.
 /// Vertical destinations are pinned to the vertical leg; TikTok and
-/// Instagram are manual-key only (no public ingest APIs).
+/// Instagram are manual-key only (no public ingest APIs), and so is Facebook
+/// until its Page sign-in passes Meta's review (plan 206).
 pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
     vec![
         default_stream_target(
@@ -667,6 +676,11 @@ pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
             "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app",
         ),
         default_stream_target(StreamPlatform::X, "X", ""),
+        default_stream_target(
+            StreamPlatform::Facebook,
+            "Facebook",
+            FACEBOOK_STREAM_SERVER_URL,
+        ),
         default_stream_target_with_id(
             "youtube-vertical",
             StreamPlatform::Youtube,
@@ -746,6 +760,7 @@ mod tests {
             StreamPlatform::Twitch,
             StreamPlatform::Kick,
             StreamPlatform::X,
+            StreamPlatform::Facebook,
             StreamPlatform::Tiktok,
             StreamPlatform::Instagram,
             StreamPlatform::Custom,
@@ -759,6 +774,52 @@ mod tests {
             assert_eq!(serde_id, stream_platform_id(platform));
         }
         assert_eq!(stream_platform_from_id("mixer"), None);
+    }
+
+    #[test]
+    fn facebook_is_a_horizontal_stream_key_default_after_x() {
+        let targets = default_stream_targets();
+        let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
+        let x = ids.iter().position(|id| *id == "x").unwrap();
+        assert_eq!(ids[x + 1], "facebook");
+        let facebook = &targets[x + 1];
+        assert_eq!(facebook.platform, StreamPlatform::Facebook);
+        assert_eq!(facebook.label, "Facebook");
+        assert_eq!(facebook.server_url, FACEBOOK_STREAM_SERVER_URL);
+        assert_eq!(facebook.auth_mode, StreamAuthMode::ManualRtmp);
+        assert_ne!(
+            facebook.output_orientation,
+            Some(StreamOutputOrientation::Vertical)
+        );
+        assert!(!facebook.enabled);
+        assert!(!facebook.stream_key_present);
+    }
+
+    #[test]
+    fn a_saved_facebook_target_reloads_as_facebook() {
+        // The renderer persists targets and sends them with every session
+        // start; a stream-key Facebook card must parse as itself, key ref kept.
+        let wire = serde_json::json!({
+            "id": "facebook",
+            "platform": "facebook",
+            "label": "Facebook",
+            "enabled": true,
+            "serverUrl": FACEBOOK_STREAM_SERVER_URL,
+            "urlMode": "server-and-key",
+            "streamKey": "",
+            "streamKeySecretRef": "stream-target:facebook:manual-stream-key",
+            "streamKeyPresent": true,
+            "authMode": "manual-rtmp",
+            "createdAt": "2026-10-27T00:00:00Z",
+            "updatedAt": "2026-10-27T00:00:00Z"
+        });
+        let target: StreamTargetSettings = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(target.platform, StreamPlatform::Facebook);
+        assert_eq!(
+            target.effective_output_orientation(),
+            StreamOutputOrientation::Horizontal
+        );
+        assert_eq!(serde_json::to_value(&target).unwrap(), wire);
     }
 
     #[test]

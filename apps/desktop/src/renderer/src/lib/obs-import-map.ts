@@ -43,7 +43,7 @@ export interface ObsImportPlanResult {
     | { kind: 'rtmp-custom'; serverUrl: string; hasKey: boolean }
     | {
         kind: 'rtmp-platform'
-        platform: 'youtube' | 'kick'
+        platform: KeyPlatform
         serviceLabel: string
         serverUrl: string
         hasKey: boolean
@@ -163,15 +163,39 @@ function volumeToGainDb(volume: number): number {
   return Math.max(-20, Math.min(20, Math.round(20 * Math.log10(volume))))
 }
 
+/** The platforms an OBS service imports into as a stream-key card. */
+type KeyPlatform = 'youtube' | 'kick' | 'facebook'
+
+const KEY_PLATFORM_NAMES: Record<KeyPlatform, string> = {
+  youtube: 'YouTube',
+  kick: 'Kick',
+  facebook: 'Facebook'
+}
+
+// Facebook ingests on facebook.com hosts: OBS lists rtmp-api.facebook.com,
+// Live Producer shows live-api-s.facebook.com.
+function isFacebookIngest(serverUrl: string | undefined): boolean {
+  try {
+    const host = new URL(serverUrl ?? '').hostname.toLowerCase()
+    return host === 'facebook.com' || host.endsWith('.facebook.com')
+  } catch {
+    return false
+  }
+}
+
 // Kick's ingest is an IVS `*.live-video.net` host, which Twitch's newer ingest
 // shares, so the host alone never means Kick: it counts only with "kick" in
 // the service label or the server URL.
 function detectPlatform(
   serviceLabel: string,
   serverUrl?: string
-): 'youtube' | 'twitch' | 'kick' | 'other' {
+): KeyPlatform | 'twitch' | 'other' {
   if (fuzzyIncludes(serviceLabel, 'youtube')) {
     return 'youtube'
+  }
+  // A key-only card for now (plan 206): never the "connect the account" advice.
+  if (fuzzyIncludes(serviceLabel, 'facebook') || isFacebookIngest(serverUrl)) {
+    return 'facebook'
   }
   if (fuzzyIncludes(serviceLabel, 'kick') || fuzzyIncludes(serverUrl ?? '', 'kick')) {
     return 'kick'
@@ -458,7 +482,11 @@ export function mapObsSetup(
 
   // --- stream service --------------------------------------------------------
   if (setup.service) {
-    if (setup.service.type === 'rtmp_custom' && setup.service.server) {
+    if (
+      setup.service.type === 'rtmp_custom' &&
+      setup.service.server &&
+      !isFacebookIngest(setup.service.server)
+    ) {
       result.stream = {
         kind: 'rtmp-custom',
         serverUrl: setup.service.server,
@@ -472,10 +500,23 @@ export function mapObsSetup(
           : 'Imports the server. OBS had no stream key.'
       })
     } else {
-      const label = setup.service.service ?? 'streaming service'
+      const label =
+        setup.service.service ??
+        (isFacebookIngest(setup.service.server) ? 'Facebook Live' : 'streaming service')
       const platform = detectPlatform(label, setup.service.server)
-      const platformName = platform === 'kick' ? 'Kick' : 'YouTube'
-      if ((platform === 'youtube' || platform === 'kick') && setup.service.server) {
+      if (platform === 'twitch' || platform === 'other') {
+        result.stream = {
+          kind: 'oauth-suggest',
+          platform,
+          serviceLabel: label
+        }
+        report.push({
+          verdict: 'approximated',
+          subject: label,
+          note: 'Connect the account in Livestream instead. Signing in is safer than a pasted stream key.'
+        })
+      } else if (setup.service.server) {
+        const platformName = KEY_PLATFORM_NAMES[platform]
         result.stream = {
           kind: 'rtmp-platform',
           platform,
@@ -490,22 +531,11 @@ export function mapObsSetup(
             ? `Imports the server and the stream key into ${platformName}, set to Stream key.`
             : `Imports the server into ${platformName}, set to Stream key. OBS had no stream key.`
         })
-      } else if (platform === 'youtube' || platform === 'kick') {
-        report.push({
-          verdict: 'approximated',
-          subject: label,
-          note: `OBS had no server URL. Set up ${platformName} with a stream key in Livestream.`
-        })
       } else {
-        result.stream = {
-          kind: 'oauth-suggest',
-          platform,
-          serviceLabel: label
-        }
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: 'Connect the account in Livestream instead. Signing in is safer than a pasted stream key.'
+          note: `OBS had no server URL. Set up ${KEY_PLATFORM_NAMES[platform]} with a stream key in Livestream.`
         })
       }
     }
