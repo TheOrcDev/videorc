@@ -1,4 +1,9 @@
-import type { AgentActivityOutcome, AgentSummary, AgentsStatus } from '@/lib/backend'
+import type {
+  AgentActivityOutcome,
+  AgentBindErrorKind,
+  AgentSummary,
+  AgentsStatus
+} from '@/lib/backend'
 import { compactTime, dayLabel } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/format-time'
 
@@ -21,16 +26,20 @@ export const AGENTS_OFF_HINT =
 export const AGENTS_PORTS_BUSY =
   "Ports 7440 to 7449 are all in use, so agents can't reach Videorc. Quit the app using them, then turn this off and on again."
 
+/** Any other bind failure: quitting an app won't help, so the copy doesn't say to. */
+export const AGENTS_BIND_FAILED =
+  "Videorc couldn't open a port for agents, so they can't reach it. Turn this off and on again, or restart Videorc."
+
+/** The listener's failure, in copy, by the backend's `bindErrorKind`. */
+export function agentsBindErrorCopy(kind: AgentBindErrorKind): string {
+  return kind === 'ports-busy' ? AGENTS_PORTS_BUSY : AGENTS_BIND_FAILED
+}
+
 export const AGENT_BRIDGE_MISSING =
   "This copy of Videorc is missing its agent bridge, so agents can't connect. Reinstall Videorc, then try again."
 
 export const CONNECT_AGENT_COMMAND = 'Connect an agent…'
 export const STOP_AGENTS_COMMAND = 'Stop agents'
-
-/** The bridge pings every 15 s; the backend calls an agent connected for 45 s after
- * it was last heard from, but publishes nothing when that lapses, so the
- * renderer reads the status again on this beat while one is connected. */
-export const AGENTS_PRESENCE_POLL_MS = 15_000
 
 /** Agents heard from in the last 45 s (`connected`, from the backend), while Agents is on. */
 export function connectedAgents(status: AgentsStatus | null): AgentSummary[] {

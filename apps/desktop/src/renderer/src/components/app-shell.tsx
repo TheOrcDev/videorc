@@ -121,7 +121,7 @@ const EndLivestreamDialog = lazy(async () => ({
   default: (await import('@/components/end-livestream-dialog')).EndLivestreamDialog
 }))
 // Plan 209 S7: the Agents status and the D11 notices on every page; the
-// tool catalog behind the notices stays out of the eager bundle.
+// Agents store behind them stays out of the eager bundle.
 const AgentsWatcher = lazy(async () => ({
   default: (await import('@/components/agents-watcher')).AgentsWatcher
 }))

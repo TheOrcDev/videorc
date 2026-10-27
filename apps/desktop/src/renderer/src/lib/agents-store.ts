@@ -1,11 +1,9 @@
 import { BackendClient } from '@/backendClient'
-import { AGENTS_PRESENCE_POLL_MS } from '@/lib/agents-view'
 import type {
   AgentActivityEntry,
   AgentBridgeInfo,
   AgentClientKind,
   AgentCreated,
-  AgentIntentEvent,
   AgentsStatus,
   BackendConnection
 } from '@/lib/backend'
@@ -18,17 +16,19 @@ import { offlineError } from '@/lib/user-error'
 //
 // The store opens its own backend client while anything subscribes (the
 // pattern of the Discord and privacy rows), narrowed with
-// `events.setIncluded` to the three Agents events, and reconnects when main
-// hands the window a new connection. `agents.status` and `agents.activity`
-// are pushed; the one read on a timer is the status while an agent is
-// connected, because the backend publishes nothing when an agent's 45 s
-// presence lapses (AGENTS_PRESENCE_POLL_MS).
+// `events.setIncluded` to the Agents status and activity, and reconnects
+// when main hands the window a new connection. Both are pushed, including
+// the status when an agent's 45 s presence lapses: nothing here polls.
+//
+// This socket never runs an agent intent: only the Studio's own socket
+// listens for `agent.intent` (`agent.intent.listen`), so this one never
+// counts as "the Studio is open".
 
 /** Settings → Remote → Agents → Activity shows the newest hundred (S7). */
 export const AGENT_ACTIVITY_ROWS = 100
 
 /** The events this store's socket asks for, and nothing else. */
-export const AGENTS_STORE_EVENTS = ['agents.status', 'agents.activity', 'agent.intent'] as const
+export const AGENTS_STORE_EVENTS = ['agents.status', 'agents.activity'] as const
 
 const RETRY_MS = 3_000
 /** A last unsubscribe waits this long, so a remount does not reopen the socket. */
@@ -51,9 +51,7 @@ export interface AgentsSnapshot {
   offline: boolean
 }
 
-export type AgentsStoreEvent =
-  | { kind: 'activity'; entry: AgentActivityEntry }
-  | { kind: 'intent'; intent: AgentIntentEvent }
+export type AgentsStoreEvent = { kind: 'activity'; entry: AgentActivityEntry }
 
 export type AgentsClient = Pick<
   BackendClient,
@@ -66,8 +64,6 @@ export interface AgentsStoreDeps {
   createClient: (connection: BackendConnection) => AgentsClient
   getBridge: (install: boolean) => Promise<AgentBridgeInfo>
   timers?: {
-    setInterval: (run: () => void, ms: number) => unknown
-    clearInterval: (handle: unknown) => void
     setTimeout: (run: () => void, ms: number) => unknown
     clearTimeout: (handle: unknown) => void
   }
@@ -91,7 +87,7 @@ export interface AgentsActions {
 export interface AgentsStore extends AgentsActions {
   subscribe: (listener: () => void) => () => void
   getSnapshot: () => AgentsSnapshot
-  /** Activity and intents as they arrive, for the D11 notices. */
+  /** Activity as it arrives, for the D11 notices. */
   onEvent: (listener: (event: AgentsStoreEvent) => void) => () => void
 }
 
@@ -130,8 +126,6 @@ function withLastAction(status: AgentsStatus, entry: AgentActivityEntry): Agents
 
 export function createAgentsStore(deps: AgentsStoreDeps): AgentsStore {
   const timers = deps.timers ?? {
-    setInterval: (run: () => void, ms: number) => setInterval(run, ms),
-    clearInterval: (handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>),
     setTimeout: (run: () => void, ms: number) => setTimeout(run, ms),
     clearTimeout: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   }
@@ -144,40 +138,16 @@ export function createAgentsStore(deps: AgentsStoreDeps): AgentsStore {
   let connection: BackendConnection | null = null
   let generation = 0
   let unwatchConnection: (() => void) | null = null
-  let pollTimer: unknown = null
   let retryTimer: unknown = null
   let idleTimer: unknown = null
 
   const set = (patch: Partial<AgentsSnapshot>): void => {
     snapshot = { ...snapshot, ...patch }
-    syncPresencePoll()
     for (const listener of [...listeners]) listener()
   }
 
   const emit = (event: AgentsStoreEvent): void => {
     for (const listener of [...eventListeners]) listener(event)
-  }
-
-  function syncPresencePoll(): void {
-    const wanted = started && ready && (snapshot.status?.connectedCount ?? 0) > 0
-    if (wanted && pollTimer === null) {
-      pollTimer = timers.setInterval(() => void refreshStatus(), AGENTS_PRESENCE_POLL_MS)
-    } else if (!wanted && pollTimer !== null) {
-      timers.clearInterval(pollTimer)
-      pollTimer = null
-    }
-  }
-
-  async function refreshStatus(): Promise<void> {
-    const active = client
-    const at = generation
-    if (!active || !ready) return
-    try {
-      const status = await active.requestTyped('agents.status')
-      if (at === generation) set({ status })
-    } catch {
-      // The next push or beat answers; a failed read never blanks the line.
-    }
   }
 
   function activityParams(agentId: string | null): { limit: number; agentId?: string } {
@@ -243,7 +213,6 @@ export function createAgentsStore(deps: AgentsStoreDeps): AgentsStore {
     client?.close()
     client = null
     connection = null
-    syncPresencePoll()
   }
 
   function attach(next: BackendConnection): void {
@@ -258,9 +227,6 @@ export function createAgentsStore(deps: AgentsStoreDeps): AgentsStore {
     })
     nextClient.on('agents.activity', (entry) => {
       if (at === generation) receiveActivity(entry as AgentActivityEntry)
-    })
-    nextClient.on('agent.intent', (intent) => {
-      if (at === generation) emit({ kind: 'intent', intent: intent as AgentIntentEvent })
     })
     nextClient.on('connection.closed', () => {
       if (at !== generation) return

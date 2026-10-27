@@ -574,6 +574,9 @@ export interface BackendRpcMethodMap {
   >
   /** Stop (D12): every agent is cut and Agents turns off. */
   'agents.stop': BackendRpcDefinition<undefined, AgentsStatus>
+  /** Renderer-only, per socket: the Studio's socket runs agent intents, so
+   * it receives `agent.intent` and counts as "the Studio is open". */
+  'agent.intent.listen': BackendRpcDefinition<undefined, AgentAcknowledged>
   /** Renderer-only: the Studio's answer to an `agent.intent` event. */
   'agent.intent.ack': BackendRpcDefinition<AgentIntentAckParams, AgentAcknowledged>
   /** Renderer-only: the Studio's projection for the Look tools. */
@@ -1223,6 +1226,7 @@ const agentsStatusSchema = objectSchema(
     enabled: booleanSchema,
     port: optionalSchema(numberSchema({ integer: true, min: 1, max: 65_535 })),
     bindError: optionalSchema(stringSchema({ maxLength: 1024 })),
+    bindErrorKind: optionalSchema(enumSchema(['ports-busy', 'other'])),
     discoveryPath: optionalSchema(boundedPath),
     agents: arraySchema(agentSummarySchema, { maxLength: 64 }),
     connectedCount: nonNegativeInteger,
@@ -5219,6 +5223,7 @@ const runtimeContracts = {
     result: agentsActivityPageSchema
   },
   'agents.stop': { params: undefinedSchema, result: agentsStatusSchema },
+  'agent.intent.listen': { params: undefinedSchema, result: agentAcknowledgedSchema },
   'agent.intent.ack': { params: agentIntentAckParamsSchema, result: agentAcknowledgedSchema },
   'agent.surface.publish': {
     params: agentSurfacePublishParamsSchema,

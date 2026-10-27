@@ -4731,11 +4731,16 @@ export interface AgentSummary {
   connected: boolean
 }
 
+/** Why the Agents listener could not bind: what Settings branches on. */
+export type AgentBindErrorKind = 'ports-busy' | 'other'
+
 export interface AgentsStatus {
   enabled: boolean
   /** Bound port; absent while off or when the bind failed. */
   port?: number
+  /** The OS's own words, for the console; Settings shows copy by `bindErrorKind`. */
   bindError?: string
+  bindErrorKind?: AgentBindErrorKind
   /** Where `agents.json` lives; absent for an in-memory database. */
   discoveryPath?: string
   agents: AgentSummary[]

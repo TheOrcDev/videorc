@@ -551,26 +551,16 @@ mod tests {
         assert_eq!(answer["result"]["isError"], true);
         assert_eq!(answer["result"]["content"][0]["text"], STUDIO_CLOSED);
 
-        // A renderer socket on the real /ws handler.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ws_address = listener.local_addr().unwrap();
-        let app = axum::Router::new()
-            .route("/ws", axum::routing::get(crate::ws_handler))
-            .with_state(state.clone());
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let (mut socket, _) =
-            tokio_tungstenite::connect_async(format!("ws://{ws_address}/ws?token={}", state.token))
-                .await
-                .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while state.agents.renderer_sockets.load(Ordering::Relaxed) == 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the renderer socket is counted");
+        // The Studio's socket on the real /ws handler: it says it runs
+        // agent intents.
+        let ws_address = serve_ws(&state).await;
+        let mut socket = open_renderer_socket(ws_address, &state.token).await;
+        let answer = ws_request(&mut socket, "listen", "agent.intent.listen", json!({})).await;
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert!(
+            state.agents.studio_open(),
+            "the listening socket is counted"
+        );
 
         // The fake Studio: answer the intent through the renderer-only RPC.
         let studio = tokio::spawn(async move {
@@ -665,15 +655,150 @@ mod tests {
         assert!(stored.get("notice").is_none());
     }
 
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// The real `/ws` handler on an ephemeral port.
+    async fn serve_ws(state: &AppState) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(crate::ws_handler))
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        address
+    }
+
+    /// A socket with the given token, after its `backend.ready`.
+    async fn open_renderer_socket(address: std::net::SocketAddr, token: &str) -> TestSocket {
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={token}"))
+                .await
+                .unwrap();
+        next_matching(&mut socket, |value| value["event"] == "backend.ready").await;
+        socket
+    }
+
+    async fn next_matching(socket: &mut TestSocket, wanted: impl Fn(&Value) -> bool) -> Value {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(message)) = socket.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let value: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+                if wanted(&value) {
+                    return value;
+                }
+            }
+            panic!("the socket closed");
+        })
+        .await
+        .expect("the socket answered")
+    }
+
+    async fn ws_request(socket: &mut TestSocket, id: &str, method: &str, params: Value) -> Value {
+        let request = json!({ "id": id, "method": method, "params": params });
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                request.to_string().into(),
+            ))
+            .await
+            .unwrap();
+        next_matching(socket, |value| value["id"] == id).await
+    }
+
+    /// Fix for S7's second socket: the Agents store's socket (narrowed to
+    /// the status and activity events) and a Settings row's own client (not
+    /// narrowed at all) are renderer sockets that never run an intent. Only
+    /// a socket that listens counts, so with just those attached a Studio
+    /// tool answers at once instead of waiting out the 15 s timeout.
+    #[tokio::test]
+    async fn only_a_listening_socket_counts_as_the_studio() {
+        let state = test_state();
+        let address = serve(&state).await;
+        let (_, token) = connect_agent(&state, "Claude Desktop");
+        let ws_address = serve_ws(&state).await;
+
+        let mut store = open_renderer_socket(ws_address, &state.token).await;
+        let narrowed = ws_request(
+            &mut store,
+            "included",
+            "events.setIncluded",
+            json!({ "events": ["agents.status", "agents.activity"] }),
+        )
+        .await;
+        assert_eq!(narrowed["ok"], true, "{narrowed}");
+        let mut settings_row = open_renderer_socket(ws_address, &state.token).await;
+        assert!(!state.agents.studio_open());
+
+        let started = Instant::now();
+        let answer: Value = post(
+            address,
+            Some(&token),
+            rpc(
+                1,
+                "tools/call",
+                json!({ "name": "notify", "arguments": { "message": "hi" } }),
+            ),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(answer["result"]["isError"], true, "{answer}");
+        assert_eq!(answer["result"]["content"][0]["text"], STUDIO_CLOSED);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "answered at once, not after the intent timeout: {:?}",
+            started.elapsed()
+        );
+        assert!(state.agents.lock().pending_intents.is_empty());
+
+        // Neither socket ever receives an intent, even one emitted anyway;
+        // the next status event is the first thing each sees.
+        state.emit_event(
+            "agent.intent",
+            json!({ "intentId": "ai-x", "agentId": "a", "agentName": "A", "tool": "notify", "args": {} }),
+        );
+        state.emit_event("agents.status", crate::agent_mcp::status(&state));
+        for socket in [&mut store, &mut settings_row] {
+            let first = next_matching(socket, |value| {
+                value["event"] == "agent.intent" || value["event"] == "agents.status"
+            })
+            .await;
+            assert_eq!(first["event"], "agents.status", "{first}");
+        }
+
+        // The Studio's socket listens: now it counts, until it closes.
+        let mut studio = open_renderer_socket(ws_address, &state.token).await;
+        ws_request(&mut studio, "listen", "agent.intent.listen", json!({})).await;
+        assert!(state.agents.studio_open());
+        drop(studio);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.agents.studio_open() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a closed Studio socket stops counting");
+
+        // Main's admin socket can't listen.
+        let mut admin = open_renderer_socket(ws_address, &state.admin_token).await;
+        let refused = ws_request(&mut admin, "listen", "agent.intent.listen", json!({})).await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(refused["error"]["code"], "forbidden-method");
+        assert!(!state.agents.studio_open());
+    }
+
     #[tokio::test]
     async fn an_unanswered_intent_times_out_and_a_refusal_keeps_the_sentence() {
         let state = test_state();
         let (agent, _) = connect_agent(&state, "Cursor");
         let tool = agent_tools::catalog().tool("notify").unwrap().clone();
-        state
-            .agents
-            .renderer_sockets
-            .fetch_add(1, Ordering::Relaxed);
+        state.agents.studio_sockets.fetch_add(1, Ordering::Relaxed);
         let outcome = relay_studio_intent(
             &state,
             &agent,

@@ -6,7 +6,7 @@
 //! secret store as one JSON record, like Phone remote's devices, so it
 //! survives restarts and never lands in the database or a log.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -106,6 +106,12 @@ pub struct AgentRegistry {
     /// When `lastUsedAt` was last written to the store, per agent.
     last_used_persisted: HashMap<String, Instant>,
     last_action: HashMap<String, AgentLastAction>,
+    /// Agents whose last action was already looked up in Activity after a
+    /// restart (found or not), so a status read queries each at most once.
+    last_action_seeded: HashSet<String>,
+    /// A presence watch is running (`agent_mcp::watch_presence`): it
+    /// publishes `agents.status` when a connected agent's 45 s lapse.
+    presence_watch: bool,
 }
 
 impl AgentRegistry {
@@ -157,6 +163,7 @@ impl AgentRegistry {
         self.last_seen.remove(id);
         self.last_used_persisted.remove(id);
         self.last_action.remove(id);
+        self.last_action_seeded.remove(id);
         self.persisted.agents.len() != before
     }
 
@@ -213,6 +220,32 @@ impl AgentRegistry {
         self.last_action.get(id)
     }
 
+    /// Agents with no last action in memory that Activity was not asked
+    /// about yet: after a restart, their newest row says what they did last.
+    pub fn last_actions_to_seed(&self) -> Vec<String> {
+        self.persisted
+            .agents
+            .iter()
+            .filter(|agent| {
+                !self.last_action.contains_key(&agent.id)
+                    && !self.last_action_seeded.contains(&agent.id)
+            })
+            .map(|agent| agent.id.clone())
+            .collect()
+    }
+
+    /// The newest Activity row's action, unless the agent acted since the
+    /// lookup began (that action is newer) or was removed.
+    pub fn seed_last_action(&mut self, id: &str, action: Option<AgentLastAction>) {
+        if self.agent(id).is_none() {
+            return;
+        }
+        self.last_action_seeded.insert(id.to_string());
+        if let Some(action) = action {
+            self.last_action.entry(id.to_string()).or_insert(action);
+        }
+    }
+
     pub fn connected(&self, id: &str, now: Instant) -> bool {
         self.last_seen
             .get(id)
@@ -227,9 +260,46 @@ impl AgentRegistry {
             .count()
     }
 
+    /// The connected agents' ids, in registry order.
+    pub fn connected_ids(&self, now: Instant) -> Vec<String> {
+        self.persisted
+            .agents
+            .iter()
+            .filter(|agent| self.connected(&agent.id, now))
+            .map(|agent| agent.id.clone())
+            .collect()
+    }
+
     /// Stop (D12): every agent reads as disconnected at once.
     pub fn disconnect_all(&mut self) {
         self.last_seen.clear();
+    }
+
+    /// True when the caller must start the presence watch: none runs yet.
+    pub fn claim_presence_watch(&mut self) -> bool {
+        !std::mem::replace(&mut self.presence_watch, true)
+    }
+
+    pub fn release_presence_watch(&mut self) {
+        self.presence_watch = false;
+    }
+
+    /// When the next connected agent's presence lapses. With none
+    /// connected the watch ends here, under the same lock a touch takes, so
+    /// a touch that lands after it starts a new watch.
+    pub fn next_presence_lapse(&mut self, now: Instant) -> Option<Instant> {
+        let next = self
+            .persisted
+            .agents
+            .iter()
+            .filter_map(|agent| self.last_seen.get(&agent.id))
+            .map(|seen| *seen + AGENT_PRESENCE_WINDOW)
+            .filter(|lapse| *lapse > now)
+            .min();
+        if next.is_none() {
+            self.presence_watch = false;
+        }
+        next
     }
 }
 
@@ -395,6 +465,78 @@ mod tests {
         registry.disconnect_all();
         assert!(!registry.connected(&record.id, start + Duration::from_secs(61)));
         assert!(!registry.touch("missing", start, "t"));
+    }
+
+    #[test]
+    fn the_presence_watch_wakes_at_the_next_lapse_and_ends_with_the_last_agent() {
+        let mut registry = AgentRegistry::default();
+        let (first, _) = registry
+            .create("Claude Code", AgentClientKind::ClaudeCode, "t")
+            .unwrap();
+        let (second, _) = registry
+            .create("Cursor", AgentClientKind::Cursor, "t")
+            .unwrap();
+        let start = Instant::now();
+        assert!(registry.claim_presence_watch());
+        assert!(!registry.claim_presence_watch(), "one watch at a time");
+        registry.touch(&first.id, start, "t");
+        registry.touch(&second.id, start + Duration::from_secs(10), "t");
+        assert_eq!(
+            registry.next_presence_lapse(start),
+            Some(start + AGENT_PRESENCE_WINDOW)
+        );
+        assert_eq!(
+            registry.connected_ids(start + Duration::from_secs(10)),
+            vec![first.id.clone(), second.id.clone()]
+        );
+        let after_first = start + AGENT_PRESENCE_WINDOW;
+        assert_eq!(registry.connected_ids(after_first), vec![second.id.clone()]);
+        assert_eq!(
+            registry.next_presence_lapse(after_first),
+            Some(start + Duration::from_secs(10) + AGENT_PRESENCE_WINDOW)
+        );
+        assert!(
+            !registry.claim_presence_watch(),
+            "still watching the second"
+        );
+        let after_both = start + Duration::from_secs(10) + AGENT_PRESENCE_WINDOW;
+        assert_eq!(registry.next_presence_lapse(after_both), None);
+        assert!(registry.claim_presence_watch(), "the watch ended");
+    }
+
+    #[test]
+    fn a_seeded_last_action_never_replaces_a_newer_one() {
+        let mut registry = AgentRegistry::default();
+        let (first, _) = registry
+            .create("Claude Code", AgentClientKind::ClaudeCode, "t")
+            .unwrap();
+        let (second, _) = registry
+            .create("Cursor", AgentClientKind::Cursor, "t")
+            .unwrap();
+        let action = |tool: &str| AgentLastAction {
+            tool: tool.to_string(),
+            at: "2026-10-27T10:00:00+00:00".to_string(),
+            outcome: AgentActivityOutcome::Ok,
+        };
+        assert_eq!(
+            registry.last_actions_to_seed(),
+            vec![first.id.clone(), second.id.clone()]
+        );
+        // The first acted while its lookup ran: the live action stays.
+        registry.record_action(&first.id, action("switch_scene"));
+        registry.seed_last_action(&first.id, Some(action("notify")));
+        registry.seed_last_action(&second.id, None);
+        assert_eq!(
+            registry.last_action(&first.id).unwrap().tool,
+            "switch_scene"
+        );
+        assert!(registry.last_action(&second.id).is_none());
+        assert!(
+            registry.last_actions_to_seed().is_empty(),
+            "each agent is looked up once"
+        );
+        registry.seed_last_action("removed", Some(action("notify")));
+        assert!(registry.last_action("removed").is_none());
     }
 
     #[test]

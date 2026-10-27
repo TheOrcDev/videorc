@@ -7335,6 +7335,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         remoteSurfacePublisher?.markConnected()
         agentSurfaceConnected = true
         agentSurfacePublisher?.markConnected()
+        // Plan 209: this socket runs agent intents. Only a socket that says
+        // so receives `agent.intent` and counts as "the Studio is open", so
+        // the Agents store's socket never stalls an agent's call. A new
+        // socket starts without it: asked on every (re)connect.
+        void nextClient
+          .requestTyped('agent.intent.listen')
+          .catch((error: unknown) => console.warn('[agents] Could not run agent intents:', error))
         // Non-fatal: the next `agents.status` event turns the projection on.
         void nextClient
           .request<AgentsStatus>('agents.status')

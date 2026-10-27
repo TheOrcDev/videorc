@@ -1195,10 +1195,7 @@ mod tests {
     }
 
     fn open_studio(state: &AppState, surface: Value) {
-        state
-            .agents
-            .renderer_sockets
-            .fetch_add(1, Ordering::Relaxed);
+        state.agents.studio_sockets.fetch_add(1, Ordering::Relaxed);
         crate::agent_call::publish_surface(state, surface);
     }
 
@@ -1227,10 +1224,7 @@ mod tests {
         assert_eq!(status["destinations"], json!([]));
         assert_eq!(status["clips"]["on"], false);
 
-        state
-            .agents
-            .renderer_sockets
-            .fetch_add(1, Ordering::Relaxed);
+        state.agents.studio_sockets.fetch_add(1, Ordering::Relaxed);
         let open = get_status(&state, &agent, json!({})).await;
         let status = structured(&open);
         assert_eq!(status["studioOpen"], true);

@@ -15,8 +15,9 @@ import {
 } from './agents-store'
 
 // Plan 209 S7: one Agents store for the main window. It seeds from the
-// backend, follows the pushed events, re-reads the status while an agent is
-// connected (presence lapses without an event), and reconnects with main.
+// backend, follows the pushed events (the backend publishes the status when
+// an agent's presence lapses, so nothing polls), never asks for agent intents
+// (only the Studio's socket runs them), and reconnects with main.
 
 const CONNECTION: BackendConnection = {
   host: '127.0.0.1',
@@ -95,18 +96,11 @@ function fakeClient(answers: Record<string, unknown>) {
 }
 
 function fakeTimers() {
-  const intervals = new Map<number, () => void>()
   const timeouts = new Map<number, () => void>()
   let next = 1
   return {
-    intervals,
     timeouts,
     timers: {
-      setInterval: (run: () => void) => {
-        intervals.set(next, run)
-        return next++
-      },
-      clearInterval: (handle: unknown) => void intervals.delete(handle as number),
       setTimeout: (run: () => void) => {
         timeouts.set(next, run)
         return next++
@@ -170,6 +164,11 @@ describe('agents store (plan 209 S7)', () => {
       method: 'events.setIncluded',
       params: { events: [...AGENTS_STORE_EVENTS] }
     })
+    // Agent intents are the Studio socket's alone: a socket that asked for
+    // them would look like a Studio that never answers.
+    expect(AGENTS_STORE_EVENTS).toEqual(['agents.status', 'agents.activity'])
+    expect(fake.raw.on).not.toHaveBeenCalledWith('agent.intent', expect.anything())
+    expect(fake.requests.map((request) => request.method)).not.toContain('agent.intent.listen')
     expect(fake.requests.map((request) => request.method)).toContain('agents.activity.list')
     expect(fake.requests.find((r) => r.method === 'agents.activity.list')?.params).toEqual({
       limit: 100
@@ -202,15 +201,6 @@ describe('agents store (plan 209 S7)', () => {
       outcome: 'ok'
     })
     expect(events).toEqual([{ kind: 'activity', entry: next }])
-
-    fake.emit('agent.intent', {
-      intentId: 'i',
-      agentId: 'a1',
-      agentName: 'x',
-      tool: 'notify',
-      args: {}
-    })
-    expect(events.at(-1)?.kind).toBe('intent')
   })
 
   it("keeps at most 100 rows, and only the filtered agent's while filtered", async () => {
@@ -233,20 +223,19 @@ describe('agents store (plan 209 S7)', () => {
     expect(store.getSnapshot().activity.map((row) => row.id)).toEqual(['only-a1'])
   })
 
-  it('re-reads the status while an agent is connected, and stops when none is', async () => {
+  it('never polls while an agent is connected: the lapse arrives as a pushed status', async () => {
     const { store, fake, time } = setup({
       'agents.status': status({ connectedCount: 1, agents: [agent({ connected: true })] })
     })
     store.subscribe(() => undefined)
     await flush()
-    expect(time.intervals.size).toBe(1)
-    const before = fake.requests.filter((r) => r.method === 'agents.status').length
-    for (const run of time.intervals.values()) run()
-    await flush()
-    expect(fake.requests.filter((r) => r.method === 'agents.status').length).toBe(before + 1)
+    expect(store.getSnapshot().status?.connectedCount).toBe(1)
+    expect(time.timeouts.size).toBe(0)
+    const reads = fake.requests.filter((r) => r.method === 'agents.status').length
 
-    fake.emit('agents.status', status({ connectedCount: 0 }))
-    expect(time.intervals.size).toBe(0)
+    fake.emit('agents.status', status({ connectedCount: 0, agents: [agent({ connected: false })] }))
+    expect(store.getSnapshot().status?.agents[0].connected).toBe(false)
+    expect(fake.requests.filter((r) => r.method === 'agents.status').length).toBe(reads)
   })
 
   it('runs the actions and keeps the answered status', async () => {

@@ -28,13 +28,13 @@ import {
   AGENT_BRIDGE_MISSING,
   AGENTS_HELP,
   AGENTS_OFF_HINT,
-  AGENTS_PORTS_BUSY,
   AGENTS_SWITCH_LABEL,
   CONNECT_AGENT_COMMAND,
   activityArgumentsLabel,
   activityTimeLabel,
   agentLastActionView,
   agentOutcomeView,
+  agentsBindErrorCopy,
   agentsSummaryLine
 } from '@/lib/agents-view'
 import type { AgentActivityEntry, AgentSummary } from '@/lib/backend'
@@ -89,6 +89,7 @@ export function AgentsSection(): ReactElement {
   const [pending, setPending] = useState(false)
   const [removing, setRemoving] = useState<AgentSummary | null>(null)
   const enabled = status?.enabled ?? false
+  const bindErrorKind = enabled ? status?.bindErrorKind : undefined
   const agents = status?.agents ?? []
   const bridgeMissing = bridge !== null && !bridge.exists
 
@@ -132,9 +133,12 @@ export function AgentsSection(): ReactElement {
       title="Agents"
     >
       <span ref={revealOnRequest} aria-hidden className="sr-only" />
-      {enabled && status?.bindError ? (
-        <Alert data-testid="agents-ports-busy" variant="warning">
-          <AlertTitle>{AGENTS_PORTS_BUSY}</AlertTitle>
+      {bindErrorKind ? (
+        <Alert
+          data-testid={bindErrorKind === 'ports-busy' ? 'agents-ports-busy' : 'agents-bind-failed'}
+          variant="warning"
+        >
+          <AlertTitle>{agentsBindErrorCopy(bindErrorKind)}</AlertTitle>
         </Alert>
       ) : null}
       {bridgeMissing ? (

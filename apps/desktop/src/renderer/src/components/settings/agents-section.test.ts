@@ -203,13 +203,39 @@ describe('AgentsSection states (plan 209 S7)', () => {
       status: status({
         port: undefined,
         bindError:
-          'Ports 7440–7449 are all in use (Address already in use (os error 48)). Quit the app using them and turn Agents on again.'
+          'Ports 7440–7449 are all in use (Address already in use (os error 48)). Quit the app using them and turn Agents on again.',
+        bindErrorKind: 'ports-busy'
       })
     })
     await render()
     const alert = byTestId('agents-ports-busy')!
     expect(alert.textContent).toContain('Ports 7440 to 7449 are all in use')
     expect(alert.textContent).not.toContain('os error')
+    expect(byTestId('agents-bind-failed')).toBeNull()
+  })
+
+  it('another bind failure: branches on the kind, never the words', async () => {
+    mocked.snapshot = snapshot({
+      status: status({
+        port: undefined,
+        // Words that look like busy ports; the kind says otherwise.
+        bindError: 'Ports are all in use (Permission denied (os error 13)).',
+        bindErrorKind: 'other'
+      })
+    })
+    await render()
+    expect(byTestId('agents-ports-busy')).toBeNull()
+    const alert = byTestId('agents-bind-failed')!
+    expect(alert.textContent).toContain("Videorc couldn't open a port for agents")
+    expect(alert.textContent).not.toContain('os error')
+
+    // Off, a stale failure says nothing.
+    mocked.snapshot = snapshot({
+      status: status({ enabled: false, bindError: 'x', bindErrorKind: 'ports-busy' })
+    })
+    await render()
+    expect(byTestId('agents-ports-busy')).toBeNull()
+    expect(byTestId('agents-bind-failed')).toBeNull()
   })
 
   it("stopped: off, the agents and Activity stay readable, and the line says they'll reconnect", async () => {

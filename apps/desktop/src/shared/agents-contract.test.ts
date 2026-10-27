@@ -35,8 +35,21 @@ describe('Agents contract (plan 209)', () => {
     const off = { enabled: false, agents: [], connectedCount: 0, studioOpen: false }
     expect(validateBackendRpcResult('agents.disable', off)).toEqual(off)
     expect(validateBackendEventPayload('agents.status', status)).toEqual(status)
-    const busy = { ...off, enabled: true, bindError: 'Ports 7440–7449 are all in use.' }
+    const busy = {
+      ...off,
+      enabled: true,
+      bindError: 'Ports 7440–7449 are all in use.',
+      bindErrorKind: 'ports-busy'
+    }
     expect(validateBackendRpcResult('agents.enable', busy)).toEqual(busy)
+    const other = { ...busy, bindErrorKind: 'other' }
+    expect(validateBackendRpcResult('agents.status', other)).toEqual(other)
+    expect(() =>
+      validateBackendRpcResult('agents.status', { ...busy, bindErrorKind: 'busy' })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('agents.status', { ...busy, bindErrorKind: null })
+    ).toThrow()
   })
 
   it('refuses nulls, token hashes and tokens outside agents.create', () => {
@@ -104,6 +117,10 @@ describe('Agents contract (plan 209)', () => {
     }
     expect(validateBackendEventPayload('agent.intent', intent)).toEqual(intent)
     expect(() => validateBackendEventPayload('agent.intent', { ...intent, token: 'x' })).toThrow()
+
+    // The Studio's socket says it runs intents; nothing else does.
+    expect(validateBackendRpcParams('agent.intent.listen', undefined)).toBeUndefined()
+    expect(validateBackendRpcResult('agent.intent.listen', { ok: true })).toEqual({ ok: true })
 
     const ack = { intentId: 'ai-1', ok: true, message: 'Shown.', result: { shown: true } }
     expect(validateBackendRpcParams('agent.intent.ack', ack)).toEqual(ack)

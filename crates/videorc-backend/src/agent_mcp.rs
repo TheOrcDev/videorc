@@ -69,10 +69,27 @@ pub struct AgentIntentAck {
     pub result: Option<serde_json::Value>,
 }
 
+/// Why the listener could not bind, as Settings branches on it (S7).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentBindErrorKind {
+    /// Every port from 7440 to 7449 is taken by another app.
+    PortsBusy,
+    /// Anything else the OS said (a refused or unavailable address).
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBindError {
+    pub kind: AgentBindErrorKind,
+    /// The OS's own words, for the log and the console; Settings shows copy.
+    pub message: String,
+}
+
 #[derive(Default)]
 pub struct AgentMcpRuntime {
     pub bound_port: Option<u16>,
-    pub bind_error: Option<String>,
+    pub bind_error: Option<AgentBindError>,
     server: Option<tokio::sync::oneshot::Sender<()>>,
     pub limiter: AgentRateLimiter,
     /// S3: Studio intents waiting for their ack, by intent id.
@@ -85,8 +102,11 @@ pub struct AgentMcpRuntime {
 
 pub struct AgentMcpShared {
     pub runtime: StdMutex<AgentMcpRuntime>,
-    /// Renderer-role sockets attached now. A Studio tool needs one (S3).
-    pub renderer_sockets: AtomicUsize,
+    /// Sockets that run agent intents: the Studio's, once it asked with
+    /// `agent.intent.listen`. A Studio tool needs one (S3). Other renderer
+    /// sockets (the Agents store, a Settings row's own client) never count:
+    /// they would neither run nor ack an intent.
+    pub studio_sockets: AtomicUsize,
 }
 
 pub type AgentMcpSlot = std::sync::Arc<AgentMcpShared>;
@@ -94,7 +114,7 @@ pub type AgentMcpSlot = std::sync::Arc<AgentMcpShared>;
 pub fn new_agent_mcp_slot() -> AgentMcpSlot {
     std::sync::Arc::new(AgentMcpShared {
         runtime: StdMutex::new(AgentMcpRuntime::default()),
-        renderer_sockets: AtomicUsize::new(0),
+        studio_sockets: AtomicUsize::new(0),
     })
 }
 
@@ -106,7 +126,24 @@ impl AgentMcpShared {
     }
 
     pub fn studio_open(&self) -> bool {
-        self.renderer_sockets.load(Ordering::Relaxed) > 0
+        self.studio_sockets.load(Ordering::Relaxed) > 0
+    }
+}
+
+/// One socket counted in `studio_sockets` (`agent.intent.listen`) until it
+/// closes. A Drop guard, so every exit path of the socket uncounts it.
+pub struct StudioSocketGuard(AppState);
+
+impl StudioSocketGuard {
+    pub fn attach(state: &AppState) -> Self {
+        state.agents.studio_sockets.fetch_add(1, Ordering::Relaxed);
+        Self(state.clone())
+    }
+}
+
+impl Drop for StudioSocketGuard {
+    fn drop(&mut self) {
+        self.0.agents.studio_sockets.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -247,6 +284,9 @@ pub struct AgentsStatus {
     pub port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind_error: Option<String>,
+    /// What Settings branches on; `bind_error` keeps the OS's words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bind_error_kind: Option<AgentBindErrorKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discovery_path: Option<String>,
     pub agents: Vec<AgentSummary>,
@@ -291,6 +331,7 @@ pub struct ActivityPage {
 }
 
 pub fn status(state: &AppState) -> AgentsStatus {
+    seed_last_actions(state);
     let now = Instant::now();
     let registry = registry(state);
     let (port, bind_error) = {
@@ -300,7 +341,8 @@ pub fn status(state: &AppState) -> AgentsStatus {
     AgentsStatus {
         enabled: registry.persisted.enabled,
         port,
-        bind_error,
+        bind_error_kind: bind_error.as_ref().map(|error| error.kind),
+        bind_error: bind_error.map(|error| error.message),
         discovery_path: discovery_path(state.database.path())
             .map(|path| path.display().to_string()),
         agents: registry
@@ -319,6 +361,27 @@ pub fn status(state: &AppState) -> AgentsStatus {
             .collect(),
         connected_count: registry.connected_count(now),
         studio_open: state.agents.studio_open(),
+    }
+}
+
+/// The last action lives in memory; after a restart each agent's newest
+/// Activity row says what it did last, so Settings never reads "Last seen"
+/// for an agent that acted. Asked once per agent, outside the registry lock.
+fn seed_last_actions(state: &AppState) {
+    let missing = registry(state).last_actions_to_seed();
+    for id in missing {
+        match state.database.list_agent_activity(1, Some(&id)) {
+            Ok(rows) => registry(state).seed_last_action(
+                &id,
+                rows.into_iter().next().map(|row| AgentLastAction {
+                    tool: row.tool,
+                    at: row.at,
+                    outcome: row.outcome,
+                }),
+            ),
+            // Not marked as seeded: the next status read asks again.
+            Err(error) => tracing::warn!("Could not read the agent's last action: {error:#}"),
+        }
     }
 }
 
@@ -476,17 +539,56 @@ pub fn clip_chars(text: &str, max: usize) -> String {
 /// `lastUsedAt` persisted at most once a minute.
 pub fn touch_agent(state: &AppState, agent: &AgentIdentity) {
     let now = Instant::now();
-    let (was_connected, persist_due) = {
+    let (was_connected, persist_due, start_watch) = {
         let mut registry = registry(state);
         let was = registry.connected(&agent.id, now);
         let due = registry.touch(&agent.id, now, &chrono::Utc::now().to_rfc3339());
-        (was, due)
+        (was, due, registry.claim_presence_watch())
     };
     if persist_due && let Err(error) = persist(state) {
         tracing::warn!("Could not persist the agent's last use: {error:#}");
     }
     if !was_connected {
         publish_status(state);
+    }
+    if start_watch {
+        spawn_presence_watch(state);
+    }
+}
+
+/// Presence ends without a call: the agent app quits and its bridge stops
+/// pinging. While any agent is connected one task sleeps until the next
+/// 45 s lapse and publishes `agents.status` when an agent dropped out, so
+/// the Session line and Settings never poll. It ends with the last agent.
+fn spawn_presence_watch(state: &AppState) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        // No runtime (a synchronous caller): nothing can sleep. Release the
+        // claim so the next touch tries again.
+        registry(state).release_presence_watch();
+        return;
+    };
+    runtime.spawn(watch_presence(state.clone()));
+}
+
+async fn watch_presence(state: AppState) {
+    let mut connected = registry(&state).connected_ids(Instant::now());
+    loop {
+        let (next, now_connected) = {
+            let mut registry = registry(&state);
+            let now = Instant::now();
+            (
+                registry.next_presence_lapse(now),
+                registry.connected_ids(now),
+            )
+        };
+        if connected.iter().any(|id| !now_connected.contains(id)) {
+            publish_status(&state);
+        }
+        connected = now_connected;
+        let Some(lapse) = next else {
+            return;
+        };
+        tokio::time::sleep_until(tokio::time::Instant::from_std(lapse)).await;
     }
 }
 
@@ -565,26 +667,51 @@ pub fn sync_discovery_file(state: &AppState) -> Result<()> {
 // The listener
 // ---------------------------------------------------------------------------
 
-async fn bind_listener(preferred: u16) -> std::result::Result<tokio::net::TcpListener, String> {
+async fn bind_listener(
+    preferred: u16,
+) -> std::result::Result<tokio::net::TcpListener, AgentBindError> {
     let mut candidates = vec![preferred];
     candidates.extend(
         (AGENT_PREFERRED_PORT..AGENT_PREFERRED_PORT + AGENT_PORT_SCAN)
             .filter(|port| *port != preferred),
     );
-    let mut last_error = String::new();
+    let mut failures = Vec::new();
     for port in &candidates {
         match tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, *port)).await {
             Ok(listener) => return Ok(listener),
-            Err(error) => last_error = error.to_string(),
+            Err(error) => failures.push(error),
         }
     }
     // An explicit error in Settings, never a silent random port: agent app
     // configs point at a stable one.
-    Err(format!(
-        "Ports {}–{} are all in use ({last_error}). Quit the app using them and turn Agents on again.",
+    Err(bind_failure(&failures))
+}
+
+/// Ports busy only when every port was taken (`AddrInUse`); a refused or
+/// unavailable address is something else, and quitting an app won't fix it.
+fn bind_failure(failures: &[std::io::Error]) -> AgentBindError {
+    let last_error = failures.last().map(ToString::to_string).unwrap_or_default();
+    let busy = !failures.is_empty()
+        && failures
+            .iter()
+            .all(|error| error.kind() == std::io::ErrorKind::AddrInUse);
+    let (first, last) = (
         AGENT_PREFERRED_PORT,
-        AGENT_PREFERRED_PORT + AGENT_PORT_SCAN - 1
-    ))
+        AGENT_PREFERRED_PORT + AGENT_PORT_SCAN - 1,
+    );
+    if busy {
+        AgentBindError {
+            kind: AgentBindErrorKind::PortsBusy,
+            message: format!(
+                "Ports {first}–{last} are all in use ({last_error}). Quit the app using them and turn Agents on again."
+            ),
+        }
+    } else {
+        AgentBindError {
+            kind: AgentBindErrorKind::Other,
+            message: format!("Agents couldn't open a port from {first} to {last} ({last_error})."),
+        }
+    }
 }
 
 /// Bind and serve if Agents is on. Idempotent.
@@ -646,9 +773,9 @@ pub async fn start_if_enabled(state: &AppState) {
             });
             state.emit_log("info", format!("Agents listening on 127.0.0.1:{port}/mcp."));
         }
-        Err(message) => {
-            state.emit_log("warn", format!("Agents could not start: {message}"));
-            state.agents.lock().bind_error = Some(message);
+        Err(error) => {
+            state.emit_log("warn", format!("Agents could not start: {}", error.message));
+            state.agents.lock().bind_error = Some(error);
         }
     }
 }
@@ -1428,6 +1555,121 @@ mod tests {
         );
         state.agent_registry.lock().unwrap().persisted.enabled = false;
         assert_eq!(post(address, Some(&token), ping).await.status(), 503);
+    }
+
+    #[test]
+    fn a_bind_failure_says_ports_busy_only_when_every_port_was_taken() {
+        let busy = || std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        let failures: Vec<_> = (0..AGENT_PORT_SCAN).map(|_| busy()).collect();
+        let error = bind_failure(&failures);
+        assert_eq!(error.kind, AgentBindErrorKind::PortsBusy);
+        assert!(error.message.starts_with("Ports 7440–7449 are all in use"));
+        let mut mixed: Vec<_> = (1..AGENT_PORT_SCAN).map(|_| busy()).collect();
+        mixed.push(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(bind_failure(&mixed).kind, AgentBindErrorKind::Other);
+        assert_eq!(bind_failure(&[]).kind, AgentBindErrorKind::Other);
+
+        // The kind rides the status beside the OS's words, and neither is
+        // there (never null) while the listener is fine.
+        let state = test_state();
+        let fine = serde_json::to_value(status(&state)).unwrap();
+        assert!(fine.get("bindError").is_none());
+        assert!(fine.get("bindErrorKind").is_none());
+        state.agents.lock().bind_error = Some(error);
+        let failed = serde_json::to_value(status(&state)).unwrap();
+        assert_eq!(failed["bindErrorKind"], "ports-busy");
+        assert!(failed["bindError"].as_str().unwrap().contains("all in use"));
+        stop(&state);
+        assert!(status(&state).bind_error_kind.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_presence_publishes_the_status_once() {
+        let state = test_state();
+        let (agent, _) = connect_agent(&state, "Claude Desktop");
+        let mut events = state.events.subscribe();
+        // Heard from 44.7 s ago: connected for 300 ms more.
+        let heard = Instant::now()
+            - (crate::agent_registry::AGENT_PRESENCE_WINDOW - Duration::from_millis(300));
+        {
+            let mut registry = state.agent_registry.lock().unwrap();
+            registry.touch(&agent.id, heard, "2026-10-27T10:00:00Z");
+            assert!(registry.claim_presence_watch());
+        }
+        assert_eq!(status(&state).connected_count, 1);
+        spawn_presence_watch(&state);
+        let lapsed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.event == "agents.status" {
+                    return event.payload;
+                }
+            }
+        })
+        .await
+        .expect("a lapse publishes agents.status");
+        assert_eq!(lapsed["connectedCount"], 0);
+        assert_eq!(lapsed["agents"][0]["connected"], false);
+        // The watch ended with the last agent: one event, and the next
+        // touch starts a new watch.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(events.try_recv().is_err());
+        assert!(state.agent_registry.lock().unwrap().claim_presence_watch());
+    }
+
+    #[test]
+    fn last_action_survives_a_restart_from_the_newest_activity_row() {
+        let state = test_state();
+        let (agent, _) = connect_agent(&state, "Cursor");
+        let (quiet, _) = connect_agent(&state, "Codex");
+        let row = |id: &str, at: &str, tool: &str, outcome| AgentActivityEntry {
+            id: id.to_string(),
+            at: at.to_string(),
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            tool: tool.to_string(),
+            summary: String::new(),
+            outcome,
+            message: None,
+        };
+        let recent = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let older = (recent - chrono::Duration::minutes(1)).to_rfc3339();
+        let newest = recent.to_rfc3339();
+        // Written by the last run; this registry (a restart) remembers nothing.
+        for entry in [
+            row("r1", &older, "notify", AgentActivityOutcome::Ok),
+            row("r2", &newest, "switch_scene", AgentActivityOutcome::Refused),
+        ] {
+            state.database.insert_agent_activity(&entry).unwrap();
+        }
+        let status = status(&state);
+        let seeded = status
+            .agents
+            .iter()
+            .find(|summary| summary.id == agent.id)
+            .unwrap();
+        assert_eq!(
+            seeded.last_action,
+            Some(AgentLastAction {
+                tool: "switch_scene".to_string(),
+                at: newest,
+                outcome: AgentActivityOutcome::Refused,
+            })
+        );
+        let never = status
+            .agents
+            .iter()
+            .find(|summary| summary.id == quiet.id)
+            .unwrap();
+        assert!(never.last_action.is_none());
+        assert!(
+            state
+                .agent_registry
+                .lock()
+                .unwrap()
+                .last_actions_to_seed()
+                .is_empty()
+        );
     }
 
     #[test]

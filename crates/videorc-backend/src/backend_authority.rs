@@ -161,11 +161,15 @@ pub fn authorize_backend_method(
     Ok(())
 }
 
-/// Plan 209 S3: the Studio answers agent intents and publishes the agent
-/// projection. Main never executes an intent, so an admin socket cannot ack
-/// one; remote sockets are already refused by their allowlist.
+/// Plan 209 S3: the Studio listens for agent intents, answers them and
+/// publishes the agent projection. Main never executes an intent, so an
+/// admin socket cannot listen for or ack one; remote sockets are already
+/// refused by their allowlist.
 fn renderer_only_method(method: &str) -> bool {
-    matches!(method, "agent.intent.ack" | "agent.surface.publish")
+    matches!(
+        method,
+        "agent.intent.listen" | "agent.intent.ack" | "agent.surface.publish"
+    )
 }
 
 fn renderer_smoke_method(method: &str) -> bool {
@@ -518,6 +522,7 @@ mod remote_role_tests {
             "remote.chat.snapshot",
             "agents.status",
             "agents.create",
+            "agent.intent.listen",
             "agent.intent.ack",
             "agent.surface.publish",
             "session.start",
@@ -538,7 +543,11 @@ mod remote_role_tests {
 
     #[test]
     fn agent_intent_ack_and_surface_publish_are_renderer_only() {
-        for method in ["agent.intent.ack", "agent.surface.publish"] {
+        for method in [
+            "agent.intent.listen",
+            "agent.intent.ack",
+            "agent.surface.publish",
+        ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Renderer, method, false),
                 Ok(())

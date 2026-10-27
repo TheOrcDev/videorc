@@ -4608,6 +4608,11 @@ struct ConnectionEventFilter {
     /// Set from the role at connection setup; `events.setExcluded` and
     /// `events.setIncluded` cannot change it.
     renderer: bool,
+    /// Plan 209: this socket runs agent intents (the Studio's, after
+    /// `agent.intent.listen`). `agent.intent` reaches these sockets and no
+    /// other, whatever their event lists say, so the sockets the relay
+    /// counts (`studio_sockets`) are exactly the ones it reaches.
+    agent_intents: bool,
 }
 
 /// Plan 209 S2/S3: the Agents section's status and activity, and the Studio
@@ -4626,6 +4631,9 @@ impl ConnectionEventFilter {
     }
 
     fn allows(&self, event: &str) -> bool {
+        if event == "agent.intent" {
+            return self.renderer && self.agent_intents;
+        }
         (self.renderer || !renderer_only_event(event))
             && !self.excluded.contains(event)
             && self
@@ -4633,6 +4641,45 @@ impl ConnectionEventFilter {
                 .as_ref()
                 .is_none_or(|included| included.contains(event))
     }
+}
+
+/// Plan 209 S3: `agent.intent.listen` (renderer-only). The Studio's socket
+/// says it runs agent intents; from then on it receives `agent.intent` and
+/// counts as "the Studio is open" until it closes. Every other socket,
+/// including the Agents store's own and any Settings row's client, neither
+/// receives intents nor counts, so a Studio tool answers "Videorc's Studio
+/// isn't open." at once instead of waiting on a socket that never acks.
+/// Connection-scoped like `events.setIncluded`; never reaches the shared
+/// dispatcher.
+fn handle_agent_intent_listen(
+    state: &AppState,
+    role: BackendRole,
+    event_filter: &std::sync::Arc<std::sync::Mutex<ConnectionEventFilter>>,
+    listening: &mut Option<crate::agent_mcp::StudioSocketGuard>,
+    text: &str,
+) -> Option<ServerResponse> {
+    let command: serde_json::Value = serde_json::from_str(text).ok()?;
+    if command.get("method").and_then(|method| method.as_str()) != Some("agent.intent.listen") {
+        return None;
+    }
+    let id = command
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if let Err(error) =
+        crate::backend_authority::authorize_backend_method(role, "agent.intent.listen", false)
+    {
+        return Some(ServerResponse::error(id, error.code(), error.message()));
+    }
+    event_filter
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .agent_intents = true;
+    if listening.is_none() {
+        *listening = Some(crate::agent_mcp::StudioSocketGuard::attach(state));
+    }
+    Some(ServerResponse::ok(id, serde_json::json!({ "ok": true })))
 }
 
 /// Remote sockets must not widen their locked event filter: the
@@ -8155,6 +8202,7 @@ async fn websocket_session_with_handler_role_and_redaction(
                 ])
             }),
             renderer: false,
+            agent_intents: false,
         }
     } else {
         ConnectionEventFilter::for_role(role)
@@ -8183,24 +8231,10 @@ async fn websocket_session_with_handler_role_and_redaction(
         state.emit_event("remote.control.status", remote_control_status(&state));
         RemoteClientCountGuard(state.clone())
     });
-    // Plan 209 S3: a Studio tool needs a renderer to run in. Counted with a
-    // Drop guard for the same reason as remote clients.
-    struct RendererSocketGuard(AppState);
-    impl Drop for RendererSocketGuard {
-        fn drop(&mut self) {
-            self.0
-                .agents
-                .renderer_sockets
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    let _renderer_socket_guard = (role == BackendRole::Renderer).then(|| {
-        state
-            .agents
-            .renderer_sockets
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        RendererSocketGuard(state.clone())
-    });
+    // Plan 209 S3: a Studio tool needs the Studio's socket to run in. It
+    // counts once it sends `agent.intent.listen`, with a Drop guard for the
+    // same reason as remote clients.
+    let mut studio_socket_guard: Option<crate::agent_mcp::StudioSocketGuard> = None;
 
     let writer_task = tokio::spawn(run_websocket_writer(
         sender,
@@ -8385,6 +8419,25 @@ async fn websocket_session_with_handler_role_and_redaction(
                     }
                     continue;
                 }
+                if let Some(response) = handle_agent_intent_listen(
+                    &state,
+                    role,
+                    &event_filter,
+                    &mut studio_socket_guard,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
 
                 if let Some(response) = handle_preview_frame_lease_control(
                     &state,
@@ -8438,6 +8491,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // accepted queue so native/source mutations are never canceled halfway.
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(preview_frame_lease);
+    drop(studio_socket_guard);
     drop(command_tx);
     drop(command_dispatcher_task);
     event_task.abort();
@@ -19694,6 +19748,7 @@ mod tests {
             excluded: std::collections::HashSet::from(["events.lagged".to_string()]),
             included: None,
             renderer: false,
+            agent_intents: false,
         }));
         let relay = tokio::spawn(relay_websocket_events(
             relay_state.clone(),
@@ -23029,24 +23084,99 @@ mod agent_role_tests {
     }
 
     /// S2/S3: the Agents events reach renderer sockets only, and an admin
-    /// socket cannot widen its filter into them.
+    /// socket cannot widen its filter into them. `agent.intent` reaches only
+    /// the socket that listens for it (the Studio's), whatever the event
+    /// lists say.
     #[test]
     fn agents_events_reach_renderer_sockets_only() {
-        let renderer = ConnectionEventFilter::for_role(BackendRole::Renderer);
+        let renderer = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::for_role(
+            BackendRole::Renderer,
+        )));
         let admin = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::for_role(
             BackendRole::Admin,
         )));
-        for event in ["agents.status", "agents.activity", "agent.intent"] {
-            assert!(renderer.allows(event), "{event}");
+        for event in ["agents.status", "agents.activity"] {
+            assert!(renderer.lock().unwrap().allows(event), "{event}");
             assert!(!admin.lock().unwrap().allows(event), "{event}");
         }
+        assert!(!renderer.lock().unwrap().allows("agent.intent"));
+        assert!(!admin.lock().unwrap().allows("agent.intent"));
         assert!(admin.lock().unwrap().allows("remote.control.status"));
-        handle_connection_control(
+        for filter in [&renderer, &admin] {
+            handle_connection_control(
+                filter,
+                r#"{"id":"i","method":"events.setIncluded","params":{"events":["agent.intent"]}}"#,
+            )
+            .expect("connection control");
+            assert!(!filter.lock().unwrap().allows("agent.intent"));
+        }
+
+        // Only the renderer can listen; once it does, its event lists no
+        // longer decide `agent.intent` either way.
+        let state = test_support::test_state();
+        let listen = r#"{"id":"l","method":"agent.intent.listen"}"#;
+        let mut admin_guard = None;
+        let refused = handle_agent_intent_listen(
+            &state,
+            BackendRole::Admin,
             &admin,
-            r#"{"id":"i","method":"events.setIncluded","params":{"events":["agent.intent"]}}"#,
+            &mut admin_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(
+            serde_json::to_value(&refused).unwrap()["error"]["code"],
+            "forbidden-method"
+        );
+        assert!(admin_guard.is_none());
+        assert!(!admin.lock().unwrap().allows("agent.intent"));
+        assert!(!state.agents.studio_open());
+        let mut renderer_guard = None;
+        let answer = handle_agent_intent_listen(
+            &state,
+            BackendRole::Renderer,
+            &renderer,
+            &mut renderer_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(serde_json::to_value(&answer).unwrap()["ok"], true);
+        assert!(renderer.lock().unwrap().allows("agent.intent"));
+        assert!(state.agents.studio_open());
+        // A second listen on the same socket counts it once.
+        handle_agent_intent_listen(
+            &state,
+            BackendRole::Renderer,
+            &renderer,
+            &mut renderer_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(
+            state
+                .agents
+                .studio_sockets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        handle_connection_control(
+            &renderer,
+            r#"{"id":"x","method":"events.setExcluded","params":{"events":["agent.intent"]}}"#,
         )
         .expect("connection control");
-        assert!(!admin.lock().unwrap().allows("agent.intent"));
+        assert!(renderer.lock().unwrap().allows("agent.intent"));
+        drop(renderer_guard);
+        assert!(!state.agents.studio_open());
+        assert!(
+            handle_agent_intent_listen(
+                &state,
+                BackendRole::Renderer,
+                &renderer,
+                &mut None,
+                r#"{"id":"o","method":"agents.status"}"#,
+            )
+            .is_none()
+        );
         assert!(
             crate::remote_lan::LAN_EVENTS
                 .iter()
