@@ -1522,6 +1522,109 @@
       "notice": "{agent} {summary}."
     },
     {
+      "name": "buddy_say",
+      "title": "Buddy says a line",
+      "description": "Buddy says a line in its speech bubble on the picture, like the Stream Manager's Say box, and posts it in chat too when its chat mode is Auto. Viewers see it. Refused when Buddy is off the picture and its chat mode doesn't post, since nobody would see it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "What Buddy says, 1 to 200 characters.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "mood": {
+            "type": "string",
+            "description": "How Buddy looks while it says it. Default talk.",
+            "enum": ["talk", "laugh", "think"]
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "bubble": {
+            "type": "boolean"
+          },
+          "chat": {
+            "type": "boolean"
+          },
+          "chatMode": {
+            "type": "string",
+            "enum": ["off", "suggest", "auto"]
+          }
+        },
+        "required": ["bubble", "chat", "chatMode"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "chat",
+      "notice": null
+    },
+    {
+      "name": "set_buddy",
+      "title": "Set up Buddy",
+      "description": "Turn Buddy Live on or off, choose how Buddy posts in chat (off: never, suggest: a card the streamer approves, auto: by itself), and put Buddy on the stream or take it off, like the Stream Manager's Buddy controls. Turning Buddy on needs Premium and the streamer's Cloud AI consent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean",
+            "description": "Buddy Live on or off."
+          },
+          "chatMode": {
+            "type": "string",
+            "description": "How Buddy posts in chat.",
+            "enum": ["off", "suggest", "auto"]
+          },
+          "onStream": {
+            "type": "boolean",
+            "description": "Buddy shows on the stream's picture."
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          },
+          "chatMode": {
+            "type": "string",
+            "enum": ["off", "suggest", "auto"]
+          },
+          "onStream": {
+            "type": "boolean"
+          }
+        },
+        "required": ["on", "chatMode", "onStream"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
       "name": "open_window",
       "title": "Bring a window forward",
       "description": "Bring a Videorc window to the front of the streamer's screen: the Stream Manager (chat and activity), Notes, or the detached Preview. Use it when the streamer should look at something.",

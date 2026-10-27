@@ -16957,6 +16957,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             message: error instanceof Error ? error.message : "Couldn't mark the clip."
           }
         }
+      },
+      // Plan 209 PR B, S13 to S15: what the Buddy, Prepare and Library tools
+      // need, each through the control the streamer would use.
+      buddy: {
+        settings: cohostSettingsRef.current,
+        entitled: cohostGate.allowed,
+        entitlementReason: cohostGate.allowed ? null : cohostGate.reason,
+        consented: aiConsent,
+        showOnStream: overlayLayoutRef.current.buddy.showOnStream,
+        // The Stream Manager's enable command's save (`cohostEnableRelayPatch`).
+        saveSettings: async (patch) => {
+          const next = await client.request<CohostSettings>('cohost.settings.set', patch)
+          setCohostSettings(next)
+          return next
+        },
+        // The Stream Manager header's "on stream" switch.
+        setShowOnStream: async (on) => {
+          const current = overlayLayoutRef.current
+          await setOverlayLayout({ ...current, buddy: { ...current.buddy, showOnStream: on } })
+        }
       }
     }
   }

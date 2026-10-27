@@ -130,6 +130,9 @@ pub fn backend_executor(name: &str) -> Option<BackendExecutor> {
         "remove_chat_message" => Some(|state, agent, args| {
             Box::pin(crate::agent_chat::remove_chat_message(state, agent, args))
         }),
+        "buddy_say" => {
+            Some(|state, agent, args| Box::pin(crate::agent_chat::buddy_say(state, agent, args)))
+        }
         _ => None,
     }
 }

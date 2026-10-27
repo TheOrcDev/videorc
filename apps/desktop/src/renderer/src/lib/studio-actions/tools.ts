@@ -5,8 +5,9 @@
 // structured result. A parity test holds this record to the catalog: one
 // executor per Studio tool and none besides.
 //
-// Nothing here toasts. D11 notices (`stop`, `notify`) are the Studio's,
-// from the `notice` the backend puts on the `agents.activity` event.
+// Nothing here toasts. D11 notices (`stop`, `notify`, `delete_recording`) are
+// the Studio's, from the `notice` the backend puts on the `agents.activity`
+// event.
 
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { soundboard } from '@/lib/soundboard-store'
@@ -20,6 +21,8 @@ import { sceneApply, takeoverHide, takeoverShow } from './scene'
 import { recordStart, recordStop } from './session'
 import { soundPlay, soundStop } from './sounds'
 import { windowFront } from './windows'
+// Plan 209 PR B, S13 to S15.
+import { setBuddy } from './buddy'
 
 /** What an agent reads when a Studio tool refuses before any handler runs. */
 export const AGENT_TOOL_COPY = {
@@ -192,5 +195,7 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   stop_sounds: stopSounds,
   set_highlight: setHighlight,
   open_window: openWindow,
-  notify
+  notify,
+  // Plan 209 PR B, S13 to S15 (buddy.ts, prepare.ts, settings.ts, library.ts).
+  set_buddy: setBuddy
 }

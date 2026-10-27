@@ -9,6 +9,17 @@
 import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
 import type { BannerSummary } from '../../../../shared/banner-commands'
 import type { ClipLength } from '../../../../shared/clip-lengths'
+import type {
+  CohostSettings,
+  CohostSettingsPatch,
+  EntitlementsSnapshot,
+  SessionSummary,
+  StreamMetadataDraft,
+  StreamTargetSettings,
+  StreamingSettings,
+  VideoSettings
+} from '../../../../shared/backend'
+import type { CaptureConfig, SettingsState } from '@/lib/capture'
 
 export interface StudioActionClient {
   request<T>(method: string, params?: unknown): Promise<T>
@@ -88,4 +99,79 @@ export interface StudioActionContext {
   applySavedScene?: (id: string) => Promise<boolean>
   /** Each built-in layout's name; `layoutPresetLabel` when left out. */
   layoutLabels?: Readonly<Record<string, string>>
+  // Plan 209 PR B, S13 to S15. Optional: a remote key never reads them.
+  /** Buddy (S13): what `set_buddy` reads, and the Stream Manager's own saves. */
+  buddy?: StudioBuddyAccess
+  /** The next stream (S14): the Go Live draft and the destinations. */
+  prepare?: StudioPrepareAccess
+  /** The curated settings (S14, D16). */
+  settings?: StudioSettingsAccess
+  /** The Library (S15): its rows and its own delete and export. */
+  library?: StudioLibraryAccess
+}
+
+/** Buddy as the Stream Manager's switch, mode control and header see it. */
+export interface StudioBuddyAccess {
+  /** `cohost.settings` as loaded; null until the backend answered. */
+  settings: Pick<CohostSettings, 'enabled' | 'autoChat'> | null
+  /** The Premium gate (`liveCohostGate`): Buddy Live needs it. */
+  entitled: boolean
+  entitlementReason: string | null
+  /** The renderer-local Cloud AI consent Buddy Live needs. */
+  consented: boolean
+  /** `overlayLayout.buddy.showOnStream`. */
+  showOnStream: boolean
+  /** Saves a `cohostEnableRelayPatch` patch, as the Stream Manager's command does. */
+  saveSettings: (patch: CohostSettingsPatch) => Promise<CohostSettings>
+  /** The Stream Manager header's "on stream" switch. */
+  setShowOnStream: (on: boolean) => Promise<void>
+}
+
+/** The next stream: the Go Live draft (Stream details) and Destinations. */
+export interface StudioPrepareAccess {
+  /** The Go Live draft as the Studio holds it; null while it loads. */
+  draft: StreamMetadataDraft | null
+  /** Stream details' Save: `streamTargets.metadata.update`, then the Studio's draft. */
+  saveDraft: (draft: StreamMetadataDraft) => Promise<StreamMetadataDraft>
+  /** The category search the Stream details picker uses. */
+  searchCategories: (
+    platform: 'twitch' | 'kick',
+    query: string
+  ) => Promise<{ id: string | number; name: string }[]>
+  streaming: StreamingSettings
+  entitlements: EntitlementsSnapshot | null
+  /** The Go Live dialog is open: its draft and destinations are being confirmed. */
+  goLivePending: boolean
+  /** A destination's switch (`patchStreamingTarget`). */
+  patchTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
+}
+
+/** What the curated settings read and write (D16), through their own controls' setters. */
+export interface StudioSettingsAccess {
+  captureConfig: Pick<
+    CaptureConfig,
+    'video' | 'layout' | 'recordEnabled' | 'separateSourceRecordings' | 'replayBuffer' | 'captions'
+  >
+  settings: Pick<SettingsState, 'outputDirectory' | 'keepOriginalRecording' | 'studioChat'>
+  /** next-themes' stored choice. */
+  theme: string | undefined
+  platform: string | undefined
+  entitlements: EntitlementsSnapshot | null
+  /** Output's own setter: a size or rate, the preset becomes Custom. */
+  patchVideo: (patch: Partial<VideoSettings>) => void
+  setCaptureConfig: (update: (current: CaptureConfig) => CaptureConfig) => void
+  setSettings: (update: (current: SettingsState) => SettingsState) => void
+  /** Output → Clips' one switch. */
+  setClipsEnabled: (enabled: boolean) => void
+  setTheme: (theme: 'light' | 'dark' | 'system') => void
+}
+
+/** The Library's rows and its own file actions. */
+export interface StudioLibraryAccess {
+  /** The rows the Library has loaded (newest first). */
+  recordings: readonly SessionSummary[]
+  /** The Library's delete: the backend's tombstone, then the files to the Trash. */
+  deleteRecordings: (ids: readonly string[]) => Promise<void>
+  /** Export MP4 (plan 200's export): resolves to the MP4's path. */
+  exportMp4: (id: string) => Promise<string | null>
 }
