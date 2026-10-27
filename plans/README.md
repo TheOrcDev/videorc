@@ -1,5 +1,22 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
+  agents and Buddy run the studio. Owner request: a complete MCP so people
+  control everything from their agents, with Buddy using it too. Agents on
+  this computer (Claude Desktop, Claude Code, Cursor, Codex, VS Code) connect
+  through `videorc-mcp`, a stdio bridge shipped in the app, to a loopback-only
+  `/mcp` endpoint with per-agent tokens. 43 tools cover looking (status,
+  picture, chat, Library), running the show, arranging the picture ("move
+  Buddy to the top left", "the banner to the bottom left", with the Scene
+  canvas's own snaps), chat, Buddy, preparing and the Library. They run through the same executor as the buttons and Stream
+  Deck, whose allowlists stay unchanged. The owner chose full control with no
+  prompts, so actions are logged and attributed, one Stop cuts every agent,
+  deletes go to the Trash, and YouTube removals still wait for a click (API
+  policy). Free; Buddy's tool use is Premium, triggered only by the
+  streamer's voice or `/buddy`, through a new videorc.com planner whose
+  calls the desktop checks against Buddy's subset. Five PRs (A to E).
+  **PLANNED**; four questions open (Buddy's spoken confirms, the picture,
+  one-click Connect, notices).
 - 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
   Owner request: live chat in the Studio in a small window, optional with a
   switch, a click putting a message on stream, less detail than the Stream
