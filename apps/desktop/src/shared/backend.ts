@@ -4654,9 +4654,14 @@ export type UpdateStatus =
   | { phase: 'downloaded'; version: string }
   | { phase: 'not-available'; currentVersion: string }
   | { phase: 'error'; message: string }
+  // Linux only: a newer Linux release is published on videorc.com. Linux never
+  // downloads it; Settings links to the downloads page (linux-update-notice.ts).
+  | { phase: 'download-available'; version: string }
   // `windows-feed-unpublished`: a Windows build found no update published for
   // it (no public Alpha feed, and no signed-in pilot access). Rechecked.
-  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' }
+  // `linux-version-unknown`: the Linux version check could not tell (offline,
+  // or videorc.com lists no Linux release for this line yet). Rechecked.
+  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' | 'linux-version-unknown' }
 
 export type AccountCallbackEnvelope = {
   id: string
