@@ -2273,7 +2273,7 @@ mod runtime {
         {
             let safe_inset = caption_overlay_safe_inset(
                 Some(&caption),
-                highlight_on.primary_canvas.and_then(|_| highlight.as_ref()),
+                highlight_on.primary_canvas.and(highlight.as_ref()),
                 primary_dimensions.width,
                 primary_dimensions.height,
             );
@@ -2295,9 +2295,7 @@ mod runtime {
         ) {
             let safe_inset = caption_overlay_safe_inset(
                 Some(&caption),
-                highlight_on
-                    .auxiliary_canvas
-                    .and_then(|_| highlight.as_ref()),
+                highlight_on.auxiliary_canvas.and(highlight.as_ref()),
                 output_dimensions.width,
                 output_dimensions.height,
             );
