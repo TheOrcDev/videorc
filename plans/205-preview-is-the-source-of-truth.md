@@ -14,7 +14,8 @@
 
 ## Status
 
-- **Status:** IN PROGRESS 2026-10-27. The owner answered D1 to D6 the
+- **Status:** BUILT 2026-10-27, merged in PR #880 (S1 to S9; S10, the
+  Windows tester pass and the Linux box, is owed). The owner answered D1 to D6 the
   same day (see "Owner decisions"). D2 and D3 differ from the first
   recommendations: clips follow "Show in recording", and a banner you add
   shows. So the owner's Buddy report (Clips on, Buddy stream only) is fixed
@@ -926,3 +927,44 @@ the pet is in the Preview and not in a saved clip; record + stream at 4K30
 with a stream-only banner: the banner is in the Preview and the stream,
 not the recording); the 4K idle cost call above; the packaged app with a
 real camera.
+
+### S9 (Buddy on the proof surface), 2026-10-27
+
+**What was built.** `preview_buddy_layer.rs` serves Buddy's layer at
+`GET /preview/buddy/latest.bmp?token=&canvasWidth=&canvasHeight=`, beside
+the camera and screen BMP routes and token-gated like them. Each fetch
+draws on demand, with nothing running between fetches. It draws the pet's
+current cell from the sprite slot's new `BuddySpriteLeg::Preview` (its own
+atlas, so it never evicts an output leg's) and the primary bubble raster
+into one straight-alpha BGRA BMP (V4 header) covering the layer's rect on
+the requested canvas (default 1280×720, each side clamped to 16 to 4096).
+The response names the rect in canvas fractions
+(`x-videorc-layer-rect`). An identical frame (same cell, transform, bubble
+and rect) answers `204` to the caller's cursor without drawing. While the
+program does not carry Buddy (`program_shows` over the running session's
+shape, or either switch at idle and under Clips), the route answers `204`
+with `x-videorc-layer-empty: 1`. The Preview leg's clock is an output
+leg's frame clock while one has drawn in the last 500 ms
+(`BUDDY_OUTPUT_CLOCK_FRESH_FOR`), else the slot's own, so the pet animates
+in step with the legs and never jumps backwards. The editor's Buddy
+draft moves the layer as it moves the legs. The animator keeps per-leg
+memory for three legs.
+
+Main (`main/preview-surface-buddy.ts`) reads `overlays.layout.get` on
+connect and follows `overlays.layout`, both strictly validated. It places a
+`buddy` layer above the banners while the program carries Buddy, and the
+proof page polls it with its own overlay poller, apart from the source
+pollers, so it never counts toward source liveness, blank-frame or
+transport accounting. Frame-polling suppression stops it like the sources.
+
+**Not built:** the `capturePage` proof-surface case behind the smoke
+command server. Its only meaningful host is Windows or Linux, so it moves
+to S10 with the tester pass.
+
+**Tests:** `buddy_sprite` (the BGRA blit matches the yuv blit for the same
+cell; the Preview leg follows a fresh output clock and then its own),
+`preview_buddy_layer` (the editor place, the canvas bounds, the layer
+covers the pet and the bubble, the response headers, the query, the route
+is empty while Buddy is off and serves the pet once on), and
+`preview-surface-buddy.test.ts` (the program rule, the saved rect and its
+frame URL, the layer order above the banners).
