@@ -3,7 +3,7 @@ import { createElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FirstRunSetupMode } from '@/lib/first-run'
+import type { FirstRunGoal, FirstRunSetupMode, FirstRunStep } from '@/lib/first-run'
 import type { SystemAccessRow } from '@/lib/system-access'
 
 // Plan 203 S5: the Welcome screen is the whole window, with the Permissions
@@ -64,8 +64,13 @@ const allGranted = (): SystemAccessRow[] => [
   row('camera', 'granted')
 ]
 
-const render = (mode: FirstRunSetupMode = { kind: 'first-run' }): string =>
-  renderToStaticMarkup(createElement(FirstRunSetup, { mode, onLeave: () => undefined }))
+const render = (
+  mode: FirstRunSetupMode = { kind: 'first-run' },
+  progress: { initialStep?: FirstRunStep; initialGoal?: FirstRunGoal | null } = {}
+): string =>
+  renderToStaticMarkup(
+    createElement(FirstRunSetup, { mode, onLeave: () => undefined, ...progress })
+  )
 
 beforeEach(() => {
   studio.core.wsStatus = 'connected'
@@ -165,14 +170,47 @@ describe('FirstRunSetup', () => {
     expect(skip).not.toContain('data-icon="inline-end"')
   })
 
-  it('shows the Linux replay with nothing to grant', () => {
+  it('starts the Linux replay at the goal: Linux has nothing to grant', () => {
     studio.core.runtimeInfo = { platform: 'linux', hardwareAccelerationDisabled: true }
     studio.rows = []
     const markup = render({ kind: 'replay', returnTo: 'settings' })
     expect(markup).toContain('data-first-run-mode="replay"')
-    expect(markup).toContain('Nothing to grant here')
+    expect(markup).toContain('data-first-run-step="goal"')
+    expect(markup).toMatch(/<h1[^>]*>What are you making\?<\/h1>/)
     expect(markup).not.toContain('data-slot="system-access-row"')
-    expect(markup).not.toContain('data-slot="skeleton"')
-    expect(markup).toMatch(/>Continue</)
+    expect(markup).not.toContain('data-first-run-back=""')
+  })
+
+  it('frames each step: the count and Skip setup on top, no Back on the first step (plan 207 D3)', () => {
+    const markup = render()
+    expect(markup).toMatch(/data-first-run-step-position="1\/\d"/)
+    expect(markup).toMatch(/>Step 1 of \d</)
+    expect(markup).toMatch(/<button[^>]*data-first-run-skip=""[^>]*>Skip setup</)
+    expect(markup).not.toContain('data-first-run-back=""')
+  })
+
+  it('resumes at the goal step: three choices, Back, nothing picked and no primary (plan 207 D4)', () => {
+    const markup = render({ kind: 'first-run' }, { initialStep: 'goal' })
+    expect(markup).toContain('data-first-run-step="goal"')
+    expect(markup).toMatch(/data-first-run-step-position="2\/\d"/)
+    expect(markup).toMatch(/<h1[^>]*id="first-run-title"[^>]*>What are you making\?<\/h1>/)
+    expect(markup.match(/data-first-run-goal="/g)).toHaveLength(3)
+    for (const title of ['Recordings', 'Livestreams', 'Both']) expect(markup).toContain(title)
+    expect(markup).toContain('Tutorials, demos and videos, saved on this Mac.')
+    expect(markup).toMatch(/<button[^>]*data-first-run-back=""[^>]*>.*Back</)
+    expect(markup).not.toContain('data-first-run-primary')
+    expect(markup).not.toContain('data-selected')
+  })
+
+  it('marks the saved goal when coming back to it', () => {
+    const markup = render(
+      { kind: 'replay', returnTo: 'settings' },
+      {
+        initialStep: 'goal',
+        initialGoal: 'stream'
+      }
+    )
+    expect(markup).toMatch(/data-first-run-goal="stream"[^>]*data-selected="true"/)
+    expect(markup).toContain('Chosen')
   })
 })

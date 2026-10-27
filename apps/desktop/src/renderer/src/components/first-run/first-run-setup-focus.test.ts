@@ -10,6 +10,7 @@ const bridgeSpies = vi.hoisted(() => ({ refreshBackend: vi.fn(async () => undefi
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   useEffect: vi.fn(),
+  useRef: (initial: unknown) => ({ current: initial }),
   useState: (initial: unknown) => [typeof initial === 'function' ? initial() : initial, vi.fn()]
 }))
 vi.mock('@/hooks/use-studio', () => ({
@@ -22,6 +23,7 @@ vi.mock('@/hooks/use-studio-mic-visual', () => ({
   StudioMicVisualProvider: ({ children }: { children: ReactNode }) => children
 }))
 vi.mock('./permissions-step', () => ({ PermissionsStep: () => null }))
+vi.mock('./goal-step', () => ({ GoalStep: () => null }))
 
 import { FirstRunSetup } from './first-run-setup'
 

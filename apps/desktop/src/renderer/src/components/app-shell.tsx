@@ -27,8 +27,8 @@ import { useWhatsNew } from '@/hooks/use-whats-new'
 import {
   createFirstRunStartup,
   firstRunShellSurface,
-  type FirstRunCompletion,
   type FirstRunDecision,
+  type FirstRunLeave,
   type FirstRunSetupMode
 } from '@/lib/first-run'
 import {
@@ -364,15 +364,15 @@ function AppShellContent(): ReactElement {
   // record (every fresh install sees setup once, D2) and opens the Studio; a
   // replay writes nothing and returns to the page it came from.
   const leaveFirstRunSetup = useCallback(
-    (completion: FirstRunCompletion) => {
+    ({ completion, openTab }: FirstRunLeave) => {
       if (replay) {
         setReplay(null)
-        setActive(replay.returnTo)
+        setActive(openTab ?? replay.returnTo)
         return
       }
       firstRunStartup?.complete(completion)
       setFirstRunVisibility('hide')
-      setActive('studio')
+      setActive(openTab ?? 'studio')
     },
     [replay, setActive]
   )

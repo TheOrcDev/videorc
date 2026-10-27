@@ -455,11 +455,12 @@ describe('first-run startup ordering', () => {
       shell.indexOf('const leaveFirstRunSetup'),
       shell.indexOf('[replay, setActive]')
     )
-    expect(leave.indexOf('setActive(replay.returnTo)')).toBeGreaterThan(0)
-    expect(leave.indexOf('setActive(replay.returnTo)')).toBeLessThan(
+    expect(leave.indexOf('setActive(openTab ?? replay.returnTo)')).toBeGreaterThan(0)
+    expect(leave.indexOf('setActive(openTab ?? replay.returnTo)')).toBeLessThan(
       leave.indexOf('firstRunStartup?.complete(completion)')
     )
-    expect(leave).toContain("setActive('studio')")
+    // Setup lands on the Studio unless a step names another page (plan 207 D10).
+    expect(leave).toContain("setActive(openTab ?? 'studio')")
     // The shell's chords and command-digit navigation ask setup first, like a dialog.
     expect(shell.match(/setupOpenRef\.current \|\| isModalOpen\(document\)/g)).toHaveLength(2)
     expect(shell).toContain('setFirstRunSetupOpen(setupOpen)')

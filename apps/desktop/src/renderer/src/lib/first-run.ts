@@ -278,6 +278,12 @@ export function firstRunShellSurface({
  */
 export type FirstRunSetupMode = { kind: 'first-run' } | { kind: 'replay'; returnTo: WorkspaceTab }
 
+/** How setup ends (plan 207): the record's word, and a page other than the usual one to land on. */
+export interface FirstRunLeave {
+  completion: FirstRunCompletion
+  openTab?: WorkspaceTab
+}
+
 /** Why "Run setup again…" is off (plan 203 D5): setup holds capture back. */
 export const FIRST_RUN_REPLAY_LOCKED_REASON = 'Finish your recording or livestream first.'
 
