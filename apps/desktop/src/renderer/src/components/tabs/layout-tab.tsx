@@ -29,6 +29,7 @@ import {
   type StageItemDraft
 } from '@/components/scene/overlay-stage'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
+import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
@@ -69,6 +70,7 @@ import {
   type LayoutOrientation
 } from '@/lib/capture'
 import { bannerSnapRect } from '@/lib/banner-place'
+import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
@@ -247,6 +249,7 @@ export function LayoutTab(): ReactElement {
     setSettings,
     overlayLayout,
     setOverlayLayout,
+    cohostSettings,
     reportError,
     wsStatus
   } = useStudioCore()
@@ -524,6 +527,12 @@ export function LayoutTab(): ReactElement {
       ? dockHiddenDisplay(previewWindow.dockHiddenReason ?? 'no-slot-report')
       : null
   const liveHint = liveHidden ? `${liveHidden.title}. ${liveHidden.detail}` : null
+  // The Buddy's still, drawn in its zone on the schematic canvas (the live
+  // canvas shows the pet itself while it is selected or dragged).
+  const buddyPicture = buddyStateImageUrl(
+    cohostSettings?.persona ?? { images: {}, source: 'default' },
+    'idle'
+  )
   // Decision 6: entering the tab with the preview CLOSED opens it docked into
   // the canvas; an open floating preview stays floating (the footer offers
   // "Show preview here"); leaving the tab changes nothing. Once per tab entry,
@@ -751,12 +760,19 @@ export function LayoutTab(): ReactElement {
               liveDocked={!verticalView && liveCanvasActive}
               liveHint={verticalView ? 'Vertical stream: overlay placement only.' : liveHint}
               liveSurface={!verticalView && liveSurface}
+              // The preview floating in its own window follows a drag too.
+              previewFollowsGestures={
+                liveCanvasSupported &&
+                !verticalView &&
+                previewWindow.open &&
+                previewWindow.mode === 'floating'
+              }
               slotRef={liveCanvasSupported && !verticalView ? slotRef : undefined}
               overlays={{
                 // Banners first: they draw under the overlay items (D5).
                 items: [
                   ...bannerStageItems(banners, selectedBannerId, overlayOrientation, stageAspect),
-                  ...overlayStageItems(overlayLayout, overlayOrientation)
+                  ...overlayStageItems(overlayLayout, overlayOrientation, buddyPicture)
                 ],
                 selectedId: selectedBanner
                   ? bannerStageId(selectedBanner.id)
@@ -808,6 +824,19 @@ export function LayoutTab(): ReactElement {
               // drop is just a position.
               onSnapCorner={
                 isFreeform ? undefined : (cameraCorner) => applyCameraPreset({ cameraCorner })
+              }
+              // ...at the preset's size and margin: the stage shows that box
+              // while the camera is in the corner.
+              cornerDropRect={
+                isFreeform
+                  ? undefined
+                  : (cameraCorner) =>
+                      presetCameraCornerRect(
+                        layout,
+                        cameraCorner,
+                        captureConfig.video.width,
+                        captureConfig.video.height
+                      )
               }
               onTogglePreview={() => void togglePreviewWindow()}
               onUndo={undoControl.shown ? undoLayout : undefined}

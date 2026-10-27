@@ -1207,6 +1207,61 @@ mod tests {
         }
     }
 
+    /// The Scene stage shows this box while a camera is dragged into a corner
+    /// of a preset scene (its drop target): pinned with the renderer's twin,
+    /// `presetCameraCornerRect` in `components/scene/stage-corner.test.ts`.
+    #[test]
+    fn preset_camera_corner_boxes_match_the_stage_drop_target() {
+        let cases = [
+            (
+                CameraSize::Medium,
+                CameraShape::Rectangle,
+                CameraAspect::Source,
+                32,
+                CameraCorner::BottomRight,
+                (1920, 1080),
+                (1332, 727, 540, 305),
+            ),
+            (
+                CameraSize::Small,
+                CameraShape::Circle,
+                CameraAspect::Source,
+                32,
+                CameraCorner::TopLeft,
+                (1080, 1920),
+                (27, 27, 219, 219),
+            ),
+            (
+                CameraSize::Large,
+                CameraShape::Rounded,
+                CameraAspect::Portrait,
+                500,
+                CameraCorner::TopRight,
+                (1280, 720),
+                (640, 160, 480, 640),
+            ),
+        ];
+        for (size, shape, aspect, margin, corner, (width, height), (x, y, w, h)) in cases {
+            let mut layout = layout();
+            layout.camera_size = size;
+            layout.camera_shape = shape;
+            layout.camera_aspect = aspect;
+            layout.camera_margin = margin;
+            layout.camera_corner = corner;
+            let transform = preset_camera_transform(&layout, width, height);
+            let (width, height) = (f64::from(width), f64::from(height));
+            assert_eq!(
+                (transform.x, transform.y, transform.width, transform.height),
+                (
+                    f64::from(x) / width,
+                    f64::from(y) / height,
+                    f64::from(w) / width,
+                    f64::from(h) / height
+                )
+            );
+        }
+    }
+
     #[test]
     fn custom_transform_and_zoom_crop_table_matches_1080p_and_4k() {
         let mut layout = layout();
