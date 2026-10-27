@@ -1222,10 +1222,24 @@ impl BuddySpriteSlot {
 
     /// The Buddy on one leg for this frame. Cheap: one short lock, an `Arc`
     /// clone and the source's draw; the pixels are never touched here.
+    // The D3D11 session and the tests; the CPU/Metal compositor calls `leg_frame_at`.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn leg_frame(&self, request: BuddyLegRequest) -> BuddyLegFrame {
+        self.leg_frame_at(request, None)
+    }
+
+    /// `leg_frame` at `place` instead of the saved layout's rect for this
+    /// canvas: the Scene editor's drag of the Buddy on the idle preview. The
+    /// atlas follows the place like a saved resize (the rebuild is
+    /// debounced, the last atlas keeps drawing at the new size meanwhile).
+    pub fn leg_frame_at(
+        &self,
+        request: BuddyLegRequest,
+        place: Option<OverlayRect>,
+    ) -> BuddyLegFrame {
         let mut state = self.inner.lock();
         let (width, height) = request.canvas;
-        let rect = buddy_rect_for_canvas(&state.layout, width, height);
+        let rect = place.unwrap_or_else(|| buddy_rect_for_canvas(&state.layout, width, height));
         let buddy_box = buddy_box(rect, width, height);
         let key = LegKey {
             canvas: request.canvas,

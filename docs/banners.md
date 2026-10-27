@@ -93,7 +93,10 @@ hide` and the event `banners.changed`; `importImage` runs on the
 - Z order on every path: scene, takeover, banners, captions, Buddy,
   highlight card.
 - Scene editor drafts with the stage id `banner:<id>` move the banner's
-  picture live on the idle macOS preview.
+  picture live on the idle macOS preview: on the live canvas, and in the
+  floating preview while a drag runs. The schematic canvas (the preview
+  floating, Windows, Linux) draws the banner's own image in its rect, so a
+  drag there shows the picture moving too.
 
 ### Controls
 

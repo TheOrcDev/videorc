@@ -1986,14 +1986,19 @@ impl CompositorRuntime {
     }
 
     /// Drop the draft when it expired, when the installed scene reached its
-    /// release revision, or when a capture leased this run. Runs every render
-    /// tick before use and on every scene install.
+    /// release revision, or when a recording or a stream leased this run (a
+    /// buffer-only lease keeps it, plan 181). Runs every render tick before
+    /// use and on every scene install.
     fn reap_editor_draft(&mut self, now: Instant) -> bool {
         let installed = self.installed_scene_revision();
+        let leased = self
+            .capture_lease
+            .as_ref()
+            .is_some_and(|lease| !lease.replay_only);
         let drop = self
             .editor_draft
             .as_ref()
-            .is_some_and(|draft| !draft.is_live(now, installed) || self.capture_lease.is_some());
+            .is_some_and(|draft| !draft.is_live(now, installed) || leased);
         if drop {
             self.editor_draft = None;
             self.sync_editor_draft_status();
@@ -2488,16 +2493,11 @@ mod editor_draft_tests {
         }
     }
 
-    #[test]
-    fn editor_draft_is_reaped_when_a_capture_leases_the_run() {
-        let now = Instant::now();
-        let mut runtime = initial_compositor_state();
-        runtime.scene = Some(snapshot(5));
-        runtime.set_editor_draft(params("source:camera"), now);
-        runtime.capture_lease = Some(CompositorCaptureLease {
+    fn capture_lease(replay_only: bool) -> CompositorCaptureLease {
+        CompositorCaptureLease {
             session_id: "session".to_string(),
             run_id: "run".to_string(),
-            replay_only: false,
+            replay_only,
             render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(1280, 720))),
             preview_config: CompositorLoopConfig {
                 target_fps: 30,
@@ -2509,7 +2509,16 @@ mod editor_draft_tests {
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
             },
-        });
+        }
+    }
+
+    #[test]
+    fn editor_draft_is_reaped_when_a_capture_leases_the_run() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), now);
+        runtime.capture_lease = Some(capture_lease(false));
         assert_eq!(
             CompositorRenderCache::from_runtime(&runtime).editor_draft,
             None,
@@ -2517,6 +2526,31 @@ mod editor_draft_tests {
         );
         assert!(runtime.reap_editor_draft(now));
         assert!(runtime.editor_draft.is_none());
+    }
+
+    /// The Clips ring (plan 181, on by default) leases the preview run
+    /// buffer-only: the draft keeps following the run, so a drag on the live
+    /// canvas moves the picture. The per-tick reap once dropped it on the
+    /// next tick, so each sample showed for one frame at most.
+    #[test]
+    fn editor_draft_survives_a_buffer_only_lease() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), now);
+        runtime.capture_lease = Some(capture_lease(true));
+        assert!(!runtime.reap_editor_draft(now + Duration::from_millis(1_900)));
+        assert!(runtime.status.editor_draft.is_some(), "still reported");
+        let cache = CompositorRenderCache::from_runtime(&runtime);
+        assert!(cache.drafts_follow_capture);
+        assert_eq!(
+            cache.editor_draft.map(|draft| draft.source_id),
+            Some("source:camera".to_string()),
+            "the tick draws it"
+        );
+        // The TTL still ends it.
+        assert!(runtime.reap_editor_draft(now + Duration::from_millis(2_001)));
+        assert_eq!(runtime.status.editor_draft, None);
     }
 
     #[test]
@@ -8693,15 +8727,23 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
+    // The Scene editor holding or dragging the Buddy on the idle preview: the
+    // pet draws on the primary leg where it will land, though no session
+    // carries it. A buffer-only run (the Clips ring, on by default) draws it
+    // too: like the other drafts and their chrome, it lands in the ring while
+    // the editor holds it (plan 181), and without it the default Buddy (on
+    // no output) would never show on the live canvas.
+    let buddy_edit = buddy_editor_place(editor_draft);
+    let buddy_on_primary = buddy_overlay_on_primary || buddy_edit.is_some();
     // Plan 168 S-B1: the pet on each leg that carries the Buddy, drawn from
     // the sprite slot once per composed frame at `published_at` (both legs
     // share the clock; the atlas is built off this thread).
-    let buddy_now = if buddy_overlay_on_primary || buddy_overlay_on_aux {
+    let buddy_now = if buddy_on_primary || buddy_overlay_on_aux {
         state.buddy_sprite.clock_seconds(published_at)
     } else {
         0.0
     };
-    let primary_buddy = buddy_overlay_on_primary.then(|| {
+    let primary_buddy = buddy_on_primary.then(|| {
         buddy_leg_frame(
             state,
             crate::buddy_sprite::BuddySpriteLeg::Primary,
@@ -8715,6 +8757,7 @@ async fn publish_compositor_frame(
             highlight_overlay
                 .as_ref()
                 .filter(|_| highlight_overlay_on_primary),
+            buddy_edit.flatten(),
         )
     });
     // Plan 186 S3: the banners each leg carries, fades at `published_at`
@@ -8918,6 +8961,7 @@ async fn publish_compositor_frame(
                     caption_overlay_on_aux,
                 ),
                 aux_highlight_overlay,
+                None,
             )
         });
         // The auxiliary leg picks each banner's rect by its own canvas (the
@@ -9600,7 +9644,8 @@ fn overlay_canvas_rect(
 
 /// The Buddy on one leg for this frame (plan 168 S-B1): the pet's draw from
 /// the sprite slot plus the gaze targets Phase C reads, the highlight card's
-/// and the caption bar's blits on this canvas.
+/// and the caption bar's blits on this canvas. `place` replaces the saved
+/// rect (the Scene editor's drag, `buddy_editor_place`).
 fn buddy_leg_frame(
     state: &AppState,
     leg: crate::buddy_sprite::BuddySpriteLeg,
@@ -9608,11 +9653,11 @@ fn buddy_leg_frame(
     now_seconds: f64,
     caption: Option<&crate::captions::CaptionOverlay>,
     highlight: Option<&crate::captions::CaptionOverlay>,
+    place: Option<OverlayRect>,
 ) -> crate::buddy_sprite::BuddyLegFrame {
     let (width, height) = canvas;
-    state
-        .buddy_sprite
-        .leg_frame(crate::buddy_sprite::BuddyLegRequest {
+    state.buddy_sprite.leg_frame_at(
+        crate::buddy_sprite::BuddyLegRequest {
             leg,
             canvas,
             now_seconds,
@@ -9625,7 +9670,24 @@ fn buddy_leg_frame(
                     caption_overlay_safe_inset(Some(overlay), highlight, width, height),
                 )
             }),
-        })
+        },
+        place,
+    )
+}
+
+/// The Scene editor's stage id for the Buddy (pinned with the renderer's
+/// `overlayStageId('buddy')`).
+pub(crate) const BUDDY_DRAFT_ID: &str = "overlay:buddy";
+
+/// Where the idle preview draws the Buddy for the Scene editor, if it does:
+/// `Some(None)` while a chrome-only draft holds the Buddy's selection (its
+/// saved place), `Some(Some(rect))` while a draft drags it or holds its
+/// dropped rect until the layout save lands. `None` for any other draft.
+fn buddy_editor_place(draft: Option<&EditorDraft>) -> Option<Option<OverlayRect>> {
+    let draft = draft.filter(|draft| draft.source_id == BUDDY_DRAFT_ID)?;
+    Some(draft.transform.map(|transform| {
+        OverlayRect::new(transform.x, transform.y, transform.width, transform.height)
+    }))
 }
 
 /// `render_compositor_yuv420p_frame` plus the editor chrome quads blended
@@ -20192,7 +20254,7 @@ mod buddy_sprite_tests {
         }
         let published_at = Instant::now();
         let draw = |leg, canvas, now| {
-            buddy_leg_frame(&state, leg, canvas, now, None, None)
+            buddy_leg_frame(&state, leg, canvas, now, None, None, None)
                 .sprite
                 .expect("the pet draws")
                 .draw
@@ -20284,6 +20346,127 @@ mod buddy_sprite_tests {
         let [x, y, w, h] = leg.buddy_box;
         let centre = (y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize;
         assert_eq!(cpu[centre], rgb_to_yuv(230, 40, 40).0);
+    }
+
+    fn editor_draft(source_id: &str, transform: Option<CameraTransform>) -> EditorDraft {
+        EditorDraft {
+            source_id: source_id.to_string(),
+            transform,
+            chrome: EditorChrome {
+                selected: CameraTransform {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.1,
+                    height: 0.1,
+                },
+                handles: true,
+                active_handle: None,
+                guides: Vec::new(),
+                scale: 1.0,
+                slot_css_width: None,
+            },
+            refreshed_at: Instant::now(),
+            release_at_revision: None,
+            generation: 1,
+        }
+    }
+
+    /// The Scene editor's Buddy on the idle preview: a chrome-only hold of
+    /// `overlay:buddy` draws the pet at its saved place, a draft with a rect
+    /// draws it at the dragged place (the picture follows the pointer, not
+    /// only the frame), and any other draft leaves the Buddy alone.
+    #[test]
+    fn a_buddy_draft_draws_the_pet_where_the_editor_drags_it() {
+        let layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        let saved = layout.horizontal;
+        let dragged = OverlayRect::new(0.1, 0.1, saved.w, saved.h);
+        let dragged_transform = CameraTransform {
+            x: dragged.x,
+            y: dragged.y,
+            width: dragged.w,
+            height: dragged.h,
+        };
+        assert_eq!(
+            buddy_editor_place(Some(&editor_draft(BUDDY_DRAFT_ID, None))),
+            Some(None)
+        );
+        assert_eq!(
+            buddy_editor_place(Some(&editor_draft(BUDDY_DRAFT_ID, Some(dragged_transform)))),
+            Some(Some(dragged))
+        );
+        assert_eq!(
+            buddy_editor_place(Some(&editor_draft(
+                "overlay:highlight",
+                Some(dragged_transform)
+            ))),
+            None
+        );
+        assert_eq!(
+            buddy_editor_place(Some(&editor_draft("banner:abc", None))),
+            None
+        );
+        assert_eq!(buddy_editor_place(None), None);
+
+        let slot = crate::buddy_sprite::BuddySpriteSlot::new(
+            &crate::cohost::CohostPersona::default(),
+            layout,
+            None,
+        );
+        slot.install_atlas_for_test(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::buddy_sprite::tests::parity_atlas(64),
+        );
+        let request = crate::buddy_sprite::BuddyLegRequest {
+            leg: crate::buddy_sprite::BuddySpriteLeg::Primary,
+            canvas: (WIDTH, HEIGHT),
+            now_seconds: 2.0,
+            highlight_rect: None,
+            caption_rect: None,
+        };
+        let held = slot.leg_frame_at(request, None);
+        assert_eq!(
+            held.buddy_box,
+            crate::buddy_sprite::buddy_box(saved, WIDTH, HEIGHT)
+        );
+        let moved = slot.leg_frame_at(request, Some(dragged));
+        assert_eq!(
+            moved.buddy_box,
+            crate::buddy_sprite::buddy_box(dragged, WIDTH, HEIGHT)
+        );
+        assert_ne!(moved.buddy_box, held.buddy_box);
+        let centre_luma = |frame: &[u8], [x, y, w, h]: [f32; 4]| {
+            frame[(y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize]
+        };
+        let pet = rgb_to_yuv(230, 40, 40).0;
+        let cpu = cpu_frame(inputs(1, None, None, None, Some(&moved)));
+        assert_eq!(
+            centre_luma(&cpu, moved.buddy_box),
+            pet,
+            "the pet is where it is dragged"
+        );
+        assert_ne!(
+            centre_luma(&cpu, held.buddy_box),
+            pet,
+            "and no longer at its saved place"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(
+                    Some(&mut gpu),
+                    &inputs(2, None, None, None, Some(&moved)),
+                    true,
+                )
+                .expect("metal frame")
+                .yuv;
+                assert!(
+                    centre_luma(&metal, moved.buddy_box).abs_diff(pet) <= 2,
+                    "Metal draws the dragged pet too"
+                );
+                assert_ne!(centre_luma(&metal, held.buddy_box), pet);
+            }
+        }
     }
 }
 

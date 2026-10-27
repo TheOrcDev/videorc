@@ -34,8 +34,19 @@ bitmap wider than the rect is centre-cropped. So the three old placements
 ## Placing them: the Live Scene canvas
 
 The canvas (Studio → Scene) draws the three items as labelled dashed rects
-over the sources. Drag or resize one like a source; a released gesture is
-one save. Click one to open its inspector on the right:
+over the sources, the Buddy with its still in the square its pet fills
+(dimmed while both switches are off). Drag or resize one like a source; a
+released gesture is one save, and the item stays where it was dropped
+until that save lands. On the live canvas (macOS, the preview docked into
+the Scene tab) the idle picture draws the Buddy's pet while the Buddy is
+selected or dragged, though no session carries it (a clip saved meanwhile
+shows it, like the editor's frame): select it with its chip above the
+canvas and it appears where it sits, then follows the pointer (the
+`overlay:buddy` editor draft, `compositor::buddy_editor_place`). The
+highlight card and the caption bar have nothing to draw until a session;
+their frame shows the zone. With the preview floating in its own window,
+the canvas is the schematic and that window follows each drag. Click one
+to open its inspector on the right:
 
 - **Show on stream** and **Show in recording** switches.
 - **Snap** for the orientation on the stage: Top left, Top right, Bottom
