@@ -46,6 +46,7 @@
     "ffmpeg:fetch:linux": "node scripts/fetch-ffmpeg-linux.mjs",
     "build:native-preview-addon": "node scripts/build-native-preview-addon.mjs",
     "build:native-preview-addon:release": "node scripts/build-native-preview-addon.mjs --release --universal",
+    "build:mcpb": "node scripts/build-mcpb.mjs",
     "package:backend": "cargo build --release -p videorc-backend",
     "package:desktop:linux": "pnpm package:backend && pnpm ffmpeg:fetch:linux && node scripts/preflight-linux-package.mjs && pnpm --filter @videorc/desktop package:linux",
     "package:backend:macos": "cargo build --release -p videorc-backend --bin videorc-backend --bin native_preview_host_helper --bin videorc-mcp && pnpm build:native-preview-addon:release",
