@@ -63,16 +63,9 @@ const headings = (): string[] =>
   [...container.querySelectorAll('h2')].map((heading) => heading.textContent ?? '')
 
 describe('GeneralSettings', () => {
-  it('splits into Appearance, Stream Manager, Setup, Import, Privacy and Elsewhere', async () => {
+  it('splits into Appearance, Chat, Setup, Import, Privacy and Elsewhere', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual([
-      'Appearance',
-      'Stream Manager',
-      'Setup',
-      'Import',
-      'Privacy',
-      'Elsewhere'
-    ])
+    expect(headings()).toEqual(['Appearance', 'Chat', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
     expect(container.textContent).toContain('Open Stream Manager when you go live')
   })
 
@@ -92,13 +85,42 @@ describe('GeneralSettings', () => {
     })
   })
 
-  it('hides the Stream Manager section when that window is off', async () => {
+  // Plan 204 (D3, D4): Chat in Studio is the Chat section's first row, off
+  // until turned on, and it stays when the Stream Manager window is off.
+  it('offers Chat in Studio first under Chat, off until turned on (plan 204)', async () => {
+    await act(async () => root.render(createElement(GeneralSettings)))
+    const toggle = container.querySelector('#studio-chat')
+    expect(toggle?.getAttribute('role')).toBe('switch')
+    expect(toggle?.getAttribute('aria-checked')).toBe('false')
+    const chat = [...container.querySelectorAll('h2')]
+      .find((heading) => heading.textContent === 'Chat')
+      ?.closest('[data-slot="panel-section"]')
+    expect(chat?.textContent).toContain('Chat in Studio')
+    expect(chat?.querySelector('[role="switch"]')?.id).toBe('studio-chat')
+    await act(async () => (toggle as HTMLElement).click())
+    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
+    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
+    expect(update({ keepOriginalRecording: false })).toEqual({
+      keepOriginalRecording: false,
+      studioChat: true
+    })
+  })
+
+  it('shows the switch on when the setting is on', async () => {
+    mocked.core = { ...mocked.core, settings: { studioChat: true } }
+    await act(async () => root.render(createElement(GeneralSettings)))
+    expect(container.querySelector('#studio-chat')?.getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('keeps Chat in Studio and drops only the Stream Manager row when that window is off', async () => {
     mocked.core = {
       ...mocked.core,
       runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false }
     }
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual(['Appearance', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
+    expect(headings()).toEqual(['Appearance', 'Chat', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
+    expect(container.querySelector('#studio-chat')).not.toBeNull()
+    expect(container.textContent).not.toContain('Open Stream Manager when you go live')
   })
 
   // Plan 203 S6 (D5): first-run setup again, back to Settings after.

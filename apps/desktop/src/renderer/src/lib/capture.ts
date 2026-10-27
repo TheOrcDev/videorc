@@ -62,6 +62,12 @@ export type SettingsState = {
    */
   retroLcdStudio?: boolean
   /**
+   * Chat in Studio (plan 204, owner 2026-10-27): while on air, the Studio
+   * inspector shows the livestream's chat under Session, and a click puts a
+   * message on stream. Default off (owner answer): an absent key is off.
+   */
+  studioChat?: boolean
+  /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
    */

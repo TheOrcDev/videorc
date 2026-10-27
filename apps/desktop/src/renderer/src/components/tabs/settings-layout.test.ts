@@ -117,7 +117,7 @@ describe('Settings layout', () => {
     expect(
       Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
     ).toEqual({
-      general: ['Appearance', 'Stream Manager', 'Setup', 'Import', 'Elsewhere'],
+      general: ['Appearance', 'Chat', 'Setup', 'Import', 'Elsewhere'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
       remote: ['Remote control', 'Phone remote'],
@@ -224,14 +224,14 @@ describe('Settings layout', () => {
   })
 
   it('splits General into two columns: the pair holds exactly two children', () => {
-    // Plan 174 S3.17 (I-27): Appearance over Stream Manager, Import over
-    // Elsewhere; plan 203 S6 puts Setup under Stream Manager. Each column is
+    // Plan 174 S3.17 (I-27): Appearance over Stream Manager (Chat since plan
+    // 204), Import over Elsewhere; plan 203 S6 puts Setup under it. Each column is
     // one PageStack, so the pair keeps its two stretched cells and the column
     // rule runs the full height.
     const general = exportedBody(panelSources.GeneralSettings as string, 'GeneralSettings')
     expect(general.match(/<PageStack\b/g)).toHaveLength(2)
     const [first, second] = general.split(/<PageStack\b/).slice(1)
-    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Stream Manager', 'Setup'])
+    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Chat', 'Setup'])
     expect(sectionTitles(second as string)).toEqual(['Import', 'Elsewhere'])
   })
 
