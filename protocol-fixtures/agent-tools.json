@@ -1094,7 +1094,7 @@
     {
       "name": "set_audio",
       "title": "Set the microphone or System audio",
-      "description": "Mute or unmute the microphone, and turn System audio (the computer's own sound) on or off, like the Studio's switches. Pass only what should change. Works while recording or live.",
+      "description": "Change the microphone (mute, gain, which microphone) and System audio, the computer's own sound (on or off, gain), like the Studio's switches, Gain faders and microphone picker. Pass only what should change. Works while recording or live; a microphone switch then switches the running session.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1104,9 +1104,27 @@
               "muted": {
                 "type": "boolean",
                 "description": "true mutes the microphone, false unmutes it."
+              },
+              "gainDb": {
+                "type": "number",
+                "description": "Microphone gain in dB, -24 to 24, in whole steps like the fader.",
+                "minimum": -24,
+                "maximum": 24
+              },
+              "deviceId": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "A microphone id from list_sources, or null for no microphone."
               }
             },
-            "required": ["muted"],
             "additionalProperties": false
           },
           "systemAudio": {
@@ -1115,9 +1133,14 @@
               "on": {
                 "type": "boolean",
                 "description": "true mixes the computer's sound in, false leaves it out."
+              },
+              "gainDb": {
+                "type": "number",
+                "description": "System audio gain in dB, -24 to 12, in whole steps like the fader.",
+                "minimum": -24,
+                "maximum": 12
               }
             },
-            "required": ["on"],
             "additionalProperties": false
           }
         },
@@ -1131,18 +1154,35 @@
             "properties": {
               "muted": {
                 "type": "boolean"
+              },
+              "gainDb": {
+                "type": "number"
+              },
+              "deviceId": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "name": {
+                "type": "string"
               }
-            },
-            "required": ["muted"]
+            }
           },
           "systemAudio": {
             "type": "object",
             "properties": {
               "on": {
                 "type": "boolean"
+              },
+              "gainDb": {
+                "type": "number"
               }
-            },
-            "required": ["on"]
+            }
           }
         }
       },
@@ -1451,6 +1491,818 @@
       "onAir": true,
       "rateFamily": "action",
       "notice": "{agent}: {message}"
+    },
+    {
+      "name": "go_live",
+      "title": "Go live",
+      "description": "Start the livestream now, without the Go Live dialog, on the destinations that are on or the ones named. Viewers see the stream start. Refused in Videorc's own words when something isn't ready: allowPartial goes live on the ready destinations, withoutCaptions skips captions that can't start. It records too when Output's recording is on.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "description": "Destination ids from list_destinations (or platform names) to go live on. The other destinations that are on sit this livestream out. Leave it out for all of them.",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "minItems": 1,
+            "maxItems": 16
+          },
+          "title": {
+            "type": "string",
+            "description": "The stream title for this livestream, as the dialog's Title field.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "allowPartial": {
+            "type": "boolean",
+            "description": "true goes live on the ready destinations when some aren't ready."
+          },
+          "withoutCaptions": {
+            "type": "boolean",
+            "description": "true goes live without captions when they can't start."
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "live": {
+            "type": "boolean"
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": ["id", "platform", "label"],
+              "additionalProperties": false
+            }
+          },
+          "recording": {
+            "type": "boolean"
+          }
+        },
+        "required": ["live", "destinations", "recording"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": true,
+      "rateFamily": "session",
+      "notice": "{agent} started the livestream."
+    },
+    {
+      "name": "set_sources",
+      "title": "Choose the screen, window or camera",
+      "description": "Choose which screen or window is captured and which camera is used, like the pickers on the Sources page. Use ids from list_sources; cameraId null turns the camera off. Works while recording or live, where it switches the running session's source.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "screenId": {
+            "type": "string",
+            "description": "A screen id from list_sources.",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "windowId": {
+            "type": "string",
+            "description": "A window id from list_sources.",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "cameraId": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A camera id from list_sources, or null for no camera."
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "screen": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "name"],
+            "additionalProperties": false
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "name"],
+            "additionalProperties": false
+          },
+          "camera": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["id", "name"],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_captions",
+      "title": "Turn live captions on or off",
+      "description": "Turn live captions on or off, like the Live captions switch. Captions transcribe the microphone onto the picture during a recording or livestream. Turning them on needs what the switch needs, such as Videorc Premium; off always works.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean",
+            "description": "true turns live captions on, false off."
+          }
+        },
+        "required": ["on"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          }
+        },
+        "required": ["on"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_background",
+      "title": "Choose the live background",
+      "description": "Put a live background behind the scene, like its tile in Assets, or take the background off with liveId null. Use an id from list_assets' backgrounds. Viewers see it change at once while live.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "liveId": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A live background id from list_assets, or null for no background."
+          }
+        },
+        "required": ["liveId"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "liveId": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["liveId"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "edit_banner",
+      "title": "Import or rename a banner",
+      "description": "Import an image file on this computer as a new banner (path, its full path; PNG, JPEG or WebP), or rename a banner (bannerId and name). Banners are images. A new banner stays hidden until set_banner shows it. Nothing about Videorc's own files comes back.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The image's full path on this computer, to import it as a banner.",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "bannerId": {
+            "type": "string",
+            "description": "The banner to rename, by its id from list_assets.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "name": {
+            "type": "string",
+            "description": "The banner's name, 1 to 40 characters.",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "banner": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "shown": {
+                "type": "boolean"
+              },
+              "width": {
+                "type": "integer"
+              },
+              "height": {
+                "type": "integer"
+              }
+            },
+            "required": ["id", "name", "shown", "width", "height"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["banner"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "runsIn": "backend",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "get_scene_layout",
+      "title": "Read where everything sits on the picture",
+      "description": "List everything on the picture and where it sits: the camera, the screen, Buddy, the highlight card, the captions bar and each banner, with names, switches and rects per orientation as fractions of the canvas from the top left. Use it before moving things, and to find a banner's id by its name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "orientation": {
+            "type": "string",
+            "enum": ["horizontal", "vertical"]
+          },
+          "verticalStream": {
+            "type": "boolean"
+          },
+          "layoutId": {
+            "type": "string"
+          },
+          "arrangement": {
+            "type": "string",
+            "enum": ["preset", "freeform"]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "item": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": ["camera", "screen", "overlay", "banner"]
+                },
+                "rects": {
+                  "type": "object",
+                  "properties": {
+                    "horizontal": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        },
+                        "width": {
+                          "type": "number"
+                        },
+                        "height": {
+                          "type": "number"
+                        }
+                      },
+                      "required": ["x", "y", "width", "height"],
+                      "additionalProperties": false
+                    },
+                    "vertical": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        },
+                        "width": {
+                          "type": "number"
+                        },
+                        "height": {
+                          "type": "number"
+                        }
+                      },
+                      "required": ["x", "y", "width", "height"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "shown": {
+                  "type": "boolean"
+                },
+                "showOnStream": {
+                  "type": "boolean"
+                },
+                "showInRecording": {
+                  "type": "boolean"
+                },
+                "corner": {
+                  "type": "string",
+                  "enum": ["top-left", "top-right", "bottom-left", "bottom-right"]
+                },
+                "shape": {
+                  "type": "string",
+                  "enum": ["rectangle", "rounded", "circle"]
+                }
+              },
+              "required": ["item", "name", "kind", "rects"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["orientation", "verticalStream", "layoutId", "arrangement", "items"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "read",
+      "notice": null
+    },
+    {
+      "name": "move_on_scene",
+      "title": "Move or resize something on the picture",
+      "description": "Move or resize one item where the Scene canvas's own snaps would put it: a place on the 3×3 grid (full-frame for banners), a size, or an exact rect. A place writes both orientations. The camera at a corner keeps its scene; other source moves switch to freeform. The result has the old rects (pass them back as rects to undo) and what it now covers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "description": "camera, screen, buddy, highlight, captions, or banner:<id> from get_scene_layout.",
+            "minLength": 1,
+            "maxLength": 140
+          },
+          "place": {
+            "type": "string",
+            "enum": [
+              "top-left",
+              "top-center",
+              "top-right",
+              "middle-left",
+              "center",
+              "middle-right",
+              "bottom-left",
+              "bottom-center",
+              "bottom-right",
+              "full-frame"
+            ],
+            "description": "Where on the canvas, inside its margins and safe area."
+          },
+          "size": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": ["small", "medium", "large"]
+              },
+              {
+                "type": "number",
+                "minimum": 0.02,
+                "maximum": 1
+              }
+            ],
+            "description": "small, medium (the default size), large, or a fraction of the canvas width. Left out, the size stays."
+          },
+          "rect": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "width": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "height": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": ["x", "y", "width", "height"],
+            "additionalProperties": false,
+            "description": "An exact rect, clamped inside the canvas like a drag."
+          },
+          "rects": {
+            "type": "object",
+            "description": "Exact rects per orientation, such as a result's previous.",
+            "properties": {
+              "horizontal": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "y": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "width": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "height": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              },
+              "vertical": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "y": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "width": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "height": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "orientation": {
+            "type": "string",
+            "enum": ["horizontal", "vertical", "both"],
+            "description": "Which orientation to change. A place defaults to both, a rect to horizontal."
+          }
+        },
+        "required": ["item"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "rects": {
+            "type": "object",
+            "properties": {
+              "horizontal": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              },
+              "vertical": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "previous": {
+            "type": "object",
+            "properties": {
+              "horizontal": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              },
+              "vertical": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": ["x", "y", "width", "height"],
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "overlaps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "item": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": ["item", "name"],
+              "additionalProperties": false
+            }
+          },
+          "arrangement": {
+            "type": "string",
+            "enum": ["preset", "freeform"]
+          },
+          "corner": {
+            "type": "string",
+            "enum": ["top-left", "top-right", "bottom-left", "bottom-right"]
+          }
+        },
+        "required": ["item", "name", "rects", "previous", "overlaps"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
+    },
+    {
+      "name": "set_scene_item",
+      "title": "Show, hide or shape something on the picture",
+      "description": "Change an item's switches and look, like the Scene inspector: show or hide the camera or the screen, the camera's shape (rectangle, rounded, circle), and Show on stream and Show in recording for Buddy, the highlight card, the captions bar and banners. Use set_banner to show or hide a banner itself.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "description": "camera, screen, buddy, highlight, captions, or banner:<id> from get_scene_layout.",
+            "minLength": 1,
+            "maxLength": 140
+          },
+          "shown": {
+            "type": "boolean",
+            "description": "Camera or screen: true shows it, false hides it."
+          },
+          "shape": {
+            "type": "string",
+            "enum": ["rectangle", "rounded", "circle"],
+            "description": "The camera's shape."
+          },
+          "showOnStream": {
+            "type": "boolean",
+            "description": "Buddy, highlight, captions or a banner: shown on the livestream."
+          },
+          "showInRecording": {
+            "type": "boolean",
+            "description": "Buddy, highlight, captions or a banner: shown in the recording."
+          }
+        },
+        "required": ["item"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "shown": {
+            "type": "boolean"
+          },
+          "shape": {
+            "type": "string",
+            "enum": ["rectangle", "rounded", "circle"]
+          },
+          "showOnStream": {
+            "type": "boolean"
+          },
+          "showInRecording": {
+            "type": "boolean"
+          }
+        },
+        "required": ["item", "name"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": false,
+      "rateFamily": "action",
+      "notice": null
     }
   ]
 }

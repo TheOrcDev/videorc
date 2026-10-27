@@ -12,18 +12,26 @@ import { layoutPresetLabel } from '@/lib/layout-labels'
 import { soundboard } from '@/lib/soundboard-store'
 import type { LayoutPreset } from '@/lib/backend'
 import type { AgentToolExecutor } from './agent'
-import { micMute, micUnmute, systemAudioOff, systemAudioOn } from './audio'
 import { commentHighlight, commentHighlightClear } from './comments'
 import type { StudioActionFields } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
+import {
+  RUN_THE_SHOW_COPY,
+  goLive,
+  setAudio,
+  setBackground,
+  setCaptions,
+  setSources
+} from './run-the-show'
 import { sceneApply, takeoverHide, takeoverShow } from './scene'
+import { getSceneLayout, moveOnScene, setSceneItem } from './scene-layout'
 import { recordStart, recordStop } from './session'
 import { soundPlay, soundStop } from './sounds'
 import { windowFront } from './windows'
 
 /** What an agent reads when a Studio tool refuses before any handler runs. */
 export const AGENT_TOOL_COPY = {
-  setAudioEmpty: 'Say what to change: microphone or systemAudio.',
+  setAudioEmpty: RUN_THE_SHOW_COPY.setAudioEmpty,
   notifyEmpty: 'Say what the notice should say: message.',
   sceneMissing: REMOTE_INTENT_COPY.sceneMissing,
   sceneFailed: REMOTE_INTENT_COPY.sceneFailed
@@ -88,34 +96,6 @@ const switchScene: AgentToolExecutor = async (context, args) => {
     message: `Switched to ${name}.`,
     result: { scene: { id: sceneId, name, kind: 'layout' } }
   }
-}
-
-const setAudio: AgentToolExecutor = async (context, args) => {
-  const microphone = args.microphone as { muted?: unknown } | undefined
-  const systemAudio = args.systemAudio as { on?: unknown } | undefined
-  const muted = typeof microphone?.muted === 'boolean' ? microphone.muted : undefined
-  const on = typeof systemAudio?.on === 'boolean' ? systemAudio.on : undefined
-  if (muted === undefined && on === undefined) {
-    return { ok: false, message: AGENT_TOOL_COPY.setAudioEmpty }
-  }
-  const result: Record<string, unknown> = {}
-  const said: string[] = []
-  if (muted !== undefined) {
-    const outcome = await (muted ? micMute : micUnmute)(context, {})
-    if (!outcome.ok) return outcome
-    result.microphone = { muted }
-    said.push(muted ? 'The microphone is muted.' : 'The microphone is on.')
-  }
-  if (on !== undefined) {
-    const outcome = await (on ? systemAudioOn : systemAudioOff)(context, {})
-    if (!outcome.ok) {
-      // A microphone change above stays; say both.
-      return { ok: false, message: [...said, outcome.message].filter(Boolean).join(' ') }
-    }
-    result.systemAudio = { on }
-    said.push(on ? 'System audio is on.' : 'System audio is off.')
-  }
-  return { ok: true, message: said.join(' '), result }
 }
 
 const setTakeover: AgentToolExecutor = async (context, args) => {
@@ -192,5 +172,13 @@ export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
   stop_sounds: stopSounds,
   set_highlight: setHighlight,
   open_window: openWindow,
-  notify
+  notify,
+  // PR B (plan 209 S10, S11, S11b)
+  go_live: goLive,
+  set_sources: setSources,
+  set_captions: setCaptions,
+  set_background: setBackground,
+  get_scene_layout: getSceneLayout,
+  move_on_scene: moveOnScene,
+  set_scene_item: setSceneItem
 }

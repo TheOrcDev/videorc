@@ -6,9 +6,21 @@
 // that needs more than a key does (a notice, a headless Go Live) adds its
 // field here, and the Studio fills it in the one place the context is built.
 
-import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
+import type {
+  Banner,
+  Device,
+  DeviceStatus,
+  LayoutPreset,
+  LayoutSettings,
+  OverlayLayout,
+  OverlayOrientation,
+  Scene,
+  SourceSelection
+} from '@/lib/backend'
+import type { HeadlessGoLiveOutcome, HeadlessGoLiveRequest } from '@/lib/go-live-headless'
 import type { BannerSummary } from '../../../../shared/banner-commands'
 import type { ClipLength } from '../../../../shared/clip-lengths'
+import type { LiveBackgroundId } from '../../../../shared/live-background-ids'
 
 export interface StudioActionClient {
   request<T>(method: string, params?: unknown): Promise<T>
@@ -88,4 +100,85 @@ export interface StudioActionContext {
   applySavedScene?: (id: string) => Promise<boolean>
   /** Each built-in layout's name; `layoutPresetLabel` when left out. */
   layoutLabels?: Readonly<Record<string, string>>
+  // Run the show, PR B (plan 209 S10). Optional: a remote key never reads them.
+  /** Go live without the dialog (D13): the dialog's own preflight, gate and
+   * confirm. A deck's or a phone's `streamStart` never calls it (D2, D19). */
+  goLive?: (request: HeadlessGoLiveRequest) => Promise<HeadlessGoLiveOutcome>
+  // (plan 209 S11)
+  /** The Sources tab's pickers: the sources chosen and what each offers. */
+  sourcePicker?: {
+    sources: SourceSelection
+    capture: readonly Device[]
+    cameras: readonly Device[]
+    microphones: readonly Device[]
+  }
+  /** The Sources tab's own switch (`switchSourceDeviceLive`): idle it saves
+   * the pick, while recording or live it switches the running session. A
+   * refusal is the picker's own reason. */
+  switchSource?: (
+    kind: 'capture' | 'camera' | 'microphone',
+    sources: SourceSelection
+  ) => Promise<StudioActionOutcome>
+  /** The Gain faders: whole dB, written to captureConfig.audio as they do. */
+  setAudioGain?: (patch: { microphoneGainDb?: number; systemAudioGainDb?: number }) => void
+  /** The Live captions switch, and why it can't turn on. */
+  captions?: {
+    enabled: boolean
+    pending: boolean
+    blockedReason: string | null
+    set: (enabled: boolean) => void
+  }
+  /** Assets → Backgrounds: what is on the scene, and a live tile's click. */
+  background?: {
+    liveId: string | null
+    picture: boolean
+    apply: (liveId: LiveBackgroundId | null) => Promise<boolean>
+  }
+  // Arrange the picture (plan 209 S11b, D22).
+  /** The Scene page's canvas and inspector: what is where, and the saves a
+   * drag, a snap or a switch makes. lib/studio-actions/scene-layout.ts. */
+  arrange?: SceneArrangeContext
+}
+
+/** What the Scene canvas shows, read fresh for each step of an Arrange tool. */
+export interface SceneArrangeSnapshot {
+  /** The committed scene: its sources and where each is drawn. */
+  scene: Scene | null
+  layout: LayoutSettings
+  overlayLayout: OverlayLayout
+  banners: readonly Banner[]
+  /** Each orientation's canvas shape (width / height), as the stage draws it. */
+  canvasAspect: Readonly<Record<OverlayOrientation, number>>
+  /** The program canvas's orientation. */
+  orientation: OverlayOrientation
+  /** A vertical stream is armed beside the program (its own 9:16 rects). */
+  verticalStream: boolean
+  sessionActive: boolean
+  /** The Windows D3D11 pump keeps the overlay input it started with
+   * (docs/overlays.md): a change mid-session shows from the next one. */
+  startTimeOverlays: boolean
+  /** Why the canvas takes no edit now (offline, a scene switching), or null. */
+  blockedReason: string | null
+}
+
+export interface SceneArrangeContext {
+  read: () => SceneArrangeSnapshot
+  /** `overlays.layout.set`, as the canvas's overlay gestures and switches. */
+  setOverlayLayout: (layout: OverlayLayout) => Promise<void>
+  /** `banners.update`; false when it failed (the Studio said why). */
+  updateBanner: (
+    id: string,
+    patch: Partial<Pick<Banner, 'horizontal' | 'vertical' | 'showOnStream' | 'showInRecording'>>
+  ) => Promise<boolean>
+  /** The camera preset controls' transaction (corner, Freeform). */
+  applyCameraPreset: (patch: Partial<LayoutSettings>) => Promise<boolean>
+  /** The inspector's layout patch (the camera's Shape). */
+  applyLayoutPatch: (patch: Partial<LayoutSettings>) => Promise<boolean>
+  /** A released source drag in freeform (`scene.source.transform.update`). */
+  setSourceTransform: (
+    sourceId: string,
+    rect: { x: number; y: number; width: number; height: number }
+  ) => Promise<boolean>
+  /** The inspector's Visible switch; false when it did not land. */
+  setSourceVisible: (sourceId: string, visible: boolean) => Promise<boolean>
 }

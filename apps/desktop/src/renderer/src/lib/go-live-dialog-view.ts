@@ -1,4 +1,14 @@
-import type { GoLiveDestinationPreflight, GoLivePreflight, StreamPlatform } from './backend'
+import type {
+  GoLiveDestinationPreflight,
+  GoLivePreflight,
+  StreamMetadataDraft,
+  StreamPlatform,
+  StreamTargetSettings,
+  StreamingSettings
+} from './backend'
+import { broadcastInfoIssues, type BroadcastInfoIssues } from './broadcast-info'
+import type { GoLiveCaptionsReadiness } from './captions-preflight'
+import type { EntitlementUiGate } from './entitlement-ui'
 import { platformLabel } from './platform-copy'
 
 // What the Go Live dialog shows, derived once (plan 174 S3.4): each
@@ -98,5 +108,81 @@ export function goLiveDialogView(
     warnings,
     summary: views.length ? `${readyCount} of ${views.length} ready` : null,
     destinationsReady: views.length > 0 && readyCount === views.length && generalErrors.length === 0
+  }
+}
+
+/** The entitlement gate when it blocks (the dialog's LockAlert). */
+export type GoLiveEntitlementBlocker = Extract<EntitlementUiGate, { allowed: false }>
+
+/**
+ * Everything the Go Live dialog's primary waits on, derived once (plan 209
+ * S10, D13): the dialog draws it and disables "Go live" while `blocked`, and
+ * an agent's `go_live` refuses on the same answer, so a call without the
+ * dialog can never start what the dialog would hold back.
+ *
+ * `sentStreaming` is what this Go Live sends (the saved destinations minus
+ * the ones left out of it); `entitlementGate` is `goLiveEntitlementGate` for
+ * the saved destinations, as the host computes it.
+ */
+export interface GoLiveConfirmGate {
+  /** The destinations this Go Live sends. */
+  sentTargets: StreamTargetSettings[]
+  /** One of them starts a scheduled event. */
+  hasScheduledTargets: boolean
+  /** One of them streams the instant draft (so the dialog carries a Title). */
+  hasInstantTargets: boolean
+  /** An instant destination is YouTube (privacy reaches it). */
+  instantYouTube: boolean
+  /** The draft's title and description problems, when the dialog has the fields. */
+  titleIssues: BroadcastInfoIssues | null
+  view: GoLiveDialogView
+  entitlementBlocker: GoLiveEntitlementBlocker | null
+  /** Something above the primary blocks it. */
+  blocked: boolean
+}
+
+export function goLiveConfirmGate({
+  preflight,
+  draft,
+  sentStreaming,
+  captionsReadiness,
+  entitlementGate
+}: {
+  preflight: GoLivePreflight | null
+  draft: StreamMetadataDraft | null
+  sentStreaming: StreamingSettings
+  captionsReadiness: Pick<GoLiveCaptionsReadiness, 'blocksStart'>
+  entitlementGate: EntitlementUiGate
+}): GoLiveConfirmGate {
+  const sentTargets = sentStreaming.targets.filter((target) => target.enabled)
+  const hasScheduledTargets = sentTargets.some((target) => target.scheduledEventId)
+  // The instant draft's details apply to every destination not tied to a
+  // saved event; privacy reaches YouTube only.
+  const hasInstantTargets = sentTargets.some((target) => !target.scheduledEventId)
+  const instantYouTube = sentTargets.some(
+    (target) => !target.scheduledEventId && target.platform === 'youtube'
+  )
+  const titleIssues =
+    hasInstantTargets && draft ? broadcastInfoIssues(draft, { titleRequired: true }) : null
+  const view = goLiveDialogView(preflight, {
+    titleField: hasInstantTargets,
+    titleMissing: hasInstantTargets && (!draft || draft.title.trim() === '')
+  })
+  const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
+  const blocked =
+    Boolean(entitlementBlocker) ||
+    captionsReadiness.blocksStart ||
+    Boolean(titleIssues?.title || titleIssues?.description) ||
+    (hasInstantTargets && !draft) ||
+    !view.destinationsReady
+  return {
+    sentTargets,
+    hasScheduledTargets,
+    hasInstantTargets,
+    instantYouTube,
+    titleIssues,
+    view,
+    entitlementBlocker,
+    blocked
   }
 }

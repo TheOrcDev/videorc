@@ -886,7 +886,8 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(catalog.tools.len(), backend.len() + studio.len());
+        // PR B adds tools beside these (their own test below).
+        assert!(catalog.tools.len() >= backend.len() + studio.len());
         // D15: Buddy never reads one take's files, never opens windows.
         for name in ["get_recording", "open_window", "notify"] {
             assert!(!catalog.tool(name).unwrap().buddy, "{name}");
@@ -895,7 +896,11 @@ mod tests {
         let on_air: Vec<&str> = catalog
             .tools
             .iter()
-            .filter(|tool| tool.on_air)
+            .filter(|tool| {
+                tool.on_air
+                    && (backend.contains(&tool.name.as_str())
+                        || studio.contains(&tool.name.as_str()))
+            })
             .map(|tool| tool.name.as_str())
             .collect();
         assert_eq!(on_air, ["stop", "notify"]);
@@ -909,6 +914,82 @@ mod tests {
             );
         }
         assert!(catalog.tool("stop").unwrap().annotations.destructive_hint);
+    }
+
+    /// Plan 209 PR B, Run the show and Arrange the picture (S10, S11,
+    /// S11b): where each runs, its rate family and notice. Buddy may use all
+    /// of them (D15).
+    #[test]
+    fn the_pr_b_run_the_show_and_arrange_tools_run_where_the_plan_says() {
+        let catalog = catalog();
+        let expected: &[(&str, AgentToolRunsIn, AgentRateFamily, bool)] = &[
+            (
+                "go_live",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Session,
+                true,
+            ),
+            (
+                "set_sources",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "set_captions",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "set_background",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "edit_banner",
+                AgentToolRunsIn::Backend,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "get_scene_layout",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Read,
+                false,
+            ),
+            (
+                "move_on_scene",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+            (
+                "set_scene_item",
+                AgentToolRunsIn::Studio,
+                AgentRateFamily::Action,
+                false,
+            ),
+        ];
+        for (name, runs_in, rate_family, on_air) in expected {
+            let tool = catalog
+                .tool(name)
+                .unwrap_or_else(|| panic!("{name} is listed"));
+            assert_eq!(tool.runs_in, *runs_in, "{name}");
+            assert_eq!(tool.rate_family, *rate_family, "{name}");
+            assert_eq!(tool.on_air, *on_air, "{name}");
+            assert!(tool.buddy, "{name}: D15");
+        }
+        assert_eq!(
+            catalog
+                .tool("go_live")
+                .unwrap()
+                .fill_notice("Claude Desktop", &serde_json::json!({}), None)
+                .as_deref(),
+            Some("Claude Desktop started the livestream.")
+        );
+        assert!(catalog.tool("go_live").unwrap().annotations.open_world_hint);
     }
 
     #[test]
