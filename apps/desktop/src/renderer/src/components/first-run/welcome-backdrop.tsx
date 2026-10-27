@@ -67,7 +67,7 @@ export function WelcomeBackdrop({
   const dim = welcomeBackdropDim({ dark: resolvedTheme !== 'light', moreContrast })
   const startStill = backdropStartStillReason({ reducedMotion, hardwareAccelerationDisabled })
 
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const hostRef = useRef<HTMLDivElement>(null)
   const playerRef = useRef<BackdropPlayerHandle | null>(null)
   const dimRef = useRef(dim)
   dimRef.current = dim
@@ -77,11 +77,11 @@ export function WelcomeBackdrop({
   // running animation frames while hidden (backgroundThrottling is off), so
   // visibility pauses it below.
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (startStill || !canvas) return
+    const host = hostRef.current
+    if (startStill || !host) return
     setState({ mode: 'starting' })
     const player = startBackdropPlayer({
-      canvas,
+      host,
       look,
       dim: dimRef.current,
       onFirstFrame: () => setState({ mode: 'moving' }),
@@ -127,10 +127,12 @@ export function WelcomeBackdrop({
         src={POSTERS[look]}
       />
       {startStill || shown.mode === 'still' ? null : (
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 size-full opacity-0 transition-opacity duration-150 ease-out data-[drawn=true]:opacity-100 motion-reduce:transition-none"
+        // The player puts its own canvas in here and takes it away again.
+        <div
+          ref={hostRef}
+          className="absolute inset-0 opacity-0 transition-opacity duration-150 ease-out data-[drawn=true]:opacity-100 motion-reduce:transition-none"
           data-drawn={moving}
+          data-first-run-backdrop-canvas=""
         />
       )}
     </div>

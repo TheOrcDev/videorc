@@ -27,14 +27,16 @@ export type BackdropStillReason =
   | 'gpu-budget'
 
 /**
- * Plan 203 D8: Liquid Chrome, Mercury, Calm, the same look in both themes.
+ * Plan 203 D8: Liquid Chrome in its first look, Polished, the one a click on
+ * its tile applies, at Normal motion: the owner's by-eye (2026-10-27) found
+ * Mercury at Calm too slow to read as live. The same look in both themes.
  * Dim only under dark, so the card's rim reads against the chrome; more under
- * `prefers-contrast: more`. The owner settles the look at the by-eye.
+ * `prefers-contrast: more`.
  */
 export const WELCOME_BACKDROP = {
   id: 'liquid-chrome',
-  look: 'mercury' as WelcomeBackdropLook,
-  motion: 'calm',
+  look: 'polished' as WelcomeBackdropLook,
+  motion: 'normal',
   dimDark: 0.3,
   dimLight: 0,
   moreContrastDim: 0.2
@@ -263,19 +265,22 @@ export interface BackdropPlayerHandle {
 }
 
 /**
- * Draws Liquid Chrome into `canvas` until disposed. `onFirstFrame` fires once
- * the first frame is on the canvas (it can fade in over the poster without a
- * jump: the clock starts at the poster phase). `onStill` fires at most once,
- * after which nothing is left allocated.
+ * Draws Liquid Chrome into a canvas of its own inside `host` until disposed.
+ * `onFirstFrame` fires once the first frame is on the canvas (the host can
+ * fade in over the poster without a jump: the clock starts at the poster
+ * phase). `onStill` fires at most once, after which nothing is left
+ * allocated. The canvas is the player's because a disposed player loses its
+ * context: a canvas used again (a look change, StrictMode's second effect
+ * run) would hand the next player that lost context.
  */
 export function startBackdropPlayer({
-  canvas,
+  host,
   look,
   dim: initialDim,
   onFirstFrame,
   onStill
 }: {
-  canvas: HTMLCanvasElement
+  host: HTMLElement
   look: WelcomeBackdropLook
   dim: number
   onFirstFrame: () => void
@@ -293,6 +298,9 @@ export function startBackdropPlayer({
   let clock: Clock | null = null
   const globals = sharedGlobals()
   const spec = welcomeBackdropClockSpec(look)
+  const canvas = document.createElement('canvas')
+  canvas.className = 'block size-full'
+  host.append(canvas)
 
   const teardown = (lose: boolean): void => {
     disposed = true
@@ -307,6 +315,7 @@ export function startBackdropPlayer({
     runner = null
     if (lose) loseContext(gl)
     gl = null
+    canvas.remove()
   }
 
   const still = (reason: BackdropStillReason, detail?: string): void => {

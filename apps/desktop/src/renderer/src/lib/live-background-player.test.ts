@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+// @vitest-environment happy-dom
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   BACKDROP_GUARD_WINDOW_MS,
@@ -11,6 +12,7 @@ import {
   isSoftwareRenderer,
   recordBackdropFrame,
   resetBackdropGuardWindow,
+  startBackdropPlayer,
   welcomeBackdropClockSpec,
   welcomeBackdropDim,
   type BackdropGuard
@@ -29,8 +31,12 @@ function feed(guard: BackdropGuard, intervalMs: number, fromMs: number, untilMs:
 }
 
 describe('the welcome backdrop', () => {
-  it('is Liquid Chrome, Mercury, Calm (D8)', () => {
-    expect(WELCOME_BACKDROP).toMatchObject({ id: 'liquid-chrome', look: 'mercury', motion: 'calm' })
+  it('is Liquid Chrome, Polished, at Normal motion (D8)', () => {
+    expect(WELCOME_BACKDROP).toMatchObject({
+      id: 'liquid-chrome',
+      look: 'polished',
+      motion: 'normal'
+    })
   })
 
   it('loads the shared player and clock, and reads the look from the export', () => {
@@ -38,11 +44,11 @@ describe('the welcome backdrop', () => {
     expect(scope.VideorcLiveBackground).toBeTruthy()
     expect(scope.VideorcLiveBackgroundClock).toBeTruthy()
     // The clock starts at the poster's phase, so the first moving frame is the poster.
-    const spec = welcomeBackdropClockSpec('mercury')
-    expect(spec).toMatchObject({ id: 'liquid-chrome', look: 'mercury', motion: 'calm' })
+    const spec = welcomeBackdropClockSpec('polished')
+    expect(spec).toMatchObject({ id: 'liquid-chrome', look: 'polished', motion: 'normal' })
     expect(spec?.rate).toBeGreaterThan(0)
     expect(typeof spec?.posterPhase).toBe('number')
-    expect(welcomeBackdropClockSpec('polished')).not.toBeNull()
+    expect(welcomeBackdropClockSpec('mercury')).not.toBeNull()
     expect(welcomeBackdropClockSpec('gold')).not.toBeNull()
   })
 
@@ -128,6 +134,28 @@ describe('the welcome backdrop', () => {
     guard = recordBackdropFrame(guard, 900, 0)
     guard = feed(guard, 33.3, 33.3, BACKDROP_GUARD_WINDOW_MS + 40)
     expect(guard.level).toBe('full')
+  })
+
+  it('gives each player a canvas of its own and takes it away again', async () => {
+    // A disposed player loses its context. A second player on the same canvas
+    // (StrictMode's second effect run, a look change) got that lost context
+    // and every shader failed to compile.
+    const host = document.createElement('div')
+    const options = { host, look: 'mercury' as const, dim: 0, onFirstFrame: vi.fn() }
+    const first = startBackdropPlayer({ ...options, onStill: vi.fn() })
+    const firstCanvas = host.querySelector('canvas')
+    expect(firstCanvas).not.toBeNull()
+    first.dispose()
+    expect(host.querySelector('canvas')).toBeNull()
+
+    const onStill = vi.fn()
+    startBackdropPlayer({ ...options, onStill })
+    const secondCanvas = host.querySelector('canvas')
+    expect(secondCanvas).not.toBeNull()
+    expect(secondCanvas).not.toBe(firstCanvas)
+    // No WebGL here: the poster stays, and the canvas goes with the player.
+    await vi.waitFor(() => expect(onStill).toHaveBeenCalledOnce())
+    expect(host.querySelector('canvas')).toBeNull()
   })
 
   it('forgets the window after a pause or a resize', () => {

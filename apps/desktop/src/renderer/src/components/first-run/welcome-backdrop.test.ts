@@ -7,14 +7,15 @@ import { WelcomeBackdrop } from './welcome-backdrop'
 // Plan 203 S4: the backdrop is decoration with a DOM contract for the smoke.
 
 describe('WelcomeBackdrop', () => {
-  it('paints the poster at once, hidden from assistive tech, with the canvas waiting', () => {
+  it('paints the poster at once, hidden from assistive tech, with the canvas host waiting', () => {
     const html = renderToStaticMarkup(createElement(WelcomeBackdrop))
     expect(html).toContain('aria-hidden="true"')
     expect(html).toContain('pointer-events-none')
     expect(html).toContain('data-first-run-backdrop="starting"')
-    expect(html).toContain('data-first-run-backdrop-look="mercury"')
-    expect(html).toMatch(/<img[^>]+live-liquid-chrome-mercury/)
-    expect(html).toContain('<canvas')
+    expect(html).toContain('data-first-run-backdrop-look="polished"')
+    expect(html).toMatch(/<img[^>]+live-liquid-chrome-polished/)
+    // The player brings its own canvas into this host on the client.
+    expect(html).toContain('data-first-run-backdrop-canvas')
     expect(html).not.toContain('data-first-run-backdrop-reason')
   })
 
@@ -24,12 +25,12 @@ describe('WelcomeBackdrop', () => {
     )
     expect(html).toContain('data-first-run-backdrop="still"')
     expect(html).toContain('data-first-run-backdrop-reason="hardware-acceleration-off"')
-    expect(html).not.toContain('<canvas')
+    expect(html).not.toContain('data-first-run-backdrop-canvas')
   })
 
   it('shows the chosen look', () => {
-    const html = renderToStaticMarkup(createElement(WelcomeBackdrop, { look: 'polished' }))
-    expect(html).toContain('data-first-run-backdrop-look="polished"')
-    expect(html).toMatch(/<img[^>]+live-liquid-chrome-polished/)
+    const html = renderToStaticMarkup(createElement(WelcomeBackdrop, { look: 'mercury' }))
+    expect(html).toContain('data-first-run-backdrop-look="mercury"')
+    expect(html).toMatch(/<img[^>]+live-liquid-chrome-mercury/)
   })
 })
