@@ -4,6 +4,7 @@ import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 import type { LiveBackgroundId, LiveBackgroundMotion } from './live-background-ids'
 import type { TwitchGifMode } from './chat-gif'
+import type { WindowGround } from './window-ground'
 import type {
   BuddyAvatar,
   BuddyMotionSettings,
@@ -4171,7 +4172,8 @@ export interface RuntimeInfo {
    * verdict on whether the page drew anything; `skipped` off Mica.
    */
   windowGlass?: {
-    kind: 'material' | 'mica' | 'solid'
+    /** `ground` is the opaque chrome ground, the default since plan 208. */
+    kind: 'ground' | 'material' | 'mica' | 'solid'
     reason: string | null
     paintCheck: 'pending' | 'painted' | 'blank' | 'unknown' | 'skipped'
     /**
@@ -4754,6 +4756,12 @@ export type SessionMediaGrantResult =
 export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
+  /**
+   * What this window sits on (plan 208): the chrome ground, the OS glass, or
+   * the solid base. Main decides it per window and the preload reads it from
+   * the window's argv, so the theme bootstrap knows it before the first paint.
+   */
+  windowGround?: WindowGround
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
   /** While armed, main suspends Videorc's global shortcuts and forwards every

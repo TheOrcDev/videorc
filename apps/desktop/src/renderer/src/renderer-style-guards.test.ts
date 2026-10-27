@@ -268,6 +268,16 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
     ).toEqual([])
   })
 
+  it('paints the chrome ground from one component: nothing else imports its stills (plan 208)', () => {
+    // The only image under the UI is ChromeGround's (the design skill's new
+    // rule 2). A second import would be a second ground, or a wallpaper.
+    const owner = 'src/components/chrome-ground.tsx'
+    expect(offenders(/chrome-ground-(?:dark|light)\.webp/, (path) => path !== owner)).toEqual([])
+    const source = files.find(({ path }) => path === owner)?.code ?? ''
+    expect(source).toMatch(/chrome-ground-dark\.webp\?no-inline/)
+    expect(source).toMatch(/chrome-ground-light\.webp\?no-inline/)
+  })
+
   it('paints floating surfaces with glass-float, never the popover coat', () => {
     // Plan 072: a fresh shadcn add brings `bg-popover`, which read as a black
     // slab on the window glass. Floating surfaces use `border glass-float`.

@@ -3,8 +3,7 @@
 
 @custom-variant dark (&:is(.dark *));
 /* Windows-only chrome. theme-bootstrap.js sets data-platform before the
-   first paint, so this never waits for runtime info (the Mica coats key on
-   the same attribute). */
+   first paint, so this never waits for runtime info. */
 @custom-variant win32 (&:is([data-platform='win32'] *));
 /* The radix-rhea registry components style by orientation through these
    variants; without them Tailwind matches a literal data-horizontal
@@ -15,19 +14,25 @@
 /*
  * Videorc design tokens (.claude/skills/videorc-design, v2: the window family).
  * Two columns of the SAME design: dark is the default and reference
- * expression, light is its structural twin. Every window sits on clear glass
- * (the OS blur, stripped of its tint by the native addon; plan 091) under
- * one cover per region of the theme's solid tone: the body paints the
- * lighter cover, the sidebar and the content panes add their deltas. Chrome
- * is monochrome: hairlines, three text tiers, glass chips. Colour carries
- * meaning only: live/destructive (red), success, warning, info, and the
- * vivid source icons. There is no coloured action accent.
+ * expression, light is its structural twin. Every window is opaque and sits
+ * on the chrome ground (plan 208): a frosted still of Liquid Chrome that
+ * `ChromeGround` paints under the coats, black with silver streaks in dark
+ * and its crisp invert in light, the same on every platform. One cover per
+ * region of the theme's solid tone frosts it: the body paints the lighter
+ * cover, the sidebar and the content panes add their deltas. Chrome is
+ * monochrome and truly neutral (every neutral is chroma 0): hairlines, three
+ * text tiers, glass chips. Colour carries meaning only: live/destructive
+ * (red), success, warning, info, and the vivid source icons. There is no
+ * coloured action accent.
  *
  * Token contract: reach for these utilities, not raw values:
  *   Covers     --glass-base (the solid's oklch components) with
- *              --glass-cover-sidebar / --glass-cover-work per theme and
- *              platform (plan 091 D3/D5); the coats below are derived from
- *              them (D4), never set by hand.
+ *              --glass-cover-sidebar / --glass-cover-work per theme (plan 208
+ *              D10; plan 091 D3 for the derivation); the coats below are
+ *              derived from them (D4), never set by hand.
+ *              chrome-ground-contrast.test.ts proves every text tier over
+ *              the ground's real pixels, so a cover never drops below its
+ *              floor.
  *   Coats      bg-glass-window (body) · bg-glass-sidebar (the sidebar, the
  *              heavier region) · bg-glass-content (content panes). Never
  *              stack a third coat, never backdrop-filter.
@@ -63,32 +68,32 @@
   /* White glass — the porcelain twin of the black-glass column below.
      White-over-bright reads solid at higher alphas — light mode needs a
      thinner coat than dark to show at all. */
-  --background: oklch(0.985 0.001 286 / 62%);
-  --foreground: oklch(0.17 0.004 286);
+  --background: oklch(0.985 0 0 / 62%);
+  --foreground: oklch(0.17 0 0);
   --card: oklch(0.99 0 0 / 92%);
-  --card-foreground: oklch(0.17 0.004 286);
+  --card-foreground: oklch(0.17 0 0);
   /* Floating surfaces paint glass-float; the token follows it so a stray
      bg-popover (a fresh shadcn add) still lands on the glass tone. */
   --popover: var(--glass-float);
-  --popover-foreground: oklch(0.17 0.004 286);
+  --popover-foreground: oklch(0.17 0 0);
 
   /* Monochrome action: ink on porcelain. */
-  --primary: oklch(0.17 0.004 286);
+  --primary: oklch(0.17 0 0);
   --primary-foreground: oklch(0.985 0 0);
 
   --secondary: oklch(0 0 0 / 7%);
-  --secondary-foreground: oklch(0.17 0.004 286);
+  --secondary-foreground: oklch(0.17 0 0);
   --muted: oklch(0 0 0 / 7%);
-  --muted-foreground: oklch(0.47 0.006 286);
+  --muted-foreground: oklch(0.47 0 0);
   /* Hover/selection block: black-6%. */
   --accent: oklch(0 0 0 / 6%);
-  --accent-foreground: oklch(0.17 0.004 286);
+  --accent-foreground: oklch(0.17 0 0);
   /* Pressed block: black-10%. */
   --accent-pressed: oklch(0 0 0 / 10%);
   /* Tertiary text tier (section labels, hints, disabled). Plan 174 S1.8
      (D12): 4.85:1 on the porcelain solid and 4.92:1 on a float; it was
      0.58, 4.11:1. Essential copy uses the secondary tier, never this one. */
-  --subtle: oklch(0.54 0.005 286);
+  --subtle: oklch(0.54 0 0);
 
   /* The brand red — the logo's LED-glow eyes (same hue family both themes). */
   --destructive: oklch(0.55 0.24 27);
@@ -119,25 +124,28 @@
   /* Sidebar is a frosted pane on the glass (backdrop-blur in the aside);
      selection is the monochrome block. */
   --sidebar: oklch(0 0 0 / 4%);
-  --sidebar-foreground: oklch(0.17 0.004 286);
-  --sidebar-primary: oklch(0.17 0.004 286);
+  --sidebar-foreground: oklch(0.17 0 0);
+  --sidebar-primary: oklch(0.17 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0 0 0 / 6%);
-  --sidebar-accent-foreground: oklch(0.17 0.004 286);
+  --sidebar-accent-foreground: oklch(0.17 0 0);
   --sidebar-border: oklch(0 0 0 / 12%);
   --sidebar-ring: oklch(0 0 0 / 25%);
 
-  /* Window glass (plan 091): a clear, neutral blur of the desktop under one
-     cover per region. --glass-base is the theme's solid tone (oklch
-     components); a cover is how much of it a region paints over the blur,
-     Ghostex's numbers: the sidebar is the heavier one, the work area shows
-     more of the desktop. The coats themselves are derived below (D4) so
-     every region composites to exactly its cover, and --glass-solid replaces
-     them when the OS asks for reduced transparency. */
-  --glass-base: 0.985 0.001 286;
-  --glass-cover-sidebar: 0.93;
+  /* The window coats (plan 208, D10; plan 091 for the derivation): one cover
+     per region over the chrome ground. --glass-base is the theme's solid
+     tone (oklch components); a cover is how much of it a region paints over
+     the ground: the sidebar is the heavier one, the work area shows more
+     chrome. The light ground's darkest line (sRGB 0.078) under the work
+     cover composites to about #DADADA on #FAFAFA: graphite streaks under
+     porcelain. The floor is 0.83 (secondary text at 4.5:1 over that line;
+     chrome-ground-contrast.test.ts). The coats themselves are derived below
+     (D4) so every region composites to exactly its cover, and --glass-solid
+     replaces them when the OS asks for reduced transparency. */
+  --glass-base: 0.985 0 0;
+  --glass-cover-sidebar: 0.92;
   --glass-cover-work: 0.86;
-  --glass-solid: oklch(0.985 0.001 286);
+  --glass-solid: oklch(0.985 0 0);
 
   /* Floating glass (plan 072; plan 091 D6, Ghostex's web modals): menus,
      popovers, hover cards, tooltips, dialogs and toasts are flat, opaque
@@ -178,9 +186,9 @@
 
   /* The video ground: the letterbox the docked preview sits on, with its
      text. Dark in both themes, because it frames video. */
-  --video-ground: oklch(0.13 0.003 286);
-  --video-ground-foreground: oklch(0.97 0.001 286);
-  --video-ground-muted: oklch(0.71 0.01 286);
+  --video-ground: oklch(0.13 0 0);
+  --video-ground-foreground: oklch(0.97 0 0);
+  --video-ground-muted: oklch(0.71 0 0);
 }
 
 .dark {
@@ -193,29 +201,29 @@
      Alpha history: 65% read as barely-there, 58% let background text interfere;
      62% was the charcoal sweet spot — the black base needs 68% or the frost
      disappears into it. */
-  --background: oklch(0.13 0.003 286 / 68%);
-  --foreground: oklch(0.97 0.001 286);
-  --card: oklch(0.16 0.004 286 / 92%);
-  --card-foreground: oklch(0.97 0.001 286);
+  --background: oklch(0.13 0 0 / 68%);
+  --foreground: oklch(0.97 0 0);
+  --card: oklch(0.16 0 0 / 92%);
+  --card-foreground: oklch(0.97 0 0);
   --popover: var(--glass-float);
-  --popover-foreground: oklch(0.97 0.001 286);
+  --popover-foreground: oklch(0.97 0 0);
 
   /* Monochrome action: chrome on black. */
-  --primary: oklch(0.97 0.001 286);
-  --primary-foreground: oklch(0.13 0.003 286);
+  --primary: oklch(0.97 0 0);
+  --primary-foreground: oklch(0.13 0 0);
 
   --secondary: oklch(1 0 0 / 6%);
-  --secondary-foreground: oklch(0.97 0.001 286);
+  --secondary-foreground: oklch(0.97 0 0);
   --muted: oklch(1 0 0 / 6%);
-  --muted-foreground: oklch(0.71 0.01 286);
+  --muted-foreground: oklch(0.71 0 0);
   /* Hover/selection block: white-8%. */
   --accent: oklch(1 0 0 / 8%);
-  --accent-foreground: oklch(0.97 0.001 286);
+  --accent-foreground: oklch(0.97 0 0);
   /* Pressed block: white-12%. */
   --accent-pressed: oklch(1 0 0 / 12%);
   /* Plan 174 S1.8 (D12): 5.32:1 on the black solid and 4.69:1 on a dialog;
      it was 0.55, 3.99:1. */
-  --subtle: oklch(0.62 0.008 286);
+  --subtle: oklch(0.62 0 0);
 
   /* The brand red — the logo's LED-glow eyes. Red stays semantic (record,
      live, destructive); it is never chrome. */
@@ -240,31 +248,32 @@
   --ring: oklch(1 0 0 / 28%);
 
   --sidebar: oklch(1 0 0 / 5%);
-  --sidebar-foreground: oklch(0.97 0.001 286);
-  --sidebar-primary: oklch(0.97 0.001 286);
-  --sidebar-primary-foreground: oklch(0.13 0.003 286);
+  --sidebar-foreground: oklch(0.97 0 0);
+  --sidebar-primary: oklch(0.97 0 0);
+  --sidebar-primary-foreground: oklch(0.13 0 0);
   --sidebar-accent: oklch(1 0 0 / 8%);
-  --sidebar-accent-foreground: oklch(0.97 0.001 286);
+  --sidebar-accent-foreground: oklch(0.97 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(1 0 0 / 28%);
 
-  /* Dark window glass (plan 091, D3): the sidebar covers 88% and the work
-     area 83% of the clear blur. 83% is the smallest work cover that keeps
-     --muted-foreground at 4.5:1 over a white desktop (probe:ui-glass). The
-     base is the OKLCH of #0D0D0F, the dark solid the palette, the addon's
-     snapshot base and the design skill all name (0.13 rendered #070708 and
-     composited to near-black over a dark desktop). */
-  --glass-base: 0.16 0.004 286;
+  /* The dark window coats (plan 208, D10): the sidebar covers 88% and the
+     work area 82% of the chrome ground. The base is the chrome's own black,
+     oklch 0.13 (#070707), the dark solid the palette and the design skill
+     name. The dark ground's brightest crest (sRGB 0.92) under the work cover
+     composites to about #303030 on a #0A0A0A trough: silver streaks under
+     black. The floor is 0.78 (secondary text at 4.5:1 over that crest;
+     chrome-ground-contrast.test.ts). */
+  --glass-base: 0.13 0 0;
   --glass-cover-sidebar: 0.88;
-  --glass-cover-work: 0.83;
-  --glass-solid: oklch(0.16 0.004 286);
+  --glass-cover-work: 0.82;
+  --glass-solid: oklch(0.13 0 0);
 
   /* Dark floating glass (plan 091 D6): Ghostex's lifts over the solid,
      mixed in sRGB. A dialog (and the palette) is the solid plus 6% white,
-     about #1C1C1D; a popup (menus, selects, popovers, hover cards, chart
-     tooltips, toasts) adds 3% more, about #222224; a tooltip sits on the
-     solid itself. Deliberately darker than the glass over a bright desktop:
-     a fixed tone whatever is behind (probe:ui-glass --surfaces). */
+     about #161616; a popup (menus, selects, popovers, hover cards, chart
+     tooltips, toasts) adds 3% more, about #1D1D1D; a tooltip sits on the
+     solid itself. Flat and opaque over the chrome ground (plan 208 D2): a
+     fixed tone whatever is behind (probe:ui-glass --surfaces). */
   --glass-float-dialog: color-mix(in srgb, oklch(1 0 0) 6%, var(--glass-solid));
   --glass-float: color-mix(in srgb, oklch(1 0 0) 3%, var(--glass-float-dialog));
   --glass-float-tooltip: var(--glass-solid);
@@ -294,17 +303,17 @@
   --knob: oklch(1 0 0);
   --knob-ring: oklch(0 0 0 / 35%);
 
-  --video-ground: oklch(0.13 0.003 286);
-  --video-ground-foreground: oklch(0.97 0.001 286);
-  --video-ground-muted: oklch(0.71 0.01 286);
+  --video-ground: oklch(0.13 0 0);
+  --video-ground-foreground: oklch(0.97 0 0);
+  --video-ground-muted: oklch(0.71 0 0);
 }
 
 /* The derived coats (plan 091, D4). The body paints the lighter cover, so
    first paint and every full-window state are already tinted; the heavier
    region adds exactly the delta that composites to its cover,
-   1 - (1 - cover) / (1 - body). On macOS the work delta is 0 and the sidebar
-   adds 29.4% (dark) or 50% (light); on Windows the Mica covers (below) put
-   the delta on the content pane instead. window-palette.test.ts computes the
+   1 - (1 - cover) / (1 - body). The work delta is 0 and the sidebar adds
+   33.3% (dark) or 42.9% (light), on every platform (plan 208 took the
+   Windows Mica covers away with Mica). window-palette.test.ts computes the
    composites from the covers. */
 :root,
 .dark {
@@ -320,42 +329,27 @@
   );
 }
 
-/* Windows 11 Mica (plan 050, D7; plan 091, D5): Mica tints from the wallpaper
-   and never shows what is behind the window, so the coats only carry the
-   tone. These covers reproduce the plan 050 composite exactly: a 50% body
-   plus a 24% content coat in light, 34% plus 26% in dark. Starting values;
-   the Windows box tunes them (S21 acceptance). */
-:root[data-platform='win32'] {
-  --glass-cover-sidebar: 0.5;
-  --glass-cover-work: 0.62;
-}
-:root[data-platform='win32'].dark {
-  --glass-cover-sidebar: 0.34;
-  --glass-cover-work: 0.5116;
-}
-
-/* Increase Contrast: hairlines strong enough to read on glass, the secondary
-   and tertiary tiers one step closer to the primary, and both covers at 95%
-   (plan 091, D7; the tertiary since plan 174 S1.8). */
+/* Increase Contrast: hairlines strong enough to read on the ground, the
+   secondary and tertiary tiers one step closer to the primary, and both
+   covers at 95% (plan 091, D7; plan 208 D12; the tertiary since plan 174
+   S1.8). */
 @media (prefers-contrast: more) {
-  :root,
-  :root[data-platform='win32'] {
+  :root {
     --border: oklch(0 0 0 / 28%);
     --input: oklch(0 0 0 / 28%);
-    --muted-foreground: oklch(0.38 0.006 286);
-    --subtle: oklch(0.45 0.005 286);
+    --muted-foreground: oklch(0.38 0 0);
+    --subtle: oklch(0.45 0 0);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(0 0 0 / 24%);
     --chip-rim: oklch(0 0 0 / 24%);
     --keycap-rim: oklch(0 0 0 / 28%);
   }
-  .dark,
-  :root[data-platform='win32'].dark {
+  .dark {
     --border: oklch(1 0 0 / 24%);
     --input: oklch(1 0 0 / 24%);
-    --muted-foreground: oklch(0.8 0.01 286);
-    --subtle: oklch(0.68 0.008 286);
+    --muted-foreground: oklch(0.8 0 0);
+    --subtle: oklch(0.68 0 0);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(1 0 0 / 30%);
@@ -364,19 +358,31 @@
   }
 }
 
-/* After Increase Contrast, so it wins when both are on. The OS paints the
-   material solid under Reduce Transparency (the clear-glass strip steps
-   aside too); the coats go solid with it so text contrast never depends on
-   what sits behind. */
+/* After Increase Contrast, so it wins when both are on. Under Reduce
+   Transparency the chrome ground hides (plan 208 D12; a media query, so a
+   runtime change applies at once) and the coats go solid with it, so text
+   contrast never depends on what sits behind. Under the clear glass (D9)
+   the OS paints the material solid too. */
 @media (prefers-reduced-transparency: reduce) {
   :root,
-  .dark,
-  :root[data-platform='win32'],
-  :root[data-platform='win32'].dark {
+  .dark {
     --glass-window: var(--glass-solid);
     --glass-sidebar: transparent;
     --glass-content: transparent;
   }
+  [data-chrome-ground] {
+    display: none;
+  }
+}
+
+/* The chrome ground (plan 208, D7): the Welcome screen's moving backdrop
+   covers the whole window while first-run setup is open (and the placeholder
+   before it paints the solid), so the ground has nothing to show and is not
+   drawn. ChromeGround itself mounts only while the root says
+   data-ground='chrome'; the escape hatches (VIDEORC_GLASS=clear or 0) leave
+   it unmounted. */
+html:has([data-first-run-backdrop], [data-first-run-surface]) [data-chrome-ground] {
+  display: none;
 }
 
 /* audiocn (plans 092 and 093): meter and channel tones are Videorc tones. A
@@ -712,9 +718,13 @@
   * {
     @apply border-border outline-ring/50;
   }
-  /* The window coat sits on the OS material. color-scheme lives on body, never
-     inline on the root: a root color-scheme of light makes Chromium paint an
-     opaque canvas over the material (plan 050, P5.3). */
+  /* The body paints the window coat as the canvas: the first paint and every
+     window without a ground are already the theme's tone. ChromeGround puts
+     the Liquid Chrome still over that canvas and the same coat over the
+     still (plan 208), so the frosted chrome shows under the sidebar and the
+     panes. color-scheme lives on body, never inline on the root: a root
+     color-scheme of light makes Chromium paint an opaque canvas over the
+     window (plan 050, P5.3). */
   body {
     @apply bg-glass-window text-foreground;
     color-scheme: light;

@@ -14,10 +14,18 @@
   } catch {
     document.documentElement.classList.add('dark')
   }
-  // The platform before first paint: Windows (Mica) takes its own coats.
+  // The platform before first paint: Windows-only chrome keys on it.
   document.documentElement.dataset.platform = /Win/i.test(navigator.platform)
     ? 'win32'
     : /Mac/i.test(navigator.platform)
       ? 'darwin'
       : 'linux'
+  // What the window sits on (plan 208): main's call, read off the preload's
+  // bridge (it came in on the window's argv, like the renderer role), so
+  // ChromeGround mounts on the first React paint and never pops in. The
+  // chrome ground is the product default; `glass` and `solid` are the
+  // VIDEORC_GLASS escape hatches.
+  const ground = window.videorc?.windowGround
+  document.documentElement.dataset.ground =
+    ground === 'glass' || ground === 'solid' ? ground : 'chrome'
 })()

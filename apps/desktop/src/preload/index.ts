@@ -12,6 +12,7 @@ import {
   type ElectronInvokeResult
 } from '../shared/electron-ipc-contract'
 import { rendererRoleFromArguments } from '../shared/renderer-security-policy'
+import { windowGroundFromArguments } from '../shared/window-ground'
 import { apiForRendererRole } from './api-policy'
 
 async function invoke<TChannel extends ElectronInvokeChannel>(
@@ -35,6 +36,13 @@ function subscribe<TChannel extends ElectronEventChannel>(
 }
 
 const api: VideorcApi = {
+  // What this window sits on (plan 208): main's call, off the window's argv,
+  // so the theme bootstrap can set data-ground before the first paint. Every
+  // Videorc window names one; a missing value leaves the bootstrap's default.
+  ...(() => {
+    const windowGround = windowGroundFromArguments(process.argv)
+    return windowGround ? { windowGround } : {}
+  })(),
   getBackendConnection: () => invoke('backend:get-connection'),
   getBackendLogs: () => invoke('backend:get-logs'),
   getRuntimeInfo: () => invoke('app:get-runtime-info'),

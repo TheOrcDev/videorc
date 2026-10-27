@@ -424,6 +424,7 @@ import {
   solidWindowBase,
   WINDOW_HEADER_HEIGHT,
   windowGlassOptions,
+  windowGroundForMode,
   type AppliedGlass,
   type GlassMode,
   type GlassStyle,
@@ -1995,12 +1996,18 @@ function applyNativeTheme(theme: string): void {
   // AppKit rebuilds each material for the new appearance; the clear glass
   // strips it again (plan 091).
   restyleGlassWindows()
-  // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
-  // with the theme; the glass windows' material follows nativeTheme itself,
-  // and every window's page follows it through prefers-color-scheme.
+  // An opaque window (the chrome ground, plan 208; or the solid palette)
+  // repaints its base with the theme, so the backing under the renderer's
+  // ground never shows the other theme's tone; the glass windows' material
+  // follows nativeTheme itself, and every window's page follows it through
+  // prefers-color-scheme.
   for (const window of [mainWindow, commentsWindow, captionsWindow, notesWindow]) {
     const applied = appliedGlass(window)
-    if (window && !window.isDestroyed() && applied?.mode.kind === 'solid') {
+    if (
+      window &&
+      !window.isDestroyed() &&
+      (applied?.mode.kind === 'solid' || applied?.mode.kind === 'ground')
+    ) {
       window.setBackgroundColor(solidWindowBase(applied.role, theme !== 'light'))
     }
   }
@@ -2230,21 +2237,22 @@ function applyMicaBlankFallback(window: BrowserWindow): void {
 }
 
 function createWindow(): void {
+  const chrome = glassWindowChrome('main')
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 960,
     minHeight: 660,
     title: 'Videorc',
-    // Hold the (transparent) window until the renderer has painted its first
-    // frame — showing it at create time put an empty pane on screen that then
+    // Hold the window until the renderer has painted its first frame —
+    // showing it at create time put an empty pane on screen that then
     // visibly filled in piece by piece.
     show: false,
-    ...glassWindowChrome('main').options,
+    ...chrome.options,
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('main'),
+      ...rendererWindowWebPreferences('main', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy),
       // Plan 189: the soundboard's monitor plays a press from a Stream Deck,
       // the phone or Stream Manager, none of which is a gesture in this
@@ -2947,7 +2955,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('notes'),
+      ...rendererWindowWebPreferences('notes', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('notes', electronBackgroundPolicy)
     }
   })
@@ -3793,7 +3801,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('comments'),
+      ...rendererWindowWebPreferences('comments', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('comments', electronBackgroundPolicy)
     }
   })
@@ -4012,7 +4020,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('captions'),
+      ...rendererWindowWebPreferences('captions', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('captions', electronBackgroundPolicy)
     }
   })

@@ -15,10 +15,15 @@
   }
   apply()
   query.addEventListener('change', apply)
-  // The platform before first paint: Windows (Mica) takes its own coats.
+  // The platform before first paint: Windows-only chrome keys on it.
   root.dataset.platform = /Win/i.test(navigator.platform)
     ? 'win32'
     : /Mac/i.test(navigator.platform)
       ? 'darwin'
       : 'linux'
+  // What the window sits on (plan 208): main's call, read off the preload's
+  // bridge (it came in on the window's argv, like the renderer role), so
+  // ChromeGround mounts on the first React paint and never pops in.
+  const ground = window.videorc?.windowGround
+  root.dataset.ground = ground === 'glass' || ground === 'solid' ? ground : 'chrome'
 })()
