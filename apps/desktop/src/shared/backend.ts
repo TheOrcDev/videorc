@@ -5004,7 +5004,8 @@ export interface VideorcApi {
   updateNativePreviewSurfaceCompositor: (
     status: PreviewSurfaceCompositorUpdateParams
   ) => Promise<PreviewSurfaceStatus>
-  // Keeps the macOS vibrancy material in step with the in-app theme.
+  // Keeps the windows' opaque base (and the clear glass's vibrancy) in step
+  // with the in-app theme.
   setNativeTheme: (theme: 'dark' | 'light') => Promise<void>
   // True while the MAIN process pumps presents from its own backend socket;
   // the renderer pump stays dormant then and resumes only as a fallback.

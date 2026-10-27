@@ -1,9 +1,10 @@
 // Theme for the secondary windows (Stream Manager, Notes, Captions). They have
 // no theme provider: they follow the app theme through prefers-color-scheme,
 // which main drives from the main window's toggle (nativeTheme.themeSource).
-// That is the same signal the window's vibrancy material follows, so the text
-// tokens and the glass always agree, and a toggle in the main window restyles
-// every open window live. Kept external so the CSP can reject inline scripts.
+// That is the same signal main repaints the window's opaque base from, so the
+// text tokens, the coats and the chrome ground always agree, and a toggle in
+// the main window restyles every open window live. Kept external so the CSP
+// can reject inline scripts.
 ;(() => {
   const root = document.documentElement
   const query = window.matchMedia('(prefers-color-scheme: dark)')

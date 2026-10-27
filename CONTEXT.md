@@ -256,6 +256,21 @@ _Avoid_: Captions window, caption viewer
 The two other windows, by these names.
 _Avoid_: Teleprompter, Preview window (as a title)
 
+**Chrome ground**:
+The still of Liquid Chrome under every Videorc window (plan 208): black
+metal with soft silver streaks in dark, and the same turned around,
+porcelain with graphite streaks, in light. It never moves, and the desktop
+never shows through it. The Preview has none, because it frames video.
+_Avoid_: wallpaper, background (a scene has one), live background (it never
+moves), glass
+
+**Chrome controls**:
+The polished controls you touch: the chrome primary button (Go Live…,
+Continue, Save), the beads on switches and sliders, the plate on what is
+selected, and the red Record LED that lights while a recording or
+livestream runs. Panels, menus, dialogs and text stay flat.
+_Avoid_: metallic, shiny, glass buttons
+
 **Keep on top**:
 The pin that keeps a window over other apps, the same name in every window.
 _Avoid_: Pin, Always on top, Float

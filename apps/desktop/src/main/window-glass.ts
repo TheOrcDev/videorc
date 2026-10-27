@@ -113,9 +113,9 @@ function glassMaterialFrom(value: string | undefined): GlassMaterial | null {
 export type GlassStyle = 'clear' | 'material'
 
 /**
- * Clear glass is the default (plan 091, S1). `VIDEORC_GLASS_STYLE=material`
- * keeps the plan 050 look, AppKit's own tint and saturation, as the A/B
- * control for one release.
+ * Under `VIDEORC_GLASS=clear` the clear style is the default (plan 091, S1).
+ * `VIDEORC_GLASS_STYLE=material` keeps the plan 050 look, AppKit's own tint
+ * and saturation, as the A/B control for one release.
  */
 export const DEFAULT_GLASS_STYLE: GlassStyle = 'clear'
 

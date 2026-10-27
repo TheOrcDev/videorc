@@ -940,8 +940,9 @@ nativeTheme.on('updated', () => {
   repinDarkAlwaysWindows()
   restyleGlassWindows()
 })
-// Window glass is real macOS vibrancy (window-glass.ts, plan 050). VIDEORC_GLASS=0
-// paints the solid palette; a material name overrides the material.
+// The window material (window-glass.ts): the opaque chrome ground by default
+// (plan 208). VIDEORC_GLASS=clear is the plan 091 vibrancy for one release (a
+// material name picks its material), and VIDEORC_GLASS=0 the solid palette.
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
@@ -1988,8 +1989,9 @@ function restyleGlassWindows(): void {
   }
 }
 
-/** Vibrancy tints by OS appearance; the renderer's theme toggle drives it so
- * the blur material always matches the in-app theme (videorc-design). */
+/** The renderer's theme toggle drives the OS appearance, so every window's
+ * opaque base (and, under the clear glass, the vibrancy material) matches the
+ * in-app theme (videorc-design). */
 function applyNativeTheme(theme: string): void {
   nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
   repinDarkAlwaysWindows()

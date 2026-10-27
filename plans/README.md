@@ -13,7 +13,14 @@
 
   Eight slices, from before pictures through the ground assets, opaque
   windows, the probe, controls, the Welcome invert and the served pages, to
-  docs and gates. **PLANNED**.
+  docs and gates. **EXECUTED** 2026-10-27 (S0 to S7) on
+  `plan-208-liquid-chrome-colour`, PR pending: every window sits on the
+  chrome ground, controls wear chrome, Record is the red LED, light
+  Welcome is the invert, and the phone remote and OAuth page follow; the
+  design skill is rewritten for it. `VIDEORC_GLASS=clear` keeps the old
+  glass for one release. Gates in the
+  [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
+  the owner's by-eye in both themes and a Windows pass are owed.
 
 - 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
   Owner request: live chat in the Studio in a small window, optional with a

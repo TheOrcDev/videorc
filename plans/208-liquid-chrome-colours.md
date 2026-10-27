@@ -1,8 +1,12 @@
 # Plan 208: Liquid Chrome colours
 
-**Status:** PLANNED 2026-10-27. D1 to D5 are owner decisions (2026-10-27);
-D6 to D13 are recommendations the executor uses unless the owner changes
-them. **Priority:** P1. Every screen changes. **Owner request:** "let's plan
+**Status:** EXECUTED 2026-10-27 on `plan-208-liquid-chrome-colour` (PR
+pending). S0 to S7 are done; the gates, the owner's by-eye and the Windows
+pass are tracked in the
+[acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md).
+D1 to D5 are owner decisions (2026-10-27); D6 to D13 are recommendations
+the executor used unless the owner changes them. **Priority:** P1. Every
+screen changes. **Owner request:** "let's plan
 out complete redesign of our Videorc color. I really love our new
 onboarding live background thing that we have. let's put same colors like
 that so metallic black with that shine, and similar just other way around
