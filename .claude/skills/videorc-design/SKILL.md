@@ -379,6 +379,13 @@ links home.
 - **Buddy**: the Buddy page (Profile, Chat, Voice, Reports, Clean cut)
   creates and sets Buddy up; the Stream Manager's Buddy pane operates it
   live.
+- **Chat**: the Stream Manager is the full chat (filters, search, the
+  composer, ⋯ actions, removals, Buddy). With Chat in Studio on (Settings →
+  General → Chat, off by default; ⌘K mirrors it), the Studio inspector
+  shows a Chat section under Session while on air (plan 204): a small
+  avatar, the name, the words and the platform mark per row, a click that
+  shows the message on stream through the same highlight, and nothing
+  else. It keeps its default look under Retro LCD for now.
 - **Health**: no sidebar row. The status bar state, "Open Health" on a
   degraded alert or an error toast, Settings → About and ⌘K open it. The
   support bundle's one home is Health (`SupportBundleButton`).
