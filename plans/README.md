@@ -1,5 +1,17 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 203](203-first-run-permissions.md), First-run setup,
+  step 1: permissions. Owner request: onboarding only on the first launch,
+  a Settings button to run it again, and permissions done perfectly first.
+  The Liquid Chrome live background fills the window (the shared WebGL2
+  player, lazy, 30 fps cap, poster when still), and one centred card asks
+  for Screen Recording, System audio, Microphone and Camera in place, with
+  live states and proof. No OS prompt appears before Videorc explains it
+  (today main and the backend both ask at launch). Reopen and resume handle
+  a grant macOS only applies after a relaunch. Existing installs never see
+  it; smokes skip it by default. "Run setup again…" sits in Settings →
+  General and ⌘K. S0 measures first launch on a clean macOS account first.
+  **PLANNED**; D1 and D4 decided by the owner, D2, D3 and D5 to D8 owed.
 - 2026-10-26: [Plan 202](202-buddy-talks-in-its-bubble.md), Buddy talks in
   its bubble. Owner request: a mode where Buddy talks only in its bubble, not
   in chat, and a switch for whether Buddy shows on takeover screens. A fourth
