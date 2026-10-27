@@ -284,6 +284,16 @@ async function runProbe(options) {
     }
   }
 
+  if (options.mode === 'grounds') {
+    const background = RENDER.backgrounds.find((entry) => entry.id === 'liquid-chrome');
+    const look = background.looks.find((entry) => entry.id === 'polished');
+    canvas.width = 1280;
+    canvas.height = 720;
+    runner.draw({ id: background.id, look: look.id, phase: look.posterPhase, dim: 0, width: 1280, height: 720, level: 'full' });
+    gl.finish();
+    result.ground = { phase: look.posterPhase, png: await blobBase64(canvas, 'image/png') };
+  }
+
   if (options.mode === 'posters') {
     for (const background of backgrounds) {
       for (const look of background.looks) {

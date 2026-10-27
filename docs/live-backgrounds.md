@@ -273,3 +273,35 @@ The ten shaders are ported from React Bits by David Haz
 (https://reactbits.dev), MIT + Commons Clause. They are used in Videorc with
 the author's permission (2026-10-24). Videorc never offers them for export
 or as a separate pack. See `THIRD_PARTY_NOTICES.md`.
+
+### Chrome grounds (plan 208)
+
+The opaque window grounds are a still of Liquid Chrome's Polished look at
+its catalogue poster phase (1.2), rendered by the existing WebGL2 poster
+runner at 1280 × 720 with Dim 0. The Rust `chrome-grounds` example applies
+`image::imageops::blur` with Gaussian σ 24 to sRGB bytes. For light, it
+inverts each channel (`255 - v`) **before** blurring. No UI uses them yet.
+
+Regenerate from the repository root (requires Rust, desktop Electron and
+libwebp's `cwebp` on PATH):
+
+```sh
+PATH=/opt/homebrew/bin:$PATH env -u ELECTRON_RUN_AS_NODE pnpm probe:live-background-cost -- --mode grounds
+```
+
+The helper encodes with `cwebp -q 90` (lossy), enforcing 40,000 bytes per
+asset. The existing `image` lossless WebP encoder exceeded that budget;
+using the installed encoder adds no dependency to the app. Outputs live in
+`assets/backgrounds/chrome-ground-{dark,light}.webp` and
+`chrome-ground.stats.json`. Never hand-edit them; rerun the generator.
+Stats measure decoded shipping pixels: Rec.709 weighted luma of
+gamma-encoded sRGB (`(0.2126 R + 0.7152 G + 0.0722 B) / 255`), without
+linearization. This grey is not WCAG relative luminance; contrast tests
+must linearize the composited sRGB values separately. JSON uses stable
+field order and records generator version, inputs and encoding.
+
+Verify the committed pixels and stats with:
+
+```sh
+cargo test -p videorc-backend --example chrome-grounds chrome_ground_stats_match_committed_webps
+```
