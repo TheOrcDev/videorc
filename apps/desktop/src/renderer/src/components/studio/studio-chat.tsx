@@ -236,7 +236,7 @@ export function StudioChatList({
           anchoring stays out of it. */}
       <ScrollArea
         ref={rootRef}
-        className={cn(STUDIO_CHAT_LIST_HEIGHT, '-mx-2')}
+        className={STUDIO_CHAT_LIST_HEIGHT}
         viewportClassName="[overflow-anchor:none]"
       >
         {shown.length === 0 ? (

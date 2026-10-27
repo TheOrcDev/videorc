@@ -33,6 +33,17 @@ const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 // never opens the Stream Manager window.
 const surface =
   process.env.VIDEORC_COMMENT_HIGHLIGHT_SURFACE === 'studio' ? 'studio' : 'stream-manager'
+// The Studio surface's section, and its preview card while the section is away.
+const STUDIO_CHAT = '[data-testid="studio-chat"]'
+/** The preview card's rect while the section is away, to compare once it shows. */
+let studioPreviewBefore = null
+
+const PREVIEW_CARD_RECT = `(() => {
+  const card = document.querySelector('[data-videorc-preview-card]')
+  if (!card) return null
+  const { x, y, width, height } = card.getBoundingClientRect()
+  return { x, y, width, height }
+})()`
 // The fake chatter's avatar and emote (plan 095). The URLs are on allowlisted
 // CDN hosts so main's `avatars:cache` accepts them, but they are never
 // fetched: the smoke seeds the app's avatar cache with flat-colour PNGs under
@@ -321,6 +332,7 @@ async function runScenario(ws, smoke, scenario, index) {
         sessionId,
         messageId: message.id
       })
+      await recordStudioChatEvidence(smoke, scenarioDirectory)
     } else {
       await waitForDetachedComment(smoke, message)
       highlight = await selectAndWaitForHighlight(ws, smoke, {
@@ -629,8 +641,6 @@ async function waitForDetachedComment(smoke, message) {
 // goes through the same controls a streamer uses: the Settings switch, the
 // row button, the hide button and the toast's Undo.
 
-const STUDIO_CHAT = '[data-testid="studio-chat"]'
-
 /** Main-window JS with the smoke helper kit (`waitFor`, `openTab`, `sleep`). */
 async function studioEval(smoke, code, params = {}) {
   const response = await smokeCommand(smoke, 'eval-js', { ...params, code })
@@ -639,6 +649,8 @@ async function studioEval(smoke, code, params = {}) {
 
 /** Settings → General → Chat in Studio, then back to the Studio. */
 async function turnOnStudioChat(smoke) {
+  // The main window's default size (D8): the section must fit there.
+  await smokeCommand(smoke, 'resize-window', { width: 1180, height: 780 })
   const result = await studioEval(
     smoke,
     `await openTab('settings', '#studio-chat')
@@ -647,8 +659,14 @@ async function turnOnStudioChat(smoke) {
      await sleep(150)
      const checked = document.querySelector('#studio-chat')?.getAttribute('aria-checked')
      await openTab('studio')
-     return { checked, section: Boolean(document.querySelector(${JSON.stringify(STUDIO_CHAT)})) }`
+     await sleep(400)
+     return {
+       checked,
+       section: Boolean(document.querySelector(${JSON.stringify(STUDIO_CHAT)})),
+       preview: ${PREVIEW_CARD_RECT}
+     }`
   )
+  studioPreviewBefore = result?.preview ?? null
   if (result?.checked !== 'true') {
     throw new Error(`Chat in Studio did not turn on: ${JSON.stringify(result)}`)
   }
@@ -758,6 +776,71 @@ async function selectStudioRowAndWaitForHighlight(ws, smoke, params) {
   throw new Error(
     `Timed out waiting for the Studio click to reach backend live: ${JSON.stringify(last)}`
   )
+}
+
+/**
+ * Evidence for the PR (S3): at 1180×780, the preview card has not moved or
+ * resized since the section was away (D1), the whole section is in view
+ * without scrolling (D8), and a screenshot in each theme for the by-eye.
+ */
+async function recordStudioChatEvidence(smoke, scenarioDirectory) {
+  const metrics = await studioEval(
+    smoke,
+    `const section = document.querySelector(${JSON.stringify(STUDIO_CHAT)})
+     let pane = section?.parentElement ?? null
+     while (pane && !['auto', 'scroll'].includes(getComputedStyle(pane).overflowY)) pane = pane.parentElement
+     const rect = (element) => {
+       if (!element) return null
+       const { x, y, width, height, bottom } = element.getBoundingClientRect()
+       return { x, y, width, height, bottom }
+     }
+     return {
+       window: { width: window.innerWidth, height: window.innerHeight },
+       paneScrollTop: pane?.scrollTop ?? null,
+       pane: rect(pane),
+       section: rect(section),
+       preview: ${PREVIEW_CARD_RECT}
+     }`
+  )
+  const before = studioPreviewBefore
+  const after = metrics?.preview
+  const same = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) <= 0.5
+  const previewStill =
+    Boolean(before && after) &&
+    same(before.x, after.x) &&
+    same(before.y, after.y) &&
+    same(before.width, after.width) &&
+    same(before.height, after.height)
+  const inView =
+    Boolean(metrics?.section && metrics.pane) &&
+    metrics.paneScrollTop === 0 &&
+    metrics.section.bottom <= metrics.pane.bottom + 0.5
+  const shots = {}
+  for (const theme of ['dark', 'light']) {
+    await studioEval(
+      smoke,
+      `localStorage.setItem('videorc.theme', '${theme}')
+       window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' }))
+       await sleep(700)
+       return document.documentElement.classList.contains('${theme}')`
+    )
+    shots[theme] = (
+      await smokeCommand(smoke, 'capture-page', { name: `studio-chat-${theme}` })
+    )?.file
+  }
+  const evidence = { metrics, previewBefore: before, previewStill, inView, shots }
+  writeFileSync(
+    join(scenarioDirectory, 'studio-chat-layout.json'),
+    JSON.stringify(evidence, null, 2)
+  )
+  console.log(
+    `[studio] layout at ${metrics?.window?.width}x${metrics?.window?.height}: preview unmoved=${previewStill}, section in view=${inView} (bottom ${Math.round(metrics?.section?.bottom ?? -1)} of ${Math.round(metrics?.pane?.bottom ?? -1)}); shots ${shots.dark}, ${shots.light}`
+  )
+  if (!previewStill) {
+    throw new Error(
+      `The preview card moved when the Chat section appeared: ${JSON.stringify(evidence)}`
+    )
+  }
 }
 
 /** A click on the live row takes it off (owner call, D10). */
