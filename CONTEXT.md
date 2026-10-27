@@ -272,6 +272,20 @@ _Avoid_: diagnostics, logs (as the thing to send)
 Bringing a local file into Videorc: an image, a recording, an OBS setup.
 _Avoid_: Upload (for a local file), Add file
 
+### Agents
+
+**Agents**:
+AI apps on this computer (Claude, Cursor, Codex, VS Code and others) that
+run Videorc through Videorc MCP: Settings → Remote → Agents, "Let AI agents
+control Videorc". Each connected app is "an agent" with the name the
+streamer gave it ("Claude Desktop"); Stop disconnects every agent. Plan 209.
+_Avoid_: bots, AI assistants, integrations, MCP clients (in copy)
+
+**Videorc MCP**:
+What docs and the website call the way agents connect. In agent apps the
+server is named `videorc`.
+_Avoid_: Videorc API, MCP server (in the app's own copy)
+
 ### Buddy and Premium
 
 **Buddy**:

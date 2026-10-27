@@ -28,7 +28,7 @@
 | S5    | One Studio action executor for remotes and agents (refactor)       | A   | DONE    |
 | S6    | First tools: look, plus everything a Stream Deck can do            | A   | DONE    |
 | S7    | Settings → Remote → Agents, the Session line, ⌘K, notices          | A   | PLANNED |
-| S8    | Docs, glossary, release note                                       | A   | PLANNED |
+| S8    | Docs, glossary, release note                                       | A   | DONE    |
 | S9    | `smoke:agent-mcp` and the gates                                    | A   | PLANNED |
 | S10   | `go_live` without the dialog                                       | B   | PLANNED |
 | S11   | Sources, audio, captions, backgrounds, banner editing              | B   | PLANNED |
@@ -1134,17 +1134,23 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
 - **The surface** (`lib/agent-surface.ts`, `AgentSurfacePublisher`): lazy,
   latest-value, deduped, 150 ms debounce, republish on reconnect, bounded
   retry, and published only while Agents is on (`agents.status`, seeded on
-  `backend.ready`). Fields: `version`, `recordBlockedReason?`,
-  `liveBlockedReason?`, `scene {id, name, kind, modified}`, `scenes [{id,
-  name, kind}]`, `microphone {muted, name?}`, `systemAudio {on, available}`,
-  `takeoverId?`, `takeovers [{id, name}]`, `sounds [{id, name, playing}]`,
-  `background? {liveId, look} | {picture: true}`, `captions {on, state}`,
-  `buddy {on, status?}`, `sources {devices [{id, name, kind, available}],
-  chosen {screenId?, windowId?, cameraId?, microphoneId?}}`, `destinations
-  [{id, platform, label, on, ready, reason?, title?, category?}]`, `windows
-  {notes, streamManager, preview}`. Never a key, server URL, account id,
-  device detail or path (a test seeds each and scans). The backend reads the
-  surface only while a renderer socket is attached.
+  `backend.ready`). Fields:
+  - `version`, `recordBlockedReason?`, `liveBlockedReason?`;
+  - `scene {id, name, kind, modified}` and `scenes [{id, name, kind}]`;
+  - `microphone {muted, name?}` and `systemAudio {on, available}`;
+  - `takeoverId?`, `takeovers [{id, name}]`, `sounds [{id, name, playing}]`;
+  - `background?` (`{liveId, look}` or `{picture: true}`);
+  - `captions {on, state}` and `buddy {on, status?}`;
+  - `sources.devices [{id, name, kind, available}]` and `sources.chosen`
+    (`screenId?`, `windowId?`, `cameraId?`, `microphoneId?`);
+  - `destinations`, each `{id, platform, label, on, ready}` plus
+    `reason?`, `title?` and `category?`;
+  - `windows {notes, streamManager, preview}`.
+
+  Never a key, server URL, account id, device detail or path (a test seeds
+  each and scans). The backend reads the surface only while a renderer
+  socket is attached.
+
 - **Notices (D11)**: the backend fills the catalog `notice` for a
   successful `onAir` call (`{agent}`, then `{field}` from the arguments,
   then from the structured result) and puts it on the `agents.activity`
@@ -1170,3 +1176,24 @@ videorc-mcp -p videorc-backend`): **4.9 MB** (4,918,064 bytes), 3.8 MB
 - **Smoke input**: `FakeChatConfig.texts` (deserialize-only) rotates fake
   message texts, so S9 can seed an injection line.
 
+### S8 (2026-10-27)
+
+- `docs/agents-mcp.md`: the streamer half (connect, the per-app lines, the
+  tools, Activity, notices, Stop, privacy, chat is viewer-written, Stream
+  Deck and phone unchanged) and the developer half (the shape, catalog,
+  role, listener, registry, discovery, bridge, a call start to finish, the
+  surface, `get_picture`, `read_chat`, notices, adding a tool), with the
+  Security table as the leak argument and the D9 crosses/never list.
+- `docs/remote-control.md`: one paragraph pointing at it; the remote and
+  Phone allowlists, `RemoteIntent`, `LAN_EVENTS` and the Stream Deck's Go
+  Live behaviour are unchanged (D19).
+- `AGENTS.md`: the `pnpm smoke:agent-mcp` bullet beside the remote-control
+  one.
+- Glossary (`CONTEXT.md`): an **Agents** section with "Agents" and
+  "Videorc MCP".
+- **Release note** (for the PR body; the changelog file is written at
+  release time, `changelog/README.md`): "Agents: let Claude, Cursor, Codex
+  and other AI agents on your computer run Videorc. Turn it on in Settings →
+  Remote → Agents, connect your app, and ask it to switch scenes, play
+  sounds, record, read chat or find your recordings. Off by default, and
+  nothing listens on the network."
