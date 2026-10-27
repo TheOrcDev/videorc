@@ -3681,6 +3681,18 @@ async fn start_session_with_timeline(
     if let Some(replay) = params.replay.as_mut() {
         replay.seconds = crate::replay_buffer::clamp_seconds(replay.seconds);
     }
+    // Refusals that depend only on the request come before the hand-over: a
+    // refused Record used to stop the clip buffer first, and the re-armed ring
+    // started empty (retest 152: 24 s buffered -> 2 s).
+    hydrate_stream_key_secret_refs(&state, &mut params)?;
+    normalize_stream_only_output_video(&mut params)?;
+    validate_session_entitlements(&params, &entitlements::current_entitlements())?;
+    validate_outputs(&params)?;
+    if let Some(scene) = params.scene.as_ref()
+        && let Err(message) = validate_scene_background(scene)
+    {
+        bail!(message);
+    }
     // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
     // over here, so no caller meets "A capture session is already running"
     // because of the buffer. The new session carries its own ring.
@@ -3743,9 +3755,6 @@ async fn start_session_with_timeline(
     // decision is implemented in a later port phase.
     ensure_platform_encoder_supported()?;
 
-    hydrate_stream_key_secret_refs(&state, &mut params)?;
-    normalize_stream_only_output_video(&mut params)?;
-    validate_session_entitlements(&params, &entitlements::current_entitlements())?;
     let caption_start_intent_generation = if live_captions_requested(&params) {
         crate::captions::reserve_caption_session_start(&state).await
     } else {
@@ -3779,12 +3788,6 @@ async fn start_session_with_timeline(
         );
     }
     timeline.mark(RecordingStartPhase::FfmpegWorkPermit);
-    validate_outputs(&params)?;
-    if let Some(scene) = params.scene.as_ref()
-        && let Err(message) = validate_scene_background(scene)
-    {
-        bail!(message);
-    }
 
     let ffmpeg_path = resolve_ffmpeg_path(params.output.ffmpeg_path.clone());
     // Must run before anything below sizes capture, compositor, bridge or
@@ -29689,6 +29692,35 @@ mod tests {
         let mut streaming = base_params(true, true);
         streaming.output.video.fps = 60;
         assert!(!record_only_bridge_60fps_eligible(&streaming));
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_is_refused_before_the_clip_buffer_hands_over() {
+        // Retest 152: separate files refused on Linux, but only after Record
+        // had stopped the clip buffer, so the re-armed ring started empty.
+        // A ring start in flight makes the hand-over wait up to its 5 s
+        // timeout and fail with "Clips are still starting"; the request's
+        // own refusal must come first.
+        let state = test_state();
+        let _ring_starting = crate::replay_buffer::begin_start_in_flight(&state);
+        let mut params = base_params(true, false);
+        params.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: false,
+            });
+        let started = Instant::now();
+        let error = format!(
+            "{:#}",
+            start_session(state.clone(), params).await.unwrap_err()
+        );
+        assert!(error.contains("separate-source-recordings-"), "{error}");
+        assert!(
+            started.elapsed() < REPLAY_HANDOVER_CLEANUP_TIMEOUT / 5,
+            "refused after {:?}",
+            started.elapsed()
+        );
+        assert!(state.recording.lock().await.is_none());
     }
 
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
