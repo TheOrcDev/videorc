@@ -1,5 +1,18 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
+  Owner request: live chat in the Studio in a small window, optional with a
+  switch, a click putting a message on stream, less detail than the Stream
+  Manager. While on air, a Chat section sits in the inspector under
+  Session: each message is the name, the words and the platform mark, and a
+  click shows it on stream through the same highlight the Stream Manager
+  uses. It follows the newest message, has Open Stream Manager and a hide
+  button with Undo, and is drawn on an LCD screen with Retro LCD. It is on by
+  default and appears only on air. The switch lives in Settings → General →
+  Chat, with "Chat in Studio" in ⌘K. Renderer only, in its own lazy chunk;
+  `smoke:studio-chat` proves the card in the stream output. **PLANNED**:
+  four owner questions open (placement, default, Retro LCD, avatars), each
+  with a recommendation.
 - 2026-10-27: [Plan 203](203-first-run-permissions.md), First-run setup,
   step 1: permissions. Owner request: onboarding only on the first launch,
   a Settings button to run it again, and permissions done perfectly first.
