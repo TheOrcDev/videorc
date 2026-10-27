@@ -128,7 +128,8 @@ async function evaluate(expression) {
 const instrument = `(() => {
   const evidence = window.__firstRunSmoke = {
     documentId: crypto.randomUUID(), mountedAt: null, movingAt: null, setupEver: false,
-    workspaceBeforeSetup: false, whatsNewOverSetup: false, draws: [], contexts: []
+    workspaceBeforeSetup: false, whatsNewOverSetup: false, draws: [], contexts: [], tones: [],
+    flipMark: null
   };
   const draw = WebGL2RenderingContext.prototype.drawArrays;
   WebGL2RenderingContext.prototype.drawArrays = function(...args) {
@@ -144,16 +145,22 @@ const instrument = `(() => {
       evidence.setupEver = true;
       evidence.mountedAt ??= performance.now();
       if (document.querySelector('[data-first-run-backdrop="moving"]')) evidence.movingAt ??= performance.now();
+      const tone = document.querySelector('[data-first-run-backdrop]')?.dataset.firstRunBackdropTone;
+      if (tone && tone !== evidence.tones.at(-1)?.tone) evidence.tones.push({ tone, at: performance.now() });
       if (Array.from(document.querySelectorAll('[role="dialog"]')).some(el => /What's new in Videorc/.test(el.textContent))) evidence.whatsNewOverSetup = true;
     } else if (!evidence.setupEver && document.querySelector('aside')) evidence.workspaceBeforeSetup = true;
   };
-  new MutationObserver(observe).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-first-run-backdrop', 'data-first-run-setup'] });
+  new MutationObserver(observe).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-first-run-backdrop', 'data-first-run-backdrop-tone', 'data-first-run-setup'] });
   observe();
 })();`
 
 const stateExpression = `(() => {
   const setup = document.querySelector('[data-first-run-setup]');
   const backdrop = document.querySelector('[data-first-run-backdrop]');
+  const picture = backdrop?.querySelector('[data-first-run-backdrop-picture]');
+  const poster = picture?.querySelector('img');
+  // Null for a moment while a reload swaps the document.
+  const root = document.documentElement?.classList;
   const e = window.__firstRunSmoke;
   const recordRaw = localStorage.getItem('videorc.firstRun');
   return {
@@ -168,6 +175,12 @@ const stateExpression = `(() => {
     backdrop: backdrop?.dataset.firstRunBackdrop ?? null,
     reason: backdrop?.dataset.firstRunBackdropReason ?? null,
     look: backdrop?.dataset.firstRunBackdropLook ?? null,
+    theme: root?.contains('light') ? 'light' : root?.contains('dark') ? 'dark' : null,
+    tone: backdrop?.dataset.firstRunBackdropTone ?? null,
+    pictureFilter: picture ? getComputedStyle(picture).filter : null,
+    posterFilter: poster ? getComputedStyle(poster).filter : null,
+    moreContrast: matchMedia('(prefers-contrast: more)').matches,
+    toneHistory: e?.tones.map(t => t.tone) ?? [],
     canvasCount: document.querySelectorAll('[data-first-run-backdrop-canvas] canvas').length,
     recordRaw, record: recordRaw ? JSON.parse(recordRaw) : null,
     whatsNew: Array.from(document.querySelectorAll('[role="dialog"]')).some(el => /What's new in Videorc/.test(el.textContent)),
@@ -234,7 +247,40 @@ async function click(selector) {
   )
 }
 
-async function motionSample() {
+// Media features stay emulated until the next call replaces them all.
+async function emulate(features = {}) {
+  await cdp.call('Emulation.setEmulatedMedia', {
+    features: Object.entries(features).map(([name, value]) => ({ name, value }))
+  })
+}
+
+// Two frames: React has rendered the media or theme change and it is painted.
+const settled = async () => {
+  await evaluate('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+  return state()
+}
+
+// The app's own theme key, as Settings → Appearance writes it; next-themes
+// follows a storage event, as when another window changes it.
+async function setTheme(theme) {
+  await evaluate(
+    `localStorage.setItem('videorc.theme', ${JSON.stringify(theme)}); window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: ${JSON.stringify(theme)} }))`
+  )
+}
+
+// Plan 208 S5: how long the backdrop takes to turn after a theme change,
+// measured on the renderer's clock from just before the change is asked for.
+async function toneFlip(change, tone) {
+  const mark = await evaluate('window.__firstRunSmoke.flipMark = performance.now()')
+  await change()
+  await waitFor(`tone ${tone}`, (s) => s.tone === tone, 2000)
+  const at = await evaluate(
+    `window.__firstRunSmoke.tones.find(t => t.at >= window.__firstRunSmoke.flipMark && t.tone === ${JSON.stringify(tone)})?.at ?? null`
+  )
+  return { ...(await settled()), toneFlipMs: at === null ? null : at - mark }
+}
+
+async function motionSample(prefix = '') {
   const frames = []
   const listener = (message) => {
     if (message.method !== 'Page.screencastFrame') return
@@ -264,8 +310,8 @@ async function motionSample() {
   const hash = (frame) =>
     frame ? createHash('sha256').update(Buffer.from(frame.data, 'base64')).digest('hex') : null
   for (const [name, frame] of [
-    ['motion-first', frames[0]],
-    ['motion-last', frames.at(-1)]
+    [`${prefix}motion-first`, frames[0]],
+    [`${prefix}motion-last`, frames.at(-1)]
   ]) {
     if (frame) writeFileSync(join(output, `${name}.png`), Buffer.from(frame.data, 'base64'))
   }
@@ -345,6 +391,54 @@ try {
       (s) => ['moving', 'still'].includes(s.backdrop) && s.reason !== 'reduced-motion'
     )
   )
+
+  // Plan 208 S5 (D3): light turns the Polished chrome around. Dark, as opened,
+  // draws it as it is; more contrast deepens the shader's Dim.
+  await check('tone', await settled())
+  await emulate({ 'prefers-contrast': 'more' })
+  await check('tone', await settled())
+  await screenshot('dark-more-contrast')
+  // Follow the system, as macOS's Auto appearance does, and turn it to light
+  // while Welcome is open: the chrome turns at once, with no reload.
+  await emulate({ 'prefers-color-scheme': 'dark' })
+  await setTheme('system')
+  await check('tone', await settled())
+  await check('tone', await toneFlip(() => emulate({ 'prefers-color-scheme': 'light' }), 'inverse'))
+  await screenshot('light-moving')
+  await check('motion', await motionSample('light-'))
+  await emulate({ 'prefers-color-scheme': 'light', 'prefers-contrast': 'more' })
+  await check('tone', await settled())
+  await screenshot('light-more-contrast')
+  // The still is the poster, inverted with the canvas's picture.
+  await emulate({ 'prefers-color-scheme': 'light', 'prefers-reduced-motion': 'reduce' })
+  const lightStill = await waitFor('light reduced motion still', (s) => s.backdrop === 'still')
+  await check('reduced-motion', lightStill)
+  await check('tone', await settled())
+  await screenshot('light-still')
+  await emulate({ 'prefers-color-scheme': 'light' })
+  await check(
+    'moving',
+    await waitFor(
+      'light motion restored',
+      (s) => ['moving', 'still'].includes(s.backdrop) && s.reason !== 'reduced-motion'
+    )
+  )
+  await check('tone', await toneFlip(() => emulate({ 'prefers-color-scheme': 'dark' }), 'normal'))
+  await setTheme('dark')
+  await emulate()
+  // Opened in light: the first frame is already turned, never dark first.
+  await reloadWith({ 'videorc.theme': 'light' })
+  await check(
+    'fresh',
+    await waitFor('light fresh rows', (s) => s.setup === 'open' && s.rows.length === 4)
+  )
+  await check(
+    'moving',
+    await waitFor('light moving backdrop', (s) => ['moving', 'still'].includes(s.backdrop), 5000)
+  )
+  const lightOpen = await settled()
+  await check('tone', { ...lightOpen, tonesSeen: lightOpen.toneHistory })
+  await screenshot('light-fresh')
 
   const pressedPrimary = (await state()).primary
   await click('[data-first-run-primary]')

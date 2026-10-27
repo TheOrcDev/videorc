@@ -32,6 +32,16 @@ const observations = {
     drawCount: 60,
     drawFps: 30
   },
+  tone: {
+    setup: 'open',
+    backdrop: 'moving',
+    theme: 'light',
+    tone: 'inverse',
+    moreContrast: false,
+    pictureFilter: 'invert(1)',
+    posterFilter: 'none',
+    toneFlipMs: 40
+  },
   'reduced-motion': { backdrop: 'still', reason: 'reduced-motion', canvasCount: 0 },
   finish: {
     ...workspace,
@@ -85,6 +95,16 @@ for (const [step, change] of [
   ['motion', { drawFps: 31.01 }],
   ['motion', { drawCount: 0 }],
   ['motion', { durationMs: 100 }],
+  ['tone', { tone: 'normal' }],
+  ['tone', { theme: null }],
+  ['tone', { setup: null }],
+  ['tone', { pictureFilter: 'none' }],
+  ['tone', { pictureFilter: 'invert(1) brightness(0.85)' }],
+  ['tone', { posterFilter: 'brightness(0.7)' }],
+  ['tone', { toneFlipMs: FIRST_RUN_SMOKE_LIMITS.toneFlipWithinMs + 1 }],
+  ['tone', { toneFlipMs: null }],
+  ['tone', { tonesSeen: ['normal', 'inverse'] }],
+  ['tone', { tonesSeen: [] }],
   ['reduced-motion', { reason: 'no-gpu' }],
   ['finish', { retainedContextsLost: false }],
   ['finish', { pressedPrimary: 'Continue' }],
@@ -110,6 +130,42 @@ test('Continue writes done, with the same completion checks as Skip for now', ()
     }).pass,
     true
   )
+})
+
+test('tone: dark draws the chrome as it is, its poster dimmed like the shader', () => {
+  const dark = {
+    ...observations.tone,
+    theme: 'dark',
+    tone: 'normal',
+    pictureFilter: 'none',
+    posterFilter: 'brightness(0.7)'
+  }
+  assert.deepEqual(evaluateFirstRunSmokeStep('tone', dark), { pass: true, failures: [] })
+  assert.equal(evaluateFirstRunSmokeStep('tone', { ...dark, tone: 'inverse' }).pass, false)
+  assert.equal(
+    evaluateFirstRunSmokeStep('tone', { ...dark, pictureFilter: 'invert(1)' }).pass,
+    false
+  )
+  assert.equal(evaluateFirstRunSmokeStep('tone', { ...dark, posterFilter: 'none' }).pass, false)
+})
+
+test('tone: light under more contrast tones the chrome down after the invert', () => {
+  const more = {
+    ...observations.tone,
+    moreContrast: true,
+    pictureFilter: 'invert(1) brightness(0.85)'
+  }
+  assert.deepEqual(evaluateFirstRunSmokeStep('tone', more), { pass: true, failures: [] })
+  assert.equal(
+    evaluateFirstRunSmokeStep('tone', { ...more, pictureFilter: 'invert(1)' }).pass,
+    false
+  )
+})
+
+test('tone: a cold open shows only its own theme', () => {
+  const cold = { ...observations.tone, tonesSeen: ['inverse'] }
+  delete cold.toneFlipMs
+  assert.equal(evaluateFirstRunSmokeStep('tone', cold).pass, true)
 })
 
 test('unknown steps fail closed', () => {

@@ -40,7 +40,7 @@
  *              cards, chart tooltips, toasts) · glass-float-dialog (dialogs,
  *              the palette, the error panel) · glass-float-tooltip. Flat,
  *              opaque tiers of the solid with a rim and a drop shadow (plan
- *              072, plan 091 D6).
+ *              072, plan 091 D6); light dialogs a deeper drop (plan 208 S5).
  *   Text tiers text-foreground (primary) · text-muted-foreground (secondary) ·
  *              text-subtle (tertiary). Three tiers, nothing else.
  *   Radius     rounded-panel (12px: containers, dialogs) · rounded-row (8px:
@@ -163,6 +163,12 @@
   --glass-float-tooltip: oklch(0.99 0 0);
   --glass-float-rim: oklch(0 0 0 / 10%);
   --glass-float-drop: 0 12px 36px oklch(0 0 0 / 14%), 0 1px 3px oklch(0 0 0 / 8%);
+  /* The dialog tier's own drop (plan 208 S5): the Welcome card sits on the
+     white liquid chrome with no overlay, where the popup drop melted into
+     the white crests and only the rim drew the edge. A deeper ambient and a
+     10 px halo on every side separate porcelain from white; every dialog,
+     the palette and the error panel take it. */
+  --glass-float-dialog-drop: 0 16px 48px oklch(0 0 0 / 20%), 0 1px 10px oklch(0 0 0 / 14%);
 
   /* Glass chips (plan 050, D9; plan 208 S4 crisper): the porcelain twin of
      the dark chip glass, a whiter fill under a full white top line. */
@@ -314,6 +320,7 @@
   --glass-float-tooltip: var(--glass-solid);
   --glass-float-rim: oklch(1 0 0 / 10%);
   --glass-float-drop: 0 14px 44px oklch(0 0 0 / 50%), 0 1px 3px oklch(0 0 0 / 30%);
+  --glass-float-dialog-drop: var(--glass-float-drop);
 
   /* Glass chips (plan 050, D9; plan 208 S4 crisper): white 13% to 3% with a
      9% rim, an 18% top highlight and a soft drop. Emphasis chips tint the
@@ -660,7 +667,7 @@ html:has([data-first-run-backdrop], [data-first-run-surface]) [data-chrome-groun
 @utility glass-float-dialog {
   border-color: var(--glass-float-rim);
   background-color: var(--glass-float-dialog);
-  box-shadow: var(--glass-float-drop);
+  box-shadow: var(--glass-float-dialog-drop);
 }
 
 @utility glass-float-tooltip {

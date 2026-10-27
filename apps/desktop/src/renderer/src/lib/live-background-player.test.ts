@@ -15,6 +15,7 @@ import {
   startBackdropPlayer,
   welcomeBackdropClockSpec,
   welcomeBackdropDim,
+  welcomeBackdropPictureFilter,
   type BackdropGuard
 } from './live-background-player'
 
@@ -52,11 +53,29 @@ describe('the welcome backdrop', () => {
     expect(welcomeBackdropClockSpec('gold')).not.toBeNull()
   })
 
-  it('dims only under dark, more with more contrast, never past the shader clamp', () => {
-    expect(welcomeBackdropDim({ dark: true, moreContrast: false })).toBeCloseTo(0.3)
-    expect(welcomeBackdropDim({ dark: false, moreContrast: false })).toBe(0)
-    expect(welcomeBackdropDim({ dark: true, moreContrast: true })).toBeCloseTo(0.5)
-    expect(welcomeBackdropDim({ dark: false, moreContrast: true })).toBeCloseTo(0.2)
+  it('dims the shader only under dark, more with more contrast, never past the shader clamp', () => {
+    const dark = welcomeBackdropDim({ dark: true, moreContrast: false })
+    expect(dark).toMatchObject({ tone: 'normal', brightness: 1 })
+    expect(dark.shader).toBeCloseTo(0.3)
+    const darkMore = welcomeBackdropDim({ dark: true, moreContrast: true })
+    expect(darkMore).toMatchObject({ tone: 'normal', brightness: 1 })
+    expect(darkMore.shader).toBeCloseTo(0.5)
+    // Under dark nothing is inverted and nothing is filtered after the shader.
+    expect(welcomeBackdropPictureFilter(dark)).toBeUndefined()
+    expect(welcomeBackdropPictureFilter(darkMore)).toBeUndefined()
+  })
+
+  it('turns light around with no shader Dim, toned after the invert (plan 208 D3)', () => {
+    // The shader's Dim darkens before the invert and would wash the chrome
+    // out after it, so light's tone is a CSS brightness after the invert.
+    const light = welcomeBackdropDim({ dark: false, moreContrast: false })
+    expect(light).toEqual({ tone: 'inverse', shader: 0, brightness: 1 })
+    // The owner's crisp invert: nothing after it.
+    expect(welcomeBackdropPictureFilter(light)).toBe('invert(1)')
+    // More contrast takes the white chrome down so the porcelain card separates.
+    const lightMore = welcomeBackdropDim({ dark: false, moreContrast: true })
+    expect(lightMore).toEqual({ tone: 'inverse', shader: 0, brightness: 0.85 })
+    expect(welcomeBackdropPictureFilter(lightMore)).toBe('invert(1) brightness(0.85)')
   })
 
   it('stays still under reduced motion or without hardware acceleration', () => {
