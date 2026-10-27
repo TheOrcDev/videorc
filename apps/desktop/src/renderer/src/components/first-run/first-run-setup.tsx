@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
+import { DestinationsStep } from '@/components/first-run/destinations-step'
 import { GoalStep } from '@/components/first-run/goal-step'
 import { PermissionsStep } from '@/components/first-run/permissions-step'
 import { SoundStep } from '@/components/first-run/sound-step'
@@ -30,7 +31,8 @@ export const FIRST_RUN_LEAVE_MS = 150
 const STEP_SIZES: Partial<Record<FirstRunStep, FirstRunCardSize>> = {
   permissions: 'lg',
   goal: 'lg',
-  sound: 'lg'
+  sound: 'lg',
+  destinations: 'lg'
 }
 
 const stepOrder = (step: FirstRunStep): number => FIRST_RUN_STEPS.indexOf(step)
@@ -106,7 +108,8 @@ export function FirstRunSetup({
     skip: () => setLeaving({ completion: 'skipped' }),
     goTo: (target) => {
       if (steps.includes(target)) enter(target)
-    }
+    },
+    leaveTo: (tab) => setLeaving({ completion: 'done', openTab: tab })
   }
 
   // Grants flip in System Settings or the native prompt while Videorc is in
@@ -180,6 +183,8 @@ export function FirstRunSetup({
                 <GoalStep key={step} goal={goal} onPick={pickGoal} />
               ) : step === 'sound' ? (
                 <SoundStep key={step} />
+              ) : step === 'destinations' ? (
+                <DestinationsStep key={step} />
               ) : (
                 <PermissionsStep key={step} />
               )}

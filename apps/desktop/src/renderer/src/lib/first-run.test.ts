@@ -453,7 +453,7 @@ describe('first-run startup ordering', () => {
     // A replay returns to its page before the record could be written.
     const leave = shell.slice(
       shell.indexOf('const leaveFirstRunSetup'),
-      shell.indexOf('[replay, setActive]')
+      shell.indexOf('[replay, selectLivestreamView, setActive]')
     )
     expect(leave.indexOf('setActive(openTab ?? replay.returnTo)')).toBeGreaterThan(0)
     expect(leave.indexOf('setActive(openTab ?? replay.returnTo)')).toBeLessThan(

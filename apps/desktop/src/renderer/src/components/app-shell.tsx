@@ -365,6 +365,8 @@ function AppShellContent(): ReactElement {
   // replay writes nothing and returns to the page it came from.
   const leaveFirstRunSetup = useCallback(
     ({ completion, openTab }: FirstRunLeave) => {
+      // "Open Livestream" (plan 207 D10) lands on Setup, where stream keys go.
+      if (openTab === 'live') selectLivestreamView('setup')
       if (replay) {
         setReplay(null)
         setActive(openTab ?? replay.returnTo)
@@ -374,7 +376,7 @@ function AppShellContent(): ReactElement {
       setFirstRunVisibility('hide')
       setActive(openTab ?? 'studio')
     },
-    [replay, setActive]
+    [replay, selectLivestreamView, setActive]
   )
 
   // The shell's chords (plan 174 S3.21): ⌘ on macOS, Ctrl elsewhere (A-17),

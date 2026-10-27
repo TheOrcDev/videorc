@@ -33,7 +33,16 @@ const studio = vi.hoisted(() => ({
         systemAudioEnabled: false,
         systemAudioGainDb: -6
       },
-      sources: { microphoneId: 'mic', microphoneName: 'MacBook Pro Microphone' }
+      sources: { microphoneId: 'mic', microphoneName: 'MacBook Pro Microphone' },
+      streaming: {
+        targets: ['youtube', 'twitch', 'kick', 'x'].map((id) => ({
+          id,
+          platform: id,
+          enabled: false,
+          authMode: 'manual-rtmp'
+        })),
+        enabledTargetIds: [] as string[]
+      }
     },
     setCaptureConfig: vi.fn(),
     selectedMicrophone: undefined,
@@ -43,7 +52,16 @@ const studio = vi.hoisted(() => ({
     audioBusActive: false,
     systemAudioConfirmed: null,
     systemAudioJoining: false,
-    systemAudioIssue: null
+    systemAudioIssue: null,
+    // Where you stream (plan 207 S7).
+    entitlements: null,
+    platformAccounts: [] as unknown[],
+    oauthProviderCredentials: [] as unknown[],
+    connectPlatformAccount: vi.fn(async () => null),
+    patchStreamingTarget: vi.fn(),
+    xNativeCapability: null,
+    refreshXNativeCapability: vi.fn(async () => undefined),
+    authorizeXLive: vi.fn(async () => undefined)
   },
   rows: [] as SystemAccessRow[]
 }))
@@ -101,6 +119,8 @@ beforeEach(() => {
   studio.core.mediaAccess = { camera: 'granted', microphone: 'granted', screen: 'granted' }
   studio.core.runtimeInfo = { platform: 'darwin', hardwareAccelerationDisabled: true }
   studio.rows = allGranted()
+  studio.core.platformAccounts = []
+  studio.core.oauthProviderCredentials = []
 })
 
 describe('FirstRunSetup', () => {
@@ -282,5 +302,57 @@ describe('FirstRunSetup', () => {
     expect(markup).toMatch(/Videorc can(&#x27;|')t hear your microphone yet\./)
     expect(markup).toContain('Back to permissions')
     expect(markup).not.toContain('data-mic-level-meter=""')
+  })
+
+  it('Where you stream: four sign-in rows, the stream-key way out, and Open Studio last (plan 207 S7)', () => {
+    const markup = render(
+      { kind: 'first-run' },
+      { initialStep: 'destinations', initialGoal: 'stream' }
+    )
+    expect(markup).toContain('data-first-run-step="destinations"')
+    expect(markup).toMatch(/<h1[^>]*id="first-run-title"[^>]*>Where you stream<\/h1>/)
+    for (const platform of ['youtube', 'twitch', 'kick', 'x']) {
+      expect(markup).toContain(`data-first-run-destination="${platform}"`)
+    }
+    expect(markup.match(/>Sign in…</g)).toHaveLength(4)
+    expect(markup).toContain('Using a stream key, TikTok or Instagram? Set it up in Livestream.')
+    expect(markup).toContain('>Open Livestream<')
+    expect(markup).toMatch(/data-first-run-primary=""[^>]*>Open Studio</)
+  })
+
+  it('Where you stream: a connected account shows its name and no button; replay ends on Done', () => {
+    studio.core.platformAccounts = [
+      {
+        platform: 'twitch',
+        status: 'connected',
+        accountId: 't1',
+        accountLabel: 'orcdev',
+        updatedAt: 'x',
+        scopes: []
+      }
+    ]
+    const markup = render(
+      { kind: 'replay', returnTo: 'settings' },
+      { initialStep: 'destinations', initialGoal: 'both' }
+    )
+    expect(markup).toMatch(/data-first-run-destination="twitch"[^>]*data-state="connected"/)
+    expect(markup).toContain('orcdev')
+    expect(markup.match(/>Sign in…</g)).toHaveLength(3)
+    expect(markup).toMatch(/data-first-run-primary=""[^>]*>Done</)
+  })
+
+  it('Where you stream: a build without sign-in says so and offers no button', () => {
+    studio.core.oauthProviderCredentials = [{ platform: 'kick', ready: false, message: 'missing' }]
+    const markup = render(
+      { kind: 'first-run' },
+      { initialStep: 'destinations', initialGoal: 'stream' }
+    )
+    expect(markup).toMatch(/Signing in to Kick isn(&#x27;|')t available in this build\./)
+    expect(markup.match(/>Sign in…</g)).toHaveLength(3)
+  })
+
+  it('skips Where you stream for Recordings: Sound check is the last step', () => {
+    const markup = render({ kind: 'first-run' }, { initialStep: 'sound', initialGoal: 'record' })
+    expect(markup).toMatch(/data-first-run-primary=""[^>]*>Open Studio</)
   })
 })

@@ -3,6 +3,7 @@ import { createContext, useContext, type ReactElement, type ReactNode, type Ref 
 import { ArrowLeftIcon, ArrowRightIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { DIALOG_SIZE_CLASS, DIALOG_SURFACE_CLASS, DialogBody } from '@/components/ui/dialog'
+import type { WorkspaceTab } from '@/components/workspace-nav'
 import type { FirstRunSetupMode, FirstRunStep } from '@/lib/first-run'
 import { cn } from '@/lib/utils'
 
@@ -36,6 +37,8 @@ export interface FirstRunStepFrame {
   skip: () => void
   /** Goes straight to an earlier step that applies here ("Back to permissions"). */
   goTo: (step: FirstRunStep) => void
+  /** Finishes setup and opens another page than the usual one ("Open Livestream"). */
+  leaveTo: (tab: WorkspaceTab) => void
 }
 
 const FrameContext = createContext<FirstRunStepFrame | null>(null)
