@@ -6,12 +6,14 @@
   The Liquid Chrome live background fills the window (the shared WebGL2
   player, lazy, 30 fps cap, poster when still), and one centred card asks
   for Screen Recording, System audio, Microphone and Camera in place, with
-  live states and proof. No OS prompt appears before Videorc explains it
-  (today main and the backend both ask at launch). Reopen and resume handle
-  a grant macOS only applies after a relaunch. Existing installs never see
-  it; smokes skip it by default. "Run setup again…" sits in Settings →
-  General and ⌘K. S0 measures first launch on a clean macOS account first.
-  **PLANNED**; D1 and D4 decided by the owner, D2, D3 and D5 to D8 owed.
+  live states and proof. Launch requests were removed; Reopen and resume
+  handle grants that require a relaunch. Existing installs skip it; smokes
+  suppress it by default. "Run setup again…" sits in Settings → General
+  and ⌘K. **SHIPPED IN PR**: S1 to S7 implemented, Polished at Normal
+  chosen by the owner. Owner-owed: S0 clean macOS account (cold launch,
+  main's identity, System audio and Reopen), light and dark by-eye, Windows
+  tester pass, long refused-row copy, review of D2/D3/D5 to D7 shipped as
+  recommended. [Acceptance](../docs/acceptance/2026-10-27-first-run-permissions.md).
 - 2026-10-26: [Plan 202](202-buddy-talks-in-its-bubble.md), Buddy talks in
   its bubble. Owner request: a mode where Buddy talks only in its bubble, not
   in chat, and a switch for whether Buddy shows on takeover screens. A fourth

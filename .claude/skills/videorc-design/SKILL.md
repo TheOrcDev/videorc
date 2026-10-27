@@ -59,6 +59,12 @@ primitive ([Primitives](#primitives)) and added the guards that hold them.
 Binding. Follow them as written; a change that would undo one is a question
 for the owner, not a design choice.
 
+- **First-run setup paints Liquid Chrome** (2026-10-27, plan 203). The
+  Welcome screen is the only place outside a scene where a live background
+  runs: Liquid Chrome, Polished, Normal motion, edge to edge, dimmed under
+  dark. Setup sits in one centred card on the dialog tier. The backdrop is
+  opaque and makes no glass claim; it is decoration and never carries text.
+  Every other window rule stands.
 - **The toolbar holds only the page title** (2026-09-23). Record and Go
   Live… sit at the top of the Studio inspector, and a page's own actions sit
   in its body.
@@ -862,6 +868,7 @@ Words, numbers and navigation
 | Per-item actions             | `KebabMenu`                                                                 |
 | Global state and hints       | `StatusBar` + `StatusBarHint` / `StatusBarAction`                           |
 | Palette / searchable list    | `Command` (+ `CommandDialog`), palette scale                                |
+| First-run setup              | The Liquid Chrome backdrop and one card on the dialog tier                  |
 | Modals                       | `Dialog` with `size`, `DialogBody` for the scroll                           |
 | Destructive confirmations    | `ConfirmDialog` (on `AlertDialog`)                                          |
 | Segmented choice (2–4)       | `SegmentedControl` (the glass Tabs track)                                   |

@@ -1,9 +1,12 @@
 # Plan 203: first-run setup, step 1: permissions
 
-**Status:** PLANNED 2026-10-27. The owner settled D1 and D4 on 2026-10-27
-(the Liquid Chrome backdrop with one centred card, four permission rows).
-D2, D3 and D5 to D8 are owed before S3; S0 to S2 and S4 can start now (they
-hold under every answer). **Priority:** P1. Every new user meets this
+**Status:** SHIPPED IN PR 2026-10-27. S1 to S7 implemented. D1 and D4
+were owner decisions; D2, D3 and D5 to D7 shipped as recommended and await
+owner review. D8 was settled by the owner's by-eye on 2026-10-27: Polished
+at Normal motion. S0 clean-account evidence, light and dark by-eye,
+Windows acceptance and refused-row copy review remain owner-owed. See
+`docs/acceptance/2026-10-27-first-run-permissions.md` for gate results and
+outstanding checks. **Priority:** P1. Every new user meets this
 first. Owner request: "a better onboarding for our users, only the first
 time they are opening the app. And also some kind of button in settings
 where they can start with their onboarding again. First and most basic, we
@@ -199,7 +202,7 @@ changes them.
     on a build without loopback). Microphone and Camera keep their switch
     line.
 - **D5. The Settings button.** **Recommended:** Settings → General, a new
-  last section "Setup" holding one `SettingsRow`: label "First-run setup",
+  section "Setup" under Stream Manager for column balance holding one `SettingsRow`: label "First-run setup",
   description "Go through the welcome steps again, starting with
   permissions.", button **"Run setup again…"**. ⌘K lists the same command.
   It's disabled with "Finish your recording or livestream first." while a
@@ -214,21 +217,16 @@ changes them.
   Videorc"; the flow is **first-run setup** in the glossary and in
   Settings, `first-run` in code. "Setup" alone already names the sidebar
   group and Livestream → Setup.
-- **D8. The look.** **Recommended: Mercury, Calm motion, the same look in
-  both themes.** Mercury is the smoother of the two chrome looks, so it
-  stays behind the card instead of competing with it, and black and white
-  chrome is the logo's own material. Dim 30% under the dark theme (so the
-  card's rim reads against the chrome), none under light. Polished (more
-  detail) is the fallback; Gold is warm colour, which the design language
-  keeps for information. Settled at the S4 by-eye from screenshots of all
-  three looks in both themes.
+- **D8. The look. DECIDED (owner by-eye, 2026-10-27): Polished, Normal
+  motion, the same look in both themes.** Mercury at Calm did not read as
+  live. Dim 30% under dark, none under light; higher contrast adds 20% Dim.
 
 ## What the user will see
 
 macOS, first launch, nothing granted yet:
 
 ```
- ● ● ●   ~~~~~~~ Liquid Chrome, Mercury, Calm, edge to edge ~~~~~~~
+ ● ● ●   ~~~~~~~ Liquid Chrome, Polished, Normal, edge to edge ~~~~~~~
 ~~~~~~~~~~  ┌─────────────────────────────────────────────────────┐  ~~~~~~~~~~
 ~~~~~~~~~~  │ [icon 64]  Welcome to Videorc                       │  ~~~~~~~~~~
 ~~~~~~~~~~  │ First, let Videorc record your Mac. macOS asks      │  ~~~~~~~~~~
@@ -252,12 +250,12 @@ macOS, first launch, nothing granted yet:
 ~~~~~~~~~~  │ Recordings stay on this Mac. Cloud AI only runs     │  ~~~~~~~~~~
 ~~~~~~~~~~  │ after you opt in.                                   │  ~~~~~~~~~~
 ~~~~~~~~~~  │                                                     │  ~~~~~~~~~~
-~~~~~~~~~~  │                       [Skip for now]  [Continue]    │  ~~~~~~~~~~
+~~~~~~~~~~  │                                  [Skip for now]    │  ~~~~~~~~~~
 ~~~~~~~~~~  └─────────────────────────────────────────────────────┘  ~~~~~~~~~~
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ```
 
-- **The backdrop** is Liquid Chrome in the D8 look, moving at Calm speed,
+- **The backdrop** is Liquid Chrome in the D8 look, moving at Normal speed,
   covering the whole window under the title band. The poster shows on the
   first frame and the motion continues from it without a jump. With Reduce
   motion on, a GPU in software mode or WebGL unavailable, the poster stays
@@ -269,7 +267,9 @@ macOS, first launch, nothing granted yet:
   dark solid or porcelain), over the same backdrop.
 - **Inside the card:** the app icon (64 px, as in About), the title as the
   window's `h1`, the description, one `GroupedList` of the four rows, the
-  privacy line, and the footer.
+  privacy line, and the footer. The footer has ONE primary: "Continue" when Screen
+  Recording and Microphone are granted, otherwise "Skip for now". S3
+  resolved the original two-button mock to this changing label.
 
 Each row moves through these states. One status chip and at most one
 button per row, from `SystemAccessList`:
@@ -522,7 +522,8 @@ Linux preview).
 **Changes:**
 
 1. **Load lazily.** The backdrop, the two shared scripts and the render
-   JSON load in the setup chunk only; the eager bundle doesn't change. The
+   JSON load in the setup chunk only; the eager gzip budget is 405,000 bytes
+   (raised from 400,000 during execution). The
    wrapper imports the two scripts for their side effect and reads
    `globalThis.VideorcLiveBackground` and `VideorcLiveBackgroundClock`
    with types. If an import needs a change to a shared file (an ES export,
@@ -533,10 +534,10 @@ Linux preview).
    while the setup chunk loads, so the first frame is never bare glass. The
    canvas fades in (150 ms) after its first drawn frame; the clock starts at
    the poster phase, so the motion continues from the picture.
-3. **Draw.** The player draws `liquid-chrome` at the D8 look, Calm, with the
+3. **Draw.** The player draws `liquid-chrome`, Polished, Normal, with the
    theme's Dim; the canvas is the window's size times `devicePixelRatio`,
-   and the player's soft-size rule keeps the internal render at most 1080 on
-   the short side. A resize rebuilds the size, debounced.
+   and the canvas's long side is capped at 1920 device pixels. The player
+   resizes on its next frame and resets the guard's timing window.
 4. **Cheap by design.** At most 30 frames a second (a time gate in
    `requestAnimationFrame`); decoration never needs more. Paused while the
    document is hidden (`hooks/use-document-visible.ts`) and while the window
@@ -595,7 +596,8 @@ keeps the plain variant); `components/app-shell.tsx`; delete
    guard's rule applies), at most the window less 16 px a side, with the
    rows region scrolling. Inside: the app icon (64 px), the title as the
    window's `h1`, the description, one `GroupedList` of the four rows, the
-   privacy line, and the footer with "Skip for now" (ghost) and the primary.
+   privacy line, and the footer with ONE primary: "Continue" when the needed
+   rows are granted, otherwise "Skip for now" (outline).
    Built only from shared primitives (`GroupedList`, `StatusBadge`, `Badge`
    for the tags, `Button`, `Spinner`, `MicLevelMeter`); no new widget.
 3. The shell's chords, ⌘K and the status bar shortcuts are off while setup
@@ -668,32 +670,35 @@ setup"); a dated acceptance doc; `plans/README.md`.
 
 **The owner call for the design skill:** "**First-run setup paints Liquid
 Chrome** (2026-10-27, plan 203). The Welcome screen is the one surface with
-a live background behind the UI: Liquid Chrome in the D8 look, Calm, edge to
-edge, with the setup in one centred card on the dialog tier. The backdrop is
+a live background behind the UI: Liquid Chrome, Polished, Normal motion,
+edge to edge, dimmed under dark, with setup in one centred card on the dialog tier. The backdrop is
 opaque and makes no glass claim; it is decoration and never carries text.
 Every other window rule stands."
 
 **The smoke (dev app, macOS; it opts out of the S1 suppression):**
 
-1. A fresh profile: setup shows before the workspace; the four rows are
-   present; no OS prompt is raised by launch (backend and main log lines
-   from S2 show no request).
-2. The backdrop reads `moving` within 2 s, its canvas pixels change between
-   two reads 1 s apart, and it draws no more than 31 frames a second.
-3. With Reduce motion emulated (`Emulation.setEmulatedMedia`), a fresh
-   profile's backdrop reads `still` with the reason `reduced-motion`.
-4. On this host every grant exists, so every row reads Granted and the
-   primary reads Continue. Continue writes `done`, the Studio mounts, and no
-   backdrop canvas or WebGL context is left.
-5. Relaunch on the same profile: no setup.
-6. A profile seeded with only `videorc.whatsNewLastSeenVersion`: no setup,
-   and the record reads `existing-install`.
-7. A profile seeded with `in-progress`: setup shows again.
-8. Settings → "Run setup again…" opens it; Continue returns to Settings.
-9. What's New never opens over setup.
+1. A fresh isolated profile: setup shows in first-run mode with four resolved
+   rows, an in-progress record and no sidebar. Launch logs are retained;
+   the clean-account S0 pass is the proof of no cold OS prompts.
+2. Measured from setup mount, the backdrop reaches moving within 3 s (the
+   2 s plan target plus 1 s of honest dev-loading and observation slack).
+   A 2.1 s screencast has at least ten changing frames, different first and
+   last PNGs, and measured backdrop draws stay at or below 31 fps. Any
+   unexpected still fails with its reason.
+3. CDP reduced-motion emulation produces a still with reason
+   `reduced-motion`; clearing it restores motion.
+4. The one primary writes done or skipped as its label promises, mounts the
+   workspace, removes the canvas and releases retained backdrop contexts.
+   Grants are observed, never requested by the smoke.
+5. Reload on the same profile: no setup, finished record unchanged.
+6. Only the What's New key seeded: no setup; record becomes existing-install.
+7. An in-progress record resumes setup.
+8. Settings → General → Run setup again… opens replay; the primary returns
+   to Settings, and the record is byte-for-byte unchanged on entry and exit.
+9. With an old What's New version and an in-progress record, no What's New
+   dialog appears over setup during a continuous observer watch.
 
-The not-asked, waiting, refused and reopen paths can't run on a granted
-host; S3's unit matrix covers them and the owner's clean-account pass proves
+The not-asked, waiting, refused and reopen paths need a clean account; S3's unit matrix covers them and the owner's clean-account pass proves
 them.
 
 **Owner clean-account checklist (the real first-run proof):**
@@ -832,7 +837,7 @@ checklist with what's owed.
   every launch since 2026-07-02. Older installs that never launched a
   version since then would see setup once, which is acceptable.
 
-## How to start
+## Original execution order (historical)
 
 1. `git fetch origin && git worktree add -b plan-203-first-run ~/projects/videorc-wt-203-exec origin/main`
    (never the shared checkout).
@@ -844,4 +849,47 @@ checklist with what's owed.
 
 ## Execution notes
 
-(empty)
+Committed slices, from `git log --oneline adee3866..HEAD` (oldest first):
+
+- `baf9caa4`: docs(plans): plan 203, first-run setup step 1: permissions on Liquid Chrome.
+- `1bab9247`: S1, a versioned first-run record and gate.
+- `d0d439a5`: S2, nothing asks at launch; screen asked in place; Reopen.
+- `b012962f`: S4, the Liquid Chrome backdrop.
+- `78af8c9a`: S3, four rows that say everything.
+- `68020fae`: S4 fix, each player owns its canvas; Polished at Normal.
+- `f6a72eb7`: S5, the Welcome card on Liquid Chrome.
+- `04243c5f`: S6, Run setup again… in Settings → General and ⌘K.
+
+S7 adds the smoke, its pure gate/tests and acceptance docs without app
+source changes. The orchestrator reviews and commits this slice.
+
+Execution deviations and settled choices:
+
+- Eager renderer gzip budget: 400,000 → 405,000 bytes.
+- New IPC `app:workspace-shown`: main restores the launch Preview window
+  only once the workspace shows.
+- Clips does not start while setup is open.
+- StrictMode reused a canvas with a lost WebGL context, leaving the backdrop
+  still. Found and fixed by giving each player its own canvas.
+- D8 owner by-eye, 2026-10-27: Polished at Normal shipped; Mercury at Calm
+  did not read as live.
+- Setup sits under Stream Manager in General for column balance, rather
+  than being the last section.
+- Remote-control intents are not gated during replay. The recording and
+  livestream lock still controls entry to replay.
+- S3 resolved the original footer mock to ONE primary, labelled Continue
+  or Skip for now from the required permission rows.
+- D2, D3 and D5 to D7 shipped as recommended; the owner still owes review.
+- Every surface names Videorc (`permissionTargetName`), and the Sources
+  alert no longer offers "Show helper in Finder" (S3, `9bcf01d3` fixed its
+  stale test). That follows this plan's working answer to question 8; if S0
+  finds macOS lists `videorc-backend` as its own entry, the STOP above
+  applies and the helper reveal comes back with the packaging change.
+- The smoke allows 3,000 ms from setup mount to moving, with 1,000 ms slack
+  over the 2,000 ms target. It measures backdrop draws separately from
+  screencast delivery, since card and microphone updates can produce frames.
+
+S0 clean-account measurements are still owed. No cold-prompt, main-identity,
+system-audio grant or Reopen result is inferred from this host's smoke.
+Gate results and remaining acceptance are recorded in
+`docs/acceptance/2026-10-27-first-run-permissions.md`.
