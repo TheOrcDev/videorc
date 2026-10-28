@@ -39,19 +39,9 @@ export function sceneListActive(input: {
   return { kind: 'unsaved' }
 }
 
-/** The library with one scene moved to `toIndex`, or null when nothing moves. */
-export function movedScenes(
-  scenes: readonly SavedScene[],
-  id: string,
-  toIndex: number
-): SavedScene[] | null {
-  const from = scenes.findIndex((scene) => scene.id === id)
-  if (from < 0 || toIndex < 0 || toIndex >= scenes.length || toIndex === from) return null
-  const next = [...scenes]
-  const [scene] = next.splice(from, 1)
-  next.splice(toIndex, 0, scene!)
-  return next
-}
+// The library hook moves scenes too, from the Studio's eager chunk: the move
+// lives in its own module so this one stays with the lazy scene UI.
+export { movedScenes } from './scene-order'
 
 /** The keys a row answers to move (WCAG 2.1.1: never only by dragging). */
 export const MOVE_SCENE_UP_ACCELERATOR = 'Alt+Up'

@@ -3,7 +3,7 @@ import type { AppPreviewsParams, AppPreviewsResult } from '@/lib/backend'
 import { toast } from '@/lib/toast'
 import { loadJson } from '@/lib/capture'
 import { sceneAutosave } from '@/lib/scene-autosave'
-import { movedScenes } from '@/lib/scene-list'
+import { movedScenes } from '@/lib/scene-order'
 import {
   hydrateSceneLibrary,
   normalizeSceneAudio,
