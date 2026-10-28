@@ -6,7 +6,10 @@ import { normalizeSceneVisual } from '@/lib/scene-presets'
 import { defaultCaptureConfig } from '@/lib/capture'
 import { ScenePresetControls } from './scene-presets'
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  useStudioAudio: () => ({ audioMeter: null })
+}))
 let root: Root
 let container: HTMLDivElement
 beforeEach(() => {
@@ -17,13 +20,28 @@ beforeEach(() => {
   mocked.core = {
     savedScenes: [],
     activeSavedSceneId: null,
-    savedSceneModified: false,
     savedScenePendingId: null,
+    savedSceneAppStates: {},
+    savedSceneWindowApps: {},
     canSaveScene: true,
     sceneLibraryError: null,
+    sceneLibraryActions: {
+      readOnly: false,
+      workingOrigin: 'builtin',
+      workingVisual: saved().visual,
+      workingAudio: { microphoneOff: false, systemAudioEnabled: false },
+      insert: vi.fn(() => true),
+      move: vi.fn(() => true),
+      replace: vi.fn(() => true),
+      listAppPreviews: vi.fn(async () => ({ apps: [] }))
+    },
     deviceList: { devices: [] },
     captureConfig: defaultCaptureConfig,
+    settings: {},
+    runtimeInfo: { platform: 'darwin' },
     isSessionActive: false,
+    wsStatus: 'connected',
+    scene: { id: 'scene:default', sources: [] },
     saveScene: vi.fn(() => true),
     deleteSavedScene: vi.fn(() => true),
     renameSavedScene: vi.fn(() => true),
@@ -53,17 +71,19 @@ async function input(value: string): Promise<void> {
     element.dispatchEvent(new Event('input', { bubbles: true }))
   })
 }
-const saved = () => ({
-  id: 'scene-a',
-  name: 'Presentation',
-  createdAt: '2026-09-22',
-  updatedAt: '2026-09-22',
-  visual: normalizeSceneVisual({
-    layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
-    sources: { testPattern: true },
-    background: null
-  })
-})
+function saved() {
+  return {
+    id: 'scene-a',
+    name: 'Presentation',
+    createdAt: '2026-09-22',
+    updatedAt: '2026-09-22',
+    visual: normalizeSceneVisual({
+      layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
+      sources: { testPattern: true },
+      background: null
+    })
+  }
+}
 async function menu(action: string): Promise<void> {
   const trigger = document.querySelector('button[aria-label="Actions for Presentation"]')!
   await act(async () =>
@@ -75,69 +95,66 @@ async function menu(action: string): Promise<void> {
   expect(item).toBeTruthy()
   await act(async () => (item as HTMLElement).click())
 }
-describe('scene library controls', () => {
-  // Plan 174 S3.9 (C-23, V-10): the Scene page's section actions.
-  it('offers Update “{name}” beside Save scene once the applied saved scene drifts', async () => {
+describe("Studio's saved scenes (plan 210 D6)", () => {
+  it('heads the gallery with Save scene… and New scene…, and never Update or Modified', async () => {
     mocked.core.savedScenes = [saved()]
     mocked.core.activeSavedSceneId = 'scene-a'
-    mocked.core.savedSceneModified = false
-    await act(async () => root.render(createElement(ScenePresetControls, { toolbar: true })))
-    const labels = () => [...container.querySelectorAll('button')].map((b) => b.textContent)
-    expect(labels()).toEqual(['Save scene…'])
-    // The name and its state belong to the section's description now.
-    expect(container.textContent).not.toContain('Modified')
-
-    mocked.core = { ...mocked.core, savedSceneModified: true }
-    await act(async () => root.render(createElement(ScenePresetControls, { toolbar: true })))
-    expect(labels()).toEqual(['Update “Presentation”…', 'Save scene…'])
-    await click('Update “Presentation”…')
-    expect(document.body.textContent).toContain('Update saved scene')
-    await click('Save')
-    expect(mocked.core.saveScene).toHaveBeenCalledExactlyOnceWith('Presentation', 'scene-a')
+    await render()
+    const labels = [...container.querySelectorAll('button')]
+      .map((b) => b.textContent)
+      .filter((label) => label?.endsWith('…'))
+    expect(labels).toEqual(['Save scene…', 'New scene…'])
+    expect(container.textContent).not.toMatch(/Update|Modified/)
+    await menu('Duplicate')
+    expect(
+      (mocked.core.sceneLibraryActions as { insert: ReturnType<typeof vi.fn> }).insert
+    ).toHaveBeenCalledWith([expect.objectContaining({ name: 'Presentation 2' })], 'scene-a')
   })
 
-  it('validates names inline and saves only explicitly', async () => {
+  it('starts Save scene… with a name, validates inline and saves only explicitly', async () => {
     await render()
     await click('Save scene…')
+    expect(document.querySelector('input')!.value).toBe('Screen only')
+    await input('')
     await click('Save')
     expect(document.body.textContent).toContain('between 1 and 80')
     expect(mocked.core.saveScene).not.toHaveBeenCalled()
     await input('Presentation')
     await click('Save')
-    expect(mocked.core.saveScene).toHaveBeenCalledExactlyOnceWith('Presentation', undefined)
+    expect(mocked.core.saveScene).toHaveBeenCalledExactlyOnceWith('Presentation')
   })
-  it('disables saving unresolved visuals and shows future-version recovery', async () => {
+
+  it('says why Save scene… is off and shows future-version recovery', async () => {
     mocked.core.canSaveScene = false
+    mocked.core.sceneLibraryActions = {
+      ...(mocked.core.sceneLibraryActions as object),
+      readOnly: true
+    }
     mocked.core.sceneLibraryError =
-      'This scene library uses an unsupported version. Its saved data has been preserved.'
+      'Update Videorc to open these scenes. Your saved data is preserved.'
     await render()
-    expect((container.querySelector('button') as HTMLButtonElement).disabled).toBe(true)
-    expect(container.textContent).toContain('saved data has been preserved')
+    const save = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Save scene…'
+    )!
+    expect(save.disabled).toBe(true)
+    expect(
+      document.getElementById(save.closest('[aria-describedby]')!.getAttribute('aria-describedby')!)
+        ?.textContent
+    ).toBe('Update Videorc to save scenes. Your saved scenes are kept.')
+    expect(container.textContent).toContain('saved data is preserved')
   })
-  it('renames, explicitly updates the selected snapshot, and saves a new identity separately', async () => {
+
+  it('renames from ⋯ and asks before deleting', async () => {
     mocked.core.savedScenes = [saved()]
     mocked.core.activeSavedSceneId = 'scene-a'
-    mocked.core.savedSceneModified = true
     await render()
     await menu('Rename')
     await input('Renamed')
     await click('Rename')
     expect(mocked.core.renameSavedScene).toHaveBeenCalledExactlyOnceWith('scene-a', 'Renamed')
-    await menu('Update saved scene')
-    await click('Save')
-    expect(mocked.core.saveScene).toHaveBeenLastCalledWith('Presentation', 'scene-a')
-    await menu('Save as new scene')
-    await input('Second')
-    await click('Save')
-    expect(mocked.core.saveScene).toHaveBeenLastCalledWith('Second', undefined)
-  })
-  it('requires confirmation to delete and cancel leaves the running picture alone', async () => {
-    mocked.core.savedScenes = [saved()]
-    mocked.core.activeSavedSceneId = 'scene-a'
-    await render()
     await menu('Delete')
     expect(mocked.core.deleteSavedScene).not.toHaveBeenCalled()
-    expect(document.body.textContent).toContain('current scene and recording continue')
+    expect(document.body.textContent).toContain('What’s on stream stays as it is.')
     await click('Cancel')
     expect(mocked.core.deleteSavedScene).not.toHaveBeenCalled()
     await menu('Delete')
@@ -145,7 +162,8 @@ describe('scene library controls', () => {
     expect(mocked.core.deleteSavedScene).toHaveBeenCalledExactlyOnceWith('scene-a')
     expect(mocked.core.applySavedScene).not.toHaveBeenCalled()
   })
-  it('repairs an unavailable window with exact source selection before dispatch', async () => {
+
+  it('repairs an unavailable window with exact sources, and the scene keeps them', async () => {
     const scene = saved()
     scene.visual.sources = { windowId: 'closed', testPattern: false }
     mocked.core.savedScenes = [scene]
@@ -158,7 +176,7 @@ describe('scene library controls', () => {
       entry.textContent?.includes('Resolve sources')
     )!
     await act(async () => card.click())
-    expect(mocked.core.applySavedScene).not.toHaveBeenCalled()
+    expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
     expect(
       [...document.querySelectorAll('button')].find((entry) => entry.textContent === 'Apply scene')
         ?.disabled
@@ -168,7 +186,7 @@ describe('scene library controls', () => {
     await act(async () =>
       (document.querySelector('[cmdk-item][data-value="screen-new"]') as HTMLElement).click()
     )
-    expect(mocked.core.applySavedScene).not.toHaveBeenCalled()
+    expect(mocked.core.applySavedSceneResult).not.toHaveBeenCalled()
     await click('Apply scene')
     expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith(
       'scene-a',
@@ -176,6 +194,30 @@ describe('scene library controls', () => {
         sources: expect.objectContaining({ screenId: 'screen-new', windowId: undefined })
       })
     )
+    expect(
+      (mocked.core.sceneLibraryActions as { replace: ReturnType<typeof vi.fn> }).replace
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'scene-a',
+        visual: expect.objectContaining({
+          sources: expect.objectContaining({ screenId: 'screen-new', screenName: 'New display' })
+        })
+      })
+    )
+  })
+
+  it("disables a card whose app isn't ready, with S2's words as its line", async () => {
+    const scene = saved()
+    scene.visual.sources = {
+      windowId: 'gone',
+      app: { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+    }
+    mocked.core.savedScenes = [scene]
+    mocked.core.savedSceneAppStates = { 'scene-a': 'minimized' }
+    await render()
+    const card = container.querySelector<HTMLButtonElement>('[data-slot="scene-card-button"]')!
+    expect(card.disabled).toBe(true)
+    expect(card.textContent).toContain("Figma's window is minimized")
   })
 })
 

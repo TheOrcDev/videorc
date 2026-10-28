@@ -1,4 +1,3 @@
-import { findAcceleratorOwner } from '../../../../shared/accelerator'
 import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
 import {
   globalShortcutEntries,
@@ -15,6 +14,7 @@ import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
+import { globalShortcutTakenReason } from '@/lib/global-shortcut-owner'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { shortcutsByGroup } from '@/lib/shortcuts'
@@ -75,21 +75,14 @@ export function ShortcutsSettings(): ReactElement {
     }))
   const validateGlobalShortcut =
     (action: GlobalShortcutAction) =>
-    (accelerator: string): string | null => {
-      const owner = findAcceleratorOwner(
-        settings.globalShortcuts ?? {},
+    (accelerator: string): string | null =>
+      globalShortcutTakenReason({
+        config: settings.globalShortcuts ?? {},
         accelerator,
         action,
-        runtimeInfo?.platform
-      )
-      const label = owner?.startsWith('scene:')
-        ? (savedScenes.find((scene) => scene.id === owner.slice(6))?.name ??
-          globalShortcutLabel(owner))
-        : owner
-          ? globalShortcutLabel(owner)
-          : null
-      return label ? `Already used by ${label}.` : null
-    }
+        platform: runtimeInfo?.platform,
+        scenes: savedScenes
+      })
 
   return (
     <>
