@@ -749,10 +749,11 @@ pub struct CohostUtteranceTrigger {
     pub message_id: Option<String>,
 }
 
-/// Where an utterance stands (plan 164 D7). `proposed` waits for the
-/// streamer (Suggest) or for the send (Auto); `sent` landed on at least one
+/// Where an utterance stands (plan 164 D7, plan 211 D2). `proposed` waits
+/// for the streamer's click (Suggest); `sent` landed on at least one
 /// destination; `failed` reached none (the log says why); `dismissed` was
-/// declined or expired; `bubble-only` never goes to chat.
+/// declined or expired; `bubble-only` never goes to chat: every Bubble line
+/// and every Say line.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostUtteranceStatus {
@@ -7412,7 +7413,7 @@ impl CohostEngine {
             let pass =
                 self.auto_chat
                     .route_answer(&self.settings.auto_chat, candidate, now, now_iso);
-            merged.send.extend(pass.send);
+            merged.bubble.extend(pass.bubble);
             merged.propose.extend(pass.propose);
             merged.log.extend(pass.log);
         }
@@ -7549,6 +7550,12 @@ impl CohostEngine {
         self.auto_chat.note_sent(now);
     }
 
+    /// A Bubble line showed on stream (plan 211 S-A2): Banter's quiet minute
+    /// runs from it, as it did from a send.
+    pub(crate) fn note_buddy_spoke(&mut self, now: Instant) {
+        self.auto_chat.note_spoken(now);
+    }
+
     /// The live-chat session the lane follows (for the Say box and the pump).
     pub(crate) fn auto_chat_session_id(&self) -> Option<String> {
         self.auto_chat.session_id().map(str::to_string)
@@ -7641,9 +7648,10 @@ pub(crate) async fn is_buddy_operation(state: &AppState, operation_id: &str) -> 
     state.cohost.lock().await.is_buddy_operation(operation_id)
 }
 
-/// Act on a lane pass: log its lines, publish proposals, spawn its sends and
-/// arm the pump for what it held. `lifecycle_delivery` orders the state emit
-/// with chat delivery when the caller holds the fence; the pump takes one.
+/// Act on a lane pass: log its lines, publish proposals, show its bubble
+/// lines and arm the pump for what it held. `lifecycle_delivery` orders the
+/// state emit with chat delivery when the caller holds the fence; the pump
+/// takes one.
 async fn apply_auto_chat_pass(
     state: &AppState,
     pass: AutoChatPass,
@@ -7655,8 +7663,10 @@ async fn apply_auto_chat_pass(
     publish_auto_chat_pass(state, pass, lifecycle_delivery).await;
 }
 
-/// The pass minus the pump: logs, proposals, sends, the skip counts and the
-/// AI greet request. The pump itself calls this (it owns its own schedule).
+/// The pass minus the pump: logs, proposals, bubble lines, the skip counts
+/// and the AI greet request. The pump itself calls this (it owns its own
+/// schedule). Nothing here sends (plan 211 D2): a Suggest card posts only
+/// from `approve_utterance`, and a Bubble line goes to the bubble.
 async fn publish_auto_chat_pass(
     state: &AppState,
     pass: AutoChatPass,
@@ -7685,7 +7695,23 @@ async fn publish_auto_chat_pass(
                 ),
             );
         }
-        let snapshot = state.cohost.lock().await.snapshot();
+        for utterance in &pass.bubble {
+            state.emit_log(
+                "info",
+                format!(
+                    "Buddy says ({}): {}",
+                    utterance_trigger_label(utterance.trigger.kind),
+                    utterance.text
+                ),
+            );
+        }
+        let snapshot = {
+            let mut engine = state.cohost.lock().await;
+            if !pass.bubble.is_empty() {
+                engine.note_buddy_spoke(Instant::now());
+            }
+            engine.snapshot()
+        };
         match lifecycle_delivery {
             Some(guard) => emit_state(state, &snapshot, guard),
             None => {
@@ -7694,11 +7720,11 @@ async fn publish_auto_chat_pass(
             }
         }
     }
-    for utterance in pass.send {
-        let state = state.clone();
-        tokio::spawn(async move {
-            send_automatic(&state, utterance).await;
-        });
+    // plan 211 S-B2: the bubble queue goes in front of this call, so a line
+    // waits for the current bubble instead of replacing it, and the report
+    // records the line when it shows (S-B5).
+    for utterance in &pass.bubble {
+        crate::buddy_overlay::show_for_utterance(state, utterance).await;
     }
 }
 
@@ -7942,10 +7968,13 @@ fn clip_for_platforms(text: &str, platforms: &[StreamPlatform]) -> (String, bool
     (format!("{}…", head.trim_end()), true)
 }
 
-/// Send one utterance as the streamer (D3, D10): a Buddy-owned
-/// `operationId`, the mode re-read, the destinations filtered, the text
-/// clipped, the outcome on the utterance, the state and the report.
-async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
+/// Post one Suggest card the streamer clicked, as the streamer (D3, D10,
+/// plan 211 D2). This is the one path from Buddy's lane to chat, and only
+/// `approve_utterance` reaches it: a Buddy-owned `operationId`, the mode
+/// re-read (Suggest, a `proposed` non-manual card, or it fails), the
+/// destinations filtered, the text clipped, the outcome on the utterance,
+/// the state and the report.
+async fn send_approved(state: &AppState, utterance: CohostUtterance) {
     let now_iso = chrono::Utc::now().to_rfc3339();
     let (session_id, talk) = {
         let engine = state.cohost.lock().await;
@@ -8218,7 +8247,7 @@ pub async fn approve_utterance(
     };
     let task_state = state.clone();
     tokio::spawn(async move {
-        send_automatic(&task_state, utterance).await;
+        send_approved(&task_state, utterance).await;
     });
     Ok(snapshot)
 }
@@ -8302,7 +8331,7 @@ pub async fn say_utterance(
     if send {
         let task_state = state.clone();
         tokio::spawn(async move {
-            send_automatic(&task_state, utterance).await;
+            send_approved(&task_state, utterance).await;
         });
     }
     Ok(snapshot)

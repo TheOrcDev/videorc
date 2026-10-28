@@ -1,13 +1,17 @@
-//! The automatic chat lane (plan 164 Phase D, plan 192): what the Buddy
-//! says, and whether it goes to chat now, waits for the streamer's click, or
-//! only to the bubble.
+//! The automatic chat lane (plan 164 Phase D, plan 192, plan 211): what the
+//! Buddy says, and whether it goes to the bubble on stream or waits for the
+//! streamer's click as a card.
 //!
 //! The lane is engine-wide and follows the live-chat session: it does not
 //! need the Premium tick session, because greetings are free (D6). Every
-//! routing method starts from the mode (D4): `off` produces nothing, ever.
-//! `suggest` produces `proposed` cards for the Stream Manager; `auto` produces
-//! sends. The throttle (`cohost_throttle`) keeps time; `cohost.rs` owns the
-//! lane, performs the sends and writes the report.
+//! routing method starts from the talk mode (plan 211 D1): `off` produces
+//! nothing, ever; `bubble` produces `bubble-only` lines for the overlay and
+//! never a send; `suggest` produces `proposed` cards for the Stream Manager.
+//! Nothing the lane decides reaches chat on its own (D2): a pass has no send
+//! list, and the one send path (`cohost::send_approved`) takes a card only
+//! from the streamer's click. The throttle (`cohost_throttle`) keeps time;
+//! `cohost.rs` owns the lane, shows the bubbles, posts the approved cards and
+//! writes the report.
 //!
 //! Plan 192: a greeting kind with no user line says its built-in line (D1),
 //! a chatter's first message gets a welcome (D2), every skip is logged once
@@ -20,8 +24,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::cohost::{
-    COHOST_GREETING_TEXT_MAX_CHARS, CohostAutoChat, CohostAutoChatMode, CohostTone,
-    CohostUtterance, CohostUtteranceState, CohostUtteranceStatus, CohostUtteranceTrigger,
+    COHOST_GREETING_TEXT_MAX_CHARS, CohostAutoChat, CohostTalkMode, CohostTone, CohostUtterance,
+    CohostUtteranceState, CohostUtteranceStatus, CohostUtteranceTrigger,
     CohostUtteranceTriggerKind, truncate_utf16, utterance_state_for_mood,
 };
 use crate::cohost_greetings::{
@@ -48,12 +52,15 @@ pub(crate) const ACTIVITY_FRESH_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// A viewer name as the greet route takes it.
 const GREET_NAME_MAX_UNITS: usize = 120;
 
-/// What one lane pass decided. The caller sends `send`, publishes `propose`
-/// (and every change), arms the pump for `schedule`, runs `greet` off the
-/// engine lock and folds `skipped` into the session report.
+/// What one lane pass decided. The caller shows `bubble`, publishes
+/// `propose` (and every change), arms the pump for `schedule`, runs `greet`
+/// off the engine lock and folds `skipped` into the session report. There is
+/// no send list (plan 211 D2): the lane cannot hand a line to chat.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct AutoChatPass {
-    pub(crate) send: Vec<CohostUtterance>,
+    /// `bubble-only` lines for the overlay (Bubble mode).
+    pub(crate) bubble: Vec<CohostUtterance>,
+    /// `proposed` cards for the Stream Manager (Suggest mode).
     pub(crate) propose: Vec<CohostUtterance>,
     pub(crate) schedule: Option<Instant>,
     pub(crate) log: Vec<String>,
@@ -70,7 +77,7 @@ pub(crate) struct AutoChatPass {
 
 impl AutoChatPass {
     pub(crate) fn changed(&self) -> bool {
-        !self.send.is_empty() || !self.propose.is_empty()
+        !self.bubble.is_empty() || !self.propose.is_empty()
     }
 }
 
@@ -332,8 +339,9 @@ impl AutoChatLane {
         utterance
     }
 
-    /// Route one decided utterance by the mode: `auto` sends, `suggest`
-    /// proposes. Never called with the mode off.
+    /// Route one decided utterance by the talk mode (plan 211 D1): `bubble`
+    /// records it `bubble-only` for the overlay, `suggest` proposes a card.
+    /// There is no arm that sends. Never called with the mode off.
     fn route(
         &mut self,
         settings: &CohostAutoChat,
@@ -343,20 +351,21 @@ impl AutoChatLane {
         now_iso: &str,
         pass: &mut AutoChatPass,
     ) {
-        debug_assert!(settings.mode != CohostAutoChatMode::Off);
-        match settings.mode {
-            CohostAutoChatMode::Off => {}
-            CohostAutoChatMode::Auto => {
+        let talk = settings.talk();
+        debug_assert!(talk.speaks());
+        match talk {
+            CohostTalkMode::Off => {}
+            CohostTalkMode::Bubble => {
                 let utterance = self.record(
                     spoken,
-                    CohostUtteranceStatus::Proposed,
+                    CohostUtteranceStatus::BubbleOnly,
                     greeting,
                     now,
                     now_iso,
                 );
-                pass.send.push(utterance);
+                pass.bubble.push(utterance);
             }
-            CohostAutoChatMode::Suggest => {
+            CohostTalkMode::Suggest => {
                 let utterance = self.record(
                     spoken,
                     CohostUtteranceStatus::Proposed,
@@ -409,7 +418,7 @@ impl AutoChatLane {
 
     /// Chat rows just delivered: greetings for Activity rows (S-D1) and
     /// welcomes for a chatter's first message (plan 192 S1.2). With the mode
-    /// off or greetings off nothing is sent and the skip is counted; stale
+    /// off or greetings off nothing is said and the skip is counted; stale
     /// rows and switched-off kinds are skipped; the throttle decides now,
     /// later, or never (D9). `ai` is the AI's context when it may write the
     /// lines (S2.2).
@@ -422,7 +431,7 @@ impl AutoChatLane {
         now_iso: &str,
     ) -> AutoChatPass {
         let mut pass = AutoChatPass::default();
-        let on = settings.mode != CohostAutoChatMode::Off && settings.greetings.enabled;
+        let on = settings.talk().speaks() && settings.greetings.enabled;
         for message in messages {
             let Some(facts) = activity_facts(message).or_else(|| welcome_facts(message)) else {
                 continue;
@@ -473,9 +482,9 @@ impl AutoChatLane {
     ) -> AutoChatPass {
         let mut pass = AutoChatPass::default();
         let batches = self.throttle.drain_due(now);
-        if settings.mode == CohostAutoChatMode::Off || !settings.greetings.enabled {
+        if !settings.talk().speaks() || !settings.greetings.enabled {
             // The mode went off while a bucket waited: it is dropped, never
-            // sent later (D4). The buckets were taken above.
+            // said later (D4). The buckets were taken above.
             if !batches.is_empty() {
                 pass.log
                     .push("Buddy dropped waiting greetings: automatic chat is off.".to_string());
@@ -650,7 +659,7 @@ impl AutoChatLane {
             );
             return pass;
         }
-        if settings.mode == CohostAutoChatMode::Off || !settings.greetings.enabled {
+        if !settings.talk().speaks() || !settings.greetings.enabled {
             pass.log
                 .push("Buddy dropped waiting greetings: automatic chat is off.".to_string());
             for batch in &pending.batches {
@@ -727,7 +736,9 @@ impl AutoChatLane {
 
     /// A tick reply the viewer asked the Buddy for by name (S-D3), or one
     /// the notes answer (plan 192 D5): under the answers switch, the answers
-    /// cooldown and the destination's limiter.
+    /// cooldown and the destination's limiter. Nothing here counts as a
+    /// send (plan 211 D10): a Suggest card counts when it lands, a Bubble
+    /// line never.
     pub(crate) fn route_answer(
         &mut self,
         settings: &CohostAutoChat,
@@ -736,7 +747,7 @@ impl AutoChatLane {
         now_iso: &str,
     ) -> AutoChatPass {
         let mut pass = AutoChatPass::default();
-        if settings.mode == CohostAutoChatMode::Off || !settings.answers.enabled {
+        if !settings.talk().speaks() || !settings.answers.enabled {
             return pass;
         }
         let cooldown = Duration::from_secs(u64::from(settings.answers.cooldown_seconds));
@@ -770,9 +781,6 @@ impl AutoChatLane {
             return pass;
         }
         self.last_answer_at = Some(now);
-        if settings.mode == CohostAutoChatMode::Auto {
-            self.throttle.note_sent(&destination_id, now);
-        }
         let trigger = CohostUtteranceTrigger {
             kind: CohostUtteranceTriggerKind::Answer,
             event_id: None,
@@ -795,9 +803,10 @@ impl AutoChatLane {
     }
 
     /// Whether a banter request may go out now (S-D4): the switch, its
-    /// cooldown, and no greeting or answer sent in the last minute.
+    /// cooldown, and no greeting or answer said (bubbled or posted) in the
+    /// last minute.
     pub(crate) fn banter_allowed(&self, settings: &CohostAutoChat, now: Instant) -> bool {
-        if settings.mode == CohostAutoChatMode::Off || !settings.banter.enabled {
+        if !settings.talk().speaks() || !settings.banter.enabled {
             return false;
         }
         let cooldown = Duration::from_secs(u64::from(settings.banter.cooldown_seconds));
@@ -829,7 +838,7 @@ impl AutoChatLane {
         now_iso: &str,
     ) -> AutoChatPass {
         let mut pass = AutoChatPass::default();
-        if settings.mode == CohostAutoChatMode::Off || !settings.banter.enabled {
+        if !settings.talk().speaks() || !settings.banter.enabled {
             return pass;
         }
         let text = text.trim().to_string();
@@ -941,9 +950,16 @@ impl AutoChatLane {
         true
     }
 
-    /// An automatic send landed (sent or partial).
+    /// An approved card landed in chat (sent or partial).
     pub(crate) fn note_sent(&mut self, now: Instant) {
         self.sends = self.sends.saturating_add(1);
+        self.last_auto_send_at = Some(now);
+    }
+
+    /// A Bubble line showed on stream (plan 211 S-A2): Banter's quiet minute
+    /// runs from it like from a send, but it is no send and is not counted
+    /// as one.
+    pub(crate) fn note_spoken(&mut self, now: Instant) {
         self.last_auto_send_at = Some(now);
     }
 
