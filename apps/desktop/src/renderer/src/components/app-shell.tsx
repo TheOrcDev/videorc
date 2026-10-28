@@ -38,6 +38,7 @@ import {
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
 import { isModalOpen } from '@/lib/modal-open'
+import { pageChunk, useRenderPageWhenLoaded, type PageLoad } from '@/lib/page-chunk'
 import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
@@ -70,37 +71,57 @@ import { WINDOW_NAMES } from '../../../shared/window-names'
 
 // Workspace views are loaded only on first navigation, then retained by the
 // browser module cache. Studio remains the launch surface, but its dashboard and
-// heavier dependencies stay out of the shell's eager entry chunk.
-const StudioTab = lazy(async () => ({
-  default: (await import('@/components/tabs/studio-tab')).StudioTab
-}))
-const AssetsTab = lazy(async () => ({
-  default: (await import('@/components/tabs/assets-tab')).AssetsTab
-}))
-const CaptionsTab = lazy(async () => ({
-  default: (await import('@/components/tabs/captions-tab')).CaptionsTab
-}))
-const DiagnosticsTab = lazy(async () => ({
-  default: (await import('@/components/tabs/diagnostics-tab')).DiagnosticsTab
-}))
-const loadLayoutTab = () => import('@/components/tabs/layout-tab')
-const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab }))
-const LibraryTab = lazy(async () => ({
-  default: (await import('@/components/tabs/library-tab')).LibraryTab
-}))
-const BuddyTab = lazy(async () => ({
-  default: (await import('@/components/tabs/buddy-tab')).BuddyTab
-}))
-const RecordingTab = lazy(async () => ({
-  default: (await import('@/components/tabs/recording-tab')).RecordingTab
-}))
-const loadSettingsTab = () => import('@/components/tabs/settings-tab')
-const SettingsTab = lazy(async () => ({ default: (await loadSettingsTab()).SettingsTab }))
-const loadSourcesTab = () => import('@/components/tabs/sources-tab')
-const SourcesTab = lazy(async () => ({ default: (await loadSourcesTab()).SourcesTab }))
-const StreamingTab = lazy(async () => ({
-  default: (await import('@/components/tabs/streaming-tab')).StreamingTab
-}))
+// heavier dependencies stay out of the shell's eager entry chunk. A page the
+// shell is waiting on renders as soon as its chunk is in (page-chunk.ts).
+const studioPage = pageChunk(async () => (await import('@/components/tabs/studio-tab')).StudioTab)
+const assetsPage = pageChunk(async () => (await import('@/components/tabs/assets-tab')).AssetsTab)
+const captionsPage = pageChunk(
+  async () => (await import('@/components/tabs/captions-tab')).CaptionsTab
+)
+const diagnosticsPage = pageChunk(
+  async () => (await import('@/components/tabs/diagnostics-tab')).DiagnosticsTab
+)
+const layoutPage = pageChunk(async () => (await import('@/components/tabs/layout-tab')).LayoutTab)
+const libraryPage = pageChunk(
+  async () => (await import('@/components/tabs/library-tab')).LibraryTab
+)
+const buddyPage = pageChunk(async () => (await import('@/components/tabs/buddy-tab')).BuddyTab)
+const recordingPage = pageChunk(
+  async () => (await import('@/components/tabs/recording-tab')).RecordingTab
+)
+const settingsPage = pageChunk(
+  async () => (await import('@/components/tabs/settings-tab')).SettingsTab
+)
+const sourcesPage = pageChunk(
+  async () => (await import('@/components/tabs/sources-tab')).SourcesTab
+)
+const streamingPage = pageChunk(
+  async () => (await import('@/components/tabs/streaming-tab')).StreamingTab
+)
+const PAGE_CHUNKS: Record<WorkspaceTab, PageLoad> = {
+  studio: studioPage,
+  sources: sourcesPage,
+  layouts: layoutPage,
+  assets: assetsPage,
+  live: streamingPage,
+  captions: captionsPage,
+  recording: recordingPage,
+  library: libraryPage,
+  ai: buddyPage,
+  diagnostics: diagnosticsPage,
+  settings: settingsPage
+}
+const StudioTab = studioPage.Page
+const AssetsTab = assetsPage.Page
+const CaptionsTab = captionsPage.Page
+const DiagnosticsTab = diagnosticsPage.Page
+const LayoutTab = layoutPage.Page
+const LibraryTab = libraryPage.Page
+const BuddyTab = buddyPage.Page
+const RecordingTab = recordingPage.Page
+const SettingsTab = settingsPage.Page
+const SourcesTab = sourcesPage.Page
+const StreamingTab = streamingPage.Page
 // First-run setup (plan 203): its backdrop, player and card load only when
 // setup opens, never in the eager bundle.
 const FirstRunSetup = lazy(async () => ({
@@ -198,6 +219,9 @@ function AppShellContent(): ReactElement {
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
+  // The page's first open suspends; render it once its chunk is in, before
+  // the shell's steady updates can starve React's retry (retest 152, 0004).
+  useRenderPageWhenLoaded(PAGE_CHUNKS[active])
   // Set by every way to a page except a click on its sidebar row: the page
   // title takes the focus once the page is up (plan 174 A-18).
   const titleFocusPendingRef = useRef(false)
@@ -309,7 +333,7 @@ function AppShellContent(): ReactElement {
   // without putting these modules into the eager entry chunk.
   useEffect(() => {
     const prefetch = (): void => {
-      void Promise.allSettled([loadSourcesTab(), loadLayoutTab(), loadSettingsTab()])
+      void Promise.allSettled([sourcesPage.preload(), layoutPage.preload(), settingsPage.preload()])
     }
     if (typeof window.requestIdleCallback === 'function') {
       const requestId = window.requestIdleCallback(prefetch, { timeout: 5000 })
