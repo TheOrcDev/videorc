@@ -29,7 +29,7 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
-import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const outputDirectory = resolve(
@@ -156,6 +156,8 @@ try {
     // from it. That scene holds whatever camera the Mac has, which the dev
     // app can't read, so the start is refused. This smoke records its own
     // scene: turn the switch off first, as the record-latency smoke does.
+    // The renderer mounts after main's markers; on a slow machine well after.
+    await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
     const clipsOff = await requestSmokeCommand(
       smoke,
       'eval-js',

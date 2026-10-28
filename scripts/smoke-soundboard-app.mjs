@@ -53,6 +53,7 @@ import {
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
+import { FORGET_WORKING_SCENE_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const ALL_CASES = ['idle', 'on-air', 'system-audio']
@@ -206,6 +207,7 @@ async function seedRenderer(smoke) {
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const audio = { ...(current.audio ?? {}), systemAudioEnabled: false, systemAudioGainDb: -6 };
         localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, layout, audio, recordEnabled: true, streamEnabled: false }));
+        ${FORGET_WORKING_SCENE_JS}
         setTimeout(() => location.reload(), 50);
         return true;
       `,

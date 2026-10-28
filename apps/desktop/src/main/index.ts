@@ -13320,7 +13320,16 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         tab.click();
         await waitForActiveTab(tabId);
         if (waitSelector) {
-          await waitFor(waitSelector);
+          // A page's first open loads its lazy chunk; under electron-vite dev
+          // that transforms the page's modules on demand, which took 8.5 s on
+          // an 800 MHz Linux laptop (retest 153) against waitFor's 8 s, so the
+          // page was still "Opening Videorc…". Say what it showed on timeout.
+          try {
+            await waitFor(waitSelector, 45000);
+          } catch (error) {
+            const shown = (document.querySelector('main')?.innerText ?? '').replace(/\\s+/g, ' ').slice(0, 120);
+            throw new Error(error.message + ' on ' + tabId + ' (page shows: ' + JSON.stringify(shown) + ')');
+          }
         } else {
           await sleep(250);
         }
