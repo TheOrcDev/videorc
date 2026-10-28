@@ -57,9 +57,22 @@ import {
   sceneSourceProblems,
   sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
+  type SceneApp,
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
+import {
+  withoutSceneApp,
+  SCENE_WINDOW_APPS_KEY,
+  rememberedSceneApps,
+  rememberSceneWindowApp,
+  sceneAppState,
+  resolveSceneWindowForApply,
+  sceneWindowRefusal,
+  reconcileWorkingSceneSources,
+  type SceneAppState,
+  type SavedSceneApplyResult
+} from '@/lib/scene-window-resolution'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
 import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
 import type { FirstRunLook } from '@/lib/first-run-look'
@@ -181,7 +194,6 @@ import {
   preparedYouTubeCompletionTargets,
   providerStreamOutputPlanOptions,
   readyStreamTargetLabels,
-  reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
   resolveProviderStreamOutputPlan,
   separateSourceRecordingsForSession,
@@ -1108,6 +1120,7 @@ type LayoutTransactionSnapshot = {
   captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
   origin?: 'builtin' | 'saved'
   sources?: SourceSelection
+  sceneApp?: SceneApp
   savedSceneId?: string | null
 }
 
@@ -1430,6 +1443,9 @@ export type StudioContextValue = {
   saveScene: (name: string, updateId?: string) => boolean
   renameSavedScene: (id: string, name: string) => boolean
   deleteSavedScene: (id: string) => boolean
+  savedSceneWindowApps: Readonly<Record<string, string>>
+  savedSceneAppStates: Readonly<Record<string, SceneAppState | undefined>>
+  applySavedSceneResult: (id: string, repaired?: SceneVisual) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
   applyBackgroundSlot: (slotId: string | null) => void
   applyWorkingBackgroundStyle: (patch: Partial<Scene['background']>) => void
@@ -2850,13 +2866,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
     warned: new Set()
   })
+  const workingAppRef = useRef<SceneApp | undefined>(
+    hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
+  )
   const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
     const config = loadCaptureConfig()
     const working = hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))
     return working
       ? {
           ...config,
-          sources: { ...config.sources, ...working.visual.sources },
+          sources: withoutSceneApp({ ...config.sources, ...working.visual.sources }),
           layout: working.visual.layout,
           video: coerceVideoToOrientation(
             config.video,
@@ -4535,6 +4554,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const { registry: backgroundRegistry, setRegistry: setBackgroundRegistry } = useBackgroundAssets()
   const sceneLibrary = useScenePresets()
+  const rememberedAppsRef = useRef(
+    rememberedSceneApps(loadJson(SCENE_WINDOW_APPS_KEY, {}), sceneLibrary.scenes)
+  )
+  const [resolvedAppStates, setResolvedAppStates] = useState<Record<string, SceneAppState>>({})
+  useEffect(() => {
+    setResolvedAppStates({})
+  }, [deviceList.devices])
+  const savedSceneAppStates = useMemo(
+    () =>
+      Object.fromEntries(
+        sceneLibrary.scenes.map((scene) => [
+          scene.id,
+          sceneAppState(scene.visual, deviceList.devices, resolvedAppStates[scene.id])
+        ])
+      ),
+    [sceneLibrary.scenes, deviceList.devices, resolvedAppStates]
+  )
+  useEffect(() => {
+    rememberedAppsRef.current = rememberedSceneApps(rememberedAppsRef.current, sceneLibrary.scenes)
+    try {
+      localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+    } catch {
+      /* Device memory is best effort. */
+    }
+  }, [sceneLibrary.scenes])
   const { save: saveSceneEntry, remove: removeSceneEntry } = sceneLibrary
   const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(
     () => hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.sceneId ?? null
@@ -4564,7 +4608,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const confirmedVisualRef = useRef<SceneVisual>(
     normalizeSceneVisual({
       layout: captureConfig.layout,
-      sources: visualSources(captureConfig.sources),
+      sources: visualSources({ ...captureConfig.sources, app: workingAppRef.current }),
       background: snapshotBackground(workingBackground)
     })
   )
@@ -4591,7 +4635,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ) => {
       const visual = normalizeSceneVisual({
         layout,
-        sources: visualSources(sources),
+        sources: visualSources({ ...sources, app: workingAppRef.current }),
         background: snapshotBackground(background)
       })
       confirmedVisualRef.current = visual
@@ -6942,21 +6986,45 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sourceStatusUnknownRef.current ||
       isActiveRecordingState(recordingRef.current.state) ||
       sessionStartInFlightRef.current ||
-      sessionStartLifecycleActiveRef.current
+      sessionStartLifecycleActiveRef.current ||
+      layoutIntentAwaitingProofRef.current !== null
     )
       return
-    setCaptureConfig((current) => {
-      const nextSources = reconcileSourceSelection(current.sources, deviceList.devices)
-
-      if (JSON.stringify(nextSources) === JSON.stringify(current.sources)) {
-        return current
+    const before = captureConfigRef.current.sources
+    const appBefore = workingAppRef.current
+    let disposed = false
+    void reconcileWorkingSceneSources(
+      { ...before, app: appBefore },
+      deviceList.devices,
+      (params) => {
+        if (!clientRef.current) throw offlineError()
+        return clientRef.current.requestTyped('sources.resolve_app_window', params)
       }
-
-      recordAutomaticSourceFallbacks(current.sources, nextSources)
-      return { ...current, sources: nextSources }
-    })
-    // recording.state re-runs this when a session ends: a device that vanished
-    // mid-session was skipped above and must fall back once the session is idle.
+    )
+      .then((nextSources) => {
+        if (
+          disposed ||
+          isActiveRecordingState(recordingRef.current.state) ||
+          sessionStartInFlightRef.current ||
+          sessionStartLifecycleActiveRef.current ||
+          layoutIntentAwaitingProofRef.current !== null
+        )
+          return
+        setCaptureConfig((current) => {
+          if (
+            current.sources !== before ||
+            workingAppRef.current !== appBefore ||
+            JSON.stringify(withoutSceneApp(nextSources)) === JSON.stringify(before)
+          )
+            return current
+          recordAutomaticSourceFallbacks(before, nextSources)
+          return { ...current, sources: withoutSceneApp(nextSources) }
+        })
+      })
+      .catch((error) => console.warn('[scenes] working window resolution failed', error))
+    return () => {
+      disposed = true
+    }
   }, [deviceList, sourceStatusKnown, recording.state, recordAutomaticSourceFallbacks])
 
   useEffect(() => {
@@ -9614,6 +9682,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ? current.layoutFramingMemory
               : rememberLayoutFraming(current.layoutFramingMemory, snapshot.layout)
         }
+        workingAppRef.current = snapshot.sceneApp
         captureConfigRef.current = next
         persistWorkingVisual(next.layout, next.sources, background, savedId)
         return next
@@ -9676,12 +9745,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     const visual = normalizeSceneVisual({
       layout: compositorStatus.sceneLayout,
-      sources: visualSources(sources),
+      sources: visualSources({ ...sources, app: workingAppRef.current }),
       background: snapshotBackground(sceneAfter.background)
     })
     const matchesWorking = sameSceneVisual(visual, confirmedVisualRef.current)
     return {
       sources,
+      sceneApp: matchesWorking ? workingAppRef.current : undefined,
       savedSceneId: matchesWorking ? activeSavedSceneIdRef.current : null,
       origin: matchesWorking ? workingOriginRef.current : ('saved' as const),
       sceneRevision: compositorStatus.sceneRevision,
@@ -9761,6 +9831,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         pendingIndicator?: boolean
         videoOverride?: VideoSettings
         captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
+        sceneApp?: SceneApp
         sourcesOverride?: SourceSelection
         backgroundOverride?: Scene['background'] | null
         strictSources?: boolean
@@ -9846,7 +9917,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             const issues = sceneSourceProblems(
               {
                 layout,
-                sources: visualSources(requestedSources),
+                sources: { ...visualSources(requestedSources), app: undefined },
                 background: snapshotBackground(requestedBackground)
               },
               freshDevices.devices
@@ -9909,6 +9980,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             compositorStatus: status.compositorStatus,
             captureConfigPatch: options?.captureConfigPatch,
             sources: requestedSources,
+            sceneApp: options && 'sceneApp' in options ? options.sceneApp : workingAppRef.current,
             savedSceneId:
               options && 'savedSceneId' in options
                 ? options.savedSceneId
@@ -10034,6 +10106,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                     ...backendTruth,
                     captureConfigPatch: options?.captureConfigPatch,
                     sources: options?.sourcesOverride ?? captureConfigRef.current.sources,
+                    sceneApp:
+                      options && 'sceneApp' in options ? options.sceneApp : workingAppRef.current,
                     savedSceneId:
                       options && 'savedSceneId' in options
                         ? options.savedSceneId
@@ -10327,7 +10401,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () =>
       normalizeSceneVisual({
         layout: captureConfig.layout,
-        sources: visualSources(captureConfig.sources),
+        sources: visualSources({ ...captureConfig.sources, app: workingAppRef.current }),
         background: snapshotBackground(workingBackground)
       }),
     [captureConfig.layout, captureConfig.sources, workingBackground]
@@ -10403,11 +10477,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       audio: { ...current.audio, systemAudioEnabled }
     }))
   }, [])
-  const applySavedScene = useCallback(
-    async (id: string, repaired?: SceneVisual): Promise<boolean> => {
+  const savedSceneResolveGenerationRef = useRef(0)
+  const applySavedSceneResult = useCallback(
+    async (id: string, repaired?: SceneVisual): Promise<SavedSceneApplyResult> => {
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
-      if (!saved) return false
-      const visual = normalizeSceneVisual(repaired ?? saved.visual)
+      if (!saved) return { ok: false }
+      let visual = normalizeSceneVisual(repaired ?? saved.visual)
+      const generation = ++savedSceneResolveGenerationRef.current
+      const layoutIntentBefore = layoutIntentIdRef.current
+      try {
+        const resolved = await resolveSceneWindowForApply(
+          visual,
+          deviceListRef.current.devices,
+          (params) => {
+            if (!clientRef.current) throw offlineError()
+            return clientRef.current.requestTyped('sources.resolve_app_window', params)
+          },
+          rememberedAppsRef.current[id]
+        )
+        if (
+          generation !== savedSceneResolveGenerationRef.current ||
+          layoutIntentBefore !== layoutIntentIdRef.current
+        )
+          return { ok: false }
+        if (resolved.kind === 'blocked') {
+          setResolvedAppStates((current) => ({
+            ...current,
+            [id]: resolved.reason.slice(4) as SceneAppState
+          }))
+          const refusal = sceneWindowRefusal(visual, resolved.reason)
+          if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
+          return refusal
+        }
+        if (resolved.kind === 'ready') {
+          visual = { ...visual, sources: resolved.sources }
+          if (visual.sources.app) setResolvedAppStates((current) => ({ ...current, [id]: 'ready' }))
+        }
+      } catch (error) {
+        reportError(error, { action: 'switch', object: 'the scene' })
+        return { ok: false }
+      }
       const current = captureConfigRef.current
       // Idle, the scene's microphone rides in its sources and the commit makes
       // it the pick. A recording or livestream switches to it after the
@@ -10425,7 +10534,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
         : null
       const applied = await requestLayoutTransaction(visual.layout, {
-        sourcesOverride: { ...current.sources, ...visual.sources, ...(live ? null : microphone) },
+        sceneApp: visual.sources.app,
+        sourcesOverride: withoutSceneApp({
+          ...current.sources,
+          ...visual.sources,
+          ...(live ? null : microphone)
+        }),
         backgroundOverride: resolveSavedBackground(visual.background),
         savedSceneId: id,
         origin: 'saved',
@@ -10440,7 +10554,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           : {})
       })
-      if (!applied || !saved.audio) return applied
+      if (applied) {
+        rememberedAppsRef.current = rememberSceneWindowApp(
+          rememberedAppsRef.current,
+          id,
+          visual.sources,
+          deviceListRef.current.devices,
+          sceneLibrary.scenes
+        )
+        try {
+          localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+        } catch {
+          /* Best effort. */
+        }
+      }
+      if (!applied || !saved.audio) return { ok: applied }
       if (saved.audio.systemAudioEnabled !== captureConfigRef.current.audio.systemAudioEnabled)
         setSystemAudioEnabled(saved.audio.systemAudioEnabled)
       if (!microphone) {
@@ -10453,7 +10581,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 'The scene kept your current microphone. Connect it, then choose the scene again.'
             }
           )
-        return applied
+        return { ok: applied }
       }
       if (
         live &&
@@ -10470,7 +10598,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             id: 'source-switch-blocked',
             description: 'The scene kept your current microphone.'
           })
-          return applied
+          return { ok: applied }
         }
         // Plan 0027: the session confirms only the device; None is renderer intent.
         if (microphone.microphoneOff)
@@ -10490,7 +10618,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           reportError(error, { action: 'switch', object: 'the microphone' })
         }
       }
-      return applied
+      return { ok: applied }
     },
     [
       sceneLibrary.scenes,
@@ -10499,6 +10627,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sourceSelectionController,
       reportError
     ]
+  )
+
+  const applySavedScene = useCallback(
+    async (id: string, repaired?: SceneVisual): Promise<boolean> =>
+      (await applySavedSceneResult(id, repaired)).ok,
+    [applySavedSceneResult]
   )
 
   const applyCameraPreset = useCallback(
@@ -10587,6 +10721,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         return
       }
+      if (sourceKind === 'capture') workingAppRef.current = undefined
       if (!sessionOwnsTransport(recordingRef.current)) {
         // Pickers build `sources` from a render-time snapshot; merge only the
         // picked kind so a concurrent confirmation or reconcile is not undone.
@@ -17136,6 +17271,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       bannerListRef,
       savedScenes: sceneLibrary.scenes,
       applySavedScene,
+      applySavedSceneResult,
       // Plan 209 S10 (D13): the Go Live dialog's own preflight, gate and
       // confirm, for an agent's `go_live` (lib/go-live-headless).
       dialogOpenRef,
@@ -17883,6 +18019,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       firstRunLookHold,
       applyFirstRunLook,
       savedScenes: sceneLibrary.scenes,
+      savedSceneWindowApps: rememberedAppsRef.current,
+      savedSceneAppStates,
       activeSavedSceneId,
       savedScenePendingId,
       savedSceneModified,
@@ -17893,6 +18031,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       renameSavedScene: sceneLibrary.rename,
       deleteSavedScene,
       applySavedScene,
+      applySavedSceneResult,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
       applyLiveBackground,
@@ -18124,6 +18263,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       firstRunLookHold,
       applyFirstRunLook,
       sceneLibrary.scenes,
+      savedSceneAppStates,
       sceneLibrary.error,
       sceneLibrary.rename,
       activeSavedSceneId,
@@ -18133,6 +18273,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       saveScene,
       deleteSavedScene,
       applySavedScene,
+      applySavedSceneResult,
       applyBackgroundSlot,
       applyWorkingBackgroundStyle,
       applyLiveBackground,

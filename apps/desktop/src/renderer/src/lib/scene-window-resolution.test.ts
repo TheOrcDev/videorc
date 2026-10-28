@@ -1,0 +1,152 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { Device, ResolveAppWindowResult } from './backend'
+import { defaultCaptureConfig, mergeSourceKind } from './capture'
+import { hydrateWorkingScene, scenesForApps, type SceneVisual } from './scene-presets'
+import {
+  rememberedSceneApps,
+  rememberSceneWindowApp,
+  resolveSceneWindowForApply,
+  reconcileWorkingSceneSources,
+  sceneAppState,
+  sceneWindowRefusal,
+  withoutSceneApp
+} from './scene-window-resolution'
+
+const app = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+const visual = (): SceneVisual => ({
+  layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
+  sources: { windowId: 'window:screencapturekit:old', app },
+  background: null
+})
+const device: Device = {
+  id: 'window:screencapturekit:new',
+  name: 'New design',
+  kind: 'window',
+  status: 'available',
+  app: { ...app, pid: 12 }
+}
+const screen: Device = {
+  id: 'screen:screencapturekit:1',
+  name: 'Display',
+  kind: 'screen',
+  status: 'available'
+}
+const success: ResolveAppWindowResult = {
+  ok: true,
+  windowId: device.id,
+  title: device.name,
+  width: 800,
+  height: 600
+}
+
+describe('scene window wiring', () => {
+  it('resolves before apply, passes the preferred id, and never rewrites the saved visual', async () => {
+    const saved = visual()
+    const before = structuredClone(saved)
+    const rpc = vi.fn(async () => success)
+    expect(await resolveSceneWindowForApply(saved, [], rpc)).toMatchObject({
+      kind: 'ready',
+      sources: { windowId: device.id, app }
+    })
+    expect(rpc).toHaveBeenCalledWith({
+      bundleId: app.bundleId,
+      preferWindowId: saved.sources.windowId
+    })
+    expect(saved).toEqual(before)
+  })
+  it.each([
+    ['not-running', "Figma isn't open"],
+    ['no-window', 'Figma has no window open'],
+    ['minimized', "Figma's window is minimized"]
+  ] as const)('returns a typed %s refusal and shared caller copy', async (reason, message) => {
+    const result = await resolveSceneWindowForApply(
+      visual(),
+      [],
+      vi.fn(async (): Promise<ResolveAppWindowResult> => ({ ok: false, reason }))
+    )
+    expect(result.kind).toBe('blocked')
+    if (result.kind !== 'blocked') throw new Error('Expected refusal')
+    expect(sceneWindowRefusal(visual(), result.reason)).toEqual({
+      ok: false,
+      reason: `app-${reason}`,
+      message
+    })
+  })
+  it('tries an exact legacy window, then remembered app, then source repair', async () => {
+    const legacy = visual()
+    delete legacy.sources.app
+    const rpc = vi.fn(async () => success)
+    expect(
+      (
+        await resolveSceneWindowForApply(
+          legacy,
+          [{ ...device, id: legacy.sources.windowId! }],
+          rpc,
+          app.bundleId
+        )
+      ).kind
+    ).toBe('ready')
+    expect(rpc).not.toHaveBeenCalled()
+    expect((await resolveSceneWindowForApply(legacy, [], rpc, app.bundleId)).kind).toBe('ready')
+    expect(rpc).toHaveBeenCalledOnce()
+    expect(
+      (
+        await resolveSceneWindowForApply(
+          legacy,
+          [],
+          async () => ({ ok: false, reason: 'no-window' }),
+          app.bundleId
+        )
+      ).kind
+    ).toBe('resolve-sources')
+    expect((await resolveSceneWindowForApply(legacy, [], rpc)).kind).toBe('resolve-sources')
+  })
+  it('fills separate device memory, prunes deleted scenes and caps it at 200', () => {
+    const scene = scenesForApps([{ ...app }], visual(), [], { id: () => 's', now: () => '' })[0]
+    const legacy = { windowId: device.id }
+    expect(rememberSceneWindowApp({}, 's', legacy, [device], [scene])).toEqual({ s: app.bundleId })
+    expect(rememberedSceneApps({ s: app.bundleId, gone: app.bundleId, bad: 4 }, [scene])).toEqual({
+      s: app.bundleId
+    })
+    const scenes = Array.from({ length: 205 }, (_, i) => ({ id: `s${i}` }))
+    const memory = rememberedSceneApps(
+      Object.fromEntries(scenes.map((s) => [s.id, app.bundleId])),
+      scenes
+    )
+    expect(Object.keys(memory)).toHaveLength(200)
+    expect(memory.s0).toBeUndefined()
+  })
+  it('restores working app identity at launch and resolves a different title before exact-name reconciliation', async () => {
+    const working = hydrateWorkingScene(
+      JSON.parse(JSON.stringify({ version: 1, sceneId: 's', visual: visual() }))
+    )!
+    const next = await reconcileWorkingSceneSources(
+      working.visual.sources,
+      [screen],
+      vi.fn(async () => success)
+    )
+    expect(next.windowId).toBe(device.id)
+    expect(next.app).toEqual(app)
+    expect(withoutSceneApp(next)).not.toHaveProperty('app')
+  })
+  it('falls back to a display on working app refusal, keeping app memory for its return', async () => {
+    const next = await reconcileWorkingSceneSources(
+      visual().sources,
+      [screen, device],
+      vi.fn(async (): Promise<ResolveAppWindowResult> => ({ ok: false, reason: 'not-running' }))
+    )
+    expect(next.screenId).toBe(screen.id)
+    expect(next.windowId).toBeUndefined()
+    expect(next.app).toEqual(app)
+  })
+  it('exposes lazy app state and clears app identity on a manual capture pick', () => {
+    expect(sceneAppState(visual(), [device])).toBe('ready')
+    expect(sceneAppState(visual(), [], 'minimized')).toBe('minimized')
+    expect(sceneAppState(visual(), [device], 'no-window')).toBe('no-window')
+    expect(sceneAppState(visual(), [])).toBe('not-running')
+    expect(sceneAppState({ ...visual(), sources: {} }, [])).toBeUndefined()
+    expect(
+      mergeSourceKind(visual().sources, { screenId: screen.id }, 'capture')
+    ).not.toHaveProperty('app')
+  })
+})

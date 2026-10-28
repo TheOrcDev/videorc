@@ -1,3 +1,4 @@
+import type { SavedSceneApplyResult } from '../scene-window-resolution'
 // The Studio's action context, built from the Studio's handles (plan 209 S5).
 // hooks/use-studio.tsx hands over, per intent, the latest render's handlers,
 // state and refs (`StudioActionSource`); this module turns them into the
@@ -97,6 +98,7 @@ export interface StudioActionSource extends Omit<
   publishCommentHighlightState: (state: CommentHighlightState) => void
   bannerListRef: Ref<readonly Banner[] | null>
   savedScenes: readonly { id: string; name: string }[]
+  applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string) => Promise<boolean>
   captureConfigRef: Ref<CaptureConfig>
   deviceListRef: Ref<DeviceList>
@@ -250,6 +252,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
     noteRecordClick: (kind) => studio.noteRecordClick(kind),
     sessionLive: sessionIsLive(studio.recordingRef.current),
     savedScenes: studio.savedScenes,
+    applySavedSceneResult: studio.applySavedSceneResult,
     applySavedScene: (id) => studio.applySavedScene(id),
     // Plan 209 PR B: what the Run the show and Arrange tools add. A deck
     // key never reads them.

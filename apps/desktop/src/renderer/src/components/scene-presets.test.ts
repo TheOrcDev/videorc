@@ -27,6 +27,7 @@ beforeEach(() => {
     saveScene: vi.fn(() => true),
     deleteSavedScene: vi.fn(() => true),
     renameSavedScene: vi.fn(() => true),
+    applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true)
   }
 })
@@ -169,7 +170,7 @@ describe('scene library controls', () => {
     )
     expect(mocked.core.applySavedScene).not.toHaveBeenCalled()
     await click('Apply scene')
-    expect(mocked.core.applySavedScene).toHaveBeenCalledExactlyOnceWith(
+    expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith(
       'scene-a',
       expect.objectContaining({
         sources: expect.objectContaining({ screenId: 'screen-new', windowId: undefined })
@@ -177,3 +178,28 @@ describe('scene library controls', () => {
     )
   })
 })
+
+it.each([
+  ['app-not-running', "Figma isn't open"],
+  ['app-no-window', 'Figma has no window open'],
+  ['app-minimized', "Figma's window is minimized"]
+])(
+  'an app card reaches the typed %s refusal without opening source repair',
+  async (reason, message) => {
+    const scene = saved()
+    scene.visual.sources = {
+      windowId: 'gone',
+      app: { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
+    }
+    mocked.core.savedScenes = [scene]
+    mocked.core.applySavedSceneResult = vi.fn(async () => ({ ok: false, reason, message }))
+    await render()
+    expect(container.textContent).not.toContain('Resolve sources')
+    const card = [...container.querySelectorAll('button')].find((entry) =>
+      entry.textContent?.includes('Presentation')
+    )!
+    await act(async () => card.click())
+    expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith('scene-a', undefined)
+    expect(document.body.textContent).not.toContain('Resolve scene sources')
+  }
+)

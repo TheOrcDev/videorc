@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { AGENT_TOOL_CATALOG, studioAgentTools } from '../../../../shared/agent-tools'
+import { sceneWindowRefusal } from '../scene-window-resolution'
+import { defaultCaptureConfig } from '../capture'
 import { SOUND_ACTION_COPY } from '@/lib/sounds'
 import { AGENT_TOOL_EXECUTORS, executeAgentIntent, type AgentIntent } from './agent'
 import type { StudioActionContext } from './context'
@@ -261,4 +263,30 @@ describe('the Studio agent tools (plan 209 S6)', () => {
       message: AGENT_TOOL_COPY.notifyEmpty
     })
   })
+})
+
+describe('app scene refusals for MCP and Buddy', () => {
+  it.each(['agent-1', 'buddy'])(
+    'passes the typed refusal and plain words to %s',
+    async (agentId) => {
+      for (const reason of ['app-not-running', 'app-no-window', 'app-minimized'] as const) {
+        const refusal = sceneWindowRefusal(
+          {
+            layout: defaultCaptureConfig.layout,
+            sources: { app: { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true } },
+            background: null
+          },
+          reason
+        )
+        const context = studioContext({ applySavedSceneResult: vi.fn(async () => refusal) })
+        expect(
+          await executeAgentIntent(
+            { ...call('switch_scene', { sceneId: 'scene-1' }), agentId },
+            context
+          )
+        ).toEqual({ ok: false, message: !refusal.ok && refusal.message, result: { reason } })
+        expect(context.applySavedScene).not.toHaveBeenCalled()
+      }
+    }
+  )
 })

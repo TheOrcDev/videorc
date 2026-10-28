@@ -126,7 +126,7 @@ export function CommandPalette({
   const {
     runtimeInfo,
     savedScenes,
-    applySavedScene,
+    applySavedSceneResult,
     captureConfig,
     setCaptureConfig,
     settings,
@@ -409,7 +409,7 @@ export function CommandPalette({
                   keywords={['scene', 'layout']}
                   onSelect={() =>
                     run(async () => {
-                      await applySavedScene(scene.id)
+                      await applySavedSceneResult(scene.id)
                     })
                   }
                 >

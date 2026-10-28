@@ -80,13 +80,20 @@ const switchScene: AgentToolExecutor = async (context, args) => {
   if (!sceneId) return { ok: false, message: AGENT_TOOL_COPY.sceneMissing }
   const saved = context.savedScenes?.find((scene) => scene.id === sceneId)
   if (saved && context.applySavedScene) {
-    return (await context.applySavedScene(saved.id))
+    const outcome = context.applySavedSceneResult
+      ? await context.applySavedSceneResult(saved.id)
+      : { ok: await context.applySavedScene(saved.id) }
+    return outcome.ok
       ? {
           ok: true,
           message: `Switched to ${saved.name}.`,
           result: { scene: { id: saved.id, name: saved.name, kind: 'saved' } }
         }
-      : { ok: false, message: AGENT_TOOL_COPY.sceneFailed }
+      : {
+          ok: false,
+          message: ('message' in outcome && outcome.message) || AGENT_TOOL_COPY.sceneFailed,
+          ...('reason' in outcome && outcome.reason ? { result: { reason: outcome.reason } } : {})
+        }
   }
   const outcome = await sceneApply(context, { layoutPreset: sceneId })
   if (!outcome.ok) return outcome

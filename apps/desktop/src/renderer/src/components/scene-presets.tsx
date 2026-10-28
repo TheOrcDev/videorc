@@ -66,8 +66,10 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
   const apply = async (scene: SavedScene, visual?: SceneVisual): Promise<void> => {
     setBusy(true)
     try {
-      const success = await studio.applySavedScene(scene.id, visual)
-      if (!success) {
+      const result = await studio.applySavedSceneResult(scene.id, visual)
+      if (!result.ok && result.reason) {
+        setError(result.message ?? null)
+      } else if (!result.ok) {
         open({ kind: 'repair', scene })
         setError("The scene couldn't be applied. Check its sources and background, then try again.")
       } else setAction(null)
@@ -118,7 +120,19 @@ export function ScenePresetControls({ toolbar = false }: { toolbar?: boolean }):
           ) : null}
           <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
             {savedScenes.map((scene) => {
-              const problems = sceneSourceProblems(scene.visual, deviceList.devices)
+              const rememberedApp = studio.savedSceneWindowApps?.[scene.id]
+              const problems = sceneSourceProblems(
+                rememberedApp
+                  ? {
+                      ...scene.visual,
+                      sources: {
+                        ...scene.visual.sources,
+                        app: { bundleId: rememberedApp, name: scene.name, follows: false }
+                      }
+                    }
+                  : scene.visual,
+                deviceList.devices
+              )
               const selected = activeSavedSceneId === scene.id
               const orientationLocked =
                 studio.isSessionActive &&
