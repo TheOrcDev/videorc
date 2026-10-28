@@ -94,6 +94,10 @@ beforeEach(() => {
     remove: vi.fn(async () => undefined),
     showActivityFor: vi.fn(async () => undefined),
     prepareBridge: vi.fn(async () => ({ path: BRIDGE, exists: true })),
+    addToApp: vi.fn(async () => ({
+      added: true,
+      message: 'Added. Restart Claude Desktop to see Videorc.'
+    })),
     openConnect: vi.fn(() => {
       mocked.snapshot = { ...mocked.snapshot, connectOpen: true }
     }),
@@ -321,6 +325,51 @@ describe('Connect an agent… (plan 209 S7, D6)', () => {
       args: [],
       env: { VIDEORC_AGENT_TOKEN: TOKEN }
     })
+  })
+
+  it('adds the agent to Claude Desktop in one click, and says to restart it (S22)', async () => {
+    mocked.snapshot = snapshot({ connectOpen: true })
+    await render()
+    await act(async () => byTestId('connect-agent-create')!.click())
+    const add = byTestId('connect-agent-add')!
+    expect(add.textContent).toBe('Add to Claude Desktop')
+    expect(byTestId('connect-agent-add-result')).toBeNull()
+    await act(async () => add.click())
+    expect(mocked.actions.addToApp).toHaveBeenCalledExactlyOnceWith('claude-desktop', TOKEN)
+    const result = byTestId('connect-agent-add-result')!
+    expect(result.textContent).toContain('Added. Restart Claude Desktop to see Videorc.')
+    expect(result.getAttribute('data-variant')).toBe('success')
+    // The line stays, for pasting anywhere else.
+    expect(byTestId('connect-agent-line')!.textContent).toContain(BRIDGE)
+  })
+
+  it("shows main's sentence when the app's file was left alone, and the line stays (S22)", async () => {
+    const sentence =
+      "Cursor's mcp.json isn't plain JSON, so Videorc left it alone. Copy the line instead."
+    mocked.actions.addToApp = vi.fn(async () => ({ added: false, message: sentence }))
+    mocked.snapshot = snapshot({ connectOpen: true })
+    await render()
+    await act(async () => byTestId('connect-agent-create')!.click())
+    await act(async () => byTestId('connect-agent-add')!.click())
+    const result = byTestId('connect-agent-add-result')!
+    expect(result.textContent).toContain(sentence)
+    expect(result.getAttribute('data-variant')).toBe('warning')
+    expect(byTestId('connect-agent-copy')).not.toBeNull()
+  })
+
+  it("says to copy the line when main can't be reached (S22)", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    mocked.actions.addToApp = vi.fn(async () => {
+      throw new Error('ipc closed')
+    })
+    mocked.snapshot = snapshot({ connectOpen: true })
+    await render()
+    await act(async () => byTestId('connect-agent-create')!.click())
+    await act(async () => byTestId('connect-agent-add')!.click())
+    expect(byTestId('connect-agent-add-result')!.textContent).toContain(
+      "Couldn't add Videorc to Claude Desktop. Copy the line instead."
+    )
+    expect(byTestId('connect-agent-add-result')!.textContent).not.toContain('ipc closed')
   })
 
   it('turns Agents on when it connects from ⌘K with Agents off', async () => {

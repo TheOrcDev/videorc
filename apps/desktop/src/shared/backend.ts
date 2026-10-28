@@ -4835,6 +4835,16 @@ export interface AgentBridgeInfo {
   /** This install has the bridge; false means Connect can't work. */
   exists: boolean
 }
+
+/** Plan 209 S22: the apps "Add to …" writes Videorc into (every one but Other). */
+export type AgentAddApp = Exclude<AgentClientKind, 'other'>
+
+/** What "Add to …" did, in the dialog's own sentence. `added` false means the
+ * app's file was left alone and the line is the way. */
+export interface AgentAddResult {
+  added: boolean
+  message: string
+}
 // --- end Agents (plan 209) ---
 
 export interface GlobalShortcutsConfig {
@@ -5183,6 +5193,9 @@ export interface VideorcApi {
   /** Plan 209 S7: where `videorc-mcp` lives, for Settings → Remote → Agents'
    * config lines. `install` (Connect) puts the Linux copy in place (D20). */
   getAgentBridge: (install: boolean) => Promise<AgentBridgeInfo>
+  /** Plan 209 S22: "Add to …" writes the agent's entry into that app's own
+   * config (or runs `claude mcp add`); main resolves the bridge's path. */
+  addAgentToApp: (app: AgentAddApp, token: string) => Promise<AgentAddResult>
   obsDiscover?: () => Promise<ObsDiscovery>
   obsRead?: (collection: string, profile: string) => Promise<ObsSetup | null>
   obsReadStreamKey?: (profile: string) => Promise<string | null>

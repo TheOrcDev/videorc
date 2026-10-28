@@ -27,6 +27,7 @@ import { SectionLabel } from '@/components/section-label'
 import type { AgentsActions } from '@/lib/agents-store'
 import {
   AGENT_APPS,
+  agentAppLabel,
   agentBridgePathWarning,
   agentConnectLine,
   agentConnectLineDisplay,
@@ -34,7 +35,7 @@ import {
   type AgentConnectLine
 } from '@/lib/agent-connect-lines'
 import { AGENT_BRIDGE_MISSING, agentRefusalMessage } from '@/lib/agents-view'
-import type { AgentBridgeInfo, AgentClientKind } from '@/lib/backend'
+import type { AgentAddResult, AgentBridgeInfo, AgentClientKind } from '@/lib/backend'
 import { useCopyText } from '@/lib/copy-text'
 import { inlineUserError } from '@/lib/user-error'
 
@@ -43,7 +44,9 @@ export const AGENT_NAME_MAX_CHARS = 40
 
 type Step =
   | { kind: 'choose' }
-  | { kind: 'show'; name: string; token: string; line: AgentConnectLine }
+  | { kind: 'show'; client: AgentClientKind; name: string; token: string; line: AgentConnectLine }
+
+type ConnectActions = Pick<AgentsActions, 'create' | 'enable' | 'prepareBridge' | 'addToApp'>
 
 /**
  * Connect an agent… (plan 209 S7, D6): pick the app, name it, then the exact
@@ -60,7 +63,7 @@ export function ConnectAgentDialog({
 }: {
   enabled: boolean
   bridge: AgentBridgeInfo | null
-  actions: Pick<AgentsActions, 'create' | 'enable' | 'prepareBridge'>
+  actions: ConnectActions
   onClose: () => void
 }): ReactElement {
   const [step, setStep] = useState<Step>({ kind: 'choose' })
@@ -76,7 +79,14 @@ export function ConnectAgentDialog({
             onCreated={(next) => setStep({ kind: 'show', ...next })}
           />
         ) : (
-          <ShowStep line={step.line} name={step.name} token={step.token} onDone={onClose} />
+          <ShowStep
+            client={step.client}
+            line={step.line}
+            name={step.name}
+            token={step.token}
+            onAdd={actions.addToApp}
+            onDone={onClose}
+          />
         )}
       </DialogContent>
     </Dialog>
@@ -92,9 +102,14 @@ function ChooseStep({
 }: {
   enabled: boolean
   bridge: AgentBridgeInfo | null
-  actions: Pick<AgentsActions, 'create' | 'enable' | 'prepareBridge'>
+  actions: Pick<ConnectActions, 'create' | 'enable' | 'prepareBridge'>
   onCancel: () => void
-  onCreated: (created: { name: string; token: string; line: AgentConnectLine }) => void
+  onCreated: (created: {
+    client: AgentClientKind
+    name: string
+    token: string
+    line: AgentConnectLine
+  }) => void
 }): ReactElement {
   const [app, setApp] = useState<AgentClientKind>('claude-desktop')
   // The name follows the app until the streamer types one.
@@ -120,6 +135,7 @@ function ChooseStep({
       if (!enabled) await actions.enable()
       const created = await actions.create(name.trim(), app)
       onCreated({
+        client: app,
         name: created.agent.name,
         token: created.token,
         line: agentConnectLine(app, { bridgePath: prepared.path, token: created.token })
@@ -211,18 +227,43 @@ function ChooseStep({
 }
 
 function ShowStep({
+  client,
   name,
   token,
   line,
+  onAdd,
   onDone
 }: {
+  client: AgentClientKind
   name: string
   token: string
   line: AgentConnectLine
+  onAdd: ConnectActions['addToApp']
   onDone: () => void
 }): ReactElement {
   const [shown, setShown] = useState(false)
   const { copied, copy } = useCopyText()
+  // S22: "Add to …" writes this line into the app's own config from main.
+  const [adding, setAdding] = useState(false)
+  const [added, setAdded] = useState<AgentAddResult | null>(null)
+  const appLabel = agentAppLabel(client)
+
+  const add = async (): Promise<void> => {
+    if (client === 'other') return
+    setAdding(true)
+    try {
+      setAdded(await onAdd(client, token))
+    } catch (caught) {
+      console.warn('[agents] Add to app failed:', caught)
+      setAdded({
+        added: false,
+        message: `Couldn't add Videorc to ${appLabel}. Copy the line instead.`
+      })
+    } finally {
+      setAdding(false)
+    }
+  }
+
   return (
     <>
       <DialogHeader>
@@ -264,8 +305,28 @@ function ShowStep({
           The line holds this agent&apos;s token, and Videorc shows it only now. Lost it? Remove the
           agent and connect it again.
         </p>
+        {added ? (
+          <Alert
+            className="mt-2"
+            data-testid="connect-agent-add-result"
+            variant={added.added ? 'success' : 'warning'}
+          >
+            <AlertTitle>{added.message}</AlertTitle>
+          </Alert>
+        ) : null}
       </DialogBody>
       <DialogFooter>
+        {client === 'other' ? null : (
+          <Button
+            data-testid="connect-agent-add"
+            disabled={adding}
+            type="button"
+            variant="outline"
+            onClick={() => void add()}
+          >
+            {adding ? 'Adding…' : `Add to ${appLabel}`}
+          </Button>
+        )}
         <Button type="button" onClick={onDone}>
           Done
         </Button>

@@ -1,6 +1,8 @@
 import { BackendClient } from '@/backendClient'
 import type {
   AgentActivityEntry,
+  AgentAddApp,
+  AgentAddResult,
   AgentBridgeInfo,
   AgentClientKind,
   AgentCreated,
@@ -63,6 +65,8 @@ export interface AgentsStoreDeps {
   onConnection: (listener: (connection: BackendConnection) => void) => () => void
   createClient: (connection: BackendConnection) => AgentsClient
   getBridge: (install: boolean) => Promise<AgentBridgeInfo>
+  /** S22: "Add to …", in Electron main. */
+  addToApp: (app: AgentAddApp, token: string) => Promise<AgentAddResult>
   timers?: {
     setTimeout: (run: () => void, ms: number) => unknown
     clearTimeout: (handle: unknown) => void
@@ -80,6 +84,9 @@ export interface AgentsActions {
   showActivityFor: (agentId: string | null) => Promise<void>
   /** Connect: the bridge's path, with the Linux copy in place (D20). */
   prepareBridge: () => Promise<AgentBridgeInfo>
+  /** S22: write the agent into that app's own config; the token is passed
+   * through, never kept. */
+  addToApp: (app: AgentAddApp, token: string) => Promise<AgentAddResult>
   openConnect: () => void
   closeConnect: () => void
 }
@@ -319,6 +326,9 @@ export function createAgentsStore(deps: AgentsStoreDeps): AgentsStore {
       set({ bridge })
       return bridge
     },
+    addToApp(app, token) {
+      return deps.addToApp(app, token)
+    },
     openConnect() {
       set({ connectOpen: true, connectRequest: snapshot.connectRequest + 1 })
     },
@@ -339,7 +349,11 @@ export function agentsStore(): AgentsStore {
     getBridge: (install) =>
       window.videorc?.getAgentBridge
         ? window.videorc.getAgentBridge(install)
-        : Promise.reject(new Error('The agent bridge is only known in the main window.'))
+        : Promise.reject(new Error('The agent bridge is only known in the main window.')),
+    addToApp: (app, token) =>
+      window.videorc?.addAgentToApp
+        ? window.videorc.addAgentToApp(app, token)
+        : Promise.reject(new Error('Add to … only works in the main window.'))
   })
   return mainWindowStore
 }

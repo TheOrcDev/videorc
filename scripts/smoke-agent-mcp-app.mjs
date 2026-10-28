@@ -8,9 +8,10 @@
 // Videorc, and the smoke proves it never tried. It goes live only to a local
 // FFmpeg sink on 127.0.0.1 (step B1).
 //
-//   1. Agents off: initialize and tools/list answer from the bridge; a call
-//      says how to turn Agents on.
-//   2. Enable, create an agent, connect: tools/list equals the catalog.
+//   1. Agents off: initialize, tools/list and the prompts (S22) answer from
+//      the bridge; a call says how to turn Agents on.
+//   2. Enable, create an agent, connect: tools/list equals the catalog, and
+//      the backend's own prompts/list (straight to /mcp) equals the bridge's.
 //   3. get_status, list_scenes, list_assets, get_picture (a decodable JPEG at
 //      most 1280 px wide).
 //   4. switch_scene, set_banner, set_takeover and set_audio (mute) round
@@ -97,6 +98,10 @@ const bridgeBinary = agentBridgeBinary({ repoRoot })
 const catalog = JSON.parse(
   readFileSync(join(repoRoot, 'protocol-fixtures', 'agent-tools.json'), 'utf8')
 )
+const promptCatalog = JSON.parse(
+  readFileSync(join(repoRoot, 'protocol-fixtures', 'agent-prompts.json'), 'utf8')
+)
+const promptNames = promptCatalog.prompts.map((prompt) => prompt.name)
 
 const TURN_ON_AGENTS = 'Turn on Agents in Videorc → Settings → Remote.'
 const BAD_TOKEN =
@@ -531,12 +536,24 @@ try {
   if (JSON.stringify(offNames) !== JSON.stringify(catalogNames)) {
     fail(`the bridge's tools/list is not the catalog: ${JSON.stringify(offNames)}`)
   }
+  // S22: the prompts are fixed text the bridge serves with Videorc's Agents off.
+  const offPrompts = await offBridge.request('prompts/list')
+  if (
+    JSON.stringify(offPrompts.result?.prompts?.map((prompt) => prompt.name)) !==
+    JSON.stringify(promptNames)
+  ) {
+    fail(`the bridge's prompts/list is not the fixture: ${JSON.stringify(offPrompts)}`)
+  }
+  const offPrompt = await offBridge.request('prompts/get', { name: 'go_live_checklist' })
+  if (!offPrompt.result?.messages?.[0]?.content?.text?.includes('list_destinations')) {
+    fail(`the bridge's prompts/get: ${JSON.stringify(offPrompt)}`)
+  }
   const offCall = await call(offBridge, 'get_status')
   if (!offCall.isError || resultText(offCall) !== TURN_ON_AGENTS) {
     fail(`a call with Agents off: ${JSON.stringify(offCall)}`)
   }
   log(
-    'step 1: Agents off; the bridge answers initialize and tools/list, a call says how to turn it on'
+    'step 1: Agents off; the bridge answers initialize, tools/list and the prompts, a call says how to turn it on'
   )
 
   // 2. Enable, create, connect.
@@ -565,8 +582,22 @@ try {
       if (internal in tool) fail(`tools/list leaks the catalog field ${internal}`)
     }
   }
+  // S22: the backend serves the same prompts the bridge answered offline.
+  const backendPrompts = await postMcp({
+    port,
+    token: agentToken,
+    body: { jsonrpc: '2.0', id: 2, method: 'prompts/list' }
+  })
+  const promptFields = (prompts) =>
+    JSON.stringify(
+      (prompts ?? []).map(({ name, title, description }) => ({ name, title, description }))
+    )
+  const backendPromptList = JSON.parse(backendPrompts.body || '{}').result?.prompts
+  if (promptFields(backendPromptList) !== promptFields(offPrompts.result.prompts)) {
+    fail(`the backend's prompts/list differs from the bridge's: ${backendPrompts.body}`)
+  }
   log(
-    `step 2: Agents on at 127.0.0.1:${port}; tools/list equals the catalog (${catalogNames.length} tools)`
+    `step 2: Agents on at 127.0.0.1:${port}; tools/list equals the catalog (${catalogNames.length} tools), prompts/list the bridge's`
   )
 
   // 3. Look.

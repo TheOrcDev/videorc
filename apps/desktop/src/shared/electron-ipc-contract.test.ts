@@ -72,8 +72,9 @@ describe('Electron IPC contract', () => {
     // 150: plan 209 S7 adds agents:bridge (the agent bridge's path for
     // Settings → Remote → Agents, and the Linux copy on Connect).
     // 152: plan 209 S20 adds the Stream Manager's `/buddy` relay pair.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(152)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(152)
+    // 153: plan 209 S22 adds agents:add-to-app ("Add to …" in Connect).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(153)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(153)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -112,6 +113,28 @@ describe('Electron IPC contract', () => {
     expect(() => validateElectronInvokeArgs('shell:exec', ['calc.exe'])).toThrow(
       'Electron IPC channel is not declared'
     )
+  })
+
+  it('takes only a known app and an agent token for Add to … (plan 209 S22)', () => {
+    const token = `vrc_agent_${'ab12'.repeat(16)}`
+    expect(validateElectronInvokeArgs('agents:add-to-app', ['codex', token])).toEqual([
+      'codex',
+      token
+    ])
+    // Other has no config file, and nothing but a token's shape crosses.
+    expect(() => validateElectronInvokeArgs('agents:add-to-app', ['other', token])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('agents:add-to-app', ['cursor', 'vrc_agent_short'])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('agents:add-to-app', ['cursor', token, '/tmp/evil'])
+    ).toThrow()
+    expect(
+      validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'Added.' })
+    ).toEqual({ added: true, message: 'Added.' })
+    expect(() =>
+      validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'x', path: '/' })
+    ).toThrow()
   })
 
   it('validates account authorization URLs and callback identifiers', () => {

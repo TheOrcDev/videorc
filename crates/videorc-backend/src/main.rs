@@ -12,6 +12,7 @@ mod agent_library;
 mod agent_look;
 mod agent_mcp;
 mod agent_prepare;
+mod agent_prompts;
 mod agent_registry;
 mod agent_tools;
 mod atomic_file;

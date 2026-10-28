@@ -3,7 +3,8 @@
 //! Every MCP client speaks stdio, so this small binary ships inside the app
 //! and turns stdio JSON-RPC into calls on the backend's Agents listener
 //! (`http://127.0.0.1:<port>/mcp`, Bearer `VIDEORC_AGENT_TOKEN`). It answers
-//! `initialize`, `ping` and `tools/list` itself from the compiled-in catalog
+//! `initialize`, `ping`, `tools/list` and the prompts (`prompts/list`,
+//! `prompts/get`, S22) itself from the compiled-in catalog and fixture
 //! (D7), so an agent app never marks the server as failed and opening the
 //! agent app never opens Videorc. The first `tools/call` with no listener
 //! opens Videorc and waits up to 30 s; if Agents is off, the answer is
@@ -16,6 +17,11 @@
 #[allow(dead_code)]
 #[path = "../agent_tools.rs"]
 mod agent_tools;
+
+// S22: the prompts are fixed text, so the bridge serves them itself.
+#[allow(dead_code)]
+#[path = "../agent_prompts.rs"]
+mod agent_prompts;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,7 +164,7 @@ fn initialize_result(params: &Value) -> Value {
     let catalog = agent_tools::catalog();
     json!({
         "protocolVersion": negotiate_protocol_version(params.get("protocolVersion").and_then(Value::as_str)),
-        "capabilities": { "tools": {} },
+        "capabilities": { "tools": {}, "prompts": {} },
         "serverInfo": {
             "name": catalog.server_name,
             "title": catalog.server_title,
@@ -170,6 +176,20 @@ fn initialize_result(params: &Value) -> Value {
 
 fn tools_list_result() -> Value {
     json!({ "tools": agent_tools::catalog().mcp_tools() })
+}
+
+fn prompts_list_result() -> Value {
+    json!({ "prompts": agent_prompts::prompts().mcp_prompts() })
+}
+
+/// A prompt is fixed text: answered here, with Videorc open or closed, and
+/// without a token (it reads nothing from Videorc).
+fn prompts_get_answer(id: &Value, params: &Value) -> Value {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    match agent_prompts::prompts().prompt(name) {
+        Some(prompt) => response(id, prompt.mcp_get_result()),
+        None => error_response(id, -32602, &agent_prompts::unknown_prompt(name)),
+    }
 }
 
 /// A refusal the agent reads: a tool result with `isError`, never a
@@ -246,6 +266,30 @@ fn reach(path: &Path) -> Reach {
     }
 }
 
+/// Windows: the install this bridge sits in (`<install>\\resources\\`), else
+/// the default per-user install, for a copy outside it (S22: the Claude
+/// Desktop extension unpacks the bridge into Claude's own folder).
+fn windows_videorc_exe(
+    bridge: Option<&Path>,
+    local_app_data: Option<&str>,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let beside = bridge
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|install| install.join("Videorc.exe"));
+    let installed = local_app_data.map(|folder| {
+        PathBuf::from(folder)
+            .join("Programs")
+            .join("Videorc")
+            .join("Videorc.exe")
+    });
+    [beside, installed]
+        .into_iter()
+        .flatten()
+        .find(|exe| exists(exe))
+}
+
 /// Open Videorc in the background (D7). macOS by bundle id, Windows the exe
 /// beside this bridge's `resources` folder, Linux per D20.
 fn open_videorc() -> Result<(), String> {
@@ -254,17 +298,12 @@ fn open_videorc() -> Result<(), String> {
         command.args(["-g", "-b", MACOS_BUNDLE_ID]);
         command
     } else if cfg!(target_os = "windows") {
-        let exe = std::env::current_exe()
-            .ok()
-            .and_then(|bridge| {
-                bridge
-                    .parent()
-                    .and_then(Path::parent)
-                    .map(Path::to_path_buf)
-            })
-            .map(|install| install.join("Videorc.exe"))
-            .filter(|exe| exe.exists())
-            .ok_or_else(|| "Videorc.exe isn't beside this bridge.".to_string())?;
+        let exe = windows_videorc_exe(
+            std::env::current_exe().ok().as_deref(),
+            env_var("LOCALAPPDATA").as_deref(),
+            &|path| path.exists(),
+        )
+        .ok_or_else(|| "Videorc.exe isn't beside this bridge.".to_string())?;
         std::process::Command::new(exe)
     } else {
         let launcher = env_var("VIDEORC_APP_PATH")
@@ -447,6 +486,8 @@ async fn handle(bridge: Arc<Bridge>, message: Value) -> Option<Value> {
         (Some(id), "initialize") => Some(response(&id, initialize_result(&params))),
         (Some(id), "ping") => Some(response(&id, json!({}))),
         (Some(id), "tools/list") => Some(response(&id, tools_list_result())),
+        (Some(id), "prompts/list") => Some(response(&id, prompts_list_result())),
+        (Some(id), "prompts/get") => Some(prompts_get_answer(&id, &params)),
         (Some(_), "tools/call") => Some(bridge.forward(message).await),
         (Some(id), "") => Some(error_response(&id, -32600, "Invalid request: no method.")),
         (Some(id), other) => Some(error_response(
@@ -523,6 +564,7 @@ mod tests {
         assert_eq!(result["protocolVersion"], "2025-06-18");
         assert_eq!(result["serverInfo"]["name"], "videorc");
         assert_eq!(result["capabilities"]["tools"], json!({}));
+        assert_eq!(result["capabilities"]["prompts"], json!({}));
         assert_eq!(result["instructions"], agent_tools::catalog().instructions);
         assert_eq!(
             initialize_result(&json!({ "protocolVersion": "2030-01-01" }))["protocolVersion"],
@@ -610,6 +652,28 @@ mod tests {
     }
 
     #[test]
+    fn windows_finds_videorc_beside_the_bridge_or_in_the_default_install() {
+        let bridge = Path::new("/install/resources/videorc-mcp.exe");
+        let beside = Path::new("/install").join("Videorc.exe");
+        let default = PathBuf::from("/local")
+            .join("Programs")
+            .join("Videorc")
+            .join("Videorc.exe");
+        let only = |wanted: PathBuf| move |path: &Path| path == wanted.as_path();
+        assert_eq!(
+            windows_videorc_exe(Some(bridge), Some("/local"), &only(beside.clone())),
+            Some(beside.clone())
+        );
+        // The extension's copy lives in Claude's folder: the default install.
+        let extension = Path::new("/claude/extensions/videorc/server/videorc-mcp.exe");
+        assert_eq!(
+            windows_videorc_exe(Some(extension), Some("/local"), &only(default.clone())),
+            Some(default)
+        );
+        assert_eq!(windows_videorc_exe(Some(extension), None, &|_| false), None);
+    }
+
+    #[test]
     fn answers_are_read_from_json_and_sse_bodies() {
         let id = json!(7);
         let body = r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#;
@@ -672,6 +736,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(answer["error"]["code"], -32601);
+        // S22: the prompts answer offline and without a token.
+        let answer = handle(
+            bridge.clone(),
+            json!({ "jsonrpc": "2.0", "id": 30, "method": "prompts/list" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer["result"]["prompts"],
+            Value::Array(agent_prompts::prompts().mcp_prompts())
+        );
+        let answer = handle(
+            bridge.clone(),
+            json!({ "jsonrpc": "2.0", "id": 31, "method": "prompts/get", "params": { "name": "go_live_checklist" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer["id"], 31);
+        assert_eq!(
+            answer["result"],
+            agent_prompts::prompts()
+                .prompt("go_live_checklist")
+                .unwrap()
+                .mcp_get_result()
+        );
+        let answer = handle(
+            bridge.clone(),
+            json!({ "jsonrpc": "2.0", "id": 32, "method": "prompts/get", "params": { "name": "nope" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer["error"]["code"], -32602);
+        assert_eq!(
+            answer["error"]["message"],
+            agent_prompts::unknown_prompt("nope")
+        );
         // No token: the call is refused in the agent's words, without
         // opening anything.
         let answer = handle(

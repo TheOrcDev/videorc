@@ -3,6 +3,7 @@ import {
   validateChatDeliveryBoundary,
   type ChatDeliveryBoundary
 } from './chat-delivery'
+import { AGENT_TOKEN_PATTERN } from './agent-config-entry'
 import { isGlobalShortcutConfigKey } from './global-shortcut-bindings'
 import { GLOBAL_SHORTCUT_ACTIONS, type GlobalShortcutAction } from './global-shortcuts'
 import type {
@@ -250,6 +251,7 @@ export const electronInvokeApiMethods = {
   'resource:reveal-background': 'revealBackgroundAsset',
   'resource:reveal-support-bundle': 'revealSupportBundle',
   'agents:bridge': 'getAgentBridge',
+  'agents:add-to-app': 'addAgentToApp',
   'resource:open-session': 'openSession',
   'media:grant-session': 'grantSessionMedia',
   'resource:trash-session-deletion': 'trashSessionDeletion',
@@ -588,6 +590,11 @@ const chatImageLocalUrlSchema = runtimeSchema<string | null>(
   }
 )
 const boundedIdentifier = stringSchema({ minLength: 1, maxLength: 1024 })
+const agentTokenSchema = runtimeSchema<string>('an agent token', (value, path) => {
+  const input = stringSchema({ minLength: 74, maxLength: 74 }).parse(value, path)
+  if (!AGENT_TOKEN_PATTERN.test(input)) throw new RuntimeSchemaError(path, 'an agent token')
+  return input
+})
 const boundedStatusText = stringSchema({ maxLength: 16_384 })
 const nonNegativeSafeIntegerSchema = runtimeSchema<number>(
   'a non-negative safe integer',
@@ -1672,6 +1679,18 @@ const specificRuntimeInvokeContracts = {
   'agents:bridge': invokeContract(
     tupleSchema([booleanSchema]),
     objectSchema({ path: pathSchema, exists: booleanSchema }, { allowUnknown: false })
+  ),
+  // Plan 209 S22: the app and the token Connect just minted, nothing else;
+  // main resolves the bridge's path itself. The answer is a sentence.
+  'agents:add-to-app': invokeContract(
+    tupleSchema([
+      enumSchema(['claude-desktop', 'claude-code', 'cursor', 'codex', 'vs-code']),
+      agentTokenSchema
+    ]),
+    objectSchema(
+      { added: booleanSchema, message: stringSchema({ minLength: 1, maxLength: 512 }) },
+      { allowUnknown: false }
+    )
   ),
   'resource:open-session': invokeContract(tupleSchema([boundedIdentifier])),
   'media:grant-session': invokeContract(
