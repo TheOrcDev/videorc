@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type {
+  AiCapabilities,
   GoLiveDestinationPreflight,
   GoLivePreflight,
   StreamMetadataDraft,
@@ -374,7 +375,7 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
       connected: true,
       wsStatus: 'connected',
       recording: { state: 'idle', message: 'Ready.' },
-      dialogOpen: false,
+      dialogOpenRef: { current: false },
       goLiveConfirmationPending: false,
       startRequestPending: false,
       openGoLiveConfirmationInFlightRef: { current: null },
@@ -414,7 +415,7 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
         { recording: { state: 'recording', message: 'Recording.' } },
         START_BLOCKED_COPY.sessionRunning
       ],
-      [{ dialogOpen: true }, HEADLESS_GO_LIVE_COPY.dialogOpen],
+      [{ dialogOpenRef: { current: true } }, HEADLESS_GO_LIVE_COPY.dialogOpen],
       [{ goLiveConfirmationPending: true }, HEADLESS_GO_LIVE_COPY.inFlight],
       [
         { openGoLiveConfirmationInFlightRef: { current: Promise.resolve() } },
@@ -465,7 +466,14 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
   })
 
   it("confirms through the dialog's own confirm and reports where it went live", async () => {
-    const fake = studio()
+    // Captions on and not ready: withoutCaptions presses "Go live without captions".
+    const fake = studio({
+      config: {
+        ...defaultCaptureConfig,
+        streaming: twoOn,
+        captions: { ...defaultCaptureConfig.captions, enabled: true }
+      }
+    })
     expect(await goLiveWithoutDialog({ withoutCaptions: true }, fake)).toEqual({
       ok: true,
       destinations: [
@@ -475,9 +483,101 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
       recording: defaultCaptureConfig.recordEnabled
     })
     expect(fake.setSuppressCaptionsForSession).toHaveBeenCalledWith(true)
+    expect(fake.setSuppressCaptionsForSession).not.toHaveBeenCalledWith(false)
     expect(fake.runGoLiveConfirmation).toHaveBeenCalledWith(
       expect.objectContaining({ excludedTargetIds: [], draft, suppressCaptions: true })
     )
+  })
+
+  // Review fix 5: "Go live without captions" applies only when captions
+  // would block, as the dialog offers it only then.
+  it('keeps captions that can start on, even with withoutCaptions', async () => {
+    const fake = studio({
+      config: {
+        ...defaultCaptureConfig,
+        streaming: twoOn,
+        captions: { ...defaultCaptureConfig.captions, enabled: true }
+      },
+      runGoLivePreflight: vi.fn(async () => ({
+        kind: 'ready' as const,
+        preflight: {
+          valid: true,
+          destinations: [destination('youtube-1'), destination('twitch-1')],
+          issues: []
+        },
+        draft,
+        capabilities: {
+          captions: { available: true, preferredTransport: 'realtime' }
+        } as unknown as AiCapabilities
+      }))
+    })
+    expect((await goLiveWithoutDialog({ withoutCaptions: true }, fake)).ok).toBe(true)
+    expect(fake.setSuppressCaptionsForSession).not.toHaveBeenCalled()
+    const confirmation = vi.mocked(fake.runGoLiveConfirmation).mock.calls[0]?.[0]
+    expect(confirmation?.suppressCaptions).toBe(false)
+    expect(confirmation?.captionsReadiness.blocksStart).toBe(false)
+  })
+
+  // Review fix 9: the captions choice belongs to an attempt that started.
+  it('puts "without captions" back on every outcome that did not start', async () => {
+    const captionsOn = {
+      ...defaultCaptureConfig,
+      streaming: twoOn,
+      captions: { ...defaultCaptureConfig.captions, enabled: true }
+    }
+    const endings: GoLiveConfirmOutcome[] = [
+      { kind: 'ignored' },
+      { kind: 'failed', error: new Error('Network.') },
+      { kind: 'started', started: false, streaming: twoOn },
+      { kind: 'cancelled', streaming: twoOn }
+    ]
+    for (const ending of endings) {
+      const fake = studio({
+        config: captionsOn,
+        runGoLiveConfirmation: vi.fn(async () => ending)
+      })
+      expect((await goLiveWithoutDialog({ withoutCaptions: true }, fake)).ok).toBe(false)
+      expect(vi.mocked(fake.setSuppressCaptionsForSession).mock.calls).toEqual([[true], [false]])
+    }
+  })
+
+  // Review fix 10: one in-flight hold for the whole call, and the dialog read
+  // when it confirms.
+  it('owns the transport through the recheck and reads the dialog when it confirms', async () => {
+    const preflight: GoLivePreflight = {
+      valid: false,
+      destinations: [
+        destination('youtube-1'),
+        destination('twitch-1', { ready: false, message: 'Twitch is offline.' })
+      ],
+      issues: []
+    }
+    let releaseRecheck: (value: GoLivePreflight) => void = () => undefined
+    const dialogOpenRef = { current: false }
+    const fake = studio({
+      dialogOpenRef,
+      runGoLivePreflight: vi.fn(async () => ({
+        kind: 'ready' as const,
+        preflight,
+        draft,
+        capabilities: null
+      })),
+      revalidateGoLive: vi.fn(
+        () =>
+          new Promise<GoLivePreflight>((resolve) => {
+            releaseRecheck = resolve
+          })
+      )
+    })
+    const outcome = goLiveWithoutDialog({ allowPartial: true }, fake)
+    await vi.waitFor(() => expect(fake.revalidateGoLive).toHaveBeenCalled())
+    expect(fake.openGoLiveConfirmationInFlightRef.current).not.toBeNull()
+    // The streamer's dialog opened anyway (an older click): never confirm over it.
+    dialogOpenRef.current = true
+    releaseRecheck({ valid: true, destinations: [destination('youtube-1')], issues: [] })
+    expect(await outcome).toEqual({ ok: false, message: HEADLESS_GO_LIVE_COPY.dialogOpen })
+    expect(fake.runGoLiveConfirmation).not.toHaveBeenCalled()
+    expect(fake.openGoLiveConfirmationInFlightRef.current).toBeNull()
   })
 
   // Review fix 1: Stop agents while it checks or sets up never goes live.

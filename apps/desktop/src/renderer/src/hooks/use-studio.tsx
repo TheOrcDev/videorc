@@ -3780,6 +3780,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
+  // Plan 209 review fix 10: an agent's Go Live reads it when it confirms.
+  const goLiveConfirmationOpenRef = useRef(false)
+  goLiveConfirmationOpenRef.current = goLiveConfirmationOpen
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
@@ -15275,6 +15278,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (run.kind !== 'ready') {
             return
           }
+          goLiveConfirmationOpenRef.current = true
           setGoLiveConfirmationOpen(true)
         } catch (error) {
           // A preflight that fails is a refused Go Live (B-7): the same
@@ -17123,7 +17127,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       // Plan 209 S10 (D13): the Go Live dialog's own preflight, gate and
       // confirm, for an agent's `go_live` (lib/go-live-headless).
-      dialogOpen: goLiveConfirmationOpen,
+      dialogOpenRef: goLiveConfirmationOpenRef,
       goLiveConfirmationPending,
       startRequestPending,
       openGoLiveConfirmationInFlightRef,

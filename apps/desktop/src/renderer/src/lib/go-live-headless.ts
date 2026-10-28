@@ -298,8 +298,8 @@ export interface HeadlessGoLiveStudio {
   connected: boolean
   wsStatus: WsStatus
   recording: RecordingStatus
-  /** The Go Live dialog is open. */
-  dialogOpen: boolean
+  /** The Go Live dialog is open, read when asked (review fix 10). */
+  dialogOpenRef: { readonly current: boolean }
   goLiveConfirmationPending: boolean
   startRequestPending: boolean
   openGoLiveConfirmationInFlightRef: { current: Promise<void> | null }
@@ -345,14 +345,13 @@ export async function goLiveWithoutDialog(
   studio: HeadlessGoLiveStudio
 ): Promise<HeadlessGoLiveOutcome> {
   const copy = HEADLESS_GO_LIVE_COPY
-  const cancelled = () => request.cancelled?.() === true
   if (!studio.connected) {
     return { ok: false, message: connectionBlockedReason(studio.wsStatus) ?? copy.inFlight }
   }
   if (sessionOwnsTransport(studio.recording)) {
     return { ok: false, message: START_BLOCKED_COPY.sessionRunning }
   }
-  if (studio.dialogOpen) return { ok: false, message: copy.dialogOpen }
+  if (studio.dialogOpenRef.current) return { ok: false, message: copy.dialogOpen }
   // A Go Live in flight owns the transport (B-14), this one included.
   if (
     shouldIgnoreGoLiveAction({
@@ -366,42 +365,61 @@ export async function goLiveWithoutDialog(
   ) {
     return { ok: false, message: copy.inFlight }
   }
+  // This call owns the transport from here to its answer (review fix 10):
+  // while it checks, rechecks and confirms, Go Live, Record, ⌘K and the
+  // remotes join or wait, and the dialog can't open over it.
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  studio.openGoLiveConfirmationInFlightRef.current = gate
+  let suppressed = false
+  let outcome: HeadlessGoLiveOutcome | undefined
+  try {
+    outcome = await goLiveOwningTheTransport(request, studio, () => {
+      suppressed = true
+      studio.setSuppressCaptionsForSession(true)
+    })
+    return outcome
+  } finally {
+    // "Go live without captions" belongs to an attempt that started (review
+    // fix 9): any other ending puts it back.
+    if (suppressed && outcome?.ok !== true) studio.setSuppressCaptionsForSession(false)
+    if (studio.openGoLiveConfirmationInFlightRef.current === gate) {
+      studio.openGoLiveConfirmationInFlightRef.current = null
+    }
+    release()
+  }
+}
+
+async function goLiveOwningTheTransport(
+  request: HeadlessGoLiveRequest,
+  studio: HeadlessGoLiveStudio,
+  suppressCaptionsForSession: () => void
+): Promise<HeadlessGoLiveOutcome> {
+  const copy = HEADLESS_GO_LIVE_COPY
+  const cancelled = () => request.cancelled?.() === true
   const config = studio.config
   const exclusions = headlessExclusions(config.streaming, request.destinations)
   if (!exclusions.ok) return { ok: false, message: exclusions.message }
   let excludedTargetIds = exclusions.excludedTargetIds
   const intent = livestreamIntent(config.recordEnabled)
   const allowPartial = request.allowPartial === true
-  const suppressCaptions = request.withoutCaptions === true
 
-  // The dialog's preflight, owning the transport as the dialog's does
-  // (B-7): Record, ⌘K and the remotes wait, and Go Live says Checking….
-  const preflightRun = (async () => {
-    studio.setGoLiveConfirmationPending(true)
-    try {
-      return await studio.runGoLivePreflight(
-        intent,
-        streamingWithoutTargets(config.streaming, excludedTargetIds),
-        headlessDraft(studio.streamMetadataDraft, request.title)
-      )
-    } finally {
-      studio.setGoLiveConfirmationPending(false)
-    }
-  })()
-  const preflightGate = preflightRun.then(
-    () => undefined,
-    () => undefined
-  )
-  studio.openGoLiveConfirmationInFlightRef.current = preflightGate
+  // The dialog's preflight, as the dialog's runs it (B-7): Go Live says
+  // Checking….
   let run: GoLivePreflightRun
   try {
-    run = await preflightRun
+    studio.setGoLiveConfirmationPending(true)
+    run = await studio.runGoLivePreflight(
+      intent,
+      streamingWithoutTargets(config.streaming, excludedTargetIds),
+      headlessDraft(studio.streamMetadataDraft, request.title)
+    )
   } catch (error) {
     return { ok: false, message: sessionStartFailureMessage(error) }
   } finally {
-    if (studio.openGoLiveConfirmationInFlightRef.current === preflightGate) {
-      studio.openGoLiveConfirmationInFlightRef.current = null
-    }
+    studio.setGoLiveConfirmationPending(false)
   }
   if (run.kind === 'refused') return { ok: false, message: run.reason }
   if (run.kind === 'settling') return { ok: false, message: LIVESTREAM_STILL_SETTLING }
@@ -409,14 +427,20 @@ export async function goLiveWithoutDialog(
     return { ok: false, message: connectionBlockedReason(studio.wsStatus) ?? copy.inFlight }
   }
 
-  // "Go live without captions" folds into captions' answer, as in the dialog.
-  const captionsReadiness = decideGoLiveCaptionsReadiness({
-    persistedEnabled: config.captions.enabled,
-    suppressForSession: suppressCaptions || studio.captionsPlatformUnavailable !== null,
-    capabilities: run.capabilities,
-    outputReadiness: studio.goLiveCaptionOutputReadiness,
-    platformUnavailable: studio.captionsPlatformUnavailable
-  })
+  // Captions' answer as the dialog first shows it; "Go live without
+  // captions" applies only when they would block the start, as the dialog
+  // offers it only then (review fix 5). Captions that can start stay on.
+  const captionsFor = (suppress: boolean) =>
+    decideGoLiveCaptionsReadiness({
+      persistedEnabled: config.captions.enabled,
+      suppressForSession: suppress || studio.captionsPlatformUnavailable !== null,
+      capabilities: run.capabilities,
+      outputReadiness: studio.goLiveCaptionOutputReadiness,
+      platformUnavailable: studio.captionsPlatformUnavailable
+    })
+  const asShown = captionsFor(false)
+  const suppressCaptions = request.withoutCaptions === true && asShown.blocksStart
+  const captionsReadiness = suppressCaptions ? captionsFor(true) : asShown
   const entitlementGate = goLiveEntitlementGate({
     entitlements: studio.entitlements,
     streaming: config.streaming
@@ -445,9 +469,10 @@ export async function goLiveWithoutDialog(
     return { ok: false, message: decision.kind === 'refuse' ? decision.message : copy.inFlight }
   }
 
-  // Stop agents wins over a confirm.
+  // Stop agents (or the dialog, which can't open now) wins over a confirm.
   if (cancelled()) return { ok: false, message: copy.cancelled }
-  if (suppressCaptions) studio.setSuppressCaptionsForSession(true)
+  if (studio.dialogOpenRef.current) return { ok: false, message: copy.dialogOpen }
+  if (suppressCaptions) suppressCaptionsForSession()
   const outcome = await studio.runGoLiveConfirmation({
     excludedTargetIds,
     draft: run.draft,
