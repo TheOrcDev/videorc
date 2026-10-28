@@ -1048,6 +1048,7 @@ mod tests {
 
     fn settings(mode: CohostAutoChatMode) -> CohostAutoChat {
         CohostAutoChat {
+            talk: None,
             mode,
             greetings: CohostGreetingsSettings {
                 enabled: true,

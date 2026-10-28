@@ -48,8 +48,13 @@ export const setBuddy: AgentToolExecutor = async (context, args) => {
   const said: string[] = []
   let saved = current
   if (on !== undefined || chatMode !== undefined) {
+    // plan 211 Phase D (S-D1): the argument becomes `talk` with the three
+    // talk values and `auto` is refused. Until then the old `chatMode`
+    // saves through `talk`, Auto reading as Bubble (D4).
     const autoChat = chatMode
-      ? mergeAutoChatRelayPatch(current?.autoChat ?? null, { mode: chatMode })
+      ? mergeAutoChatRelayPatch(current?.autoChat ?? null, {
+          talk: chatMode === 'auto' ? 'bubble' : chatMode
+        })
       : null
     const patch = cohostEnableRelayPatch(
       current,

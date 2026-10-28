@@ -631,7 +631,52 @@ impl Default for CohostPersona {
     }
 }
 
-/// The chat posting mode (plan 164 D4): everything is off by default.
+/// How Buddy talks on its own (plan 211 D1): `off` says nothing, `bubble`
+/// speaks on stream in its bubble and never in chat, `suggest` proposes a
+/// card the streamer clicks to post as themself. This is the one truth
+/// (`autoChat.talk`); [`CohostAutoChatMode`] is only its projection for
+/// older apps. Bubble is the default (D4).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostTalkMode {
+    Off,
+    #[default]
+    Bubble,
+    Suggest,
+}
+
+impl CohostTalkMode {
+    /// Whether Buddy says anything on its own: everything but Off.
+    pub(crate) fn speaks(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The legacy `mode` an app from before plan 211 reads (D3): Bubble is
+    /// saved as `off`, so an older app on a Bubble profile stays quiet.
+    /// `auto` is never written again.
+    pub(crate) fn legacy(self) -> CohostAutoChatMode {
+        match self {
+            Self::Off | Self::Bubble => CohostAutoChatMode::Off,
+            Self::Suggest => CohostAutoChatMode::Suggest,
+        }
+    }
+
+    /// The talk mode a block saved without `talk` means (D3, D4): `auto`
+    /// becomes Bubble, which never posts.
+    fn from_legacy(mode: CohostAutoChatMode) -> Self {
+        match mode {
+            CohostAutoChatMode::Off => Self::Off,
+            CohostAutoChatMode::Suggest => Self::Suggest,
+            CohostAutoChatMode::Auto => Self::Bubble,
+        }
+    }
+}
+
+/// Legacy storage only (plan 211 D3): the `autoChat.mode` an app from before
+/// plan 211 reads, written by `CohostAutoChat::normalize_talk` as the
+/// projection of [`CohostTalkMode`]. `auto` is read as Bubble and never
+/// written again. Nothing in the engine reads it; `CohostAutoChat::talk()`
+/// is the mode.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostAutoChatMode {
@@ -847,10 +892,19 @@ pub struct CohostCooldownBehaviour {
 }
 
 /// The automatic behaviours (plan 164 D5), each behind its own switch under
-/// the mode. Phase A stores them; Phase D acts on them.
+/// the talk mode (plan 211 D1). Phase A stores them; Phase D acts on them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostAutoChat {
+    /// How Buddy talks (plan 211 D3): the one truth. Absent only in a block
+    /// saved by an app from before plan 211 (or saved by one afterwards,
+    /// which drops the field); `normalize_talk` fills it from `mode` on
+    /// every load and every patch, so the engine always reads `talk()`.
+    /// `skip_serializing_if` keeps `null` off the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk: Option<CohostTalkMode>,
+    /// Legacy projection of `talk` for older apps (plan 211 D3): written by
+    /// `normalize_talk`, never read by the engine once `talk` is set.
     #[serde(default)]
     pub mode: CohostAutoChatMode,
     #[serde(default)]
@@ -878,13 +932,36 @@ fn default_banter() -> CohostCooldownBehaviour {
 }
 
 impl Default for CohostAutoChat {
+    /// A new install talks in its bubble (plan 211 D4); `mode` carries the
+    /// projection older apps read.
     fn default() -> Self {
         Self {
-            mode: CohostAutoChatMode::Off,
+            talk: Some(CohostTalkMode::Bubble),
+            mode: CohostTalkMode::Bubble.legacy(),
             greetings: CohostGreetingsSettings::default(),
             answers: default_answers(),
             banter: default_banter(),
         }
+    }
+}
+
+impl CohostAutoChat {
+    /// How Buddy talks (plan 211 D3): `talk` when the block carries it, else
+    /// what its legacy `mode` means (`auto` reads as Bubble).
+    pub fn talk(&self) -> CohostTalkMode {
+        self.talk
+            .unwrap_or_else(|| CohostTalkMode::from_legacy(self.mode))
+    }
+
+    /// Make `talk` and `mode` agree (plan 211 D3): `talk` wins when present,
+    /// otherwise it is taken from `mode`; then `mode` becomes the projection
+    /// older apps read (Bubble saves as `off`, nothing ever saves as `auto`).
+    /// Runs on every load and every patch, so a stored block always carries
+    /// both fields in agreement.
+    pub(crate) fn normalize_talk(&mut self) {
+        let talk = self.talk();
+        self.talk = Some(talk);
+        self.mode = talk.legacy();
     }
 }
 
@@ -973,6 +1050,10 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
 /// S-A2). Unknown kinds never reach here: the closed enum refuses them.
 pub(crate) fn validate_auto_chat(auto_chat: &CohostAutoChat) -> Result<CohostAutoChat, String> {
     let mut valid = auto_chat.clone();
+    // Plan 211 D3: a patch replaces the whole block, so `talk` is settled
+    // here: it wins when present, else it comes from `mode`, and `mode` is
+    // re-projected either way.
+    valid.normalize_talk();
     if valid.greetings.templates.len() > COHOST_GREETING_TEMPLATES_MAX {
         return Err(format!(
             "At most {COHOST_GREETING_TEMPLATES_MAX} greeting templates."
@@ -1078,8 +1159,9 @@ pub struct CohostSettings {
     /// before the field loads as the bundled default pack.
     #[serde(default)]
     pub persona: CohostPersona,
-    /// Automatic chat (plan 164 S-A2): mode off and every behaviour disabled
-    /// by default. `default` so a settings row from before the field loads.
+    /// Automatic chat (plan 164 S-A2): Buddy talks in its bubble by default
+    /// (plan 211 D4). `default` so a settings row from before the field
+    /// loads as Bubble.
     #[serde(default)]
     pub auto_chat: CohostAutoChat,
 }
@@ -1106,6 +1188,9 @@ impl CohostSettings {
     fn normalized(mut self) -> Self {
         self.notes = truncate_utf16(&self.notes, COHOST_NOTES_MAX_CHARS);
         self.rules = normalize_rules(self.rules);
+        // Plan 211 D3: a block saved before `talk` existed takes it from
+        // `mode` (`auto` reads as Bubble); `mode` is re-projected.
+        self.auto_chat.normalize_talk();
         // A stored welcome is bounded like every other text here; a reaction
         // that is not a reaction id is dropped (only a patch is refused).
         for line in [
@@ -1683,8 +1768,9 @@ pub enum CohostError {
     /// Plan 164 S-A2: the automatic chat settings on a patch are out of bounds.
     #[error("{0}")]
     InvalidAutoChat(String),
-    /// Plan 164 D4: a send was asked for while the chat mode is off.
-    #[error("The Buddy's chat mode is off. Turn on Suggest or Auto in Stream Manager.")]
+    /// Plan 164 D4, plan 211 D2: a card was approved while Buddy is not on
+    /// Suggest, the one mode whose cards post.
+    #[error("Buddy isn't on Suggest, so it has no card to post. Choose Suggest in Stream Manager.")]
     AutoChatOff,
     /// Plan 164 S-D2: the card to approve is gone, answered or expired.
     #[error("{0}")]
@@ -7412,13 +7498,14 @@ impl CohostEngine {
     }
 
     /// `cohost.utterance.approve` (S-D2): the card to send, or why not. The
-    /// mode is checked here too: off refuses even an approved card (D4).
+    /// mode is checked here too (plan 211 D2): only Suggest has cards that
+    /// post, so Off and Bubble refuse even an approved card.
     pub(crate) fn approve_utterance(
         &mut self,
         utterance_id: &str,
         now: Instant,
     ) -> Result<CohostUtterance, CohostError> {
-        if self.settings.auto_chat.mode == CohostAutoChatMode::Off {
+        if self.talk_mode() != CohostTalkMode::Suggest {
             return Err(CohostError::AutoChatOff);
         }
         self.auto_chat
@@ -7471,9 +7558,9 @@ impl CohostEngine {
         self.auto_chat.follow_session(session_id)
     }
 
-    /// Whether the chat mode allows a send right now (re-read at send time).
-    pub(crate) fn auto_chat_mode(&self) -> CohostAutoChatMode {
-        self.settings.auto_chat.mode
+    /// How Buddy talks right now (plan 211 D1), re-read at send time.
+    pub(crate) fn talk_mode(&self) -> CohostTalkMode {
+        self.settings.auto_chat.talk()
     }
 
     fn session_for_mut(&mut self, session_id: &str) -> Result<&mut CohostSession, CohostError> {
@@ -7860,9 +7947,9 @@ fn clip_for_platforms(text: &str, platforms: &[StreamPlatform]) -> (String, bool
 /// clipped, the outcome on the utterance, the state and the report.
 async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
     let now_iso = chrono::Utc::now().to_rfc3339();
-    let (session_id, mode) = {
+    let (session_id, talk) = {
         let engine = state.cohost.lock().await;
-        (engine.auto_chat_session_id(), engine.auto_chat_mode())
+        (engine.auto_chat_session_id(), engine.talk_mode())
     };
     let trigger = utterance.trigger.kind;
     let manual = trigger == CohostUtteranceTriggerKind::Manual;
@@ -7872,15 +7959,12 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
     {
         crate::buddy_overlay::think(state).await;
     }
-    // The mode is the one gate every send passes, decided at send time (D4):
-    // Auto for anything automatic, Suggest or Auto for an approved card.
-    let mode_allows = match mode {
-        CohostAutoChatMode::Off => false,
-        CohostAutoChatMode::Suggest => {
-            utterance.status == CohostUtteranceStatus::Proposed && !manual
-        }
-        CohostAutoChatMode::Auto => true,
-    };
+    // The mode is the one gate every send passes, decided at send time (D4,
+    // plan 211 D2): only a proposed, non-manual card while Buddy is on
+    // Suggest. Off and Bubble never post.
+    let mode_allows = talk == CohostTalkMode::Suggest
+        && utterance.status == CohostUtteranceStatus::Proposed
+        && !manual;
     let session_id = match (session_id, mode_allows) {
         (Some(session_id), true) => session_id,
         (None, _) => {
@@ -14946,6 +15030,7 @@ mod tests {
         assert_eq!(loaded.persona, CohostPersona::default());
         assert_eq!(loaded.persona.id, COHOST_DEFAULT_PERSONA_ID);
         assert_eq!(loaded.persona.name, COHOST_DEFAULT_PERSONA_NAME);
+        assert_eq!(loaded.auto_chat.talk(), CohostTalkMode::Bubble);
         assert_eq!(loaded.auto_chat.mode, CohostAutoChatMode::Off);
         assert!(loaded.auto_chat.greetings.enabled);
         assert!(loaded.auto_chat.greetings.templates.is_empty());
@@ -14986,6 +15071,7 @@ mod tests {
                 library_avatar_id: Some("official:orc".to_string()),
             }),
             auto_chat: Some(CohostAutoChat {
+                talk: Some(CohostTalkMode::Suggest),
                 mode: CohostAutoChatMode::Suggest,
                 greetings: CohostGreetingsSettings {
                     enabled: true,
@@ -21279,6 +21365,7 @@ mod tests {
 
     fn auto_chat_settings(mode: CohostAutoChatMode) -> CohostAutoChat {
         CohostAutoChat {
+            talk: None,
             mode,
             greetings: CohostGreetingsSettings {
                 enabled: true,
@@ -21639,6 +21726,7 @@ mod tests {
     #[test]
     fn greetings_default_on_with_ai_and_welcomes_and_answers_on_for_new_installs() {
         let auto_chat = CohostAutoChat::default();
+        assert_eq!(auto_chat.talk(), CohostTalkMode::Bubble);
         assert_eq!(auto_chat.mode, CohostAutoChatMode::Off);
         assert!(auto_chat.greetings.enabled);
         assert!(auto_chat.greetings.ai);
@@ -21667,7 +21755,13 @@ mod tests {
             "banter": { "enabled": false, "cooldownSeconds": 240 }
         }))
         .unwrap();
-        assert_eq!(stored.mode, CohostAutoChatMode::Auto);
+        assert_eq!(stored.mode, CohostAutoChatMode::Auto, "raw, not normalized");
+        assert_eq!(stored.talk, None);
+        assert_eq!(
+            stored.talk(),
+            CohostTalkMode::Bubble,
+            "plan 211 D4: saved Auto means Bubble"
+        );
         assert!(!stored.answers.enabled, "saved settings are never flipped");
         assert!(stored.greetings.ai);
         assert_eq!(stored.greetings.welcomes, CohostWelcomes::default());
@@ -21708,6 +21802,181 @@ mod tests {
         // Nothing stored: the defaults.
         let database = Database::open_in_memory_for_tests();
         assert!(load_cohost_settings(&database).auto_chat.answers.enabled);
+    }
+
+    /// Plan 211 D3, D4: `talk` is the mode and `mode` its projection for
+    /// older apps. Each value round-trips through storage with the right
+    /// projection (Bubble saves as `off`; nothing ever saves as `auto`); a
+    /// block with only `mode` loads the right `talk` (`auto` → Bubble); no
+    /// block, and no stored settings at all, load Bubble; a patch settles
+    /// `talk` the same way (`talk` wins, else `mode`).
+    #[test]
+    fn talk_is_the_mode_and_mode_is_its_projection_for_older_apps() {
+        for (talk, projection) in [
+            (CohostTalkMode::Off, "off"),
+            (CohostTalkMode::Bubble, "off"),
+            (CohostTalkMode::Suggest, "suggest"),
+        ] {
+            let database = Database::open_in_memory_for_tests();
+            let mut settings = CohostSettings::default();
+            settings.auto_chat.talk = Some(talk);
+            // The projection is written by normalization, never by hand.
+            settings.auto_chat.mode = CohostAutoChatMode::Auto;
+            let patched = CohostSettings::validated_patch(CohostSettingsPatch {
+                auto_chat: Some(settings.auto_chat.clone()),
+                ..CohostSettingsPatch::default()
+            })
+            .unwrap()
+            .auto_chat
+            .unwrap();
+            assert_eq!(patched.talk, Some(talk));
+            assert_eq!(serde_json::to_value(&patched).unwrap()["mode"], projection);
+            settings.auto_chat = patched;
+            database
+                .save_setting(COHOST_SETTINGS_KEY, &settings)
+                .unwrap();
+            let raw: serde_json::Value =
+                database.load_setting(COHOST_SETTINGS_KEY).unwrap().unwrap();
+            assert_eq!(raw["autoChat"]["talk"], serde_json::to_value(talk).unwrap());
+            assert_eq!(raw["autoChat"]["mode"], projection);
+            assert_ne!(raw["autoChat"]["mode"], "auto", "never written again");
+            let loaded = load_cohost_settings(&database);
+            assert_eq!(loaded.auto_chat.talk(), talk);
+            assert_eq!(loaded.auto_chat.talk, Some(talk));
+            assert_eq!(loaded.auto_chat.mode, talk.legacy());
+        }
+        // A block saved before `talk` existed: `mode` decides, and the load
+        // fills `talk` and keeps `mode` as it was.
+        for (mode, talk) in [
+            ("off", CohostTalkMode::Off),
+            ("suggest", CohostTalkMode::Suggest),
+            ("auto", CohostTalkMode::Bubble),
+        ] {
+            let database = Database::open_in_memory_for_tests();
+            database
+                .save_setting(
+                    COHOST_SETTINGS_KEY,
+                    &serde_json::json!({
+                        "enabled": true,
+                        "tone": "short",
+                        "notes": "",
+                        "autoHighlight": false,
+                        "persona": { "id": "p-1", "name": "Grum", "personality": "", "bubbleStyle": "shout", "images": {}, "source": "uploaded" },
+                        "autoChat": {
+                            "mode": mode,
+                            "greetings": { "enabled": true, "templates": [] },
+                            "answers": { "enabled": false, "cooldownSeconds": 20 },
+                            "banter": { "enabled": false, "cooldownSeconds": 240 }
+                        }
+                    }),
+                )
+                .unwrap();
+            let loaded = load_cohost_settings(&database);
+            assert_eq!(loaded.auto_chat.talk, Some(talk), "mode {mode}");
+            assert_eq!(loaded.auto_chat.mode, talk.legacy(), "mode {mode}");
+            assert_eq!(loaded.persona.name, "Grum", "the persona is intact");
+            assert!(!loaded.auto_chat.answers.enabled, "nothing else changes");
+        }
+        // No `autoChat` block at all, and nothing stored at all: Bubble.
+        let database = Database::open_in_memory_for_tests();
+        database
+            .save_setting(
+                COHOST_SETTINGS_KEY,
+                &serde_json::json!({ "enabled": false, "tone": "friendly", "notes": "", "autoHighlight": false }),
+            )
+            .unwrap();
+        assert_eq!(
+            load_cohost_settings(&database).auto_chat.talk(),
+            CohostTalkMode::Bubble
+        );
+        let database = Database::open_in_memory_for_tests();
+        assert_eq!(
+            load_cohost_settings(&database).auto_chat.talk(),
+            CohostTalkMode::Bubble
+        );
+        assert_eq!(
+            CohostSettings::default().auto_chat.talk(),
+            CohostTalkMode::Bubble
+        );
+        // A patch with `talk` wins over a stale `mode`; one without takes
+        // `mode` (an older renderer's save), `auto` reading as Bubble.
+        let mut block = CohostAutoChat::default();
+        block.talk = Some(CohostTalkMode::Suggest);
+        block.mode = CohostAutoChatMode::Off;
+        let valid = validate_auto_chat(&block).unwrap();
+        assert_eq!(valid.talk, Some(CohostTalkMode::Suggest));
+        assert_eq!(valid.mode, CohostAutoChatMode::Suggest);
+        block.talk = None;
+        block.mode = CohostAutoChatMode::Auto;
+        let valid = validate_auto_chat(&block).unwrap();
+        assert_eq!(valid.talk, Some(CohostTalkMode::Bubble));
+        assert_eq!(valid.mode, CohostAutoChatMode::Off);
+        // `null` never reaches the wire for `talk` (the serde-null trap).
+        let json = serde_json::to_value(CohostAutoChat {
+            talk: None,
+            ..CohostAutoChat::default()
+        })
+        .unwrap();
+        assert!(json.get("talk").is_none());
+        assert_eq!(
+            serde_json::to_value(CohostAutoChat::default()).unwrap()["talk"],
+            "bubble"
+        );
+        // `speaks`: Off is the only quiet value.
+        assert!(!CohostTalkMode::Off.speaks());
+        assert!(CohostTalkMode::Bubble.speaks());
+        assert!(CohostTalkMode::Suggest.speaks());
+    }
+
+    /// Plan 211 D3 (the plan 192 S1.1 trap again): a Bubble block saved by
+    /// this build parses with the shape from before plan 211 (no `talk`, the
+    /// three-value `mode`), reading as Off, with the persona intact; an
+    /// older app therefore never loads defaults and never wipes anything.
+    #[test]
+    #[allow(dead_code)] // The pre-211 shape, parsed only.
+    fn a_bubble_block_still_parses_with_the_shape_from_before_plan_211() {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        enum OldMode {
+            Off,
+            Suggest,
+            Auto,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldAutoChat {
+            mode: OldMode,
+            greetings: CohostGreetingsSettings,
+            answers: CohostCooldownBehaviour,
+            banter: CohostCooldownBehaviour,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldSettings {
+            enabled: bool,
+            persona: CohostPersona,
+            auto_chat: OldAutoChat,
+        }
+        let mut settings = CohostSettings::default();
+        settings.persona.name = "Golmar".to_string();
+        for talk in [
+            CohostTalkMode::Off,
+            CohostTalkMode::Bubble,
+            CohostTalkMode::Suggest,
+        ] {
+            settings.auto_chat.talk = Some(talk);
+            settings.auto_chat.normalize_talk();
+            let json = serde_json::to_value(&settings).unwrap();
+            let old: OldSettings =
+                serde_json::from_value(json).expect("an older app ignores `talk`");
+            assert_eq!(old.persona.name, "Golmar");
+            assert!(old.auto_chat.answers.enabled);
+            match (talk, old.auto_chat.mode) {
+                (CohostTalkMode::Off | CohostTalkMode::Bubble, OldMode::Off) => {}
+                (CohostTalkMode::Suggest, OldMode::Suggest) => {}
+                (talk, mode) => panic!("{talk:?} projected as {mode:?}"),
+            }
+        }
     }
 
     /// Plan 192 S1.1 trap: `load_cohost_settings` falls back to defaults

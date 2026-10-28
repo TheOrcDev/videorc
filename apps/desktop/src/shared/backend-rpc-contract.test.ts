@@ -2075,6 +2075,26 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcParams('cohost.settings.set', { autoChat: oldAutoChat })).toEqual({
       autoChat: oldAutoChat
     })
+    // Plan 211 D3: `talk` is the mode (three values, absent never null); the
+    // legacy `mode` rides along.
+    for (const talk of ['off', 'bubble', 'suggest']) {
+      const block = { ...oldAutoChat, mode: 'off', talk }
+      expect(
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: block })
+      ).toEqual({ ...settings, autoChat: block })
+      expect(validateBackendRpcParams('cohost.settings.set', { autoChat: block })).toEqual({
+        autoChat: block
+      })
+    }
+    for (const talk of ['auto', 'loud', null, 1]) {
+      const block = { ...oldAutoChat, talk }
+      expect(() => validateBackendRpcParams('cohost.settings.set', { autoChat: block })).toThrow(
+        'cohost.settings.set'
+      )
+      expect(() =>
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: block })
+      ).toThrow('cohost.settings.get')
+    }
 
     const welcomes = {
       firstTime: { enabled: true },

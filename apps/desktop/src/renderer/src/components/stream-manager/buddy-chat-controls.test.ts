@@ -22,6 +22,7 @@ let onOpenChatSettings: ReturnType<typeof vi.fn<() => void>>
 
 function autoChat(overrides: Partial<CohostAutoChat> = {}): CohostAutoChat {
   return {
+    talk: 'off',
     mode: 'off',
     greetings: { enabled: false, templates: [] },
     answers: { enabled: false, cooldownSeconds: 20 },

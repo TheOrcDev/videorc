@@ -312,6 +312,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
 
 describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () => {
   const autoChat = {
+    talk: 'suggest' as const,
     mode: 'suggest' as const,
     greetings: { enabled: true, templates: [] },
     answers: { enabled: false, cooldownSeconds: 20 },

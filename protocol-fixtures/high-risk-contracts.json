@@ -587,6 +587,7 @@
         "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
       },
       "autoChat": {
+        "talk": "suggest",
         "mode": "suggest",
         "greetings": {
           "enabled": true,
@@ -638,6 +639,7 @@
         "reactions": {}
       },
       "autoChat": {
+        "talk": "bubble",
         "mode": "off",
         "greetings": {
           "enabled": true,

@@ -961,6 +961,7 @@ describe('shared high-risk protocol fixture', () => {
       reactions: {}
     })
     expect(fixtures.cohost.settings.autoChat).toStrictEqual({
+      talk: 'bubble',
       mode: 'off',
       greetings: {
         enabled: true,

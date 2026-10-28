@@ -2997,6 +2997,14 @@ const cohostWelcomeLineSchema = objectSchema(
 )
 const cohostAutoChatSchema = objectSchema(
   {
+    // Plan 211 D3: how Buddy talks, the one truth. Rust always sends it
+    // after normalization; optional here like `ai`, so a block from before
+    // the field still validates (the backend then reads `mode` for it).
+    // Absent, never null.
+    talk: optionalSchema(enumSchema(['off', 'bubble', 'suggest'])),
+    // Legacy (plan 211 D3): the projection older apps read. `auto` stays
+    // accepted on the way in (an old block) and is read as Bubble; the
+    // backend never writes it again.
     mode: enumSchema(['off', 'suggest', 'auto']),
     greetings: objectSchema(
       {

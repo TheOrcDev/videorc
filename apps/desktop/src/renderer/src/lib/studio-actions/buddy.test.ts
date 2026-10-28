@@ -87,16 +87,18 @@ describe('set_buddy (plan 209 S13)', () => {
         }
       }
     })
+    // plan 211 Phase D (S-D1) reshapes this call to `talk`; the merge-alone
+    // intent is what this test keeps.
     const outcome = await executeAgentIntent(
-      call('set_buddy', { chatMode: 'auto' }),
+      call('set_buddy', { chatMode: 'suggest' }),
       context({ buddy: access })
     )
     const patch = vi.mocked(access.saveSettings).mock.calls[0][0]
     expect(patch).not.toHaveProperty('enabled')
     expect(patch).not.toHaveProperty('listen')
-    expect(patch.autoChat?.mode).toBe('auto')
+    expect(patch.autoChat?.talk).toBe('suggest')
     expect(patch.autoChat?.greetings.templates).toEqual(templates)
-    expect(outcome.message).toBe('Chat posting: Auto.')
+    expect(outcome.message).toBe('Chat posting: Suggest.')
   })
 
   it('refuses Buddy Live without Premium or consent, but always turns it off', async () => {

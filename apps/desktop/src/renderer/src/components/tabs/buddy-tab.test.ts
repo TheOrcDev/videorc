@@ -121,6 +121,7 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
       reactions: {}
     },
     autoChat: {
+      talk: 'off',
       mode: 'off',
       greetings: { enabled: false, templates: [] },
       answers: { enabled: false, cooldownSeconds: 20 },

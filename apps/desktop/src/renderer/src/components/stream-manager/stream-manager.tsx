@@ -965,7 +965,12 @@ export function StreamManager({
           autoChat={cohostAutoChat}
           name={buddyName}
           picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
-          onModeChange={(mode) => onCohostAutoChatChange({ mode })}
+          // plan 211 Phase C (S-C1): the control still offers the old Auto
+          // choice; until it is redesigned, Auto saves as Bubble (D4) and
+          // the relay carries `talk`, never the legacy `mode`.
+          onModeChange={(mode) =>
+            onCohostAutoChatChange({ talk: mode === 'auto' ? 'bubble' : mode })
+          }
           onOpenChatSettings={onCohostOpenChatSettings}
         />
       ) : null}

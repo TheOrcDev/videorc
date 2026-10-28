@@ -42,6 +42,7 @@ function settings(
       reactions: {}
     },
     autoChat: {
+      talk: 'off',
       mode: 'off',
       greetings: { enabled: true, templates, ...greetings },
       answers: { enabled: false, cooldownSeconds: 20 },
