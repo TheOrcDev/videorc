@@ -1,3 +1,4 @@
+import type { FrontAppChanged } from './front-app'
 import {
   validateChatDelivery,
   validateChatDeliveryBoundary,
@@ -114,6 +115,8 @@ export const electronInvokeApiMethods = {
   'backend:get-connection': 'getBackendConnection',
   'backend:get-logs': 'getBackendLogs',
   'app:get-runtime-info': 'getRuntimeInfo',
+  'app:front-window-watch': 'setFrontWindowWatch',
+  'app:self-bundle-ids': 'getSelfBundleIds',
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
@@ -269,9 +272,9 @@ export const electronInvokeApiMethods = {
 
 export type ElectronInvokeChannel = keyof typeof electronInvokeApiMethods
 export type ElectronIpcInvokeMap = {
-  [TChannel in ElectronInvokeChannel]: InvokeDefinition<
-    NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>
-  >
+  [TChannel in ElectronInvokeChannel]: TChannel extends 'app:front-window-watch'
+    ? { args: [options: { enabled: boolean }]; result: void }
+    : InvokeDefinition<NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>>
 }
 export type ElectronInvokeArgs<TChannel extends ElectronInvokeChannel> =
   ElectronIpcInvokeMap[TChannel]['args']
@@ -294,6 +297,7 @@ export interface BuddyDeepLinkNavigation {
 }
 
 export interface ElectronIpcEventMap {
+  'app:front-changed': FrontAppChanged
   'account:callback': AccountCallbackEnvelope
   'backend:connection': BackendConnection
   'backend:lifecycle': BackendLifecycleEvent
@@ -386,6 +390,7 @@ export const electronEventChannels = [
   'buddy:deep-link',
   'shortcut:modifier',
   'window:visible',
+  'app:front-changed',
   'session:take-running',
   'global-shortcuts:triggered',
   'shortcut-recorder:key',
@@ -1494,6 +1499,11 @@ const starterSoundFilesSchema = arraySchema(
 )
 
 const specificRuntimeInvokeContracts = {
+  'app:front-window-watch': invokeContract(
+    tupleSchema([objectSchema({ enabled: booleanSchema }, { allowUnknown: false })]),
+    undefinedSchema
+  ),
+  'app:self-bundle-ids': invokeContract(noArgs, arraySchema(stringSchema({ maxLength: 1024 }))),
   'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
   'comments-window:marker-context-push': invokeContract(
     tupleSchema([markerContextSchema]),
@@ -1981,6 +1991,16 @@ const specificRuntimeEventSchemas = {
   // Page Visibility API, so document.visibilityState reads 'visible' even when
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
+  'app:front-changed': objectSchema(
+    {
+      bundleId: optionalSchema(nullableSchema(stringSchema({ maxLength: 1024 }))),
+      name: stringSchema({ maxLength: 4096 }),
+      pid: numberSchema({ integer: true, min: 0 }),
+      frontWindowId: optionalSchema(stringSchema({ maxLength: 128 })),
+      at: numberSchema({ min: 0 })
+    },
+    { allowUnknown: false }
+  ),
   // A recording or livestream is running (never a Clips-only ring). Every
   // window hears it; the chrome ground holds still while it is true.
   'session:take-running': booleanSchema,

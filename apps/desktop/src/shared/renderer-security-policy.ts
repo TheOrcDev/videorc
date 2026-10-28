@@ -23,6 +23,8 @@ export const IPC_INVOKE_ROLES = {
   'account:callbacks-list': MAIN_ONLY,
   'account:callback-ack': MAIN_ONLY,
   'app:get-runtime-info': MAIN_ONLY,
+  'app:front-window-watch': MAIN_ONLY,
+  'app:self-bundle-ids': MAIN_ONLY,
   'app:retry-hardware-acceleration': MAIN_ONLY,
   'app:set-native-theme': MAIN_ONLY,
   'app:exit': MAIN_ONLY,
