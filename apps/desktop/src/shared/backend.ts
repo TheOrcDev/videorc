@@ -360,7 +360,26 @@ export type VideorcAccountRefreshResult =
 export type DeviceKind = 'screen' | 'window' | 'camera' | 'microphone' | 'system-audio'
 export type DeviceStatus = 'available' | 'unavailable' | 'permission-required'
 
+export interface DeviceApp {
+  bundleId: string
+  name: string
+  pid: number
+}
+
+export interface ResolveAppWindowParams {
+  bundleId: string
+  preferWindowId?: string
+  minWidth?: number
+  minHeight?: number
+}
+
+export type ResolveAppWindowResult =
+  | { ok: true; windowId: string; title: string; width: number; height: number }
+  | { ok: false; reason: 'not-running' | 'no-window' | 'minimized' }
+
 export interface Device {
+  app?: DeviceApp
+  windowTitle?: string
   id: string
   name: string
   kind: DeviceKind

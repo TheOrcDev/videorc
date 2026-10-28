@@ -3312,3 +3312,76 @@ describe('banner backend wire contract (plan 186)', () => {
     expect(validateBackendRpcResult('discord.webhook.sendTest', {})).toStrictEqual({})
   })
 })
+
+describe('app window source contracts (plan 210 S1)', () => {
+  it('accepts legacy and app-aware devices, rejecting null metadata', () => {
+    const device = {
+      id: 'window:screencapturekit:7',
+      name: 'App - Editor',
+      kind: 'window',
+      status: 'available'
+    }
+    for (const extra of [
+      {},
+      { app: { bundleId: 'test.app', name: 'App', pid: 42 }, windowTitle: 'Editor' }
+    ]) {
+      const payload = { devices: [{ ...device, ...extra }], warnings: [] }
+      expect(validateBackendRpcResult('devices.list', payload)).toEqual(payload)
+      expect(validateBackendEventPayload('devices.changed', payload)).toEqual(payload)
+    }
+    for (const extra of [
+      { app: null },
+      { windowTitle: null },
+      { app: { bundleId: 'test.app', name: 'App', pid: 42, secret: true } }
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('devices.list', {
+          devices: [{ ...device, ...extra }],
+          warnings: []
+        })
+      ).toThrow()
+    }
+  })
+
+  it('registers the resolver and validates params and both result variants strictly', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.resolve_app_window')
+    const params = {
+      bundleId: 'test.app',
+      preferWindowId: 'window:screencapturekit:7',
+      minWidth: 400,
+      minHeight: 300
+    }
+    expect(validateBackendRpcParams('sources.resolve_app_window', params)).toEqual(params)
+    expect(
+      validateBackendRpcParams('sources.resolve_app_window', { bundleId: 'test.app' })
+    ).toEqual({ bundleId: 'test.app' })
+    for (const bad of [
+      { bundleId: '' },
+      { ...params, minWidth: -1 },
+      { ...params, minHeight: 0.5 },
+      { ...params, minSize: {} }
+    ]) {
+      expect(() => validateBackendRpcParams('sources.resolve_app_window', bad)).toThrow()
+    }
+    const found = {
+      ok: true,
+      windowId: 'window:screencapturekit:7',
+      title: '',
+      width: 800,
+      height: 600
+    }
+    expect(validateBackendRpcResult('sources.resolve_app_window', found)).toEqual(found)
+    for (const reason of ['not-running', 'no-window', 'minimized']) {
+      expect(validateBackendRpcResult('sources.resolve_app_window', { ok: false, reason })).toEqual(
+        { ok: false, reason }
+      )
+    }
+    for (const bad of [
+      { ok: false, reason: 'unsupported' },
+      { ...found, reason: 'no-window' },
+      { ok: true }
+    ]) {
+      expect(() => validateBackendRpcResult('sources.resolve_app_window', bad)).toThrow()
+    }
+  })
+})

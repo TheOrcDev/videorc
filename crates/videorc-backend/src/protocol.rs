@@ -223,6 +223,10 @@ pub struct DeviceList {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<DeviceApp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
     pub id: String,
     pub name: String,
     pub kind: DeviceKind,
@@ -233,6 +237,51 @@ pub struct Device {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceApp {
+    pub bundle_id: String,
+    pub name: String,
+    pub pid: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveAppWindowParams {
+    pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefer_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ResolveAppWindowResult {
+    Found {
+        ok: bool,
+        #[serde(rename = "windowId")]
+        window_id: String,
+        title: String,
+        width: u32,
+        height: u32,
+    },
+    Unavailable {
+        ok: bool,
+        reason: AppWindowUnavailableReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppWindowUnavailableReason {
+    NotRunning,
+    NoWindow,
+    Minimized,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

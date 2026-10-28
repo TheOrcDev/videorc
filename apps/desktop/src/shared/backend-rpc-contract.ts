@@ -87,6 +87,8 @@ import type {
   SceneEditorDraftParams,
   SceneEditorDraftStatus,
   DeviceList,
+  ResolveAppWindowParams,
+  ResolveAppWindowResult,
   DiagnosticStats,
   EntitlementsSnapshot,
   FileAssessment,
@@ -373,6 +375,7 @@ export interface BackendRpcMethodMap {
   >
   'account.sign_out': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
+  'sources.resolve_app_window': BackendRpcDefinition<ResolveAppWindowParams, ResolveAppWindowResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
   'stream.output.topology.probe': BackendRpcDefinition<
@@ -833,6 +836,17 @@ const entitlementsSchema = objectSchema(
 
 const deviceSchema = objectSchema(
   {
+    app: optionalSchema(
+      objectSchema(
+        {
+          bundleId: boundedString,
+          name: boundedString,
+          pid: numberSchema({ integer: true, min: 0, max: 2_147_483_647 })
+        },
+        { allowUnknown: false }
+      )
+    ),
+    windowTitle: optionalText,
     id: boundedString,
     name: boundedString,
     kind: enumSchema(['screen', 'window', 'camera', 'microphone', 'system-audio']),
@@ -4839,6 +4853,33 @@ const runtimeContracts = {
   'platformAccounts.oauth.complete': {
     params: oauthCompleteParamsSchema,
     result: oauthCallbackResultSchema
+  },
+  'sources.resolve_app_window': {
+    params: objectSchema(
+      {
+        bundleId: stringSchema({ minLength: 1, maxLength: 16_384 }),
+        preferWindowId: optionalText,
+        minWidth: optionalSchema(numberSchema({ integer: true, min: 0, max: 65_536 })),
+        minHeight: optionalSchema(numberSchema({ integer: true, min: 0, max: 65_536 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: unionSchema([
+      objectSchema(
+        {
+          ok: literalSchema(true),
+          windowId: boundedString,
+          title: stringSchema({ maxLength: 16_384 }),
+          width: nonNegativeInteger,
+          height: nonNegativeInteger
+        },
+        { allowUnknown: false }
+      ),
+      objectSchema(
+        { ok: literalSchema(false), reason: enumSchema(['not-running', 'no-window', 'minimized']) },
+        { allowUnknown: false }
+      )
+    ])
   },
   'devices.list': { params: undefinedOrFfmpegPathSchema, result: deviceListSchema },
   'recording.status': { params: undefinedSchema, result: recordingStatusSchema },

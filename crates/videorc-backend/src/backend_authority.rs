@@ -293,6 +293,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn app_window_resolution_is_local_studio_authority() {
+        for role in [BackendRole::Renderer, BackendRole::Admin] {
+            assert!(authorize_backend_method(role, "sources.resolve_app_window", false).is_ok());
+        }
+        for role in [BackendRole::Remote, BackendRole::Agent] {
+            assert!(authorize_backend_method(role, "sources.resolve_app_window", false).is_err());
+        }
+    }
+
+    #[test]
     fn renderer_and_admin_credentials_are_distinct_roles() {
         assert_eq!(
             authenticate_backend_token("renderer-secret", "renderer-secret", "admin-secret"),

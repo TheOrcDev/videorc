@@ -5899,6 +5899,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "ai.capabilities.get"
         | "ai.quota.get"
         | "devices.list"
+        | "sources.resolve_app_window"
         | "diagnostics.stats"
         | "capture.recovery.status"
         | "preview.surface.status"
@@ -10389,6 +10390,32 @@ async fn handle_text_message_with_role(
             Ok(quota) => ServerResponse::ok(command.id, quota),
             Err(error) => ServerResponse::error(command.id, "ai-quota-failed", error.to_string()),
         },
+        "sources.resolve_app_window" => {
+            match serde_json::from_value::<protocol::ResolveAppWindowParams>(command.params) {
+                Ok(params) if !params.bundle_id.trim().is_empty() => {
+                    match tokio::task::spawn_blocking(move || {
+                        screen_capture::resolve_app_window(&params)
+                    })
+                    .await
+                    {
+                        Ok(Ok(result)) => ServerResponse::ok(command.id, result),
+                        Ok(Err(error)) => {
+                            ServerResponse::error(command.id, "app-window-resolution-failed", error)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "app-window-resolution-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                _ => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected a non-empty bundleId and optional window id and minimum dimensions.",
+                ),
+            }
+        }
         "devices.list" => {
             let ffmpeg_path = resolve_trusted_ffmpeg_path(
                 command
