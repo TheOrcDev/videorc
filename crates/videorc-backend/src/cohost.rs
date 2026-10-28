@@ -7518,16 +7518,16 @@ impl CohostEngine {
         self.auto_chat.dismiss(utterance_id)
     }
 
-    /// The Say box (D7): the utterance, and whether it goes to chat.
+    /// The Say box (D7, plan 211 D1): one bubble-only utterance, in every
+    /// mode.
     pub(crate) fn say(
         &mut self,
         text: &str,
         state: CohostUtteranceState,
         now: Instant,
         now_iso: &str,
-    ) -> (CohostUtterance, bool) {
-        self.auto_chat
-            .say(&self.settings.auto_chat, text, state, now, now_iso)
+    ) -> CohostUtterance {
+        self.auto_chat.say(text, state, now, now_iso)
     }
 
     pub(crate) fn mark_utterance(
@@ -8274,13 +8274,12 @@ pub async fn dismiss_utterance(
     Ok(snapshot)
 }
 
-/// `cohost.utterance.say` (D7): the streamer's own line, one utterance that
-/// both posts and bubbles. In Auto, with the live-chat session named, it goes
-/// to every writable destination like any utterance; otherwise (Off, Suggest,
-/// or no chat session: an empty `sessionId`) it is bubble-only. Either way
-/// the bubble shows at once when the Buddy is on some output (Phase C's
-/// `show_bubble`); a named session must be the active one (the lane follows
-/// it).
+/// `cohost.utterance.say` (D7, plan 211 D1): the streamer's own line, one
+/// bubble-only utterance in every mode; it never goes to chat. The bubble
+/// shows at once when the Buddy is on some output (`show_bubble`), and the
+/// line is on the state either way. A named session must be the active one
+/// (the lane follows it); an empty `sessionId` means no chat session, which
+/// is fine, because nothing is posted.
 pub async fn say_utterance(
     state: &AppState,
     params: crate::protocol::CohostSayParams,
@@ -8305,35 +8304,22 @@ pub async fn say_utterance(
         Some(session_id.to_string())
     };
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    let (utterance, send, snapshot) = {
+    let (utterance, snapshot) = {
         let mut engine = state.cohost.lock().await;
         if let Some(session_id) = session_id.as_deref() {
             engine.follow_auto_chat_session(session_id);
         }
-        let (mut utterance, mut send) = engine.say(
+        let utterance = engine.say(
             &text,
             params.state.unwrap_or_default(),
             Instant::now(),
             &chrono::Utc::now().to_rfc3339(),
         );
-        if send && session_id.is_none() {
-            // Auto mode without a chat session: nowhere to post, so the line
-            // is bubble-only rather than a send that fails.
-            send = false;
-            utterance.status = CohostUtteranceStatus::BubbleOnly;
-            engine.mark_utterance(&utterance.id, CohostUtteranceStatus::BubbleOnly);
-        }
-        (utterance, send, engine.snapshot())
+        (utterance, engine.snapshot())
     };
     emit_state(state, &snapshot, &lifecycle_delivery);
     drop(lifecycle_delivery);
     crate::buddy_overlay::show_for_utterance(state, &utterance).await;
-    if send {
-        let task_state = state.clone();
-        tokio::spawn(async move {
-            send_approved(&task_state, utterance).await;
-        });
-    }
     Ok(snapshot)
 }
 

@@ -376,8 +376,11 @@ pub async fn remove_chat_message(
 // buddy_say (S13)
 // ---------------------------------------------------------------------------
 
+/// Plan 211 D1: the Say box is bubble-only in every mode, so this tool never
+/// posts. Phase D (S-D2) finishes it: the refusal copy, the catalog's output
+/// schema and the docs.
 pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) -> ToolOutcome {
-    use crate::cohost::{CohostAutoChatMode, CohostUtteranceState};
+    use crate::cohost::CohostUtteranceState;
     let Some(text) = text_of(&args, "text") else {
         return ToolOutcome::refused("Say what Buddy should say: text.");
     };
@@ -388,19 +391,15 @@ pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) ->
         },
         None => CohostUtteranceState::default(),
     };
+    if !crate::buddy_overlay::overlay_enabled(state) {
+        return ToolOutcome::refused(BUDDY_UNSEEN);
+    }
     let session_id = state
         .live_chat
         .lock()
         .await
         .session_id()
         .map(str::to_string);
-    let mode = state.cohost.lock().await.auto_chat_mode();
-    let bubble = crate::buddy_overlay::overlay_enabled(state);
-    // The Say box posts only in Auto, and only into a running chat.
-    let posts = mode == CohostAutoChatMode::Auto && session_id.is_some();
-    if !bubble && !posts {
-        return ToolOutcome::refused(BUDDY_UNSEEN);
-    }
     let params = crate::protocol::CohostSayParams {
         session_id: session_id.unwrap_or_default(),
         text: text.to_string(),
@@ -409,23 +408,9 @@ pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) ->
     if let Err(error) = crate::cohost::say_utterance(state, params).await {
         return ToolOutcome::refused(error.to_string());
     }
-    let chat_mode = match mode {
-        CohostAutoChatMode::Off => "off",
-        CohostAutoChatMode::Suggest => "suggest",
-        CohostAutoChatMode::Auto => "auto",
-    };
-    let text = match (bubble, posts) {
-        (true, true) => "Buddy said it in its bubble, and posts it in chat (chat mode Auto).",
-        (true, false) => {
-            "Buddy said it in its bubble. Its chat mode doesn't post, so chat didn't get it."
-        }
-        _ => {
-            "Buddy posts it in chat (chat mode Auto). Buddy isn't on the picture, so there's no bubble."
-        }
-    };
     ToolOutcome::ok(
-        text,
-        Some(json!({ "bubble": bubble, "chat": posts, "chatMode": chat_mode })),
+        "Buddy said it in its bubble.",
+        Some(json!({ "bubble": true })),
     )
 }
 

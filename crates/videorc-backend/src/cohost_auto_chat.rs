@@ -866,41 +866,33 @@ impl AutoChatLane {
         pass
     }
 
-    /// The streamer's own Say box (D7): in `auto` it goes to chat like any
-    /// other utterance; otherwise it is bubble-only (Phase C shows it).
-    /// Returns the utterance and whether to send it.
+    /// The streamer's own Say box (D7, plan 211 D1): bubble-only in every
+    /// mode, never a send. Returns the recorded utterance; the caller shows
+    /// it.
     pub(crate) fn say(
         &mut self,
-        settings: &CohostAutoChat,
         text: &str,
         state: CohostUtteranceState,
         now: Instant,
         now_iso: &str,
-    ) -> (CohostUtterance, bool) {
+    ) -> CohostUtterance {
         let trigger = CohostUtteranceTrigger {
             kind: CohostUtteranceTriggerKind::Manual,
             event_id: None,
             message_id: None,
         };
-        let send = settings.mode == CohostAutoChatMode::Auto;
-        let status = if send {
-            CohostUtteranceStatus::Proposed
-        } else {
-            CohostUtteranceStatus::BubbleOnly
-        };
-        let utterance = self.record(
+        self.record(
             Spoken {
                 text: text.trim().to_string(),
                 state,
                 trigger,
                 destination_ids: Vec::new(),
             },
-            status,
+            CohostUtteranceStatus::BubbleOnly,
             None,
             now,
             now_iso,
-        );
-        (utterance, send)
+        )
     }
 
     /// The Stream Manager approved a proposed card (S-D2): the utterance to
