@@ -1920,3 +1920,74 @@ warnings`, `cargo fmt --check --all`; `pnpm typecheck`, `pnpm lint` (the
   `cargo clippy -p videorc-backend --bins -- -D warnings` passes (it
   first caught the prompt helpers being test-only in the backend; the
   backend now builds rmcp's types from them, like `tools/list`).
+
+### Gates (2026-10-28, after the merge with main's plans 205, 207 and 208)
+
+- **TypeScript**: `pnpm typecheck`, `pnpm lint` (the one older warning),
+  `pnpm format:check`, the desktop suite (571 files, 6,202 tests) and
+  `pnpm test:scripts` (2,714) pass.
+- **Rust** (each under the cargo lock): `cargo fmt --check --all`,
+  `cargo clippy -p videorc-backend -- -D warnings`, `cargo test -p
+videorc-backend` filtered to agent, buddy, remote*, backend_authority,
+  cohost, live_chat, websocket*, banner, overlay and capabilit, the
+  bridge's 22 tests (`--bin videorc-mcp`) and `pnpm audit:rust` pass.
+  - Merge fallout: `typed_steps_never_halt_and_spoken_ones_wait_for_a_yes`
+    failed. PR B's catalog has `go_live` (rate family `session`), so the
+    typed `go_live` is admitted and spends Buddy's one go-live or stop
+    every 10 seconds. The test's idle `stop` then read the rate limit
+    instead of "the Studio isn't open". The idle stop now runs on its own
+    state, and the typed step asserts STUDIO_CLOSED.
+- **The eager bundle**: `check:renderer-assets` stays red on gzip.
+  - Main measures 2,006,426 raw / 404,071 gzip (929 gzip bytes of
+    headroom). The merged branch measured 2,031,174 / 409,844.
+  - Three pieces moved into lazy modules, with no change in behaviour:
+    - `go_live` without the dialog: `goLiveWithoutDialog` in
+      `lib/go-live-headless.ts`.
+    - The action context: `lib/studio-actions/studio-context.ts` builds it
+      from the `StudioActionSource` the Studio hands over per intent;
+      `go_live` is built there too.
+    - The agents' socket wiring: `lib/agent-studio-link.ts` owns the
+      publisher, `agent.intent.listen` and the status on every
+      (re)connect, the intent lane and its ack, and the rename refresh.
+  - That brings it to 2,014,460 / 406,010. Raw passes; gzip is 1,010
+    bytes over 405,000.
+  - What plan 209 still adds to the eager bundle (+1,939 gzip) is
+    wiring:
+    - the shared go-live path (D13), about 390;
+    - the per-intent source list, about 360;
+    - the surface input, about 260;
+    - the shell's lazy watcher mount, about 200;
+    - the intent queue's agent lane, about 150;
+    - the shared snap math, about 150.
+  - Getting under 405,000 needs either a recalibration (the owner's call)
+    or splitting main's own Studio code.
+- **Smokes** (dev app, one at a time): these pass:
+  - `smoke:agent-mcp` (B1 `go_live` runs through the moved code);
+  - `smoke:buddy-act` (first run, tuned below);
+  - `smoke:buddy-commands`, `smoke:captions-contract`,
+    `smoke:remote-control`, `smoke:remote-lan`;
+  - `smoke:record-latency:gate`, `smoke:multistream`,
+    `smoke:live-chat-fake-providers`, `smoke:banners`,
+    `smoke:comment-highlight-stream`.
+  - `smoke:freeform-editor` fails with "No camera device available to
+    select". The same happens on `origin/main` on this host: the dev app
+    has no camera here.
+  - `smoke:buddy-act` step 4: the spoken `stop` ends the recording that
+    Buddy's session runs with, so Buddy stops and the D14 card goes with
+    it. The backend logs "dropped a planned command's card: its session
+    changed". The step now accepts either ending: the card finishes in
+    place, or Buddy is off and the card is gone. A card left open still
+    fails.
+- **Packaged and signed (S4's done-when)**: `CARGO_PROFILE_RELEASE_STRIP=false`
+  release build of the three bins and the universal addon (each under the
+  lock), then `package:preflight:macos`, `--filter @videorc/desktop package`
+  and `sign:desktop:local`. FFmpeg came from a clone of a matching 8.1.1
+  bundle with the same clock-patch SHA.
+  - `Contents/Resources/videorc-mcp` is an arm64 Mach-O, signed by
+    "Developer ID Application: Uros Miric (C2PA37RB58)" with
+    `flags=0x10000(runtime)`, and `codesign --verify --strict` passes.
+  - With no Videorc running, `initialize` answers (serverInfo `videorc`,
+    protocol 2025-06-18) and `tools/list` returns 43 tools. Nothing was
+    notarized or uploaded.
+  - The release build's 24 warnings are older release-cfg warnings
+    (encoder_bridge, compositor, captions); none are in plan 209's files.
