@@ -158,28 +158,32 @@ same files at `/chrome-ground-{dark,light}.webp` (`include_bytes!`, never a
 copy; S6). `chrome-ground-contrast.test.ts` reads the stats file, so a
 regenerated ground re-proves the windows' text contrast.
 
-The ground drifts slightly (owner, 2026-10-28). It is the same still, with no
-second image, shader or zoom:
+The ground drifts (owner, 2026-10-28). It is the same still, with no second
+image, shader or zoom. The owner first asked for "just slightly", then for
+"clear but calm". Under the coats, 10 and then 40 px could not be seen, so
+the amount was tuned live with the owner watching:
 
-- **The motion.** It slides up to 10 px across and 7 px down along two sines
-  (53 s and 67 s). A 200 ms timer moves it, so each step is under a third of
-  a pixel on the σ 24 blur.
-- **The edges.** The stills overhang the window by 16 px, so no edge shows.
+- **The motion.** It sways up to 120 px across and 84 px down along two sines
+  (25 s and 33 s). A 50 ms timer moves it, so each step is under 2 px on the
+  σ 24 blur.
+- **The edges.** The stills overhang the window by 128 px, so no edge shows.
 - **The layer.** While moving, the slide is a 3D translate, which gets its
   own compositor layer, clipped to the window plus the margin. Paused, it is
   a 2D translate at the same place, which hands the layer back.
-- **When it runs.** Only while the window is visible and focused and Reduce
-  Motion is off. Behind another app it pauses where it is, and it resumes
-  without a jump. The layer says `data-chrome-ground-drift="moving|paused"`,
-  and `probe:ui-glass` holds Reduce Motion on its CDP session so its
-  zero-tolerance pixel stability still compares like with like. The phone
-  remote's ground stays still.
-- **Cost.** Measured in the dev app on the Studio window in light, four
-  60 s runs: the GPU process used 2.8% and 3.0% of a core drifting against
-  2.3% and 1.9% paused. The renderer and browser differed within their
-  noise, and RSS did not change. The drift layer holds about 20 MB of GPU
-  memory (`footprint` of the GPU process: 114 MB drifting, 90 to 106 MB
-  paused), only in the focused window, and gives it back when it pauses.
+- **When it runs.** Whenever the window is on screen, even beside a focused
+  app. It pauses where it is while the window is minimised or hidden (main's
+  `window:visible` for the main window, whose Page Visibility API is
+  frozen), while a recording or livestream runs (main's
+  `session:take-running`; a Clips-only ring is no take), and under Reduce
+  Motion. It resumes without a jump.
+- **Probe.** The layer says `data-chrome-ground-drift="moving|paused"`, and
+  `probe:ui-glass` holds Reduce Motion on its CDP session so its
+  zero-tolerance pixel stability still compares like with like.
+- **Phone remote.** Its ground stays still.
+- **Cost.** At the first tuning (10 px, 5 steps a second) the GPU process
+  used about 0.8% more of a core and about 20 MB more GPU memory while
+  drifting. The approved tuning (20 steps a second, a larger layer) is
+  re-measured in the PR that shipped it.
 
 Regenerate from the repository root (requires Rust, desktop Electron and
 libwebp's `cwebp` on PATH):

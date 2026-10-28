@@ -5288,6 +5288,8 @@ export interface VideorcApi {
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
   /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */
   onWindowVisible: (callback: (visible: boolean) => void) => () => void
+  /** A recording or livestream is running (not a Clips-only ring); every window. */
+  onTakeRunning: (callback: (running: boolean) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLifecycle: (callback: (event: BackendLifecycleEvent) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void

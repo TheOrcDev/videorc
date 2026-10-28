@@ -83,13 +83,17 @@ for the owner, not a design choice.
   - **Light is the crisp invert** (D3): the dark chrome's pixels turned
     around, white liquid with black reflections and black-chrome controls.
     No separate light look.
-  - **The ground drifts, just slightly** (D5, revised 2026-10-28; the owner
-    asked for "a little bit" of movement without costing memory or CPU).
-    The same still slides up to 10 px along two slow sines, 5 steps a
-    second, only in the window you are looking at (visible and focused).
-    Behind another app, as while you record a game or a screen, it pauses
-    and costs nothing. No second image, no shader, no zoom. Reduce Motion
-    makes it a still.
+  - **The ground drifts, clear but calm** (D5, revised 2026-10-28). The
+    owner asked for "a little bit" of movement without costing memory or
+    CPU, and then for "clear but calm". Under the coats 10 and then 40 px
+    could not be seen, so it was tuned live with the owner watching.
+    - The same still sways up to 120 px across and 84 px down along two slow
+      sines (25 s and 33 s), 20 steps a second.
+    - It moves whenever the window is on screen, even beside a focused app.
+    - It holds still while the window is minimised or hidden, while a
+      recording or livestream runs (a Clips-only ring is not a take), and
+      under Reduce Motion.
+    - No second image, no shader, no zoom.
   - **Record and Stop are a red LED** (D8): the `record` Button, unlit at
     idle and lit while a recording or livestream runs. Go Live… is the
     chrome primary. Delete, Remove and every other destructive action keep
@@ -863,7 +867,7 @@ moved onto the utility.
 
 Fast and subtle: 100–150 ms ease-out. Floating surfaces fade and scale from
 0.98. Rows highlight instantly. Nothing bounces, and chips never move. The
-chrome ground only drifts, a few px, in the focused window (owner call,
+chrome ground only drifts, slowly, while no take runs (owner call,
 2026-10-28); only the Welcome screen's backdrop plays Liquid Chrome itself.
 `prefers-reduced-motion` collapses motion.
 

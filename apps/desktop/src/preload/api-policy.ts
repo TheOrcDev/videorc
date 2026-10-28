@@ -14,7 +14,9 @@ export const AUXILIARY_API_KEYS = {
     'onNotesFlushRequest',
     'onNotesWindowState',
     // What the window sits on (plan 208): a value, read before first paint.
-    'windowGround'
+    'windowGround',
+    // The chrome ground holds still while a take runs (2026-10-28).
+    'onTakeRunning'
   ],
   comments: [
     'cacheChatAvatar',
@@ -82,7 +84,9 @@ export const AUXILIARY_API_KEYS = {
     // The Buddy pane's living preview reads its pet pack (plan 168 Phase D).
     'readBuddyPetFile',
     // What the window sits on (plan 208): a value, read before first paint.
-    'windowGround'
+    'windowGround',
+    // The chrome ground holds still while a take runs (2026-10-28).
+    'onTakeRunning'
   ],
   captions: [
     'getCaptionsWindowState',
@@ -91,7 +95,9 @@ export const AUXILIARY_API_KEYS = {
     'getCaptionSnapshot',
     'onCaptionSnapshot',
     // What the window sits on (plan 208): a value, read before first paint.
-    'windowGround'
+    'windowGround',
+    // The chrome ground holds still while a take runs (2026-10-28).
+    'onTakeRunning'
   ]
 } as const satisfies Record<Exclude<RendererRole, 'main'>, readonly VideorcApiKey[]>
 
