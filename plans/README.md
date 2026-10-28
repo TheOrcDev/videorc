@@ -19,7 +19,8 @@
   Connect, a `.mcpb` and two MCP prompts) and a videorc.com PR (the planner
   route and an agents page; deploy it first). Local gates and smokes green;
   owner acceptance, packaged by-eye, the planner's live eval and
-  Windows/Linux runs owed; seven owner questions open.
+  Windows/Linux runs owed; the owner took all seven recommended answers
+  (2026-10-28).
 - 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
   colours. Owner request: redesign Videorc's colour after the Welcome
   screen's Liquid Chrome, metallic black with its shine, and the other way

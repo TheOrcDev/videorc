@@ -50,7 +50,8 @@
   S17 and the agents page (deploy the web PR first). Local gates and smokes
   green (see As built, Gates and Review fixes). Owed: the owner acceptance
   below, the packaged by-eye in both themes, the planner's live eval
-  (p50/p95), and Windows/Linux runs. Open questions lists the owner calls.
+  (p50/p95), and Windows/Linux runs. The owner took all seven recommended
+  answers on 2026-10-28 (see Owner decisions).
 - **Priority**: P1 (owner request, 2026-10-27).
 - **Effort**: XL in total. PR A is L (a new listener, role, binary and
   settings section, plus a refactor of the remote executor). PR B is L
@@ -472,7 +473,7 @@ the Trash.
   and `stop` must name Buddy (review fix 17): a bare "yes", which a
   text-to-speech donation alert could say, leaves the question open. The
   removal card's own yes is unchanged. Typed `/buddy` runs at once like an agent. This differs
-  from D2 on purpose; see Open questions.
+  from D2 on purpose; the owner kept it (Owner decisions 1 and 5).
 - **D15 Buddy's tool subset.** Buddy may use the Look tools except
   `get_settings` and `get_recording`, everything in Run the show and Arrange
   the picture ("Buddy, move to the top left") except `edit_banner` (it
@@ -1003,28 +1004,44 @@ On the packaged app, with a test channel:
 10. Light and dark by eye for the Agents section, the dialog, the Session line
     and the notices.
 
-## Open questions (recommended answers already applied)
+## Owner decisions (2026-10-28)
 
-1. **D14**: Buddy asks for a spoken yes before going live, ending the stream
-   and removing a message, though agents never ask. Keep it, or let Buddy run
-   those at once too?
-2. **D8**: agents can see the program picture, idle or live. Keep, or only
-   while recording or live?
-3. **D6 and S22**: a copy-paste line first and one-click later, or one-click
-   in PR A?
-4. **D11**: notices for the six big actions only. Or one for every agent
-   action, or none?
-5. **D14, as built**: Buddy's spoken stop also asks while only recording
-   ("Stop the recording? Say 'Buddy, yes'."), and the go-live and stop yes
-   needs the wake word ("Buddy, yes"; review fix #17). Keep both?
-6. **S18, as built**: Buddy's banner commands run through the agent tools;
-   highlight, clear, removal and voice markers keep their engine path and are
-   only logged in Activity as Buddy (`smoke:buddy-commands` must stay
-   unchanged). Move them too in a later PR?
-7. **D22, as built**: a named place keeps the item's current size (the
-   inspector's snap button resets it), and camera or screen moves off a
-   corner are refused while recording or live (the canvas allows no source
-   drag then). Keep?
+The owner took every recommended answer ("yes I agree execute all"). Each
+one is what the PR already does, so no code changed.
+
+1. **D14: keep Buddy's spoken yes** before going live, ending the stream and
+   removing a message. Speech gets misheard, and a streamer reading chat
+   aloud can say a viewer's words. Agents and typed `/buddy` still run at
+   once, because the streamer typed the request. YouTube removals wait for a
+   click whoever asks (YouTube API policy).
+2. **D8: keep the picture while idle.** "Does my scene look right?" before
+   going live is the main use. It is the program only, never the raw screen,
+   and only while Agents is on.
+3. **D6 and S22: keep both** the copy line and one-click "Add to …". One-click
+   is the easy path. The copy line is the fallback for apps Videorc doesn't
+   know and for config files it refuses to rewrite (JSONC with comments,
+   TOML the scanner refuses).
+4. **D11: keep notices for the six big actions only**: `go_live`, `stop`,
+   `send_chat_message`, `remove_chat_message`, `delete_recording` and
+   `notify`. They are what the public sees or what's hard to undo. Every
+   other call shows in Activity only, so a busy agent doesn't bury the
+   streamer in toasts.
+5. **D14, as built: keep both.** Buddy's spoken stop also asks while only
+   recording (a misheard stop loses the take), and the go-live and stop yes
+   needs "Buddy, yes" (a text-to-speech alert or a quoted viewer can't
+   answer). Follow-up, not in this PR: the chat-removal card still takes a
+   bare "yes" so `smoke:buddy-commands` stays unchanged. Move it to "Buddy,
+   yes" in its own PR, together with that smoke.
+6. **S18, as built: leave as is.** Highlight, clear, removal and voice
+   markers keep their engine path, logged in Activity as Buddy. Moving them
+   gains the streamer nothing and risks tested behaviour (the flagged
+   comment's "Show it anyway?" card, the comment chooser). Move them only
+   when something needs it.
+7. **D22, as built: keep both.** A named place keeps the item's size, so
+   "move Buddy to the top left" never shrinks a Buddy the streamer made
+   bigger (`size: "medium"` resets it). Camera or screen moves off a corner
+   are refused while recording or live, as the Scene canvas refuses those
+   drags. Camera corner moves still work live.
 
 ## As built
 
@@ -1766,7 +1783,7 @@ format:check`, vitest on `studio-actions/`, `agent-surface`,
     live and **"Stop the recording? Say yes." before `stop` while recording**
     (deviation: D14 names the livestream; the orchestrator's S21 asks the
     smoke to prove it while recording, and a misheard stop ends a recording
-    just as hard; flag for the owner with Open question 1).
+    just as hard; the owner kept it, Owner decision 5).
     `remove_chat_message` opens the existing removal card
     (`execute_resolved_command`, always a yes) and the steps after it do
     not run.
