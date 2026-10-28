@@ -4265,9 +4265,23 @@ pub const COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN: usize = 8;
 /// `None` while nothing composes, and on a path whose frames carry no pixels
 /// the backend can read (the metadata-only preview, a D3D11 texture).
 pub(crate) struct ProgramPicture {
+    /// The program frame it came from (plan 209 review fix 11: `get_picture`
+    /// encodes one JPEG per frame).
+    pub sequence: u64,
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+}
+
+/// The newest program frame's sequence, without reading its pixels.
+pub(crate) async fn latest_program_sequence(state: &AppState) -> Option<u64> {
+    let compositor = state.compositor.lock().await;
+    let frame = compositor
+        .frame_store
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .latest()?;
+    Some(frame.sequence)
 }
 
 pub(crate) async fn latest_program_picture(state: &AppState) -> Option<ProgramPicture> {
@@ -4293,6 +4307,7 @@ fn program_picture_from_frame(
         CompositorPixelFormat::Yuv420p {
             export: CompositorFrameExportKind::CpuYuv420p,
         } => yuv420p_to_rgb(width, height, &frame.bytes).map(|rgb| ProgramPicture {
+            sequence: frame.sequence,
             width,
             height,
             rgb,
@@ -4306,6 +4321,7 @@ fn program_picture_from_frame(
                 let (width, height) = (target.width() as u32, target.height() as u32);
                 let bgra = target.copy_bgra()?;
                 Some(ProgramPicture {
+                    sequence: frame.sequence,
                     width,
                     height,
                     rgb: bgra_to_rgb(&bgra),

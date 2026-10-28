@@ -210,15 +210,16 @@ pub async fn run_tool(
     if let Err(sentence) = tool.validate_arguments(&arguments) {
         return ToolOutcome::refused(sentence);
     }
+    let admitted_at = Instant::now();
     let admitted = state
         .agents
         .lock()
         .limiter
-        .admit(&agent.id, tool.rate_family, Instant::now());
+        .admit(&agent.id, tool.rate_family, admitted_at);
     if let Err(sentence) = admitted {
         return ToolOutcome::refused(sentence);
     }
-    match tool.runs_in {
+    let outcome = match tool.runs_in {
         AgentToolRunsIn::Backend => match backend_executor(&tool.name) {
             Some(run) => run(state, agent, arguments).await,
             None => ToolOutcome::failed(format!("Videorc can't run `{}` yet.", tool.name)),
@@ -231,7 +232,17 @@ pub async fn run_tool(
             };
             relay_studio_intent(state, agent, tool, arguments, wait).await
         }
+    };
+    // Review fix 4: a refusal did nothing, so it spends no budget (a
+    // refused go_live never makes the next one wait 10 s).
+    if outcome.outcome == AgentActivityOutcome::Refused {
+        state
+            .agents
+            .lock()
+            .limiter
+            .release(&agent.id, tool.rate_family, admitted_at);
     }
+    outcome
 }
 
 /// A Studio tool becomes an `agent.intent` event the renderer executes

@@ -86,7 +86,11 @@ pub enum AgentToolRunsIn {
 #[serde(rename_all = "lowercase")]
 pub enum AgentRateFamily {
     Read,
+    /// `get_picture`: a read that encodes a JPEG (review fix 11).
+    Picture,
     Action,
+    /// `stop`: never held back by `go_live`'s budget (review fix 4).
+    Stop,
     Chat,
     Removal,
     Session,
@@ -902,11 +906,23 @@ mod tests {
         for tool in &catalog.tools {
             assert_eq!(
                 tool.annotations.read_only_hint,
-                tool.rate_family == AgentRateFamily::Read,
+                matches!(
+                    tool.rate_family,
+                    AgentRateFamily::Read | AgentRateFamily::Picture
+                ),
                 "{}",
                 tool.name
             );
         }
+        // Review fixes 4 and 11: stop and get_picture have budgets of their own.
+        assert_eq!(
+            catalog.tool("stop").unwrap().rate_family,
+            AgentRateFamily::Stop
+        );
+        assert_eq!(
+            catalog.tool("get_picture").unwrap().rate_family,
+            AgentRateFamily::Picture
+        );
         assert!(catalog.tool("stop").unwrap().annotations.destructive_hint);
     }
 

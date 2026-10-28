@@ -15,7 +15,15 @@ export const MIN_AGENT_TOOL_DESCRIPTION_CHARS = 40
 export const MAX_AGENT_TOOL_DESCRIPTION_CHARS = 400
 
 export type AgentToolRunsIn = 'backend' | 'studio'
-export const AGENT_RATE_FAMILIES = ['read', 'action', 'chat', 'removal', 'session'] as const
+export const AGENT_RATE_FAMILIES = [
+  'read',
+  'picture',
+  'action',
+  'stop',
+  'chat',
+  'removal',
+  'session'
+] as const
 export type AgentRateFamily = (typeof AGENT_RATE_FAMILIES)[number]
 
 /** MCP tool annotations. All hints, honest ones (D2). */

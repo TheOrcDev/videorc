@@ -390,35 +390,86 @@ fn jpeg_at_most(image: image::RgbImage) -> Option<(u32, u32, Vec<u8>)> {
     Some((image.width(), image.height(), bytes))
 }
 
+/// Which frame a picture came from: the program's, or the JPEG fallback
+/// preview's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PictureFrame {
+    Program(u64),
+    Preview(u64),
+}
+
+/// The last picture an agent got, kept per frame (review fix 11): a second
+/// `get_picture` of the same frame never encodes it again.
+#[derive(Debug, Clone)]
+pub struct CachedPicture {
+    pub frame: PictureFrame,
+    pub width: u32,
+    pub height: u32,
+    pub base64: String,
+}
+
+fn picture_outcome(picture: &CachedPicture) -> ToolOutcome {
+    ToolOutcome::ok(
+        format!("The program picture, {}×{}.", picture.width, picture.height),
+        Some(json!({ "width": picture.width, "height": picture.height, "format": "jpeg" })),
+    )
+    .with_image(picture.base64.clone(), "image/jpeg")
+}
+
+fn cached_picture(state: &AppState, frame: PictureFrame) -> Option<ToolOutcome> {
+    let runtime = state.agents.lock();
+    let cached = runtime.picture.as_ref()?;
+    (cached.frame == frame).then(|| picture_outcome(cached))
+}
+
 pub async fn get_picture(state: &AppState, _agent: &AgentIdentity, _args: Value) -> ToolOutcome {
+    if let Some(sequence) = crate::compositor::latest_program_sequence(state).await
+        && let Some(cached) = cached_picture(state, PictureFrame::Program(sequence))
+    {
+        return cached;
+    }
     let encoded = match crate::compositor::latest_program_picture(state).await {
-        Some(picture) => tokio::task::spawn_blocking(move || {
-            encode_picture(picture.width, picture.height, picture.rgb)
-        })
-        .await
-        .ok()
-        .flatten(),
-        // The JPEG polling fallback preview publishes the same program as
-        // JPEG frames; scale it like the rest.
-        None => match state.preview_latest_frame.read().await.clone() {
-            Some(frame) => tokio::task::spawn_blocking(move || {
-                jpeg_at_most(image::load_from_memory(&frame.bytes).ok()?.to_rgb8())
+        Some(picture) => {
+            let frame = PictureFrame::Program(picture.sequence);
+            tokio::task::spawn_blocking(move || {
+                encode_picture(picture.width, picture.height, picture.rgb)
             })
             .await
             .ok()
-            .flatten(),
+            .flatten()
+            .map(|encoded| (frame, encoded))
+        }
+        // The JPEG polling fallback preview publishes the same program as
+        // JPEG frames; scale it like the rest.
+        None => match state.preview_latest_frame.read().await.clone() {
+            Some(preview) => {
+                let frame = PictureFrame::Preview(preview.sequence);
+                if let Some(cached) = cached_picture(state, frame) {
+                    return cached;
+                }
+                tokio::task::spawn_blocking(move || {
+                    jpeg_at_most(image::load_from_memory(&preview.bytes).ok()?.to_rgb8())
+                })
+                .await
+                .ok()
+                .flatten()
+                .map(|encoded| (frame, encoded))
+            }
             None => None,
         },
     };
     match encoded {
-        Some((width, height, bytes)) => ToolOutcome::ok(
-            format!("The program picture, {width}×{height}."),
-            Some(json!({ "width": width, "height": height, "format": "jpeg" })),
-        )
-        .with_image(
-            base64::engine::general_purpose::STANDARD.encode(bytes),
-            "image/jpeg",
-        ),
+        Some((frame, (width, height, bytes))) => {
+            let picture = CachedPicture {
+                frame,
+                width,
+                height,
+                base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            };
+            let outcome = picture_outcome(&picture);
+            state.agents.lock().picture = Some(picture);
+            outcome
+        }
         None => ToolOutcome::refused(NO_PICTURE),
     }
 }
@@ -1345,6 +1396,23 @@ mod tests {
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (1280, 720));
 
+        // Review fix 11: the same frame is encoded once. A frame whose bytes
+        // can't decode under the same sequence still answers from the cache;
+        // a new sequence is encoded afresh.
+        *state.preview_latest_frame.write().await = Some(crate::state::PreviewFrame {
+            sequence: 1,
+            bytes: b"not a jpeg".to_vec(),
+            published_at: Instant::now(),
+        });
+        assert_eq!(get_picture(&state, &agent, json!({})).await, picture);
+        *state.preview_latest_frame.write().await = Some(crate::state::PreviewFrame {
+            sequence: 2,
+            bytes: jpeg(640, 360),
+            published_at: Instant::now(),
+        });
+        let next = get_picture(&state, &agent, json!({})).await;
+        assert_eq!(next.structured.as_ref().unwrap()["width"], 640);
+
         // Through the router: text first, then MCP image content.
         let address = serve(&state).await;
         let (_, token) = connect_agent(&state, "Cursor");
@@ -1364,7 +1432,7 @@ mod tests {
         assert_eq!(answer["result"]["isError"], false, "{answer}");
         assert_eq!(answer["result"]["content"][1]["type"], "image");
         assert_eq!(answer["result"]["content"][1]["mimeType"], "image/jpeg");
-        assert_eq!(answer["result"]["structuredContent"]["width"], 1280);
+        assert_eq!(answer["result"]["structuredContent"]["width"], 640);
     }
 
     #[test]

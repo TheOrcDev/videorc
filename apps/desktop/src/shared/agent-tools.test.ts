@@ -262,7 +262,10 @@ describe('the agent tool catalog (plan 209 S1)', () => {
         .map((tool) => tool.name)
     ).toEqual(['stop', 'notify'])
     for (const tool of AGENT_TOOL_CATALOG.tools) {
-      expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.rateFamily === 'read')
+      // `get_picture` is a read with a budget of its own (review fix 11).
+      expect(tool.annotations.readOnlyHint, tool.name).toBe(
+        tool.rateFamily === 'read' || tool.rateFamily === 'picture'
+      )
     }
     // D18: chat comes back under viewer-named fields only.
     const chat = agentTool('read_chat')!.outputSchema as {
@@ -296,6 +299,9 @@ describe('the agent tool catalog (plan 209 S1)', () => {
       // Review fix 18: Buddy never imports an image from a path.
       expect(tool!.buddy, name).toBe(name !== 'edit_banner')
     }
+    // Review fixes 4 and 11: stop and get_picture have budgets of their own.
+    expect(agentTool('stop')!.rateFamily).toBe('stop')
+    expect(agentTool('get_picture')!.rateFamily).toBe('picture')
     expect(agentTool('go_live')!.notice).toBe('{agent} started the livestream.')
     // S11: set_audio's objects take gain and the microphone beside S6's switches.
     const audio = agentTool('set_audio')!.inputSchema as {

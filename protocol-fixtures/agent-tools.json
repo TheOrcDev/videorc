@@ -228,7 +228,7 @@
       "runsIn": "backend",
       "buddy": true,
       "onAir": false,
-      "rateFamily": "read",
+      "rateFamily": "picture",
       "notice": null
     },
     {
@@ -1009,7 +1009,7 @@
       "runsIn": "studio",
       "buddy": true,
       "onAir": true,
-      "rateFamily": "session",
+      "rateFamily": "stop",
       "notice": "{agent} ended the {stopped}."
     },
     {

@@ -172,6 +172,8 @@ pub struct AgentMcpRuntime {
     /// S3: the Studio's projection for `get_status` and the `list_*` tools,
     /// published through `agent.surface.publish` and deduped.
     pub surface: Option<serde_json::Value>,
+    /// Review fix 11: the last `get_picture` JPEG, by the frame it shows.
+    pub picture: Option<crate::agent_look::CachedPicture>,
 }
 
 pub struct AgentMcpShared {
@@ -241,9 +243,13 @@ pub struct RateRule {
 }
 
 /// Per agent: 20 actions per 10 s; chat posts 1 per 2 s and 20 a minute;
-/// removals 10 a minute; go_live and stop once per 10 s. Reads are bounded
-/// too, generously, so a polling loop cannot starve the Studio.
+/// removals 10 a minute; go_live once per 10 s. `stop` has its own budget
+/// (review fix 4): a go_live never holds a stop back, and repeat stops are
+/// harmless. Reads are bounded too, generously, so a polling loop cannot
+/// starve the Studio; a picture (a JPEG each) once a second (review fix 11).
+/// A call the tool refused gives its slot back (`AgentRateLimiter::release`).
 pub fn rate_rules(family: AgentRateFamily) -> &'static [RateRule] {
+    const SECOND: Duration = Duration::from_secs(1);
     const SECONDS_2: Duration = Duration::from_secs(2);
     const SECONDS_10: Duration = Duration::from_secs(10);
     const MINUTE: Duration = Duration::from_secs(60);
@@ -252,6 +258,16 @@ pub fn rate_rules(family: AgentRateFamily) -> &'static [RateRule] {
             count: 60,
             window: SECONDS_10,
             sentence: "60 reads every 10 seconds",
+        }],
+        AgentRateFamily::Picture => &[RateRule {
+            count: 1,
+            window: SECOND,
+            sentence: "one picture a second",
+        }],
+        AgentRateFamily::Stop => &[RateRule {
+            count: 5,
+            window: SECONDS_10,
+            sentence: "5 stops every 10 seconds",
         }],
         AgentRateFamily::Action => &[RateRule {
             count: 20,
@@ -278,7 +294,7 @@ pub fn rate_rules(family: AgentRateFamily) -> &'static [RateRule] {
         AgentRateFamily::Session => &[RateRule {
             count: 1,
             window: SECONDS_10,
-            sentence: "one go-live or stop every 10 seconds",
+            sentence: "one go-live every 10 seconds",
         }],
     }
 }
@@ -323,6 +339,20 @@ impl AgentRateLimiter {
         // Keys for removed agents expire with their windows.
         self.windows.retain(|_, window| !window.is_empty());
         Ok(())
+    }
+
+    /// Review fix 4: a call the tool refused (nothing happened) gives back
+    /// the slot `admit` took at `at`.
+    pub fn release(&mut self, agent_id: &str, family: AgentRateFamily, at: Instant) {
+        let key = (agent_id.to_string(), family);
+        if let Some(window) = self.windows.get_mut(&key)
+            && let Some(index) = window.iter().rposition(|admitted| *admitted == at)
+        {
+            window.remove(index);
+            if window.is_empty() {
+                self.windows.remove(&key);
+            }
+        }
     }
 
     pub fn forget(&mut self, agent_id: &str) {
@@ -1568,6 +1598,59 @@ mod tests {
         );
         limiter.forget("a");
         limiter.admit("a", AgentRateFamily::Session, start).unwrap();
+
+        // Review fix 4: go_live's budget never holds a stop back, and a
+        // refused go_live gives its slot back.
+        let mut limiter = AgentRateLimiter::default();
+        limiter.admit("a", AgentRateFamily::Session, start).unwrap();
+        for second in 0..5 {
+            limiter
+                .admit(
+                    "a",
+                    AgentRateFamily::Stop,
+                    start + Duration::from_secs(second),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            limiter.admit("a", AgentRateFamily::Stop, start + Duration::from_secs(5)),
+            Err("Slow down: at most 5 stops every 10 seconds.".to_string())
+        );
+        limiter.release("a", AgentRateFamily::Session, start);
+        limiter
+            .admit(
+                "a",
+                AgentRateFamily::Session,
+                start + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            limiter.admit(
+                "a",
+                AgentRateFamily::Session,
+                start + Duration::from_secs(2)
+            ),
+            Err("Slow down: at most one go-live every 10 seconds.".to_string())
+        );
+
+        // Review fix 11: a picture a second, beside the reads.
+        limiter.admit("a", AgentRateFamily::Picture, start).unwrap();
+        assert_eq!(
+            limiter.admit(
+                "a",
+                AgentRateFamily::Picture,
+                start + Duration::from_millis(500)
+            ),
+            Err("Slow down: at most one picture a second.".to_string())
+        );
+        limiter
+            .admit(
+                "a",
+                AgentRateFamily::Picture,
+                start + Duration::from_secs(1),
+            )
+            .unwrap();
+        limiter.admit("a", AgentRateFamily::Read, start).unwrap();
     }
 
     #[test]

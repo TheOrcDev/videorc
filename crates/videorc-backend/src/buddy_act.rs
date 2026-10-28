@@ -1615,10 +1615,9 @@ mod tests {
             vec![crate::agent_call::STUDIO_CLOSED.to_string()]
         );
         // Spoken `stop` while idle has nothing to confirm and runs (the
-        // Studio is closed in a test: refused with that sentence). A state of
-        // its own: the typed `go_live` above spent Buddy's one go-live or
-        // stop every 10 seconds.
-        let state = crate::agent_mcp::test_support::test_state();
+        // Studio is closed in a test: refused with that sentence). Review
+        // fix 4: the go_live above never holds it back (a budget of its own,
+        // and a refused go_live gives its slot back).
         let mut idle_stop = PendingAct::new("buddy stop", refused_plan("stop"));
         assert_eq!(
             run_steps(&state, &mut idle_stop, true, false).await,
@@ -1727,6 +1726,7 @@ mod tests {
             &authors
         ));
         assert!(!about_comment("end the stream", &authors));
+        assert!(!about_comment("move yourself to the top left", &authors));
         // Review fix 6: Buddy's own name, a one-word everyday or command
         // name, or a tool word never pulls chat in.
         let viewers = vec![
@@ -1752,7 +1752,6 @@ mod tests {
             "buddy put stop motion up",
             &["Stop Motion".to_string()]
         ));
-        assert!(!about_comment("move yourself to the top left", &authors));
     }
 
     #[test]
