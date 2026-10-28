@@ -1024,4 +1024,76 @@ the owner's by-eye checks:
 
 ## Execution notes
 
-(Empty until execution starts. S0's numbers go here first.)
+### S0 baseline (2026-10-28)
+
+**Setup.** `pnpm probe:scene-window-switch` on `4f68c500` (a detached base
+worktree, so the numbers are today's code, not this branch's), dev app on an
+isolated profile, 1920x1080@30 canvas, Clips ring off, two saved Screen-only
+scenes made through the renderer's own `applySavedScene` path: "Fixture
+Alpha" (red, 1280x720 window) and "Fixture Beta" (blue). A->B->A, 20
+switches per variant, two full runs. Evidence: the recording decoded per frame
+(centre colour, bottom-left motion strip, top-left/bottom-right layout marks),
+aligned to the wall clock by Alpha's white flash (anchor drift 0 to 50 ms over
+a run); the gap split from the backend's own tracing timestamps. Idle has no
+program file, so it reports status edges only.
+
+**Host load was not quiet.** Other agents compiled Rust during both runs: run 1
+at load 26 to 42, run 2 at 40 falling to 14. Every number stretches with load,
+so run 2's recording and layout variants (load 14 to 24) are the baseline and
+run 1 is what a busy Mac does to the same code.
+
+**Recording, Screen only -> Screen only (what viewers see):**
+
+| run | host load | click -> new window p50 / p95 / max | black frames (20 switches; per switch p50 / max) | old-window frames before the cut p50 (frozen) |
+| --- | --------- | ----------------------------------- | ------------------------------------------------ | --------------------------------------------- |
+| 2   | 24 -> 15  | 467 / 731 / 776 ms                  | 39 (2 / 8)                                       | 12 (4)                                        |
+| 1   | 42 -> 41  | 1373 / 1971 / 2331 ms               | 139 (6 to 8 / 14)                                | 36 (6)                                        |
+
+**Recording, layout change** (Alpha full-bleed <-> Beta freeform at 70% of the
+canvas): run 2 678 / 1109 / 1323 ms, 58 black frames, **0 wrong-layout
+frames** in 20 switches; run 1 807 / 1654 / 1911 ms, 114 black, 0
+wrong-layout. The warm path does hold the old layout until the new source has
+frames, but what it holds on air is black, not the old picture.
+
+**Idle** (status edges): click -> first captured frame of the new window p50
+590 / p95 1552 ms (run 2), 1722 / 3376 ms (run 1). The compositor's preview
+run is torn down and restarted on every saved-scene switch while idle
+(`compositor.status` goes `stopped` then `live` with a new run), and its
+status snapshot refreshes only every ~2 s, so there is no finer idle edge
+today; the recording variants are the measurement.
+
+**Where the gap goes** (run 2, recording, p50 / p95):
+
+| stage                                 | p50 / p95    | what it is                                                                                                                                                                                                             |
+| ------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| renderer preflight                    | 321 / 528 ms | click -> backend begins the new capture generation: `devices.list` (a fresh `SCShareableContent` enumeration every call, `screen_capture.rs`), protected overlay ids, background check, then `scene.layout.apply_live` |
+| backend stop                          | 8 / 19 ms    | the old SCStream's `stop_join_ms`                                                                                                                                                                                      |
+| shareable content + select            | 54 / 69 ms   | `load_shareable_content` to `[videorc-capture-sizing]`                                                                                                                                                                 |
+| start -> first captured frame         | 120 / 227 ms | `startCapture` to the first sample buffer                                                                                                                                                                              |
+| first captured -> compositor shows it | 311 / 376 ms | status-based and coarse; the pixel cut lands ~50 ms before `firstCaptured` + commit on average                                                                                                                         |
+
+**The largest share is the renderer preflight**: about 55 to 70% of click ->
+first captured frame on the quiet run, and the part that grows most under
+load (1077 to 1384 ms p50 in run 1). The sequence on air is: the old window
+keeps playing live for the whole preflight (~10 frames), then 3 to 4 frozen
+frames while the old stream stops and shareable content loads, then black
+until the new window's first frame, then the cut. No black after the cut. The
+direction matters a little: A->B shows 2 black frames per switch at p50, B->A
+shows 1.
+
+**Against D5** (150 ms p95, zero black, zero wrong-layout): today misses the
+latency budget by about 5x on the quiet run and shows black on nearly every
+switch; wrong-layout is already zero. S3's swap-in-place removes the stop +
+shareable + start chain (~180 ms p50) and the black, but the renderer
+preflight (~320 ms p50 quiet) has to shrink too or the budget cannot be met;
+that is a renderer slice (skip the second `devices.list` enumeration for a
+scene whose sources were listed moments ago), not S3's backend work.
+
+**For S3 and S11.** Gate with
+`pnpm probe:scene-window-switch -- --switches 40 --budget-ms 150`; run it when
+the host load is under 10 or the numbers are not comparable (each variant
+records `hostLoadAtStart`/`hostLoadAtEnd`). The per-switch rows, poll traces,
+per-frame classes (`*-frames.json`) and `dev-app.log` land in the evidence
+directory. Frozen counts are meaningful only for full-bleed scenes (the shrunk
+scene moves the motion strip off the sampled canvas strip): read
+`oldWindowFrames` for the layout variant's marked scene.

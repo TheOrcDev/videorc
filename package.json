@@ -217,6 +217,7 @@
     "probe:comments-window": "node scripts/comments-window-probe.mjs",
     "probe:ui-glass": "node scripts/ui-glass-probe.mjs",
     "probe:preview-lifecycle": "node scripts/preview-lifecycle-probe.mjs --gate",
+    "probe:scene-window-switch": "node scripts/probe-scene-window-switch.mjs",
     "probe:preview-lifecycle:linux": "node scripts/run-with-env.mjs --platform=linux VIDEORC_EXPECT_LINUX_PROOF=1 -- node scripts/preview-lifecycle-probe.mjs --gate",
     "probe:live-background-cost": "node scripts/live-backgrounds/cost-probe.mjs",
     "probe:split-flv": "node scripts/probe-split-flv-capture.mjs",
