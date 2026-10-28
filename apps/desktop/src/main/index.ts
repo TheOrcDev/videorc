@@ -2275,6 +2275,10 @@ secureIpcHandle('app:self-bundle-ids', (event) => {
     ? (frontAppMonitor?.selfBundleIds() ?? [])
     : []
 })
+// Plan 210 S5: New scene… and the scene list ask for app icons by bundle id.
+// S4 fills this in (the app's icon from its bundle, cached per id); until
+// then every app draws the generic glyph.
+secureIpcHandle('app:icons', (_event, _bundleIds: string[]): Record<string, string> => ({}))
 
 function createWindow(): void {
   const chrome = glassWindowChrome('main')

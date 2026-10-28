@@ -377,6 +377,30 @@ export type ResolveAppWindowResult =
   | { ok: true; windowId: string; title: string; width: number; height: number }
   | { ok: false; reason: 'not-running' | 'no-window' | 'minimized' }
 
+/** Plan 210 S4: New scene…'s picker asks for these only while it is open. */
+export interface AppPreviewsParams {
+  /** The widest picture to return, in pixels. */
+  maxWidth?: number
+}
+
+/** One running app with a normal window, and a small picture of its front window. */
+export interface AppPreview {
+  bundleId: string
+  name: string
+  pid: number
+  windowCount: number
+  frontWindowId?: string
+  frontWindowTitle?: string
+  /** `data:image/jpeg;base64,…`; absent below macOS 14. */
+  picture?: string
+  width?: number
+  height?: number
+}
+
+export interface AppPreviewsResult {
+  apps: AppPreview[]
+}
+
 export interface Device {
   app?: DeviceApp
   windowTitle?: string

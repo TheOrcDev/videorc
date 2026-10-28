@@ -74,8 +74,9 @@ describe('Electron IPC contract', () => {
     // 152: plan 209 S20 adds the Stream Manager's `/buddy` relay pair.
     // 153: plan 209 S22 adds agents:add-to-app ("Add to …" in Connect).
     // 155: plan 210 S9 adds foreground window watch and self bundle ids.
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(155)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(155)
+    // 156: plan 210 S5 adds app icons for New scene… (S4 fills main's side).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(156)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(156)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

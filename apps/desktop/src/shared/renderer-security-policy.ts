@@ -25,6 +25,7 @@ export const IPC_INVOKE_ROLES = {
   'app:get-runtime-info': MAIN_ONLY,
   'app:front-window-watch': MAIN_ONLY,
   'app:self-bundle-ids': MAIN_ONLY,
+  'app:icons': MAIN_ONLY,
   'app:retry-hardware-acceleration': MAIN_ONLY,
   'app:set-native-theme': MAIN_ONLY,
   'app:exit': MAIN_ONLY,

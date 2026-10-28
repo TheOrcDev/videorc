@@ -3384,4 +3384,39 @@ describe('app window source contracts (plan 210 S1)', () => {
       expect(() => validateBackendRpcResult('sources.resolve_app_window', bad)).toThrow()
     }
   })
+
+  // Plan 210 S4/S5: New scene…'s picker. S5 builds against this shape first.
+  it('registers app previews and validates their pictures strictly', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.app_previews')
+    expect(validateBackendRpcParams('sources.app_previews', { maxWidth: 320 })).toEqual({
+      maxWidth: 320
+    })
+    expect(validateBackendRpcParams('sources.app_previews', undefined)).toBeUndefined()
+    for (const bad of [{ maxWidth: 0 }, { maxWidth: 4_000 }, { maxWidth: 320, extra: true }]) {
+      expect(() => validateBackendRpcParams('sources.app_previews', bad)).toThrow()
+    }
+    const figma = {
+      bundleId: 'com.figma.Desktop',
+      name: 'Figma',
+      pid: 42,
+      windowCount: 3,
+      frontWindowId: 'window:screencapturekit:7',
+      frontWindowTitle: 'Untitled',
+      picture: 'data:image/jpeg;base64,/9j/4AAQ',
+      width: 320,
+      height: 200
+    }
+    const iconOnly = { bundleId: 'com.t3.code', name: 'T3 Code', pid: 7, windowCount: 1 }
+    expect(validateBackendRpcResult('sources.app_previews', { apps: [figma, iconOnly] })).toEqual({
+      apps: [figma, iconOnly]
+    })
+    for (const bad of [
+      { ...figma, picture: 'data:image/png;base64,AAAA' },
+      { ...figma, picture: 'https://example.com/a.jpg' },
+      { ...figma, windowCount: -1 },
+      { ...figma, secret: true }
+    ]) {
+      expect(() => validateBackendRpcResult('sources.app_previews', { apps: [bad] })).toThrow()
+    }
+  })
 })

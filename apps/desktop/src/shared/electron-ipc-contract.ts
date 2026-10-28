@@ -1,4 +1,5 @@
 import type { FrontAppChanged } from './front-app'
+import { APP_ICONS_MAX_IDS } from './app-icons'
 import {
   validateChatDelivery,
   validateChatDeliveryBoundary,
@@ -117,6 +118,7 @@ export const electronInvokeApiMethods = {
   'app:get-runtime-info': 'getRuntimeInfo',
   'app:front-window-watch': 'setFrontWindowWatch',
   'app:self-bundle-ids': 'getSelfBundleIds',
+  'app:icons': 'getAppIcons',
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
@@ -1511,6 +1513,13 @@ const specificRuntimeInvokeContracts = {
     undefinedSchema
   ),
   'app:self-bundle-ids': invokeContract(noArgs, arraySchema(stringSchema({ maxLength: 1024 }))),
+  // Plan 210 S4/S5: icons for the apps New scene… lists, by bundle id.
+  'app:icons': invokeContract(
+    tupleSchema([
+      arraySchema(stringSchema({ minLength: 1, maxLength: 1024 }), { maxLength: APP_ICONS_MAX_IDS })
+    ]),
+    recordSchema(stringSchema({ maxLength: 4_000_000 }), { maxKeys: APP_ICONS_MAX_IDS })
+  ),
   'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
   'comments-window:marker-context-push': invokeContract(
     tupleSchema([markerContextSchema]),

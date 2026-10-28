@@ -89,6 +89,8 @@ import type {
   DeviceList,
   ResolveAppWindowParams,
   ResolveAppWindowResult,
+  AppPreviewsParams,
+  AppPreviewsResult,
   DiagnosticStats,
   EntitlementsSnapshot,
   FileAssessment,
@@ -376,6 +378,8 @@ export interface BackendRpcMethodMap {
   'account.sign_out': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
   'sources.resolve_app_window': BackendRpcDefinition<ResolveAppWindowParams, ResolveAppWindowResult>
+  // Plan 210 S4: New scene…'s picker, only while it is open.
+  'sources.app_previews': BackendRpcDefinition<AppPreviewsParams | undefined, AppPreviewsResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
   'stream.output.topology.probe': BackendRpcDefinition<
@@ -833,6 +837,15 @@ const entitlementsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<EntitlementsSnapshot>
+
+// Plan 210 S4: a small JPEG of an app's front window. 2 MB of base64 is far
+// past a 320 px picture; anything else is not a picture the picker draws.
+const appPreviewPictureSchema = runtimeSchema<string>('a JPEG data URL', (value, path) => {
+  const url = stringSchema({ minLength: 1, maxLength: 2_000_000 }).parse(value, path)
+  if (!url.startsWith('data:image/jpeg;base64,'))
+    throw new RuntimeSchemaError(path, 'a JPEG data URL')
+  return url
+})
 
 const deviceSchema = objectSchema(
   {
@@ -4880,6 +4893,36 @@ const runtimeContracts = {
         { allowUnknown: false }
       )
     ])
+  },
+  'sources.app_previews': {
+    params: optionalSchema(
+      objectSchema(
+        { maxWidth: optionalSchema(numberSchema({ integer: true, min: 32, max: 1_920 })) },
+        { allowUnknown: false }
+      )
+    ),
+    result: objectSchema(
+      {
+        apps: arraySchema(
+          objectSchema(
+            {
+              bundleId: boundedString,
+              name: boundedString,
+              pid: numberSchema({ integer: true, min: 0, max: 2_147_483_647 }),
+              windowCount: nonNegativeInteger,
+              frontWindowId: optionalSchema(boundedString),
+              frontWindowTitle: optionalText,
+              picture: optionalSchema(appPreviewPictureSchema),
+              width: optionalSchema(nonNegativeInteger),
+              height: optionalSchema(nonNegativeInteger)
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 512 }
+        )
+      },
+      { allowUnknown: false }
+    )
   },
   'devices.list': { params: undefinedOrFfmpegPathSchema, result: deviceListSchema },
   'recording.status': { params: undefinedSchema, result: recordingStatusSchema },
