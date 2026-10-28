@@ -129,7 +129,7 @@ describe('buildAgentSurface', () => {
     expect(surface.systemAudio).toEqual({ on: true, available: true })
     expect(surface.takeoverId).toBe('brb')
     expect(surface.takeovers).toEqual([{ id: 'brb', name: 'BRB' }])
-    expect(surface.background).toEqual({ liveId: 'silk', look: 'satin' })
+    expect(surface.sceneBackground).toEqual({ liveId: 'silk', look: 'satin' })
     expect(surface.captions).toEqual({ on: true, state: 'listening' })
     expect(surface.buddy).toEqual({ on: true, status: 'listening' })
     expect(surface.sources.devices.map((device) => device.kind)).toEqual([
@@ -181,7 +181,28 @@ describe('buildAgentSurface', () => {
       []
     )
     expect(surface.scene).toEqual({ id: 'scene-1', name: 'Coding', kind: 'saved', modified: true })
-    expect(surface.background).toEqual({ picture: true })
+    expect(surface.sceneBackground).toEqual({ picture: true })
+  })
+
+  it('never names a key `background`, which the backend reads as a managed picture', () => {
+    // The backend resolves every `background` object in a renderer's params
+    // as a picture with an `assetId`, and refuses the call without one: a
+    // live or picture background froze the agents' view (plan 209 S16).
+    const named = (value: unknown): boolean =>
+      Array.isArray(value)
+        ? value.some(named)
+        : value !== null && typeof value === 'object'
+          ? Object.entries(value).some(([key, child]) => key === 'background' || named(child))
+          : false
+    const live = buildAgentSurface(input(), [])
+    const picture = buildAgentSurface(
+      input({ background: { assetId: 'beach', managedAssetPath: '/x/beach.png' } as never }),
+      []
+    )
+    expect(live.sceneBackground).toEqual({ liveId: 'silk', look: 'satin' })
+    expect(picture.sceneBackground).toEqual({ picture: true })
+    expect(named(live)).toBe(false)
+    expect(named(picture)).toBe(false)
   })
 
   it('never carries a key, a server URL, an account id, a path or a device detail (D9)', () => {

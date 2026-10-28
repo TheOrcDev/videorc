@@ -122,6 +122,10 @@ fn session_word(status: &crate::protocol::RecordingStatus) -> (&'static str, boo
     match status.state {
         RecordingState::Idle => ("idle", false),
         RecordingState::Starting => ("starting", true),
+        // Go Live records too, and a record+stream session reads `recording`:
+        // it streams exactly when it carries a stream URL (the renderer's
+        // `sessionIsLive`, plan 095 S5). Only presence is read, never the URL.
+        RecordingState::Recording if status.stream_url.is_some() => ("live", true),
         RecordingState::Recording => ("recording", true),
         RecordingState::Streaming => ("live", true),
         RecordingState::Stopping => ("stopping", true),
@@ -599,7 +603,7 @@ pub async fn list_assets(state: &AppState, _agent: &AgentIdentity, _args: Value)
     let backgrounds = background_catalog(
         surface
             .as_ref()
-            .and_then(|surface| surface.get("background")),
+            .and_then(|surface| surface.get("sceneBackground")),
     );
     let text = format!(
         "{} banners, {} takeovers, {} sounds, {} live backgrounds.",
@@ -1188,7 +1192,7 @@ mod tests {
             "takeoverId": "brb",
             "takeovers": [{ "id": "brb", "name": "BRB" }],
             "sounds": [{ "id": "airhorn", "name": "Airhorn", "playing": true }],
-            "background": { "liveId": "silk", "look": "satin" },
+            "sceneBackground": { "liveId": "silk", "look": "satin" },
             "captions": { "on": false, "state": "idle" },
             "buddy": { "on": true, "status": "listening" },
             "sources": {
@@ -1266,11 +1270,12 @@ mod tests {
     #[test]
     fn session_words_hide_a_clips_only_session() {
         use crate::protocol::{RecordingState, RecordingStatus};
-        let status = |state, replay_only| RecordingStatus {
+        let streaming = || Some("rtmp://a.example/live/secret-key".to_string());
+        let status = |state, replay_only, stream_url: Option<String>| RecordingStatus {
             state,
             session_id: Some("s".to_string()),
             output_path: None,
-            stream_url: Some("rtmp://a.example/live/secret-key".to_string()),
+            stream_url,
             started_at: None,
             audio_tracks: Vec::new(),
             pipeline: None,
@@ -1279,16 +1284,22 @@ mod tests {
             replay_only,
         };
         assert_eq!(
-            session_word(&status(RecordingState::Recording, true)),
+            session_word(&status(RecordingState::Recording, true, None)),
             ("idle", false)
         );
         assert_eq!(
-            session_word(&status(RecordingState::Streaming, false)),
+            session_word(&status(RecordingState::Streaming, false, streaming())),
             ("live", true)
         );
         assert_eq!(
-            session_word(&status(RecordingState::Recording, false)),
+            session_word(&status(RecordingState::Recording, false, None)),
             ("recording", true)
+        );
+        // Go Live's default (plan 209 S16): a record+stream session reads
+        // `recording`, and it is live because it streams.
+        assert_eq!(
+            session_word(&status(RecordingState::Recording, false, streaming())),
+            ("live", true)
         );
         assert_eq!(
             scrub_addresses("Could not reach rtmp://a.example/live/secret-key now"),

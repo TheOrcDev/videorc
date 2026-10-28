@@ -20813,6 +20813,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_surface_publish_carries_a_live_background_past_the_managed_background_walk() {
+        // Plan 209 S16: every `background` object in a renderer's params is
+        // resolved as a managed picture and refused without an `assetId`, so
+        // the surface names its background `sceneBackground` (a live one, or
+        // only that a picture is on). With `background` the publish failed and
+        // the agents' view froze while any background was on.
+        let state = test_state();
+        for scene_background in [
+            json!({ "liveId": "silk", "look": "satin" }),
+            json!({ "picture": true }),
+        ] {
+            let publish = json!({
+                "id": "publish",
+                "method": "agent.surface.publish",
+                "params": { "surface": { "version": 1, "sceneBackground": scene_background } }
+            });
+            let response =
+                handle_text_message_with_role(&state, &publish.to_string(), BackendRole::Renderer)
+                    .await;
+            assert!(response.ok, "{:?}", response.error);
+            assert_eq!(
+                state
+                    .agents
+                    .lock()
+                    .surface
+                    .as_ref()
+                    .map(|surface| surface["sceneBackground"].clone()),
+                Some(scene_background)
+            );
+        }
+        let old_shape = json!({
+            "id": "publish",
+            "method": "agent.surface.publish",
+            "params": { "surface": { "version": 1, "background": { "liveId": "silk" } } }
+        });
+        let response =
+            handle_text_message_with_role(&state, &old_shape.to_string(), BackendRole::Renderer)
+                .await;
+        assert!(!response.ok);
+    }
+
+    #[tokio::test]
     async fn session_chat_totals_rpc_returns_zero_and_rejects_unbounded_or_foreign_parameters() {
         let state = test_state();
         state

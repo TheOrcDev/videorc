@@ -59,8 +59,11 @@ export interface AgentSurface {
   takeoverId?: string
   takeovers: { id: string; name: string }[]
   sounds: { id: string; name: string; playing: boolean }[]
-  /** A live background by its catalog id and look; a picture says only that. */
-  background?: { liveId: string; look: string } | { picture: true }
+  /** A live background by its catalog id and look; a picture says only that.
+   * Never named `background`: the backend resolves every `background` object
+   * in a renderer's params as a managed picture (`assetId`), so a surface
+   * with one was refused and the agents' view froze (plan 209 S16). */
+  sceneBackground?: { liveId: string; look: string } | { picture: true }
   captions: { on: boolean; state: string }
   buddy: { on: boolean; status?: string }
   sources: {
@@ -198,9 +201,9 @@ export function buildAgentSurface(
     takeovers: input.takeovers.map(({ id, name }) => ({ id, name })),
     sounds: playingSounds.map(({ id, name, playing }) => ({ id, name, playing })),
     ...(live
-      ? { background: { liveId: live.id, look: live.look } }
+      ? { sceneBackground: { liveId: live.id, look: live.look } }
       : input.background
-        ? { background: { picture: true as const } }
+        ? { sceneBackground: { picture: true as const } }
         : {}),
     captions: {
       on: input.captionsEnabled && CAPTIONS_RUNNING.has(input.captionsStatus.state),
