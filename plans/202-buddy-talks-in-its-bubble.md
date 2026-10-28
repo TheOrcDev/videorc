@@ -17,15 +17,22 @@
 
 ## Status
 
-| Phase | What                                                       | PR         | State   |
-| ----- | ---------------------------------------------------------- | ---------- | ------- |
-| A     | "Show on takeovers": Buddy hidden on takeovers when off    | desktop PR | PLANNED |
-| B     | Bubble mode in the engine: speaks on stream, never in chat | desktop PR | PLANNED |
-| C     | Bubble mode in the UI: the control, the copy, the report   | desktop PR | PLANNED |
-| D     | Smokes and the owner's live acceptance                     | desktop PR | PLANNED |
+| Phase | What                                                       | PR         | State                                              |
+| ----- | ---------------------------------------------------------- | ---------- | -------------------------------------------------- |
+| A     | "Show on takeovers": Buddy hidden on takeovers when off    | desktop PR | PLANNED                                            |
+| B     | Bubble mode in the engine: speaks on stream, never in chat | —          | SUPERSEDED by plan 211                             |
+| C     | Bubble mode in the UI: the control, the copy, the report   | —          | SUPERSEDED by plan 211                             |
+| D     | Smokes and the owner's live acceptance                     | —          | SUPERSEDED by plan 211 (S-D1 1 stays with Phase A) |
 
-- **Status**: PLANNED 2026-10-26. The owner answered all three questions
-  the same day (see Owner answers). Ready to execute from Phase A.
+- **Status**: Phase A only, PLANNED. On 2026-10-28 the owner hit the chat
+  posting problem again and asked to remove Auto altogether.
+  [Plan 211](211-buddy-talks-only-in-its-bubble.md) replaces Phases B to D:
+  "Buddy talks: Off · Bubble · Suggest", Bubble the default, no Auto. Do
+  not build B to D from this file. Phase A ("Show on takeovers") runs after
+  plan 211 as its own PR, with the S-D1 1 `smoke:buddy-pet` rows. Its S-A2 6
+  doesn't add a new function: it extends plan 211's
+  `buddy_overlay::buddy_visible` (S-B4) with the takeover rule. Re-run the
+  drift check against plan 211's merge before starting.
 - **Priority**: P1 (owner request, 2026-10-26).
 - **Effort**: A is M (one setting, three render paths, one switch). B is L
   (settings wire, lane routing, bubble pacing, report). C is M. D is S plus
