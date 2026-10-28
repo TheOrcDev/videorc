@@ -19,6 +19,7 @@ import { parseLivePosterAssetId } from '../../../shared/live-background-ids'
 
 export const SCENE_LIBRARY_KEY = 'videorc.scene-presets.v1'
 export const WORKING_SCENE_KEY = 'videorc.working-scene.v1'
+export type SceneApp = { bundleId: string; name: string; follows: boolean }
 export type VisualSources = Pick<
   SourceSelection,
   | 'cameraId'
@@ -30,7 +31,7 @@ export type VisualSources = Pick<
   | 'windowId'
   | 'windowName'
   | 'testPattern'
->
+> & { app?: SceneApp }
 export type SavedSceneBackground = Omit<EffectiveSceneBackground, 'managedAssetPath'> & {
   fileName?: string
 }
@@ -69,7 +70,24 @@ export type WorkingScene = {
   visual: SceneVisual
 }
 
+/** Invalid optional fields never discard a scene or opt it into following. */
+export function normalizeSceneApp(raw: unknown): SceneApp | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const data = raw as Record<string, unknown>
+  if (
+    typeof data.bundleId !== 'string' ||
+    !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(data.bundleId)
+  )
+    return undefined
+  return {
+    bundleId: data.bundleId,
+    name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : data.bundleId,
+    follows: data.follows === true
+  }
+}
+
 export function visualSources(sources: VisualSources): VisualSources {
+  const app = normalizeSceneApp(sources.app)
   return {
     cameraId: sources.cameraId,
     cameraName: sources.cameraName,
@@ -83,6 +101,7 @@ export function visualSources(sources: VisualSources): VisualSources {
     screenName: sources.screenName,
     windowId: sources.windowId,
     windowName: sources.windowName,
+    ...(app ? { app } : {}),
     testPattern: sources.testPattern === true
   }
 }
@@ -395,7 +414,8 @@ export function sceneSourceGaps(visual: SceneVisual, devices: readonly Device[])
       layoutPresetNeedsScreen(visual.layout.layoutPreset)) &&
     (!visual.sources.testPattern || baseId)
   ) {
-    check(baseId, visual.sources.windowId ? 'window' : 'screen', 'screen')
+    // App identities require resolution, not a stale-window-id refusal.
+    if (!visual.sources.app) check(baseId, visual.sources.windowId ? 'window' : 'screen', 'screen')
   }
   return gaps
 }
@@ -509,4 +529,127 @@ export function sourceVisibilityFromScene(
       visibility.capture = source.visible
   }
   return visibility
+}
+
+export type AppWindowFailure = 'app-not-running' | 'app-no-window' | 'app-minimized'
+export type AppWindowResolution =
+  | { windowId: string; title: string }
+  | { reason: 'not-running' | 'no-window' | 'minimized' }
+export type SceneWindowResolution =
+  | { kind: 'ready'; sources: VisualSources }
+  | { kind: 'resolve-app'; bundleId: string }
+  | { kind: 'blocked'; reason: AppWindowFailure }
+  | { kind: 'resolve-sources' }
+
+export function appWindowFailureCopy(name: string, reason: AppWindowFailure): string {
+  switch (reason) {
+    case 'app-not-running':
+      return `${name} isn't open`
+    case 'app-no-window':
+      return `${name} has no window open`
+    case 'app-minimized':
+      return `${name}'s window is minimized`
+  }
+}
+
+/** Resolve before strict preflight; the returned projection never rewrites a snapshot.
+ * An old fixed-window scene can pass remembered device ownership as fallbackBundleId.
+ * App scenes always resolve anew, even when their old window is still listed.
+ */
+export function resolveSceneWindow(
+  visual: SceneVisual,
+  devices: readonly Device[],
+  fallbackBundleId?: string,
+  resolution?: AppWindowResolution
+): SceneWindowResolution {
+  const sources = visualSources(visual.sources)
+  const bundleId = sources.app?.bundleId ?? fallbackBundleId
+  const exact = devices.some(
+    (d) => d.kind === 'window' && d.id === sources.windowId && d.status === 'available'
+  )
+  if (!sources.app && (!sources.windowId || exact)) return { kind: 'ready', sources }
+  if (!bundleId) return { kind: 'resolve-sources' }
+  if (!resolution) return { kind: 'resolve-app', bundleId }
+  if ('reason' in resolution) return { kind: 'blocked', reason: `app-${resolution.reason}` }
+  return {
+    kind: 'ready',
+    sources: {
+      ...sources,
+      screenId: undefined,
+      screenName: undefined,
+      captureOff: false,
+      testPattern: false,
+      windowId: resolution.windowId,
+      windowName: resolution.title
+    }
+  }
+}
+
+export type SceneAppChoice = {
+  bundleId: string
+  name: string
+  frontWindowId?: string
+  frontWindowName?: string
+}
+export type ScenesForAppsOptions = { id: () => string; now: () => string }
+export function scenesForApps(
+  apps: readonly SceneAppChoice[],
+  look: SceneVisual,
+  existingScenes: readonly SavedScene[],
+  options: ScenesForAppsOptions = {
+    id: () => crypto.randomUUID(),
+    now: () => new Date().toISOString()
+  }
+): SavedScene[] {
+  const names = new Set(existingScenes.map((s) => s.name.toLocaleLowerCase()))
+  return apps.map((app) => {
+    const base = app.name.trim().slice(0, 80) || app.bundleId.slice(0, 80)
+    let name = base
+    for (let n = 2; names.has(name.toLocaleLowerCase()); n++) {
+      const suffix = ` ${n}`
+      name = base.slice(0, 80 - suffix.length).trimEnd() + suffix
+    }
+    names.add(name.toLocaleLowerCase())
+    const now = options.now()
+    return {
+      id: options.id(),
+      name,
+      createdAt: now,
+      updatedAt: now,
+      visual: normalizeSceneVisual({
+        ...look,
+        sources: {
+          ...look.sources,
+          screenId: undefined,
+          screenName: undefined,
+          windowId: app.frontWindowId,
+          windowName: app.frontWindowName,
+          captureOff: false,
+          testPattern: false,
+          app: { bundleId: app.bundleId, name: app.name, follows: true }
+        }
+      })
+    }
+  })
+}
+
+export type SceneOrientation = 'horizontal' | 'vertical'
+export function sceneForFrontApp(
+  scenes: readonly SavedScene[],
+  front: { bundleId: string },
+  lastUsedAt: Readonly<Record<string, number>>,
+  orientation: SceneOrientation
+): SavedScene | undefined {
+  let best: SavedScene | undefined
+  for (const scene of scenes) {
+    const app = scene.visual.sources.app
+    if (
+      app?.bundleId.toLowerCase() !== front.bundleId.toLowerCase() ||
+      !app.follows ||
+      scene.visual.layout.layoutPreset.startsWith('vertical-') !== (orientation === 'vertical')
+    )
+      continue
+    if (!best || (lastUsedAt[scene.id] ?? 0) > (lastUsedAt[best.id] ?? 0)) best = scene
+  }
+  return best
 }
