@@ -28,6 +28,13 @@ const requiredPortraitProfiles = [
   { label: 'vertical-1440p60', width: 1440, height: 2560, fps: 60, bitrateKbps: 16000 }
 ]
 
+// 9:16 keeps the size the user chose (verticalTwinVideo), so the
+// performance-check floor rungs must record their portrait twins too.
+const requiredFloorTwins = [
+  { label: 'vertical-720p30', width: 720, height: 1280, fps: 30, bitrateKbps: 4000 },
+  { label: 'vertical-540p30', width: 540, height: 960, fps: 30, bitrateKbps: 2500 }
+]
+
 function assertRequiredProfile(profiles, required) {
   assert.deepEqual(
     profiles.find((profile) => profile.label === required.label),
@@ -100,6 +107,15 @@ describe('recording matrix profile inventory', () => {
           required
         )
       )
+    })
+  }
+
+  for (const required of requiredFloorTwins) {
+    it(`includes the Custom ${required.label} twin with even dimensions`, () => {
+      assertRequiredProfile(RECORDING_MATRIX_PROFILES, required)
+      assert.deepEqual(selectRecordingMatrixProfiles(required.label), [required])
+      assert.equal(required.width % 2, 0)
+      assert.equal(required.height % 2, 0)
     })
   }
 

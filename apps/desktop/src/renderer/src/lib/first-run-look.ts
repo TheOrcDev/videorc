@@ -81,8 +81,9 @@ export function cameraShapeLayoutPatch(cameraShape: CameraShape): Partial<Layout
  * `layoutPreset` (`requestCameraPresetTransaction` + the transaction's
  * commit point) and the Scene page set `cameraShape`: the preset's remembered
  * framing, Preset mode with no freeform overrides, the orientation ⇄ canvas
- * coupling (vertical presets take the 1080×1920 canvas and remember the
- * landscape one; leaving restores it), and the per-mode scene memory.
+ * coupling (vertical presets take the portrait twin of the chosen canvas and
+ * remember the landscape one; leaving restores it), and the per-mode scene
+ * memory.
  * Off-air only: setup never runs beside a session.
  */
 export function firstRunLookPatch(
