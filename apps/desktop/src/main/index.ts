@@ -524,6 +524,7 @@ import {
   captureStateAfterStatusPayload,
   captureStateAfterTransportLoss,
   captureStateBlocksInterruption,
+  takeRunning,
   type MainCaptureState
 } from '../shared/capture-state'
 import {
@@ -905,6 +906,9 @@ let backendManagedAssetRoots: ManagedAssetRoots | null = null
 let backendAuthorityReady: Promise<void> = Promise.resolve()
 const mainResourceCapabilities = new MainResourceCapabilityRegistry()
 let mainCaptureState: MainCaptureState = 'unknown'
+// The chrome ground holds still while a take runs (2026-10-28): what every
+// window last heard on `session:take-running`. Windows start from false.
+let publishedTakeRunning = false
 let mainPreviewProgramShape: ReturnType<typeof previewProgramShape> = null
 // Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
 // the renderer's End livestream question (exit-guard.ts).
@@ -4138,6 +4142,24 @@ function restoreCaptionsWindowOnLaunch(): void {
 
 app.on('browser-window-focus', () => {
   void setNativePreviewSurfacesVisible(true)
+})
+
+function publishTakeRunning(): void {
+  const running = takeRunning(mainCaptureState)
+  if (running === publishedTakeRunning) {
+    return
+  }
+  publishedTakeRunning = running
+  sendToWindows('session:take-running', running)
+}
+
+// A window that loads (or reloads) during a take starts from false: tell it.
+app.on('browser-window-created', (_event, window) => {
+  window.webContents.on('did-finish-load', () => {
+    if (publishedTakeRunning && !window.isDestroyed() && window !== nativePreviewSurfaceWindow) {
+      sendElectronEvent(window.webContents, 'session:take-running', true)
+    }
+  })
 })
 
 function previewWindowIsOpenForSurface(): boolean {
@@ -9875,6 +9897,7 @@ function disconnectBackendEventSocket(): void {
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
+  publishTakeRunning()
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -9910,6 +9933,7 @@ function retireBackendEventSocket(
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
+  publishTakeRunning()
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -14134,6 +14158,7 @@ function updateMainCaptureState(payload: RecordingStatus): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
+  publishTakeRunning()
   const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {

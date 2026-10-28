@@ -333,6 +333,7 @@ export interface ElectronIpcEventMap {
   'buddy:deep-link': BuddyDeepLinkNavigation
   'shortcut:modifier': boolean
   'window:visible': boolean
+  'session:take-running': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
   'shortcut-recorder:key': ShortcutRecorderKeyEvent
   'shortcut-recorder:disarmed': undefined
@@ -385,6 +386,7 @@ export const electronEventChannels = [
   'buddy:deep-link',
   'shortcut:modifier',
   'window:visible',
+  'session:take-running',
   'global-shortcuts:triggered',
   'shortcut-recorder:key',
   'shortcut-recorder:disarmed',
@@ -1979,6 +1981,9 @@ const specificRuntimeEventSchemas = {
   // Page Visibility API, so document.visibilityState reads 'visible' even when
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
+  // A recording or livestream is running (never a Clips-only ring). Every
+  // window hears it; the chrome ground holds still while it is true.
+  'session:take-running': booleanSchema,
   'global-shortcuts:triggered': enumSchema(GLOBAL_SHORTCUT_ACTIONS),
   // Plan 062: keys main captured while the Settings shortcut recorder is armed.
   'shortcut-recorder:key': objectSchema({

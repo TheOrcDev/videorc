@@ -17,19 +17,20 @@ const subscribeNever = (): (() => void) => () => {}
 
 /**
  * The ground's drift (owner, 2026-10-28: "move a little bit, just slightly",
- * without costing memory or CPU). The same still, no second image and no
- * shader: it slides a few px along two sines whose periods share no factor,
- * so it never visibly loops. Translation only: a changing scale would make
- * the compositor re-raster the still, a slide only moves its layer. The
- * stills overhang the window by `marginPx`, more than the largest offset, so
- * no edge ever shows. At 5 updates a second each step is under a third of a
- * pixel on a σ 24 blur: smooth to the eye.
+ * then "clear but calm"; tuned live with the owner watching, because under the
+ * coats 10 and then 40 px could not be seen). The same still, no second image
+ * and no shader: it sways up to 120 px across and 84 px down along two sines
+ * whose periods share no factor, so it never visibly loops. Translation only:
+ * a changing scale would make the compositor re-raster the still, a slide
+ * only moves its layer. The stills overhang the window by `marginPx`, more
+ * than the largest offset, so no edge ever shows. At 20 updates a second each
+ * step is under 2 px on a σ 24 blur: smooth to the eye.
  */
 export const CHROME_GROUND_DRIFT = Object.freeze({
-  tickMs: 200,
-  marginPx: 16,
-  amplitudePx: Object.freeze({ x: 10, y: 7 }),
-  periodS: Object.freeze({ x: 53, y: 67 })
+  tickMs: 50,
+  marginPx: 128,
+  amplitudePx: Object.freeze({ x: 120, y: 84 }),
+  periodS: Object.freeze({ x: 25, y: 33 })
 })
 
 /** Where the drift is after `seconds` of running, in px from the centre. */
@@ -42,8 +43,8 @@ export function chromeGroundDriftAt(seconds: number): { x: number; y: number } {
 /**
  * The drift layer's transform. Moving, a 3D translate gives it its own
  * compositor layer, so a step costs no paint; paused, a 2D translate at the
- * same place hands the layer back, so a window you are not looking at holds
- * no extra GPU memory.
+ * same place hands the layer back, so a still window holds no extra GPU
+ * memory.
  */
 export function chromeGroundTransform(seconds: number, moving: boolean): string {
   const { x, y } = chromeGroundDriftAt(seconds)
@@ -53,18 +54,25 @@ export function chromeGroundTransform(seconds: number, moving: boolean): string 
 }
 
 /**
- * Runs the drift while this is the window you are looking at: visible,
- * focused and Reduce Motion off. Anything else pauses it where it is, so a
- * window behind another app (as while you record a game or a screen) costs
- * nothing. A 200 ms timer rather than a per-frame callback: the compositor
- * draws 5 frames a second, not one per display refresh, and each changes
- * only the transform of a composited layer (no layout, no paint). Its clock
- * advances only while it runs, so it resumes without a jump. The
- * root says `data-chrome-ground-drift="moving|paused"` (probe:ui-glass waits
- * for paused before it compares pixels).
+ * Runs the drift whenever the window is on screen (owner, 2026-10-28), even
+ * with another app focused. It pauses where it is while the window is
+ * minimised or hidden, while a recording or livestream runs (main's
+ * `session:take-running`; a Clips-only ring is no take), and under Reduce
+ * Motion. The main window keeps the Page Visibility API frozen (no
+ * background throttling), so main says when it is minimised or hidden
+ * (`window:visible`); the other windows' documents report it themselves.
+ *
+ * A 50 ms timer rather than a per-frame callback: the compositor draws 20
+ * frames a second, not one per display refresh, and each changes only the
+ * transform of a composited layer (no layout, no paint). Its clock advances
+ * only while it runs, so it resumes without a jump. The layer says
+ * `data-chrome-ground-drift="moving|paused"` (probe:ui-glass holds Reduce
+ * Motion so its shots compare like with like).
  */
 function startChromeGroundDrift(node: HTMLDivElement): () => void {
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+  let windowVisible = true
+  let takeRunning = false
   let runningMs = 0
   let lastTick = 0
   let timer: number | undefined
@@ -76,7 +84,10 @@ function startChromeGroundDrift(node: HTMLDivElement): () => void {
   }
   const update = (): void => {
     const run =
-      document.visibilityState === 'visible' && document.hasFocus() && !reducedMotion.matches
+      windowVisible &&
+      document.visibilityState === 'visible' &&
+      !takeRunning &&
+      !reducedMotion.matches
     node.dataset.chromeGroundDrift = run ? 'moving' : 'paused'
     node.style.transform = chromeGroundTransform(runningMs / 1000, run)
     if (run && timer === undefined) {
@@ -89,15 +100,21 @@ function startChromeGroundDrift(node: HTMLDivElement): () => void {
   }
   update()
   document.addEventListener('visibilitychange', update)
-  window.addEventListener('focus', update)
-  window.addEventListener('blur', update)
   reducedMotion.addEventListener('change', update)
+  const offWindowVisible = window.videorc?.onWindowVisible?.((visible) => {
+    windowVisible = visible
+    update()
+  })
+  const offTakeRunning = window.videorc?.onTakeRunning?.((running) => {
+    takeRunning = running
+    update()
+  })
   return () => {
     window.clearInterval(timer)
     document.removeEventListener('visibilitychange', update)
-    window.removeEventListener('focus', update)
-    window.removeEventListener('blur', update)
     reducedMotion.removeEventListener('change', update)
+    offWindowVisible?.()
+    offTakeRunning?.()
   }
 }
 
@@ -166,7 +183,11 @@ export function ChromeGround(): ReactElement | null {
     >
       {/* The drift layer: the window plus the margin, clipped there, so its
           compositor layer is never the size of the display. */}
-      <div className="absolute -inset-4 overflow-hidden" ref={startChromeGroundDrift}>
+      <div
+        className="absolute overflow-hidden"
+        ref={startChromeGroundDrift}
+        style={{ inset: -CHROME_GROUND_DRIFT.marginPx }}
+      >
         <img
           alt=""
           className={`${imageClass} dark:hidden`}
