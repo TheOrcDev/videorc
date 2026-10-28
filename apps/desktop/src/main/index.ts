@@ -271,6 +271,7 @@ import {
   validateSmokeResourceAuthorization
 } from './smoke-command-security'
 import { runTimedBoundsStorm, timeSmokeAction } from './smoke-window-bounds-storm'
+import { SMOKE_FIND_TAB_SOURCE } from './smoke-find-tab'
 import {
   assertPermissionShortcutSupported,
   buildRuntimeInfo,
@@ -13269,14 +13270,9 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         }
         throw new Error('Timed out waiting for active tab ' + tabId);
       };
+      const findTab = ${SMOKE_FIND_TAB_SOURCE};
       const openTab = async (tabId, waitSelector = null) => {
-        const tab =
-          Array.from(document.querySelectorAll('[data-videorc-tab-trigger]'))
-            .find((candidate) => candidate.getAttribute('data-videorc-tab-trigger') === tabId) ??
-          document.querySelector('[data-videorc-open-tab="' + tabId + '"]');
-        if (!tab) {
-          throw new Error('Could not find tab ' + tabId);
-        }
+        const tab = await findTab(document, tabId, sleep);
         tab.click();
         await waitForActiveTab(tabId);
         if (waitSelector) {
