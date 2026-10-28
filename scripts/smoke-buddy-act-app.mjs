@@ -474,20 +474,26 @@ try {
           ['idle', 'stopping'].includes(event.payload?.state),
         60_000
       )
+      // The card never stays open asking: it finishes in place, or, when the
+      // stop ends the session Buddy runs with (here: the recording), Buddy
+      // stops and the card goes with it.
       const finished = events.createWait(
-        'the card finishing after the yes',
+        'the card finishing or leaving with Buddy after the yes',
         (event) =>
           event.event === 'cohost.state' &&
-          event.payload?.command?.id === card.id &&
-          event.payload.command.status !== 'confirm',
+          ((event.payload?.command?.id === card.id &&
+            event.payload.command.status !== 'confirm') ||
+            (event.payload?.status === 'off' && event.payload?.command?.id !== card.id)),
         60_000
       )
       await say('Yes.')
       await stopped.promise
-      const answered = await finished.promise
-      results.push(
-        `4 voice: "${STOP_QUESTION}" held the recording until "Yes." (${answered.payload.command.message})`
-      )
+      const answered = (await finished.promise).payload
+      const ending =
+        answered.command?.id === card.id
+          ? answered.command.message
+          : 'the stop ended the session, Buddy stopped and the card went with it'
+      results.push(`4 voice: "${STOP_QUESTION}" held the recording until "Yes." (${ending})`)
       log('step 4: a spoken stop waited for a spoken yes')
     } finally {
       pumping = false
