@@ -1413,17 +1413,23 @@ mod tests {
         );
         assert_eq!(act.next, 0);
         assert!(act.results.is_empty());
-        // Typed, it runs at once (here: refused, the catalog on this branch
-        // may not have it, or the Studio is closed).
+        // Typed, it runs at once (here: refused, the Studio is closed in a
+        // test).
         let mut typed = act.clone();
         assert_eq!(
             run_steps(&state, &mut typed, false, false).await,
             Halt::Done
         );
         assert_eq!(typed.next, 1);
-        assert_eq!(typed.results.len(), 1);
+        assert_eq!(
+            typed.results,
+            vec![crate::agent_call::STUDIO_CLOSED.to_string()]
+        );
         // Spoken `stop` while idle has nothing to confirm and runs (the
-        // Studio is closed in a test: refused with that sentence).
+        // Studio is closed in a test: refused with that sentence). A state of
+        // its own: the typed `go_live` above spent Buddy's one go-live or
+        // stop every 10 seconds.
+        let state = crate::agent_mcp::test_support::test_state();
         let mut idle_stop = PendingAct::new("buddy stop", refused_plan("stop"));
         assert_eq!(
             run_steps(&state, &mut idle_stop, true, false).await,
