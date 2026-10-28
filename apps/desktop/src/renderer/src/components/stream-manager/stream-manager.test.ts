@@ -116,13 +116,13 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     expect(wideTabs.match(/data-slot="pane-on-stream"/g)).toHaveLength(1)
     // The Buddy question behind another message is not on stream.
     const buddy = markup.slice(markup.indexOf('data-pane="buddy"'))
-    expect(buddy).not.toMatch(/data-variant="success"[^>]*>On stream</)
+    expect(buddy).not.toMatch(/data-variant="chrome"[^>]*>On stream</)
   })
 
   it('lights the Buddy badge for the question on stream, without the Activity dot', () => {
     const markup = render(live(chat.id))
     const buddy = markup.slice(markup.indexOf('data-pane="buddy"'))
-    expect(buddy).toMatch(/data-variant="success"[^>]*>On stream</)
+    expect(buddy).toMatch(/data-variant="chrome"[^>]*>On stream</)
     // A chat message has its own row in Chat: no Activity tab dot.
     expect(markup).not.toContain('data-slot="pane-on-stream"')
   })
@@ -131,7 +131,7 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     const markup = render({ sessionId: 's1', generation: 3, phase: 'idle' })
     expect(markup).not.toContain('data-slot="pane-on-stream"')
     expect(markup).not.toContain('data-highlight-phase="live"')
-    expect(markup).not.toMatch(/data-variant="success"[^>]*>On stream</)
+    expect(markup).not.toMatch(/data-variant="chrome"[^>]*>On stream</)
   })
 })
 

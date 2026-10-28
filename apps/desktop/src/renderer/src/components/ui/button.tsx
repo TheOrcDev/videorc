@@ -15,8 +15,7 @@ const buttonVariants = cva(
         outline:
           'border-border bg-transparent hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-input/30',
         // The chip recipe (plan 208 S4): the same glass as a badge, with
-        // the secondary tone under it on hover. An on-stream chat row wears
-        // it too, so it never takes the row tint (bg-accent).
+        // the secondary tone under it on hover.
         secondary:
           'glass-chip text-secondary-foreground hover:bg-secondary aria-expanded:bg-secondary',
         ghost:

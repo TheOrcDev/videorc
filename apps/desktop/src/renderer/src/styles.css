@@ -110,7 +110,8 @@
   --warning-foreground: oklch(0.27 0.06 75);
   --info: oklch(0.58 0.14 250);
   --info-foreground: oklch(0.985 0 0);
-  /* Membership (plan 154): the member row tint. Never chrome, never text. */
+  /* Membership (plan 154): the member hue. Since plan 0011 a member's row is a
+     chrome plate and this hue is only its edge. Never text. */
   --member: oklch(0.55 0.13 300);
   --member-foreground: oklch(0.985 0 0);
   /* Rewards (plan 177): the channel point reward row tint in Activity. Never
@@ -221,6 +222,20 @@
   --chrome-led-glow: color-mix(in oklch, var(--live) 30%, transparent);
   /* The edge a fill or LED gains under Increase Contrast (D12). */
   --chrome-edge: transparent;
+  /* Chrome rows (plan 0011): the Stream Manager's on-stream row is a plate
+     with a black-chrome edge down its left side; a member's row is a quieter
+     plate whose edge keeps the member hue, the one place colour says who
+     wrote it. */
+  --chrome-row-edge-stops: oklch(0.45 0 0), oklch(0.22 0 0) 55%, oklch(0.1 0 0);
+  --chrome-row-live-top: oklch(0 0 0 / 10%);
+  --chrome-row-live-bottom: oklch(0 0 0 / 3%);
+  --chrome-row-live-hi: oklch(1 0 0 / 90%);
+  --chrome-row-member-top: oklch(0 0 0 / 5%);
+  --chrome-row-member-bottom: oklch(0 0 0 / 1%);
+  --chrome-row-member-hi: oklch(1 0 0 / 70%);
+  --chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);
+  --chrome-row-rim: oklch(0 0 0 / 8%);
+  --chrome-row-lift: oklch(0 0 0 / 3%);
 
   /* The knob's hairline: the chrome bead's rim (black 20% on porcelain). */
   --knob: oklch(1 0 0);
@@ -374,6 +389,19 @@
   --chrome-led-lift: oklch(1 0 0 / 10%);
   --chrome-led-glow: color-mix(in oklch, var(--live) 40%, transparent);
   --chrome-edge: transparent;
+  /* Chrome rows (plan 0011): a silver plate on the black solid with a
+     polished bead edge for the on-stream row, half its strength for a
+     member's row. */
+  --chrome-row-edge-stops: oklch(1 0 0), oklch(0.85 0 0) 55%, oklch(0.6 0 0);
+  --chrome-row-live-top: oklch(1 0 0 / 14%);
+  --chrome-row-live-bottom: oklch(1 0 0 / 4%);
+  --chrome-row-live-hi: oklch(1 0 0 / 20%);
+  --chrome-row-member-top: oklch(1 0 0 / 7%);
+  --chrome-row-member-bottom: oklch(1 0 0 / 2%);
+  --chrome-row-member-hi: oklch(1 0 0 / 10%);
+  --chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);
+  --chrome-row-rim: oklch(1 0 0 / 8%);
+  --chrome-row-lift: oklch(1 0 0 / 4%);
 
   --knob: oklch(1 0 0);
   --knob-ring: oklch(0 0 0 / 35%);
@@ -435,6 +463,7 @@
     --keycap-rim: oklch(0 0 0 / 28%);
     --chrome-edge: oklch(0 0 0 / 60%);
     --chrome-plate-rim: oklch(0 0 0 / 28%);
+    --chrome-row-rim: oklch(0 0 0 / 28%);
   }
   .dark {
     --border: oklch(1 0 0 / 24%);
@@ -448,6 +477,7 @@
     --keycap-rim: oklch(1 0 0 / 30%);
     --chrome-edge: oklch(1 0 0 / 55%);
     --chrome-plate-rim: oklch(1 0 0 / 30%);
+    --chrome-row-rim: oklch(1 0 0 / 30%);
   }
 }
 
@@ -791,6 +821,70 @@ html:has([data-first-run-backdrop], [data-first-run-surface]) [data-chrome-groun
   &:disabled {
     background-image: none;
     --tw-shadow: 0 0 0 1px var(--chrome-edge);
+  }
+}
+
+/*
+ * Chrome rows (plan 0011): the Stream Manager's rows that matter most, as
+ * plates of the same Liquid Chrome, worn through components/ui/chrome-row.ts
+ * and never named by a screen. Each plate sits on the theme's solid (the
+ * bottom layer), so its text keeps the tiers' contrast over any pixel of the
+ * ground: a translucent plate on the work area alone dropped the secondary
+ * tier under 4.5:1 over the ground's brightest streak
+ * (chrome-ground-contrast.test.ts). Hover adds a faint lift, as chrome-fill
+ * does. Both are static: a few gradients and inset shadows on the row's own
+ * box, cached with its tile, so a virtualized chat of any number of members
+ * costs what the old flat tint did, also on a CPU-only compositor. No
+ * transition, no motion, no backdrop-filter.
+ *   chrome-row-live    the row that is on stream: a plate, a top line, a rim
+ *                      and a 2px polished edge down the left.
+ *   chrome-row-member  a member's row: a plate at half strength with a 2px
+ *                      edge in the member hue, so a tip still reads louder.
+ */
+@utility chrome-row-live {
+  background-image:
+    linear-gradient(to bottom, var(--chrome-row-edge-stops)),
+    linear-gradient(to bottom, var(--chrome-row-live-top), var(--chrome-row-live-bottom)),
+    linear-gradient(var(--glass-solid), var(--glass-solid));
+  background-size:
+    2px 100%,
+    100% 100%,
+    100% 100%;
+  background-repeat: no-repeat;
+  background-origin: border-box;
+  --tw-shadow: inset 0 1px 0 var(--chrome-row-live-hi), inset 0 0 0 1px var(--chrome-row-rim);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &:hover:not(:disabled) {
+    background-image:
+      linear-gradient(to bottom, var(--chrome-row-edge-stops)),
+      linear-gradient(var(--chrome-row-lift), var(--chrome-row-lift)),
+      linear-gradient(to bottom, var(--chrome-row-live-top), var(--chrome-row-live-bottom)),
+      linear-gradient(var(--glass-solid), var(--glass-solid));
+    background-size:
+      2px 100%,
+      100% 100%,
+      100% 100%,
+      100% 100%;
+  }
+}
+
+@utility chrome-row-member {
+  background-image:
+    linear-gradient(to bottom, var(--chrome-row-member-top), var(--chrome-row-member-bottom)),
+    linear-gradient(var(--glass-solid), var(--glass-solid));
+  background-origin: border-box;
+  --tw-shadow:
+    inset 2px 0 0 var(--chrome-row-member-edge), inset 0 1px 0 var(--chrome-row-member-hi);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &:hover:not(:disabled) {
+    background-image:
+      linear-gradient(var(--chrome-row-lift), var(--chrome-row-lift)),
+      linear-gradient(to bottom, var(--chrome-row-member-top), var(--chrome-row-member-bottom)),
+      linear-gradient(var(--glass-solid), var(--glass-solid));
   }
 }
 

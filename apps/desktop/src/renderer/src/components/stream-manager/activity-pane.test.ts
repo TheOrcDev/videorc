@@ -355,16 +355,16 @@ describe('ActivityPane on stream', () => {
     const start = markup.lastIndexOf('<li', at)
     return markup.slice(start, markup.indexOf('</li>', at))
   }
-  // Selected = a full-row bg-accent block, not only the hover one.
+  // Selected = the full-row chrome plate (plan 0011), not only the hover block.
   const selected = (row: string): boolean =>
-    (row.match(/^<li class="([^"]*)"/)?.[1] ?? '').split(' ').includes('bg-accent')
+    (row.match(/^<li class="([^"]*)"/)?.[1] ?? '').split(' ').includes('chrome-row-live')
 
   it('shows On stream on the live row only, as a full-row selection', () => {
     const markup = render({ highlightState: live('m-follow'), liveHighlightId: 'm-follow' })
     const follow = rowOf(markup, 'follow')
     expect(follow).toContain('data-highlight-phase="live"')
     expect(follow).toContain('data-slot="activity-highlight"')
-    expect(follow).toMatch(/data-variant="success"[^>]*>On stream</)
+    expect(follow).toMatch(/data-variant="chrome"[^>]*>On stream</)
     expect(follow).not.toMatch(/data-variant="live"/)
     expect(selected(follow)).toBe(true)
     expect(rowOf(markup, 'sub')).toContain('data-highlight-phase="idle"')
@@ -479,7 +479,7 @@ describe('ActivityPane reward rows', () => {
     expect(markup.match(/data-row-tint="reward"/g)).toHaveLength(1)
   })
 
-  it('keeps hover, and gives way to the on-stream fill', () => {
+  it('keeps hover, and gives way to the on-stream plate', () => {
     const idle = rowClasses(render(), 'reward')
     expect(idle).toContain('hover:bg-accent')
     expect(idle).not.toContain('bg-accent')
@@ -490,7 +490,8 @@ describe('ActivityPane reward rows', () => {
       }),
       'reward'
     )
-    expect(live).toContain('bg-accent')
+    expect(live).toContain('chrome-row-live')
+    expect(live).not.toContain('bg-accent')
     expect(live).not.toContain('bg-reward/8')
   })
 
@@ -498,10 +499,19 @@ describe('ActivityPane reward rows', () => {
     expect(activityRowTint(reward, { phase: 'idle' })).toBe('reward')
     expect(activityRowTint(reward, { phase: 'applying' })).toBe('reward')
     expect(activityRowTint(reward, { phase: 'live' })).toBeNull()
-    // A sub is support, never a tip: no tint.
-    expect(activityRowTint(items[0]!, { phase: 'idle' })).toBeNull()
+    // A sub is support, never a tip: the member plate (plan 0011).
+    expect(activityRowTint(items[0]!, { phase: 'idle' })).toBe('member')
+    expect(activityRowTint(items[0]!, { phase: 'live' })).toBeNull()
     expect(activityRowTint(items[1]!, { phase: 'idle' })).toBe('paid')
     expect(activityRowTint(items[1]!, { phase: 'live' })).toBeNull()
+  })
+
+  it('wears the member plate on subs and memberships, never on a tip or reward', () => {
+    const markup = render()
+    expect(rowClasses(markup, 'a')).toContain('chrome-row-member')
+    expect(rowClasses(markup, 'b')).not.toContain('chrome-row-member')
+    expect(rowClasses(markup, 'reward')).not.toContain('chrome-row-member')
+    expect(markup.match(/data-row-tint="member"/g)).toHaveLength(1)
   })
 
   it('lays rows out as a block, so a long reward truncates instead of widening every row', () => {

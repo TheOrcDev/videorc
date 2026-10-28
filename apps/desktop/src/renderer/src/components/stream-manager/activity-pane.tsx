@@ -30,6 +30,7 @@ import {
 } from '@/components/stream-manager/platform-filter'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CHROME_ROW_CLASS } from '@/components/ui/chrome-row'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -239,18 +240,20 @@ export function activityRowActions(
   ]
 }
 
-export type ActivityRowTint = 'reward' | 'paid'
+export type ActivityRowTint = 'reward' | 'paid' | 'member'
 
 /** A row's one background (plan 177, as chat's plan 154): a channel point
- * reward paints the reward tint and a tip (bits, Power-ups, KICKs, Super
- * Chats and Stickers) chat's paid tint, unless it is on stream, where the
- * on-stream fill wins. Hover still paints over it. */
+ * reward paints the reward tint, a tip (bits, Power-ups, KICKs, Super Chats
+ * and Stickers) chat's paid tint, and a sub or membership chat's member plate
+ * (plan 0011), unless it is on stream, where the on-stream plate wins. Hover
+ * still paints under it. */
 export function activityRowTint(
   item: ActivityItem,
   highlight: CommentHighlightPresentation
 ): ActivityRowTint | null {
   if (highlight.phase === 'live') return null
   if (item.kind === 'redemption') return 'reward'
+  if (item.filter === 'support') return 'member'
   return item.filter === 'tips' ? 'paid' : null
 }
 
@@ -258,7 +261,8 @@ export function activityRowTint(
  * ring. */
 const ACTIVITY_ROW_TINT_CLASS: Record<ActivityRowTint, string> = {
   reward: 'bg-reward/8',
-  paid: 'bg-warning/10'
+  paid: 'bg-warning/10',
+  member: CHROME_ROW_CLASS.member
 }
 
 function ActivityRow({
@@ -297,7 +301,7 @@ function ActivityRow({
     <li
       className={cn(
         'group/activity group/kebab-host flex items-start gap-2.5 px-3 py-2 hover:bg-accent',
-        highlight.phase === 'live' && 'bg-accent',
+        highlight.phase === 'live' && CHROME_ROW_CLASS.live,
         tint && ACTIVITY_ROW_TINT_CLASS[tint]
       )}
       data-activity-id={item.id}
