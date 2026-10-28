@@ -611,6 +611,17 @@ impl PreviewCameraShared {
             ..Self::default()
         }
     }
+
+    /// A frame read from the capture process pipe (Windows dshow, Linux v4l2)
+    /// is that platform's capture callback. Count it like the AVFoundation
+    /// sample-buffer callback: capture recovery verifies a restarted camera by
+    /// this counter, and a pipe camera that never advanced it was restarted
+    /// while live and latched Failed.
+    #[cfg(any(not(target_os = "macos"), test))]
+    fn record_pipe_frame_callback(&mut self, at: Instant) {
+        self.capture_timings.record_callback_at(at);
+        self.capture_callback_count = self.capture_callback_count.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4809,9 +4820,7 @@ mod linux {
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard
-            .capture_timings
-            .record_callback_at(callback_started_at);
+        guard.record_pipe_frame_callback(callback_started_at);
         let now = Instant::now();
         guard.frames_captured = guard.frames_captured.saturating_add(1);
         guard.frames_in_window = guard.frames_in_window.saturating_add(1);
@@ -5292,9 +5301,7 @@ mod windows {
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard
-            .capture_timings
-            .record_callback_at(callback_started_at);
+        guard.record_pipe_frame_callback(callback_started_at);
         let now = Instant::now();
         guard.frames_captured = guard.frames_captured.saturating_add(1);
         guard.frames_in_window = guard.frames_in_window.saturating_add(1);
@@ -8948,6 +8955,36 @@ mod tests {
             1,
             "old reader releases its session owner"
         );
+    }
+
+    #[tokio::test]
+    async fn pipe_camera_frames_advance_recovery_callback_evidence() {
+        let state = test_state();
+        let video = test_video();
+        let (_, shared) = install_restartable_camera(&state, 22, &test_layout(false), &video).await;
+        let snapshot = preview_camera_restart_snapshot(&state)
+            .await
+            .expect("restart snapshot");
+        let baseline = preview_camera_recovery_evidence(&state, &snapshot)
+            .await
+            .expect("baseline evidence");
+        assert_eq!(baseline.capture_callback_count, 0);
+
+        let started = Instant::now();
+        {
+            let mut shared = shared.lock().unwrap();
+            for frame in 0..3u64 {
+                shared.record_pipe_frame_callback(started + Duration::from_millis(33 * frame));
+            }
+        }
+        let evidence = preview_camera_recovery_evidence(&state, &snapshot)
+            .await
+            .expect("current evidence");
+        assert_eq!(
+            evidence.capture_callback_count, 3,
+            "a pipe camera's frames are its capture callbacks"
+        );
+        assert_eq!(shared.lock().unwrap().capture_timings.gap_sample_count(), 2);
     }
 
     #[tokio::test]
