@@ -230,6 +230,19 @@ export function smokeAppEnv(env = {}, options = {}) {
   // a parent shell must not silently redirect a new harness into an older run.
   if (!explicitStateDir) delete result.VIDEORC_SMOKE_STATE_DIR
   if (!explicitOutputDir) delete result.VIDEORC_SMOKE_OUTPUT_DIR
+  // The smoke Trash stand-in (plan 209 S16) lives in this run's own state, or
+  // nowhere: a Library delete in any other smoke still reaches the real Trash.
+  const smokeTrashDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_TRASH_DIR')
+  if (smokeTrashDir) {
+    result.VIDEORC_SMOKE_TRASH_DIR = isolatedSmokePath(
+      env,
+      'VIDEORC_SMOKE_TRASH_DIR',
+      smokeTrashDir,
+      isolationRoots
+    )
+  } else {
+    delete result.VIDEORC_SMOKE_TRASH_DIR
+  }
   return result
 }
 

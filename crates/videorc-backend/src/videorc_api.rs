@@ -47,6 +47,10 @@ pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
 pub(crate) const COHOST_COMMAND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(2_500);
 const COHOST_COMMAND_PATH: &str = "/api/ai/cohost/command";
+/// Plan 209 S19, contract part F: Buddy's planner. The server budget is 3 s;
+/// the desktop gives up at 3.5 s and says it did not catch that.
+pub(crate) const BUDDY_ACT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3_500);
+const BUDDY_ACT_PATH: &str = "/api/ai/buddy/act";
 /// Plan 169 D4, D7: the set route's own `maxDuration` is 180 s (an idle,
 /// then three edits of it in parallel), so the client waits 190. Four PNGs
 /// as base64 stay well under 40 MB; a larger body is refused unread.
@@ -1914,6 +1918,59 @@ impl VideorcApiClient {
                 CohostApiError::malformed_response(
                     status.as_u16(),
                     format!("Could not read Buddy's command response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// Plan 209 S19: one planner call (contract part F). Bearer JSON of at
+    /// most 128 KB, a 3.5 s timeout, and the tick's failure mapping (code
+    /// first, then status). The caller checks every returned call against
+    /// the catalog and Buddy's subset; nothing here trusts the answer.
+    pub async fn post_buddy_act(
+        &self,
+        bearer_token: &str,
+        request: &crate::buddy_act::PlannerRequest,
+    ) -> std::result::Result<crate::buddy_act::PlannerResponse, CohostApiError> {
+        let body = request.body().map_err(|problem| CohostApiError {
+            kind: CohostApiErrorKind::InvalidRequest,
+            detail: CohostErrorDetail::new(
+                "invalid-request",
+                format!("Buddy did not send the request: {problem}."),
+                None,
+            ),
+        })?;
+        let response = self
+            .http
+            .post(self.endpoint(BUDDY_ACT_PATH))
+            .bearer_auth(bearer_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .timeout(BUDDY_ACT_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, BUDDY_ACT_TIMEOUT))?;
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| {
+                if error.is_timeout() {
+                    return CohostApiError::from_transport_within(error, BUDDY_ACT_TIMEOUT);
+                }
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read Buddy's planner response: {error}"),
                 )
             });
         }

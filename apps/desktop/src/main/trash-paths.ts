@@ -1,3 +1,5 @@
+import { basename, isAbsolute, join } from 'node:path'
+
 export interface TrashPathDependencies {
   stat: (path: string) => Promise<unknown>
   trashItem: (path: string) => Promise<void>
@@ -31,4 +33,40 @@ export async function trashPaths(
     }
   }
   return { failures }
+}
+
+/**
+ * Smoke runs only (plan 209 S16): a stand-in for the system Trash inside the
+ * run's own state directory (`VIDEORC_SMOKE_TRASH_DIR`), so `smoke:agent-mcp`
+ * proves a Library delete moves the file away without filling the
+ * developer's real Trash on every gate run. Null in a packaged app, without
+ * the smoke command server, or for a relative directory.
+ */
+export function smokeTrashDirectory(
+  value: string | undefined,
+  { packaged, smokeCommandServer }: { packaged: boolean; smokeCommandServer: boolean }
+): string | null {
+  const directory = value?.trim()
+  if (packaged || !smokeCommandServer || !directory || !isAbsolute(directory)) return null
+  return directory
+}
+
+export interface SmokeTrashDependencies {
+  mkdir: (path: string) => Promise<unknown>
+  rename: (from: string, to: string) => Promise<void>
+  now?: () => number
+}
+
+/** `trashItem` for the smoke stand-in: the file moves into `directory`,
+ * under a name no other delete can take. */
+export function smokeTrashItem(
+  directory: string,
+  { mkdir, rename, now = Date.now }: SmokeTrashDependencies
+): (target: string) => Promise<void> {
+  let sequence = 0
+  return async (target) => {
+    await mkdir(directory)
+    sequence += 1
+    await rename(target, join(directory, `${now()}-${sequence}-${basename(target)}`))
+  }
 }

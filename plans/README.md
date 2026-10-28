@@ -1,5 +1,26 @@
 # Implementation Plans
 
+- 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
+  agents and Buddy run the studio. Owner request: a complete MCP so people
+  control everything from their agents, with Buddy using it too. Agents on
+  this computer (Claude Desktop, Claude Code, Cursor, Codex, VS Code) connect
+  through `videorc-mcp`, a stdio bridge shipped in the app, to a loopback-only
+  `/mcp` endpoint with per-agent tokens. 43 tools cover looking (status,
+  picture, chat, Library), running the show, arranging the picture ("move
+  Buddy to the top left", "the banner to the bottom left", with the Scene
+  canvas's own snaps), chat, Buddy, preparing and the Library. They run through the same executor as the buttons and Stream
+  Deck, whose allowlists stay unchanged. The owner chose full control with no
+  prompts, so actions are logged and attributed, one Stop cuts every agent,
+  deletes go to the Trash, and YouTube removals still wait for a click (API
+  policy). Free; Buddy's tool use is Premium, triggered only by the
+  streamer's voice or `/buddy`, through a new videorc.com planner whose
+  calls the desktop checks against Buddy's subset.
+  **BUILT** 2026-10-28 as one desktop PR (all 23 slices, plus one-click
+  Connect, a `.mcpb` and two MCP prompts) and a videorc.com PR (the planner
+  route and an agents page; deploy it first). Local gates and smokes green;
+  owner acceptance, packaged by-eye, the planner's live eval and
+  Windows/Linux runs owed; the owner took all seven recommended answers
+  (2026-10-28).
 - 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
   colours. Owner request: redesign Videorc's colour after the Welcome
   screen's Liquid Chrome, metallic black with its shine, and the other way
@@ -21,6 +42,7 @@
   glass for one release. Gates in the
   [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
   the owner's by-eye in both themes and a Windows pass are owed.
+
 - 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
   steps 2 to 5. Owner request: after permissions, "What are you making?",
   "Your look", "Sound check" and "Where you stream". The goal (Recordings,

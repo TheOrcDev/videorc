@@ -45,6 +45,23 @@ export function freeformEntryOverrides(
   )
 }
 
+/**
+ * The layout patch that enters Freeform (plan 174, C-4): the arrangement a
+ * preset last replaced in this orientation, and where the scene draws every
+ * other source now, so nothing visibly moves. The Scene page's Freeform
+ * button, its "Make freeform" hint and an agent's move off a preset (plan
+ * 209 D22) all send this one patch.
+ */
+export function freeformEntryPatch(
+  orientation: LayoutOrientation,
+  sources: readonly Pick<SceneSource, 'id' | 'transform'>[]
+): Pick<LayoutSettings, 'arrangementMode' | 'sourceTransformOverrides'> {
+  return {
+    arrangementMode: 'freeform',
+    sourceTransformOverrides: freeformEntryOverrides(rememberedFreeform(), orientation, sources)
+  }
+}
+
 // One memory per window for the app's lifetime: the provider notes a Freeform
 // layout as a preset replaces it, and the Scene page reads it back.
 let windowMemory: FreeformMemory = {}

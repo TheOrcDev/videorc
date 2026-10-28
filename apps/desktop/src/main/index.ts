@@ -23,6 +23,8 @@ import { openableChatLink } from '../shared/chat-link'
 import { parseClipLength } from '../shared/clip-lengths'
 import { WINDOW_NAMES } from '../shared/window-names'
 import type {
+  AgentAddApp,
+  AgentAddResult,
   Banner,
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
@@ -228,6 +230,7 @@ import type {
   StarterSound,
   StarterSoundFile
 } from '../shared/sound-commands'
+import { BUDDY_ACT_RESULT_TIMEOUT_MS, type CohostActAnswer } from '../shared/buddy-act'
 import {
   SOUND_IMPORT_EXTENSIONS,
   STARTER_SOUNDS_MANIFEST,
@@ -249,7 +252,7 @@ import {
   type ManagedAssetRoots
 } from './backend-bootstrap'
 import { managedBackendAssetRootCandidates } from './managed-asset-roots'
-import { trashPaths } from './trash-paths'
+import { smokeTrashDirectory, smokeTrashItem, trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
   type ResourceCapabilityKind,
@@ -277,6 +280,12 @@ import {
   permissionUrlForPane
 } from './runtime-info'
 import { devBackendCargoProfile } from './dev-backend-profile'
+import {
+  refreshAgentBridgeCopy,
+  resolveAgentBridge,
+  type AgentBridgeLocation
+} from './agent-bridge'
+import { AGENT_ADD_BRIDGE_MISSING, addAgentToApp } from './agent-config-install'
 import {
   requestMediaAccessWithRestart,
   requestScreenAccessWithWatch,
@@ -9339,6 +9348,41 @@ function resolveDevBackendBinary(root = workspaceRoot()): string {
   )
 }
 
+/** Plan 209 S22: "Add to …" for the app Connect just named (the IPC
+ * contract has already checked the app and the token's shape). */
+async function addAgentToInstalledApp(app: AgentAddApp, token: string): Promise<AgentAddResult> {
+  const bridge = await resolveAgentBridge(agentBridgeLocation(), true)
+  if (!bridge.exists) return { added: false, message: AGENT_ADD_BRIDGE_MISSING }
+  return addAgentToApp(
+    app,
+    { bridgePath: bridge.path, token },
+    {
+      platform: process.platform,
+      homeDir: homedir(),
+      appData: process.env.APPDATA,
+      localAppData: process.env.LOCALAPPDATA,
+      xdgConfigHome: process.env.XDG_CONFIG_HOME,
+      codexHome: process.env.CODEX_HOME,
+      pathVariable: process.env.PATH ?? process.env.Path
+    },
+    { log: (message) => logBackend('warn', `[agents] ${message}`) }
+  )
+}
+
+/** Plan 209 S7: where this install's `videorc-mcp` bridge lives (D6, D20). */
+function agentBridgeLocation(): AgentBridgeLocation {
+  return {
+    packaged: app.isPackaged,
+    platform: process.platform,
+    resourcesPath: process.resourcesPath,
+    workspaceRoot: workspaceRoot(),
+    cargoProfile: devBackendCargoProfile(),
+    homeDir: homedir(),
+    localAppData: process.env.LOCALAPPDATA,
+    appExecutable: process.execPath
+  }
+}
+
 function resolveBackendPermissionTargetPath(): string {
   if (backendPermissionTargetPath) {
     return backendPermissionTargetPath
@@ -14297,9 +14341,19 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
   if (operation.operationId !== operationId || !Array.isArray(operation.paths)) {
     throw new Error('Library deletion operation response is invalid.')
   }
+  // Smoke runs move into their own folder instead (plan 209 S16).
+  const smokeTrash = smokeTrashDirectory(process.env.VIDEORC_SMOKE_TRASH_DIR, {
+    packaged: app.isPackaged,
+    smokeCommandServer: smokeCommandServerEnabled
+  })
   const trash = await trashPaths(operation.paths, {
     stat: (target) => fsPromises.stat(target),
-    trashItem: (target) => shell.trashItem(target)
+    trashItem: smokeTrash
+      ? smokeTrashItem(smokeTrash, {
+          mkdir: (path) => fsPromises.mkdir(path, { recursive: true }),
+          rename: (from, to) => fsPromises.rename(from, to)
+        })
+      : (target) => shell.trashItem(target)
   })
   const failedPaths = [...(operation.blockedPaths ?? []), ...trash.failures]
   const completion = await requestBackendAdmin<{ deleted: boolean }>(
@@ -15605,6 +15659,12 @@ app.whenReady().then(async () => {
   installRendererSessionPermissions(session.defaultSession)
   moveLegacyBuddyAssetsOnce()
   scheduleStaleHttpCacheCleanup()
+  // Plan 209 D20 and review #8: a Linux or Windows agent app runs the bridge
+  // copied out of the AppImage or the install; after an update that copy is
+  // the old version, so refresh it.
+  void refreshAgentBridgeCopy(agentBridgeLocation()).catch((error: unknown) =>
+    logBackend('warn', `Couldn't refresh the agent bridge copy: ${errorMessage(error)}`)
+  )
 
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
@@ -15708,6 +15768,17 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('resource:reveal-support-bundle', (_event, path: unknown) =>
     revealSupportBundle(path)
+  )
+  // Settings → Remote → Agents (plan 209 S7): the bridge's absolute path for
+  // the config line; Connect (`install`) puts the Linux or Windows copy in
+  // place (D20, review #8).
+  secureIpcHandle('agents:bridge', (_event, install: unknown) =>
+    resolveAgentBridge(agentBridgeLocation(), install === true)
+  )
+  // "Add to …" (plan 209 S22): the app's own config gets the videorc entry,
+  // or `claude mcp add` runs. The path is main's, never the renderer's.
+  secureIpcHandle('agents:add-to-app', (_event, app: unknown, token: unknown) =>
+    addAgentToInstalledApp(app as AgentAddApp, token as string)
   )
   // OBS setup import (O1): read-only discovery over OBS Studio's config files.
   // The stream key never rides these payloads — obs:read strips it; the apply
@@ -16349,6 +16420,28 @@ app.whenReady().then(async () => {
     })
   })
   secureIpcHandle('comments-window:sound-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // `/buddy <words>` (plan 209 S20): the same relay. The MAIN renderer owns
+  // the backend socket and the Cloud AI consent, makes the `cohost.act` call
+  // and answers with Buddy's final words, which can take a planner call and
+  // up to three tool calls (going live waits up to 60 s).
+  secureIpcHandle('comments-window:buddy-act', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can ask Buddy here.'))
+    }
+    return commentsCommandBroker.request<CohostActAnswer>(
+      command.requestId,
+      () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:buddy-act-request', command)
+        return true
+      },
+      BUDDY_ACT_RESULT_TIMEOUT_MS + 5_000
+    )
+  })
+  secureIpcHandle('comments-window:buddy-act-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
   })

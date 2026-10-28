@@ -15,7 +15,8 @@ import {
   SettingsIcon,
   SpeakerOffIcon,
   SpeakerOnIcon,
-  StopIcon
+  StopIcon,
+  TerminalIcon
 } from '@/components/icons'
 import { useTheme } from 'next-themes'
 import { useState, type ReactElement, type ReactNode } from 'react'
@@ -42,6 +43,7 @@ import { SETTINGS_TABS, type SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { sessionStopControl } from '@/lib/studio-session-view'
 import { studioChatOn } from '@/lib/studio-chat'
+import { toastUserError } from '@/lib/user-error'
 import { openFirstRunSetup } from '@/lib/workspace-navigation'
 import {
   STUDIO_PANELS,
@@ -52,7 +54,9 @@ import {
   type WorkspaceTab,
   type WorkspaceTabGroup
 } from '@/components/workspace-nav'
+import { useAgents, useAgentsActions } from '@/hooks/use-agents'
 import { useSoundboard } from '@/hooks/use-soundboard'
+import { CONNECT_AGENT_COMMAND, STOP_AGENTS_COMMAND } from '@/lib/agents-view'
 import {
   useStudioBanners,
   useStudioCore,
@@ -86,7 +90,7 @@ const SETTINGS_KEYWORDS: Readonly<Record<SettingsTabId, readonly string[]>> = {
   general: ['theme', 'startup', 'animate', 'preferences'],
   permissions: ['camera access', 'screen recording', 'microphone access', 'system access'],
   shortcuts: ['keyboard', 'keys', 'hotkeys', 'bindings'],
-  remote: ['phone', 'stream deck', 'pair', 'control'],
+  remote: ['phone', 'stream deck', 'pair', 'control', 'agents', 'ai', 'mcp'],
   about: ['version', 'update', 'release notes', 'support bundle']
 }
 
@@ -145,6 +149,8 @@ export function CommandPalette({
   const replayBuffer = useStudioReplay()
   const { banners, showBanner, hideBanner } = useStudioBanners()
   const soundboard = useSoundboard()
+  const agents = useAgents()
+  const agentsActions = useAgentsActions()
   const platform = runtimeInfo?.platform
   const { theme, setTheme } = useTheme()
   // cmdk's selected item; the footer names it.
@@ -274,6 +280,25 @@ export function CommandPalette({
                 {shortcut(settings.globalShortcuts?.clipMarkLong)}
               </CommandItem>
             </>
+          ) : null}
+          {/* Plan 209 D12: every agent cut and Agents off, from anywhere. */}
+          {agents.status?.enabled ? (
+            <CommandItem
+              value={STOP_AGENTS_COMMAND}
+              keywords={['agents', 'ai', 'mcp', 'claude', 'cursor', 'codex', 'disconnect', 'off']}
+              onSelect={() =>
+                run(async () => {
+                  try {
+                    await agentsActions.stop()
+                  } catch (error) {
+                    toastUserError(error, { action: 'stop', object: 'the agents' })
+                  }
+                })
+              }
+            >
+              <StopIcon className="size-4" />
+              {STOP_AGENTS_COMMAND}
+            </CommandItem>
           ) : null}
         </CommandGroup>
 
@@ -504,6 +529,21 @@ export function CommandPalette({
               {tab.id === 'shortcuts' ? shortcut(shortcutAccelerator('shortcuts-page')) : null}
             </CommandItem>
           ))}
+          {/* Plan 209 S7: Settings → Remote at Agents, with the dialog open. */}
+          <CommandItem
+            value={CONNECT_AGENT_COMMAND}
+            keywords={['agent', 'ai', 'mcp', 'claude', 'cursor', 'codex', 'vs code', 'connect']}
+            onSelect={() =>
+              run(() => {
+                openSettings('remote')
+                agentsActions.openConnect()
+              })
+            }
+          >
+            <TerminalIcon className="size-4" />
+            {CONNECT_AGENT_COMMAND}
+            <Context>Settings → Remote</Context>
+          </CommandItem>
           {/* Plan 203 S6: setup again, back to this page after. Setup holds
               capture back, so a session hides it (Settings says why). */}
           {firstRunReplayLocked(recording) ? null : (

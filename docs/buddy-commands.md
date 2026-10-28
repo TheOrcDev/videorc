@@ -51,6 +51,35 @@ Library → Session actions → Markers. `/marker [title]` in Stream Manager is 
 manual alternative and does not require Premium or Cloud AI. See
 [Session markers](session-markers.md) for timing, limits and stream-only behavior.
 
+## Ask Buddy to do more (plan 209)
+
+When Videorc offers it, a sentence after "Buddy" that the commands above
+don't cover goes to Buddy's planner: "Buddy, switch to BRB and play the drum
+roll", "Buddy, put up the sponsor banner", "Buddy, end the stream". Buddy
+uses the same tools an AI agent connected to Videorc uses (docs/agents-mcp.md),
+but only its own share of them: the Look tools, running the show, arranging
+the picture, chat and Buddy itself. Never the Library, settings,
+destinations or scheduling. Videorc checks every step against that list on
+your computer, whatever the planner said.
+
+- **It asks out loud first** before going live and before stopping a
+  recording or a livestream: 'End the livestream? Say "Buddy, yes".' Say
+  "Buddy, yes" or press Enter; a bare "yes" (a text-to-speech alert could
+  say one) leaves the question open. "No", Esc or 20 seconds without an
+  answer and nothing more happens. Removing a message uses the removal card
+  above, and showing a comment Buddy flagged asks "Show it anyway?" as the
+  highlight command does (typed, Buddy says it flagged it instead).
+- **Type it** in the Stream Manager: `/buddy switch to BRB`. No "Buddy"
+  first and no spoken yes, because typing is deliberate. The answer shows
+  under the composer.
+- **The strip** says what happened: "Switched to BRB. Pressed Drum roll."
+- **Activity** (Settings → Remote → Agents) lists everything Buddy did as
+  "Buddy", the voice commands above included.
+
+It is Premium, needs Cloud AI consent, and follows Videorc's voice-command
+switch. Without it, or on a free account ("Buddy requires Videorc
+Premium."), everything above works exactly as before.
+
 ## How Buddy picks "this one"
 
 - **To highlight:** the comment Buddy thinks you are talking about. If there
@@ -147,7 +176,10 @@ A removal goes from your computer to the platform, with your account. When
 Buddy hears its name but cannot work out the command on your computer, it may
 send that sentence and up to 20 recent comments to Videorc's cloud AI to work
 out what you meant (only once that parser is turned on); they are not kept
-after the response, and Videorc keeps only a usage count.
+after the response, and Videorc keeps only a usage count. Buddy's planner
+(above) gets the sentence, the names of your scenes, banners, takeovers,
+sounds and destinations, what the studio is doing, and recent comments only
+when the sentence is about one; nothing is kept, only a usage count.
 
 ## Report
 
@@ -166,7 +198,9 @@ and not found. Counts only, never names or words.
 | A "remove it from our chat" fires while you talk | The wake-word-free phrases are on.                                                     | Turn on Commands need “Buddy” first.                           |
 | "Removing messages is paused by Videorc."        | Videorc's remote switch.                                                               | Use Remove from chat in the ⋯ menu.                            |
 
-Checks: `pnpm smoke:buddy-commands` (plan 140, S9) and the removal steps in
+Checks: `pnpm smoke:buddy-commands` (plan 140, S9), `pnpm smoke:buddy-act`
+(plan 209 S21: `/buddy`, the subset, and a spoken stop that waits for a
+yes) and the removal steps in
 [live-chat-live-smoke-checklist.md](live-chat-live-smoke-checklist.md).
 
 The smoke drives the real debug backend with fakes only. Its fake chat lanes

@@ -90,7 +90,8 @@ pub const COHOST_NOTES_MAX_CHARS: usize = 4000;
 /// are normalised to these caps before they are stored or sent.
 pub const COHOST_RULES_MAX: usize = 10;
 pub const COHOST_RULE_MAX_CHARS: usize = 120;
-const DESKTOP_CLIENT_VERSION: &str = concat!("videorc-desktop/", env!("CARGO_PKG_VERSION"));
+pub(crate) const DESKTOP_CLIENT_VERSION: &str =
+    concat!("videorc-desktop/", env!("CARGO_PKG_VERSION"));
 
 const TICK_MESSAGE_TEXT_MAX_CHARS: usize = 500;
 /// Newest messages kept per tick; older delta rows are counted as dropped.
@@ -1311,6 +1312,9 @@ pub enum CohostCommandKind {
     ShowBuddy,
     /// "hide", "go away": the Buddy itself leaves the stream.
     HideBuddy,
+    /// Plan 209 S19: a sentence Buddy's planner turned into tool calls. Its
+    /// card says what ran, or asks for a spoken yes first (D14).
+    Act,
 }
 
 /// Where the latest voice command stands.
@@ -2228,6 +2232,17 @@ struct CommandParserLane {
     off_until: Option<Instant>,
 }
 
+/// Plan 209 S19: Buddy's tool planner, client side. Engine-wide like the
+/// parser: `buddy.act` from the capability read, and a 403 from the route
+/// turns it off until the next read or Buddy session (contract part F: "no
+/// planner for the rest of this session").
+#[derive(Debug, Default)]
+struct BuddyActLane {
+    enabled: bool,
+    refused: bool,
+    seq: u64,
+}
+
 /// One parse on its way: the request, and the command card that was
 /// current when it left (a newer command since makes the answer stale).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2541,6 +2556,11 @@ enum CommandPending {
     Removal,
     /// A confirmed removal is running at the platform.
     Removing,
+    /// Plan 209 D14: a planner call (going live, ending what runs) waits for
+    /// a spoken yes; `CommandRecord::act` holds the rest of the plan.
+    ActConfirm,
+    /// The streamer said yes: the plan's calls are running.
+    ActRunning,
 }
 
 /// The verb of a new command.
@@ -2578,6 +2598,8 @@ struct CommandRecord {
     /// The command may remove on a countdown (`NewCommand::countdown_allowed`);
     /// a removal picked from its chooser keeps the rule.
     countdown_allowed: bool,
+    /// Plan 209: the planner's calls still to run while a D14 card waits.
+    act: Option<crate::buddy_act::PendingAct>,
 }
 
 impl CommandRecord {
@@ -2638,6 +2660,7 @@ impl CommandRecord {
             resolved: Vec::new(),
             operation_rank: 0,
             countdown_allowed: false,
+            act: None,
         }
     }
 
@@ -2779,6 +2802,9 @@ struct CommandEffects {
     confirm_removal: Option<String>,
     /// The streamer said no to this removal operation.
     cancel_removal: Option<String>,
+    /// Plan 209 D14: the streamer said yes to this card (its id): the
+    /// planner's calls run on from the one that waited.
+    run_act: Option<(String, crate::buddy_act::PendingAct)>,
 }
 
 /// The kill switches as the state carries them: absent while both are on.
@@ -4528,10 +4554,11 @@ impl CohostSession {
         let record = self.command.as_mut()?;
         if matches!(
             record.pending,
-            CommandPending::None | CommandPending::Removing
+            CommandPending::None | CommandPending::Removing | CommandPending::ActRunning
         ) {
             return None;
         }
+        record.act = None;
         let mut cancel = None;
         if record.pending == CommandPending::Removal
             && let Some(operation_id) = record.wire.operation_id.clone()
@@ -4933,6 +4960,33 @@ impl CohostSession {
                 effects.emit = false;
                 effects.cancel_removal = Some(operation_id);
             }
+            // Plan 209 D14: yes to going live or ending what runs. The plan
+            // runs on after the lock from the call that waited.
+            (CommandPending::ActConfirm, CommandAnswer::Confirm) => {
+                if let Some(message) = command_gate(ctx, None) {
+                    record.act = None;
+                    record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
+                    return Ok(effects);
+                }
+                let Some(act) = record.act.take() else {
+                    return Err(CohostCommandError::not_pending());
+                };
+                record.pending = CommandPending::ActRunning;
+                record.wire.message = act.with_results("On it…");
+                record.wire.expires_at = None;
+                record.wire.at = now_iso;
+                effects.run_act = Some((record.wire.id.clone(), act));
+            }
+            (CommandPending::ActConfirm, CommandAnswer::Cancel) => {
+                let message = match record.act.take() {
+                    Some(act) => {
+                        act.with_results(crate::buddy_act::halt_words(act.waiting_tool()).0)
+                    }
+                    None => "Cancelled.".to_string(),
+                };
+                record.finish(CohostCommandStatus::Cancelled, message, &now_iso);
+                self.report.commands.cancelled += 1;
+            }
             _ => return Err(CohostCommandError::not_pending()),
         }
         Ok(effects)
@@ -4989,6 +5043,87 @@ impl CohostSession {
         }
         self.command = Some(record);
         true
+    }
+
+    /// Plan 209 D14: the planner's next call needs a spoken yes. The card
+    /// says what ran so far and asks; it replaces an open card, like every
+    /// new command, and expires after 20 s with nothing more run.
+    fn open_act_confirm(
+        &mut self,
+        act: crate::buddy_act::PendingAct,
+        question: &str,
+        ctx: &CommandContext,
+    ) -> CommandEffects {
+        let mut effects = CommandEffects {
+            emit: true,
+            ..CommandEffects::default()
+        };
+        effects.cancel_superseded = self.supersede_command();
+        let mut record = CommandRecord::with(CohostCommandKind::Act, None, &act.heard, None, ctx);
+        let expires_at = iso_after(ctx.now, ctx.now + COMMAND_CARD_TTL);
+        record.pending = CommandPending::ActConfirm;
+        record.wire.status = CohostCommandStatus::Confirm;
+        record.wire.message = act.with_results(question);
+        record.wire.expires_at = Some(expires_at.clone());
+        effects.expire_card = Some((record.wire.id.clone(), expires_at));
+        record.act = Some(act);
+        self.command = Some(record);
+        effects
+    }
+
+    /// Plan 209 S19: the planner's calls are done. The card that waited for
+    /// the yes (`command_id`) finishes in place, so an answer updates its
+    /// command; otherwise a new card says what ran.
+    fn finish_act(
+        &mut self,
+        command_id: Option<&str>,
+        heard: &str,
+        status: CohostCommandStatus,
+        message: String,
+        ctx: &CommandContext,
+    ) -> CommandEffects {
+        if let Some(record) = self.command.as_mut()
+            && command_id.is_some_and(|id| id == record.wire.id)
+            && record.pending == CommandPending::ActRunning
+        {
+            record.finish(status, message, &ctx.now_iso());
+            return CommandEffects {
+                emit: true,
+                ..CommandEffects::default()
+            };
+        }
+        self.note_instant_command(CohostCommandKind::Act, heard, status, message, ctx)
+    }
+
+    /// Plan 209 S19: the comments a planner request may quote (D18): the
+    /// parser's own pool (the focus, then the newest eligible comments),
+    /// with each one's platform. Sent only when the sentence is about one.
+    fn planner_comment_pool(
+        &self,
+        on_stream: Option<&str>,
+        now: Instant,
+    ) -> Vec<crate::buddy_act::PlannerComment> {
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(focus) = self.command_parse_focus(on_stream, now) {
+            ids.push(focus);
+        }
+        for candidate in self.command_parse_candidates() {
+            if !ids.contains(&candidate.id) {
+                ids.push(candidate.id);
+            }
+        }
+        ids.iter()
+            .filter_map(|id| {
+                let known = self.command_target_eligible(id)?;
+                crate::buddy_act::planner_comment(
+                    id,
+                    known.platform,
+                    &known.author_name,
+                    &known.text,
+                )
+            })
+            .take(crate::buddy_act::MAX_COMMENTS)
+            .collect()
     }
 
     /// Chat moderation answered the removal request a command made. Returns
@@ -5083,12 +5218,17 @@ impl CohostSession {
             return false;
         }
         let message = match record.pending {
-            CommandPending::Choice => "No comment was picked.",
-            CommandPending::HighlightConfirm => "No answer. Nothing was shown.",
+            CommandPending::Choice => "No comment was picked.".to_string(),
+            CommandPending::HighlightConfirm => "No answer. Nothing was shown.".to_string(),
+            CommandPending::ActConfirm => match record.act.take() {
+                Some(act) => act.with_results(crate::buddy_act::halt_words(act.waiting_tool()).1),
+                None => "No answer, so Buddy did nothing more.".to_string(),
+            },
             CommandPending::None
             | CommandPending::Requesting
             | CommandPending::Removal
-            | CommandPending::Removing => return false,
+            | CommandPending::Removing
+            | CommandPending::ActRunning => return false,
         };
         record.finish(CohostCommandStatus::Expired, message, now_iso);
         self.report.commands.expired += 1;
@@ -6243,6 +6383,8 @@ pub struct CohostEngine {
     command_availability: Option<CohostCommandAvailability>,
     /// The cloud command parser (plan 140 S8).
     command_parser: CommandParserLane,
+    /// Buddy's tool planner (plan 209 S19).
+    buddy_act: BuddyActLane,
     /// Plan 164 Phase D: greetings, answers, banter and the Say box. Engine
     /// wide, following the live-chat session: greetings are free and never
     /// need the tick session.
@@ -6268,6 +6410,7 @@ impl CohostEngine {
             auto_highlight_generation: 0,
             command_availability: None,
             command_parser: CommandParserLane::default(),
+            buddy_act: BuddyActLane::default(),
             auto_chat: AutoChatLane::default(),
             web_tick_version: None,
             web_greet_version: None,
@@ -6299,6 +6442,77 @@ impl CohostEngine {
     /// `features.cohostCommandEnabled` from the last capability read.
     pub(crate) fn set_command_parser_enabled(&mut self, enabled: bool) {
         self.command_parser.enabled = enabled;
+    }
+
+    // --- Buddy's planner (plan 209 S19, S20) ----------------------------------
+
+    /// `buddy.act` from the last capability read. A fresh read clears a 403.
+    pub(crate) fn set_buddy_act_enabled(&mut self, enabled: bool) {
+        self.buddy_act.enabled = enabled;
+        self.buddy_act.refused = false;
+    }
+
+    /// The web offers the planner and has not refused this account since.
+    fn buddy_act_available(&self) -> bool {
+        self.buddy_act.enabled && !self.buddy_act.refused
+    }
+
+    /// Whether a spoken sentence may go to the planner for `scope`: the
+    /// capability, Premium, the voice switch, Buddy on with this session and
+    /// its consent to process chat. Otherwise the old path runs, unchanged.
+    fn buddy_act_ready_for(
+        &self,
+        scope: &CommandSession,
+        premium: bool,
+        voice_enabled: bool,
+    ) -> bool {
+        self.buddy_act_available()
+            && premium
+            && voice_enabled
+            && self.settings.enabled
+            && self.session.as_ref().is_some_and(|session| {
+                session.session_id == scope.session_id
+                    && session.generation == scope.generation
+                    && session.consent
+            })
+    }
+
+    fn next_buddy_act_seq(&mut self) -> u64 {
+        self.buddy_act.seq = self.buddy_act.seq.saturating_add(1);
+        self.buddy_act.seq
+    }
+
+    /// Plan 209 review fix 17: the open card is a D14 question (going live
+    /// or ending what runs), whose yes must name Buddy.
+    fn act_confirm_waiting(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(|session| session.command.as_ref())
+            .is_some_and(|record| record.pending == CommandPending::ActConfirm)
+    }
+
+    /// Plan 209 review fix 3: the grammar's question for a comment Buddy
+    /// flagged high, as `highlight_or_ask` would put it on its card.
+    fn flagged_comment_question(&self, message_id: &str) -> Option<String> {
+        let flag = self.session.as_ref()?.flags.iter().find(|flag| {
+            flag.message_id == message_id && flag.severity == CohostFlagSeverity::High
+        })?;
+        Some(match command_flag_label(flag.kind) {
+            Some(label) => format!(
+                "Buddy flagged this ({label}). Show it from the Stream Manager if you still want it."
+            ),
+            None => "Buddy flagged this. Show it from the Stream Manager if you still want it."
+                .to_string(),
+        })
+    }
+
+    /// The latest command's id in the running session, to tell a stale
+    /// planner answer from a current one.
+    fn latest_command_id(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .and_then(|session| session.command.as_ref())
+            .map(|record| record.wire.id.clone())
     }
 
     /// Whether a parse may go out for `scope` now: the capability, Premium,
@@ -6445,7 +6659,9 @@ impl CohostEngine {
                 require_wake_word: self.settings.wake_word_required,
                 awaiting_answer: matches!(
                     pending,
-                    CommandPending::Removal | CommandPending::HighlightConfirm
+                    CommandPending::Removal
+                        | CommandPending::HighlightConfirm
+                        | CommandPending::ActConfirm
                 ),
                 awaiting_choice: pending == CommandPending::Choice,
             },
@@ -6607,6 +6823,8 @@ impl CohostEngine {
             CohostSession::new(session_id, self.generation, consent, stream_title, now);
         session.prompt_version = prompt_version;
         self.session = Some(session);
+        // Plan 209: a planner the web refused gets a new chance per session.
+        self.buddy_act.refused = false;
         self.generation
     }
 
@@ -8009,6 +8227,9 @@ pub async fn say_utterance(
 // --- AppState integration ------------------------------------------------------------
 
 fn emit_state(state: &AppState, snapshot: &CohostState, _lifecycle_delivery: &OwnedMutexGuard<()>) {
+    // Plan 209 S18: a grammar command that ran is Buddy's tool call in
+    // Activity, once per status it reaches.
+    crate::buddy_act::note_grammar_command(state, snapshot.command.as_ref());
     state.emit_event(COHOST_STATE_EVENT, snapshot.clone());
 }
 
@@ -8230,6 +8451,13 @@ async fn run_detected_command(
     );
     let intent = match command.kind {
         CommandKind::Confirm => {
+            // Plan 209 review fix 17 (D14): going live or ending what runs
+            // needs "Buddy, yes". A bare "yes" (a text-to-speech alert, a
+            // viewer's words read out) leaves the question open.
+            if !command.wake_word && state.cohost.lock().await.act_confirm_waiting() {
+                tracing::info!("Buddy kept its question open: a yes to it must name Buddy.");
+                return;
+            }
             return answer_by_voice(state, scope, CommandAnswer::Confirm, premium).await;
         }
         CommandKind::Cancel => {
@@ -8241,6 +8469,11 @@ async fn run_detected_command(
         CommandKind::Unknown => {
             // Only a clearly addressed "Buddy" earns a reply.
             if !command.wake_word {
+                return;
+            }
+            // Plan 209 S19: Buddy's planner, when it may run. Without it (no
+            // `buddy.act`, or the web refused it) the old path runs as before.
+            if run_buddy_act_by_voice(state, scope, &command.heard, premium).await {
                 return;
             }
             let resolution = resolve_unknown_command(state, scope, &command.heard, premium).await;
@@ -8451,6 +8684,7 @@ fn kind_label(kind: CohostCommandKind) -> &'static str {
         CohostCommandKind::ShowBanner | CohostCommandKind::HideBanner => "banner",
         CohostCommandKind::HideBanners => "banners",
         CohostCommandKind::ShowBuddy | CohostCommandKind::HideBuddy => "presence",
+        CohostCommandKind::Act => "act",
     }
 }
 
@@ -8461,7 +8695,7 @@ async fn banner_command_outcome(
     state: &AppState,
     command: &DetectedCommand,
 ) -> (CohostCommandStatus, String) {
-    use crate::banners::{BannerNameMatch, hide_banners_and_publish, show_banner_and_publish};
+    use crate::banners::BannerNameMatch;
     let banners = match state.database.list_banners() {
         Ok(banners) => banners,
         Err(error) => {
@@ -8517,13 +8751,13 @@ async fn banner_command_outcome(
                     format!("The {} banner is already showing.", banner.name),
                 );
             }
-            match show_banner_and_publish(state, &banner.id).await {
-                Ok(_) => (
-                    CohostCommandStatus::Done,
-                    format!("Showed the {} banner.", banner.name),
-                ),
-                Err(error) => (CohostCommandStatus::Refused, error.to_string()),
-            }
+            // Plan 209 S18: through the agent tool path as Buddy (Activity).
+            banner_tool_outcome(
+                state,
+                serde_json::json!({ "bannerId": banner.id, "shown": true }),
+                format!("Showed the {} banner.", banner.name),
+            )
+            .await
         }
         CommandKind::HideBanner => {
             let banner = match spoken {
@@ -8551,13 +8785,12 @@ async fn banner_command_outcome(
                     format!("The {} banner isn't showing.", banner.name),
                 );
             }
-            match hide_banners_and_publish(state, Some(&banner.id)).await {
-                Ok(_) => (
-                    CohostCommandStatus::Done,
-                    format!("Hid the {} banner.", banner.name),
-                ),
-                Err(error) => (CohostCommandStatus::Refused, error.to_string()),
-            }
+            banner_tool_outcome(
+                state,
+                serde_json::json!({ "bannerId": banner.id, "shown": false }),
+                format!("Hid the {} banner.", banner.name),
+            )
+            .await
         }
         CommandKind::HideBanners => {
             if showing.is_empty() {
@@ -8566,10 +8799,12 @@ async fn banner_command_outcome(
                     "No banner is showing.".to_string(),
                 );
             }
-            match hide_banners_and_publish(state, None).await {
-                Ok(_) => (CohostCommandStatus::Done, "Hid all banners.".to_string()),
-                Err(error) => (CohostCommandStatus::Refused, error.to_string()),
-            }
+            banner_tool_outcome(
+                state,
+                serde_json::json!({ "shown": false }),
+                "Hid all banners.".to_string(),
+            )
+            .await
         }
         CommandKind::Highlight
         | CommandKind::Clear
@@ -8583,6 +8818,23 @@ async fn banner_command_outcome(
             CohostCommandStatus::NotFound,
             "Buddy didn't catch that.".to_string(),
         ),
+    }
+}
+
+/// Plan 209 S18: a banner command runs Buddy's `set_banner` call (the same
+/// `banners::show_banner_and_publish` / `hide_banners_and_publish`, now with
+/// an Activity row as Buddy). The card keeps the grammar's own sentence;
+/// a refusal lands on it in the tool's words.
+async fn banner_tool_outcome(
+    state: &AppState,
+    args: serde_json::Value,
+    done: String,
+) -> (CohostCommandStatus, String) {
+    let outcome = crate::buddy_act::call(state, "set_banner", args).await;
+    if outcome.outcome == crate::storage::AgentActivityOutcome::Ok {
+        (CohostCommandStatus::Done, done)
+    } else {
+        (CohostCommandStatus::Refused, outcome.text)
     }
 }
 
@@ -8807,6 +9059,445 @@ pub(crate) async fn set_command_parser_capability(state: &AppState, enabled: boo
         .set_command_parser_enabled(enabled);
 }
 
+// --- Buddy's planner (plan 209 S19, S20) -----------------------------------------
+
+/// `buddy.act` from the capability read (launch, sign-in, every refresh).
+pub(crate) async fn set_buddy_act_capability(state: &AppState, enabled: bool) {
+    state.cohost.lock().await.set_buddy_act_enabled(enabled);
+}
+
+/// A 403 from the planner route (premium, consent, switched off, blocked):
+/// no planner until the next capability read or Buddy session (part F).
+fn planner_refused(error: &CohostApiError) -> bool {
+    error.detail.status == Some(403)
+}
+
+fn planner_client_error(error: anyhow::Error) -> CohostApiError {
+    CohostApiError::network(error.to_string())
+}
+
+/// Plan 209 S19: a wake-word sentence the grammar does not know goes to
+/// Buddy's planner when it may: `buddy.act`, Premium, the voice switch,
+/// Buddy on with this session and its consent. The desktop checks every
+/// call it returns (`buddy_act::plan`), runs them in order through the agent
+/// tool path as Buddy, and asks out loud before the D14 calls.
+///
+/// Returns false when the planner may not run, or the web refused it with a
+/// 403: the caller takes the old path, exactly as before. Any other failure
+/// is "Buddy didn't catch that" for this sentence.
+async fn run_buddy_act_by_voice(
+    state: &AppState,
+    scope: &CommandSession,
+    heard: &str,
+    premium: bool,
+) -> bool {
+    run_buddy_act_by_voice_with(
+        state,
+        scope,
+        heard,
+        premium,
+        crate::account::stored_session_token,
+        |token: String, request: crate::buddy_act::PlannerRequest| async move {
+            match VideorcApiClient::new() {
+                Ok(client) => client.post_buddy_act(&token, &request).await,
+                Err(error) => Err(planner_client_error(error)),
+            }
+        },
+    )
+    .await
+}
+
+/// `run_buddy_act_by_voice` with the token read and the planner call
+/// injected. Nothing, not even the stored token, is read while the planner
+/// may not run.
+async fn run_buddy_act_by_voice_with<T, C, F>(
+    state: &AppState,
+    scope: &CommandSession,
+    heard: &str,
+    premium: bool,
+    token: T,
+    call: C,
+) -> bool
+where
+    T: FnOnce() -> Option<String>,
+    C: FnOnce(String, crate::buddy_act::PlannerRequest) -> F,
+    F: std::future::Future<Output = Result<crate::buddy_act::PlannerResponse, CohostApiError>>,
+{
+    let voice_enabled = crate::service_flags::buddy_voice_commands_enabled(state);
+    let on_stream = live_card_message_id(state).await;
+    let (seq, pool, command_id) = {
+        let mut engine = state.cohost.lock().await;
+        if !engine.buddy_act_ready_for(scope, premium, voice_enabled) {
+            return false;
+        }
+        let pool = engine
+            .session
+            .as_ref()
+            .map(|session| session.planner_comment_pool(on_stream.as_deref(), Instant::now()))
+            .unwrap_or_default();
+        (
+            engine.next_buddy_act_seq(),
+            pool,
+            engine.latest_command_id(),
+        )
+    };
+    let Some(token) = token() else {
+        return false;
+    };
+    let authors: Vec<String> = pool
+        .iter()
+        .map(|comment| comment.viewer_name.clone())
+        .collect();
+    let comments = if crate::buddy_act::about_comment(heard, &authors) {
+        pool
+    } else {
+        Vec::new()
+    };
+    let snapshot = crate::buddy_act::studio_snapshot(state).await;
+    let request =
+        crate::buddy_act::build_request(heard, &scope.session_id, seq, &snapshot, comments);
+    let result = call(token, request).await;
+    // A newer command, session or consent since: this answer is stale.
+    let current = {
+        let engine = state.cohost.lock().await;
+        engine.command_session_current(scope) && engine.latest_command_id() == command_id
+    };
+    let response = match result {
+        Ok(response) => response,
+        Err(error) if planner_refused(&error) => {
+            tracing::info!(
+                code = %error.detail.code,
+                "Buddy's planner refused this account; the old command path runs."
+            );
+            state.cohost.lock().await.buddy_act.refused = true;
+            return false;
+        }
+        Err(error) => {
+            tracing::info!(
+                code = %error.detail.code,
+                status = ?error.detail.status,
+                "Buddy's planner failed: {}",
+                error.message()
+            );
+            if current {
+                note_unheard_command(state, scope, heard, premium).await;
+            }
+            return true;
+        }
+    };
+    if !current {
+        tracing::info!("Buddy dropped a planner answer: a newer command or session came first.");
+        return true;
+    }
+    match crate::buddy_act::plan(&response, &snapshot.names) {
+        Err(problem) => {
+            tracing::info!("Buddy's planner answer was malformed: {problem}");
+            note_unheard_command(state, scope, heard, premium).await;
+        }
+        Ok(plan) if plan.unknown => {
+            note_unheard_command(state, scope, heard, premium).await;
+        }
+        Ok(plan) if plan.steps.is_empty() => {
+            // A question answered from the state: the line is the answer.
+            let ctx = command_context(state, premium).await;
+            record_instant_command(
+                state,
+                scope,
+                CohostCommandKind::Act,
+                heard,
+                CohostCommandStatus::Done,
+                plan.line,
+                &ctx,
+            )
+            .await;
+        }
+        Ok(plan) => {
+            tracing::info!(calls = plan.steps.len(), "Buddy's planner read '{heard}'.");
+            run_voice_act(
+                state,
+                scope,
+                None,
+                crate::buddy_act::PendingAct::new(heard, plan),
+                false,
+            )
+            .await;
+        }
+    }
+    true
+}
+
+/// The planner's calls by voice, from `act.next`. Boxed: a yes to a D14
+/// card comes back here through `run_command_effects`.
+fn run_voice_act<'a>(
+    state: &'a AppState,
+    scope: &'a CommandSession,
+    command_id: Option<String>,
+    mut act: crate::buddy_act::PendingAct,
+    confirmed: bool,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        use crate::buddy_act::Halt;
+        // A card only for the session that heard it.
+        if !state.cohost.lock().await.command_session_current(scope) {
+            tracing::info!("Buddy dropped a planned command: its session changed.");
+            return;
+        }
+        match crate::buddy_act::run_steps(state, &mut act, true, confirmed).await {
+            Halt::Done => {
+                let status = act.final_status();
+                let message = act.strip_message();
+                finish_act_card(
+                    state,
+                    scope,
+                    command_id.as_deref(),
+                    &act.heard,
+                    status,
+                    message,
+                )
+                .await;
+            }
+            Halt::Confirm { question } => open_act_confirm_card(state, scope, act, question).await,
+            Halt::Removal { message_id, reason } => {
+                // D14: the existing removal card, with its own yes (a target
+                // the cloud picked never counts down).
+                execute_resolved_command(
+                    state,
+                    scope,
+                    CommandKind::Remove,
+                    vec![message_id],
+                    act.heard.clone(),
+                    reason,
+                )
+                .await;
+            }
+            Halt::Highlight { message_id } => {
+                // Review fix 3: the grammar's own highlight, which asks
+                // "Buddy flagged this… Show it anyway?" first for a comment
+                // Buddy flagged.
+                execute_resolved_command(
+                    state,
+                    scope,
+                    CommandKind::Highlight,
+                    vec![message_id],
+                    act.heard.clone(),
+                    None,
+                )
+                .await;
+            }
+        }
+    })
+}
+
+/// Plan 209 review fix 3: a typed `/buddy` can't ask "Show it anyway?", so a
+/// comment Buddy flagged high is refused with this sentence instead of shown.
+pub(crate) async fn buddy_flagged_comment(state: &AppState, message_id: &str) -> Option<String> {
+    state
+        .cohost
+        .lock()
+        .await
+        .flagged_comment_question(message_id)
+}
+
+async fn finish_act_card(
+    state: &AppState,
+    scope: &CommandSession,
+    command_id: Option<&str>,
+    heard: &str,
+    status: CohostCommandStatus,
+    message: String,
+) {
+    let ctx = command_context(state, premium_entitled()).await;
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (effects, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        engine.set_command_availability(ctx.availability());
+        let Some(session) = engine.command_session_mut(scope) else {
+            tracing::info!("Buddy dropped a planned command's card: its session changed.");
+            return;
+        };
+        let effects = session.finish_act(command_id, heard, status, message, &ctx);
+        mirror_command_slot(state, &engine);
+        (effects, engine.snapshot())
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
+    drop(lifecycle_delivery);
+    run_command_effects(state, scope, effects, false).await;
+}
+
+async fn open_act_confirm_card(
+    state: &AppState,
+    scope: &CommandSession,
+    act: crate::buddy_act::PendingAct,
+    question: &str,
+) {
+    let ctx = command_context(state, premium_entitled()).await;
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (effects, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        engine.set_command_availability(ctx.availability());
+        let Some(session) = engine.command_session_mut(scope) else {
+            tracing::info!("Buddy dropped a planned command's card: its session changed.");
+            return;
+        };
+        let effects = session.open_act_confirm(act, question, &ctx);
+        mirror_command_slot(state, &engine);
+        (effects, engine.snapshot())
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
+    drop(lifecycle_delivery);
+    run_command_effects(state, scope, effects, false).await;
+}
+
+/// Plan 209 S20: `cohost.act`, the typed `/buddy <words>`. The gates answer
+/// at once in the sentences the voice commands use (a free user reads "Buddy
+/// requires Videorc Premium."); otherwise the planner and the calls run on
+/// their own task, without a wake word and without D14's spoken confirm
+/// (typing is deliberate), and the outcome arrives as `cohost.act.result`.
+/// A Buddy session is not required: the renderer passes its Cloud AI
+/// consent, as for `cohost.start`.
+pub async fn act_typed(
+    state: &AppState,
+    params: crate::buddy_act::CohostActParams,
+) -> Result<crate::buddy_act::CohostActAnswer, CohostCommandError> {
+    use crate::buddy_act::{self as act, CohostActAnswer, CohostActStatus};
+    if !act::valid_act_id(&params.act_id) {
+        return Err(CohostCommandError::invalid(
+            "actId must be 1 to 128 letters, digits, dashes or underscores.",
+        ));
+    }
+    let act_id = params.act_id;
+    let answer = |status, message: &str| Ok(CohostActAnswer::new(&act_id, status, message));
+    let sentence = params.sentence.trim().to_string();
+    if sentence.is_empty() {
+        return answer(CohostActStatus::Refused, act::EMPTY_SENTENCE);
+    }
+    if sentence.chars().count() > act::MAX_SENTENCE_CHARS {
+        return answer(CohostActStatus::Refused, act::TOO_LONG);
+    }
+    let premium = premium_entitled();
+    let voice_enabled = crate::service_flags::buddy_voice_commands_enabled(state);
+    if let Some((status, message)) = act::typed_gate(
+        premium,
+        voice_enabled,
+        params.consent_to_process_chat,
+        true,
+        true,
+    ) {
+        return answer(status, message);
+    }
+    let on_stream = live_card_message_id(state).await;
+    let (available, seq, session_client_id, pool) = {
+        let mut engine = state.cohost.lock().await;
+        let available = engine.buddy_act_available();
+        let session = engine.session.as_ref().filter(|session| session.consent);
+        let session_client_id = session.map_or_else(
+            || "studio".to_string(),
+            |session| session.session_id.clone(),
+        );
+        let pool = session
+            .map(|session| session.planner_comment_pool(on_stream.as_deref(), Instant::now()))
+            .unwrap_or_default();
+        (
+            available,
+            engine.next_buddy_act_seq(),
+            session_client_id,
+            pool,
+        )
+    };
+    let token = crate::account::stored_session_token();
+    if let Some((status, message)) = act::typed_gate(
+        premium,
+        voice_enabled,
+        params.consent_to_process_chat,
+        available,
+        token.is_some(),
+    ) {
+        return answer(status, message);
+    }
+    let Some(token) = token else {
+        return answer(CohostActStatus::Unavailable, act::SIGNED_OUT);
+    };
+    let task_state = state.clone();
+    let task_id = act_id.clone();
+    tokio::spawn(async move {
+        let result = typed_act_outcome(
+            &task_state,
+            &task_id,
+            &sentence,
+            seq,
+            &session_client_id,
+            pool,
+            &token,
+        )
+        .await;
+        task_state.emit_event(act::ACT_RESULT_EVENT, result);
+    });
+    answer(CohostActStatus::Working, "Asking Buddy…")
+}
+
+async fn typed_act_outcome(
+    state: &AppState,
+    act_id: &str,
+    sentence: &str,
+    seq: u64,
+    session_client_id: &str,
+    pool: Vec<crate::buddy_act::PlannerComment>,
+    token: &str,
+) -> crate::buddy_act::CohostActAnswer {
+    use crate::buddy_act::{self as act, CohostActAnswer, CohostActStatus};
+    let authors: Vec<String> = pool
+        .iter()
+        .map(|comment| comment.viewer_name.clone())
+        .collect();
+    let comments = if act::about_comment(sentence, &authors) {
+        pool
+    } else {
+        Vec::new()
+    };
+    let snapshot = act::studio_snapshot(state).await;
+    let request = act::build_request(sentence, session_client_id, seq, &snapshot, comments);
+    let result = match VideorcApiClient::new() {
+        Ok(client) => client.post_buddy_act(token, &request).await,
+        Err(error) => Err(planner_client_error(error)),
+    };
+    let response = match result {
+        Ok(response) => response,
+        Err(error) if planner_refused(&error) => {
+            state.cohost.lock().await.buddy_act.refused = true;
+            let message = match error.detail.code.as_str() {
+                "premium-required" => crate::live_chat_moderation::PREMIUM_REQUIRED_MESSAGE,
+                "consent-required" => act::CONSENT_OFF,
+                _ => act::UNAVAILABLE,
+            };
+            return CohostActAnswer::new(act_id, CohostActStatus::Unavailable, message);
+        }
+        Err(error) => {
+            tracing::info!(
+                code = %error.detail.code,
+                status = ?error.detail.status,
+                "Buddy's planner failed for /buddy: {}",
+                error.message()
+            );
+            return CohostActAnswer::new(act_id, CohostActStatus::NotFound, act::NOT_CAUGHT);
+        }
+    };
+    let plan = match act::plan(&response, &snapshot.names) {
+        Ok(plan) if !plan.unknown => plan,
+        Ok(_) => return CohostActAnswer::new(act_id, CohostActStatus::NotFound, act::NOT_CAUGHT),
+        Err(problem) => {
+            tracing::info!("Buddy's planner answer was malformed: {problem}");
+            return CohostActAnswer::new(act_id, CohostActStatus::NotFound, act::NOT_CAUGHT);
+        }
+    };
+    let mut pending = act::PendingAct::new(sentence, plan);
+    act::run_steps(state, &mut pending, false, false).await;
+    let status = match pending.final_status() {
+        CohostCommandStatus::Refused => CohostActStatus::Refused,
+        _ => CohostActStatus::Done,
+    };
+    CohostActAnswer::new(act_id, status, pending.strip_message())
+}
+
 /// Run a command whose target is already known as message ids (plan 140
 /// S8's cloud parser). One eligible id acts (a highlight, or a removal card),
 /// several open the chooser (at most three), none says "couldn't find".
@@ -8980,6 +9671,19 @@ async fn run_command_effects(
     }
     if let Some(operation_id) = effects.cancel_removal {
         cancel_command_removal(state, &operation_id).await;
+    }
+    // Plan 209 D14: the streamer said yes; the planner's calls run on. The
+    // RPC answers first (a Studio call can take 15 s, going live 60).
+    if let Some((command_id, act)) = effects.run_act {
+        if background_confirm {
+            let state = state.clone();
+            let scope = scope.clone();
+            tokio::spawn(async move {
+                run_voice_act(&state, &scope, Some(command_id), act, true).await;
+            });
+        } else {
+            run_voice_act(state, scope, Some(command_id), act, true).await;
+        }
     }
 }
 
@@ -21542,5 +22246,546 @@ mod tests {
             "no bubble with the Buddy on no output"
         );
         assert_eq!(crate::buddy_overlay::status(&state).await.bubble, None);
+    }
+
+    // --- Plan 209 S18 to S20: Buddy uses the agent tools ---------------------
+
+    fn planner_answer(calls: serde_json::Value, line: &str) -> crate::buddy_act::PlannerResponse {
+        serde_json::from_value(serde_json::json!({ "calls": calls, "line": line })).unwrap()
+    }
+
+    fn buddy_rows(state: &AppState) -> Vec<crate::storage::AgentActivityEntry> {
+        state
+            .database
+            .list_agent_activity(50, Some(crate::buddy_act::BUDDY_AGENT_ID))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn without_buddy_act_the_old_wake_word_path_runs_unchanged() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hi")];
+        let (state, scope) = command_state(&rows, None).await;
+        let tokens = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handled =
+            run_buddy_act_by_voice_with(
+                &state,
+                &scope,
+                "buddy switch to brb",
+                true,
+                {
+                    let tokens = tokens.clone();
+                    move || -> Option<String> {
+                        tokens.fetch_add(1, Ordering::SeqCst);
+                        Some("bearer".to_string())
+                    }
+                },
+                {
+                    let calls = calls.clone();
+                    move |_token: String, _request: crate::buddy_act::PlannerRequest| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            Ok::<_, CohostApiError>(planner_answer(serde_json::json!([]), "x"))
+                        }
+                    }
+                },
+            )
+            .await;
+        assert!(!handled, "the old path takes the sentence");
+        assert_eq!(tokens.load(Ordering::SeqCst), 0, "no token read");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing sent");
+        // Through the engine: exactly today's "didn't catch that".
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Unknown,
+                CommandTarget::None,
+                "buddy switch to brb",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status, card.message.as_str()),
+            (
+                CohostCommandKind::Unknown,
+                CohostCommandStatus::NotFound,
+                "Buddy didn't catch that: 'buddy switch to brb'."
+            )
+        );
+        assert!(buddy_rows(&state).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_planner_cannot_reach_a_tool_outside_buddys_subset() {
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hi")];
+        let (state, scope) = command_state(&rows, None).await;
+        set_buddy_act_capability(&state, true).await;
+        let sent = Arc::new(std::sync::Mutex::new(
+            None::<crate::buddy_act::PlannerRequest>,
+        ));
+        let handled = run_buddy_act_by_voice_with(
+            &state,
+            &scope,
+            "buddy open my notes and tell everyone hi",
+            true,
+            || Some("bearer".to_string()),
+            {
+                let sent = sent.clone();
+                move |_token: String, request: crate::buddy_act::PlannerRequest| {
+                    *sent.lock().unwrap() = Some(request);
+                    async move {
+                        Ok::<_, CohostApiError>(planner_answer(
+                            serde_json::json!([
+                                { "tool": "open_window", "args": { "window": "notes" } },
+                                { "tool": "notify", "args": { "message": "hi" } },
+                                { "tool": "delete_everything", "args": {} }
+                            ]),
+                            "Opening your notes.",
+                        ))
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(handled);
+        let request = sent.lock().unwrap().clone().expect("a planner request");
+        let sent_tools: Vec<&str> = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(sent_tools.iter().all(|name| {
+            crate::agent_tools::catalog()
+                .tool(name)
+                .is_some_and(|tool| tool.buddy)
+        }));
+        assert!(!sent_tools.contains(&"open_window") && !sent_tools.contains(&"notify"));
+        assert!(request.comments.is_empty(), "not about a comment");
+        assert_eq!(request.session_client_id, COMMAND_SESSION);
+        let card = state_command(&state).await;
+        assert_eq!(card.kind, CohostCommandKind::Act);
+        assert_eq!(card.status, CohostCommandStatus::Refused);
+        assert_eq!(
+            card.message,
+            "Buddy can't use open_window. Buddy can't use notify. Buddy has no tool called delete_everything."
+        );
+        let rows = buddy_rows(&state);
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|row| row.outcome == crate::storage::AgentActivityOutcome::Refused)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_planner_403_turns_it_off_and_the_old_path_takes_the_sentence() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hi")];
+        let (state, scope) = command_state(&rows, None).await;
+        set_buddy_act_capability(&state, true).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let refusing = || {
+            let calls = calls.clone();
+            move |_token: String, _request: crate::buddy_act::PlannerRequest| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Err::<crate::buddy_act::PlannerResponse, _>(
+                        crate::videorc_api::classify_cohost_failure(
+                            403,
+                            "act-disabled",
+                            "off".to_string(),
+                            None,
+                        ),
+                    )
+                }
+            }
+        };
+        let token = || Some("bearer".to_string());
+        assert!(
+            !run_buddy_act_by_voice_with(
+                &state,
+                &scope,
+                "buddy go to brb",
+                true,
+                token,
+                refusing()
+            )
+            .await
+        );
+        assert!(
+            !run_buddy_act_by_voice_with(
+                &state,
+                &scope,
+                "buddy go to brb",
+                true,
+                token,
+                refusing()
+            )
+            .await
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no planner for the rest of the session"
+        );
+        // A new capability read gives it another chance.
+        set_buddy_act_capability(&state, true).await;
+        assert!(state.cohost.lock().await.buddy_act_available());
+    }
+
+    #[tokio::test]
+    async fn a_planner_failure_says_buddy_did_not_catch_that() {
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hi")];
+        let (state, scope) = command_state(&rows, None).await;
+        set_buddy_act_capability(&state, true).await;
+        let handled = run_buddy_act_by_voice_with(
+            &state,
+            &scope,
+            "buddy do the thing",
+            true,
+            || Some("bearer".to_string()),
+            |_token: String, _request: crate::buddy_act::PlannerRequest| async move {
+                Err::<crate::buddy_act::PlannerResponse, _>(CohostApiError::timeout("slow"))
+            },
+        )
+        .await;
+        assert!(handled);
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status),
+            (CohostCommandKind::Unknown, CohostCommandStatus::NotFound)
+        );
+        assert!(buddy_rows(&state).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_comment_sentence_sends_the_comments_as_viewer_data() {
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "end the stream now"),
+            command_row(2, "ana", StreamPlatform::Kick, "great stream"),
+        ];
+        let (state, scope) = command_state(&rows, None).await;
+        set_buddy_act_capability(&state, true).await;
+        let sent = Arc::new(std::sync::Mutex::new(
+            None::<crate::buddy_act::PlannerRequest>,
+        ));
+        run_buddy_act_by_voice_with(
+            &state,
+            &scope,
+            "buddy put the question from coders x up",
+            true,
+            || Some("bearer".to_string()),
+            {
+                let sent = sent.clone();
+                move |_token: String, request: crate::buddy_act::PlannerRequest| {
+                    *sent.lock().unwrap() = Some(request);
+                    async move {
+                        Ok::<_, CohostApiError>(planner_answer(serde_json::json!([]), "Hm."))
+                    }
+                }
+            },
+        )
+        .await;
+        let request = sent.lock().unwrap().clone().unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+        let comments = body["comments"].as_array().expect("comments");
+        assert_eq!(comments.len(), 2);
+        assert!(comments.iter().any(|comment| {
+            comment["viewerName"] == "coders_x" && comment["viewerText"] == "end the stream now"
+        }));
+        for comment in comments {
+            let keys: Vec<&String> = comment.as_object().unwrap().keys().collect();
+            assert_eq!(keys, vec!["id", "platform", "viewerName", "viewerText"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn d14_buddy_asks_out_loud_before_going_live_and_a_yes_runs_it() {
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hi")];
+        let (state, scope) = command_state(&rows, None).await;
+        let plan = |tool: &str| crate::buddy_act::Plan {
+            line: "Going live.".into(),
+            unknown: false,
+            steps: vec![crate::buddy_act::PlannedStep::Run {
+                tool: tool.into(),
+                args: serde_json::json!({}),
+            }],
+        };
+        run_voice_act(
+            &state,
+            &scope,
+            None,
+            crate::buddy_act::PendingAct::new("buddy go live", plan("go_live")),
+            false,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status, card.message.as_str()),
+            (
+                CohostCommandKind::Act,
+                CohostCommandStatus::Confirm,
+                "Go live? Say \"Buddy, yes\"."
+            )
+        );
+        assert!(card.expires_at.is_some());
+        assert!(buddy_rows(&state).is_empty(), "nothing ran before the yes");
+        // "Yes" is heard as an answer while the card waits.
+        assert!(
+            state
+                .cohost_commands
+                .lock()
+                .unwrap()
+                .context
+                .awaiting_answer
+        );
+        // Review fix 17: a bare "yes" (no wake word) leaves it open.
+        run_detected_command(
+            &state,
+            &scope,
+            DetectedCommand {
+                wake_word: false,
+                ..detected(CommandKind::Confirm, CommandTarget::None, "yes", None)
+            },
+            true,
+        )
+        .await;
+        let still = state_command(&state).await;
+        assert_eq!(
+            (still.id.as_str(), still.status),
+            (card.id.as_str(), CohostCommandStatus::Confirm)
+        );
+        assert!(buddy_rows(&state).is_empty(), "a bare yes ran nothing");
+        // "Buddy, yes" runs it.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Confirm, CommandTarget::None, "buddy yes", None),
+            true,
+        )
+        .await;
+        let done = state_command(&state).await;
+        assert_eq!(done.id, card.id, "the yes updates the same command");
+        assert_ne!(done.status, CohostCommandStatus::Confirm);
+        let rows = buddy_rows(&state);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool, "go_live");
+
+        // "No": nothing runs.
+        run_voice_act(
+            &state,
+            &scope,
+            None,
+            crate::buddy_act::PendingAct::new("buddy go live", plan("go_live")),
+            false,
+        )
+        .await;
+        answer_by_voice(&state, &scope, CommandAnswer::Cancel, true).await;
+        let cancelled = state_command(&state).await;
+        assert_eq!(
+            (cancelled.status, cancelled.message.as_str()),
+            (
+                CohostCommandStatus::Cancelled,
+                "Cancelled. You're not live."
+            )
+        );
+        assert_eq!(buddy_rows(&state).len(), 1, "the no ran nothing");
+    }
+
+    #[tokio::test]
+    async fn d14_an_unanswered_card_expires_with_nothing_run() {
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hi")];
+        let (state, scope) = command_state(&rows, None).await;
+        let ctx = command_context(&state, true).await;
+        let act = crate::buddy_act::PendingAct {
+            results: vec!["Switched to BRB.".to_string()],
+            ..crate::buddy_act::PendingAct::new(
+                "buddy switch to brb and end the stream",
+                crate::buddy_act::Plan {
+                    line: "Ending.".into(),
+                    unknown: false,
+                    steps: vec![crate::buddy_act::PlannedStep::Run {
+                        tool: "stop".into(),
+                        args: serde_json::json!({}),
+                    }],
+                },
+            )
+        };
+        let (id, expires_at) = {
+            let mut engine = state.cohost.lock().await;
+            let session = engine.command_session_mut(&scope).unwrap();
+            let effects =
+                session.open_act_confirm(act, "End the livestream? Say \"Buddy, yes\".", &ctx);
+            effects.expire_card.unwrap()
+        };
+        let card = state_command(&state).await;
+        assert_eq!(
+            card.message,
+            "Switched to BRB. End the livestream? Say \"Buddy, yes\"."
+        );
+        let expired = {
+            let mut engine = state.cohost.lock().await;
+            engine.command_session_mut(&scope).unwrap().expire_command(
+                &id,
+                &expires_at,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+        };
+        assert!(expired);
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.status, card.message.as_str()),
+            (
+                CohostCommandStatus::Expired,
+                "Switched to BRB. No answer, so nothing stopped."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_voice_plan_removal_opens_the_existing_removal_card() {
+        let rows = vec![command_row(
+            1,
+            "spam_bot",
+            StreamPlatform::Twitch,
+            "buy followers",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        let act = crate::buddy_act::PendingAct::new(
+            "buddy delete the spam",
+            crate::buddy_act::Plan {
+                line: "Removing it.".into(),
+                unknown: false,
+                steps: vec![crate::buddy_act::PlannedStep::Run {
+                    tool: "remove_chat_message".into(),
+                    args: serde_json::json!({ "messageId": rows[0].id, "reason": "spam" }),
+                }],
+            },
+        );
+        run_voice_act(&state, &scope, None, act, false).await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status),
+            (CohostCommandKind::Remove, CohostCommandStatus::Confirm)
+        );
+        assert_eq!(
+            card.target
+                .as_ref()
+                .map(|target| target.message_id.as_str()),
+            Some(rows[0].id.as_str())
+        );
+        // It waits for a yes (a target the cloud picked never counts down);
+        // nothing was removed and no Buddy call ran yet.
+        assert!(buddy_rows(&state).is_empty());
+    }
+
+    /// Review fix 3: a planned highlight by voice is the grammar's own, so a
+    /// comment Buddy flagged asks "Show it anyway?" first; typed, it is
+    /// refused in those words instead of shown.
+    #[tokio::test]
+    async fn a_planned_highlight_of_a_flagged_comment_asks_first() {
+        let rows = vec![command_row(
+            1,
+            "grumpy_gus",
+            StreamPlatform::Twitch,
+            "you are bad",
+        )];
+        let (state, scope) = command_state(&rows, None).await;
+        {
+            let mut engine = state.cohost.lock().await;
+            let session = engine.session.as_mut().unwrap();
+            session.flags.push(command_flag(
+                &rows[0].id,
+                CohostFlagSeverity::High,
+                chrono::Utc::now().to_rfc3339(),
+            ));
+        }
+        let plan = || crate::buddy_act::Plan {
+            line: "Showing it.".into(),
+            unknown: false,
+            steps: vec![crate::buddy_act::PlannedStep::Run {
+                tool: "set_highlight".into(),
+                args: serde_json::json!({ "messageId": rows[0].id }),
+            }],
+        };
+        run_voice_act(
+            &state,
+            &scope,
+            None,
+            crate::buddy_act::PendingAct::new("buddy show gus's comment", plan()),
+            false,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status, card.message.as_str()),
+            (
+                CohostCommandKind::Highlight,
+                CohostCommandStatus::Confirm,
+                "Buddy flagged this (harassment). Show it anyway?"
+            )
+        );
+        assert!(
+            state
+                .cohost
+                .lock()
+                .await
+                .snapshot()
+                .auto_highlight
+                .is_none(),
+            "nothing on stream before a yes"
+        );
+
+        let mut typed = crate::buddy_act::PendingAct::new("show gus's comment", plan());
+        crate::buddy_act::run_steps(&state, &mut typed, false, false).await;
+        assert_eq!(
+            typed.results,
+            vec![
+                "Buddy flagged this (harassment). Show it from the Stream Manager if you still want it."
+                    .to_string()
+            ]
+        );
+        assert_eq!(typed.final_status(), CohostCommandStatus::Refused);
+        let rows = buddy_rows(&state);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool, "set_highlight");
+        assert_eq!(
+            rows[0].outcome,
+            crate::storage::AgentActivityOutcome::Refused
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grammar_banner_command_runs_set_banner_as_buddy() {
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hi")];
+        let (state, scope) = command_state(&rows, None).await;
+        insert_banner(&state, "banner-sponsor", "Sponsor");
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::ShowBanner,
+                CommandTarget::Name("sponsor".into()),
+                "buddy show the sponsor banner",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.status, card.message.as_str()),
+            (CohostCommandStatus::Done, "Showed the Sponsor banner.")
+        );
+        let rows = buddy_rows(&state);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool, "set_banner");
+        assert_eq!(rows[0].agent_name, "Buddy");
+        assert_eq!(rows[0].outcome, crate::storage::AgentActivityOutcome::Ok);
     }
 }

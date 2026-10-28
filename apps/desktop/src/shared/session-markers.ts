@@ -20,6 +20,7 @@ import {
   type BannerSummary
 } from './banner-commands'
 import { classifySoundCommand, type SoundRelayAction, type SoundSummary } from './sound-commands'
+import { classifyBuddyCommand } from './buddy-act'
 
 export interface SessionMarker {
   id: string
@@ -255,6 +256,8 @@ export type ComposerCommand =
   | { kind: 'banner'; action: BannerRelayAction }
   /** Plan 189: press a sound or stop them all; never posts to chat. */
   | { kind: 'sound'; action: SoundRelayAction }
+  /** Plan 209 S20: ask Buddy to do something; never posts to chat. */
+  | { kind: 'buddy'; sentence: string }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 /**
@@ -285,10 +288,12 @@ export function classifyComposerDraft(
   if (banner) return classifyBannerCommand(banner[1] ?? '', banners)
   const sound = /^\/sound(?:\s+([\s\S]*))?$/i.exec(text)
   if (sound) return classifySoundCommand(sound[1] ?? '', sounds)
+  const buddy = /^\/buddy(?:\s+([\s\S]*))?$/i.exec(text)
+  if (buddy) return classifyBuddyCommand(buddy[1] ?? '')
   return {
     kind: 'error',
     message:
-      'Unknown command. Use /marker [title], /clip, /banner [name], /sound [name], or /help. To send a literal slash, start with //.'
+      'Unknown command. Use /marker [title], /clip, /banner [name], /sound [name], /buddy [words], or /help. To send a literal slash, start with //.'
   }
 }
 /** Plan 199 D6: what `/clip` says when it is given a length nobody offers. */

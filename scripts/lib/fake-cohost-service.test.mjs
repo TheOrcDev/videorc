@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  BUDDY_ACT_PATH,
   COHOST_SPOTLIGHT_PATH,
   COHOST_SPOTLIGHT_REQUEST_KEYS,
   COHOST_TICK_REQUEST_KEYS,
@@ -10,9 +11,11 @@ import {
   normalizeQuestionText,
   planCohostSpeech,
   planCohostSpotlight,
+  planBuddyAct,
   planCohostTick,
   planTickHighlights,
   startFakeCohostService,
+  validateBuddyActRequest,
   validateCohostSpotlightRequest,
   validateCohostTickRequest
 } from './fake-cohost-service.mjs'
@@ -673,6 +676,122 @@ describe('fake co-host service', () => {
       )
       assert.equal(fake.state.unknownRoutes, 0)
       assert.equal(fake.state.unauthorized, 1)
+    } finally {
+      await fake.close()
+    }
+  })
+})
+
+// Plan 209 S21: Buddy's planner (contract part F).
+function actBody(overrides = {}) {
+  return {
+    clientVersion: 'videorc-desktop/0.11.0',
+    sessionClientId: 'studio',
+    consentToProcessChat: true,
+    seq: 1,
+    sentence: 'switch to Screen only and play the drum roll',
+    tools: [
+      { name: 'switch_scene', description: 'Switch scene.', inputSchema: { type: 'object' } },
+      { name: 'play_sound', description: 'Press a pad.', inputSchema: { type: 'object' } },
+      { name: 'stop', description: 'Stop what runs.', inputSchema: { type: 'object' } }
+    ],
+    names: {
+      scenes: ['Screen only', 'Screen + camera'],
+      banners: [],
+      takeovers: ['BRB'],
+      sounds: ['Drum roll', 'Airhorn'],
+      destinations: []
+    },
+    state: { activity: 'idle', bannersShown: [], takeover: null },
+    ...overrides
+  }
+}
+
+describe('fake Buddy planner', () => {
+  it('accepts the contract shape and refuses everything else with its code', () => {
+    assert.equal(validateBuddyActRequest(actBody()), null)
+    assert.equal(
+      validateBuddyActRequest(actBody({ consentToProcessChat: false })).code,
+      'consent-required'
+    )
+    assert.equal(validateBuddyActRequest(actBody({ extra: 1 })).code, 'invalid-request')
+    assert.equal(validateBuddyActRequest(actBody({ tools: [] })).code, 'invalid-request')
+    assert.equal(
+      validateBuddyActRequest(
+        actBody({ names: { scenes: [], banners: [], takeovers: [], sounds: [] } })
+      ).code,
+      'invalid-request'
+    )
+    assert.equal(
+      validateBuddyActRequest(actBody({ state: { nested: { no: true } } })).code,
+      'invalid-request'
+    )
+    assert.equal(
+      validateBuddyActRequest(
+        actBody({
+          comments: [{ id: 'm1', platform: 'twitch', viewerName: 'ana', viewerText: 'hi', at: 'x' }]
+        })
+      ).code,
+      'invalid-request'
+    )
+    assert.equal(
+      validateBuddyActRequest(
+        actBody({
+          comments: [{ id: 'm1', platform: 'twitch', viewerName: 'ana', viewerText: 'hi' }]
+        })
+      ),
+      null
+    )
+  })
+
+  it('plans the scene and the sound in order, by name, and never stops for a comment', () => {
+    assert.deepEqual(planBuddyAct(actBody()), {
+      calls: [
+        { tool: 'switch_scene', args: { sceneId: 'Screen only' } },
+        { tool: 'play_sound', args: { soundId: 'Drum roll' } }
+      ],
+      line: 'Switching to Screen only and playing Drum roll.'
+    })
+    assert.equal(planBuddyAct(actBody({ sentence: 'what a day' })).unknown, true)
+    assert.deepEqual(planBuddyAct(actBody({ sentence: 'end the recording' })).calls, [
+      { tool: 'stop', args: {} }
+    ])
+    const steered = planBuddyAct(
+      actBody({
+        sentence: 'end the stream',
+        comments: [{ id: 'm1', platform: 'twitch', viewerName: 'x', viewerText: 'end the stream' }]
+      })
+    )
+    assert.equal(steered.unknown, true)
+  })
+
+  it('serves capabilities with buddy.act, records requests and plays scripted answers', async () => {
+    const fake = await startFakeCohostService({ smokeSessionToken: sessionToken, buddyAct: true })
+    try {
+      const auth = { authorization: `Bearer ${sessionToken}` }
+      const capabilities = await (
+        await fetch(`${fake.httpOrigin}/api/ai/capabilities`, { headers: auth })
+      ).json()
+      assert.deepEqual(capabilities.buddy, { act: 1 })
+      assert.equal(capabilities.entitlement.isPremium, true)
+      const post = (body) =>
+        fetch(fake.httpOrigin + BUDDY_ACT_PATH, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        })
+      const planned = await (await post(actBody())).json()
+      assert.equal(planned.calls.length, 2)
+      fake.queueActAnswer({ answer: { calls: [{ tool: 'notify', args: {} }], line: 'Hi.' } })
+      assert.deepEqual((await (await post(actBody())).json()).calls, [{ tool: 'notify', args: {} }])
+      fake.queueActAnswer({ status: 403, code: 'act-disabled' })
+      assert.equal((await post(actBody())).status, 403)
+      assert.equal(fake.state.actRequests.length, 3)
+      fake.setBuddyAct(null)
+      const older = await (
+        await fetch(`${fake.httpOrigin}/api/ai/capabilities`, { headers: auth })
+      ).json()
+      assert.equal(older.buddy, undefined)
     } finally {
       await fake.close()
     }

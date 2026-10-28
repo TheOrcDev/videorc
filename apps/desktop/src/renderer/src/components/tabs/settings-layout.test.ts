@@ -28,13 +28,15 @@ const panelSources = Object.fromEntries(
 /** Sections rendered by a component that carries its own title prop. */
 const SECTION_COMPONENTS: Record<string, string> = {
   PhoneRemoteSection: 'Phone remote',
+  AgentsSection: 'Agents',
   AboutAndUpdates: 'About & updates',
   SetupSection: 'Setup'
 }
 
 /** Files rendered only under Settings that carry their own `PanelSection`. */
 const SECTION_FILES: Record<string, string> = {
-  PhoneRemoteSection: '../phone-remote-section.tsx'
+  PhoneRemoteSection: '../phone-remote-section.tsx',
+  AgentsSection: '../settings/agents-section.tsx'
 }
 
 /**
@@ -120,7 +122,7 @@ describe('Settings layout', () => {
       general: ['Appearance', 'Chat', 'Setup', 'Import', 'Elsewhere'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
-      remote: ['Remote control', 'Phone remote'],
+      remote: ['Remote control', 'Phone remote', 'Agents'],
       about: ['About & updates', 'Support']
     })
   })
@@ -233,6 +235,14 @@ describe('Settings layout', () => {
     const [first, second] = general.split(/<PageStack\b/).slice(1)
     expect(sectionTitles(first as string)).toEqual(['Appearance', 'Chat', 'Setup'])
     expect(sectionTitles(second as string)).toEqual(['Import', 'Elsewhere'])
+  })
+
+  it('splits Remote into two columns: remotes, then Agents (plan 209 S7)', () => {
+    const remote = exportedBody(panelSources.RemoteSettings as string, 'RemoteSettings')
+    expect(remote.match(/<PageStack\b/g)).toHaveLength(2)
+    const [first, second] = remote.split(/<PageStack\b/).slice(1)
+    expect(sectionTitles(first as string)).toEqual(['Remote control', 'Phone remote'])
+    expect(sectionTitles(second as string)).toEqual(['Agents'])
   })
 
   it('points to the pages that own the rest, with the typed navigation', () => {

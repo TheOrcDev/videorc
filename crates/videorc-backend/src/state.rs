@@ -1107,6 +1107,12 @@ pub struct AppState {
     /// listener's shutdown handle, and the client count that gates chat
     /// projection in `emit_event`.
     pub remote_lan: crate::remote_lan::RemoteLanSlot,
+    /// Plan 209: the agents a streamer connected (tokens hashed), the Agents
+    /// switch and the persisted port.
+    pub agent_registry: Arc<StdMutex<crate::agent_registry::AgentRegistry>>,
+    /// Plan 209: the Agents listener's bound port, rate limiter, pending
+    /// Studio intents, the Studio's projection and the renderer socket count.
+    pub agents: crate::agent_mcp::AgentMcpSlot,
     pub resource_authority: ResourceAuthority,
     pub oauth: Arc<OAuthSessions>,
     /// Pending 3-legged OAuth 1.0a authorizations for X Live (keyed by
@@ -1394,6 +1400,10 @@ impl AppState {
             remote_lan: crate::remote_lan::new_remote_lan_slot(
                 crate::remote_lan::LanRuntime::load_from_secrets(),
             ),
+            agent_registry: Arc::new(StdMutex::new(
+                crate::agent_registry::AgentRegistry::load_from_secrets(),
+            )),
+            agents: crate::agent_mcp::new_agent_mcp_slot(),
             resource_authority: ResourceAuthority::default(),
             oauth: Arc::new(OAuthSessions::new_with_secret_store(
                 oauth_store_path,

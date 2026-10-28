@@ -9,6 +9,8 @@ import type {
 import { isCleanCutJobActive } from '@/lib/clean-cut-view'
 import { formatBytes, isActiveRecordingState, plural } from '@/lib/format'
 import { isCommandKey } from '@/lib/platform'
+import { separateFileStopped } from '@/lib/separate-source-recordings-view'
+import { isFinalizingSession } from '@/lib/session-finalization'
 import { sessionModeRecorded, sessionModeStreamed } from '@/lib/session-modes'
 
 // Library table view logic (Library rewrite L4; plan 174 S3.11): filtering,
@@ -383,6 +385,28 @@ export function libraryQualityChip(
     default:
       return null
   }
+}
+
+// --- File actions ---------------------------------------------------------------
+
+/** Why file actions wait while a recording or a livestream runs. */
+export const CAPTURE_HOLD_REASON = 'Available when you stop recording or end the livestream.'
+
+/**
+ * Whether "Export MP4" applies to a row: a finished capture whose MKV has no
+ * MP4 yet and is not being exported right now. Plan 198: a stopped Screen or
+ * Camera file exports what it recorded, and nothing when it recorded nothing.
+ * The Library's menu and an agent's `export_recording` (plan 209 S15) ask
+ * the same question.
+ */
+export function canExportMp4(session: SessionSummary): boolean {
+  return (
+    Boolean(
+      session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
+    ) &&
+    !isFinalizingSession(session) &&
+    separateFileStopped(session)?.exportable !== false
+  )
 }
 
 // --- Clean cut (E-4) ------------------------------------------------------------

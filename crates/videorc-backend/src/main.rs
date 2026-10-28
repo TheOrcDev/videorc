@@ -6,6 +6,15 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 mod account;
+mod agent_call;
+mod agent_chat;
+mod agent_library;
+mod agent_look;
+mod agent_mcp;
+mod agent_prepare;
+mod agent_prompts;
+mod agent_registry;
+mod agent_tools;
 mod atomic_file;
 mod audience;
 mod audio;
@@ -14,6 +23,7 @@ mod backend_authority;
 mod banner_prepare;
 mod banner_timers;
 mod banners;
+mod buddy_act;
 mod buddy_animator;
 mod buddy_motion;
 mod buddy_overlay;
@@ -681,6 +691,15 @@ async fn run_backend() -> Result<()> {
         );
     }
     crate::remote_lan_server::start_if_enabled(&state).await;
+    // Plan 209: the Agents listener (only while Agents is on) and its
+    // discovery file (always, so the bridge can say "Turn on Agents").
+    crate::agent_mcp::start_if_enabled(&state).await;
+    if let Err(error) = crate::agent_mcp::sync_discovery_file(&state) {
+        state.emit_log(
+            "warn",
+            format!("Agents discovery file could not be written: {error:#}"),
+        );
+    }
     // Restore the signed-in account's verified entitlement at boot so a
     // premium user's cloud AI, co-host, and streaming-quality limits survive
     // an app restart without touching the AI tab first (fail-closed: no
@@ -848,6 +867,7 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
         crate::remote_control::remove_discovery(&path);
     }
     crate::remote_lan_server::stop(&state);
+    crate::agent_mcp::shutdown(&state);
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     state.clean_cut.interrupt_all_for_shutdown();
@@ -4598,16 +4618,86 @@ fn token_expires_soon(expires_at: Option<&str>) -> bool {
 struct ConnectionEventFilter {
     excluded: std::collections::HashSet<String>,
     included: Option<std::collections::HashSet<String>>,
+    /// Plan 209: only the Studio window's socket receives the Agents events.
+    /// Set from the role at connection setup; `events.setExcluded` and
+    /// `events.setIncluded` cannot change it.
+    renderer: bool,
+    /// Plan 209: this socket runs agent intents (the Studio's, after
+    /// `agent.intent.listen`). `agent.intent` reaches these sockets and no
+    /// other, whatever their event lists say, so the sockets the relay
+    /// counts (`studio_sockets`) are exactly the ones it reaches.
+    agent_intents: bool,
+}
+
+/// Plan 209 S2/S3: the Agents section's status and activity, and the Studio
+/// tool intents, reach renderer sockets only. Main (admin) never executes an
+/// intent, and remote and phone sockets are locked to their own lanes anyway.
+fn renderer_only_event(event: &str) -> bool {
+    matches!(
+        event,
+        "agents.status" | "agents.activity" | "agent.intent" | "agent.intent.cancel"
+    )
 }
 
 impl ConnectionEventFilter {
+    fn for_role(role: BackendRole) -> Self {
+        Self {
+            renderer: role == BackendRole::Renderer,
+            ..Self::default()
+        }
+    }
+
     fn allows(&self, event: &str) -> bool {
-        !self.excluded.contains(event)
+        // Review fix 1: the cancel goes where the intents went.
+        if event == "agent.intent" || event == "agent.intent.cancel" {
+            return self.renderer && self.agent_intents;
+        }
+        (self.renderer || !renderer_only_event(event))
+            && !self.excluded.contains(event)
             && self
                 .included
                 .as_ref()
                 .is_none_or(|included| included.contains(event))
     }
+}
+
+/// Plan 209 S3: `agent.intent.listen` (renderer-only). The Studio's socket
+/// says it runs agent intents; from then on it receives `agent.intent` and
+/// counts as "the Studio is open" until it closes. Every other socket,
+/// including the Agents store's own and any Settings row's client, neither
+/// receives intents nor counts, so a Studio tool answers "Videorc's Studio
+/// isn't open." at once instead of waiting on a socket that never acks.
+/// Connection-scoped like `events.setIncluded`; never reaches the shared
+/// dispatcher.
+fn handle_agent_intent_listen(
+    state: &AppState,
+    role: BackendRole,
+    event_filter: &std::sync::Arc<std::sync::Mutex<ConnectionEventFilter>>,
+    listening: &mut Option<crate::agent_mcp::StudioSocketGuard>,
+    text: &str,
+) -> Option<ServerResponse> {
+    let command: serde_json::Value = serde_json::from_str(text).ok()?;
+    if command.get("method").and_then(|method| method.as_str()) != Some("agent.intent.listen") {
+        return None;
+    }
+    let id = command
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if let Err(error) =
+        crate::backend_authority::authorize_backend_method(role, "agent.intent.listen", false)
+    {
+        return Some(ServerResponse::error(id, error.code(), error.message()));
+    }
+    event_filter
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .agent_intents = true;
+    if listening.is_none() {
+        *listening = Some(crate::agent_mcp::StudioSocketGuard::attach(state));
+    }
+    Some(ServerResponse::ok(id, serde_json::json!({ "ok": true })))
 }
 
 /// Remote sockets must not widen their locked event filter: the
@@ -5570,6 +5660,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
+        // Plan 209 S20: answers at once; the planner and the tool calls run
+        // on their own task and report `cohost.act.result`.
+        | "cohost.act"
         | "cohost.utterance.approve"
         | "cohost.utterance.dismiss"
         | "cohost.utterance.say"
@@ -5595,6 +5688,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.control.enable"
         | "remote.control.disable"
         | "remote.control.regenerate"
+        | "agents.enable"
+        | "agents.disable"
+        | "agents.stop"
+        | "agents.create"
+        | "agents.remove"
         | "remote.lan.enable"
         | "remote.lan.disable"
         | "remote.lan.pairing.begin"
@@ -5603,6 +5701,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.devices.rename"
         | "remote.surface.publish"
         | "remote.intent.ack"
+        | "agent.surface.publish"
+        | "agent.intent.ack"
         | "remote.intent"
         | "compositor.scene.update"
         | "preview.camera.start"
@@ -5803,6 +5903,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.status"
         | "remote.chat.snapshot"
         | "remote.describe"
+        | "agents.status"
+        | "agents.activity.list"
         | "compositor.status"
         | "preview.debug.sample"
         | "preview.camera.status"
@@ -8121,9 +8223,11 @@ async fn websocket_session_with_handler_role_and_redaction(
                     "remote.ack".to_string(),
                 ])
             }),
+            renderer: false,
+            agent_intents: false,
         }
     } else {
-        ConnectionEventFilter::default()
+        ConnectionEventFilter::for_role(role)
     }));
     let event_filter_for_events = event_filter.clone();
     // Count Remote clients with a Drop guard: every exit path (early return on
@@ -8149,6 +8253,10 @@ async fn websocket_session_with_handler_role_and_redaction(
         state.emit_event("remote.control.status", remote_control_status(&state));
         RemoteClientCountGuard(state.clone())
     });
+    // Plan 209 S3: a Studio tool needs the Studio's socket to run in. It
+    // counts once it sends `agent.intent.listen`, with a Drop guard for the
+    // same reason as remote clients.
+    let mut studio_socket_guard: Option<crate::agent_mcp::StudioSocketGuard> = None;
 
     let writer_task = tokio::spawn(run_websocket_writer(
         sender,
@@ -8333,6 +8441,25 @@ async fn websocket_session_with_handler_role_and_redaction(
                     }
                     continue;
                 }
+                if let Some(response) = handle_agent_intent_listen(
+                    &state,
+                    role,
+                    &event_filter,
+                    &mut studio_socket_guard,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
 
                 if let Some(response) = handle_preview_frame_lease_control(
                     &state,
@@ -8386,6 +8513,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // accepted queue so native/source mutations are never canceled halfway.
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(preview_frame_lease);
+    drop(studio_socket_guard);
     drop(command_tx);
     drop(command_dispatcher_task);
     event_task.abort();
@@ -9805,6 +9933,20 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 209 S20: `/buddy <words>` from the Stream Manager. Answers at
+        // once (a gate's sentence, or `working`); the result follows as
+        // `cohost.act.result`. Never routed by the LAN listener.
+        "cohost.act" => {
+            match serde_json::from_value::<buddy_act::CohostActParams>(command.params) {
+                Ok(params) => match cohost::act_typed(state, params).await {
+                    Ok(answer) => ServerResponse::ok(command.id, answer),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         // Plan 164 Phase D: the Stream Manager's answers to the Buddy's
         // proposed cards, and the Say box. Never routed by the LAN listener.
         "cohost.utterance.approve" => {
@@ -10461,6 +10603,84 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 209 S2: the Agents section's RPCs (renderer and admin).
+        "agents.status" => ServerResponse::ok(command.id, crate::agent_mcp::status(state)),
+        "agents.enable" => match crate::agent_mcp::enable(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+        },
+        // Stop (D12) is Off: every agent is cut and the port closes.
+        "agents.disable" | "agents.stop" => match crate::agent_mcp::disable(state) {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+        },
+        "agents.create" => {
+            match serde_json::from_value::<crate::agent_mcp::CreateAgentParams>(command.params) {
+                Ok(params) => match crate::agent_mcp::create_agent(state, params) {
+                    Ok(created) => ServerResponse::ok(command.id, created),
+                    Err(message) => ServerResponse::error(command.id, "agents", message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "agents.remove" => {
+            match serde_json::from_value::<crate::agent_mcp::AgentIdParams>(command.params) {
+                Ok(params) => match crate::agent_mcp::remove_agent(state, params) {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "agents.activity.list" => {
+            match serde_json::from_value::<crate::agent_mcp::ActivityListParams>(
+                if command.params.is_null() {
+                    serde_json::json!({})
+                } else {
+                    command.params
+                },
+            ) {
+                Ok(params) => match crate::agent_mcp::activity(state, params) {
+                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 209 S3 (renderer-only, `backend_authority`): the Studio's
+        // answer to an `agent.intent`. A late or unknown id is still `ok`:
+        // the agent's call already ended with its timeout sentence.
+        "agent.intent.ack" => {
+            match serde_json::from_value::<crate::agent_mcp::AgentIntentAck>(command.params) {
+                Ok(ack) => {
+                    crate::agent_call::ack_studio_intent(state, ack);
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 209 S3 (renderer-only): the Studio's projection for
+        // `get_status` and the `list_*` tools. Stored, deduped, never relayed
+        // to any socket.
+        "agent.surface.publish" => match command.params.get("surface") {
+            Some(surface) if surface.is_object() => {
+                crate::agent_call::publish_surface(state, surface.clone());
+                ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+            }
+            _ => ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "agent.surface.publish needs a surface object.".to_string(),
+            ),
+        },
         "remote.control.status" => ServerResponse::ok(command.id, remote_control_status(state)),
         "remote.control.enable" => match enable_remote_control(state) {
             Ok(status) => ServerResponse::ok(command.id, status),
@@ -11913,6 +12133,14 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<live_chat_moderation::ModerationRequestParams>(
                 command.params,
             ) {
+                // Plan 209 S12: only the Agents endpoint makes agent removals.
+                Ok(params) if params.source == live_chat_moderation::ModerationSource::Agent => {
+                    ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "Agent removals come from the Agents endpoint only.",
+                    )
+                }
                 Ok(params) => match live_chat_moderation::request(state, params.into()).await {
                     Ok(operation) => ServerResponse::ok(command.id, operation),
                     Err(refusal) => {
@@ -13875,6 +14103,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     let mut greet_version: Option<Option<u32>> = None;
     // Plan 170 D9: the same read turns the account Buddy library on or off.
     let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
+    // Plan 209 S19: and whether Buddy's tool planner may be asked
+    // (`buddy.act`). Signed out or absent reads as off.
+    let mut buddy_act: Option<bool> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -13896,6 +14127,13 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.greet))
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                buddy_act = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(false),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.buddy_act_enabled())
                     }
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
@@ -13936,6 +14174,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     }
     if let Some(library) = buddy_library {
         cohost_library::set_capability(state, library).await;
+    }
+    if let Some(enabled) = buddy_act {
+        cohost::set_buddy_act_capability(state, enabled).await;
     }
 }
 
@@ -16419,6 +16660,9 @@ mod tests {
             "cohost.command.choose",
             "cohost.command.confirm",
             "cohost.command.cancel",
+            // Plan 209 S20: `/buddy` answers at once; the calls run on their
+            // own task and report `cohost.act.result`.
+            "cohost.act",
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(
@@ -16437,6 +16681,7 @@ mod tests {
             );
         }
         assert!(!crate::remote_lan::LAN_EVENTS.contains(&cohost::COHOST_STATE_EVENT));
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&buddy_act::ACT_RESULT_EVENT));
 
         for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
             let command = json!({
@@ -19675,6 +19920,8 @@ mod tests {
         let event_filter = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter {
             excluded: std::collections::HashSet::from(["events.lagged".to_string()]),
             included: None,
+            renderer: false,
+            agent_intents: false,
         }));
         let relay = tokio::spawn(relay_websocket_events(
             relay_state.clone(),
@@ -20725,6 +20972,48 @@ mod tests {
         let error = response.error.expect("idle snapshot error");
         assert_eq!(error.code, "stream-targets-unavailable");
         assert!(error.message.contains("No active capture session"));
+    }
+
+    #[tokio::test]
+    async fn agent_surface_publish_carries_a_live_background_past_the_managed_background_walk() {
+        // Plan 209 S16: every `background` object in a renderer's params is
+        // resolved as a managed picture and refused without an `assetId`, so
+        // the surface names its background `sceneBackground` (a live one, or
+        // only that a picture is on). With `background` the publish failed and
+        // the agents' view froze while any background was on.
+        let state = test_state();
+        for scene_background in [
+            json!({ "liveId": "silk", "look": "satin" }),
+            json!({ "picture": true }),
+        ] {
+            let publish = json!({
+                "id": "publish",
+                "method": "agent.surface.publish",
+                "params": { "surface": { "version": 1, "sceneBackground": scene_background } }
+            });
+            let response =
+                handle_text_message_with_role(&state, &publish.to_string(), BackendRole::Renderer)
+                    .await;
+            assert!(response.ok, "{:?}", response.error);
+            assert_eq!(
+                state
+                    .agents
+                    .lock()
+                    .surface
+                    .as_ref()
+                    .map(|surface| surface["sceneBackground"].clone()),
+                Some(scene_background)
+            );
+        }
+        let old_shape = json!({
+            "id": "publish",
+            "method": "agent.surface.publish",
+            "params": { "surface": { "version": 1, "background": { "liveId": "silk" } } }
+        });
+        let response =
+            handle_text_message_with_role(&state, &old_shape.to_string(), BackendRole::Renderer)
+                .await;
+        assert!(!response.ok);
     }
 
     #[tokio::test]
@@ -22964,5 +23253,221 @@ mod tests {
         );
         let only_twitch: std::collections::HashSet<&str> = ["twitch"].into_iter().collect();
         assert_eq!(session_audience_sources(&streaming, &only_twitch).len(), 1);
+    }
+}
+
+/// Plan 209 (S2): the Agent role is a new door, never a wider old one.
+#[cfg(test)]
+mod agent_role_tests {
+    use super::*;
+    use crate::agent_mcp::test_support;
+
+    /// D19: Phone remote's event list and the remote intent surface are
+    /// byte-identical to `dc1309cb`. A change here needs its own plan and a
+    /// leak argument, never a ride on the Agents work.
+    #[test]
+    fn remote_surface_is_pinned_to_dc1309cb() {
+        assert_eq!(
+            crate::remote_lan::LAN_EVENTS,
+            &[
+                "remote.state",
+                "remote.ack",
+                "remote.chat.message",
+                "remote.chat.reset",
+                "remote.highlight",
+            ]
+        );
+        let source = include_str!("remote_control.rs");
+        let start = source
+            .find("pub enum RemoteIntent {")
+            .expect("RemoteIntent enum");
+        let end = source[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset + 3)
+            .expect("RemoteIntent enum end");
+        let block = &source[start..end];
+        let mut digest = <sha2::Sha256 as sha2::Digest>::new();
+        sha2::Digest::update(&mut digest, block.as_bytes());
+        let hash = sha2::Digest::finalize(digest)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            hash, "4858a6c539c15f41af2682f40b038cbf53d89f8d2897a6db4a089c4f9d45f466",
+            "RemoteIntent is not byte-identical to dc1309cb"
+        );
+    }
+
+    /// S2/S3: the Agents events reach renderer sockets only, and an admin
+    /// socket cannot widen its filter into them. `agent.intent` reaches only
+    /// the socket that listens for it (the Studio's), whatever the event
+    /// lists say.
+    #[test]
+    fn agents_events_reach_renderer_sockets_only() {
+        let renderer = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::for_role(
+            BackendRole::Renderer,
+        )));
+        let admin = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::for_role(
+            BackendRole::Admin,
+        )));
+        for event in ["agents.status", "agents.activity"] {
+            assert!(renderer.lock().unwrap().allows(event), "{event}");
+            assert!(!admin.lock().unwrap().allows(event), "{event}");
+        }
+        for event in ["agent.intent", "agent.intent.cancel"] {
+            assert!(!renderer.lock().unwrap().allows(event), "{event}");
+            assert!(!admin.lock().unwrap().allows(event), "{event}");
+        }
+        assert!(admin.lock().unwrap().allows("remote.control.status"));
+        for filter in [&renderer, &admin] {
+            handle_connection_control(
+                filter,
+                r#"{"id":"i","method":"events.setIncluded","params":{"events":["agent.intent","agent.intent.cancel"]}}"#,
+            )
+            .expect("connection control");
+            assert!(!filter.lock().unwrap().allows("agent.intent"));
+            assert!(!filter.lock().unwrap().allows("agent.intent.cancel"));
+        }
+
+        // Only the renderer can listen; once it does, its event lists no
+        // longer decide `agent.intent` either way.
+        let state = test_support::test_state();
+        let listen = r#"{"id":"l","method":"agent.intent.listen"}"#;
+        let mut admin_guard = None;
+        let refused = handle_agent_intent_listen(
+            &state,
+            BackendRole::Admin,
+            &admin,
+            &mut admin_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(
+            serde_json::to_value(&refused).unwrap()["error"]["code"],
+            "forbidden-method"
+        );
+        assert!(admin_guard.is_none());
+        assert!(!admin.lock().unwrap().allows("agent.intent"));
+        assert!(!state.agents.studio_open());
+        let mut renderer_guard = None;
+        let answer = handle_agent_intent_listen(
+            &state,
+            BackendRole::Renderer,
+            &renderer,
+            &mut renderer_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(serde_json::to_value(&answer).unwrap()["ok"], true);
+        assert!(renderer.lock().unwrap().allows("agent.intent"));
+        // Review fix 1: the cancel reaches the socket the intents reach.
+        assert!(renderer.lock().unwrap().allows("agent.intent.cancel"));
+        assert!(!admin.lock().unwrap().allows("agent.intent.cancel"));
+        assert!(state.agents.studio_open());
+        // A second listen on the same socket counts it once.
+        handle_agent_intent_listen(
+            &state,
+            BackendRole::Renderer,
+            &renderer,
+            &mut renderer_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(
+            state
+                .agents
+                .studio_sockets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        handle_connection_control(
+            &renderer,
+            r#"{"id":"x","method":"events.setExcluded","params":{"events":["agent.intent"]}}"#,
+        )
+        .expect("connection control");
+        assert!(renderer.lock().unwrap().allows("agent.intent"));
+        drop(renderer_guard);
+        assert!(!state.agents.studio_open());
+        assert!(
+            handle_agent_intent_listen(
+                &state,
+                BackendRole::Renderer,
+                &renderer,
+                &mut None,
+                r#"{"id":"o","method":"agents.status"}"#,
+            )
+            .is_none()
+        );
+        assert!(
+            crate::remote_lan::LAN_EVENTS
+                .iter()
+                .all(|event| !renderer_only_event(event))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_refuses_agent_tokens_and_the_agents_rpcs_are_renderer_and_admin() {
+        let state = test_support::test_state();
+        let (_, token) = test_support::connect_agent(&state, "Claude Code");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={token}"))
+                .await
+                .is_err(),
+            "an agent token must never open the websocket"
+        );
+        // The renderer and admin sockets still open, and the agents RPCs
+        // answer on them; a remote socket never reaches them.
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={}", state.token))
+                .await
+                .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"id":"s","method":"agents.status"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let answer = loop {
+            let message = timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("answer in time")
+                .expect("socket open")
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if value["id"] == "s" {
+                break value;
+            }
+        };
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["payload"]["agents"][0]["name"], "Claude Code");
+        assert!(answer["payload"]["agents"][0].get("tokenHash").is_none());
+        assert_eq!(
+            authorize_backend_method(BackendRole::Remote, "agents.status", false),
+            Err(crate::backend_authority::MethodAdmissionError::AdminOnly)
+        );
+        // Every agents RPC arm has an execution policy, like the rest.
+        for method in [
+            "agents.status",
+            "agents.enable",
+            "agents.disable",
+            "agents.stop",
+            "agents.create",
+            "agents.remove",
+            "agents.activity.list",
+        ] {
+            assert!(
+                websocket_method_execution_policy(method).is_some(),
+                "{method} has no execution policy"
+            );
+        }
     }
 }

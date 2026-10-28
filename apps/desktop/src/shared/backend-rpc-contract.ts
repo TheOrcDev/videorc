@@ -135,6 +135,19 @@ import type {
   UsageStatsState,
   DiscordAnnounceSnapshot,
   DiscordAnnounceUpdateParams,
+  AgentAcknowledged,
+  AgentActivityEntry,
+  AgentCreated,
+  AgentIdParams,
+  AgentIntentAckParams,
+  AgentIntentEvent,
+  AgentIntentCancelEvent,
+  AgentsActivityListParams,
+  AgentsActivityPage,
+  AgentsCreateParams,
+  AgentsStatus,
+  AgentSummary,
+  AgentSurfacePublishParams,
   DiscordLinksPreview,
   DiscordTargetsParams,
   DiscordTestParams,
@@ -191,6 +204,7 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import type { CohostActAnswer, CohostActParams } from './buddy-act'
 import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from './live-background-ids'
 import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
@@ -467,6 +481,9 @@ export interface BackendRpcMethodMap {
   'cohost.command.choose': BackendRpcDefinition<CohostCommandChooseParams, CohostState>
   'cohost.command.confirm': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
+  // Plan 209 S20: `/buddy <words>`; answers at once, the result follows as
+  // `cohost.act.result`.
+  'cohost.act': BackendRpcDefinition<CohostActParams, CohostActAnswer>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
   // --- Overlay layout (plan 164) ---
@@ -549,6 +566,27 @@ export interface BackendRpcMethodMap {
   // --- end Buddy pets (plan 168, Phase B) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
+  // --- Agents (plan 209 S2, S3): renderer and admin ---
+  'agents.status': BackendRpcDefinition<undefined, AgentsStatus>
+  'agents.enable': BackendRpcDefinition<undefined, AgentsStatus>
+  'agents.disable': BackendRpcDefinition<undefined, AgentsStatus>
+  /** The token is in the answer once; show it, never store it. */
+  'agents.create': BackendRpcDefinition<AgentsCreateParams, AgentCreated>
+  'agents.remove': BackendRpcDefinition<AgentIdParams, AgentsStatus>
+  'agents.activity.list': BackendRpcDefinition<
+    AgentsActivityListParams | undefined,
+    AgentsActivityPage
+  >
+  /** Stop (D12): every agent is cut and Agents turns off. */
+  'agents.stop': BackendRpcDefinition<undefined, AgentsStatus>
+  /** Renderer-only, per socket: the Studio's socket runs agent intents, so
+   * it receives `agent.intent` and counts as "the Studio is open". */
+  'agent.intent.listen': BackendRpcDefinition<undefined, AgentAcknowledged>
+  /** Renderer-only: the Studio's answer to an `agent.intent` event. */
+  'agent.intent.ack': BackendRpcDefinition<AgentIntentAckParams, AgentAcknowledged>
+  /** Renderer-only: the Studio's projection for the Look tools. */
+  'agent.surface.publish': BackendRpcDefinition<AgentSurfacePublishParams, AgentAcknowledged>
+  // --- end Agents (plan 209) ---
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
   'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
   'liveChat.moderation.request': BackendRpcDefinition<ModerationRequestParams, ModerationOperation>
@@ -609,6 +647,8 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  // Plan 209 S20: the final answer to a `cohost.act`.
+  'cohost.act.result': CohostActAnswer
   'cohost.report.saved': CohostReportSavedEvent
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
@@ -652,6 +692,12 @@ export interface BackendEventMap {
   'liveChat.moderationOperation': ModerationOperation
   'youtube.quota': YouTubeQuotaStatus
   'discord.announce.changed': DiscordAnnounceSnapshot
+  // --- Agents (plan 209): renderer sockets only ---
+  'agents.status': AgentsStatus
+  'agents.activity': AgentActivityEntry
+  'agent.intent': AgentIntentEvent
+  'agent.intent.cancel': AgentIntentCancelEvent
+  // --- end Agents (plan 209) ---
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -1151,6 +1197,128 @@ const discordAnnounceSnapshotSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordAnnounceSnapshot>
+// --- Agents (plan 209): strict shapes, no nulls, no tokens past agents.create ---
+const AGENT_NAME_MAX_CHARS = 40
+const AGENT_TOOL_NAME_MAX_CHARS = 40
+const AGENT_ACTIVITY_MAX_ROWS = 1000
+const agentClientKindSchema = enumSchema([
+  'claude-desktop',
+  'claude-code',
+  'cursor',
+  'codex',
+  'vs-code',
+  'other'
+])
+const agentActivityOutcomeSchema = enumSchema(['ok', 'refused', 'failed', 'timeout'])
+const agentIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const agentNameSchema = stringSchema({ minLength: 1, maxLength: AGENT_NAME_MAX_CHARS * 4 })
+const agentToolNameSchema = stringSchema({ minLength: 1, maxLength: AGENT_TOOL_NAME_MAX_CHARS })
+const agentLastActionSchema = objectSchema(
+  { tool: agentToolNameSchema, at: timestamp, outcome: agentActivityOutcomeSchema },
+  { allowUnknown: false }
+)
+const agentSummarySchema = objectSchema(
+  {
+    id: agentIdSchema,
+    name: agentNameSchema,
+    client: agentClientKindSchema,
+    createdAt: timestamp,
+    lastUsedAt: optionalSchema(timestamp),
+    lastAction: optionalSchema(agentLastActionSchema),
+    connected: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentSummary>
+const agentsStatusSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    port: optionalSchema(numberSchema({ integer: true, min: 1, max: 65_535 })),
+    bindError: optionalSchema(stringSchema({ maxLength: 1024 })),
+    bindErrorKind: optionalSchema(enumSchema(['ports-busy', 'other'])),
+    discoveryPath: optionalSchema(boundedPath),
+    agents: arraySchema(agentSummarySchema, { maxLength: 64 }),
+    connectedCount: nonNegativeInteger,
+    studioOpen: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsStatus>
+const agentsCreateParamsSchema = objectSchema(
+  { name: agentNameSchema, client: agentClientKindSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsCreateParams>
+const agentCreatedSchema = objectSchema(
+  { agent: agentSummarySchema, token: stringSchema({ minLength: 1, maxLength: 256 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentCreated>
+const agentIdParamsSchema = objectSchema(
+  { id: agentIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIdParams>
+const agentActivityEntrySchema = objectSchema(
+  {
+    id: agentIdSchema,
+    at: timestamp,
+    agentId: agentIdSchema,
+    agentName: agentNameSchema,
+    tool: agentToolNameSchema,
+    summary: stringSchema({ maxLength: 512 }),
+    outcome: agentActivityOutcomeSchema,
+    message: optionalSchema(stringSchema({ maxLength: 2048 })),
+    // Plan 209 S6 (D11): the filled notice of a successful onAir call, on
+    // the `agents.activity` event only; stored rows never carry it.
+    notice: optionalSchema(stringSchema({ minLength: 1, maxLength: 2048 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentActivityEntry>
+const agentsActivityListParamsSchema = objectSchema(
+  {
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: AGENT_ACTIVITY_MAX_ROWS })),
+    agentId: optionalSchema(agentIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsActivityListParams>
+const agentsActivityPageSchema = objectSchema(
+  { entries: arraySchema(agentActivityEntrySchema, { maxLength: AGENT_ACTIVITY_MAX_ROWS }) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsActivityPage>
+const agentIntentEventSchema = objectSchema(
+  {
+    intentId: agentIdSchema,
+    agentId: agentIdSchema,
+    agentName: agentNameSchema,
+    tool: agentToolNameSchema,
+    args: boundedBackendParamValueSchema,
+    deadlineAt: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    generation: optionalSchema(numberSchema({ integer: true, min: 0 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentEvent>
+const agentIntentCancelEventSchema = objectSchema(
+  {
+    generation: numberSchema({ integer: true, min: 0 }),
+    agentId: optionalSchema(agentIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentCancelEvent>
+const agentIntentAckParamsSchema = objectSchema(
+  {
+    intentId: agentIdSchema,
+    ok: booleanSchema,
+    message: optionalSchema(stringSchema({ maxLength: 2048 })),
+    result: optionalSchema(boundedBackendParamValueSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentAckParams>
+const agentSurfacePublishParamsSchema = objectSchema(
+  { surface: boundedBackendParamValueSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentSurfacePublishParams>
+const agentAcknowledgedSchema = objectSchema(
+  { ok: literalSchema(true) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentAcknowledged>
+// --- end Agents (plan 209) ---
+
 const discordAnnounceUpdateParamsSchema = objectSchema(
   {
     enabled: optionalSchema(booleanSchema),
@@ -3635,7 +3803,8 @@ const cohostCommandSchema = objectSchema(
       'hide-banner',
       'hide-banners',
       'show-buddy',
-      'hide-buddy'
+      'hide-buddy',
+      'act'
     ]),
     status: enumSchema([
       'done',
@@ -3763,7 +3932,10 @@ const cohostFlagParamsSchema = objectSchema(
 // Chat moderation (plan 140 S4): closed shapes, kebab-case enums, optional
 // fields absent (never null) when the backend has nothing to say.
 // 'orcle-voice' is a saved wire value (plan 170 D22); never rename it.
-const moderationSourceSchema = enumSchema(['manual', 'orcle-voice'])
+// 'agent' (plan 209 S12) is the backend's own: an operation may carry it,
+// a renderer request never asks for it.
+const moderationSourceSchema = enumSchema(['manual', 'orcle-voice', 'agent'])
+const moderationRequestSourceSchema = enumSchema(['manual', 'orcle-voice'])
 const removeConfirmModeSchema = enumSchema(['confirm', 'countdown'])
 const moderationOperationSchema = objectSchema(
   {
@@ -3811,7 +3983,7 @@ const moderationRequestParamsSchema = objectSchema(
   {
     operationId: boundedString,
     messageId: boundedString,
-    source: moderationSourceSchema,
+    source: moderationRequestSourceSchema,
     reason: optionalSchema(stringSchema({ maxLength: 200 })),
     confirmMode: optionalSchema(removeConfirmModeSchema)
   },
@@ -3856,6 +4028,25 @@ const cohostCommandParamsSchema = objectSchema(
   { commandId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostCommandParams>
+// Plan 209 S20: `/buddy <words>` and Buddy's answer (`cohost.act`, then the
+// final one as `cohost.act.result`).
+const cohostActIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const cohostActParamsSchema = objectSchema(
+  {
+    actId: cohostActIdSchema,
+    sentence: stringSchema({ minLength: 1, maxLength: 2000 }),
+    consentToProcessChat: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostActParams>
+const cohostActAnswerSchema = objectSchema(
+  {
+    actId: cohostActIdSchema,
+    status: enumSchema(['working', 'done', 'refused', 'unavailable', 'not-found']),
+    message: stringSchema({ minLength: 1, maxLength: 2000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostActAnswer>
 
 // Plan 119 S1: the Buddy report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
@@ -4902,6 +5093,7 @@ const runtimeContracts = {
   'cohost.command.choose': { params: cohostCommandChooseParamsSchema, result: cohostStateSchema },
   'cohost.command.confirm': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
+  'cohost.act': { params: cohostActParamsSchema, result: cohostActAnswerSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
   // --- Overlay layout (plan 164) ---
@@ -5060,7 +5252,25 @@ const runtimeContracts = {
   'cohost.report.latest': {
     params: undefinedSchema,
     result: nullableSchema(cohostReportPayloadSchema)
+  },
+  // --- Agents (plan 209 S2, S3) ---
+  'agents.status': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.enable': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.disable': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.create': { params: agentsCreateParamsSchema, result: agentCreatedSchema },
+  'agents.remove': { params: agentIdParamsSchema, result: agentsStatusSchema },
+  'agents.activity.list': {
+    params: optionalSchema(agentsActivityListParamsSchema),
+    result: agentsActivityPageSchema
+  },
+  'agents.stop': { params: undefinedSchema, result: agentsStatusSchema },
+  'agent.intent.listen': { params: undefinedSchema, result: agentAcknowledgedSchema },
+  'agent.intent.ack': { params: agentIntentAckParamsSchema, result: agentAcknowledgedSchema },
+  'agent.surface.publish': {
+    params: agentSurfacePublishParamsSchema,
+    result: agentAcknowledgedSchema
   }
+  // --- end Agents (plan 209) ---
 } satisfies Record<BackendRpcMethod, RuntimeBackendRpcContract>
 
 export function isTypedBackendRpcMethod(method: string): method is BackendRpcMethod {
@@ -5106,6 +5316,7 @@ const runtimeEventSchemas = {
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
+  'cohost.act.result': cohostActAnswerSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
@@ -5150,7 +5361,13 @@ const runtimeEventSchemas = {
   'liveChat.moderationOperation': moderationOperationSchema,
   'youtube.quota': youtubeQuotaStatusSchema,
   'liveChat.totals': sessionChatTotalsSchema,
-  'discord.announce.changed': discordAnnounceSnapshotSchema
+  'discord.announce.changed': discordAnnounceSnapshotSchema,
+  // --- Agents (plan 209) ---
+  'agents.status': agentsStatusSchema,
+  'agents.activity': agentActivityEntrySchema,
+  'agent.intent': agentIntentEventSchema,
+  'agent.intent.cancel': agentIntentCancelEventSchema
+  // --- end Agents (plan 209) ---
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

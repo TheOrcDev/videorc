@@ -16,6 +16,15 @@ Two integration tiers:
    and live state for key rendering. The official plugin lives in
    `apps/streamdeck-plugin`.
 
+**AI agents** (Claude, Cursor, Codex and other MCP apps on this computer)
+use a separate door, Videorc MCP: Settings → Remote → Agents, its own
+loopback listener, role, per-agent tokens and tool catalog
+([`docs/agents-mcp.md`](agents-mcp.md), plan 209). It reuses the same Studio
+action executor as the intents below, so a tool and a key run the same
+handler, but it changes nothing here: the remote and Phone remote
+allowlists, `RemoteIntent`, `LAN_EVENTS` and the Stream Deck's Go Live
+behaviour are exactly as this page describes (D19).
+
 ## Pairing (same machine)
 
 When Remote Control is enabled, the backend writes a discovery file next to

@@ -4322,10 +4322,12 @@ export interface CommentsSendOperation {
 // Wire mirror of crates/videorc-backend/src/live_chat_moderation.rs. Every
 // removal is a durable, audited operation; the backend owns the timers. The
 // event `liveChat.moderationOperation` carries a ModerationOperation on every
-// change. Manual removal is free; `orcle-voice` needs Premium.
+// change. Manual removal is free; `orcle-voice` needs Premium. `agent` is an AI
+// agent on this computer (plan 209 S12): free, at once, except on YouTube,
+// where it waits for the streamer's click on the removal card.
 
 // The value stays 'orcle-voice' (plan 170 D22): saved reports and older apps carry it.
-export type ModerationSource = 'manual' | 'orcle-voice'
+export type ModerationSource = 'manual' | 'orcle-voice' | 'agent'
 export type RemoveConfirmMode = 'confirm' | 'countdown'
 export type ModerationPhase =
   | 'pending-confirm'
@@ -4379,7 +4381,8 @@ export interface ModerationRequestParams {
   operationId: string
   /** The app message id (`LiveChatMessage.id`). */
   messageId: string
-  source: ModerationSource
+  /** `agent` is never asked for by a renderer: the Agents endpoint owns it. */
+  source: Exclude<ModerationSource, 'agent'>
   reason?: string
   confirmMode?: RemoveConfirmMode
 }
@@ -4708,6 +4711,165 @@ export interface RemoteLanPairing {
   addresses: string[]
   expiresAt: string
 }
+
+// --- Agents (plan 209): AI agents on this computer run the studio over MCP ---
+
+/** Which app the streamer connected (D6): it picks the config line shown. */
+export type AgentClientKind =
+  | 'claude-desktop'
+  | 'claude-code'
+  | 'cursor'
+  | 'codex'
+  | 'vs-code'
+  | 'other'
+
+/** How an agent action ended; the Activity list's word. */
+export type AgentActivityOutcome = 'ok' | 'refused' | 'failed' | 'timeout'
+
+export interface AgentLastAction {
+  tool: string
+  at: string
+  outcome: AgentActivityOutcome
+}
+
+/** One connected agent. Carries no token: the token exists once, in
+ * `agents.create`'s answer. */
+export interface AgentSummary {
+  id: string
+  name: string
+  client: AgentClientKind
+  createdAt: string
+  lastUsedAt?: string
+  lastAction?: AgentLastAction
+  /** Heard from (a call or the bridge's heartbeat) inside the last 45 s. */
+  connected: boolean
+}
+
+/** Why the Agents listener could not bind: what Settings branches on. */
+export type AgentBindErrorKind = 'ports-busy' | 'other'
+
+export interface AgentsStatus {
+  enabled: boolean
+  /** Bound port; absent while off or when the bind failed. */
+  port?: number
+  /** The OS's own words, for the console; Settings shows copy by `bindErrorKind`. */
+  bindError?: string
+  bindErrorKind?: AgentBindErrorKind
+  /** Where `agents.json` lives; absent for an in-memory database. */
+  discoveryPath?: string
+  agents: AgentSummary[]
+  connectedCount: number
+  /** A Studio window is attached, so Studio tools can run. */
+  studioOpen: boolean
+}
+
+export interface AgentsCreateParams {
+  name: string
+  client: AgentClientKind
+}
+
+/** The one time the token exists in the clear. Show it once; never store it. */
+export interface AgentCreated {
+  agent: AgentSummary
+  token: string
+}
+
+export interface AgentIdParams {
+  id: string
+}
+
+/** One row of Settings → Remote → Agents → Activity. */
+export interface AgentActivityEntry {
+  id: string
+  at: string
+  agentId: string
+  agentName: string
+  tool: string
+  /** A short rendering of the arguments. */
+  summary: string
+  outcome: AgentActivityOutcome
+  message?: string
+  /**
+   * D11 (plan 209 S6): on the `agents.activity` event only, the filled
+   * catalog notice of a successful onAir call ("Claude Desktop ended the
+   * livestream."). The Studio shows it; `agents.activity.list` rows never
+   * carry it.
+   */
+  notice?: string
+}
+
+export interface AgentsActivityListParams {
+  /** Newest first; default 100, at most 1,000. */
+  limit?: number
+  agentId?: string
+}
+
+export interface AgentsActivityPage {
+  entries: AgentActivityEntry[]
+}
+
+/** A Studio tool call relayed to the renderer (S3): run it through the
+ * Studio action executor and answer with `agent.intent.ack`. */
+export interface AgentIntentEvent {
+  intentId: string
+  agentId: string
+  agentName: string
+  tool: string
+  args: Record<string, unknown>
+  /** Epoch ms: the agent stops waiting then, so an intent the Studio hasn't
+   * started by then is dropped (plan 209 review fix 1). */
+  deadlineAt?: number
+  /** The cancel generation it was sent in (`agent.intent.cancel`). */
+  generation?: number
+}
+
+/** Stop agents, Off or Remove (plan 209 review fix 1): the Studio drops every
+ * intent of an older generation it hasn't started, one agent's (`agentId`)
+ * or every agent's but Buddy's, and `go_live` stops before it confirms. */
+export interface AgentIntentCancelEvent {
+  generation: number
+  agentId?: string
+}
+
+export interface AgentIntentAckParams {
+  intentId: string
+  ok: boolean
+  /** The app's own sentence; the agent reads it. */
+  message?: string
+  /** The tool's structured result, matching its output schema. */
+  result?: Record<string, unknown>
+}
+
+/** The Studio's projection for `get_status` and the `list_*` tools (S3),
+ * built like the remote surface: allowlisted fields, never a token, a path
+ * or a URL. */
+export interface AgentSurfacePublishParams {
+  surface: Record<string, unknown>
+}
+
+export interface AgentAcknowledged {
+  ok: true
+}
+
+/** Plan 209 S7 (D6, D20): the bridge an agent app runs, from Electron main.
+ * `path` is absolute: the app's own copy on macOS and Windows, the stable
+ * copy in `~/.local/share/videorc/bin` on Linux, the cargo build in dev. */
+export interface AgentBridgeInfo {
+  path: string
+  /** This install has the bridge; false means Connect can't work. */
+  exists: boolean
+}
+
+/** Plan 209 S22: the apps "Add to …" writes Videorc into (every one but Other). */
+export type AgentAddApp = Exclude<AgentClientKind, 'other'>
+
+/** What "Add to …" did, in the dialog's own sentence. `added` false means the
+ * app's file was left alone and the line is the way. */
+export interface AgentAddResult {
+  added: boolean
+  message: string
+}
+// --- end Agents (plan 209) ---
 
 export interface GlobalShortcutsConfig {
   layoutNext?: string
@@ -5059,6 +5221,12 @@ export interface VideorcApi {
   /** Shows an exported support bundle in Finder or Explorer (plan 174 S3.18).
    * Main reveals only a bundle file inside the backend's export folder. */
   revealSupportBundle: (path: string) => Promise<void>
+  /** Plan 209 S7: where `videorc-mcp` lives, for Settings → Remote → Agents'
+   * config lines. `install` (Connect) puts the Linux copy in place (D20). */
+  getAgentBridge: (install: boolean) => Promise<AgentBridgeInfo>
+  /** Plan 209 S22: "Add to …" writes the agent's entry into that app's own
+   * config (or runs `claude mcp add`); main resolves the bridge's path. */
+  addAgentToApp: (app: AgentAddApp, token: string) => Promise<AgentAddResult>
   obsDiscover?: () => Promise<ObsDiscovery>
   obsRead?: (collection: string, profile: string) => Promise<ObsSetup | null>
   obsReadStreamKey?: (profile: string) => Promise<string | null>
@@ -6484,6 +6652,10 @@ export type CohostCommandKind =
   // stream (`overlayLayout.buddy.showOnStream`), finished at once.
   | 'show-buddy'
   | 'hide-buddy'
+  // Plan 209 S19: a sentence Buddy's planner turned into tool calls. `done`
+  // or `refused` says what ran; `confirm` asks for a spoken yes first (D14:
+  // going live, ending what runs), answered like any card.
+  | 'act'
 
 /**
  * Where the latest voice command stands:

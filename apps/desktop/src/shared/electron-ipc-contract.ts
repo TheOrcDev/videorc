@@ -3,6 +3,7 @@ import {
   validateChatDeliveryBoundary,
   type ChatDeliveryBoundary
 } from './chat-delivery'
+import { AGENT_TOKEN_PATTERN } from './agent-config-entry'
 import { isGlobalShortcutConfigKey } from './global-shortcut-bindings'
 import { GLOBAL_SHORTCUT_ACTIONS, type GlobalShortcutAction } from './global-shortcuts'
 import type {
@@ -45,6 +46,11 @@ import {
 } from './session-markers'
 import type { BannerRelayCommand, BannerSummary } from './banner-commands'
 import type { SoundRelayCommand, SoundboardSummary } from './sound-commands'
+import {
+  BUDDY_SENTENCE_MAX_CHARS,
+  type BuddyActRelayCommand,
+  type CohostActAnswer
+} from './buddy-act'
 import { isSoundStarterSlug } from './sound-assets'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
@@ -202,6 +208,9 @@ export const electronInvokeApiMethods = {
   'comments-window:sounds-push': 'pushCommentsSounds',
   'comments-window:sound': 'soundFromCommentsWindow',
   'comments-window:sound-result-push': 'pushSoundResult',
+  // Plan 209 S20: `/buddy <words>`, relayed to Studio like `/sound`.
+  'comments-window:buddy-act': 'buddyActFromCommentsWindow',
+  'comments-window:buddy-act-result-push': 'pushBuddyActResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
@@ -241,6 +250,8 @@ export const electronInvokeApiMethods = {
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
   'resource:reveal-support-bundle': 'revealSupportBundle',
+  'agents:bridge': 'getAgentBridge',
+  'agents:add-to-app': 'addAgentToApp',
   'resource:open-session': 'openSession',
   'media:grant-session': 'grantSessionMedia',
   'resource:trash-session-deletion': 'trashSessionDeletion',
@@ -306,6 +317,7 @@ export interface ElectronIpcEventMap {
   'comments-window:banner-request': BannerRelayCommand
   'comments-window:sounds': SoundboardSummary | null
   'comments-window:sound-request': SoundRelayCommand
+  'comments-window:buddy-act-request': BuddyActRelayCommand
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -357,6 +369,7 @@ export const electronEventChannels = [
   'comments-window:banner-request',
   'comments-window:sounds',
   'comments-window:sound-request',
+  'comments-window:buddy-act-request',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -577,6 +590,11 @@ const chatImageLocalUrlSchema = runtimeSchema<string | null>(
   }
 )
 const boundedIdentifier = stringSchema({ minLength: 1, maxLength: 1024 })
+const agentTokenSchema = runtimeSchema<string>('an agent token', (value, path) => {
+  const input = stringSchema({ minLength: 74, maxLength: 74 }).parse(value, path)
+  if (!AGENT_TOKEN_PATTERN.test(input)) throw new RuntimeSchemaError(path, 'an agent token')
+  return input
+})
 const boundedStatusText = stringSchema({ maxLength: 16_384 })
 const nonNegativeSafeIntegerSchema = runtimeSchema<number>(
   'a non-negative safe integer',
@@ -1224,7 +1242,8 @@ const moderationOperationIpcSchema = boundedSemanticValue(
       sessionId: boundedIdentifier,
       messageId: boundedIdentifier,
       // A saved wire value (plan 170 D22): never rename 'orcle-voice'.
-      source: enumSchema(['manual', 'orcle-voice']),
+      // 'agent': an AI agent's removal (plan 209 S12).
+      source: enumSchema(['manual', 'orcle-voice', 'agent']),
       phase: enumSchema(MODERATION_PHASES)
     },
     { allowUnknown: true }
@@ -1396,6 +1415,37 @@ const soundboardSummarySchema = objectSchema(
 )
 /** Null until Studio has read the board once. */
 const soundboardSummaryOrNullSchema = nullableSchema(soundboardSummarySchema)
+// Plan 209 S20: `/buddy <words>` from the Stream Manager, and Buddy's final
+// answer (what ran, or why not), which the composer shows.
+const buddyActRelayCommandSchema = objectSchema(
+  {
+    requestId: soundRequestIdSchema,
+    sentence: stringSchema({ minLength: 1, maxLength: BUDDY_SENTENCE_MAX_CHARS * 4 })
+  },
+  soundStrict
+) as RuntimeSchema<BuddyActRelayCommand>
+const cohostActAnswerSchema = objectSchema(
+  {
+    actId: soundRequestIdSchema,
+    status: enumSchema(['working', 'done', 'refused', 'unavailable', 'not-found']),
+    message: stringSchema({ minLength: 1, maxLength: 2000 })
+  },
+  soundStrict
+) as RuntimeSchema<CohostActAnswer>
+const buddyActResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: soundRequestIdSchema, ok: literalSchema(true), value: cohostActAnswerSchema },
+    soundStrict
+  ),
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    soundStrict
+  )
+])
 const soundRelayCommandSchema = unionSchema([
   objectSchema(
     {
@@ -1484,6 +1534,14 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:sound-result-push': invokeContract(
     tupleSchema([soundRelayResolutionSchema]),
+    booleanSchema
+  ),
+  'comments-window:buddy-act': invokeContract(
+    tupleSchema([buddyActRelayCommandSchema]),
+    cohostActAnswerSchema
+  ),
+  'comments-window:buddy-act-result-push': invokeContract(
+    tupleSchema([buddyActResolutionSchema]),
     booleanSchema
   ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
@@ -1616,6 +1674,24 @@ const specificRuntimeInvokeContracts = {
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-support-bundle': invokeContract(tupleSchema([pathSchema])),
+  // Plan 209 S7: install (Connect) or not; the bridge's absolute path and
+  // whether this install has it. Never a token.
+  'agents:bridge': invokeContract(
+    tupleSchema([booleanSchema]),
+    objectSchema({ path: pathSchema, exists: booleanSchema }, { allowUnknown: false })
+  ),
+  // Plan 209 S22: the app and the token Connect just minted, nothing else;
+  // main resolves the bridge's path itself. The answer is a sentence.
+  'agents:add-to-app': invokeContract(
+    tupleSchema([
+      enumSchema(['claude-desktop', 'claude-code', 'cursor', 'codex', 'vs-code']),
+      agentTokenSchema
+    ]),
+    objectSchema(
+      { added: booleanSchema, message: stringSchema({ minLength: 1, maxLength: 512 }) },
+      { allowUnknown: false }
+    )
+  ),
   'resource:open-session': invokeContract(tupleSchema([boundedIdentifier])),
   'media:grant-session': invokeContract(
     tupleSchema([boundedIdentifier]),
@@ -1870,6 +1946,7 @@ const specificRuntimeEventSchemas = {
   'comments-window:banner-request': bannerRelayCommandSchema,
   'comments-window:sounds': soundboardSummaryOrNullSchema,
   'comments-window:sound-request': soundRelayCommandSchema,
+  'comments-window:buddy-act-request': buddyActRelayCommandSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,

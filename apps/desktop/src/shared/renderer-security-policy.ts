@@ -39,6 +39,12 @@ export const IPC_INVOKE_ROLES = {
   'resource:reveal-session': MAIN_ONLY,
   'resource:reveal-background': MAIN_ONLY,
   'resource:reveal-support-bundle': MAIN_ONLY,
+  // Settings → Remote → Agents (plan 209 S7): the bridge's path for the
+  // config line, and the Linux copy on Connect. The Studio renderer only.
+  'agents:bridge': MAIN_ONLY,
+  // "Add to …" in Connect (plan 209 S22): writes another app's config file
+  // with an agent token. The Studio renderer only.
+  'agents:add-to-app': MAIN_ONLY,
   'resource:trash-session-deletion': MAIN_ONLY,
   'resource:open-session': MAIN_ONLY,
   // In-app playback grants (plan 119, S11). Only the Studio renderer may mint
@@ -167,6 +173,10 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:sounds-push': MAIN_ONLY,
   'comments-window:sound': MAIN_AND_COMMENTS,
   'comments-window:sound-result-push': MAIN_ONLY,
+  // Plan 209 S20: `/buddy <words>` from the Stream Manager (its handler
+  // refuses any other sender); Studio replies with Buddy's answer.
+  'comments-window:buddy-act': MAIN_AND_COMMENTS,
+  'comments-window:buddy-act-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
   'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
   // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):

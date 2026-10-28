@@ -52,6 +52,7 @@ describe('buildMacosReleaseArtifactChecks', () => {
         'capture entitlements (app)',
         'capture entitlements (videorc-backend)',
         'capture entitlements (native_preview_host_helper)',
+        'capture entitlements (videorc-mcp)',
         'capture entitlements (ffmpeg)',
         'capture entitlements (ffprobe)',
         'native preview addon signature',
@@ -214,6 +215,7 @@ describe('capture entitlement gate', () => {
         '/release/Videorc.app',
         '/release/Videorc.app/Contents/Resources/videorc-backend',
         '/release/Videorc.app/Contents/Resources/native_preview_host_helper',
+        '/release/Videorc.app/Contents/Resources/videorc-mcp',
         '/release/Videorc.app/Contents/Resources/ffmpeg/bin/ffmpeg',
         '/release/Videorc.app/Contents/Resources/ffmpeg/bin/ffprobe'
       ]
@@ -346,7 +348,7 @@ describe('capture entitlement gate', () => {
   it('targets the same tool set the signing scripts sign', () => {
     assert.deepEqual(
       captureEntitlementCheckTargets('/a/Videorc.app').map((target) => target.id),
-      ['app', 'videorc-backend', 'native-preview-host-helper', 'ffmpeg', 'ffprobe']
+      ['app', 'videorc-backend', 'native-preview-host-helper', 'videorc-mcp', 'ffmpeg', 'ffprobe']
     )
   })
 

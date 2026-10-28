@@ -20,7 +20,6 @@ import { acceleratorLabel } from '../../../shared/accelerator-format'
 import {
   DEFAULT_CLIP_SECONDS,
   LONG_CLIP_SECONDS,
-  clipMarkKeptSomething,
   clipMarkSavedClip,
   clipMarkedToast
 } from '../../../shared/clip-marks'
@@ -41,6 +40,7 @@ import {
   type SessionStopOrigin
 } from '@/lib/session-stop'
 import type { AppExitKind } from '@/lib/backend'
+import { useTheme } from 'next-themes'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -121,11 +121,15 @@ import type {
   GlobalShortcutContext,
   GlobalShortcutsRegistrar
 } from '@/lib/global-shortcuts'
+import type { AgentSurfaceInput } from '@/lib/agent-surface'
+import type { AgentStudioLink } from '@/lib/agent-studio-link'
+import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
+import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
-  RemoteIntentContext,
-  RemoteSurfacePublisher,
-  RemoteSurfaceValues
-} from '@/lib/remote-surface'
+  GoLiveConfirmOutcome,
+  GoLivePreflightRun,
+  HeadlessGoLiveConfirmation
+} from '@/lib/go-live-headless'
 import { previewSurfaceBoundsChanged } from '../../../shared/native-preview-bounds'
 import {
   commentsRefreshRevisionIsCurrent,
@@ -222,6 +226,7 @@ import {
   decideContinueGoLiveWithReadyDestinations,
   decideGoLivePreflight,
   decidePreparedGoLiveSetup,
+  LIVESTREAM_STILL_SETTLING,
   shouldIgnoreGoLiveAction,
   type GoLivePartialSetup,
   type GoLiveSetupFailure
@@ -648,9 +653,6 @@ type PlatformLifecycleSettlement = {
   promise: Promise<PlatformBroadcastCleanupResult>
 }
 
-/** Why a new Go Live waits: the last one is still being ended on its platforms. */
-const LIVESTREAM_STILL_SETTLING =
-  'Videorc is still ending your last livestream on its platforms. Try again in a moment.'
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
 const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
 const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
@@ -2421,6 +2423,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // source previews, the Preview window and the OS-global shortcuts wait for it
   // to close; the shell owns the flag.
   const [firstRunSetupOpen, setFirstRunSetupOpen] = useState(false)
+  // Plan 209 S14: `update_settings` sets the theme through next-themes, like
+  // Settings → General's control.
+  const { theme: appTheme, setTheme: setAppTheme } = useTheme()
+
   // Plan 207 S4: a look chosen in setup while a session holds the idle
   // reload back (the Clips ring in a replay); applied once setup closes.
   const [firstRunLookHold, setFirstRunLookHold] = useState<FirstRunLook | null>(null)
@@ -2430,6 +2436,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
+  // Plan 209 S6: the agents' link (their projection and tool calls), the
+  // same lazy latest-value bridge.
+  const agentLinkRef = useRef<AgentStudioLink | null>(null)
+  const agentSurfaceInputRef = useRef<AgentSurfaceInput | null>(null)
   const globalShortcutsRegistrarRef = useRef<GlobalShortcutsRegistrar | null>(null)
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -3770,6 +3780,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
   const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
+  // Plan 209 review fix 10: an agent's Go Live reads it when it confirms.
+  const dialogOpenRef = useRef(false)
+  dialogOpenRef.current = goLiveConfirmationOpen
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
@@ -4414,7 +4427,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     intent: SessionStartIntent
     promise: Promise<boolean>
   } | null>(null)
-  const confirmGoLiveInFlightPromiseRef = useRef<Promise<void> | null>(null)
+  const confirmGoLiveInFlightPromiseRef = useRef<Promise<GoLiveConfirmOutcome> | null>(null)
   const stopSessionInFlightPromiseRef = useRef<Promise<boolean> | null>(null)
   const sessionStartAuthoritativeStatusesRef = useRef<Map<string, RecordingStatus>>(new Map())
   // Late-bound mirror so applyRecordingStatus (declared earlier) can trigger the
@@ -4603,6 +4616,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     checking: false,
     error: null
   })
+  // The controller's latest state the moment it publishes, for an agent's
+  // switch that must say how it ended before React renders (plan 209 S11).
+  const sourceSelectionStateRef = useRef(sourceSelectionState)
   const [sourceSelectionController] = useState(
     () =>
       new LazyLiveSourceSelectionController({
@@ -4615,7 +4631,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (!clientRef.current) throw offlineError()
           return clientRef.current.requestTyped('session.source.switch', request)
         },
-        changed: setSourceSelectionState,
+        changed: (next) => {
+          sourceSelectionStateRef.current = next
+          setSourceSelectionState(next)
+        },
         failed: (requestId, message, source) =>
           toast.error(sourceSwitchFailedTitle(source, deviceListRef.current.devices), {
             id: `source-switch-${requestId}`,
@@ -4947,6 +4966,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [])
 
   const cohostGate = useMemo(() => liveCohostGate(entitlements), [entitlements])
+  // Plan 209 S20: `/buddy` reads the consent and Buddy's Premium gate when
+  // asked (a render-body mirror, like the refs above; no effect).
+  const buddyActGateRef = useRef({ consent: aiConsent, entitled: cohostGate.allowed })
+  buddyActGateRef.current = { consent: aiConsent, entitled: cohostGate.allowed }
   const cohostEnabled = cohostSettings?.enabled === true
   const cohostListen = cohostSettings?.listen === true
   const cohostLiveSessionId = liveChatSnapshot.sessionId ?? null
@@ -7043,15 +7066,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // Manager is closed. Events that arrive first wait for it.
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
+    let stopBuddyActRelay: (() => void) | null = null
     const moderationBacklog: ModerationOperation[] = []
     void import('@/lib/chat-moderation-relay')
-      .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
+      .then(({ startChatModerationRelay, startCohostCommandRelay, startBuddyActRelay }) => {
         if (!generationIsCurrent()) return
         // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
         stopCohostCommandRelay = startCohostCommandRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,
           commit: commitCohostState
+        })
+        // Plan 209 S20: `/buddy <words>` from the Stream Manager.
+        stopBuddyActRelay = startBuddyActRelay({
+          client: nextClient,
+          consent: () => buddyActGateRef.current.consent,
+          entitled: () => buddyActGateRef.current.entitled
         })
         moderation = startChatModerationRelay({
           client: nextClient,
@@ -7306,6 +7336,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       run: async (payload) => {
         if (!disposed) await handleRemoteIntent(payload)
       },
+      // Plan 209 S5/S6: an agent's tool call, on its own lane.
+      runAgent: (intent) => handleAgentIntent(intent, disposed),
       refuseStale: async (payload) => {
         const intentId = (payload as { intentId?: unknown } | null)?.intentId
         if (disposed || typeof intentId !== 'string') return
@@ -7318,6 +7350,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .catch(() => undefined)
       }
     })
+    // Plan 209 S6: the agents' link (lib/agent-studio-link.ts): their
+    // projection, published only while Agents is on, and their tool calls.
+    let agentLink: AgentStudioLink | null = null
+    void import('@/lib/agent-studio-link')
+      .then(({ AgentStudioLink }) => {
+        if (disposed) return
+        agentLink = new AgentStudioLink(nextClient, {
+          run: (intent) => remoteIntents.enqueueAgent(intent),
+          recordingRenamed: () => void refreshSessions(nextClient),
+          reportError: (error) => {
+            if (!disposed) reportError(error)
+          }
+        })
+        agentLinkRef.current = agentLink
+        const input = agentSurfaceInputRef.current
+        if (input) agentLink.sync(input)
+        if (remoteSurfaceConnected) agentLink.markConnected()
+      })
+      .catch((error: unknown) => {
+        if (!disposed) reportError(error)
+      })
     const unsubscribers = [
       nextClient.on('session.sources.changed', () => {
         // Read the complete current authority; event delivery can race RPC completion.
@@ -7328,6 +7381,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // The backend's remote surface slate is blank on (re)connect.
         remoteSurfaceConnected = true
         remoteSurfacePublisher?.markConnected()
+        agentLink?.markConnected()
         // Seed the pushed remote-control status; every later change arrives
         // as a remote.control.status event.
         void nextClient
@@ -8629,6 +8683,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       dashboardBacklog.length = 0
       moderation?.dispose()
       stopCohostCommandRelay?.()
+      stopBuddyActRelay?.()
       if (chatModerationRef.current === moderation) chatModerationRef.current = null
       moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
@@ -8668,6 +8723,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       remoteSurfacePublisher?.detach()
       if (remoteSurfacePublisherRef.current === remoteSurfacePublisher) {
         remoteSurfacePublisherRef.current = null
+      }
+      agentLink?.detach()
+      if (agentLinkRef.current === agentLink) {
+        agentLinkRef.current = null
       }
       setRemoteControlStatus(null)
       soundboard.disconnect(nextClient)
@@ -10049,13 +10108,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [desiredLibraryBackground, firstRunSetupOpen, requestLayoutTransaction])
 
+  // Resolves whether the layout committed (an agent's `set_scene_item` reads
+  // it, plan 209 S11b); the inspector ignores it.
   const applyLayoutPatch = useCallback(
-    (patch: Partial<LayoutSettings>) => {
-      void requestLayoutTransaction({
+    (patch: Partial<LayoutSettings>): Promise<boolean> =>
+      requestLayoutTransaction({
         ...captureConfigRef.current.layout,
         ...patch
-      })
-    },
+      }),
     [requestLayoutTransaction]
   )
 
@@ -10227,13 +10287,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 190: put a live background on the scene (null takes it off). Its
   // look, motion and style come from the registry; changing them edits the
   // registry, and the library sync below applies the edit.
+  // Resolves whether the scene committed (an agent's `set_background` reads
+  // it, plan 209 S11); the tile ignores it.
   const applyLiveBackground = useCallback(
-    (id: LiveBackgroundId | null): void => {
+    (id: LiveBackgroundId | null): Promise<boolean> => {
       const registry = backgroundRegistryRef.current
       const background = id
         ? effectiveSceneBackground(applyLiveBackgroundToRegistry(registry, id))
         : null
-      void requestLayoutTransaction(captureConfigRef.current.layout, {
+      return requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false,
         backgroundOverride: background
       })
@@ -12026,12 +12088,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // holds. The logic lives in a chunk loaded on the first Go Live, so the
   // startup bundle does not carry it.
   const settleStreamOutputTopology = useCallback(
-    async (streaming: StreamingSettings): Promise<GoLiveOutput.GoLiveSessionOutput> => {
+    async (
+      streaming: StreamingSettings,
+      // A Go Live without the dialog says whether it skips captions (plan
+      // 209 S10); every other caller reads the session's choice.
+      suppressCaptions: boolean = suppressCaptionsForSession
+    ): Promise<GoLiveOutput.GoLiveSessionOutput> => {
       const { settleGoLiveSessionOutput } = await loadGoLiveOutput()
       return settleGoLiveSessionOutput({
         captureConfig,
         streaming,
-        suppressCaptionsForSession,
+        suppressCaptionsForSession: suppressCaptions,
         performanceCheck,
         rejectedSplitKeys: () => rejectedStreamOutputSplitKeysRef.current,
         noteRejectedSplit: (requestKey) => {
@@ -14344,7 +14411,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     | ((
         streamingOverride?: StreamingSettings,
         preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
-        intent?: SessionStartIntent
+        intent?: SessionStartIntent,
+        suppressCaptions?: boolean
       ) => Promise<boolean>)
     | null
   >(null)
@@ -14354,8 +14422,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null,
       // Plan 174 S3.1: what this start asks for; the saved mode only for the
       // smokes' hook, never for a transport button.
-      intent: SessionStartIntent = savedModeIntent(captureConfig)
+      intent: SessionStartIntent = savedModeIntent(captureConfig),
+      // A Go Live without the dialog says whether it skips captions (plan
+      // 209 S10); every other start reads the session's choice.
+      suppressCaptionsOverride?: boolean
     ) => {
+      const suppressCaptions = suppressCaptionsOverride ?? suppressCaptionsForSession
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
         captureConfig,
@@ -14363,7 +14435,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sceneEditMode,
         settings,
         streamingOverride,
-        suppressCaptionsForSession,
+        suppressCaptionsForSession: suppressCaptions,
         intent
       }
       const pendingStart = sessionStartInFlightRef.current
@@ -14501,7 +14573,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             scene: sceneWithBackground,
             sceneEditMode,
             settings,
-            suppressCaptionsForSession,
+            suppressCaptionsForSession: suppressCaptions,
             // Plan 181 S7: the ring rides every session while the switch is on.
             replayArmed: replayArmedRef.current,
             platform: runtimeInfo?.platform
@@ -14693,7 +14765,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           reportSessionStartFailure(
             error,
             () => {
-              void runStartSessionRef.current?.(streamingOverride, preparedOutput, intent)
+              void runStartSessionRef.current?.(
+                streamingOverride,
+                preparedOutput,
+                intent,
+                suppressCaptionsOverride
+              )
             },
             Boolean(streamingOverride)
           )
@@ -15097,6 +15174,83 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const openGoLiveConfirmationRef = useRef<((intent: SessionStartIntent) => Promise<void>) | null>(
     null
   )
+  // The Go Live dialog's preflight (plan 174 B-7), shared with an agent's
+  // `go_live` (plan 209 S10, D13): the previous livestream settled, the start
+  // gate, the output check, the draft saved and validated, the destinations
+  // checked and the captions' readiness asked. The dialog opens on the
+  // answer; a Go Live without the dialog decides on the same answer.
+  // `streaming` is what this attempt sends and `draft` the details it goes
+  // out with. Throws what the dialog reports as a refused Go Live.
+  const runGoLivePreflight = useCallback(
+    async (
+      intent: SessionStartIntent,
+      streaming: StreamingSettings,
+      draft: StreamMetadataDraft | null
+    ): Promise<GoLivePreflightRun> => {
+      if (!client) return { kind: 'offline' }
+      if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
+        return { kind: 'settling' }
+      }
+      const blockedReason = startBlockedReasonFor(intent)
+      if (blockedReason) return { kind: 'refused', reason: blockedReason }
+      setLastError(null)
+      setGoLivePartialSetup(null)
+      setSuppressCaptionsForSession(false)
+      // Settle the output check before anything is prepared on a platform.
+      const topology = await settleStreamOutputTopology(streaming)
+      if (topology.reason) {
+        throw new Error(topology.reason)
+      }
+      let savedDraft = draft
+      if (draft) {
+        const saved = await client.request<StreamMetadataDraft>(
+          'streamTargets.metadata.update',
+          draft
+        )
+        savedDraft = saved
+        setStreamMetadataDraft(saved)
+        const validation = await client.request<StreamMetadataValidation>(
+          'streamTargets.metadata.validate',
+          saved
+        )
+        setStreamMetadataValidation(validation)
+      }
+      let capabilities: AiCapabilities | null = null
+      const [preflight] = await Promise.all([
+        client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
+          scheduledEventIds: Object.fromEntries(
+            streaming.targets
+              .filter((t) => t.enabled && t.scheduledEventId)
+              .map((t) => [t.id, t.scheduledEventId])
+          ),
+          streaming
+        }),
+        captureConfig.captions.enabled
+          ? client
+              .request<AiCapabilities>('ai.capabilities.get')
+              .then((next) => {
+                capabilities = next
+                setAiCapabilities(next)
+                setAiReadinessError(null)
+              })
+              .catch((error: unknown) => {
+                setAiCapabilities(null)
+                setAiReadinessError(error instanceof Error ? error.message : String(error))
+              })
+          : Promise.resolve()
+      ])
+      setGoLivePreflight(preflight)
+      return { kind: 'ready', preflight, draft: savedDraft, capabilities }
+    },
+    [
+      captureConfig.captions.enabled,
+      client,
+      isSessionActive,
+      settlePreviousPlatformLifecycle,
+      settleStreamOutputTopology,
+      startBlockedReasonFor
+    ]
+  )
   const openGoLiveConfirmation = useCallback(
     (intent: SessionStartIntent): Promise<void> => {
       // One preflight at a time (B-7): a second click joins the first.
@@ -15111,59 +15265,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         try {
           // "Checking…" from the first click (B-7), before the first await.
           setGoLiveConfirmationPending(true)
-          if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
-            return
-          }
-          const blockedReason = startBlockedReasonFor(intent)
-          if (blockedReason) {
+          const run = await runGoLivePreflight(intent, captureConfig.streaming, streamMetadataDraft)
+          if (run.kind === 'refused') {
             if (!isSessionActive) {
-              refuseStart(blockedReason, intent)
+              refuseStart(run.reason, intent)
             }
             return
           }
-          setLastError(null)
-          setGoLivePartialSetup(null)
-          setSuppressCaptionsForSession(false)
-          // Settle the output check before anything is prepared on a platform.
-          const topology = await settleStreamOutputTopology(captureConfig.streaming)
-          if (topology.reason) {
-            throw new Error(topology.reason)
+          if (run.kind !== 'ready') {
+            return
           }
-          if (streamMetadataDraft) {
-            const saved = await client.request<StreamMetadataDraft>(
-              'streamTargets.metadata.update',
-              streamMetadataDraft
-            )
-            setStreamMetadataDraft(saved)
-            const validation = await client.request<StreamMetadataValidation>(
-              'streamTargets.metadata.validate',
-              saved
-            )
-            setStreamMetadataValidation(validation)
-          }
-          const [preflight] = await Promise.all([
-            client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
-              scheduledEventIds: Object.fromEntries(
-                captureConfig.streaming.targets
-                  .filter((t) => t.enabled && t.scheduledEventId)
-                  .map((t) => [t.id, t.scheduledEventId])
-              ),
-              streaming: captureConfig.streaming
-            }),
-            captureConfig.captions.enabled
-              ? client
-                  .request<AiCapabilities>('ai.capabilities.get')
-                  .then((capabilities) => {
-                    setAiCapabilities(capabilities)
-                    setAiReadinessError(null)
-                  })
-                  .catch((error: unknown) => {
-                    setAiCapabilities(null)
-                    setAiReadinessError(error instanceof Error ? error.message : String(error))
-                  })
-              : Promise.resolve()
-          ])
-          setGoLivePreflight(preflight)
+          dialogOpenRef.current = true
           setGoLiveConfirmationOpen(true)
         } catch (error) {
           // A preflight that fails is a refused Go Live (B-7): the same
@@ -15190,15 +15302,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return preflightRun
     },
     [
-      captureConfig.captions.enabled,
       captureConfig.streaming,
       client,
       isSessionActive,
       refuseStart,
       reportSessionStartFailure,
-      settlePreviousPlatformLifecycle,
-      settleStreamOutputTopology,
-      startBlockedReasonFor,
+      runGoLivePreflight,
       streamMetadataDraft
     ]
   )
@@ -15287,190 +15396,239 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   ])
 
   const confirmGoLiveRef = useRef<(() => Promise<void>) | null>(null)
-  const confirmGoLive = useCallback(() => {
-    const pendingConfirmation = confirmGoLiveInFlightPromiseRef.current
-    if (pendingConfirmation) {
-      return pendingConfirmation
-    }
-    if (!client || goLiveConfirmationPending || startRequestPending) {
-      return Promise.resolve()
-    }
-    if (goLiveCaptionsReadiness.blocksStart) {
-      toast.warning("Live captions aren't ready", {
-        description: goLiveCaptionsReadiness.description
-      })
-      return Promise.resolve()
-    }
+  // The Go Live dialog's confirm (plan 174 S3.4), shared with an agent's
+  // `go_live` (plan 209 S10, D13). The dialog calls it bare; a Go Live
+  // without the dialog passes `headless` with what it decided (the
+  // destinations left out, the draft, the preflight, captions), and reads
+  // the outcome instead of the dialog's toasts, upsell and partial card.
+  const runGoLiveConfirmation = useCallback(
+    (headless?: HeadlessGoLiveConfirmation): Promise<GoLiveConfirmOutcome> => {
+      const pendingConfirmation = confirmGoLiveInFlightPromiseRef.current
+      if (pendingConfirmation) {
+        return pendingConfirmation
+      }
+      if (!client || goLiveConfirmationPending || startRequestPending) {
+        return Promise.resolve({ kind: 'ignored' })
+      }
+      const captionsReadiness = headless?.captionsReadiness ?? goLiveCaptionsReadiness
+      if (captionsReadiness.blocksStart) {
+        if (!headless) {
+          toast.warning("Live captions aren't ready", {
+            description: captionsReadiness.description
+          })
+        }
+        return Promise.resolve({ kind: 'captions', description: captionsReadiness.description })
+      }
+      const draft = headless ? headless.draft : streamMetadataDraft
+      const previousPreflight = headless ? headless.preflight : goLivePreflight
 
-    const confirmationPromise = (async (): Promise<void> => {
-      // What this attempt sends: the saved destinations minus the ones left
-      // out of this livestream (plan 174 S3.4, B-8). Never written back.
-      const excludedTargetIds = goLiveExcludedTargetIdsRef.current
-      const goLiveStreaming = streamingWithoutTargets(captureConfig.streaming, excludedTargetIds)
+      const confirmationPromise = (async (): Promise<GoLiveConfirmOutcome> => {
+        // What this attempt sends: the saved destinations minus the ones left
+        // out of this livestream (plan 174 S3.4, B-8). Never written back.
+        const excludedTargetIds = headless
+          ? headless.excludedTargetIds
+          : goLiveExcludedTargetIdsRef.current
+        const goLiveStreaming = streamingWithoutTargets(captureConfig.streaming, excludedTargetIds)
+        try {
+          setLastError(null)
+          setGoLiveConfirmationPending(true)
+          setGoLivePhase({ kind: 'checking' })
+          if (draft) {
+            const saved = await client.request<StreamMetadataDraft>(
+              'streamTargets.metadata.update',
+              draft
+            )
+            setStreamMetadataDraft(saved)
+            const validation = await client.request<StreamMetadataValidation>(
+              'streamTargets.metadata.validate',
+              saved
+            )
+            setStreamMetadataValidation(validation)
+          }
+          const preflight = await client.request<GoLivePreflight>(
+            'streamTargets.confirmation.validate',
+            {
+              scheduledEventIds: Object.fromEntries(
+                goLiveStreaming.targets
+                  .filter((t) => t.enabled && t.scheduledEventId)
+                  .map((t) => [t.id, t.scheduledEventId])
+              ),
+              streaming: goLiveStreaming
+            }
+          )
+          const changedScheduledEvent = preflight.destinations.some(
+            (destination) =>
+              destination.scheduled &&
+              previousPreflight?.destinations.find(
+                (previous) => previous.targetId === destination.targetId
+              )?.scheduled?.fingerprint !== destination.scheduled.fingerprint
+          )
+          if (changedScheduledEvent) {
+            setGoLivePreflight(preflight)
+            if (!headless) {
+              toast.warning('The scheduled event changed', {
+                description: 'Review its updated visibility and details, then confirm again.'
+              })
+            }
+            return { kind: 'scheduled-changed', preflight }
+          }
+          setGoLivePreflight(preflight)
+          const preflightDecision = decideGoLivePreflight(preflight)
+          if (preflightDecision.kind === 'blocked') {
+            const premiumIssue = premiumRequiredIssueMessage(preflight)
+            // The dialog stays open on the fresh preflight, which says what to
+            // fix; a toast repeating it was noise (plan 174 S3.4, B-18).
+            if (premiumIssue && !headless) {
+              void loadSessionRuntimeRecovery().then((runtime) =>
+                runtime.showPremiumUpgrade(
+                  'This Go Live setup is part of Videorc Premium',
+                  premiumIssue
+                )
+              )
+            }
+            return { kind: 'blocked', preflight }
+          }
+          // Settled before anything is created on a platform, so a refused
+          // start leaves no broadcast behind and a prepared one advertises the
+          // profile this session will send.
+          const sessionOutput = await settleStreamOutputTopology(
+            goLiveStreaming,
+            headless?.suppressCaptions
+          )
+          if (sessionOutput.reason) {
+            throw new Error(sessionOutput.reason)
+          }
+          preparedGoLiveOutputRef.current = sessionOutput
+          const setup = await prepareOauthTargetsForGoLive(
+            preflight,
+            sessionOutput,
+            excludedTargetIds
+          )
+          const setupDecision = decidePreparedGoLiveSetup(setup)
+          if (setupDecision.kind === 'no-ready-destinations') {
+            throw new Error('No livestream destinations are ready after platform setup.')
+          }
+          if (setupDecision.kind === 'partial') {
+            // The dialog lists what failed and offers the ready ones (B-18).
+            if (!headless) setGoLivePartialSetup(setupDecision.setup)
+            return { kind: 'partial', setup: setupDecision.setup }
+          }
+          // Plan 209 review fix 1: Stop agents during an agent's platform
+          // setup ends it here; the caller cleans up what was prepared.
+          if (headless?.cancelled?.()) {
+            return { kind: 'cancelled', streaming: setupDecision.streaming }
+          }
+          setGoLivePhase({ kind: 'starting' })
+          setGoLiveConfirmationOpen(false)
+          const started = await runStartSession(
+            setupDecision.streaming,
+            sessionOutput,
+            livestreamIntent(captureConfigRef.current.recordEnabled),
+            headless?.suppressCaptions
+          )
+          return { kind: 'started', started, streaming: setupDecision.streaming }
+        } catch (error) {
+          // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
+          // setup) is just as silent as a refused start: same persistent surface.
+          // The dialog stays open, so Retry re-runs the confirmation. A Go Live
+          // without the dialog answers its caller instead.
+          if (!headless) {
+            reportSessionStartFailure(
+              error,
+              () => {
+                void confirmGoLiveRef.current?.()
+              },
+              true
+            )
+          }
+          return { kind: 'failed', error }
+        } finally {
+          setGoLiveConfirmationPending(false)
+          setGoLivePhase(null)
+        }
+      })()
+      confirmGoLiveInFlightPromiseRef.current = confirmationPromise
+      const clearConfirmationPromise = () => {
+        if (confirmGoLiveInFlightPromiseRef.current === confirmationPromise) {
+          confirmGoLiveInFlightPromiseRef.current = null
+        }
+      }
+      void confirmationPromise.then(clearConfirmationPromise, clearConfirmationPromise)
+      return confirmationPromise
+    },
+    [
+      captureConfig.streaming,
+      client,
+      goLiveConfirmationPending,
+      goLivePreflight,
+      goLiveCaptionsReadiness,
+      prepareOauthTargetsForGoLive,
+      reportSessionStartFailure,
+      runStartSession,
+      settleStreamOutputTopology,
+      startRequestPending,
+      streamMetadataDraft
+    ]
+  )
+  const confirmGoLive = useCallback(async (): Promise<void> => {
+    await runGoLiveConfirmation()
+  }, [runGoLiveConfirmation])
+  confirmGoLiveRef.current = confirmGoLive
+
+  // "Go live on {ready}" (B-18). A Go Live without the dialog passes the
+  // setup its confirm returned (plan 209 S10, `allowPartial`); the dialog
+  // reads the one it shows. Resolves whether the livestream started.
+  const startOnReadyDestinations = useCallback(
+    async (headless?: {
+      setup: GoLivePartialSetup
+      suppressCaptions: boolean
+    }): Promise<boolean> => {
+      // A Go Live without the dialog decided on captions before its confirm.
+      if (!headless && goLiveCaptionsReadiness.blocksStart) {
+        toast.warning("Live captions aren't ready", {
+          description: goLiveCaptionsReadiness.description
+        })
+        return false
+      }
+      const decision = decideContinueGoLiveWithReadyDestinations({
+        goLiveConfirmationPending,
+        startRequestPending,
+        partialSetup: headless?.setup ?? goLivePartialSetup
+      })
+      if (decision.kind === 'ignore') {
+        return false
+      }
+
       try {
         setLastError(null)
         setGoLiveConfirmationPending(true)
-        setGoLivePhase({ kind: 'checking' })
-        if (streamMetadataDraft) {
-          const saved = await client.request<StreamMetadataDraft>(
-            'streamTargets.metadata.update',
-            streamMetadataDraft
-          )
-          setStreamMetadataDraft(saved)
-          const validation = await client.request<StreamMetadataValidation>(
-            'streamTargets.metadata.validate',
-            saved
-          )
-          setStreamMetadataValidation(validation)
-        }
-        const preflight = await client.request<GoLivePreflight>(
-          'streamTargets.confirmation.validate',
-          {
-            scheduledEventIds: Object.fromEntries(
-              goLiveStreaming.targets
-                .filter((t) => t.enabled && t.scheduledEventId)
-                .map((t) => [t.id, t.scheduledEventId])
-            ),
-            streaming: goLiveStreaming
-          }
-        )
-        const changedScheduledEvent = preflight.destinations.some(
-          (destination) =>
-            destination.scheduled &&
-            goLivePreflight?.destinations.find(
-              (previous) => previous.targetId === destination.targetId
-            )?.scheduled?.fingerprint !== destination.scheduled.fingerprint
-        )
-        if (changedScheduledEvent) {
-          setGoLivePreflight(preflight)
-          toast.warning('The scheduled event changed', {
-            description: 'Review its updated visibility and details, then confirm again.'
-          })
-          return
-        }
-        setGoLivePreflight(preflight)
-        const preflightDecision = decideGoLivePreflight(preflight)
-        if (preflightDecision.kind === 'blocked') {
-          const premiumIssue = premiumRequiredIssueMessage(preflight)
-          // The dialog stays open on the fresh preflight, which says what to
-          // fix; a toast repeating it was noise (plan 174 S3.4, B-18).
-          if (premiumIssue) {
-            void loadSessionRuntimeRecovery().then((runtime) =>
-              runtime.showPremiumUpgrade(
-                'This Go Live setup is part of Videorc Premium',
-                premiumIssue
-              )
-            )
-          }
-          return
-        }
-        // Settled before anything is created on a platform, so a refused
-        // start leaves no broadcast behind and a prepared one advertises the
-        // profile this session will send.
-        const sessionOutput = await settleStreamOutputTopology(goLiveStreaming)
-        if (sessionOutput.reason) {
-          throw new Error(sessionOutput.reason)
-        }
-        preparedGoLiveOutputRef.current = sessionOutput
-        const setup = await prepareOauthTargetsForGoLive(
-          preflight,
-          sessionOutput,
-          excludedTargetIds
-        )
-        const setupDecision = decidePreparedGoLiveSetup(setup)
-        if (setupDecision.kind === 'no-ready-destinations') {
-          throw new Error('No livestream destinations are ready after platform setup.')
-        }
-        if (setupDecision.kind === 'partial') {
-          // The dialog lists what failed and offers the ready ones (B-18).
-          setGoLivePartialSetup(setupDecision.setup)
-          return
-        }
-        setGoLivePhase({ kind: 'starting' })
+        setGoLivePartialSetup(null)
         setGoLiveConfirmationOpen(false)
-        await runStartSession(
-          setupDecision.streaming,
-          sessionOutput,
-          livestreamIntent(captureConfigRef.current.recordEnabled)
+        return await runStartSession(
+          decision.streaming,
+          preparedGoLiveOutputRef.current,
+          livestreamIntent(captureConfigRef.current.recordEnabled),
+          headless?.suppressCaptions
         )
       } catch (error) {
-        // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
-        // setup) is just as silent as a refused start: same persistent surface.
-        // The dialog stays open, so Retry re-runs the confirmation.
-        reportSessionStartFailure(
-          error,
-          () => {
-            void confirmGoLiveRef.current?.()
-          },
-          true
-        )
+        reportError(error)
+        return false
       } finally {
         setGoLiveConfirmationPending(false)
-        setGoLivePhase(null)
       }
-    })()
-    confirmGoLiveInFlightPromiseRef.current = confirmationPromise
-    const clearConfirmationPromise = () => {
-      if (confirmGoLiveInFlightPromiseRef.current === confirmationPromise) {
-        confirmGoLiveInFlightPromiseRef.current = null
-      }
-    }
-    void confirmationPromise.then(clearConfirmationPromise, clearConfirmationPromise)
-    return confirmationPromise
-  }, [
-    captureConfig.streaming,
-    client,
-    goLiveConfirmationPending,
-    goLivePreflight,
-    goLiveCaptionsReadiness,
-    prepareOauthTargetsForGoLive,
-    reportSessionStartFailure,
-    runStartSession,
-    settleStreamOutputTopology,
-    startRequestPending,
-    streamMetadataDraft
-  ])
-  confirmGoLiveRef.current = confirmGoLive
-
-  const continueGoLiveWithReadyDestinations = useCallback(async () => {
-    if (goLiveCaptionsReadiness.blocksStart) {
-      toast.warning("Live captions aren't ready", {
-        description: goLiveCaptionsReadiness.description
-      })
-      return
-    }
-    const decision = decideContinueGoLiveWithReadyDestinations({
+    },
+    [
       goLiveConfirmationPending,
-      startRequestPending,
-      partialSetup: goLivePartialSetup
-    })
-    if (decision.kind === 'ignore') {
-      return
-    }
-
-    try {
-      setLastError(null)
-      setGoLiveConfirmationPending(true)
-      setGoLivePartialSetup(null)
-      setGoLiveConfirmationOpen(false)
-      await runStartSession(
-        decision.streaming,
-        preparedGoLiveOutputRef.current,
-        livestreamIntent(captureConfigRef.current.recordEnabled)
-      )
-    } catch (error) {
-      reportError(error)
-    } finally {
-      setGoLiveConfirmationPending(false)
-    }
-  }, [
-    goLiveConfirmationPending,
-    goLiveCaptionsReadiness,
-    goLivePartialSetup,
-    reportError,
-    runStartSession,
-    startRequestPending
-  ])
+      goLiveCaptionsReadiness,
+      goLivePartialSetup,
+      reportError,
+      runStartSession,
+      startRequestPending
+    ]
+  )
+  const continueGoLiveWithReadyDestinations = useCallback(async (): Promise<void> => {
+    await startOnReadyDestinations()
+  }, [startOnReadyDestinations])
 
   const stopSession = useCallback(() => {
     const pendingStop = stopSessionInFlightPromiseRef.current
@@ -15814,7 +15972,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // at the original path can therefore never cross the backend-check/Electron-
   // use boundary and be trashed by mistake.
   const deleteSessions = useCallback(
-    async (targets: SessionSummary[]): Promise<void> => {
+    async (targets: readonly Pick<SessionSummary, 'id'>[]): Promise<void> => {
       if (!client) {
         throw offlineError()
       }
@@ -16463,9 +16621,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // destinations (with an optional patch) minus the ones left out of this
   // attempt. The dialog shows the answer without reopening.
   const revalidateGoLive = useCallback(
-    async (streaming: StreamingSettings, excludedTargetIds: readonly string[]) => {
+    async (
+      streaming: StreamingSettings,
+      excludedTargetIds: readonly string[]
+    ): Promise<GoLivePreflight | null> => {
       if (!client) {
-        return
+        return null
       }
       const sent = streamingWithoutTargets(streaming, excludedTargetIds)
       try {
@@ -16481,8 +16642,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         )
         setGoLivePreflight(preflight)
+        return preflight
       } catch (error) {
         reportError(error)
+        return null
       }
     },
     [client, reportError]
@@ -16517,10 +16680,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [commitGoLiveExclusions, patchStreamingTarget, revalidateGoLive]
   )
 
-  const recheckGoLive = useCallback(
-    () => revalidateGoLive(captureConfigRef.current.streaming, goLiveExcludedTargetIdsRef.current),
-    [revalidateGoLive]
-  )
+  const recheckGoLive = useCallback(async (): Promise<void> => {
+    await revalidateGoLive(captureConfigRef.current.streaming, goLiveExcludedTargetIdsRef.current)
+  }, [revalidateGoLive])
 
   const patchManualStreamKeyResult = useCallback(
     (targetId: string, result: StoreManualStreamKeyResult) => {
@@ -16927,105 +17089,130 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // ── Remote control (issue #143) ──────────────────────────────────────
   // Intents execute through the SAME handlers as the on-screen buttons —
   // no second session-start path, no validation bypass. Every intent is
-  // acked so deck keys can show failure reasons. An effect event: stable
-  // identity for the one-time client subscription, latest closure inside.
-  const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
-    if (!client) return
-    const knownLayoutPresets = [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS]
-    const context: RemoteIntentContext = {
+  // acked so deck keys can show failure reasons. The executors live in
+  // lib/studio-actions (plan 209 S5); per intent the Studio hands over its
+  // latest render's handlers, state and refs, and studio-context.ts builds
+  // the one context a deck key and (S6) an agent's tool call run against.
+  const studioActionSource = (): StudioActionSource | null =>
+    client && {
       client,
-      sessionActive: sessionOwnsTransport(recordingRef.current),
-      replayOn: replayStateRef.current.state === 'on',
+      recordingRef,
+      replayStateRef,
       recordBlockedReason,
       liveStreamBlockedReason,
       startRecording,
       startLivestream,
-      // A remote intent is a deliberate device action (plan 174 S0.1, D2):
-      // it stops at once, through the one door every stop takes.
-      stopSession: () => requestStopSession('remote-control'),
-      setMicrophoneMuted: requestRemoteMicrophoneMute,
-      systemAudio: [systemAudioStatus, systemAudioShown],
+      requestStopSession,
+      requestRemoteMicrophoneMute,
+      systemAudioStatus,
+      systemAudioShown,
       setSystemAudioEnabled,
-      knownLayoutPresets,
-      applyLayoutPreset: (layoutPreset) => requestCameraPresetTransaction({ layoutPreset }),
-      hasTakeover: (assetId) => screens.some((screen) => screen.id === assetId),
-      activateTakeover: activateScreen,
-      clearTakeover: clearActiveScreen,
-      openWindow: async (name) => {
-        if (name === 'notes') await openNotesWindow()
-        else if (name === 'comments') await openCommentsWindow()
-        else if (name === 'preview') await openPreviewWindow()
-        else return false
-        return true
-      },
-      showCommentHighlight: async (messageId) => {
-        const message = liveChatSnapshot.messages.find((candidate) => candidate.id === messageId)
-        if (!message || message.isDeleted) {
-          return { ok: false, message: 'That comment is no longer available.' }
-        }
-        const highlightIntent = ++commentHighlightIntentRef.current
-        setCommentHighlightFailure(null)
-        try {
-          const state = await applyCommentHighlight(message, undefined, highlightIntent, {
-            alwaysSet: true
-          })
-          if (!state) return { ok: false, message: 'A newer comment replaced this one.' }
-          publishCommentHighlightState(state)
-          return state.phase === 'live'
-            ? { ok: true }
-            : { ok: false, message: state.reason ?? "The comment didn't reach the stream." }
-        } catch (error) {
-          // The backend's eligibility reason ("not live", ...) verbatim.
-          return {
-            ok: false,
-            message: error instanceof Error ? error.message : 'Highlight failed.'
-          }
-        }
-      },
-      clearCommentHighlight: async () => {
-        ++commentHighlightIntentRef.current
-        try {
-          const state = await client.request<CommentHighlightState>('comments.highlight.clear')
-          publishCommentHighlightState(state)
-          return { ok: true }
-        } catch (error) {
-          return {
-            ok: false,
-            message: error instanceof Error ? error.message : "Couldn't clear the comment."
-          }
-        }
-      },
-      banners: bannerListRef.current ?? NO_BANNERS,
-      markClip: async (seconds) => {
-        try {
-          const event = await client.request<ClipMarkedEvent>('clip.mark', seconds && { seconds })
-          // Plan 181 R4: a saved clip is a success for a deck key, mark or not.
-          return clipMarkKeptSomething(event)
-            ? { ok: true }
-            : { ok: false, message: clipMarkedToast(event).title }
-        } catch (error) {
-          return {
-            ok: false,
-            message: error instanceof Error ? error.message : "Couldn't mark the clip."
-          }
-        }
-      }
+      requestCameraPresetTransaction,
+      screens,
+      activateScreen,
+      clearActiveScreen,
+      openNotesWindow,
+      openCommentsWindow,
+      openPreviewWindow,
+      liveChatMessages: liveChatSnapshot.messages,
+      commentHighlightIntentRef,
+      setCommentHighlightFailure,
+      applyCommentHighlight,
+      publishCommentHighlightState,
+      bannerListRef,
+      savedScenes: sceneLibrary.scenes,
+      applySavedScene,
+      // Plan 209 S10 (D13): the Go Live dialog's own preflight, gate and
+      // confirm, for an agent's `go_live` (lib/go-live-headless).
+      dialogOpenRef,
+      goLiveConfirmationPending,
+      startRequestPending,
+      openGoLiveConfirmationInFlightRef,
+      confirmGoLiveInFlightPromiseRef,
+      sessionStartInFlightRef,
+      goLiveCaptionOutputReadiness,
+      setGoLiveConfirmationPending,
+      setSuppressCaptionsForSession,
+      runGoLivePreflight,
+      revalidateGoLive,
+      runGoLiveConfirmation,
+      settlePreparedPlatformLifecycle,
+      startOnReadyDestinations,
+      captureConfigRef,
+      deviceListRef,
+      sourceSwitchReason,
+      switchSourceDeviceLive,
+      sourceSelectionStateRef,
+      setCaptureConfig,
+      captionsCommandPending,
+      entitlements,
+      captionsPlatformUnavailable,
+      background: activeSceneBackground,
+      applyLiveBackground,
+      transformSceneRef,
+      overlayLayoutRef,
+      platform: runtimeInfo?.platform,
+      wsStatusRef,
+      layoutSwitchPending,
+      savedScenePendingId,
+      setOverlayLayout,
+      updateBanner,
+      applyLayoutPatch,
+      setSceneSourceTransform,
+      setSceneSourceVisible,
+      cohostSettingsRef,
+      cohostGate,
+      aiConsent,
+      setCohostSettings,
+      streamMetadataDraft,
+      setStreamMetadataDraft,
+      setStreamMetadataValidation,
+      platformAccounts,
+      goLivePartialSetup,
+      patchStreamingTarget,
+      settings,
+      theme: appTheme,
+      setTheme: setAppTheme,
+      patchVideo,
+      setSettings,
+      setReplayEnabled,
+      sessions,
+      deleteSessions,
+      refreshSessions,
+      refreshNoiseCleanupJobs,
+      noteRecordClick
     }
+
+  // An effect event: stable identity for the one-time client subscription,
+  // latest closure inside.
+  const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
+    const source = studioActionSource()
+    if (!source) return
     const intentKind = (payload as { kind?: unknown } | null)?.kind
     if (intentKind === 'recordStart' || intentKind === 'streamStart') {
       noteRecordClick('start')
     } else if (intentKind === 'recordStop' || intentKind === 'streamStop') {
       noteRecordClick('stop')
     } else if (intentKind === 'recordToggle') {
-      noteRecordClick(context.sessionActive ? 'stop' : 'start')
+      noteRecordClick(sessionOwnsTransport(recordingRef.current) ? 'stop' : 'start')
     }
     try {
-      const { executeRemoteIntent } = await import('@/lib/remote-surface')
-      await executeRemoteIntent(payload, context)
+      const actions = await import('@/lib/studio-actions')
+      await actions.executeRemoteIntent(payload, actions.studioActionContext(source))
     } catch (error) {
       reportError(error)
     }
   })
+
+  // Plan 209 S6: an agent's Studio tool call, through the same context as a
+  // deck key. Resolves to the body of its `agent.intent.ack`.
+  const handleAgentIntent = useEffectEvent(
+    async (intent: AgentIntent, gone: boolean): Promise<AgentIntentOutcome> => {
+      const source = gone ? undefined : studioActionSource()
+      const actions = await import('@/lib/studio-actions')
+      return actions.executeStudioAgentIntent(intent, source)
+    }
+  )
 
   // The state projection deck keys render (types in lib/remote-surface.ts).
   // Minimal by design and the ONLY payload remote sockets receive — never
@@ -17068,6 +17255,43 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // reconnect, and retries failures on its own timeline — no effect.
   remoteSurfaceValuesRef.current = remoteSurfaceValues
   remoteSurfacePublisherRef.current?.syncValues(remoteSurfaceValues)
+
+  // Plan 209 S6: the agents' projection (lib/agent-surface.ts), handed over
+  // the same way. Only references here: the publisher builds the allowlisted
+  // surface after the commit, and only while Agents is on.
+  const agentSurfaceInput: AgentSurfaceInput = {
+    recordBlockedReason,
+    liveStreamBlockedReason,
+    layoutPreset: captureConfig.layout.layoutPreset,
+    layoutPresets: remoteSurfaceValues[10],
+    activeSavedSceneId,
+    savedSceneModified,
+    savedScenes: sceneLibrary.scenes,
+    microphoneMuted: remoteSurfaceMicrophoneMuted,
+    sources: captureConfig.sources,
+    devices: deviceList.devices,
+    systemAudioStatus,
+    systemAudioShown,
+    activeTakeoverId: activeScreen?.id ?? null,
+    takeovers: screens,
+    background: activeSceneBackground,
+    captionsEnabled: captureConfig.captions.enabled,
+    captionsStatus,
+    cohostSettings,
+    cohostState,
+    streaming: captureConfig.streaming,
+    streamMetadataDraft,
+    windows: {
+      notes: notesWindow.open,
+      streamManager: commentsWindow.open,
+      preview: previewWindow.open
+    },
+    cloudAiConsent: aiConsent,
+    // Plan 209 S19: Buddy's planner reads it too while Buddy may act.
+    buddyCanAct: cohostGate.allowed
+  }
+  agentSurfaceInputRef.current = agentSurfaceInput
+  agentLinkRef.current?.sync(agentSurfaceInput)
 
   const remoteControlRequest = useCallback(
     async (method: string): Promise<RemoteControlStatus | null> => {

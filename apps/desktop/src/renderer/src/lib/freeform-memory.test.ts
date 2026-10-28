@@ -4,6 +4,7 @@ import type { CameraTransform, LayoutPreset, LayoutSettings } from '@/lib/backen
 import { defaultCaptureConfig } from '@/lib/capture'
 import {
   freeformEntryOverrides,
+  freeformEntryPatch,
   layoutUndoAfterCommit,
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
@@ -159,5 +160,44 @@ describe('Layout undo (plan 174 S3.9, D15)', () => {
     expect(peekLayoutUndo()).toEqual(entry(presetLayout, 'scene-b'))
     restoreLayoutUndo(null)
     expect(peekLayoutUndo()).toEqual(entry(presetLayout, 'scene-b'))
+  })
+})
+
+// Plan 209 S11b: the Freeform button, the canvas's "Make freeform" and an
+// agent's move off a preset send this one patch.
+describe('freeformEntryPatch', () => {
+  it('enters freeform from the remembered arrangement, else where the scene draws it now', () => {
+    const sources = [
+      {
+        id: 'source:base',
+        transform: {
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 1,
+          cropLeft: 0,
+          cropTop: 0,
+          cropRight: 0,
+          cropBottom: 0
+        }
+      },
+      {
+        id: 'source:camera',
+        transform: {
+          x: 0.7,
+          y: 0.7,
+          width: 0.25,
+          height: 0.25,
+          cropLeft: 0,
+          cropTop: 0,
+          cropRight: 0,
+          cropBottom: 0
+        }
+      }
+    ]
+    expect(freeformEntryPatch('horizontal', sources)).toEqual({
+      arrangementMode: 'freeform',
+      sourceTransformOverrides: freeformEntryOverrides(rememberedFreeform(), 'horizontal', sources)
+    })
   })
 })
