@@ -7,11 +7,30 @@
 // counts as "the Studio is open", so the Agents store's own socket never
 // stalls an agent's call. A new socket starts without it: `markConnected`
 // asks again on every (re)connect.
+//
+// Review fix 1: Stop agents, Off and Remove reach the Studio as
+// `agent.intent.cancel`. Every intent the link holds (queued or running) of
+// an older generation is marked cancelled, one agent's or every agent's but
+// Buddy's: the lane drops it when its turn comes (`agentIntentDropReason`),
+// and `go_live` stops before it confirms.
 
 import type { BackendClient } from '@/backendClient'
 import { AgentSurfacePublisher, type AgentSurfaceInput } from '@/lib/agent-surface'
-import type { AgentsStatus } from '@/lib/backend'
-import type { AgentIntent, AgentIntentOutcome } from '@/lib/studio-actions/agent'
+import type { AgentIntentCancelEvent, AgentsStatus } from '@/lib/backend'
+import {
+  BUDDY_AGENT_ID,
+  type AgentIntent,
+  type AgentIntentOutcome
+} from '@/lib/studio-actions/agent'
+
+/** Whether a cancel reaches this intent: its agent's (Remove), or any
+ * agent's but Buddy's (Stop agents, Off), sent in an older generation. */
+export function agentCancelReaches(intent: AgentIntent, cancel: AgentIntentCancelEvent): boolean {
+  if (intent.generation !== undefined && intent.generation >= cancel.generation) return false
+  return cancel.agentId === undefined
+    ? intent.agentId !== BUDDY_AGENT_ID
+    : intent.agentId === cancel.agentId
+}
 
 export interface AgentStudioLinkHooks {
   /** Runs an agent's Studio tool on the agents' lane of the intent queue. */
@@ -26,6 +45,9 @@ type LinkClient = Pick<BackendClient, 'on' | 'request' | 'requestTyped'>
 export class AgentStudioLink {
   private readonly publisher: AgentSurfacePublisher
   private readonly unsubscribers: (() => void)[]
+  /** The intents this link holds until their ack, and whether a cancel
+   * reached each. */
+  private readonly held = new Map<AgentIntent, { cancelled: boolean }>()
 
   constructor(
     private readonly client: LinkClient,
@@ -39,15 +61,25 @@ export class AgentStudioLink {
       // lane through lib/studio-actions and is always acked: the agent is
       // waiting on the answer.
       client.on('agent.intent', (payload) => {
-        const intent = payload as AgentIntent
-        const ack = (outcome: AgentIntentOutcome): Promise<unknown> =>
-          client
+        const mark = { cancelled: false }
+        const intent: AgentIntent = { ...(payload as AgentIntent), cancelled: () => mark.cancelled }
+        this.held.set(intent, mark)
+        const ack = (outcome: AgentIntentOutcome): Promise<unknown> => {
+          this.held.delete(intent)
+          return client
             .request('agent.intent.ack', { intentId: intent.intentId, ...outcome })
             .catch(() => undefined)
+        }
         hooks.run(intent).then(ack, (error: unknown) => {
           hooks.reportError(error)
           return ack({ ok: false, message: 'Something went wrong in Videorc.' })
         })
+      }),
+      client.on('agent.intent.cancel', (payload) => {
+        const cancel = payload as AgentIntentCancelEvent
+        for (const [intent, mark] of this.held) {
+          if (agentCancelReaches(intent, cancel)) mark.cancelled = true
+        }
       }),
       client.on('agents.status', (payload) => {
         publisher.setEnabled((payload as AgentsStatus).enabled)

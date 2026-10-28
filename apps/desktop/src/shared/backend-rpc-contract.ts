@@ -141,6 +141,7 @@ import type {
   AgentIdParams,
   AgentIntentAckParams,
   AgentIntentEvent,
+  AgentIntentCancelEvent,
   AgentsActivityListParams,
   AgentsActivityPage,
   AgentsCreateParams,
@@ -695,6 +696,7 @@ export interface BackendEventMap {
   'agents.status': AgentsStatus
   'agents.activity': AgentActivityEntry
   'agent.intent': AgentIntentEvent
+  'agent.intent.cancel': AgentIntentCancelEvent
   // --- end Agents (plan 209) ---
 }
 
@@ -1285,10 +1287,19 @@ const agentIntentEventSchema = objectSchema(
     agentId: agentIdSchema,
     agentName: agentNameSchema,
     tool: agentToolNameSchema,
-    args: boundedBackendParamValueSchema
+    args: boundedBackendParamValueSchema,
+    deadlineAt: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    generation: optionalSchema(numberSchema({ integer: true, min: 0 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<AgentIntentEvent>
+const agentIntentCancelEventSchema = objectSchema(
+  {
+    generation: numberSchema({ integer: true, min: 0 }),
+    agentId: optionalSchema(agentIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentCancelEvent>
 const agentIntentAckParamsSchema = objectSchema(
   {
     intentId: agentIdSchema,
@@ -5354,7 +5365,8 @@ const runtimeEventSchemas = {
   // --- Agents (plan 209) ---
   'agents.status': agentsStatusSchema,
   'agents.activity': agentActivityEntrySchema,
-  'agent.intent': agentIntentEventSchema
+  'agent.intent': agentIntentEventSchema,
+  'agent.intent.cancel': agentIntentCancelEventSchema
   // --- end Agents (plan 209) ---
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 

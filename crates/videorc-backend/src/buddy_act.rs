@@ -133,7 +133,7 @@ pub async fn call(state: &AppState, name: &str, arguments: Value) -> ToolOutcome
     let notice = tool
         .filter(|tool| tool.on_air && outcome.outcome == AgentActivityOutcome::Ok)
         .and_then(|tool| tool.fill_notice(&agent.name, &arguments, outcome.structured.as_ref()));
-    crate::agent_mcp::log_activity(
+    let row = crate::agent_mcp::log_activity(
         state,
         &agent,
         name,
@@ -142,6 +142,9 @@ pub async fn call(state: &AppState, name: &str, arguments: Value) -> ToolOutcome
         Some(outcome.text.clone()),
         notice,
     );
+    if let Some(intent_id) = outcome.unanswered_intent.as_deref() {
+        agent_call::attach_activity_row(state, intent_id, row);
+    }
     outcome
 }
 

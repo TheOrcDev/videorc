@@ -146,6 +146,7 @@ export interface StudioActionSource extends Omit<
   deleteSessions: (targets: readonly { id: string }[]) => Promise<void>
   refreshSessions: (client: BackendClient) => Promise<unknown>
   refreshNoiseCleanupJobs: (client: BackendClient) => Promise<unknown>
+  noteRecordClick: (kind: 'start' | 'stop') => void
 }
 
 const NO_BANNERS: readonly Banner[] = []
@@ -225,6 +226,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
     },
     banners: studio.bannerListRef.current ?? NO_BANNERS,
     // Plan 209 S6: what agent tools read beside a deck key's fields.
+    noteRecordClick: (kind) => studio.noteRecordClick(kind),
     sessionLive: sessionIsLive(studio.recordingRef.current),
     savedScenes: studio.savedScenes,
     applySavedScene: (id) => studio.applySavedScene(id),

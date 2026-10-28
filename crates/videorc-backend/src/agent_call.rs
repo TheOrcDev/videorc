@@ -37,6 +37,11 @@ pub struct ToolOutcome {
     /// MCP image content after the text (`get_picture`): base64 and its
     /// MIME type.
     pub image: Option<(String, String)>,
+    /// A Studio call that ended before the Studio answered (a timeout, or
+    /// Stop closing the port): its intent id, so the caller hands its
+    /// Activity row to `attach_activity_row` for a late ack. Never on the
+    /// wire.
+    pub unanswered_intent: Option<String>,
 }
 
 impl ToolOutcome {
@@ -46,6 +51,7 @@ impl ToolOutcome {
             text: text.into(),
             structured,
             image: None,
+            unanswered_intent: None,
         }
     }
 
@@ -67,7 +73,13 @@ impl ToolOutcome {
             text: text.into(),
             structured: None,
             image: None,
+            unanswered_intent: None,
         }
+    }
+
+    fn unanswered(mut self, intent_id: String) -> Self {
+        self.unanswered_intent = Some(intent_id);
+        self
     }
 
     pub fn with_image(mut self, base64: String, mime_type: &str) -> Self {
@@ -173,7 +185,7 @@ pub async fn call_tool(
     let notice = tool
         .filter(|tool| tool.on_air && outcome.outcome == AgentActivityOutcome::Ok)
         .and_then(|tool| tool.fill_notice(&agent.name, &arguments, outcome.structured.as_ref()));
-    agent_mcp::log_activity(
+    let row = agent_mcp::log_activity(
         state,
         agent,
         &name,
@@ -182,6 +194,9 @@ pub async fn call_tool(
         Some(outcome.text.clone()),
         notice,
     );
+    if let Some(intent_id) = outcome.unanswered_intent.as_deref() {
+        attach_activity_row(state, intent_id, row);
+    }
     outcome.into_result()
 }
 
@@ -232,12 +247,27 @@ pub async fn relay_studio_intent(
         return ToolOutcome::refused(STUDIO_CLOSED);
     }
     let (sender, receiver) = tokio::sync::oneshot::channel::<AgentIntentAck>();
-    let intent_id = {
+    // Review fix 1: the Studio drops an intent it hasn't started once its
+    // deadline (epoch ms, this call's wait) passed or a cancel moved the
+    // generation on.
+    let deadline_at = chrono::Utc::now().timestamp_millis()
+        + i64::try_from(wait.as_millis()).unwrap_or(i64::MAX / 2);
+    let (intent_id, generation) = {
         let mut runtime = state.agents.lock();
         runtime.next_intent += 1;
         let intent_id = format!("ai-{}", runtime.next_intent);
-        runtime.pending_intents.insert(intent_id.clone(), sender);
-        intent_id
+        runtime.pending_intents.insert(
+            intent_id.clone(),
+            agent_mcp::PendingIntent {
+                sender,
+                call: agent_mcp::IntentCall {
+                    agent: agent.clone(),
+                    tool: tool.name.clone(),
+                    arguments: arguments.clone(),
+                },
+            },
+        );
+        (intent_id, runtime.intent_generation)
     };
     state.emit_event(
         "agent.intent",
@@ -247,6 +277,8 @@ pub async fn relay_studio_intent(
             "agentName": agent.name,
             "tool": tool.name,
             "args": arguments,
+            "deadlineAt": deadline_at,
+            "generation": generation,
         }),
     );
     match tokio::time::timeout(wait, receiver).await {
@@ -257,20 +289,114 @@ pub async fn relay_studio_intent(
             ack.message
                 .unwrap_or_else(|| "Videorc couldn't do that.".to_string()),
         ),
-        // The sender was dropped: the port closed (Stop) mid-call.
-        Ok(Err(_)) => ToolOutcome::failed(STUDIO_GONE),
+        // The sender was dropped: the port closed (Stop) mid-call. `stop`
+        // kept the call as unanswered.
+        Ok(Err(_)) => ToolOutcome::failed(STUDIO_GONE).unanswered(intent_id),
         Err(_) => {
-            state.agents.lock().pending_intents.remove(&intent_id);
-            ToolOutcome::timeout(STUDIO_TIMEOUT)
+            let mut runtime = state.agents.lock();
+            if let Some(pending) = runtime.pending_intents.remove(&intent_id) {
+                runtime.keep_unanswered(intent_id.clone(), pending.call, None);
+            }
+            ToolOutcome::timeout(STUDIO_TIMEOUT).unanswered(intent_id)
         }
     }
 }
 
 /// `agent.intent.ack` (renderer-only): the Studio's answer reaches the
-/// waiting call. False when nothing waits for that id (late or unknown).
+/// waiting call. True when a waiting call took it. An ack for a call that
+/// already ended (timed out, or cut by Stop) is late: if the Studio did it
+/// after all, the call's Activity row says so and its notice fires (review
+/// fix 1). False for a late or unknown id.
 pub fn ack_studio_intent(state: &AppState, ack: AgentIntentAck) -> bool {
-    let sender = state.agents.lock().pending_intents.remove(&ack.intent_id);
-    sender.is_some_and(|sender| sender.send(ack).is_ok())
+    let late = {
+        let mut runtime = state.agents.lock();
+        if let Some(pending) = runtime.pending_intents.remove(&ack.intent_id) {
+            match pending.sender.send(ack) {
+                Ok(()) => return true,
+                // The call timed out a moment ago and its row isn't written
+                // yet: keep the answer for it.
+                Err(ack) => {
+                    runtime.keep_unanswered(ack.intent_id.clone(), pending.call, Some(ack));
+                    return false;
+                }
+            }
+        }
+        match runtime.unanswered.get_mut(&ack.intent_id) {
+            None => return false,
+            Some(kept) if kept.row.is_none() => {
+                kept.ack = Some(ack);
+                return false;
+            }
+            Some(_) => runtime
+                .unanswered
+                .remove(&ack.intent_id)
+                .map(|kept| (kept, ack)),
+        }
+    };
+    if let Some((kept, ack)) = late
+        && let Some(row) = kept.row
+    {
+        finish_late(state, &kept.call, row, ack);
+    }
+    false
+}
+
+/// The Activity row of a call that ended unanswered: a late ack updates it.
+/// An ack that came first is applied now.
+pub fn attach_activity_row(
+    state: &AppState,
+    intent_id: &str,
+    row: crate::storage::AgentActivityEntry,
+) {
+    let kept = {
+        let mut runtime = state.agents.lock();
+        match runtime.unanswered.get_mut(intent_id) {
+            None => return,
+            Some(kept) if kept.ack.is_none() => {
+                kept.row = Some(row);
+                return;
+            }
+            Some(_) => runtime.unanswered.remove(intent_id),
+        }
+    };
+    if let Some(kept) = kept
+        && let Some(ack) = kept.ack
+    {
+        finish_late(state, &kept.call, row, ack);
+    }
+}
+
+/// The Studio did it after all: the row takes the answer's outcome and
+/// sentence, and an `onAir` tool's notice fires ("Claude Desktop started the
+/// livestream."). A late refusal changes nothing: the call already said why
+/// it ended, and nothing happened.
+fn finish_late(
+    state: &AppState,
+    call: &agent_mcp::IntentCall,
+    mut row: crate::storage::AgentActivityEntry,
+    ack: AgentIntentAck,
+) {
+    if !ack.ok {
+        return;
+    }
+    let text = ack.message.unwrap_or_else(|| DONE.to_string());
+    row.outcome = AgentActivityOutcome::Ok;
+    row.message = Some(agent_mcp::clip_chars(
+        &text,
+        agent_mcp::ACTIVITY_MESSAGE_MAX_CHARS,
+    ));
+    if let Err(error) =
+        state
+            .database
+            .update_agent_activity_outcome(&row.id, row.outcome, row.message.as_deref())
+    {
+        tracing::warn!("Could not update the agent's activity: {error:#}");
+    }
+    let notice = agent_tools::catalog()
+        .tool(&call.tool)
+        .filter(|tool| tool.on_air)
+        .and_then(|tool| tool.fill_notice(&call.agent.name, &call.arguments, ack.result.as_ref()));
+    agent_mcp::announce_activity(state, &row, notice);
 }
 
 /// `agent.surface.publish` (renderer-only): the Studio's projection for
@@ -972,8 +1098,11 @@ mod tests {
             Duration::from_millis(50),
         )
         .await;
-        assert_eq!(outcome, ToolOutcome::timeout(STUDIO_TIMEOUT));
+        assert_eq!(outcome.outcome, AgentActivityOutcome::Timeout);
+        assert_eq!(outcome.text, STUDIO_TIMEOUT);
+        assert_eq!(outcome.unanswered_intent.as_deref(), Some("ai-1"));
         assert!(state.agents.lock().pending_intents.is_empty());
+        // Late: nothing waits for it any more.
         assert!(!ack_studio_intent(
             &state,
             AgentIntentAck {
@@ -1021,6 +1150,268 @@ mod tests {
         );
         let result = outcome.into_result();
         assert_eq!(result.is_error, Some(true));
+    }
+
+    /// The Studio's `agent.intent` events and cancels as a listening socket
+    /// would see them.
+    fn intent_events(
+        events: &mut tokio::sync::broadcast::Receiver<crate::protocol::ServerEvent>,
+    ) -> Vec<(String, Value)> {
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event.starts_with("agent.intent") || event.event == "agents.activity" {
+                seen.push((event.event.clone(), event.payload.clone()));
+            }
+        }
+        seen
+    }
+
+    /// Review fix 1: a call that timed out is still finished by the Studio's
+    /// late ack, in either order (the ack before or after the caller wrote
+    /// the row), and only when the Studio did it.
+    #[tokio::test]
+    async fn a_late_ack_finishes_the_activity_row_and_fires_the_notice() {
+        let state = test_state();
+        let (agent, _) = connect_agent(&state, "Claude Desktop");
+        let tool = agent_tools::catalog().tool("notify").unwrap().clone();
+        state.agents.studio_sockets.fetch_add(1, Ordering::Relaxed);
+        let mut events = state.events.subscribe();
+        let args = json!({ "message": "the sponsor banner is up" });
+
+        // The usual order: timeout, the row, then the ack.
+        let outcome = relay_studio_intent(
+            &state,
+            &agent,
+            &tool,
+            args.clone(),
+            Duration::from_millis(20),
+        )
+        .await;
+        let intent = intent_events(&mut events).remove(0).1;
+        assert_eq!(intent["generation"], 0);
+        assert!(
+            intent["deadlineAt"].as_i64().unwrap() > chrono::Utc::now().timestamp_millis() - 5_000
+        );
+        let row = agent_mcp::log_activity(
+            &state,
+            &agent,
+            "notify",
+            String::new(),
+            outcome.outcome,
+            Some(outcome.text.clone()),
+            None,
+        );
+        attach_activity_row(
+            &state,
+            outcome.unanswered_intent.as_deref().unwrap(),
+            row.clone(),
+        );
+        intent_events(&mut events);
+        let late = ack_studio_intent(
+            &state,
+            AgentIntentAck {
+                intent_id: "ai-1".to_string(),
+                ok: true,
+                message: Some("Shown.".to_string()),
+                result: Some(json!({ "shown": true })),
+            },
+        );
+        assert!(!late, "nothing was waiting");
+        let stored = agent_mcp::activity(&state, agent_mcp::ActivityListParams::default())
+            .unwrap()
+            .entries;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, row.id);
+        assert_eq!(stored[0].outcome, AgentActivityOutcome::Ok);
+        assert_eq!(stored[0].message.as_deref(), Some("Shown."));
+        let announced = intent_events(&mut events);
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert_eq!(announced[0].1["id"], json!(row.id));
+        assert_eq!(announced[0].1["outcome"], "ok");
+        assert_eq!(
+            announced[0].1["notice"],
+            "Claude Desktop: the sponsor banner is up"
+        );
+        assert!(state.agents.lock().unanswered.is_empty());
+
+        // The ack first, then the row: applied when the row arrives.
+        let outcome = relay_studio_intent(
+            &state,
+            &agent,
+            &tool,
+            args.clone(),
+            Duration::from_millis(20),
+        )
+        .await;
+        let intent_id = outcome.unanswered_intent.clone().unwrap();
+        ack_studio_intent(
+            &state,
+            AgentIntentAck {
+                intent_id: intent_id.clone(),
+                ok: true,
+                message: None,
+                result: None,
+            },
+        );
+        let row = agent_mcp::log_activity(
+            &state,
+            &agent,
+            "notify",
+            String::new(),
+            outcome.outcome,
+            Some(outcome.text.clone()),
+            None,
+        );
+        attach_activity_row(&state, &intent_id, row.clone());
+        let stored = agent_mcp::activity(&state, agent_mcp::ActivityListParams::default())
+            .unwrap()
+            .entries;
+        assert_eq!(stored[0].id, row.id);
+        assert_eq!(stored[0].outcome, AgentActivityOutcome::Ok);
+        assert_eq!(stored[0].message.as_deref(), Some(DONE));
+
+        // A late refusal changes nothing: nothing happened.
+        let outcome =
+            relay_studio_intent(&state, &agent, &tool, args, Duration::from_millis(20)).await;
+        let intent_id = outcome.unanswered_intent.clone().unwrap();
+        let row = agent_mcp::log_activity(
+            &state,
+            &agent,
+            "notify",
+            String::new(),
+            outcome.outcome,
+            Some(outcome.text.clone()),
+            None,
+        );
+        attach_activity_row(&state, &intent_id, row.clone());
+        intent_events(&mut events);
+        ack_studio_intent(
+            &state,
+            AgentIntentAck {
+                intent_id,
+                ok: false,
+                message: Some("Stopped before it ran.".to_string()),
+                result: None,
+            },
+        );
+        let stored = agent_mcp::activity(&state, agent_mcp::ActivityListParams::default())
+            .unwrap()
+            .entries;
+        assert_eq!(stored[0].id, row.id);
+        assert_eq!(stored[0].outcome, AgentActivityOutcome::Timeout);
+        assert!(intent_events(&mut events).is_empty());
+    }
+
+    /// Review fix 1: Stop ends every agent's waiting call ("went away") and
+    /// keeps it for a late ack, cancels what the Studio queued, and never
+    /// touches Buddy's. Remove cancels that agent's intents only.
+    #[tokio::test]
+    async fn stop_and_remove_cancel_agent_intents_but_never_buddys() {
+        let state = test_state();
+        let (agent, _) = connect_agent(&state, "Cursor");
+        let tool = agent_tools::catalog().tool("notify").unwrap().clone();
+        state.agents.studio_sockets.fetch_add(1, Ordering::Relaxed);
+        let mut events = state.events.subscribe();
+
+        let agent_call = {
+            let state = state.clone();
+            let agent = agent.clone();
+            let tool = tool.clone();
+            tokio::spawn(async move {
+                relay_studio_intent(
+                    &state,
+                    &agent,
+                    &tool,
+                    json!({ "message": "x" }),
+                    Duration::from_secs(5),
+                )
+                .await
+            })
+        };
+        let buddy_call = {
+            let state = state.clone();
+            let tool = tool.clone();
+            tokio::spawn(async move {
+                relay_studio_intent(
+                    &state,
+                    &crate::buddy_act::identity(),
+                    &tool,
+                    json!({ "message": "y" }),
+                    Duration::from_secs(5),
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.agents.lock().pending_intents.len() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        agent_mcp::disable(&state).unwrap();
+        let outcome = agent_call.await.unwrap();
+        assert_eq!(outcome.outcome, AgentActivityOutcome::Failed);
+        assert_eq!(outcome.text, STUDIO_GONE);
+        let cut = outcome.unanswered_intent.unwrap();
+        assert!(state.agents.lock().unanswered.contains_key(&cut));
+        // Buddy's call still waits for its own answer.
+        let buddy_id = {
+            let runtime = state.agents.lock();
+            assert_eq!(runtime.pending_intents.len(), 1);
+            runtime.pending_intents.keys().next().cloned().unwrap()
+        };
+        assert!(ack_studio_intent(
+            &state,
+            AgentIntentAck {
+                intent_id: buddy_id,
+                ok: true,
+                message: None,
+                result: None,
+            }
+        ));
+        assert_eq!(buddy_call.await.unwrap().outcome, AgentActivityOutcome::Ok);
+
+        let cancels: Vec<Value> = intent_events(&mut events)
+            .into_iter()
+            .filter(|(event, _)| event == "agent.intent.cancel")
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(cancels, vec![json!({ "generation": 1 })]);
+
+        // Remove: that agent's intents, by id; later intents carry the new
+        // generation.
+        agent_mcp::remove_agent(
+            &state,
+            agent_mcp::AgentIdParams {
+                id: agent.id.clone(),
+            },
+        )
+        .unwrap();
+        let cancels: Vec<Value> = intent_events(&mut events)
+            .into_iter()
+            .filter(|(event, _)| event == "agent.intent.cancel")
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(
+            cancels,
+            vec![json!({ "generation": 2, "agentId": agent.id })]
+        );
+        let _ = relay_studio_intent(
+            &state,
+            &crate::buddy_act::identity(),
+            &tool,
+            json!({ "message": "z" }),
+            Duration::from_millis(10),
+        )
+        .await;
+        let intent = intent_events(&mut events)
+            .into_iter()
+            .find(|(event, _)| event == "agent.intent")
+            .unwrap()
+            .1;
+        assert_eq!(intent["generation"], 2);
     }
 
     #[test]

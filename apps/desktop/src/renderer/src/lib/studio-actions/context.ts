@@ -112,6 +112,9 @@ export interface StudioActionContext {
   applySavedScene?: (id: string) => Promise<boolean>
   /** Each built-in layout's name; `layoutPresetLabel` when left out. */
   layoutLabels?: Readonly<Record<string, string>>
+  /** The record-latency probe's click for an agent's `start_recording` and
+   * `stop` (a deck key notes its own in the Studio). */
+  noteRecordClick?: (kind: 'start' | 'stop') => void
   // Run the show, PR B (plan 209 S10). Optional: a remote key never reads them.
   /** Go live without the dialog (D13): the dialog's own preflight, gate and
    * confirm. A deck's or a phone's `streamStart` never calls it (D2, D19). */

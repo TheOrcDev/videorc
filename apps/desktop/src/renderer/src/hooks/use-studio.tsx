@@ -15512,6 +15512,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             if (!headless) setGoLivePartialSetup(setupDecision.setup)
             return { kind: 'partial', setup: setupDecision.setup }
           }
+          // Plan 209 review fix 1: Stop agents during an agent's platform
+          // setup ends it here; the caller cleans up what was prepared.
+          if (headless?.cancelled?.()) {
+            return { kind: 'cancelled', streaming: setupDecision.streaming }
+          }
           setGoLivePhase({ kind: 'starting' })
           setGoLiveConfirmationOpen(false)
           const started = await runStartSession(
@@ -17172,7 +17177,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sessions,
       deleteSessions,
       refreshSessions,
-      refreshNoiseCleanupJobs
+      refreshNoiseCleanupJobs,
+      noteRecordClick
     }
 
   // An effect event: stable identity for the one-time client subscription,
@@ -17202,8 +17208,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     async (intent: AgentIntent): Promise<AgentIntentOutcome> => {
       const source = studioActionSource()
       if (!source) return { ok: false, message: "Videorc's Studio isn't connected yet." }
-      if (intent.tool === 'start_recording') noteRecordClick('start')
-      else if (intent.tool === 'stop') noteRecordClick('stop')
       const actions = await import('@/lib/studio-actions')
       return actions.executeAgentIntent(intent, actions.studioActionContext(source))
     }

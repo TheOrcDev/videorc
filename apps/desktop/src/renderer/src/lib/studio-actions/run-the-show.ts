@@ -80,7 +80,7 @@ function unsupported(): StudioActionOutcome {
 
 /** Go live without the dialog. The Studio runs the dialog's own preflight,
  * gate and confirm; a refusal is the dialog's own sentence. */
-export const goLive: AgentToolExecutor = async (context, args) => {
+export const goLive: AgentToolExecutor = async (context, args, intent) => {
   if (context.sessionActive) return { ok: false, message: REMOTE_INTENT_COPY.alreadyRunning }
   if (!context.goLive) return unsupported()
   const destinations = Array.isArray(args.destinations)
@@ -90,7 +90,9 @@ export const goLive: AgentToolExecutor = async (context, args) => {
     destinations,
     title: text(args, 'title'),
     allowPartial: args.allowPartial === true,
-    withoutCaptions: args.withoutCaptions === true
+    withoutCaptions: args.withoutCaptions === true,
+    // Stop agents, Off or Remove while it checks: it never confirms.
+    cancelled: intent?.cancelled
   })
   if (!outcome.ok) return outcome
   const live = outcome.destinations.map((destination) => ({

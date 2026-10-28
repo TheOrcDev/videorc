@@ -4816,6 +4816,19 @@ export interface AgentIntentEvent {
   agentName: string
   tool: string
   args: Record<string, unknown>
+  /** Epoch ms: the agent stops waiting then, so an intent the Studio hasn't
+   * started by then is dropped (plan 209 review fix 1). */
+  deadlineAt?: number
+  /** The cancel generation it was sent in (`agent.intent.cancel`). */
+  generation?: number
+}
+
+/** Stop agents, Off or Remove (plan 209 review fix 1): the Studio drops every
+ * intent of an older generation it hasn't started, one agent's (`agentId`)
+ * or every agent's but Buddy's, and `go_live` stops before it confirms. */
+export interface AgentIntentCancelEvent {
+  generation: number
+  agentId?: string
 }
 
 export interface AgentIntentAckParams {

@@ -21,6 +21,13 @@ export interface AgentIntent {
   /** The catalog's tool name, snake_case (`start_recording`). */
   tool: string
   args: StudioActionFields
+  /** Epoch ms: the agent stops waiting then (plan 209 review fix 1). */
+  deadlineAt?: number
+  /** The cancel generation the backend sent it in. */
+  generation?: number
+  /** Never on the wire: the Studio's link (lib/agent-studio-link.ts) sets it,
+   * and it turns true once Stop agents, Off or Remove cancelled this call. */
+  cancelled?: () => boolean
 }
 
 /** What a tool call resolves to; `result` is the tool's structured output
@@ -41,19 +48,34 @@ export type AgentToolExecutor = (
 export const AGENT_INTENT_COPY = {
   unknownTool: "Videorc can't run that tool from the Studio.",
   notBuddys: "Buddy can't use that tool.",
-  failed: 'Something went wrong in Videorc.'
+  failed: 'Something went wrong in Videorc.',
+  cancelled: 'Agents were stopped in Videorc, so that never ran.',
+  late: 'Videorc was busy too long, so that never ran.'
 } as const
+
+/** Why an intent the Studio hasn't started never runs (plan 209 review fix
+ * 1): Stop agents, Off or Remove cancelled it, or the agent already stopped
+ * waiting. Checked when its turn on the agents' lane comes. */
+export function agentIntentDropReason(intent: AgentIntent, now = Date.now()): string | null {
+  if (intent.cancelled?.()) return AGENT_INTENT_COPY.cancelled
+  if (intent.deadlineAt !== undefined && now >= intent.deadlineAt) return AGENT_INTENT_COPY.late
+  return null
+}
 
 /** The Studio's tools by catalog name (tools.ts); a call to any other name
  * is refused. */
 export const AGENT_TOOL_EXECUTORS: Readonly<Record<string, AgentToolExecutor>> = STUDIO_AGENT_TOOLS
 
-/** Runs one agent intent to the body of its ack. Never throws. */
+/** Runs one agent intent to the body of its ack. Never throws. Called when
+ * the intent's turn on the agents' lane comes, so a cancelled or late one is
+ * dropped here before anything runs. */
 export async function executeAgentIntent(
   intent: AgentIntent,
   context: StudioActionContext,
   executors: Readonly<Record<string, AgentToolExecutor>> = AGENT_TOOL_EXECUTORS
 ): Promise<AgentIntentOutcome> {
+  const dropped = agentIntentDropReason(intent)
+  if (dropped) return { ok: false, message: dropped }
   const executor = Object.hasOwn(executors, intent.tool) ? executors[intent.tool] : undefined
   if (!executor) return { ok: false, message: AGENT_INTENT_COPY.unknownTool }
   // D15, a second time: the backend already refused anything outside Buddy's
@@ -61,6 +83,9 @@ export async function executeAgentIntent(
   if (intent.agentId === BUDDY_AGENT_ID && agentTool(intent.tool)?.buddy !== true) {
     return { ok: false, message: AGENT_INTENT_COPY.notBuddys }
   }
+  // The record-latency probe's click, as a deck key notes it.
+  if (intent.tool === 'start_recording') context.noteRecordClick?.('start')
+  else if (intent.tool === 'stop') context.noteRecordClick?.('stop')
   try {
     const outcome = await executor(context, intent.args ?? {}, intent)
     return {

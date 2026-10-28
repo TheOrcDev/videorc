@@ -26,6 +26,7 @@
 export {
   AGENT_INTENT_COPY,
   AGENT_TOOL_EXECUTORS,
+  agentIntentDropReason,
   executeAgentIntent,
   type AgentIntent,
   type AgentIntentOutcome,

@@ -92,7 +92,7 @@ describe('AgentStudioLink (plan 209 S6)', () => {
   it("runs an agent's tool on its lane and acks the outcome", async () => {
     const { client, hooks } = link()
     client.emit('agent.intent', intent)
-    expect(hooks.run).toHaveBeenCalledWith(intent)
+    expect(hooks.run).toHaveBeenCalledWith(expect.objectContaining(intent))
     await vi.waitFor(() =>
       expect(client.request).toHaveBeenCalledWith('agent.intent.ack', {
         intentId: 'intent-1',
@@ -116,6 +116,46 @@ describe('AgentStudioLink (plan 209 S6)', () => {
     expect(hooks.reportError).toHaveBeenCalledWith(error)
   })
 
+  // Review fix 1: Stop agents, Off and Remove reach what the link holds.
+  it('marks held intents cancelled: every agent but Buddy, or one agent', async () => {
+    let finish: () => void = () => undefined
+    const run = vi.fn(
+      (_intent: AgentIntent) =>
+        new Promise<{ ok: boolean }>((resolve) => {
+          finish = () => resolve({ ok: true })
+        })
+    )
+    const { client } = link(fakeClient(), { run })
+    const held = (index: number) => run.mock.calls[index]![0]
+    client.emit('agent.intent', { ...intent, intentId: 'a', generation: 0 })
+    client.emit('agent.intent', { ...intent, intentId: 'b', agentId: 'buddy', generation: 0 })
+    client.emit('agent.intent', { ...intent, intentId: 'c', agentId: 'agent-2', generation: 0 })
+    expect(held(0).cancelled?.()).toBe(false)
+
+    // Remove agent-2: that agent only.
+    client.emit('agent.intent.cancel', { generation: 1, agentId: 'agent-2' })
+    expect(held(0).cancelled?.()).toBe(false)
+    expect(held(2).cancelled?.()).toBe(true)
+    // Stop agents: every agent's, never Buddy's.
+    client.emit('agent.intent.cancel', { generation: 2 })
+    expect(held(0).cancelled?.()).toBe(true)
+    expect(held(1).cancelled?.()).toBe(false)
+
+    // An intent sent after the cancel is not reached by it.
+    client.emit('agent.intent', { ...intent, intentId: 'd', generation: 2 })
+    client.emit('agent.intent.cancel', { generation: 2 })
+    expect(held(3).cancelled?.()).toBe(false)
+
+    // Acked intents are let go.
+    finish()
+    await vi.waitFor(() =>
+      expect(client.request).toHaveBeenCalledWith(
+        'agent.intent.ack',
+        expect.objectContaining({ intentId: 'd' })
+      )
+    )
+  })
+
   it('refreshes the Library only for a successful rename', () => {
     const { client, hooks } = link()
     client.emit('agents.activity', { tool: 'rename_recording', outcome: 'refused' })
@@ -134,6 +174,7 @@ describe('AgentStudioLink (plan 209 S6)', () => {
     instance.detach()
     expect(publisher.detach).toHaveBeenCalled()
     expect(client.listeners('agent.intent')).toBe(0)
+    expect(client.listeners('agent.intent.cancel')).toBe(0)
     expect(client.listeners('agents.status')).toBe(0)
     expect(client.listeners('agents.activity')).toBe(0)
   })

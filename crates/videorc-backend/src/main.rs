@@ -4633,7 +4633,10 @@ struct ConnectionEventFilter {
 /// tool intents, reach renderer sockets only. Main (admin) never executes an
 /// intent, and remote and phone sockets are locked to their own lanes anyway.
 fn renderer_only_event(event: &str) -> bool {
-    matches!(event, "agents.status" | "agents.activity" | "agent.intent")
+    matches!(
+        event,
+        "agents.status" | "agents.activity" | "agent.intent" | "agent.intent.cancel"
+    )
 }
 
 impl ConnectionEventFilter {
@@ -4645,7 +4648,8 @@ impl ConnectionEventFilter {
     }
 
     fn allows(&self, event: &str) -> bool {
-        if event == "agent.intent" {
+        // Review fix 1: the cancel goes where the intents went.
+        if event == "agent.intent" || event == "agent.intent.cancel" {
             return self.renderer && self.agent_intents;
         }
         (self.renderer || !renderer_only_event(event))
@@ -23310,16 +23314,19 @@ mod agent_role_tests {
             assert!(renderer.lock().unwrap().allows(event), "{event}");
             assert!(!admin.lock().unwrap().allows(event), "{event}");
         }
-        assert!(!renderer.lock().unwrap().allows("agent.intent"));
-        assert!(!admin.lock().unwrap().allows("agent.intent"));
+        for event in ["agent.intent", "agent.intent.cancel"] {
+            assert!(!renderer.lock().unwrap().allows(event), "{event}");
+            assert!(!admin.lock().unwrap().allows(event), "{event}");
+        }
         assert!(admin.lock().unwrap().allows("remote.control.status"));
         for filter in [&renderer, &admin] {
             handle_connection_control(
                 filter,
-                r#"{"id":"i","method":"events.setIncluded","params":{"events":["agent.intent"]}}"#,
+                r#"{"id":"i","method":"events.setIncluded","params":{"events":["agent.intent","agent.intent.cancel"]}}"#,
             )
             .expect("connection control");
             assert!(!filter.lock().unwrap().allows("agent.intent"));
+            assert!(!filter.lock().unwrap().allows("agent.intent.cancel"));
         }
 
         // Only the renderer can listen; once it does, its event lists no
@@ -23353,6 +23360,9 @@ mod agent_role_tests {
         .expect("handled");
         assert_eq!(serde_json::to_value(&answer).unwrap()["ok"], true);
         assert!(renderer.lock().unwrap().allows("agent.intent"));
+        // Review fix 1: the cancel reaches the socket the intents reach.
+        assert!(renderer.lock().unwrap().allows("agent.intent.cancel"));
+        assert!(!admin.lock().unwrap().allows("agent.intent.cancel"));
         assert!(state.agents.studio_open());
         // A second listen on the same socket counts it once.
         handle_agent_intent_listen(

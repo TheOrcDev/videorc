@@ -117,6 +117,20 @@ describe('Agents contract (plan 209)', () => {
     }
     expect(validateBackendEventPayload('agent.intent', intent)).toEqual(intent)
     expect(() => validateBackendEventPayload('agent.intent', { ...intent, token: 'x' })).toThrow()
+    // Review fix 1: the deadline and generation ride the intent, and the
+    // cancel is its own renderer-only event.
+    const timed = { ...intent, deadlineAt: 1_793_000_000_000, generation: 3 }
+    expect(validateBackendEventPayload('agent.intent', timed)).toEqual(timed)
+    expect(() =>
+      validateBackendEventPayload('agent.intent', { ...intent, generation: -1 })
+    ).toThrow()
+    for (const cancel of [{ generation: 2 }, { generation: 3, agentId: agent.id }]) {
+      expect(validateBackendEventPayload('agent.intent.cancel', cancel)).toEqual(cancel)
+    }
+    expect(() => validateBackendEventPayload('agent.intent.cancel', {})).toThrow()
+    expect(() =>
+      validateBackendEventPayload('agent.intent.cancel', { generation: 1, all: true })
+    ).toThrow()
 
     // The Studio's socket says it runs intents; nothing else does.
     expect(validateBackendRpcParams('agent.intent.listen', undefined)).toBeUndefined()

@@ -8401,6 +8401,22 @@ impl Database {
         prune_agent_activity_locked(&conn, Utc::now())
     }
 
+    /// A Studio call that ended unanswered, then answered late (plan 209
+    /// review fix 1): its row takes the answer's outcome and sentence.
+    pub(crate) fn update_agent_activity_outcome(
+        &self,
+        id: &str,
+        outcome: AgentActivityOutcome,
+        message: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE agent_activity SET outcome = ?2, message = ?3 WHERE id = ?1",
+            params![id, outcome.as_str(), message],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// The newest rows first, optionally one agent's, at most `limit`.
     pub(crate) fn list_agent_activity(
         &self,

@@ -50,6 +50,9 @@ export interface HeadlessGoLiveRequest {
   allowPartial?: boolean
   /** Go live without captions when they can't start. */
   withoutCaptions?: boolean
+  /** Stop agents, Off or Remove cancelled the call (plan 209 review fix 1):
+   * checked right before it confirms and before it starts. */
+  cancelled?: () => boolean
 }
 
 /** Where a Go Live without the dialog ended: live on these, or why not. */
@@ -74,7 +77,8 @@ export const HEADLESS_GO_LIVE_COPY = {
   scheduledChanged:
     'The scheduled event changed. Review its updated visibility and details in Videorc, then go live again.',
   setupFailed: "Some destinations couldn't be set up",
-  didNotStart: "The livestream didn't start. Check Studio on your computer."
+  didNotStart: "The livestream didn't start. Check Studio on your computer.",
+  cancelled: "Agents were stopped in Videorc, so it didn't go live."
 } as const
 
 export type HeadlessExclusions =
@@ -264,6 +268,8 @@ export type HeadlessGoLiveConfirmation = {
   preflight: GoLivePreflight
   captionsReadiness: GoLiveCaptionsReadiness
   suppressCaptions: boolean
+  /** Checked after platform setup, right before the start (review fix 1). */
+  cancelled?: () => boolean
 }
 
 /** Where the Go Live dialog's confirm ended (plan 209 S10). */
@@ -276,6 +282,9 @@ export type GoLiveConfirmOutcome =
   | { kind: 'blocked'; preflight: GoLivePreflight }
   | { kind: 'partial'; setup: GoLivePartialSetup }
   | { kind: 'started'; started: boolean; streaming: StreamingSettings }
+  /** Cancelled after platform setup: nothing started; `streaming` is what
+   * was prepared, for the caller to clean up as Cancel does. */
+  | { kind: 'cancelled'; streaming: StreamingSettings }
   | { kind: 'failed'; error: unknown }
 
 /**
@@ -336,6 +345,7 @@ export async function goLiveWithoutDialog(
   studio: HeadlessGoLiveStudio
 ): Promise<HeadlessGoLiveOutcome> {
   const copy = HEADLESS_GO_LIVE_COPY
+  const cancelled = () => request.cancelled?.() === true
   if (!studio.connected) {
     return { ok: false, message: connectionBlockedReason(studio.wsStatus) ?? copy.inFlight }
   }
@@ -435,13 +445,16 @@ export async function goLiveWithoutDialog(
     return { ok: false, message: decision.kind === 'refuse' ? decision.message : copy.inFlight }
   }
 
+  // Stop agents wins over a confirm.
+  if (cancelled()) return { ok: false, message: copy.cancelled }
   if (suppressCaptions) studio.setSuppressCaptionsForSession(true)
   const outcome = await studio.runGoLiveConfirmation({
     excludedTargetIds,
     draft: run.draft,
     preflight,
     captionsReadiness,
-    suppressCaptions
+    suppressCaptions,
+    cancelled
   })
   const live = (streaming: StreamingSettings): HeadlessGoLiveOutcome => ({
     ok: true,
@@ -470,12 +483,16 @@ export async function goLiveWithoutDialog(
     }
     case 'failed':
       return { ok: false, message: sessionStartFailureMessage(outcome.error) }
+    case 'cancelled':
+      // What Cancel does with a prepared setup: nothing stays behind.
+      void studio.settlePreparedPlatformLifecycle(outcome.streaming)
+      return { ok: false, message: copy.cancelled }
     case 'partial': {
       const next = decideHeadlessPartialSetup(outcome.setup, allowPartial)
-      if (next.kind === 'refuse') {
+      if (next.kind === 'refuse' || cancelled()) {
         // What Cancel does with a partial setup: nothing prepared stays behind.
         void studio.settlePreparedPlatformLifecycle(outcome.setup.streaming)
-        return { ok: false, message: next.message }
+        return { ok: false, message: next.kind === 'refuse' ? next.message : copy.cancelled }
       }
       return (await studio.startOnReadyDestinations({ setup: outcome.setup, suppressCaptions }))
         ? live(outcome.setup.streaming)

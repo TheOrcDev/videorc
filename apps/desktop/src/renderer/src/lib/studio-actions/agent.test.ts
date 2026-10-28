@@ -55,6 +55,36 @@ afterEach(() => {
 })
 
 describe('executeAgentIntent', () => {
+  // Plan 209 review fix 1: the agents' lane drops what it hasn't started.
+  it('drops a cancelled or late intent before anything runs', async () => {
+    const run: AgentToolExecutor = vi.fn(async () => ({ ok: true }))
+    const noteRecordClick = vi.fn()
+    const context = studioContext({ noteRecordClick })
+    expect(
+      await executeAgentIntent({ ...intent('start_recording'), cancelled: () => true }, context, {
+        start_recording: run
+      })
+    ).toEqual({ ok: false, message: AGENT_INTENT_COPY.cancelled })
+    expect(
+      await executeAgentIntent(
+        { ...intent('start_recording'), deadlineAt: Date.now() - 1 },
+        context,
+        { start_recording: run }
+      )
+    ).toEqual({ ok: false, message: AGENT_INTENT_COPY.late })
+    expect(run).not.toHaveBeenCalled()
+    expect(noteRecordClick).not.toHaveBeenCalled()
+
+    expect(
+      await executeAgentIntent(
+        { ...intent('start_recording'), deadlineAt: Date.now() + 60_000, cancelled: () => false },
+        context,
+        { start_recording: run }
+      )
+    ).toEqual({ ok: true })
+    expect(noteRecordClick).toHaveBeenCalledWith('start')
+  })
+
   it('runs the tool under the call name with the Studio context, the args and the intent', async () => {
     const context = studioContext()
     const switchScene: AgentToolExecutor = vi.fn(async () => ({ ok: true }))

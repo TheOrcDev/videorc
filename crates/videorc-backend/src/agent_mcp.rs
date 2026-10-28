@@ -86,6 +86,74 @@ pub struct AgentBindError {
     pub message: String,
 }
 
+/// What a relayed Studio call was: kept until its ack, so an ack that comes
+/// after the call ended (a timeout, or Stop closing the port) can still
+/// finish its Activity row (review fix 1).
+#[derive(Debug, Clone)]
+pub struct IntentCall {
+    pub agent: AgentIdentity,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+}
+
+/// S3: a Studio intent waiting for its ack.
+#[derive(Debug)]
+pub struct PendingIntent {
+    pub sender: tokio::sync::oneshot::Sender<AgentIntentAck>,
+    pub call: IntentCall,
+}
+
+/// A relayed call that ended without the Studio's answer. The Studio may
+/// still have done it: its late ack updates the call's Activity row and
+/// fires the notice (`agent_call::ack_studio_intent`). Kept for
+/// `UNANSWERED_KEPT_FOR`, at most `UNANSWERED_KEPT`.
+#[derive(Debug)]
+pub struct UnansweredIntent {
+    pub call: IntentCall,
+    pub since: Instant,
+    /// The call's Activity row, once its caller wrote it.
+    pub row: Option<AgentActivityEntry>,
+    /// An ack that came before the row was written.
+    pub ack: Option<AgentIntentAck>,
+}
+
+pub const UNANSWERED_KEPT_FOR: Duration = Duration::from_secs(10 * 60);
+pub const UNANSWERED_KEPT: usize = 64;
+
+impl AgentMcpRuntime {
+    /// A call ended without its answer; its late ack is still welcome.
+    pub fn keep_unanswered(
+        &mut self,
+        intent_id: String,
+        call: IntentCall,
+        ack: Option<AgentIntentAck>,
+    ) {
+        let now = Instant::now();
+        self.unanswered
+            .retain(|_, kept| now.saturating_duration_since(kept.since) < UNANSWERED_KEPT_FOR);
+        while self.unanswered.len() >= UNANSWERED_KEPT {
+            let Some(oldest) = self
+                .unanswered
+                .iter()
+                .min_by_key(|(_, kept)| kept.since)
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            self.unanswered.remove(&oldest);
+        }
+        self.unanswered.insert(
+            intent_id,
+            UnansweredIntent {
+                call,
+                since: now,
+                row: None,
+                ack,
+            },
+        );
+    }
+}
+
 #[derive(Default)]
 pub struct AgentMcpRuntime {
     pub bound_port: Option<u16>,
@@ -93,8 +161,14 @@ pub struct AgentMcpRuntime {
     server: Option<tokio::sync::oneshot::Sender<()>>,
     pub limiter: AgentRateLimiter,
     /// S3: Studio intents waiting for their ack, by intent id.
-    pub pending_intents: HashMap<String, tokio::sync::oneshot::Sender<AgentIntentAck>>,
+    pub pending_intents: HashMap<String, PendingIntent>,
+    /// Review fix 1: calls that ended before the Studio answered.
+    pub unanswered: HashMap<String, UnansweredIntent>,
     pub next_intent: u64,
+    /// Review fix 1: every `agent.intent` carries the generation it was sent
+    /// in; `agent.intent.cancel` (Stop, Remove) moves it on, and the Studio
+    /// drops what an older generation queued.
+    pub intent_generation: u64,
     /// S3: the Studio's projection for `get_status` and the `list_*` tools,
     /// published through `agent.surface.publish` and deduped.
     pub surface: Option<serde_json::Value>,
@@ -413,6 +487,7 @@ pub fn disable(state: &AppState) -> Result<AgentsStatus> {
         registry.disconnect_all();
     }
     persist(state)?;
+    cancel_intents(state, None);
     stop(state);
     sync_discovery_file(state)?;
     Ok(publish_status(state))
@@ -444,6 +519,7 @@ pub fn remove_agent(state: &AppState, params: AgentIdParams) -> Result<AgentsSta
     if removed {
         persist(state)?;
         state.agents.lock().limiter.forget(&params.id);
+        cancel_intents(state, Some(&params.id));
     }
     Ok(publish_status(state))
 }
@@ -463,6 +539,9 @@ pub fn activity(state: &AppState, params: ActivityListParams) -> Result<Activity
 /// call ("Claude Desktop ended the livestream."). It rides the event only,
 /// never the stored row: the Studio shows it once, as it happens, and the
 /// Activity list already says what ran.
+///
+/// Returns the row, so a Studio call that ended unanswered can update it
+/// when the Studio's late ack comes (`agent_call::attach_activity_row`).
 pub fn log_activity(
     state: &AppState,
     agent: &AgentIdentity,
@@ -471,7 +550,7 @@ pub fn log_activity(
     outcome: AgentActivityOutcome,
     message: Option<String>,
     notice: Option<String>,
-) {
+) -> AgentActivityEntry {
     let entry = AgentActivityEntry {
         id: uuid::Uuid::new_v4().to_string(),
         at: chrono::Utc::now().to_rfc3339(),
@@ -485,23 +564,31 @@ pub fn log_activity(
     if let Err(error) = state.database.insert_agent_activity(&entry) {
         tracing::warn!("Could not record agent activity: {error:#}");
     }
+    announce_activity(state, &entry, notice);
+    entry
+}
+
+/// The agent's last action, and the `agents.activity` event with the D11
+/// notice of an `Ok` row. A row updated later (a late ack) is announced
+/// again under its id; the Settings list replaces it in place.
+pub fn announce_activity(state: &AppState, entry: &AgentActivityEntry, notice: Option<String>) {
     registry(state).record_action(
-        &agent.id,
+        &entry.agent_id,
         AgentLastAction {
             tool: entry.tool.clone(),
             at: entry.at.clone(),
-            outcome,
+            outcome: entry.outcome,
         },
     );
     let notice = notice
-        .filter(|_| outcome == AgentActivityOutcome::Ok)
+        .filter(|_| entry.outcome == AgentActivityOutcome::Ok)
         .map(|text| clip_chars(&text, ACTIVITY_MESSAGE_MAX_CHARS));
-    match (notice, serde_json::to_value(&entry)) {
+    match (notice, serde_json::to_value(entry)) {
         (Some(notice), Ok(serde_json::Value::Object(mut fields))) => {
             fields.insert("notice".to_string(), serde_json::Value::String(notice));
             state.emit_event("agents.activity", serde_json::Value::Object(fields));
         }
-        _ => state.emit_event("agents.activity", entry),
+        _ => state.emit_event("agents.activity", entry.clone()),
     }
 }
 
@@ -780,8 +867,11 @@ pub async fn start_if_enabled(state: &AppState) {
     }
 }
 
-/// Close the port. Pending Studio intents are dropped, so their calls end.
-/// Does not change the persisted switch.
+/// Close the port. Pending agent intents are dropped, so their calls end
+/// ("went away"); each is kept as unanswered, so a Studio that finishes it
+/// anyway still updates its Activity row. Buddy's intents never ride the
+/// port and stay: only Buddy's own paths end them. Does not change the
+/// persisted switch.
 pub fn stop(state: &AppState) {
     let mut runtime = state.agents.lock();
     if let Some(shutdown) = runtime.server.take() {
@@ -789,7 +879,30 @@ pub fn stop(state: &AppState) {
     }
     runtime.bound_port = None;
     runtime.bind_error = None;
-    runtime.pending_intents.clear();
+    let dropped: Vec<(String, PendingIntent)> = runtime
+        .pending_intents
+        .extract_if(|_, pending| pending.call.agent.id != crate::buddy_act::BUDDY_AGENT_ID)
+        .collect();
+    for (intent_id, pending) in dropped {
+        runtime.keep_unanswered(intent_id, pending.call, None);
+    }
+}
+
+/// Review fix 1: `agent.intent.cancel` (renderer-only, listening sockets).
+/// The Studio drops every intent of an older generation it hasn't started:
+/// one agent's (Remove) or every agent's but Buddy's (Stop, Off), and
+/// `go_live` stops before it confirms.
+pub fn cancel_intents(state: &AppState, agent_id: Option<&str>) {
+    let generation = {
+        let mut runtime = state.agents.lock();
+        runtime.intent_generation += 1;
+        runtime.intent_generation
+    };
+    let mut payload = serde_json::json!({ "generation": generation });
+    if let Some(agent_id) = agent_id {
+        payload["agentId"] = serde_json::Value::String(agent_id.to_string());
+    }
+    state.emit_event("agent.intent.cancel", payload);
 }
 
 /// Shutdown: close the port and remove the discovery file.

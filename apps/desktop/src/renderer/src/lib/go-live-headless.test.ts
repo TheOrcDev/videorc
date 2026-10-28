@@ -480,6 +480,69 @@ describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
     )
   })
 
+  // Review fix 1: Stop agents while it checks or sets up never goes live.
+  it('stops before it confirms or starts once the call is cancelled', async () => {
+    let cancelled = false
+    const before = studio({
+      runGoLivePreflight: vi.fn(async () => {
+        cancelled = true
+        return {
+          kind: 'ready' as const,
+          preflight: {
+            valid: true,
+            destinations: [destination('youtube-1'), destination('twitch-1')],
+            issues: []
+          },
+          draft,
+          capabilities: null
+        }
+      })
+    })
+    expect(await goLiveWithoutDialog({ cancelled: () => cancelled }, before)).toEqual({
+      ok: false,
+      message: HEADLESS_GO_LIVE_COPY.cancelled
+    })
+    expect(before.runGoLiveConfirmation).not.toHaveBeenCalled()
+
+    // Cancelled during platform setup: the confirm stops before the start
+    // and what was prepared is cleaned up.
+    let stop = false
+    const during = studio({
+      runGoLiveConfirmation: vi.fn(async (confirmation): Promise<GoLiveConfirmOutcome> => {
+        stop = true // Stop agents, pressed during platform setup
+        return confirmation.cancelled?.()
+          ? { kind: 'cancelled', streaming: twoOn }
+          : { kind: 'started', started: true, streaming: twoOn }
+      })
+    })
+    expect(await goLiveWithoutDialog({ cancelled: () => stop }, during)).toEqual({
+      ok: false,
+      message: HEADLESS_GO_LIVE_COPY.cancelled
+    })
+    expect(during.settlePreparedPlatformLifecycle).toHaveBeenCalledWith(twoOn)
+
+    // A partial setup the call would continue: cancelled, cleaned up instead.
+    const setup = {
+      streaming: twoOn,
+      failures: [
+        { targetId: 'twitch-1', platform: 'twitch' as const, label: 'Twitch', message: 'Offline.' }
+      ],
+      readyLabels: ['YouTube']
+    }
+    let late = false
+    const partial = studio({
+      runGoLiveConfirmation: vi.fn(async (): Promise<GoLiveConfirmOutcome> => {
+        late = true
+        return { kind: 'partial', setup }
+      })
+    })
+    expect(
+      await goLiveWithoutDialog({ allowPartial: true, cancelled: () => late }, partial)
+    ).toEqual({ ok: false, message: HEADLESS_GO_LIVE_COPY.cancelled })
+    expect(partial.startOnReadyDestinations).not.toHaveBeenCalled()
+    expect(partial.settlePreparedPlatformLifecycle).toHaveBeenCalledWith(twoOn)
+  })
+
   it('refuses a partial setup without allowPartial and cleans up what was prepared', async () => {
     const setup = {
       streaming: twoOn,
