@@ -55,6 +55,10 @@ export { REMOTE_INTENT_EXECUTORS, executeRemoteIntent } from './remote'
 export { sceneApply, takeoverHide, takeoverShow } from './scene'
 export { recordStart, recordStop, recordToggle, streamStart, streamStop } from './session'
 export { soundPlay, soundStop } from './sounds'
-export { studioActionContext, type StudioActionSource } from './studio-context'
+export {
+  executeStudioAgentIntent,
+  studioActionContext,
+  type StudioActionSource
+} from './studio-context'
 export { AGENT_TOOL_COPY, STUDIO_AGENT_TOOLS } from './tools'
 export { windowFront } from './windows'

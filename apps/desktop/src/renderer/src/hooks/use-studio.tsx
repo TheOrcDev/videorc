@@ -3781,8 +3781,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
   // Plan 209 review fix 10: an agent's Go Live reads it when it confirms.
-  const goLiveConfirmationOpenRef = useRef(false)
-  goLiveConfirmationOpenRef.current = goLiveConfirmationOpen
+  const dialogOpenRef = useRef(false)
+  dialogOpenRef.current = goLiveConfirmationOpen
   const [goLiveConfirmationPending, setGoLiveConfirmationPending] = useState(false)
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
@@ -7337,10 +7337,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!disposed) await handleRemoteIntent(payload)
       },
       // Plan 209 S5/S6: an agent's tool call, on its own lane.
-      runAgent: (intent) =>
-        disposed
-          ? Promise.resolve({ ok: false, message: "Videorc's Studio went away." })
-          : handleAgentIntent(intent),
+      runAgent: (intent) => handleAgentIntent(intent, disposed),
       refuseStale: async (payload) => {
         const intentId = (payload as { intentId?: unknown } | null)?.intentId
         if (disposed || typeof intentId !== 'string') return
@@ -15278,7 +15275,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (run.kind !== 'ready') {
             return
           }
-          goLiveConfirmationOpenRef.current = true
+          dialogOpenRef.current = true
           setGoLiveConfirmationOpen(true)
         } catch (error) {
           // A preflight that fails is a refused Go Live (B-7): the same
@@ -17127,7 +17124,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedScene,
       // Plan 209 S10 (D13): the Go Live dialog's own preflight, gate and
       // confirm, for an agent's `go_live` (lib/go-live-headless).
-      dialogOpenRef: goLiveConfirmationOpenRef,
+      dialogOpenRef,
       goLiveConfirmationPending,
       startRequestPending,
       openGoLiveConfirmationInFlightRef,
@@ -17156,7 +17153,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       overlayLayoutRef,
       platform: runtimeInfo?.platform,
       wsStatusRef,
-      sceneChanging: layoutSwitchPending !== null || savedScenePendingId !== null,
+      layoutSwitchPending,
+      savedScenePendingId,
       setOverlayLayout,
       updateBanner,
       applyLayoutPatch,
@@ -17170,7 +17168,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setStreamMetadataDraft,
       setStreamMetadataValidation,
       platformAccounts,
-      goLivePending: goLiveConfirmationPending || Boolean(goLivePartialSetup),
+      goLivePartialSetup,
       patchStreamingTarget,
       settings,
       theme: appTheme,
@@ -17209,11 +17207,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 209 S6: an agent's Studio tool call, through the same context as a
   // deck key. Resolves to the body of its `agent.intent.ack`.
   const handleAgentIntent = useEffectEvent(
-    async (intent: AgentIntent): Promise<AgentIntentOutcome> => {
-      const source = studioActionSource()
-      if (!source) return { ok: false, message: "Videorc's Studio isn't connected yet." }
+    async (intent: AgentIntent, gone: boolean): Promise<AgentIntentOutcome> => {
+      const source = gone ? undefined : studioActionSource()
       const actions = await import('@/lib/studio-actions')
-      return actions.executeAgentIntent(intent, actions.studioActionContext(source))
+      return actions.executeStudioAgentIntent(intent, source)
     }
   )
 

@@ -26,7 +26,7 @@ import type {
   OverlayRect,
   SceneSource
 } from '@/lib/backend'
-import { OVERLAY_ITEMS } from '@/lib/backend'
+import { OVERLAY_ITEMS, OVERLAY_RECT_MIN_SIZE } from '@/lib/backend'
 import {
   bannerDefaultPlaces,
   bannerFitRect,
@@ -42,7 +42,6 @@ import {
   overlayDefaultSize,
   overlayPlaceOrigin,
   overlayPlaceRect,
-  overlayRectValid,
   type OverlayPlace
 } from '@/lib/overlay-layout'
 import {
@@ -224,6 +223,19 @@ function overlaySize(
     : clampSize(defaults[0] * factor, defaults[1] * factor)
 }
 
+/** Whole and inside the canvas, as `overlayRectValid` says (kept here, in
+ * this lazy module, so the eager overlay chunk doesn't grow by it). */
+function onCanvas(rect: OverlayRect): boolean {
+  return (
+    rect.w >= OVERLAY_RECT_MIN_SIZE &&
+    rect.h >= OVERLAY_RECT_MIN_SIZE &&
+    rect.x >= 0 &&
+    rect.y >= 0 &&
+    rect.x + rect.w <= 1 + 1e-6 &&
+    rect.y + rect.h <= 1 + 1e-6
+  )
+}
+
 function clampSize(w: number, h: number, min = 0.02): readonly [number, number] {
   return [clamp(w, min, 1), clamp(h, min, 1)]
 }
@@ -260,7 +272,7 @@ export function overlayPlacement(
     // at an item's default size is already inside, so the inspector's snaps
     // stay exactly what they were.
     const placed = overlayPlaceRect(place, orientation, dimensions)
-    return overlayRectValid(placed) ? placed : clampOverlayRect(placed)
+    return onCanvas(placed) ? placed : clampOverlayRect(placed)
   }
   return clampOverlayRect(anchored(current, dimensions[0], dimensions[1]))
 }

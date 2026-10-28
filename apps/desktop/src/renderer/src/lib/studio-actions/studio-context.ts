@@ -53,6 +53,7 @@ import { overlayOrientationForCanvas } from '@/lib/overlay-layout'
 import { clipMarkKeptSomething, clipMarkedToast } from '../../../../shared/clip-marks'
 import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
 import type { LiveBackgroundId } from '../../../../shared/live-background-ids'
+import { executeAgentIntent, type AgentIntent, type AgentIntentOutcome } from './agent'
 import type { StudioActionContext } from './context'
 
 type SourceKind = 'capture' | 'camera' | 'microphone'
@@ -112,8 +113,9 @@ export interface StudioActionSource extends Omit<
   overlayLayoutRef: Ref<OverlayLayout>
   platform: string | undefined
   wsStatusRef: Ref<WsStatus>
-  /** A layout switch or a saved scene is being applied. */
-  sceneChanging: boolean
+  /** A layout switch or a saved scene is being applied (either is set). */
+  layoutSwitchPending: unknown
+  savedScenePendingId: string | null
   setOverlayLayout: (layout: OverlayLayout) => Promise<void>
   updateBanner: (
     id: string,
@@ -133,8 +135,9 @@ export interface StudioActionSource extends Omit<
   setStreamMetadataDraft: (draft: StreamMetadataDraft) => void
   setStreamMetadataValidation: (validation: StreamMetadataValidation) => void
   platformAccounts: readonly Pick<PlatformAccount, 'platform' | 'accountId'>[]
-  /** The Go Live dialog is confirming, or holds a partial setup. */
-  goLivePending: boolean
+  /** The Go Live dialog holds a partial setup (with
+   * `goLiveConfirmationPending`: the dialog is busy). */
+  goLivePartialSetup: unknown
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
   settings: SettingsState
   theme: string | undefined
@@ -150,6 +153,24 @@ export interface StudioActionSource extends Omit<
 }
 
 const NO_BANNERS: readonly Banner[] = []
+
+/** The Studio's agent lane (hooks/use-studio.tsx hands over its source per
+ * intent: null without a backend client, undefined once that Studio socket
+ * went away): the intent against the context built from it. Here, not in
+ * the Studio, to keep the eager bundle small. */
+export function executeStudioAgentIntent(
+  intent: AgentIntent,
+  studio: StudioActionSource | null | undefined
+): Promise<AgentIntentOutcome> {
+  if (!studio) {
+    return Promise.resolve({
+      ok: false,
+      message:
+        studio === null ? "Videorc's Studio isn't connected yet." : "Videorc's Studio went away."
+    })
+  }
+  return executeAgentIntent(intent, studioActionContext(studio))
+}
 
 /** The action context for one intent, from the Studio's handles. */
 export function studioActionContext(studio: StudioActionSource): StudioActionContext {
@@ -308,7 +329,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
           blockedReason:
             studio.wsStatusRef.current !== 'connected'
               ? OFFLINE_LOCK_REASON
-              : studio.sceneChanging
+              : studio.layoutSwitchPending !== null || studio.savedScenePendingId !== null
                 ? 'The scene is changing.'
                 : null
         }
@@ -392,7 +413,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
       },
       streaming: config.streaming,
       entitlements: studio.entitlements,
-      goLivePending: studio.goLivePending,
+      goLivePending: studio.goLiveConfirmationPending || Boolean(studio.goLivePartialSetup),
       patchTarget: studio.patchStreamingTarget
     },
     settings: {
