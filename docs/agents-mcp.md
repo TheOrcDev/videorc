@@ -354,8 +354,16 @@ real `videorc-mcp` bridge with an isolated profile and discovery file: Agents
 off, enable and connect, the Look tools and a decodable picture, Studio
 round trips against confirmed state, record → marker → stop with an ffprobed
 artifact, `read_chat` against the fake chat providers, the guards, a leak
-scan over every answer, and the remote allowlists. It never goes live. It is
-part of `smoke:local-gates`.
+scan over every answer, and the remote allowlists. PR B's steps (B1 to B9)
+cover every other tool: `go_live` without the dialog to a local FFmpeg RTMP
+sink (refused while a destination isn't ready, live with `allowPartial`),
+captions, backgrounds, `edit_banner`, Arrange against the editor's own snap
+functions and the picture's pixels, chat posts and removals on the fake
+providers (a YouTube removal waits for the card), Buddy, Prepare and the
+Library, whose delete moves into a Trash stand-in inside the run
+(`VIDEORC_SMOKE_TRASH_DIR`, dev builds with the smoke command server only).
+It goes live only to that local sink, never a real channel. It is part of
+`smoke:local-gates`.
 
 Rust: `cargo test -p videorc-backend agent` (catalog, admission, guards, rate
 limits, every backend tool). TypeScript: `shared/agent-tools.test.ts`,

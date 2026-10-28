@@ -37,7 +37,7 @@
 | S13   | Buddy tools: say and set                                           | B   | DONE    |
 | S14   | Prepare: stream info, destinations, schedule, settings             | B   | DONE    |
 | S15   | Library: rename, delete, export, Clean cut, transcripts            | B   | DONE    |
-| S16   | Smoke coverage for PR B and the gates                              | B   | PLANNED |
+| S16   | Smoke coverage for PR B and the gates                              | B   | DONE    |
 | S17   | Web: the Buddy planner route (deploy first)                        | C   | DONE    |
 | S18   | Buddy's grammar commands run through the executor                  | D   | PLANNED |
 | S19   | Buddy asks the planner and runs its tool calls                     | D   | PLANNED |
@@ -1575,3 +1575,109 @@ live_chat_moderation live_chat::tests`, `cargo check`, rustfmt on the
   warning), vitest on `studio-actions/`, `shared/agent-tools.test.ts`,
   `agent-surface.test.ts` and `chat-removal-view.test.ts`. No dev-app smoke
   (S16).
+
+### S16 (2026-10-28)
+
+- **`smoke:agent-mcp` gains steps B1 to B9** between steps 6 and 7 (S9's
+  numbers stay); the guards, the leak scan and the allowlists still close
+  the run. Every skip prints its reason, once at the step and again before
+  PASS.
+  - **B1 `go_live`**: Custom RTMP points at a local `ffmpeg -listen 1` sink
+    on a free loopback port (smoke:multistream's listener), its key stored
+    with `streamTargets.manualKey.store`; Kick is on through an account
+    that was never connected. Refused without `allowPartial` in the
+    dialog's words ("Kick: OAuth destination needs a connected account
+    before going live. Pass allowPartial: true to go live on the ready
+    ones."), then live on the sink with it: bytes at the sink, `get_status`
+    and `stream.targets` live on Custom RTMP only, the call's title saved
+    in the draft, "Smoke agent started the livestream." on
+    `agents.activity` and as a Studio toast, the Go Live dialog never in
+    the DOM (a MutationObserver), Kick still saved on; `stop` ends it with
+    its notice and the sink's FLV has video. **Deviation**: a manual Kick
+    without a key is refused by the start gate before any dialog ("Finish
+    setting up your destination in Livestream before you go live."), as
+    the Go Live button is, so the not-ready destination is one the dialog
+    opens for and its preflight rejects.
+  - **B2** the microphone switch while recording: SKIPPED. The dev app has
+    no microphone permission, so the smoke records without a microphone
+    (`VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE=1`, as smoke:record-latency)
+    and a switched input can't be heard. The debug synthetic microphones
+    are not in the picker, so `set_audio` can't name them.
+    `run-the-show.test.ts` carries the switch.
+  - **B3** `set_captions` on and off, read as the saved Live captions switch
+    (idle, `get_status`' `captions.on` says whether captions run, so it
+    stays false); the second change retries while the tool says "Live
+    captions are changing. Try again in a moment." `set_background` Silk
+    on and off: `scene.get`'s `background.live` and `list_assets`' `active`.
+  - **B4** `edit_banner` imports a 480×120 fixture PNG from the run's folder
+    (hidden), then renames it (`banners.list`).
+  - **B5 Arrange**: Buddy to `top-left` and the strip to `bottom-left`;
+    `move_on_scene`'s rects, `overlays.layout.get` and `banners.list` equal
+    `overlaySnapRect` and `bannerSnapRect` to 1e-6 in both orientations,
+    computed by the editor's own modules in the dev renderer (`eval-js`
+    imports `/src/lib/overlay-layout.ts` and `/src/lib/banner-place.ts`
+    through Vite). `get_picture` decoded by FFmpeg: the strip's green in
+    its drawn rect bottom-left, not top-right. `set_scene_item` takes Buddy
+    off the stream and back. The camera corner: SKIPPED twice. Idle, the
+    dev app can't switch to Screen + camera ("Couldn't switch the scene.");
+    while recording, the screen-only scene it records has no camera.
+    `scene-layout.test.ts` and the provider integration test carry it.
+  - **B6 chat** on a new fake session (Twitch and YouTube, `delete: ok`,
+    `echoSends`): `send_chat_message` is `sent` on both and comes back in
+    `read_chat`; the Twitch removal lands `removed` with its notice; the
+    YouTube removal answers "Waiting for you to confirm in Videorc."
+    (`pending-confirm`, `requiresExplicitConfirm`, source `agent`) with its
+    notice, and lands only after `liveChat.moderation.confirm`.
+  - **B7** `buddy_say` reaches the bubble (`cohost.buddy.status`);
+    `set_buddy on` is refused with the consent sentence in the dev profile
+    (Premium or consent are both accepted, and asserted); `set_buddy
+onStream` off and on round trips through `overlays.layout.get`.
+  - **B8** `update_stream_info` (`streamTargets.metadata.get`),
+    `set_destinations` Kick off and on (`list_destinations`),
+    `schedule_stream` refused ("YouTube OAuth is not configured in this
+    build."), `update_settings` theme light and back (`get_settings` and
+    the document's class), and `bitrateKbps` refused by the schema.
+  - **B9** `rename_recording` (in `list_recordings`), `get_recording` with
+    `includeTranscript` (`transcript: null`, "No transcript yet"),
+    `export_recording` (the MP4 exists), `start_clean_cut` refused ("Sign in
+    to use Clean cut, part of Videorc Premium."), and `delete_recording`:
+    the file leaves its path, lands in the Trash stand-in, leaves
+    `list_recordings`, and the notice shows.
+  - **The leak scan** covers every answer (130 in the PASS run) and gains
+    the sink's key and server URL as canaries (9).
+- **A Trash stand-in for smokes**: `VIDEORC_SMOKE_TRASH_DIR` makes the
+  Library's delete move into that folder instead of the system Trash, only
+  in a dev build running the smoke command server, and only for an
+  absolute path (`smokeTrashDirectory` / `smokeTrashItem` in
+  `main/trash-paths.ts`, unit-tested). The launcher accepts it only inside
+  the run's own roots and never inherits one (`app-launcher.test.mjs`), so
+  no smoke trashes anything outside its folder or fills the real Trash.
+- **Product bugs found and fixed** (each with a test):
+  - `get_status` (and `list_destinations`' live states) called Go Live's
+    default record+stream session `recording` with the idle destinations:
+    the backend reports it as `recording`, live exactly when it carries a
+    stream URL. `session_word` now reads it as the renderer's
+    `sessionIsLive` does (`agent_look` test).
+  - The agent surface froze while any background was on: the backend
+    resolves every `background` object in a renderer's params as a managed
+    picture and refuses one without an `assetId`, so `agent.surface.publish`
+    failed after retries and agents read a stale scene, sources and
+    destinations. The surface field is now `sceneBackground` (a
+    `main.rs` test over the renderer role, and an `agent-surface` test that
+    no key is named `background`).
+- **Seen, not changed**: `switch_scene` answers the generic "Couldn't switch
+  the scene." where the Studio toasts the backend's reason (for example
+  "needs a screen or window"); idle, `get_status`' `captions.on` means
+  running, so the Live captions switch's own state is not visible to an
+  agent; when a scene transaction fails, a second `set_background` with the
+  same id answers that it is on while the backend scene has none.
+- **Run, 2026-10-28, this Mac, dev app**: `smoke:agent-mcp` PASS (steps 1
+  to 9 and B1 to B9; 3 skips, above). Also `cargo test -p videorc-backend
+agent_` (73 + 13), `session_words`, the new `main.rs` test, `cargo clippy
+-p videorc-backend -- -D warnings`, `cargo fmt --check --all`, `pnpm
+typecheck`, `pnpm lint` (the one pre-existing warning), `pnpm
+format:check`, vitest on `studio-actions/`, `agent-surface`,
+  `agents-contract` and `trash-paths` (83), `node --test` on the launcher
+  and the MCP client (37). The rest of S16's bundle (smoke:multistream,
+  live-chat-fake-providers, buddy-commands, freeform-editor, banners,
+  comment-highlight-stream, the PR A list) is the orchestrator's.

@@ -246,7 +246,7 @@ import {
   type ManagedAssetRoots
 } from './backend-bootstrap'
 import { managedBackendAssetRootCandidates } from './managed-asset-roots'
-import { trashPaths } from './trash-paths'
+import { smokeTrashDirectory, smokeTrashItem, trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
   type ResourceCapabilityKind,
@@ -13975,9 +13975,19 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
   if (operation.operationId !== operationId || !Array.isArray(operation.paths)) {
     throw new Error('Library deletion operation response is invalid.')
   }
+  // Smoke runs move into their own folder instead (plan 209 S16).
+  const smokeTrash = smokeTrashDirectory(process.env.VIDEORC_SMOKE_TRASH_DIR, {
+    packaged: app.isPackaged,
+    smokeCommandServer: smokeCommandServerEnabled
+  })
   const trash = await trashPaths(operation.paths, {
     stat: (target) => fsPromises.stat(target),
-    trashItem: (target) => shell.trashItem(target)
+    trashItem: smokeTrash
+      ? smokeTrashItem(smokeTrash, {
+          mkdir: (path) => fsPromises.mkdir(path, { recursive: true }),
+          rename: (from, to) => fsPromises.rename(from, to)
+        })
+      : (target) => shell.trashItem(target)
   })
   const failedPaths = [...(operation.blockedPaths ?? []), ...trash.failures]
   const completion = await requestBackendAdmin<{ deleted: boolean }>(

@@ -54,7 +54,8 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_SMOKE_SKIP_FIRST_RUN',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
-  'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN'
+  'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN',
+  'VIDEORC_SMOKE_TRASH_DIR'
 ]
 
 test('macOS real-source launch uses the exact app bundle through LaunchServices', () => {
@@ -420,6 +421,33 @@ test('smokeAppEnv accepts explicit state paths only inside the current smoke roo
           VIDEORC_RECORDINGS_DIR: '/real/profile/recordings'
         }),
       /VIDEORC_RECORDINGS_DIR must be inside/
+    )
+  })
+})
+
+test('smokeAppEnv keeps the smoke Trash stand-in inside the run, never inherited', () => {
+  withCleanSmokeEnv(() => {
+    process.env.VIDEORC_SMOKE_TRASH_DIR = '/old/smoke/trash'
+    const stateDir = '/tmp/videorc-current-smoke'
+
+    assert.equal(
+      smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir }).VIDEORC_SMOKE_TRASH_DIR,
+      undefined
+    )
+    assert.equal(
+      smokeAppEnv({
+        VIDEORC_SMOKE_STATE_DIR: stateDir,
+        VIDEORC_SMOKE_TRASH_DIR: resolve(stateDir, 'trash')
+      }).VIDEORC_SMOKE_TRASH_DIR,
+      resolve(stateDir, 'trash')
+    )
+    assert.throws(
+      () =>
+        smokeAppEnv({
+          VIDEORC_SMOKE_STATE_DIR: stateDir,
+          VIDEORC_SMOKE_TRASH_DIR: '/Users/someone/.Trash'
+        }),
+      /VIDEORC_SMOKE_TRASH_DIR must be inside/
     )
   })
 })
