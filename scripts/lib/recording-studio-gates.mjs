@@ -236,6 +236,13 @@ export function buildRecordingStudioGateSteps({
         }
       },
       {
+        // With frame polling on, as in a production build: Buddy, Clips and
+        // banners change while the native Preview must keep presenting.
+        label: 'native preview presentation across overlay changes smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-overlay-presentation']
+      },
+      {
         label: 'real ScreenCaptureKit screen recording smoke',
         command: 'pnpm',
         args: ['smoke:screen-recording-real'],

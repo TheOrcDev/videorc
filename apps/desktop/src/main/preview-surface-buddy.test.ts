@@ -11,6 +11,7 @@ import type { OverlaySessionShape } from '../shared/preview-program'
 import {
   PREVIEW_SURFACE_BUDDY_LAYER_ID,
   previewSurfaceBuddyLayer,
+  previewSurfaceDrawsBuddyLayer,
   withPreviewSurfaceOverlays
 } from './preview-surface-buddy'
 
@@ -80,6 +81,12 @@ function scene(sources: PreviewSurfaceSceneLayer[]): PreviewSurfaceSceneState {
 }
 
 describe('the proof surface Buddy layer (plan 205 S9)', () => {
+  it('is drawn where the proof surface is the Preview, never on macOS', () => {
+    expect(previewSurfaceDrawsBuddyLayer('win32')).toBe(true)
+    expect(previewSurfaceDrawsBuddyLayer('linux')).toBe(true)
+    expect(previewSurfaceDrawsBuddyLayer('darwin')).toBe(false)
+  })
+
   it('follows the program: either switch at idle, the running outputs otherwise', () => {
     expect(previewSurfaceBuddyLayer(buddy(true, false), null, CANVAS, FRAME_URL)).not.toBeNull()
     expect(previewSurfaceBuddyLayer(buddy(false, false), null, CANVAS, FRAME_URL)).toBeNull()
