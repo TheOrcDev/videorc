@@ -9,8 +9,9 @@
 // names are the streamer's own words on this computer; the Library tools are
 // the only ones that return paths, and they read the backend.
 //
-// Published only while Agents is on: nothing crosses for a streamer who
-// never turned it on. Deliberately not a React effect: the Studio's render
+// Published only while Agents is on, or (plan 209 S19) while Buddy may use
+// the tools (Premium): Buddy's planner reads the scene and destination names
+// from it. Nothing crosses for a streamer who has neither. Deliberately not a React effect: the Studio's render
 // body hands the publisher its latest inputs (`sync`), and the publisher
 // builds, dedupes, debounces, republishes on reconnect and retries on its own
 // timeline, like `RemoteSurfacePublisher`.
@@ -102,6 +103,9 @@ export interface AgentSurfaceInput {
   windows: { notes: boolean; streamManager: boolean; preview: boolean }
   /** The renderer-local Cloud AI consent. */
   cloudAiConsent: boolean
+  /** Plan 209 S19: Buddy may use the tools (Premium), so its planner reads
+   * the projection too, Agents on or not. */
+  buddyCanAct?: boolean
 }
 
 const CAPTIONS_RUNNING = new Set(['starting', 'listening', 'reconnecting', 'degraded'])
@@ -240,7 +244,7 @@ const PUBLISH_RETRY_DELAYS_MS = [1000, 2000, 4000]
 export class AgentSurfacePublisher {
   private client: AgentSurfaceClient | null = null
   private connected = false
-  private enabled = false
+  private agentsEnabled = false
   private latest: AgentSurfaceInput | null = null
   private lastPublishedBody: string | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -265,11 +269,18 @@ export class AgentSurfacePublisher {
     this.schedule(0)
   }
 
-  /** Agents on or off (`agents.status`). Off publishes nothing; on publishes now. */
+  /** Published while Agents is on or Buddy may act (`buddyCanAct`). */
+  private get enabled(): boolean {
+    return this.agentsEnabled || this.latest?.buddyCanAct === true
+  }
+
+  /** Agents on or off (`agents.status`). Off publishes nothing (unless Buddy
+   * may act); turning it on publishes now. */
   setEnabled(enabled: boolean): void {
-    if (enabled === this.enabled) return
-    this.enabled = enabled
-    if (enabled) {
+    if (enabled === this.agentsEnabled) return
+    const was = this.enabled
+    this.agentsEnabled = enabled
+    if (!was && this.enabled) {
       this.lastPublishedBody = null
       this.schedule(0)
     }
@@ -290,8 +301,16 @@ export class AgentSurfacePublisher {
 
   /** Record the Studio's latest inputs; safe from a render body (no work, one timer). */
   sync(input: AgentSurfaceInput): void {
+    const was = this.enabled
     this.latest = input
-    if (this.enabled && this.connected) this.schedule(PUBLISH_DEBOUNCE_MS)
+    if (!this.enabled || !this.connected) return
+    if (was) {
+      this.schedule(PUBLISH_DEBOUNCE_MS)
+    } else {
+      // Buddy just became able to act: publish now, like turning Agents on.
+      this.lastPublishedBody = null
+      this.schedule(0)
+    }
   }
 
   private schedule(delayMs: number): void {

@@ -273,4 +273,28 @@ describe('AgentSurfacePublisher', () => {
     expect(request).toHaveBeenCalledTimes(3)
     publisher.detach()
   })
+
+  it('also publishes while Buddy may use the tools, Agents off (plan 209 S19)', async () => {
+    const request = vi.fn(async () => ({ ok: true }) as never)
+    const publisher = new AgentSurfacePublisher(store())
+    publisher.attach({ request })
+    publisher.markConnected()
+    publisher.sync(input({ buddyCanAct: false }))
+    await vi.advanceTimersByTimeAsync(500)
+    expect(request).not.toHaveBeenCalled()
+
+    // Premium arrives: the planner's names are published at once.
+    publisher.sync(input({ buddyCanAct: true }))
+    await vi.advanceTimersByTimeAsync(10)
+    expect(request).toHaveBeenCalledTimes(1)
+
+    // The projection itself never carries the flag.
+    const published = (request.mock.calls[0] as unknown[])[1] as { surface: object }
+    expect(published.surface).not.toHaveProperty('buddyCanAct')
+
+    publisher.sync(input({ buddyCanAct: false, microphoneMuted: true }))
+    await vi.advanceTimersByTimeAsync(500)
+    expect(request).toHaveBeenCalledTimes(1)
+    publisher.detach()
+  })
 })

@@ -121,7 +121,9 @@ sentence back instead ("Choose a screen or a camera first.").
 ### Seeing what agents do, and stopping them
 
 - **Activity** in Settings → Remote → Agents lists every call: when, which
-  agent, which tool and how it ended.
+  agent, which tool and how it ended. Buddy's own tool use (Premium:
+  voice commands, "Buddy, …" sentences and `/buddy` in the Stream Manager,
+  docs/buddy-commands.md) is listed too, as "Buddy".
 - **Notices.** Going live, ending the livestream or recording, posting in
   chat, removing a chat message, deleting a recording, and `notify`, show a
   notice in Videorc naming the agent ("Claude Desktop started the
@@ -305,6 +307,16 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
 - **Last action.** Settings shows each agent's last action and its age.
   It lives in memory; after a restart `agents.status` seeds it from the
   agent's newest Activity row (looked up once per agent).
+- **Buddy** (plan 209 S18 to S20, `buddy_act.rs`) is a built-in caller of
+  the same path: id `buddy`, never a registry agent, no token, no presence.
+  Its calls are admitted only for catalog tools marked `buddy` (D15, checked
+  by the backend and again by `executeAgentIntent`), take Buddy's own rate
+  limit, and are logged as "Buddy". The Studio projection is published
+  while Agents is on or Buddy may act (Premium), because Buddy's planner
+  reads its scene and destination names. A tool marked `buddy` joins
+  Buddy's planner request on its own; check its D14 question
+  (`buddy_act::spoken_confirm`) if it goes live or ends something. The wire
+  is part F of docs/buddy-commands-contract.md, the desktop shapes part G.
 
 ### Adding a tool
 

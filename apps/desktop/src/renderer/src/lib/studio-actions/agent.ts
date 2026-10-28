@@ -4,8 +4,13 @@
 // (`{intentId, ok, message?, result?}`). Nothing here acks or notifies: the
 // subscription in hooks/use-studio.tsx does, with the catalog's notice.
 
+import { agentTool } from '../../../../shared/agent-tools'
 import type { StudioActionContext, StudioActionFields, StudioActionOutcome } from './context'
 import { STUDIO_AGENT_TOOLS } from './tools'
+
+/** Buddy's built-in caller (plan 209 S18): never a registry agent, whose ids
+ * are uuids. */
+export const BUDDY_AGENT_ID = 'buddy'
 
 /** One tool call as the backend relays it. */
 export interface AgentIntent {
@@ -35,6 +40,7 @@ export type AgentToolExecutor = (
 /** What an agent reads when the Studio cannot run its call at all. */
 export const AGENT_INTENT_COPY = {
   unknownTool: "Videorc can't run that tool from the Studio.",
+  notBuddys: "Buddy can't use that tool.",
   failed: 'Something went wrong in Videorc.'
 } as const
 
@@ -50,6 +56,11 @@ export async function executeAgentIntent(
 ): Promise<AgentIntentOutcome> {
   const executor = Object.hasOwn(executors, intent.tool) ? executors[intent.tool] : undefined
   if (!executor) return { ok: false, message: AGENT_INTENT_COPY.unknownTool }
+  // D15, a second time: the backend already refused anything outside Buddy's
+  // subset; a Buddy intent for any other tool never reaches a handler here.
+  if (intent.agentId === BUDDY_AGENT_ID && agentTool(intent.tool)?.buddy !== true) {
+    return { ok: false, message: AGENT_INTENT_COPY.notBuddys }
+  }
   try {
     const outcome = await executor(context, intent.args ?? {}, intent)
     return {

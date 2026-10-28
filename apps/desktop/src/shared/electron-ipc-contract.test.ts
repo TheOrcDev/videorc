@@ -71,8 +71,9 @@ describe('Electron IPC contract', () => {
     // for first-run setup).
     // 150: plan 209 S7 adds agents:bridge (the agent bridge's path for
     // Settings → Remote → Agents, and the Linux copy on Connect).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(150)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(150)
+    // 152: plan 209 S20 adds the Stream Manager's `/buddy` relay pair.
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(152)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(152)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

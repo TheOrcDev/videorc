@@ -203,6 +203,7 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import type { CohostActAnswer, CohostActParams } from './buddy-act'
 import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from './live-background-ids'
 import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
@@ -479,6 +480,9 @@ export interface BackendRpcMethodMap {
   'cohost.command.choose': BackendRpcDefinition<CohostCommandChooseParams, CohostState>
   'cohost.command.confirm': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
+  // Plan 209 S20: `/buddy <words>`; answers at once, the result follows as
+  // `cohost.act.result`.
+  'cohost.act': BackendRpcDefinition<CohostActParams, CohostActAnswer>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
   // --- Overlay layout (plan 164) ---
@@ -642,6 +646,8 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  // Plan 209 S20: the final answer to a `cohost.act`.
+  'cohost.act.result': CohostActAnswer
   'cohost.report.saved': CohostReportSavedEvent
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
@@ -3786,7 +3792,8 @@ const cohostCommandSchema = objectSchema(
       'hide-banner',
       'hide-banners',
       'show-buddy',
-      'hide-buddy'
+      'hide-buddy',
+      'act'
     ]),
     status: enumSchema([
       'done',
@@ -4010,6 +4017,25 @@ const cohostCommandParamsSchema = objectSchema(
   { commandId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostCommandParams>
+// Plan 209 S20: `/buddy <words>` and Buddy's answer (`cohost.act`, then the
+// final one as `cohost.act.result`).
+const cohostActIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const cohostActParamsSchema = objectSchema(
+  {
+    actId: cohostActIdSchema,
+    sentence: stringSchema({ minLength: 1, maxLength: 2000 }),
+    consentToProcessChat: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostActParams>
+const cohostActAnswerSchema = objectSchema(
+  {
+    actId: cohostActIdSchema,
+    status: enumSchema(['working', 'done', 'refused', 'unavailable', 'not-found']),
+    message: stringSchema({ minLength: 1, maxLength: 2000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostActAnswer>
 
 // Plan 119 S1: the Buddy report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
@@ -5056,6 +5082,7 @@ const runtimeContracts = {
   'cohost.command.choose': { params: cohostCommandChooseParamsSchema, result: cohostStateSchema },
   'cohost.command.confirm': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
+  'cohost.act': { params: cohostActParamsSchema, result: cohostActAnswerSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
   // --- Overlay layout (plan 164) ---
@@ -5278,6 +5305,7 @@ const runtimeEventSchemas = {
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
+  'cohost.act.result': cohostActAnswerSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,

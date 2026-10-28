@@ -77,6 +77,7 @@ import { CommentsDeltaBatcher, scheduleCommentsDeltaFlush } from '@/lib/comments
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
 import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
+import { BUDDY_UNREACHABLE, type CohostActAnswer } from '../../shared/buddy-act'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -219,6 +220,13 @@ function CommentsWindowApp(): ReactElement {
       )
       return false
     }
+  }, [])
+  // `/buddy <words>` (plan 209 S20): relayed to Studio, which owns the
+  // backend socket and the Cloud AI consent. The answer is the composer's
+  // notice, so nothing toasts here.
+  const runBuddy = useCallback(async (sentence: string): Promise<CohostActAnswer> => {
+    if (!window.videorc?.buddyActFromCommentsWindow) throw new Error(BUDDY_UNREACHABLE)
+    return window.videorc.buddyActFromCommentsWindow({ requestId: crypto.randomUUID(), sentence })
   }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
@@ -851,6 +859,7 @@ function CommentsWindowApp(): ReactElement {
           onBanner={runBanner}
           sounds={sounds}
           onSound={runSound}
+          onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onShowFollowNames={() => {
             void window.videorc

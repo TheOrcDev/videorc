@@ -6608,6 +6608,10 @@ export type CohostCommandKind =
   // stream (`overlayLayout.buddy.showOnStream`), finished at once.
   | 'show-buddy'
   | 'hide-buddy'
+  // Plan 209 S19: a sentence Buddy's planner turned into tool calls. `done`
+  // or `refused` says what ran; `confirm` asks for a spoken yes first (D14:
+  // going live, ending what runs), answered like any card.
+  | 'act'
 
 /**
  * Where the latest voice command stands:

@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Composer } from './chat-pane'
 import type { SessionMarker, LiveChatProviderState } from '@/lib/backend'
+import { BUDDY_PREMIUM_REQUIRED, type CohostActAnswer } from '../../../../shared/buddy-act'
 
 let root: Root
 let container: HTMLElement
@@ -388,5 +389,75 @@ describe('/sound in the composer (plan 189 S9)', () => {
     await mount()
     await type('/')
     expect(completionList().some((text) => text?.startsWith('/sound'))).toBe(false)
+  })
+})
+
+describe('/buddy in the composer (plan 209 S20)', () => {
+  async function mountBuddy(onBuddy?: (sentence: string) => Promise<CohostActAnswer>) {
+    onSend.mockClear()
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          providers: [],
+          pending: false,
+          failures: [],
+          operation: null,
+          prefill: null,
+          cohostNudge: false,
+          markerContext: { sessionId: 's1', available: true },
+          onSend,
+          ...(onBuddy ? { onBuddy } : {})
+        })
+      )
+    )
+  }
+
+  it('offers /buddy with its hint only where Buddy can be asked', async () => {
+    await mountBuddy(vi.fn())
+    await type('/b')
+    expect(container.textContent).toContain('/buddy')
+    expect(container.textContent).toContain('· Ask Buddy to do something')
+    await mountBuddy()
+    await type('/b')
+    expect(container.textContent).not.toContain('Ask Buddy to do something')
+  })
+
+  it('asks Buddy, shows what it did, clears the draft and never posts to chat', async () => {
+    const onBuddy = vi.fn(async (sentence: string) => ({
+      actId: 'a1',
+      status: 'done' as const,
+      message: `Switched to BRB. Pressed Drum roll. (${sentence})`
+    }))
+    await mountBuddy(onBuddy)
+    await type('/buddy switch to BRB and play the drum roll')
+    expect(container.textContent).toContain('Buddy')
+    await enter()
+    expect(onBuddy).toHaveBeenCalledExactlyOnceWith('switch to BRB and play the drum roll')
+    expect(container.textContent).toContain('Switched to BRB. Pressed Drum roll.')
+    expect(container.querySelector('input')!.value).toBe('')
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('shows a free user the Premium sentence and keeps the words', async () => {
+    const onBuddy = vi.fn(async () => ({
+      actId: 'a2',
+      status: 'unavailable' as const,
+      message: BUDDY_PREMIUM_REQUIRED
+    }))
+    await mountBuddy(onBuddy)
+    await type('/buddy go to BRB')
+    await enter()
+    expect(container.textContent).toContain('Buddy requires Videorc Premium.')
+    expect(container.querySelector('input')!.value).toBe('/buddy go to BRB')
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('asks for words before calling Buddy', async () => {
+    const onBuddy = vi.fn()
+    await mountBuddy(onBuddy)
+    await type('/buddy ')
+    await enter()
+    expect(onBuddy).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Say what Buddy should do')
   })
 })

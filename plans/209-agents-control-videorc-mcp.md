@@ -39,10 +39,10 @@
 | S15   | Library: rename, delete, export, Clean cut, transcripts            | B   | DONE    |
 | S16   | Smoke coverage for PR B and the gates                              | B   | DONE    |
 | S17   | Web: the Buddy planner route (deploy first)                        | C   | DONE    |
-| S18   | Buddy's grammar commands run through the executor                  | D   | PLANNED |
-| S19   | Buddy asks the planner and runs its tool calls                     | D   | PLANNED |
-| S20   | `/buddy` in the Stream Manager composer                            | D   | PLANNED |
-| S21   | `smoke:buddy-act` and the gates                                    | D   | PLANNED |
+| S18   | Buddy's grammar commands run through the executor                  | D   | DONE    |
+| S19   | Buddy asks the planner and runs its tool calls                     | D   | DONE    |
+| S20   | `/buddy` in the Stream Manager composer                            | D   | DONE    |
+| S21   | `smoke:buddy-act` and the gates                                    | D   | DONE    |
 | S22   | One-click Connect, Claude Desktop extension, MCP prompts           | E   | PLANNED |
 
 - **Status**: PLANNED 2026-10-27. The owner answered the four shaping
@@ -1681,3 +1681,141 @@ format:check`, vitest on `studio-actions/`, `agent-surface`,
   and the MCP client (37). The rest of S16's bundle (smoke:multistream,
   live-chat-fake-providers, buddy-commands, freeform-editor, banners,
   comment-highlight-stream, the PR A list) is the orchestrator's.
+
+### S18 to S21 (2026-10-28, PR D)
+
+- **Buddy is a built-in caller** (`crates/videorc-backend/src/buddy_act.rs`):
+  `AgentIdentity {id: "buddy", name: "Buddy"}`, never a registry agent (no
+  token, no presence, never in the agents list; `record_action` ignores it).
+  `buddy_act::call` checks D15 (catalog tool AND `buddy: true`, else "Buddy
+  can't use notify." / "Buddy has no tool called …", a non-snake-case name
+  is quoted as "that tool"), then `agent_call::run_tool` (schema, Buddy's
+  own rate limit, the backend executor or the Studio relay with
+  `agentId: "buddy"`), then the Activity row as "Buddy" with the D11 notice
+  for an `onAir` call. The Studio refuses a Buddy intent for a tool outside
+  the subset a second time (`executeAgentIntent`, "Buddy can't use that
+  tool."). Tools added later join by their `buddy` mark alone
+  (`buddy_tools()`, `planner_tools()`).
+- **S18, deviation (read before merging):** only the banner commands now
+  _run_ through the tool path (`set_banner`, card sentences unchanged; a
+  tool refusal lands on the card in the tool's words). Highlight, clear and
+  removal keep their engine executor and are attributed instead: every
+  `cohost.state` passes `note_grammar_command`, which logs Buddy's
+  `set_highlight` / `remove_chat_message` once per command and status
+  (`done` ok; `refused`/`unavailable` refused; waiting, not found,
+  cancelled and expired are not calls). Why: `smoke:buddy-commands` has no
+  Studio (Studio tools would answer "Videorc's Studio isn't open."), it
+  asserts the engine's `source: "command"` autoHighlight, and the chooser,
+  "show it anyway?" and the voice removal card are the grammar's
+  confirmations, which `set_highlight` and PR B's `remove_chat_message` do
+  not have. A voice marker keeps its spoken time and `voice` source
+  (`commit_voice`) and is logged as Buddy's `add_marker` (`captions.rs`).
+  `smoke:buddy-commands`, checked by reading: A0 (no marker, no card, no
+  parser call), A1 (highlight card, `source: command` autoHighlight), A2
+  ("Cleared the highlight."), A3 to A7 (removal cards, voice yes/no,
+  hidden-locally, spotlight highlight, expiry, report counts), A' (kill
+  switches, restart sweep) and B (Basic refusals) see the same engine
+  states; the only new traffic is `agents.activity` rows and events. Its
+  capabilities fake has no `buddy` block, so the planner never runs there.
+- **S19, the planner by voice** (`cohost.rs`, `run_buddy_act_by_voice_with`,
+  injectable like the part E parser): a wake-word `unknown` goes to
+  `POST /api/ai/buddy/act` when `buddy.act` is 1 (new
+  `AiCapabilities.buddy`, read with the other capability flags in
+  `refresh_account_entitlements`), no 403 since the last read or Buddy
+  session, Premium, the voice switch, Buddy on and its session's consent.
+  Otherwise, or after a 403 (which turns it off), the part E path runs
+  unchanged; any other failure is "Buddy didn't catch that: '…'.". A banner
+  sentence the banner grammar could not read now goes to the planner too
+  (it knows banners; the parser never did).
+  - Request: Buddy's subset with the catalog's descriptions and schemas;
+    names from the backend (banners, takeovers, sounds) and the Studio's
+    agent surface (scenes, destinations); a flat state (`activity`,
+    `elapsedSeconds`, `viewers`, `scene`, `micMuted`, `systemAudioOn`,
+    `captionsOn`, `takeover`, `destinationsOn`, `bannersShown`,
+    `highlightShown`, `clipsOn`); comments from the parser's own pool only
+    when `about_comment` (a chat word, "this one"/"that one", or an
+    author's name), as `{id, platform, viewerName, viewerText}`.
+  - The agent surface is now published while Agents is on **or Buddy may
+    act** (`AgentSurfaceInput.buddyCanAct = cohostGate.allowed`; the flag
+    never reaches the projection).
+  - Answer: more than 3 calls is refused whole; each call is checked on its
+    own (`plan`), args must be an object of at most 2 KB, and names become
+    ids (`resolve_names`: `sceneId`, `soundId`, `bannerId`, `takeoverId`,
+    `destinations`; exact name or alias, then one unique beginning).
+  - Running: in order through `call`. D14 by voice: "Go live? Say yes."
+    before `go_live`, "End the livestream? Say yes." before `stop` while
+    live and **"Stop the recording? Say yes." before `stop` while recording**
+    (deviation: D14 names the livestream; the orchestrator's S21 asks the
+    smoke to prove it while recording, and a misheard stop ends a recording
+    just as hard; flag for the owner with Open question 1).
+    `remove_chat_message` opens the existing removal card
+    (`execute_resolved_command`, always a yes) and the steps after it do
+    not run.
+  - The card: new `CohostCommandKind::Act` (`act` in the contract and
+    `shared/backend.ts`). A D14 halt is `confirm` with `expiresAt`
+    (`CommandPending::ActConfirm`, the rest of the plan on the record);
+    "yes" (voice or `cohost.command.confirm`) runs on from that call and the
+    card finishes in place (same id; `ActRunning` while it runs, `confirm`
+    without `expiresAt`, "On it…"); "no" is "Cancelled. Nothing stopped." /
+    "Cancelled. You're not live."; 20 s without an answer is `expired`. A
+    finished plan says what the calls said ("Switched to BRB. Pressed Drum
+    roll."); a question answered by a read leads with the line; nothing
+    that ran never leads with the planner's promise. The Stream Manager
+    shows the D14 card as "Buddy asks first" with Yes and Cancel
+    (`commandConfirmView` now takes `act`).
+- **S20, `/buddy <words>`**: `COMPOSER_COMMANDS` gains
+  `{ value: '/buddy', hint: ' · Ask Buddy to do something' }` (offered only
+  where `onBuddy` exists); `classifyComposerDraft` returns
+  `{kind: 'buddy', sentence}` (whitespace collapsed, empty or over 500
+  characters is the composer's own sentence). The window relays through
+  main (`comments-window:buddy-act`, 95 s) to the Studio
+  (`lib/buddy-act-relay.ts`, in the chat-moderation chunk), which shows a
+  free user "Buddy requires Videorc Premium." without a backend call and
+  otherwise calls `cohost.act {actId, sentence, consentToProcessChat}`. It
+  answers at once (a gate's sentence, or `working`), and the planner and
+  calls run on their own task with no wake word and no D14 halt (a
+  `cohost.act` that waited would hold the Studio's own socket while the
+  Studio runs the calls it relays). The final answer is the
+  `cohost.act.result` event (contract; never a LAN event); the composer
+  shows it and clears the draft when Buddy did it.
+- **S21**: `scripts/lib/fake-cohost-service.mjs` serves
+  `POST /api/ai/buddy/act` (the part F zod rules in
+  `validateBuddyActRequest`, a deterministic `planBuddyAct` that uses
+  names, never `stop` with comments, `queueActAnswer` for a scripted or
+  compromised planner) and, only when a smoke opts in with `buddyAct`,
+  `GET /api/ai/capabilities` with the `buddy` block (other smokes keep
+  their own capabilities fake). `scripts/smoke-buddy-act-app.mjs`
+  (`pnpm smoke:buddy-act`, in `smoke:local-gates` after
+  `smoke:buddy-commands`): `/buddy switch to screen only and play the drum
+roll` (subset only, names, no comments, the backend scene, the
+  `sounds.playback` press, both calls in Activity as Buddy); a planned
+  `open_window`, `notify` and `delete_everything` refused (Notes stays
+  closed, three refused Buddy rows); `move_on_scene` guarded (SKIPPED with
+  a message while the catalog has none; with it, `{item: 'buddy', place:
+'top-left'}` and Buddy's horizontal rect top left; it FAILS loudly if
+  S11b's schema names differ); then `/buddy start recording`, a fake chat
+  session, captions and Buddy, "Buddy, stop the recording." → the card
+  "Stop the recording? Say yes.", still recording 3 s later, "Yes." → the
+  recording stops and the card finishes. Not run here (orchestrator, after
+  the merge); the spoken step leans on the caption fake and
+  `backend-debug-rpc audio.test.inject-pcm` like `smoke:session-markers`
+  and `smoke:buddy-commands`, so expect to tune it on the first run.
+- **Docs**: `docs/buddy-commands-contract.md` part F verbatim from the web
+  branch `plan-209-buddy-act`, plus a desktop part G; `docs/buddy-commands.md`
+  (Ask Buddy to do more, privacy, checks); `docs/agents-mcp.md` (Buddy in
+  Activity and the developer half); `AGENTS.md` (`smoke:buddy-act`).
+- **Checks**: `cargo test -p videorc-backend --bin videorc-backend --
+buddy_act command banner presence parser agent marker capabilit
+cohost_act` (266 passed, incl. 18 `buddy_act` and 9 new `cohost` tests:
+  the old path without `buddy.act`, a non-subset and an unknown tool never
+  running, the 403 fallback, a failure's "didn't catch that", comments only
+  for a comment sentence, the D14 yes/no/expiry, a voice removal opening
+  the removal card, a grammar banner as Buddy's `set_banner`), the policy
+  inventory test with `cohost.act`, `cargo clippy -p videorc-backend -- -D
+warnings`, `cargo fmt --check --all`; `pnpm typecheck`, `pnpm lint` (the
+  one pre-existing warning), `pnpm format:check`, vitest on 15 files (226,
+  incl. `buddy-act`, `buddy-act-relay`, the composer, `agent`,
+  `agent-surface`, `buddy-command-view` and the contract tests), and
+  `node --test scripts/lib/fake-cohost-service.test.mjs` (16). No dev-app
+  smoke run (the orchestrator runs `smoke:buddy-act`, `smoke:buddy-commands`
+  and `smoke:captions-contract` after the merge).
