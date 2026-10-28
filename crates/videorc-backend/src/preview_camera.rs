@@ -4321,12 +4321,38 @@ const WINDOWS_CAMERA_COMMON_MJPEG_MODES: &[(u32, u32)] = &[
     (1920, 1080),
 ];
 
+/// What a DirectShow `-list_options true` probe learned about a device.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum WindowsDshowModeProbe {
+    /// The device answered; these are its MJPEG sizes (possibly none).
+    Modes(Vec<(u32, u32)>),
+    /// No pin listing and no known cause: fall back to the blind ladder.
+    Unreadable,
+    /// A failure no capture mode can fix; no attempt should be spawned.
+    ModeIndependentError(String),
+}
+
+/// Classifies `-list_options true` output. An empty `Modes` means the device
+/// answered and offers no MJPEG: field UHD 620 laptop's "HP HD Camera" is
+/// YUY2-only, and 17 blind MJPEG spawns (~0.7 s each) ran past the 10 s
+/// command contract before the raw-mode attempt was ever reached.
+#[cfg(any(target_os = "windows", test))]
+fn classify_windows_dshow_mode_probe(list_options_output: &str) -> WindowsDshowModeProbe {
+    if let Some(sizes) = parse_windows_dshow_mjpeg_sizes(list_options_output) {
+        return WindowsDshowModeProbe::Modes(sizes);
+    }
+    match list_options_output
+        .lines()
+        .find(|line| windows_dshow_error_is_mode_independent(line))
+    {
+        Some(line) => WindowsDshowModeProbe::ModeIndependentError(line.trim().to_string()),
+        None => WindowsDshowModeProbe::Unreadable,
+    }
+}
+
 /// MJPEG sizes a DirectShow device advertises in `-list_options true`
-/// output, or `None` when the output holds no pin listing at all (the probe
-/// failed and the caller must fall back to the blind ladder). `Some(empty)`
-/// means the device answered and offers no MJPEG: field UHD 620 laptop's "HP
-/// HD Camera" is YUY2-only, and 17 blind MJPEG spawns (~0.7 s each) ran past
-/// the 10 s command contract before the raw-mode attempt was ever reached.
+/// output, or `None` when the output holds no pin listing at all.
 #[cfg(any(target_os = "windows", test))]
 fn parse_windows_dshow_mjpeg_sizes(list_options_output: &str) -> Option<Vec<(u32, u32)>> {
     let mut saw_pin_mode = false;
@@ -4896,7 +4922,7 @@ mod windows {
         // at 5-10 fps. Ask the device which MJPEG sizes it really has first;
         // only an unreadable answer falls back to the blind size ladder.
         let mjpeg_modes = match probe_windows_camera_mjpeg_sizes(&config, &stop_flag) {
-            Some(sizes) => {
+            WindowsDshowModeProbe::Modes(sizes) => {
                 tracing::info!(
                     camera = %config.unique_id,
                     mjpeg_sizes = sizes.len(),
@@ -4905,7 +4931,21 @@ mod windows {
                 );
                 order_windows_camera_capture_modes(sizes, width, height)
             }
-            None => {
+            WindowsDshowModeProbe::ModeIndependentError(reason) => {
+                // Busy, missing or refused: every capture mode would fail the
+                // same way, so spend none of the start budget on them.
+                tracing::warn!(
+                    camera = %config.unique_id,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "Windows camera preview mode probe hit an error no capture mode can fix: {reason}"
+                );
+                let _ = startup_tx.send(NativeCameraStartup::Failed(format!(
+                    "Windows camera preview could not open the device in {} ms: {reason}",
+                    started_at.elapsed().as_millis()
+                )));
+                return;
+            }
+            WindowsDshowModeProbe::Unreadable => {
                 tracing::warn!(
                     camera = %config.unique_id,
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
@@ -5018,7 +5058,7 @@ mod windows {
     fn probe_windows_camera_mjpeg_sizes(
         config: &NativeCameraPreviewConfig,
         stop_flag: &Arc<AtomicBool>,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> WindowsDshowModeProbe {
         let input = format!("video={}", config.unique_id);
         let mut command = Command::new(&config.ffmpeg_path);
         command
@@ -5035,7 +5075,9 @@ mod windows {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        let mut child = spawn_owned_std(&mut command).ok()?;
+        let Ok(mut child) = spawn_owned_std(&mut command) else {
+            return WindowsDshowModeProbe::Unreadable;
+        };
         let stderr = collect_stderr(child.stderr.take());
         let deadline = Instant::now() + WINDOWS_CAMERA_LIST_OPTIONS_TIMEOUT;
         loop {
@@ -5047,7 +5089,7 @@ mod windows {
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return None;
+                    return WindowsDshowModeProbe::Unreadable;
                 }
             }
         }
@@ -5061,10 +5103,10 @@ mod windows {
                 (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned())
             };
             if let Some(output) = output {
-                return parse_windows_dshow_mjpeg_sizes(&output);
+                return classify_windows_dshow_mode_probe(&output);
             }
             if Instant::now() >= read_deadline {
-                return None;
+                return WindowsDshowModeProbe::Unreadable;
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -9375,6 +9417,33 @@ Error opening input file video=HP HD Camera."#;
             None
         );
         assert_eq!(parse_windows_dshow_mjpeg_sizes(""), None);
+        assert_eq!(
+            classify_windows_dshow_mode_probe(""),
+            WindowsDshowModeProbe::Unreadable
+        );
+        assert_eq!(
+            classify_windows_dshow_mode_probe("[in#0 @ 0] Error opening input: I/O error"),
+            WindowsDshowModeProbe::Unreadable
+        );
+    }
+
+    #[test]
+    fn windows_dshow_mode_probe_stops_on_a_mode_independent_error() {
+        assert_eq!(
+            classify_windows_dshow_mode_probe(
+                "[dshow @ 0] Could not find video device with name [Gone] among source devices of type video.\n\
+                 Error opening input file video=Gone."
+            ),
+            WindowsDshowModeProbe::ModeIndependentError(
+                "[dshow @ 0] Could not find video device with name [Gone] among source devices of type video."
+                    .to_string()
+            )
+        );
+        // A listing wins over an error line: the device did answer.
+        assert_eq!(
+            classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS),
+            WindowsDshowModeProbe::Modes(Vec::new())
+        );
     }
 
     #[test]
