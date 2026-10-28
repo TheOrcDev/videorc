@@ -158,6 +158,29 @@ same files at `/chrome-ground-{dark,light}.webp` (`include_bytes!`, never a
 copy; S6). `chrome-ground-contrast.test.ts` reads the stats file, so a
 regenerated ground re-proves the windows' text contrast.
 
+The ground drifts slightly (owner, 2026-10-28). It is the same still, with no
+second image, shader or zoom:
+
+- **The motion.** It slides up to 10 px across and 7 px down along two sines
+  (53 s and 67 s). A 200 ms timer moves it, so each step is under a third of
+  a pixel on the σ 24 blur.
+- **The edges.** The stills overhang the window by 16 px, so no edge shows.
+- **The layer.** While moving, the slide is a 3D translate, which gets its
+  own compositor layer, clipped to the window plus the margin. Paused, it is
+  a 2D translate at the same place, which hands the layer back.
+- **When it runs.** Only while the window is visible and focused and Reduce
+  Motion is off. Behind another app it pauses where it is, and it resumes
+  without a jump. The layer says `data-chrome-ground-drift="moving|paused"`,
+  and `probe:ui-glass` holds Reduce Motion on its CDP session so its
+  zero-tolerance pixel stability still compares like with like. The phone
+  remote's ground stays still.
+- **Cost.** Measured in the dev app on the Studio window in light, four
+  60 s runs: the GPU process used 2.8% and 3.0% of a core drifting against
+  2.3% and 1.9% paused. The renderer and browser differed within their
+  noise, and RSS did not change. The drift layer holds about 20 MB of GPU
+  memory (`footprint` of the GPU process: 114 MB drifting, 90 to 106 MB
+  paused), only in the focused window, and gives it back when it pauses.
+
 Regenerate from the repository root (requires Rust, desktop Electron and
 libwebp's `cwebp` on PATH):
 

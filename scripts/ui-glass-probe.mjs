@@ -463,6 +463,54 @@ async function readCoats(devtoolsHost, role) {
 }
 
 // Read real computed text-tier colours rather than the pre-208 chromatic constants.
+// The chrome ground drifts slightly in the focused window (2026-10-28), and
+// the pixel-stability check needs the same pixels in every backdrop's shot.
+// Hold Reduce Motion on one CDP session for the role's shots: the drift
+// pauses where it is, and closing the session lets it move again.
+async function holdGroundStill(devtoolsHost, role) {
+  const target = await pageTarget(devtoolsHost, role)
+  if (!target) return async () => {}
+  const socket = new WebSocket(target.webSocketDebuggerUrl)
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve)
+    socket.addEventListener('error', () => reject(new Error('CDP connect failed')))
+  })
+  let id = 0
+  const call = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const callId = ++id
+      const timer = setTimeout(() => reject(new Error(`CDP ${method} timed out`)), 10_000)
+      const onMessage = (event) => {
+        const message = JSON.parse(event.data)
+        if (message.id !== callId) return
+        clearTimeout(timer)
+        socket.removeEventListener('message', onMessage)
+        if (message.error) reject(new Error(message.error.message))
+        else resolve(message.result)
+      }
+      socket.addEventListener('message', onMessage)
+      socket.send(JSON.stringify({ id: callId, method, params }))
+    })
+  await call('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'reduce' }]
+  })
+  const deadline = Date.now() + 5000
+  for (;;) {
+    const result = await call('Runtime.evaluate', {
+      expression: `document.querySelector('[data-chrome-ground-drift]')?.dataset.chromeGroundDrift ?? 'none'`,
+      returnByValue: true
+    })
+    const state = result?.result?.value
+    if (state !== 'moving') break
+    if (Date.now() > deadline) {
+      socket.close()
+      throw new Error(`${role}: the chrome ground kept drifting under Reduce Motion`)
+    }
+    await sleep(100)
+  }
+  return async () => socket.close()
+}
+
 async function readGround(devtoolsHost, role) {
   const target = await pageTarget(devtoolsHost, role)
   if (!target) return null
@@ -488,6 +536,7 @@ async function readGround(devtoolsHost, role) {
       visible: !!visible(ground),
       reducedTransparency: matchMedia('(prefers-reduced-transparency: reduce)').matches,
       firstRun: !!document.querySelector('[data-first-run-backdrop], [data-first-run-surface]'),
+      drift: document.querySelector('[data-chrome-ground-drift]')?.dataset.chromeGroundDrift ?? null,
       images: Array.from(document.querySelectorAll('[data-chrome-ground-image]')).map(el => ({
         theme: el.dataset.chromeGroundImage, visible: !!visible(el),
         loaded: el.complete, width: el.naturalWidth, height: el.naturalHeight, src: el.currentSrc
@@ -1191,17 +1240,23 @@ async function main() {
         const files = {}
         let bounds = null
         const references = {}
-        for (const variant of BACKDROPS) {
-          const { raised, file, referenceMean } = await (
-            clearRequested ? shootWithReference : shoot
-          )(smoke, theme, role, variant)
-          shots[variant] = measure(file, raised.bounds, role)
-          files[variant] = file
-          bounds = raised.bounds
-          references[variant] = referenceMean
+        const releaseGround = await holdGroundStill(devtoolsHost, role)
+        let look
+        try {
+          for (const variant of BACKDROPS) {
+            const { raised, file, referenceMean } = await (
+              clearRequested ? shootWithReference : shoot
+            )(smoke, theme, role, variant)
+            shots[variant] = measure(file, raised.bounds, role)
+            files[variant] = file
+            bounds = raised.bounds
+            references[variant] = referenceMean
+          }
+          await assertTheme(devtoolsHost, theme)
+          look = await shoot(smoke, theme, role, 'photo')
+        } finally {
+          await releaseGround()
         }
-        await assertTheme(devtoolsHost, theme)
-        const look = await shoot(smoke, theme, role, 'photo')
         looks.push({ file: look.file, label: `${theme} · ${role}` })
         const glassState = await requestSmokeCommand(smoke, 'window-glass-state', { role })
         report.effectViews[`${theme}-${role}`] = glassState.effectViews ?? null
