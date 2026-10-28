@@ -59,9 +59,16 @@ const htmlPath = resolve(
 // for a chosen screen (~0.6 KB) and the shell's step wiring (~0.8 KB). The
 // step UI and the look's helpers are lazy (setup's chunk is 357 KB raw).
 // Raise raw to 2,030,000 (~1.4%); keep re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-28 (plan 209, Videorc MCP): main measured 404,071 gzip
+// (929 bytes of headroom). The agents' Studio wiring needs ~1.9 KB of eager
+// gzip: the Go Live path the dialog and agents share, the agent intent lane
+// and its cancel handles, the agent surface input and the notices watcher's
+// mount. Executors, the surface publisher, the headless Go Live, the Agents
+// settings and the Connect dialog are lazy. Measured 405,989. Raise gzip to
+// 410,000 (~1.2%); keep re-splitting the answer for net-new UI.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_030_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 405_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 410_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }
