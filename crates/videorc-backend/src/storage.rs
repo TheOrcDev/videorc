@@ -253,7 +253,19 @@ pub struct PendingRecordingFinalization {
     pub duration_ms: Option<i64>,
     pub diagnostics_json: String,
     pub keep_original_mkv: bool,
+    /// An interrupted take being recovered: its MKV is kept whatever the
+    /// keep-original setting says.
+    pub interrupted_take: bool,
 }
+
+/// How long after its start an interrupted take is still recovered
+/// automatically. Older failed rows keep the manual Export MP4 action, so the
+/// first launch of this version never re-exports a whole history.
+pub const INTERRUPTED_TAKE_RECOVERY_WINDOW: chrono::Duration = chrono::Duration::days(7);
+
+/// A capture file smaller than this holds no media worth recovering (a start
+/// that failed before the first cluster).
+pub const INTERRUPTED_TAKE_MIN_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -2866,7 +2878,7 @@ impl Database {
         let conn = self.lock()?;
         let mut statement = conn.prepare(
             "SELECT id, output_path, ended_at, duration_ms, COALESCE(diagnostics_json, '{}'),
-                    output_json
+                    output_json, interruption_recovery IS 'pending'
              FROM sessions
              WHERE finalization_state = 'finalizing'
              ORDER BY started_at ASC",
@@ -2884,10 +2896,113 @@ impl Database {
                 duration_ms: row.get(3)?,
                 diagnostics_json: row.get(4)?,
                 keep_original_mkv,
+                interrupted_take: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(anyhow::Error::from)
+    }
+
+    /// Interrupted takes: recording rows that ended `failed` (a crash, a
+    /// killed backend, a power loss, a capture that died mid-take) with their
+    /// capture MKV still on disk and no MP4. Each one with media is claimed
+    /// for recovery (`finalization_state = 'finalizing'`, so
+    /// [`Self::sessions_pending_finalization`] picks it up, and
+    /// `interruption_recovery = 'pending'`); one without media is marked
+    /// `none` and never looked at again. Returns the claimed ids.
+    ///
+    /// Only rows started at or after `since` qualify, and `only_session`
+    /// narrows the scan to one row (the take that just failed).
+    pub fn claim_interrupted_takes(
+        &self,
+        since: &str,
+        only_session: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let candidates = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare(
+                "SELECT id, output_path FROM sessions
+                 WHERE status = 'failed'
+                   AND finalization_state IS NULL
+                   AND interruption_recovery IS NULL
+                   AND mp4_path IS NULL
+                   AND output_path IS NOT NULL
+                   AND lower(output_path) LIKE '%.mkv'
+                   AND library_hidden = 0
+                   AND derived_from_session_id IS NULL
+                   AND processing_kind IS NULL
+                   AND (recording_role IS NULL OR recording_role = 'combined')
+                   AND started_at >= ?1
+                   AND (?2 IS NULL OR id = ?2)
+                 ORDER BY started_at DESC",
+            )?;
+            statement
+                .query_map(params![since, only_session], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // Filesystem metadata never runs under the SQLite mutex.
+        let candidates = candidates
+            .into_iter()
+            .map(|(id, path)| {
+                let has_media = std::fs::metadata(&path).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.len() >= INTERRUPTED_TAKE_MIN_BYTES
+                });
+                (id, has_media)
+            })
+            .collect::<Vec<_>>();
+        let conn = self.lock()?;
+        let mut claimed = Vec::new();
+        for (id, has_media) in candidates {
+            let updated = if has_media {
+                conn.execute(
+                    "UPDATE sessions
+                     SET finalization_state = 'finalizing', finalization_error = NULL,
+                         interruption_recovery = 'pending'
+                     WHERE id = ?1 AND status = 'failed' AND finalization_state IS NULL
+                       AND interruption_recovery IS NULL",
+                    params![id],
+                )?
+            } else {
+                conn.execute(
+                    "UPDATE sessions SET interruption_recovery = 'none'
+                     WHERE id = ?1 AND interruption_recovery IS NULL",
+                    params![id],
+                )?;
+                0
+            };
+            if updated == 1 {
+                claimed.push(id);
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// Settles a pending interrupted-take recovery. Returns the new value
+    /// (`recovered` | `failed`), or `None` when the row was not being
+    /// recovered (an ordinary finalization).
+    pub fn settle_interruption_recovery(
+        &self,
+        session_id: &str,
+        recovered: bool,
+    ) -> Result<Option<&'static str>> {
+        let value = if recovered {
+            crate::recording_finalization::INTERRUPTION_RECOVERY_RECOVERED
+        } else {
+            crate::recording_finalization::INTERRUPTION_RECOVERY_FAILED
+        };
+        // The finalization commit writes `completed`; a recovery that made no
+        // MP4 leaves the take as failed as it was before.
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE sessions
+             SET interruption_recovery = ?2,
+                 status = CASE WHEN ?3 THEN status ELSE 'failed' END
+             WHERE id = ?1 AND interruption_recovery = 'pending'",
+            params![session_id, value, recovered],
+        )?;
+        Ok((updated == 1).then_some(value))
     }
 
     pub fn session_finalization_snapshot(&self, session_id: &str) -> Result<SessionFinalization> {
@@ -4852,7 +4967,7 @@ impl Database {
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
                            derived_from_session_id, source_title, processing_kind,
                            finalization_state, finalization_error, sources_json,
-                           take_id, recording_role
+                           take_id, recording_role, interruption_recovery
                     FROM sessions
                     WHERE library_hidden = 0
                       AND (
@@ -5006,7 +5121,8 @@ impl Database {
                     page_sessions.finalization_state, page_sessions.finalization_error,
                     clean_cut_outputs.source_session_id, clean_cut_outputs.mode,
                     page_sessions.sources_json,
-                    page_sessions.take_id, page_sessions.recording_role
+                    page_sessions.take_id, page_sessions.recording_role,
+                    page_sessions.interruption_recovery
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -5101,6 +5217,9 @@ impl Database {
                     finalization_error: row.get(23)?,
                     take_id: row.get(27)?,
                     recording_role: row.get(28)?,
+                    interruption_recovery: row
+                        .get::<_, Option<String>>(29)?
+                        .filter(|value| matches!(value.as_str(), "recovered" | "failed")),
                 })
             })?;
         let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -8228,6 +8347,14 @@ impl Database {
         // `take_id` (the Combined session's id); `recording_role` names the
         // file (`combined`, `screen`, `camera`). Both NULL on ordinary rows.
         ensure_column(&conn, "sessions", "take_id", "take_id TEXT")?;
+        // An interrupted take's automatic recovery: `pending` | `recovered` |
+        // `failed` | `none`. NULL on every row Videorc did not stop mid-take.
+        ensure_column(
+            &conn,
+            "sessions",
+            "interruption_recovery",
+            "interruption_recovery TEXT",
+        )?;
         ensure_column(&conn, "sessions", "recording_role", "recording_role TEXT")?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_take_id ON sessions(take_id)",
@@ -11913,6 +12040,151 @@ mod tests {
 
         // Second boot is a no-op.
         assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+    }
+
+    #[test]
+    fn interrupted_takes_with_media_are_claimed_once_and_settled() {
+        let dir = std::env::temp_dir().join(format!("videorc-interrupted-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_in_memory_for_tests();
+        let row = |id: &str, file: Option<(&str, u64)>| {
+            let mut session = sample_session(id);
+            session.started_at = "2026-10-27T10:00:00+00:00".to_string();
+            let path = dir.join(format!("{id}.mkv"));
+            if let Some((_, len)) = file {
+                std::fs::write(&path, vec![0u8; len as usize]).unwrap();
+            }
+            session.output_path = Some(path.display().to_string());
+            database.create_session(&session).unwrap();
+        };
+        // Killed backend / power loss: still `running` until the boot reconcile.
+        row("crashed", Some(("crashed", INTERRUPTED_TAKE_MIN_BYTES)));
+        // The capture died mid-take; the row is already `failed`.
+        row("died", Some(("died", 2 * INTERRUPTED_TAKE_MIN_BYTES)));
+        database
+            .finish_session("died", "failed", None, None, Some(89_599))
+            .unwrap();
+        // A start that failed before the first cluster: nothing to recover.
+        row("empty", Some(("empty", 512)));
+        row("missing", None);
+        // Finished normally: never touched.
+        row("done", Some(("done", INTERRUPTED_TAKE_MIN_BYTES)));
+        database
+            .finish_session("done", "completed", None, None, Some(1_000))
+            .unwrap();
+        // Outside the recovery window.
+        let mut old = sample_session("old");
+        let old_path = dir.join("old.mkv");
+        std::fs::write(&old_path, vec![0u8; INTERRUPTED_TAKE_MIN_BYTES as usize]).unwrap();
+        old.output_path = Some(old_path.display().to_string());
+        old.started_at = "2026-01-01T00:00:00+00:00".to_string();
+        database.create_session(&old).unwrap();
+        // A separate Screen file keeps its own interrupted-capture flow.
+        row(
+            "take-screen",
+            Some(("take-screen", INTERRUPTED_TAKE_MIN_BYTES)),
+        );
+        database
+            .set_session_take_role("take-screen", "take", "screen")
+            .unwrap();
+        database.reconcile_orphaned_sessions().unwrap();
+
+        let since = "2026-10-20T00:00:00+00:00";
+        let mut claimed = database.claim_interrupted_takes(since, None).unwrap();
+        claimed.sort();
+        assert_eq!(claimed, vec!["crashed".to_string(), "died".to_string()]);
+        // Claimed rows are what the startup finalization resume picks up.
+        let mut pending = database
+            .sessions_pending_finalization()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.session_id, row.interrupted_take))
+            .collect::<Vec<_>>();
+        pending.sort();
+        assert_eq!(
+            pending,
+            vec![("crashed".to_string(), true), ("died".to_string(), true)]
+        );
+        // A second scan (the next launch) claims nothing again.
+        assert!(
+            database
+                .claim_interrupted_takes(since, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            database
+                .settle_interruption_recovery("crashed", true)
+                .unwrap(),
+            Some("recovered")
+        );
+        assert_eq!(
+            database
+                .settle_interruption_recovery("died", false)
+                .unwrap(),
+            Some("failed")
+        );
+        // An ordinary finalization has nothing to settle.
+        assert_eq!(
+            database.settle_interruption_recovery("done", true).unwrap(),
+            None
+        );
+        let page = database.list_session_items_page(None, 20).unwrap();
+        let recovery = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .interruption_recovery
+                .clone()
+        };
+        assert_eq!(recovery("crashed").as_deref(), Some("recovered"));
+        assert_eq!(recovery("died").as_deref(), Some("failed"));
+        let status = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .status
+                .clone()
+        };
+        assert_eq!(status("died"), "failed", "a failed recovery stays failed");
+        // `none` is bookkeeping, never shown.
+        assert_eq!(recovery("empty"), None);
+        assert_eq!(recovery("missing"), None);
+        assert_eq!(recovery("done"), None);
+        assert_eq!(recovery("old"), None);
+        assert_eq!(recovery("take-screen"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claiming_one_interrupted_take_leaves_the_others() {
+        let dir = std::env::temp_dir().join(format!("videorc-interrupted-one-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_in_memory_for_tests();
+        for id in ["a", "b"] {
+            let mut session = sample_session(id);
+            session.started_at = "2026-10-27T10:00:00+00:00".to_string();
+            let path = dir.join(format!("{id}.mkv"));
+            std::fs::write(&path, vec![0u8; INTERRUPTED_TAKE_MIN_BYTES as usize]).unwrap();
+            session.output_path = Some(path.display().to_string());
+            database.create_session(&session).unwrap();
+            database
+                .finish_session(id, "failed", None, None, None)
+                .unwrap();
+        }
+        let since = "2026-10-20T00:00:00+00:00";
+        assert_eq!(
+            database.claim_interrupted_takes(since, Some("b")).unwrap(),
+            vec!["b".to_string()]
+        );
+        assert_eq!(
+            database.claim_interrupted_takes(since, None).unwrap(),
+            vec!["a".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

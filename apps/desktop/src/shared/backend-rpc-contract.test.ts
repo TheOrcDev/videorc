@@ -806,6 +806,25 @@ describe('backend RPC contract', () => {
       })
     ).toThrow()
 
+    // An interrupted take recovered on the next start (plan 0003).
+    const recovered = { ...item, interruptionRecovery: 'recovered' }
+    expect(validateBackendRpcResult('sessions.list', { items: [recovered] })).toEqual({
+      items: [recovered]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...item, interruptionRecovery: 'pending' }]
+      })
+    ).toThrow()
+    const finalized = {
+      sessionId: 'session-1',
+      state: 'finalized',
+      mp4Path: '/recordings/session-1.mp4',
+      interruptionRecovery: 'recovered',
+      updatedAt: '2026-10-28T00:00:00Z'
+    }
+    expect(validateBackendEventPayload('recording.finalization', finalized)).toEqual(finalized)
+
     const params = { sessionId: 'session-1', cursor: 'created\nid', limit: 120 }
     for (const method of [
       'sessions.healthEvents.list',

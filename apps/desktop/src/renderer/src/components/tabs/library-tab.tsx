@@ -79,6 +79,7 @@ import type {
 import {
   finalizationFailed,
   finalizingBadgeLabel,
+  interruptedTakeBadge,
   isFinalizingSession
 } from '@/lib/session-finalization'
 import {
@@ -880,6 +881,8 @@ function LibraryRow({
   // still runs; the row says so instead of claiming an MKV.
   const finalizing = isFinalizingSession(session)
   const exportFailed = finalizationFailed(session)
+  // A take Videorc stopped in the middle of, recovered on the next start.
+  const recovered = interruptedTakeBadge(session)
   // Plan 198: a Screen or Camera file that stopped during the take.
   const fileStopped = separateFileStopped(session)
   // A Clean cut copy (plan 119 S14): `cleanCutOfSessionId` names its source.
@@ -1053,6 +1056,12 @@ function LibraryRow({
             // Why the export failed, on hover and on focus (plan 174 S1.10, E-23).
             <InfoTooltip content={session.finalizationError} tabIndex={active ? 0 : -1}>
               <Badge variant="destructive">MP4 failed</Badge>
+            </InfoTooltip>
+          ) : recovered ? (
+            <InfoTooltip content={recovered.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-interrupted-take-recovered="" variant="outline">
+                {recovered.label}
+              </Badge>
             </InfoTooltip>
           ) : format ? (
             // The container is a fact, not a status: a tag (E-21).

@@ -4027,7 +4027,13 @@ export interface SessionListItem {
   takeId?: string
   /** Which file of the take this row is (plan 157); absent on ordinary rows. */
   recordingRole?: RecordingRole
+  /** A take Videorc stopped in the middle of (crash, killed backend, power
+   * loss): `recovered` once its MKV became an MP4 on the next start, `failed`
+   * when that did not work. Absent on every other row. */
+  interruptionRecovery?: InterruptionRecovery
 }
+
+export type InterruptionRecovery = 'recovered' | 'failed'
 
 /** Progress of a background recording finalization job (`recording.finalization`). */
 export interface RecordingFinalizationEvent {
@@ -4039,6 +4045,8 @@ export interface RecordingFinalizationEvent {
   durationMs?: number
   fileSizeBytes?: number
   error?: string
+  /** Set when this job finished an interrupted take's recovery. */
+  interruptionRecovery?: InterruptionRecovery
   updatedAt: string
 }
 

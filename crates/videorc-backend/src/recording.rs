@@ -11287,6 +11287,9 @@ async fn monitor_session(
     // rest of finalization to a background job that is spawned only after the
     // terminal status is published.
     let mut pending_finalization_job: Option<PendingRecordingFinalizationJob> = None;
+    // A take whose capture died mid-recording: once the failed row is
+    // committed and published, its MKV is recovered as an MP4.
+    let mut recover_failed_take: Option<String> = None;
     let performance_check_session = monitored_recording.performance_check;
     // Plan 157: ISO rows + their finalization jobs are registered BEFORE the
     // terminal status so the quit/updater gates never see an idle gap.
@@ -11733,7 +11736,7 @@ async fn monitor_session(
                 .pipeline
                 .mark_failed(failed_stage, &message);
             state.emit_log("error", &message);
-            if let Err(persistence_error) = persist_terminal_session_or_recovery(
+            match persist_terminal_session_or_recovery(
                 &state,
                 &session_id,
                 "failed",
@@ -11742,7 +11745,13 @@ async fn monitor_session(
                 duration_ms,
                 &final_diagnostics,
             ) {
-                message = format!("{message}. {persistence_error}");
+                Ok(()) if monitored_recording.records_file && !performance_check_session => {
+                    recover_failed_take = Some(session_id.clone());
+                }
+                Ok(()) => {}
+                Err(persistence_error) => {
+                    message = format!("{message}. {persistence_error}");
+                }
             }
             let _ = emit_health_event(
                 &state,
@@ -11846,6 +11855,9 @@ async fn monitor_session(
             tokio::spawn(run_recording_finalization_job(state.clone(), job));
         }
     }
+    if let Some(failed_session_id) = recover_failed_take {
+        recover_interrupted_takes(&state, Some(&failed_session_id));
+    }
     drop(finalizing_permit);
 
     restart_idle_live_preview_if_desired(state).await;
@@ -11904,7 +11916,9 @@ pub(crate) async fn run_recording_finalization_job(
     let session_id = request.session_id.clone();
     let output_path = request.input_mkv.display().to_string();
     match finalize_recording_media(&state, request, &control).await {
-        Ok(detail) => {
+        Ok(mut detail) => {
+            detail.interruption_recovery =
+                settle_interrupted_take(&state, &session_id, detail.mp4_path.is_some(), &detail);
             emit_finalization_event(
                 &state,
                 &session_id,
@@ -11933,20 +11947,82 @@ pub(crate) async fn run_recording_finalization_job(
                     "MP4 export failed; keeping MKV recovery file at {output_path}. {message}"
                 ),
             );
+            let detail = FinalizationEventDetail {
+                output_path: Some(output_path),
+                error: Some(message),
+                ..FinalizationEventDetail::default()
+            };
+            let interruption_recovery =
+                settle_interrupted_take(&state, &session_id, false, &detail);
             emit_finalization_event(
                 &state,
                 &session_id,
                 crate::protocol::RecordingFinalizationState::Failed,
                 FinalizationEventDetail {
-                    output_path: Some(output_path),
-                    error: Some(message),
-                    ..FinalizationEventDetail::default()
+                    interruption_recovery,
+                    ..detail
                 },
             );
         }
     }
     state.recording_finalization.finish(&session_id);
     drop(export_permit);
+}
+
+/// Closes the recovery of an interrupted take (no-op for an ordinary
+/// finalization) and says what happened in the take's log and Health.
+fn settle_interrupted_take(
+    state: &AppState,
+    session_id: &str,
+    recovered: bool,
+    detail: &FinalizationEventDetail,
+) -> Option<String> {
+    let settled = match state
+        .database
+        .settle_interruption_recovery(session_id, recovered)
+    {
+        Ok(settled) => settled?,
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("Could not record the interrupted recording's recovery: {error:#}"),
+            );
+            return None;
+        }
+    };
+    let message = interrupted_take_recovery_message(recovered, detail.duration_ms);
+    let level = if recovered {
+        HealthLevel::Info
+    } else {
+        HealthLevel::Warn
+    };
+    let code = if recovered {
+        "interrupted-take-recovered"
+    } else {
+        "interrupted-take-recovery-failed"
+    };
+    let _ = emit_health_event(state, Some(session_id), level, code, &message);
+    state.emit_log(if recovered { "info" } else { "warn" }, &message);
+    Some(settled.to_string())
+}
+
+/// Health copy for a settled interrupted-take recovery.
+fn interrupted_take_recovery_message(recovered: bool, duration_ms: Option<i64>) -> String {
+    if !recovered {
+        return "Videorc stopped during this recording and could not make an MP4 from it. \
+                The MKV is kept in the recordings folder."
+            .to_string();
+    }
+    match duration_ms.filter(|duration| *duration > 0) {
+        Some(duration_ms) => format!(
+            "Recovered after Videorc stopped: {:.1} s saved as MP4, up to where the recording \
+             was interrupted. The original MKV is kept.",
+            duration_ms as f64 / 1000.0
+        ),
+        None => "Recovered after Videorc stopped: saved as MP4 up to where the recording was \
+                 interrupted. The original MKV is kept."
+            .to_string(),
+    }
 }
 
 /// The post-MKV finalization sequence, verbatim from the former inline stop
@@ -12181,6 +12257,7 @@ async fn finalize_recording_media(
         duration_ms,
         file_size_bytes,
         error: None,
+        interruption_recovery: None,
     })
 }
 
@@ -12195,6 +12272,58 @@ fn ensure_mp4_export_disk_space(input_mkv: &Path) -> Result<()> {
 
 /// Rows left in `finalizing` by a backend exit mid-export: re-run the job.
 pub fn resume_pending_recording_finalizations(state: &AppState) {
+    resume_pending_recording_finalizations_where(state, |_| true);
+}
+
+/// Recovers interrupted takes: a recording Videorc stopped in the middle of
+/// (a crash, a killed backend, a power loss, a capture that died mid-take)
+/// keeps a failed row and a capture MKV. Each one started within
+/// [`INTERRUPTED_TAKE_RECOVERY_WINDOW`] runs the ordinary background
+/// finalization (MP4 export, duration probe, poster), keeps its MKV, and is
+/// marked `recovered` on the row. `only_session` recovers just the take that
+/// failed a moment ago; `None` scans at startup.
+pub fn recover_interrupted_takes(state: &AppState, only_session: Option<&str>) {
+    let since = (Utc::now() - crate::storage::INTERRUPTED_TAKE_RECOVERY_WINDOW).to_rfc3339();
+    let claimed = match state.database.claim_interrupted_takes(&since, only_session) {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("Could not look for interrupted recordings to recover: {error:#}"),
+            );
+            return;
+        }
+    };
+    if claimed.is_empty() {
+        return;
+    }
+    state.emit_log(
+        "info",
+        format!(
+            "Recovering {} interrupted recording(s) as MP4: {}",
+            claimed.len(),
+            claimed.join(", ")
+        ),
+    );
+    for session_id in &claimed {
+        // The row now reads `finalizing`: the Library shows "Saving MP4…".
+        emit_finalization_event(
+            state,
+            session_id,
+            crate::protocol::RecordingFinalizationState::Finalizing,
+            FinalizationEventDetail {
+                progress_percent: Some(0),
+                ..FinalizationEventDetail::default()
+            },
+        );
+    }
+    resume_pending_recording_finalizations_where(state, |row| claimed.contains(&row.session_id));
+}
+
+fn resume_pending_recording_finalizations_where(
+    state: &AppState,
+    include: impl Fn(&crate::storage::PendingRecordingFinalization) -> bool,
+) {
     let pending = match state.database.sessions_pending_finalization() {
         Ok(pending) => pending,
         Err(error) => {
@@ -12206,7 +12335,19 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
         }
     };
     for row in pending {
+        if !include(&row) {
+            continue;
+        }
         let session_id = row.session_id.clone();
+        // A job already running for this row (a stop's own finalization)
+        // owns it; never start a second export of the same file.
+        if state
+            .recording_finalization
+            .active_for_session(&session_id)
+            .is_some()
+        {
+            continue;
+        }
         let input_mkv = row.output_path.as_deref().map(PathBuf::from);
         let Some(input_mkv) = input_mkv.filter(|path| path.exists()) else {
             let _ = state.database.set_session_finalization_state(
@@ -12214,6 +12355,11 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
                 FINALIZATION_STATE_FAILED,
                 Some("The capture file was missing when the interrupted MP4 export resumed."),
             );
+            if row.interrupted_take {
+                let _ = state
+                    .database
+                    .settle_interruption_recovery(&session_id, false);
+            }
             continue;
         };
         let final_diagnostics: DiagnosticStats = serde_json::from_str(&row.diagnostics_json)
@@ -12263,7 +12409,9 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
                     ffmpeg_path: resolve_ffmpeg_path(None),
                     input_mkv,
                     output_ownership,
-                    keep_original_media: row.keep_original_mkv,
+                    // A recovered take keeps its MKV: it is the only copy of
+                    // the media until someone has watched the MP4.
+                    keep_original_media: row.keep_original_mkv || row.interrupted_take,
                     ended_at: row.ended_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
                     wall_duration_ms: row.duration_ms,
                     final_diagnostics,
@@ -31658,6 +31806,202 @@ mod tests {
             }),
             "{emitted:?}"
         );
+    }
+
+    /// A failed row whose capture MKV is on disk, as a crash leaves it.
+    fn create_interrupted_take(state: &AppState, session_id: &str, mkv: &Path) {
+        let params = base_params(true, false);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.to_string(),
+                title: "Interrupted take".to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "record".to_string(),
+                output_path: Some(mkv.display().to_string()),
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("create session row");
+        // The boot reconcile turns the orphaned `running` row failed.
+        state
+            .database
+            .reconcile_orphaned_sessions()
+            .expect("reconcile");
+    }
+
+    async fn wait_for_finalization_idle(state: &AppState) {
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            state.recording_finalization.wait_idle(),
+        )
+        .await
+        .expect("the recovery job finishes");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_interrupted_take_without_decodable_media_is_marked_failed_and_keeps_its_mkv() {
+        let state = test_state();
+        let session_id = format!("interrupted-garbage-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(&session_id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mkv = directory.join("take.mkv");
+        std::fs::write(
+            &mkv,
+            vec![0x5au8; crate::storage::INTERRUPTED_TAKE_MIN_BYTES as usize],
+        )
+        .unwrap();
+        create_interrupted_take(&state, &session_id, &mkv);
+        let mut events = state.events.subscribe();
+
+        recover_interrupted_takes(&state, None);
+        wait_for_finalization_idle(&state).await;
+
+        let page = state.database.list_session_items_page(None, 10).unwrap();
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.id == session_id)
+            .expect("session row");
+        assert_eq!(item.interruption_recovery.as_deref(), Some("failed"));
+        assert_eq!(item.status, "failed", "{item:?}");
+        assert!(item.mp4_path.is_none(), "{item:?}");
+        assert_eq!(
+            item.finalization_state,
+            Some(crate::protocol::RecordingFinalizationState::Failed),
+            "{item:?}"
+        );
+        assert!(
+            mkv.exists(),
+            "the MKV is never removed by a failed recovery"
+        );
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| event.event == "recording.finalization"
+                    && event.payload["sessionId"] == session_id.as_str()
+                    && event.payload["interruptionRecovery"] == "failed"),
+            "{emitted:?}"
+        );
+        // The next launch leaves the settled row alone.
+        recover_interrupted_takes(&state, None);
+        assert!(!state.recording_finalization.has_active_jobs());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn interrupted_take_recovery_copy_states_the_saved_length() {
+        assert_eq!(
+            interrupted_take_recovery_message(true, Some(41_666)),
+            "Recovered after Videorc stopped: 41.7 s saved as MP4, up to where the recording was interrupted. The original MKV is kept."
+        );
+        assert!(interrupted_take_recovery_message(true, None).starts_with("Recovered after"));
+        assert!(interrupted_take_recovery_message(false, Some(1)).contains("MKV is kept"));
+    }
+
+    /// A power-loss capture: a live (headerless-size) Matroska file cut
+    /// mid-cluster, with no cues and no duration, becomes a recovered MP4.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "spawns ffmpeg/ffprobe and writes media; run with --ignored"]
+    async fn an_unindexed_interrupted_take_is_recovered_as_a_playable_mp4() {
+        if !plan200_ffmpeg_available("an_unindexed_interrupted_take_is_recovered_as_a_playable_mp4")
+        {
+            return;
+        }
+        let state = test_state();
+        let session_id = format!("interrupted-real-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(&session_id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mkv = directory.join("take.mkv");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("testsrc2=size=320x180:rate=30")
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "6",
+                "-c:v",
+                "libx264",
+                "-bf",
+                "0",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "pcm_s16le",
+                "-ac",
+                "2",
+                "-live",
+                "1",
+            ])
+            .arg(&mkv)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success());
+        // Cut the last fifth off: no cues, no duration, a torn cluster.
+        let bytes = std::fs::read(&mkv).unwrap();
+        std::fs::write(&mkv, &bytes[..bytes.len() * 4 / 5]).unwrap();
+        assert!(
+            plan200_ffprobe(
+                &mkv,
+                &["-show_entries", "format=duration", "-of", "csv=p=0"]
+            )
+            .contains("N/A")
+        );
+        create_interrupted_take(&state, &session_id, &mkv);
+
+        recover_interrupted_takes(&state, None);
+        wait_for_finalization_idle(&state).await;
+
+        let page = state.database.list_session_items_page(None, 10).unwrap();
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.id == session_id)
+            .expect("session row");
+        assert_eq!(
+            item.interruption_recovery.as_deref(),
+            Some("recovered"),
+            "{item:?}"
+        );
+        assert_eq!(item.status, "completed");
+        assert_eq!(
+            item.finalization_state,
+            Some(crate::protocol::RecordingFinalizationState::Finalized)
+        );
+        let mp4 = PathBuf::from(item.mp4_path.as_deref().expect("an MP4"));
+        assert!(mp4.exists());
+        let duration_ms = item.duration_ms.expect("the probed duration");
+        assert!(
+            (3_000..6_000).contains(&duration_ms),
+            "the MP4 holds the media up to the cut: {duration_ms} ms"
+        );
+        let streams = plan200_ffprobe(
+            &mp4,
+            &["-show_entries", "stream=codec_name", "-of", "csv=p=0"],
+        );
+        assert!(
+            streams.contains("h264") && streams.contains("aac"),
+            "{streams}"
+        );
+        assert!(mkv.exists(), "the recovered take keeps its MKV");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[tokio::test(flavor = "current_thread")]
