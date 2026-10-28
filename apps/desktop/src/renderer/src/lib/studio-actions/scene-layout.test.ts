@@ -276,6 +276,91 @@ describe('sizes and the clamp (plan 209 S11b)', () => {
     }
   })
 
+  // Review fix #14: a named place plus a size stays on the canvas.
+  const inside = (rect: { x: number; y: number; w: number; h: number }): void => {
+    expect(rect.x).toBeGreaterThanOrEqual(0)
+    expect(rect.y).toBeGreaterThanOrEqual(0)
+    expect(rect.x + rect.w).toBeLessThanOrEqual(1 + 1e-9)
+    expect(rect.y + rect.h).toBeLessThanOrEqual(1 + 1e-9)
+  }
+
+  it('slides a large item at a side place back inside the canvas', () => {
+    for (const orientation of ORIENTATIONS) {
+      const current = DEFAULT_OVERLAY_LAYOUT.captions[orientation]
+      for (const place of OVERLAY_PLACES) {
+        for (const size of ['large', 1] as const) {
+          inside(overlayPlacement('captions', orientation, current, place, size))
+          inside(
+            overlayPlacement(
+              'highlight',
+              orientation,
+              DEFAULT_OVERLAY_LAYOUT.highlight[orientation],
+              place,
+              size
+            )
+          )
+        }
+      }
+    }
+    // Captions large at bottom left: as wide as the canvas, at its left edge.
+    const wide = overlayPlacement(
+      'captions',
+      'horizontal',
+      DEFAULT_OVERLAY_LAYOUT.captions.horizontal,
+      'bottom-left',
+      'large'
+    )
+    expect(wide).toMatchObject({ x: 0, w: 1 })
+  })
+
+  it('keeps Buddy square and inside at every size, both ways', () => {
+    for (const orientation of ORIENTATIONS) {
+      const current = DEFAULT_OVERLAY_LAYOUT.buddy[orientation]
+      for (const place of OVERLAY_PLACES) {
+        for (const size of ['small', 'large', 0.02, 0.5, 0.9, 1] as const) {
+          const rect = overlayPlacement('buddy', orientation, current, place, size)
+          inside(rect)
+          expect(rect.w * ASPECT[orientation], `${orientation} ${place} ${size}`).toBeCloseTo(
+            rect.h,
+            5
+          )
+          expect(Math.min(rect.w, rect.h)).toBeGreaterThanOrEqual(0.02 - 1e-9)
+        }
+      }
+    }
+    // As big as the landscape canvas allows: as tall as it is.
+    const biggest = overlayPlacement(
+      'buddy',
+      'horizontal',
+      DEFAULT_OVERLAY_LAYOUT.buddy.horizontal,
+      'bottom-right',
+      1
+    )
+    expect(biggest.h).toBeCloseTo(1, 6)
+    expect(biggest.w).toBeCloseTo(9 / 16, 6)
+  })
+
+  it('keeps a large banner at a corner inside the canvas, in its image shape', () => {
+    for (const image of [
+      banner('sponsor', 2400, 400),
+      banner('logo', 512, 512),
+      banner('tall', 400, 1200)
+    ]) {
+      for (const orientation of ORIENTATIONS) {
+        for (const place of ['top-left', 'bottom-right', 'middle-right'] as const) {
+          for (const size of ['large', 1] as const) {
+            const rect = bannerPlacement(image, orientation, ASPECT[orientation], place, size)
+            inside(rect)
+            expect((rect.w * ASPECT[orientation]) / rect.h).toBeCloseTo(
+              image.width / image.height,
+              3
+            )
+          }
+        }
+      }
+    }
+  })
+
   it('clamps an exact rect like a drag: inside the canvas, sides at least 0.02', async () => {
     const { context, state } = arranged()
     const rect = { x: 0.9, y: -0.2, width: 0.5, height: 0.001 }
@@ -492,6 +577,122 @@ describe('move_on_scene (plan 209 S11b, D22)', () => {
         screenOnly.context
       )
     ).toEqual({ ok: false, message: SCENE_LAYOUT_COPY.noCamera })
+  })
+})
+
+describe('a move answers from what it saved, not a re-read (review fix #7)', () => {
+  /** The Studio's refs right after a save: still the old layout until the
+   * next render (overlays, banners) or the scene's apply (a preset corner). */
+  function stale(initial: SceneArrangeSnapshot = snapshot()) {
+    const arrange: SceneArrangeContext = {
+      read: () => initial,
+      setOverlayLayout: vi.fn(async () => undefined),
+      updateBanner: vi.fn(async () => true),
+      applyCameraPreset: vi.fn(async () => true),
+      applyLayoutPatch: vi.fn(async () => true),
+      setSourceTransform: vi.fn(async () => true),
+      setSourceVisible: vi.fn(async () => true)
+    }
+    return { arrange, context: { arrange } as unknown as StudioActionContext }
+  }
+
+  it('lists what Buddy covers at its new place', async () => {
+    // Buddy on stream, at the bottom right over the camera.
+    const onStream = snapshot({
+      overlayLayout: {
+        ...DEFAULT_OVERLAY_LAYOUT,
+        buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true }
+      }
+    })
+    expect(sceneOverlaps(onStream, 'buddy').map((entry) => entry.item)).toContain('camera')
+    const { context } = stale(onStream)
+    const outcome = await executeAgentIntent(
+      call('move_on_scene', { item: 'buddy', place: 'bottom-left' }),
+      context
+    )
+    // A re-read would still see Buddy over the camera at the bottom right.
+    expect(outcome).toMatchObject({
+      ok: true,
+      message: 'Moved Buddy to the bottom left. Now covers: Highlight, Sponsor.',
+      result: {
+        rects: { horizontal: toSceneRect(overlaySnapRect('buddy', 'horizontal', 'bottom-left')) },
+        overlaps: [
+          { item: 'highlight', name: 'Highlight' },
+          { item: 'banner:sponsor', name: 'Sponsor' }
+        ]
+      }
+    })
+  })
+
+  it('lists what a banner covers at its new place, and nothing it left', async () => {
+    const { context } = stale()
+    const sponsor = snapshot().banners[0]!
+    // Over the camera and the card at the bottom; nothing at the top right.
+    expect(sceneOverlaps(snapshot(), 'banner:sponsor').map((entry) => entry.item)).toEqual([
+      'camera',
+      'highlight'
+    ])
+    const outcome = await executeAgentIntent(
+      call('move_on_scene', { item: 'banner:sponsor', place: 'top-right' }),
+      context
+    )
+    expect(outcome).toMatchObject({
+      ok: true,
+      message: 'Moved Sponsor to the top right.',
+      result: {
+        rects: {
+          horizontal: toSceneRect(
+            bannerSnapRect(sponsor, sponsor.horizontal, 'horizontal', 16 / 9, 'top-right')
+          )
+        },
+        overlaps: []
+      }
+    })
+  })
+
+  it("puts the camera's box at the corner just saved", async () => {
+    const { context } = stale()
+    const outcome = await executeAgentIntent(
+      call('move_on_scene', { item: 'camera', place: 'top-left' }),
+      context
+    )
+    // The bottom-right box (0.7 + 0.28125 + 0.01875 = 1) at the same margins.
+    expect(outcome).toMatchObject({
+      ok: true,
+      result: {
+        arrangement: 'preset',
+        corner: 'top-left',
+        rects: { horizontal: { x: 0.01875, y: 0.01875, width: 0.28125, height: 0.28125 } },
+        previous: { horizontal: { x: 0.7, y: 0.7, width: 0.28125, height: 0.28125 } }
+      }
+    })
+    const sideways = await executeAgentIntent(
+      call('move_on_scene', { item: 'camera', place: 'bottom-left' }),
+      context
+    )
+    expect(sideways.result).toMatchObject({
+      rects: { horizontal: { x: 0.01875, y: 0.7, width: 0.28125, height: 0.28125 } }
+    })
+  })
+
+  it('answers a freeform drag with the rect it committed', async () => {
+    const { context } = stale(
+      snapshot({
+        overlayLayout: {
+          ...DEFAULT_OVERLAY_LAYOUT,
+          buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true }
+        }
+      })
+    )
+    const outcome = await executeAgentIntent(
+      call('move_on_scene', { item: 'camera', place: 'top-left', size: 0.2 }),
+      context
+    )
+    const rect = (outcome.result as { rects: { horizontal: { x: number } } }).rects.horizontal
+    expect(rect).toMatchObject({ width: 0.2, height: 0.2 })
+    expect(rect.x).toBeCloseTo(overlaySnapRect('buddy', 'horizontal', 'top-left').x, 6)
+    // Off the bottom right, the camera no longer meets Buddy.
+    expect(outcome.result).toMatchObject({ overlaps: [] })
   })
 })
 

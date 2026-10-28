@@ -42,6 +42,7 @@ import {
   overlayDefaultSize,
   overlayPlaceOrigin,
   overlayPlaceRect,
+  overlayRectValid,
   type OverlayPlace
 } from '@/lib/overlay-layout'
 import {
@@ -210,18 +211,33 @@ function overlaySize(
       ? defaults
       : [current.w, current.h]
   }
+  // Buddy keeps its default shape, square on the canvas it was drawn for;
+  // the card and the caption bar keep the shape they have for a fraction.
+  const buddyRatio = defaults[1] / defaults[0]
   if (typeof size === 'number') {
-    // Buddy keeps its default shape, square on the canvas it was drawn for;
-    // the card and the caption bar keep the shape they have.
-    const ratio = item === 'buddy' ? defaults[1] / defaults[0] : current.h / current.w
-    return clampSize(size, size * ratio)
+    return fitShape(size, item === 'buddy' ? buddyRatio : current.h / current.w)
   }
   const factor = SCENE_SIZE_FACTOR[size]
-  return size === 'medium' ? defaults : clampSize(defaults[0] * factor, defaults[1] * factor)
+  if (size === 'medium') return defaults
+  return item === 'buddy'
+    ? fitShape(defaults[0] * factor, buddyRatio)
+    : clampSize(defaults[0] * factor, defaults[1] * factor)
 }
 
 function clampSize(w: number, h: number, min = 0.02): readonly [number, number] {
   return [clamp(w, min, 1), clamp(h, min, 1)]
+}
+
+/**
+ * A `w` wide item of shape `ratio` (h / w, canvas units), as wide as asked
+ * but never so wide that its height leaves the canvas, nor so narrow that a
+ * side drops under the drag's 0.02: it keeps its shape (Buddy stays square)
+ * instead of being squashed by a clamp on one side.
+ */
+function fitShape(w: number, ratio: number, min = 0.02): readonly [number, number] {
+  const shape = Number.isFinite(ratio) && ratio > 0 ? ratio : 1
+  const width = clamp(w, Math.max(min, min / shape), Math.min(1, 1 / shape))
+  return [width, width * shape]
 }
 
 /**
@@ -238,7 +254,14 @@ export function overlayPlacement(
   size: SceneSize | undefined
 ): OverlayRect {
   const dimensions = overlaySize(item, orientation, size, current)
-  if (place) return overlayPlaceRect(place, orientation, dimensions)
+  if (place) {
+    // A large item at a side place would cross the far edge (captions large
+    // at bottom left): it slides in as a drag's clamp moves it. Every place
+    // at an item's default size is already inside, so the inspector's snaps
+    // stay exactly what they were.
+    const placed = overlayPlaceRect(place, orientation, dimensions)
+    return overlayRectValid(placed) ? placed : clampOverlayRect(placed)
+  }
   return clampOverlayRect(anchored(current, dimensions[0], dimensions[1]))
 }
 
@@ -331,6 +354,59 @@ const CAMERA_CORNERS: ReadonlySet<string> = new Set([
   'bottom-right'
 ])
 
+// --- What a call saved --------------------------------------------------------
+//
+// A re-read right after a save is stale: the Studio's overlay and banner refs
+// update on the next render, and a preset transaction answers before its
+// scene is applied. So a move's rects and overlaps come from what the call
+// itself saved, laid over the snapshot it started from.
+
+/** The scene with these sources' rects replaced. */
+function withSourceRects(
+  snapshot: SceneArrangeSnapshot,
+  rects: Readonly<Record<string, SceneRect>>
+): SceneArrangeSnapshot {
+  if (!snapshot.scene) return snapshot
+  return {
+    ...snapshot,
+    scene: {
+      ...snapshot.scene,
+      sources: snapshot.scene.sources.map((entry) => {
+        const rect = Object.hasOwn(rects, entry.id) ? rects[entry.id] : undefined
+        return rect ? { ...entry, transform: { ...entry.transform, ...rect } } : entry
+      })
+    }
+  }
+}
+
+/** Float noise off a rect edge computed from two others. */
+function round9(value: number): number {
+  return Math.round(value * 1_000_000_000) / 1_000_000_000
+}
+
+/**
+ * Where the preset puts the camera at `corner`: the same box (a corner never
+ * changes the preset's size), at the same margins, on the other side where
+ * the corner flips. Null when the camera has a custom size, which the
+ * corner's transaction resets to a preset size this module doesn't know.
+ */
+function presetCornerRect(
+  snapshot: SceneArrangeSnapshot,
+  camera: SceneRect,
+  corner: CameraCorner
+): SceneRect | null {
+  if (snapshot.layout.cameraTransformMode === 'custom') return null
+  const from = snapshot.layout.cameraCorner
+  const side = (same: boolean, at: number, size: number): number =>
+    same ? at : Math.max(0, round9(1 - size - at))
+  return {
+    x: side(from.endsWith('-left') === corner.endsWith('-left'), camera.x, camera.width),
+    y: side(from.startsWith('top-') === corner.startsWith('top-'), camera.y, camera.height),
+    width: camera.width,
+    height: camera.height
+  }
+}
+
 // --- Overlaps -----------------------------------------------------------------
 
 interface PlacedItem {
@@ -395,7 +471,7 @@ function intersects(a: OverlayRect, b: OverlayRect): boolean {
 }
 
 /**
- * The items `id` now overlaps, from the latest snapshot ("Now covers:
+ * The items `id` overlaps in this snapshot ("Now covers:
  * Sponsor banner"). Something that fills the canvas (the screen, a frame
  * banner) is a frame around the picture, never news. Buddy, the highlight
  * card and the captions count only while an output shows them, a banner
@@ -654,7 +730,8 @@ export const moveOnScene: AgentToolExecutor = async (context, args) => {
         message: error instanceof Error ? error.message : SCENE_LAYOUT_COPY.failed
       }
     }
-    const overlaps = sceneOverlaps(arrange.read(), target.id)
+    // The layout just saved, not a re-read (the ref updates on the next render).
+    const overlaps = sceneOverlaps({ ...snapshot, overlayLayout: layout }, target.id)
     return moved({ item: target.id, name: target.name, rects, previous, overlaps }, what, note)
   }
 
@@ -674,7 +751,14 @@ export const moveOnScene: AgentToolExecutor = async (context, args) => {
     if (!(await arrange.updateBanner(target.banner.id, patch))) {
       return { ok: false, message: SCENE_LAYOUT_COPY.failed }
     }
-    const overlaps = sceneOverlaps(arrange.read(), target.id)
+    // The banner as just saved, not a re-read (the list updates on the next render).
+    const saved: SceneArrangeSnapshot = {
+      ...snapshot,
+      banners: snapshot.banners.map((entry) =>
+        entry.id === target.banner.id ? { ...entry, ...patch } : entry
+      )
+    }
+    const overlaps = sceneOverlaps(saved, target.id)
     return moved({ item: target.id, name: target.name, rects, previous, overlaps }, what, note)
   }
 
@@ -696,7 +780,13 @@ export const moveOnScene: AgentToolExecutor = async (context, args) => {
     if (!(await arrange.applyCameraPreset({ cameraCorner: corner }))) {
       return { ok: false, message: SCENE_LAYOUT_COPY.failed }
     }
-    const after = arrange.read()
+    // The transaction answers before its scene is applied: the camera's box
+    // comes from the corner just saved. Only a custom-sized camera (reset to
+    // a preset size here) reads back what the Studio has.
+    const cornered = presetCornerRect(snapshot, sourceRect(target.source), corner)
+    const after = cornered
+      ? withSourceRects(snapshot, { [target.source.id]: cornered })
+      : arrange.read()
     const camera = sceneSource(after, 'camera')
     const result: MoveResult = {
       item: 'camera',
@@ -716,11 +806,12 @@ export const moveOnScene: AgentToolExecutor = async (context, args) => {
     // "Make freeform": the arrangement a preset last replaced, or where the
     // scene draws every source now, so nothing else moves.
     if (!snapshot.scene) return { ok: false, message: SCENE_LAYOUT_COPY.failed }
-    const entered = await arrange.applyCameraPreset(
-      freeformEntryPatch(orientation, snapshot.scene.sources)
-    )
+    const entry = freeformEntryPatch(orientation, snapshot.scene.sources)
+    const entered = await arrange.applyCameraPreset(entry)
     if (!entered) return { ok: false, message: SCENE_LAYOUT_COPY.failed }
-    current = arrange.read()
+    // Where the entry draws every source: its own overrides (the scene a
+    // re-read gives isn't applied yet).
+    current = withSourceRects(snapshot, entry.sourceTransformOverrides)
   }
   const source = current.scene?.sources.find((candidate) => candidate.id === target.source.id)
   if (!source) return { ok: false, message: SCENE_LAYOUT_COPY.failed }
@@ -736,14 +827,13 @@ export const moveOnScene: AgentToolExecutor = async (context, args) => {
   if (!(await arrange.setSourceTransform(source.id, next))) {
     return { ok: false, message: SCENE_LAYOUT_COPY.failed }
   }
-  const after = arrange.read()
-  const committed = after.scene?.sources.find((candidate) => candidate.id === source.id)
+  // The rect just committed (a released drag commits it unsnapped).
   const result: MoveResult = {
     item: target.id,
     name: target.name,
-    rects: { [orientation]: committed ? sourceRect(committed) : next },
+    rects: { [orientation]: next },
     previous,
-    overlaps: sceneOverlaps(after, target.id),
+    overlaps: sceneOverlaps(withSourceRects(current, { [source.id]: next }), target.id),
     arrangement: 'freeform'
   }
   return moved(result, what, null)
