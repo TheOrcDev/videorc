@@ -59,8 +59,8 @@ use crate::buddy_sprite::{
     BuddySpriteSource,
 };
 use crate::cohost::{
-    CohostActivityTemplateKind, CohostAutoChat, CohostAutoChatMode, CohostAvatarState,
-    CohostPersona, CohostUtteranceState,
+    CohostActivityTemplateKind, CohostAutoChat, CohostAvatarState, CohostPersona,
+    CohostUtteranceState,
 };
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 
@@ -1098,13 +1098,14 @@ fn reaction_fresh(message: &LiveChatMessage, now: chrono::DateTime<chrono::Utc>)
 
 /// The reaction a greeting template sets for this kind and platform, when
 /// greetings answer it (D14: the greeting's own reaction wins). Several
-/// matching templates: the first that sets one.
+/// matching templates: the first that sets one. It plays whenever Buddy
+/// talks at all (plan 211 S-A4): in Bubble and in Suggest, never Off.
 fn greeting_reaction(
     auto_chat: &CohostAutoChat,
     kind: CohostActivityTemplateKind,
     platform: crate::streaming::StreamPlatform,
 ) -> Option<String> {
-    if auto_chat.mode == CohostAutoChatMode::Off || !auto_chat.greetings.enabled {
+    if !auto_chat.talk().speaks() || !auto_chat.greetings.enabled {
         return None;
     }
     let platform = crate::cohost_greetings::greeting_platform(platform);
