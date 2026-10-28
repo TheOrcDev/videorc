@@ -4844,6 +4844,29 @@ async fn start_session_with_timeline(
             .lock()
             .await
             .release_native_session_output(&session_id);
+        // A Record click right after launch queues the renderer's
+        // preview.screen.start behind this session.start; without this the
+        // startup barrier refused with 0 fresh screen frames.
+        if windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            windows_d3d11_media_mode,
+            use_encoder_bridge,
+            recording_encoder_bridge_video_output(
+                params.output.record_enabled,
+                params.output.stream_enabled,
+            ),
+        ) {
+            let screen = ensure_selected_preview_screen_live(&state, &params, &ffmpeg_path).await;
+            anyhow::ensure!(
+                matches!(screen.state, crate::protocol::PreviewScreenState::Live),
+                "Cannot start: the GPU recording path fell back and the selected Screen could not be prepared ({:?}): {}",
+                screen.state,
+                screen
+                    .message
+                    .as_deref()
+                    .unwrap_or("capture did not become live")
+            );
+        }
     }
 
     // The legacy graph's only live layer: the full-canvas RGBA FIFO. It exists
@@ -16034,36 +16057,7 @@ async fn prepare_source_iso_selected_capture(
                 .await
             }
         },
-        async {
-            let status = crate::preview_screen::preview_screen_status(state).await;
-            let current = crate::preview_screen::preview_screen_frame_source(state).await;
-            let selected = params
-                .sources
-                .window_id
-                .as_ref()
-                .or(params.sources.screen_id.as_ref());
-            if status.state == crate::protocol::PreviewScreenState::Live
-                && current
-                    .as_ref()
-                    .and_then(|source| source.source_key())
-                    .is_some_and(|key| selected == Some(&key.id))
-            {
-                status
-            } else {
-                crate::preview_screen::start_preview_screen(
-                    state.clone(),
-                    crate::protocol::PreviewScreenStartParams {
-                        sources: params.sources.clone(),
-                        video: params.output.video.clone(),
-                        protected_overlay_window_ids:
-                            crate::preview_screen::source_iso_protected_overlay_window_ids(state)
-                                .await,
-                        ffmpeg_path: Some(ffmpeg_path.to_owned()),
-                    },
-                )
-                .await
-            }
-        }
+        ensure_selected_preview_screen_live(state, params, ffmpeg_path)
     );
     anyhow::ensure!(
         matches!(camera.state, crate::protocol::PreviewCameraState::Live),
@@ -16084,6 +16078,41 @@ async fn prepare_source_iso_selected_capture(
             .unwrap_or("capture did not become live")
     );
     Ok(())
+}
+
+/// Starts the selected Screen/Window preview unless it is already live on that
+/// source; a healthy generation is reused by its existing owner.
+async fn ensure_selected_preview_screen_live(
+    state: &AppState,
+    params: &StartSessionParams,
+    ffmpeg_path: &str,
+) -> crate::protocol::PreviewScreenStatus {
+    let status = crate::preview_screen::preview_screen_status(state).await;
+    let current = crate::preview_screen::preview_screen_frame_source(state).await;
+    let selected = params
+        .sources
+        .window_id
+        .as_ref()
+        .or(params.sources.screen_id.as_ref());
+    if status.state == crate::protocol::PreviewScreenState::Live
+        && current
+            .as_ref()
+            .and_then(|source| source.source_key())
+            .is_some_and(|key| selected == Some(&key.id))
+    {
+        return status;
+    }
+    crate::preview_screen::start_preview_screen(
+        state.clone(),
+        crate::protocol::PreviewScreenStartParams {
+            sources: params.sources.clone(),
+            video: params.output.video.clone(),
+            protected_overlay_window_ids:
+                crate::preview_screen::source_iso_protected_overlay_window_ids(state).await,
+            ffmpeg_path: Some(ffmpeg_path.to_owned()),
+        },
+    )
+    .await
 }
 
 fn recording_startup_source_requirements(scene: &Scene) -> CompositorStartupSourceRequirements {
@@ -16364,6 +16393,20 @@ fn windows_d3d11_screen_preflight_candidate(
             .as_deref()
             .is_some_and(|screen_id| parse_windows_dxgi_output_index(screen_id).is_some())
         && windows_d3d11_display_camera_layout(&params.layout.layout_preset).is_some()
+}
+
+/// The source preflight skips the screen preview when the D3D11 path will
+/// capture the display itself. A bridge session that then falls back from that
+/// path composites the screen preview instead, so it must start it first.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_fallback_needs_screen_preview(
+    params: &StartSessionParams,
+    mode: WindowsD3d11MediaMode,
+    use_encoder_bridge: bool,
+    requested_video_output: EncoderBridgeVideoOutput,
+) -> bool {
+    use_encoder_bridge
+        && windows_d3d11_screen_preflight_candidate(params, mode, requested_video_output)
 }
 
 /// The legacy-path choices `should_use_compositor_encoder_bridge` makes from
@@ -36747,6 +36790,42 @@ mod tests {
             &disabled,
             WindowsD3d11MediaMode::Automatic,
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        ));
+    }
+
+    #[test]
+    fn windows_d3d11_fallback_prepares_the_screen_the_preflight_skipped() {
+        // Field UHD 620 laptop: the preflight trusted D3D11 for the screen,
+        // D3D11 startup failed, and the legacy compositor had no screen frames.
+        let mut params = base_params(false, true);
+        params.sources.screen_id = Some("screen:dxgi:00000000000003f1:2".to_string());
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        let media_foundation = EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs;
+        assert!(windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            true,
+            media_foundation,
+        ));
+        // The preflight already waited for the screen preview here.
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Disabled,
+            true,
+            media_foundation,
+        ));
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            true,
+            EncoderBridgeVideoOutput::RawYuv420p,
+        ));
+        // The FFmpeg legacy path captures the screen itself.
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            false,
+            media_foundation,
         ));
     }
 
