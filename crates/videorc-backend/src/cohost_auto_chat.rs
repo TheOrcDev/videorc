@@ -1054,10 +1054,10 @@ mod tests {
         }
     }
 
-    fn settings(mode: CohostAutoChatMode) -> CohostAutoChat {
+    fn settings(talk: CohostTalkMode) -> CohostAutoChat {
         CohostAutoChat {
-            talk: None,
-            mode,
+            talk: Some(talk),
+            mode: talk.legacy(),
             greetings: CohostGreetingsSettings {
                 enabled: true,
                 templates: vec![
@@ -1079,10 +1079,10 @@ mod tests {
 
     /// Settings with no line of the user's own: every kind says its
     /// built-in line (plan 192 D1).
-    fn bare_settings(mode: CohostAutoChatMode) -> CohostAutoChat {
+    fn bare_settings(talk: CohostTalkMode) -> CohostAutoChat {
         CohostAutoChat {
             greetings: CohostGreetingsSettings::default(),
-            ..settings(mode)
+            ..settings(talk)
         }
     }
 
@@ -1157,19 +1157,19 @@ mod tests {
     }
 
     fn silent(pass: &AutoChatPass) -> bool {
-        pass.send.is_empty()
+        pass.bubble.is_empty()
             && pass.propose.is_empty()
             && pass.schedule.is_none()
             && pass.greet.is_none()
     }
 
-    /// The STOP condition of plan 164: no automatic send path runs with the
-    /// mode off. Written first; every lane method is covered. Plan 192 D7:
-    /// the skips are counted and logged once per kind.
+    /// The STOP condition of plan 164: nothing is said, proposed or
+    /// scheduled with the mode off. Written first; every lane method is
+    /// covered. Plan 192 D7: the skips are counted and logged once per kind.
     #[test]
-    fn with_the_mode_off_nothing_is_sent_proposed_or_scheduled() {
+    fn with_the_mode_off_nothing_is_said_proposed_or_scheduled() {
         let start = Instant::now();
-        let off = settings(CohostAutoChatMode::Off);
+        let off = settings(CohostTalkMode::Off);
         let mut lane = AutoChatLane::default();
         let activity = lane.note_activity(&off, Some(&ai()), &twitch_events(), start, &now_iso());
         assert!(silent(&activity), "{activity:?}");
@@ -1206,14 +1206,7 @@ mod tests {
             ),
             AutoChatPass::default()
         );
-        let (said, send) = lane.say(
-            &off,
-            "Hello horde",
-            CohostUtteranceState::Talk,
-            start,
-            &now_iso(),
-        );
-        assert!(!send);
+        let said = lane.say("Hello horde", CohostUtteranceState::Talk, start, &now_iso());
         assert_eq!(said.status, CohostUtteranceStatus::BubbleOnly);
         assert_eq!(lane.sends(), 0);
         assert!(
@@ -1222,7 +1215,7 @@ mod tests {
                 .all(|u| u.status == CohostUtteranceStatus::BubbleOnly)
         );
         // Greetings off under a live mode: the same skip.
-        let mut greetings_off = settings(CohostAutoChatMode::Auto);
+        let mut greetings_off = settings(CohostTalkMode::Bubble);
         greetings_off.greetings.enabled = false;
         let mut lane = AutoChatLane::default();
         let pass = lane.note_activity(&greetings_off, None, &follows(1), start, &now_iso());
@@ -1230,18 +1223,18 @@ mod tests {
         assert_eq!(pass.skipped.mode_off, 1);
         // Switching off while a bucket waits drops it, counted as mode-off.
         let mut lane = AutoChatLane::default();
-        let auto = settings(CohostAutoChatMode::Auto);
-        let first = lane.note_activity(&auto, None, &follows(5), start, &now_iso());
-        assert_eq!(first.send.len(), 1);
+        let bubble = settings(CohostTalkMode::Bubble);
+        let first = lane.note_activity(&bubble, None, &follows(5), start, &now_iso());
+        assert_eq!(first.bubble.len(), 1);
         assert!(first.schedule.is_some());
         let drained = lane.drain(&off, None, start + Duration::from_secs(11), &now_iso());
-        assert!(drained.send.is_empty() && drained.propose.is_empty());
+        assert!(drained.bubble.is_empty() && drained.propose.is_empty());
         assert_eq!(drained.log.len(), 1);
         assert_eq!(drained.skipped.mode_off, 4);
         assert_eq!(lane.next_due(), None);
         // An AI result arriving after the mode went off is dropped too.
         let mut lane = AutoChatLane::default();
-        let pass = lane.note_activity(&auto, Some(&ai()), &follows(1), start, &now_iso());
+        let pass = lane.note_activity(&bubble, Some(&ai()), &follows(1), start, &now_iso());
         let pending = pass.greet.unwrap();
         let dropped = lane.apply_greet_result(
             &off,
@@ -1255,12 +1248,14 @@ mod tests {
         assert_eq!(lane.snapshot(start).len(), 0, "no card was made");
     }
 
+    /// Plan 211 D1: Bubble says the line (`bubble-only`, never a send);
+    /// Suggest proposes a card the streamer approves.
     #[test]
-    fn auto_sends_and_suggest_proposes_greetings_with_the_template_state() {
+    fn bubble_says_and_suggest_proposes_greetings_with_the_template_state() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
         let pass = lane.note_activity(
-            &settings(CohostAutoChatMode::Auto),
+            &settings(CohostTalkMode::Bubble),
             None,
             &raid_and_follow(),
             start,
@@ -1268,7 +1263,7 @@ mod tests {
         );
         // The raid goes first; the follow on the same destination waits for
         // the 5 s gap (D9) and the drain releases it.
-        let texts: Vec<&str> = pass.send.iter().map(|u| u.text.as_str()).collect();
+        let texts: Vec<&str> = pass.bubble.iter().map(|u| u.text.as_str()).collect();
         assert_eq!(texts, ["raider42 brings 234"]);
         assert_eq!(pass.schedule, Some(start + Duration::from_secs(5)));
         assert!(pass.propose.is_empty());
@@ -1279,50 +1274,56 @@ mod tests {
                 .any(|l| l.contains("holding follow greetings"))
         );
         let follow = lane.drain(
-            &settings(CohostAutoChatMode::Auto),
+            &settings(CohostTalkMode::Bubble),
             None,
             start + Duration::from_secs(5),
             &now_iso(),
         );
-        assert_eq!(follow.send.len(), 1);
-        assert_eq!(follow.send[0].text, "Welcome new_friend!");
+        assert_eq!(follow.bubble.len(), 1);
+        assert_eq!(follow.bubble[0].text, "Welcome new_friend!");
         let pass = AutoChatPass {
-            send: [pass.send, follow.send].concat(),
+            bubble: [pass.bubble, follow.bubble].concat(),
             ..pass
         };
-        assert!(pass.send.iter().all(|u| u.destination_ids == ["main"]));
+        assert!(pass.bubble.iter().all(|u| u.destination_ids == ["main"]));
         assert!(
-            pass.send
+            pass.bubble
+                .iter()
+                .all(|u| u.status == CohostUtteranceStatus::BubbleOnly && u.expires_at.is_none())
+        );
+        assert_eq!(lane.sends(), 0, "a bubble line is never a send");
+        assert!(
+            pass.bubble
                 .iter()
                 .all(|u| u.state == CohostUtteranceState::Laugh)
         );
         assert!(
-            pass.send
+            pass.bubble
                 .iter()
                 .all(|u| u.trigger.kind == CohostUtteranceTriggerKind::Greeting)
         );
-        assert!(pass.send.iter().all(|u| u.trigger.event_id.is_some()));
+        assert!(pass.bubble.iter().all(|u| u.trigger.event_id.is_some()));
         assert!(
-            pass.send
+            pass.bubble
                 .iter()
                 .all(|u| lane.utterance_source(&u.id) == Some(CohostReportPostSource::Line))
         );
 
         let mut lane = AutoChatLane::default();
         let pass = lane.note_activity(
-            &settings(CohostAutoChatMode::Suggest),
+            &settings(CohostTalkMode::Suggest),
             None,
             &raid_and_follow(),
             start,
             &now_iso(),
         );
-        assert!(pass.send.is_empty());
+        assert!(pass.bubble.is_empty());
         assert_eq!(pass.propose.len(), 1);
         let pass = AutoChatPass {
             propose: [
                 pass.propose,
                 lane.drain(
-                    &settings(CohostAutoChatMode::Suggest),
+                    &settings(CohostTalkMode::Suggest),
                     None,
                     start + Duration::from_secs(5),
                     &now_iso(),
@@ -1370,26 +1371,29 @@ mod tests {
     #[test]
     fn a_held_burst_is_released_by_drain_as_one_collapsed_greeting() {
         let start = Instant::now();
-        let auto = settings(CohostAutoChatMode::Auto);
+        let bubble = settings(CohostTalkMode::Bubble);
         let mut lane = AutoChatLane::default();
         let follows = follows(6);
-        let first = lane.note_activity(&auto, None, &follows, start, &now_iso());
-        assert_eq!(first.send.len(), 1);
-        assert_eq!(first.send[0].text, "Welcome Fan0!");
+        let first = lane.note_activity(&bubble, None, &follows, start, &now_iso());
+        assert_eq!(first.bubble.len(), 1);
+        assert_eq!(first.bubble[0].text, "Welcome Fan0!");
         assert_eq!(first.schedule, Some(start + Duration::from_secs(10)));
         assert_eq!(first.skipped.held, 5);
         assert!(
-            lane.drain(&auto, None, start + Duration::from_secs(9), &now_iso())
-                .send
+            lane.drain(&bubble, None, start + Duration::from_secs(9), &now_iso())
+                .bubble
                 .is_empty()
         );
-        let later = lane.drain(&auto, None, start + Duration::from_secs(10), &now_iso());
-        assert_eq!(later.send.len(), 1);
-        assert_eq!(later.send[0].text, "Welcome Fan1, Fan2, Fan3 and 2 others!");
+        let later = lane.drain(&bubble, None, start + Duration::from_secs(10), &now_iso());
+        assert_eq!(later.bubble.len(), 1);
+        assert_eq!(
+            later.bubble[0].text,
+            "Welcome Fan1, Fan2, Fan3 and 2 others!"
+        );
         assert_eq!(later.schedule, None);
         // Same viewers again: nothing, counted and logged once.
         let again = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &follows,
             start + Duration::from_secs(30),
@@ -1404,29 +1408,29 @@ mod tests {
     #[test]
     fn stale_rows_and_other_sessions_reset_or_skip() {
         let start = Instant::now();
-        let auto = settings(CohostAutoChatMode::Auto);
+        let bubble = settings(CohostTalkMode::Bubble);
         let mut lane = AutoChatLane::default();
         let mut old = raid_and_follow();
         for row in &mut old {
             row.published_at = "2020-01-01T00:00:00Z".to_string();
         }
-        let stale = lane.note_activity(&auto, None, &old, start, &now_iso());
+        let stale = lane.note_activity(&bubble, None, &old, start, &now_iso());
         assert!(silent(&stale));
         assert_eq!(stale.skipped.stale, 2);
         assert_eq!(stale.log.iter().filter(|l| l.contains("stale")).count(), 2);
-        let first = lane.note_activity(&auto, None, &raid_and_follow(), start, &now_iso());
-        assert_eq!(first.send.len(), 1);
+        let first = lane.note_activity(&bubble, None, &raid_and_follow(), start, &now_iso());
+        assert_eq!(first.bubble.len(), 1);
         assert_eq!(lane.session_id(), Some("session-1"));
         let next = fake_events_for_tests("session-2", StreamPlatform::Twitch, Some("main"));
         let second = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &next,
             start + Duration::from_secs(1),
             &now_iso(),
         );
         assert_eq!(
-            second.send.len(),
+            second.bubble.len(),
             1,
             "a new session starts with no dedupe or gap"
         );
@@ -1441,15 +1445,15 @@ mod tests {
     fn an_empty_list_greets_a_follow_with_the_builtin_line() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
-        assert!(auto.greetings.templates.is_empty());
-        let pass = lane.note_activity(&auto, None, &follows(1), start, &now_iso());
-        assert_eq!(pass.send.len(), 1);
-        assert_eq!(pass.send[0].text, "Welcome, Fan0! Thanks for the follow.");
-        assert_eq!(pass.send[0].state, CohostUtteranceState::Talk);
-        assert_eq!(pass.send[0].destination_ids, ["main"]);
+        let bubble = bare_settings(CohostTalkMode::Bubble);
+        assert!(bubble.greetings.templates.is_empty());
+        let pass = lane.note_activity(&bubble, None, &follows(1), start, &now_iso());
+        assert_eq!(pass.bubble.len(), 1);
+        assert_eq!(pass.bubble[0].text, "Welcome, Fan0! Thanks for the follow.");
+        assert_eq!(pass.bubble[0].state, CohostUtteranceState::Talk);
+        assert_eq!(pass.bubble[0].destination_ids, ["main"]);
         assert_eq!(
-            lane.utterance_source(&pass.send[0].id),
+            lane.utterance_source(&pass.bubble[0].id),
             Some(CohostReportPostSource::Line)
         );
         assert!(pass.log.is_empty() || pass.log.iter().all(|l| l.contains("follow chat session")));
@@ -1457,10 +1461,10 @@ mod tests {
         // Every Activity kind has a line: the whole fake set greets (one
         // now, the rest held for the gap).
         let mut lane = AutoChatLane::default();
-        let pass = lane.note_activity(&auto, None, &twitch_events(), start, &now_iso());
-        assert_eq!(pass.send.len(), 1);
+        let pass = lane.note_activity(&bubble, None, &twitch_events(), start, &now_iso());
+        assert_eq!(pass.bubble.len(), 1);
         assert_eq!(
-            pass.send[0].text,
+            pass.bubble[0].text,
             "morgaesis is back in the ranks. Thank you!"
         );
         assert_eq!(pass.skipped.held, 7);
@@ -1472,20 +1476,23 @@ mod tests {
     fn an_all_disabled_kind_stays_silent_and_is_logged_once() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let mut auto = bare_settings(CohostAutoChatMode::Auto);
+        let mut bubble = bare_settings(CohostTalkMode::Bubble);
         let mut off = template(CohostActivityTemplateKind::Follow, "Yo {name}");
         off.enabled = false;
-        auto.greetings.templates = vec![off];
-        let pass = lane.note_activity(&auto, None, &follows(2), start, &now_iso());
+        bubble.greetings.templates = vec![off];
+        let pass = lane.note_activity(&bubble, None, &follows(2), start, &now_iso());
         assert!(silent(&pass));
         assert_eq!(pass.skipped.no_line, 2);
         let no_line: Vec<&String> = pass.log.iter().filter(|l| l.contains("no-line")).collect();
         assert_eq!(no_line.len(), 1, "{:?}", pass.log);
         assert!(no_line[0].contains("a follow greeting"));
         // Other kinds still greet.
-        let raid = lane.note_activity(&auto, None, &[event("raid")], start, &now_iso());
-        assert_eq!(raid.send.len(), 1);
-        assert_eq!(raid.send[0].text, "raider42 is raiding! Welcome, everyone!");
+        let raid = lane.note_activity(&bubble, None, &[event("raid")], start, &now_iso());
+        assert_eq!(raid.bubble.len(), 1);
+        assert_eq!(
+            raid.bubble[0].text,
+            "raider42 is raiding! Welcome, everyone!"
+        );
     }
 
     /// D1: the user's line wins over the built-in line.
@@ -1493,14 +1500,14 @@ mod tests {
     fn a_user_line_beats_the_builtin_line() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let mut auto = bare_settings(CohostAutoChatMode::Auto);
-        auto.greetings.templates = vec![template(
+        let mut bubble = bare_settings(CohostTalkMode::Bubble);
+        bubble.greetings.templates = vec![template(
             CohostActivityTemplateKind::Follow,
             "Yo {name}, join the horde",
         )];
-        let pass = lane.note_activity(&auto, None, &follows(1), start, &now_iso());
-        assert_eq!(pass.send[0].text, "Yo Fan0, join the horde");
-        assert_eq!(pass.send[0].state, CohostUtteranceState::Laugh);
+        let pass = lane.note_activity(&bubble, None, &follows(1), start, &now_iso());
+        assert_eq!(pass.bubble[0].text, "Yo Fan0, join the horde");
+        assert_eq!(pass.bubble[0].state, CohostUtteranceState::Laugh);
     }
 
     /// A built-in line written with `{name}` greets the whole burst.
@@ -1508,12 +1515,15 @@ mod tests {
     fn a_collapsed_burst_resolves_name_to_the_names_list() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
-        let first = lane.note_activity(&auto, None, &follows(5), start, &now_iso());
-        assert_eq!(first.send[0].text, "Welcome, Fan0! Thanks for the follow.");
-        let later = lane.drain(&auto, None, start + Duration::from_secs(10), &now_iso());
+        let bubble = bare_settings(CohostTalkMode::Bubble);
+        let first = lane.note_activity(&bubble, None, &follows(5), start, &now_iso());
         assert_eq!(
-            later.send[0].text,
+            first.bubble[0].text,
+            "Welcome, Fan0! Thanks for the follow."
+        );
+        let later = lane.drain(&bubble, None, start + Duration::from_secs(10), &now_iso());
+        assert_eq!(
+            later.bubble[0].text,
             "Welcome, Fan1, Fan2, Fan3 and 1 other! Thanks for the follow."
         );
     }
@@ -1527,25 +1537,25 @@ mod tests {
     fn first_time_and_returning_chatters_are_welcomed_once() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
+        let bubble = bare_settings(CohostTalkMode::Bubble);
         let first = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &[chat_row("Ana", true, true)],
             start,
             &now_iso(),
         );
-        assert_eq!(first.send.len(), 1);
-        assert_eq!(first.send[0].text, "Hi Ana, welcome to the stream!");
-        assert_eq!(first.send[0].state, CohostUtteranceState::Talk);
-        assert_eq!(first.send[0].destination_ids, ["main"]);
+        assert_eq!(first.bubble.len(), 1);
+        assert_eq!(first.bubble[0].text, "Hi Ana, welcome to the stream!");
+        assert_eq!(first.bubble[0].state, CohostUtteranceState::Talk);
+        assert_eq!(first.bubble[0].destination_ids, ["main"]);
         assert_eq!(
-            first.send[0].trigger.kind,
+            first.bubble[0].trigger.kind,
             CohostUtteranceTriggerKind::Greeting
         );
         // Ana's second message: not a first message, so not even offered.
         let second = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &[chat_row("Ana", false, false)],
             start + Duration::from_secs(6),
@@ -1554,7 +1564,7 @@ mod tests {
         assert_eq!(second, AutoChatPass::default());
         // A replayed first message: deduped.
         let replay = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &[chat_row("Ana", true, true)],
             start + Duration::from_secs(7),
@@ -1564,16 +1574,16 @@ mod tests {
         assert_eq!(replay.skipped.deduped, 1);
         // Returning: once this session, with its own line.
         let back = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &[chat_row("Bo", false, true)],
             start + Duration::from_secs(8),
             &now_iso(),
         );
-        assert_eq!(back.send.len(), 1);
-        assert_eq!(back.send[0].text, "Welcome back, Bo!");
+        assert_eq!(back.bubble.len(), 1);
+        assert_eq!(back.bubble[0].text, "Welcome back, Bo!");
         let back_again = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &[chat_row("Bo", false, true)],
             start + Duration::from_secs(20),
@@ -1584,7 +1594,7 @@ mod tests {
         // A bot never gets a welcome, and nothing is counted: it is not a
         // chatter the Buddy would greet.
         let bot = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &[chat_row("Nightbot", true, true)],
             start + Duration::from_secs(30),
@@ -1595,13 +1605,13 @@ mod tests {
         let mut next = chat_row("Bo", false, true);
         next.session_id = "session-2".to_string();
         let fresh = lane.note_activity(
-            &auto,
+            &bubble,
             None,
             &[next],
             start + Duration::from_secs(40),
             &now_iso(),
         );
-        assert_eq!(fresh.send.len(), 1);
+        assert_eq!(fresh.bubble.len(), 1);
         assert_eq!(lane.session_id(), Some("session-2"));
     }
 
@@ -1610,27 +1620,27 @@ mod tests {
     #[test]
     fn a_burst_of_first_timers_collapses_and_the_mode_and_switches_gate_welcomes() {
         let start = Instant::now();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
+        let bubble = bare_settings(CohostTalkMode::Bubble);
         let rows: Vec<LiveChatMessage> = ["Ana", "Bo", "Cy", "Di", "Ed"]
             .iter()
             .map(|name| chat_row(name, true, true))
             .collect();
         let mut lane = AutoChatLane::default();
-        let first = lane.note_activity(&auto, None, &rows, start, &now_iso());
-        assert_eq!(first.send.len(), 1);
-        assert_eq!(first.send[0].text, "Hi Ana, welcome to the stream!");
+        let first = lane.note_activity(&bubble, None, &rows, start, &now_iso());
+        assert_eq!(first.bubble.len(), 1);
+        assert_eq!(first.bubble[0].text, "Hi Ana, welcome to the stream!");
         assert_eq!(first.schedule, Some(start + Duration::from_secs(5)));
         assert_eq!(first.skipped.held, 4);
-        let later = lane.drain(&auto, None, start + Duration::from_secs(5), &now_iso());
-        assert_eq!(later.send.len(), 1);
+        let later = lane.drain(&bubble, None, start + Duration::from_secs(5), &now_iso());
+        assert_eq!(later.bubble.len(), 1);
         assert_eq!(
-            later.send[0].text,
+            later.bubble[0].text,
             "Hi Bo, Cy, Di and 1 other, welcome to the stream!"
         );
         // Off: silent (counted).
         let mut lane = AutoChatLane::default();
         let off = lane.note_activity(
-            &bare_settings(CohostAutoChatMode::Off),
+            &bare_settings(CohostTalkMode::Off),
             None,
             &rows,
             start,
@@ -1641,20 +1651,20 @@ mod tests {
         // Suggest: a card.
         let mut lane = AutoChatLane::default();
         let card = lane.note_activity(
-            &bare_settings(CohostAutoChatMode::Suggest),
+            &bare_settings(CohostTalkMode::Suggest),
             None,
             &rows[..1],
             start,
             &now_iso(),
         );
-        assert!(card.send.is_empty());
+        assert!(card.bubble.is_empty());
         assert_eq!(card.propose.len(), 1);
         assert_eq!(card.propose[0].text, "Hi Ana, welcome to the stream!");
         assert_eq!(card.propose[0].status, CohostUtteranceStatus::Proposed);
         // The first-time switch off: no-line; returning still on, with the
         // user's own words.
         let mut lane = AutoChatLane::default();
-        let mut switched = bare_settings(CohostAutoChatMode::Auto);
+        let mut switched = bare_settings(CohostTalkMode::Bubble);
         switched.greetings.welcomes.first_time.enabled = false;
         switched.greetings.welcomes.returning.text = Some("Yo {name}, back again!".to_string());
         switched.greetings.welcomes.returning.state = CohostUtteranceState::Laugh;
@@ -1667,9 +1677,9 @@ mod tests {
         );
         assert_eq!(pass.skipped.no_line, 1);
         assert!(pass.log.iter().any(|l| l.contains("first-time")));
-        assert_eq!(pass.send.len(), 1);
-        assert_eq!(pass.send[0].text, "Yo Bo, back again!");
-        assert_eq!(pass.send[0].state, CohostUtteranceState::Laugh);
+        assert_eq!(pass.bubble.len(), 1);
+        assert_eq!(pass.bubble[0].text, "Yo Bo, back again!");
+        assert_eq!(pass.bubble[0].state, CohostUtteranceState::Laugh);
     }
 
     // --- Plan 192 Phase 2: the AI writes the greeting ------------------------------
@@ -1681,9 +1691,9 @@ mod tests {
     fn ai_text_replaces_the_line_and_introduce_is_asked_once() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
-        let pass = lane.note_activity(&auto, Some(&ai()), &follows(1), start, &now_iso());
-        assert!(pass.send.is_empty() && pass.propose.is_empty());
+        let bubble = bare_settings(CohostTalkMode::Bubble);
+        let pass = lane.note_activity(&bubble, Some(&ai()), &follows(1), start, &now_iso());
+        assert!(pass.bubble.is_empty() && pass.propose.is_empty());
         let pending = pass.greet.clone().expect("the batch waits for the AI");
         let request = &pending.request;
         assert_eq!(request.session_client_id, "session-1");
@@ -1706,7 +1716,7 @@ mod tests {
             "no card until the AI answers"
         );
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Ok(CohostGreetResponse {
                 lines: vec![CohostGreetLine {
@@ -1719,19 +1729,19 @@ mod tests {
             start + Duration::from_secs(1),
             &now_iso(),
         );
-        assert_eq!(routed.send.len(), 1);
-        assert_eq!(routed.send[0].text, "Fresh blood! Fan0 joins the horde.");
-        assert_eq!(routed.send[0].state, CohostUtteranceState::Laugh);
-        assert_eq!(routed.send[0].destination_ids, ["main"]);
+        assert_eq!(routed.bubble.len(), 1);
+        assert_eq!(routed.bubble[0].text, "Fresh blood! Fan0 joins the horde.");
+        assert_eq!(routed.bubble[0].state, CohostUtteranceState::Laugh);
+        assert_eq!(routed.bubble[0].destination_ids, ["main"]);
         assert_eq!(
-            lane.utterance_source(&routed.send[0].id),
+            lane.utterance_source(&routed.bubble[0].id),
             Some(CohostReportPostSource::Ai)
         );
         assert!(routed.greet.is_none());
         // The second request of the session never introduces again, and a
         // welcome carries the first message.
         let pass = lane.note_activity(
-            &auto,
+            &bubble,
             Some(&ai()),
             &[chat_row("Ana", true, true)],
             start + Duration::from_secs(6),
@@ -1747,7 +1757,7 @@ mod tests {
         );
         // A line the route did not return (or one with a link) falls back.
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Ok(CohostGreetResponse {
                 lines: vec![CohostGreetLine {
@@ -1760,14 +1770,14 @@ mod tests {
             start + Duration::from_secs(7),
             &now_iso(),
         );
-        assert_eq!(routed.send[0].text, "Hi Ana, welcome to the stream!");
+        assert_eq!(routed.bubble[0].text, "Hi Ana, welcome to the stream!");
         assert_eq!(
-            lane.utterance_source(&routed.send[0].id),
+            lane.utterance_source(&routed.bubble[0].id),
             Some(CohostReportPostSource::Line)
         );
         // Suggest: the card carries the AI text.
         let mut lane = AutoChatLane::default();
-        let suggest = bare_settings(CohostAutoChatMode::Suggest);
+        let suggest = bare_settings(CohostTalkMode::Suggest);
         let pass = lane.note_activity(&suggest, Some(&ai()), &follows(1), start, &now_iso());
         let pending = pass.greet.unwrap();
         let routed = lane.apply_greet_result(
@@ -1784,7 +1794,7 @@ mod tests {
             start + Duration::from_secs(1),
             &now_iso(),
         );
-        assert!(routed.send.is_empty());
+        assert!(routed.bubble.is_empty());
         assert_eq!(routed.propose.len(), 1);
         assert_eq!(routed.propose[0].text, "The horde grows. Welcome, Fan0.");
         assert_eq!(routed.propose[0].state, CohostUtteranceState::Talk);
@@ -1797,29 +1807,32 @@ mod tests {
     fn ai_failures_fall_back_to_the_line_and_a_403_stops_the_session() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
+        let bubble = bare_settings(CohostTalkMode::Bubble);
         let pending = lane
-            .note_activity(&auto, Some(&ai()), &follows(1), start, &now_iso())
+            .note_activity(&bubble, Some(&ai()), &follows(1), start, &now_iso())
             .greet
             .unwrap();
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Err(CohostApiError::timeout("Buddy did not answer within 3 s.")),
             start + Duration::from_secs(4),
             &now_iso(),
         );
-        assert_eq!(routed.send.len(), 1);
-        assert_eq!(routed.send[0].text, "Welcome, Fan0! Thanks for the follow.");
+        assert_eq!(routed.bubble.len(), 1);
         assert_eq!(
-            lane.utterance_source(&routed.send[0].id),
+            routed.bubble[0].text,
+            "Welcome, Fan0! Thanks for the follow."
+        );
+        assert_eq!(
+            lane.utterance_source(&routed.bubble[0].id),
             Some(CohostReportPostSource::Line)
         );
         assert_eq!(routed.log.len(), 1);
         assert!(routed.log[0].contains("timeout"), "{:?}", routed.log);
         // Still asking after a transient failure.
         let pass = lane.note_activity(
-            &auto,
+            &bubble,
             Some(&ai()),
             &[event("raid")],
             start + Duration::from_secs(10),
@@ -1827,7 +1840,7 @@ mod tests {
         );
         let pending = pass.greet.expect("a transient failure is per batch");
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Err(classify_cohost_failure(
                 403,
@@ -1839,7 +1852,7 @@ mod tests {
             &now_iso(),
         );
         assert_eq!(
-            routed.send[0].text,
+            routed.bubble[0].text,
             "raider42 is raiding! Welcome, everyone!"
         );
         assert!(
@@ -1850,22 +1863,22 @@ mod tests {
         );
         // From now on the line goes out at once.
         let pass = lane.note_activity(
-            &auto,
+            &bubble,
             Some(&ai()),
             &[event("cheer")],
             start + Duration::from_secs(20),
             &now_iso(),
         );
         assert!(pass.greet.is_none());
-        assert_eq!(pass.send.len(), 1);
-        assert_eq!(pass.send[0].text, "Thanks for the bits, sarzdotmd!");
+        assert_eq!(pass.bubble.len(), 1);
+        assert_eq!(pass.bubble[0].text, "Thanks for the bits, sarzdotmd!");
         // A new session asks again.
         let mut next = event("follow");
         next.session_id = "session-2".to_string();
         let mut other = ai();
         other.session_id = "session-2".to_string();
         let pass = lane.note_activity(
-            &auto,
+            &bubble,
             Some(&other),
             &[next.clone()],
             start + Duration::from_secs(30),
@@ -1875,23 +1888,23 @@ mod tests {
         assert!(pass.greet.unwrap().request.introduce);
         // A context for a different session than the lane's: the line.
         let mut lane = AutoChatLane::default();
-        let pass = lane.note_activity(&auto, Some(&other), &follows(1), start, &now_iso());
+        let pass = lane.note_activity(&bubble, Some(&other), &follows(1), start, &now_iso());
         assert!(pass.greet.is_none());
-        assert_eq!(pass.send.len(), 1);
+        assert_eq!(pass.bubble.len(), 1);
         // No context (Basic, no consent, no capability, `ai` off): the line.
         let mut lane = AutoChatLane::default();
-        let pass = lane.note_activity(&auto, None, &follows(1), start, &now_iso());
+        let pass = lane.note_activity(&bubble, None, &follows(1), start, &now_iso());
         assert!(pass.greet.is_none());
-        assert_eq!(pass.send.len(), 1);
+        assert_eq!(pass.bubble.len(), 1);
         // A result for a session the lane left is dropped.
         let mut lane = AutoChatLane::default();
         let pending = lane
-            .note_activity(&auto, Some(&ai()), &follows(1), start, &now_iso())
+            .note_activity(&bubble, Some(&ai()), &follows(1), start, &now_iso())
             .greet
             .unwrap();
         lane.follow_session("session-9");
         let dropped = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Ok(CohostGreetResponse::default()),
             start,
@@ -1903,11 +1916,11 @@ mod tests {
         // and falls back for the batch only; an empty `lines` is a fallback.
         let mut lane = AutoChatLane::default();
         let pending = lane
-            .note_activity(&auto, Some(&ai()), &follows(1), start, &now_iso())
+            .note_activity(&bubble, Some(&ai()), &follows(1), start, &now_iso())
             .greet
             .unwrap();
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Err(classify_cohost_failure(
                 400,
@@ -1918,12 +1931,12 @@ mod tests {
             start,
             &now_iso(),
         );
-        assert_eq!(routed.send.len(), 1);
+        assert_eq!(routed.bubble.len(), 1);
         assert_eq!(routed.warn.len(), 1, "{routed:?}");
         assert!(routed.log.is_empty());
         let pending = lane
             .note_activity(
-                &auto,
+                &bubble,
                 Some(&ai()),
                 &[event("raid")],
                 start + Duration::from_secs(10),
@@ -1932,19 +1945,19 @@ mod tests {
             .greet
             .expect("a 400 falls back for its batch only");
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Ok(CohostGreetResponse::default()),
             start + Duration::from_secs(11),
             &now_iso(),
         );
         assert_eq!(
-            routed.send[0].text,
+            routed.bubble[0].text,
             "raider42 is raiding! Welcome, everyone!"
         );
         let pending = lane
             .note_activity(
-                &auto,
+                &bubble,
                 Some(&ai()),
                 &[event("cheer")],
                 start + Duration::from_secs(20),
@@ -1953,7 +1966,7 @@ mod tests {
             .greet
             .unwrap();
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pending,
             Err(classify_cohost_failure(
                 429,
@@ -1964,7 +1977,7 @@ mod tests {
             start + Duration::from_secs(21),
             &now_iso(),
         );
-        assert_eq!(routed.send[0].text, "Thanks for the bits, sarzdotmd!");
+        assert_eq!(routed.bubble[0].text, "Thanks for the bits, sarzdotmd!");
         assert!(
             routed
                 .log
@@ -1972,14 +1985,14 @@ mod tests {
                 .any(|l| l.contains("rest of this session"))
         );
         let pass = lane.note_activity(
-            &auto,
+            &bubble,
             Some(&ai()),
             &[event("resub")],
             start + Duration::from_secs(30),
             &now_iso(),
         );
         assert!(pass.greet.is_none());
-        assert_eq!(pass.send.len(), 1);
+        assert_eq!(pass.bubble.len(), 1);
     }
 
     /// The greet route is strict: only its four platforms are asked, and
@@ -1987,18 +2000,18 @@ mod tests {
     #[test]
     fn the_greet_request_is_strict_about_platforms_and_empty_optionals() {
         let start = Instant::now();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
+        let bubble = bare_settings(CohostTalkMode::Bubble);
         let mut lane = AutoChatLane::default();
         let tiktok = fake_events_for_tests("session-1", StreamPlatform::Tiktok, Some("tt"));
-        let pass = lane.note_activity(&auto, Some(&ai()), &tiktok, start, &now_iso());
+        let pass = lane.note_activity(&bubble, Some(&ai()), &tiktok, start, &now_iso());
         assert!(pass.greet.is_none(), "TikTok gets the line");
-        assert_eq!(pass.send.len(), usize::from(!tiktok.is_empty()));
+        assert_eq!(pass.bubble.len(), usize::from(!tiktok.is_empty()));
         let mut lane = AutoChatLane::default();
         let mut row = chat_row("Ana", true, true);
         row.message_text = "   ".to_string();
         row.amount_text = Some("  ".to_string());
         let pending = lane
-            .note_activity(&auto, Some(&ai()), &[row], start, &now_iso())
+            .note_activity(&bubble, Some(&ai()), &[row], start, &now_iso())
             .greet
             .unwrap();
         let item = &pending.request.items[0];
@@ -2016,7 +2029,7 @@ mod tests {
         let mut lane = AutoChatLane::default();
         let pending = lane
             .note_activity(
-                &auto,
+                &bubble,
                 Some(&ai()),
                 &[event("channel.channel_points_custom_reward_redemption.add")],
                 start,
@@ -2037,7 +2050,7 @@ mod tests {
     fn a_greet_request_carries_at_most_six_batches() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
+        let bubble = bare_settings(CohostTalkMode::Bubble);
         // Seven follows on seven destinations: the limiter is per
         // destination, so every one is ready at once.
         let rows: Vec<LiveChatMessage> = (0..7)
@@ -2050,12 +2063,12 @@ mod tests {
                 row
             })
             .collect();
-        let pass = lane.note_activity(&auto, Some(&ai()), &rows, start, &now_iso());
+        let pass = lane.note_activity(&bubble, Some(&ai()), &rows, start, &now_iso());
         let pending = pass.greet.as_ref().unwrap();
         assert_eq!(pending.request.items.len(), COHOST_GREET_ITEMS_MAX);
-        assert_eq!(pass.send.len(), 1, "the seventh goes out as its line");
-        assert_eq!(pass.send[0].text, "Welcome, Fan6! Thanks for the follow.");
-        assert_eq!(pass.send[0].destination_ids, ["dest-6"]);
+        assert_eq!(pass.bubble.len(), 1, "the seventh goes out as its line");
+        assert_eq!(pass.bubble[0].text, "Welcome, Fan6! Thanks for the follow.");
+        assert_eq!(pass.bubble[0].destination_ids, ["dest-6"]);
         let ids: HashSet<&str> = pending
             .request
             .items
@@ -2066,15 +2079,15 @@ mod tests {
         assert!(ids.iter().all(|id| id.len() <= 80));
         // The six route back to their own destinations.
         let routed = lane.apply_greet_result(
-            &auto,
+            &bubble,
             pass.greet.unwrap(),
             Ok(CohostGreetResponse::default()),
             start + Duration::from_secs(1),
             &now_iso(),
         );
-        assert_eq!(routed.send.len(), 6);
+        assert_eq!(routed.bubble.len(), 6);
         let destinations: HashSet<String> = routed
-            .send
+            .bubble
             .iter()
             .map(|u| u.destination_ids[0].clone())
             .collect();
@@ -2083,14 +2096,16 @@ mod tests {
     }
 
     /// D7: a send-path skip is counted once per greeting and logged once per
-    /// kind; a non-greeting utterance leaves nothing.
+    /// kind; a non-greeting utterance leaves nothing. The send path takes
+    /// only an approved Suggest card (plan 211 D2), so the greeting is one.
     #[test]
     fn send_path_skips_are_counted_and_logged_once() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = bare_settings(CohostAutoChatMode::Auto);
-        let pass = lane.note_activity(&auto, None, &follows(1), start, &now_iso());
-        let id = pass.send[0].id.clone();
+        let suggest = bare_settings(CohostTalkMode::Suggest);
+        let pass = lane.note_activity(&suggest, None, &follows(1), start, &now_iso());
+        let id = pass.propose[0].id.clone();
+        lane.approve(&id, start).unwrap();
         let first = lane.note_send_skip(&id, GreetingSkipReason::YoutubePaused);
         assert_eq!(first.skipped.youtube_paused, 1);
         assert!(first.log.unwrap().contains("quota breaker"));
@@ -2100,7 +2115,7 @@ mod tests {
         let failed = lane.note_send_skip(&id, GreetingSkipReason::DestinationFailed);
         assert_eq!(failed.skipped.destination_failed, 1);
         assert!(failed.log.is_some());
-        let (said, _) = lane.say(&auto, "hi", CohostUtteranceState::Talk, start, &now_iso());
+        let said = lane.say("hi", CohostUtteranceState::Talk, start, &now_iso());
         assert_eq!(
             lane.note_send_skip(&said.id, GreetingSkipReason::DestinationFailed),
             SendSkip::default()
@@ -2123,33 +2138,47 @@ mod tests {
     fn answers_follow_the_switch_the_cooldown_and_the_limiter() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = settings(CohostAutoChatMode::Auto);
-        let first = lane.route_answer(&auto, answer(), start, &now_iso());
-        assert_eq!(first.send.len(), 1);
+        let bubble = settings(CohostTalkMode::Bubble);
+        let first = lane.route_answer(&bubble, answer(), start, &now_iso());
+        assert_eq!(first.bubble.len(), 1);
         assert_eq!(
-            first.send[0].trigger.kind,
+            first.bubble[0].trigger.kind,
             CohostUtteranceTriggerKind::Answer
         );
-        assert_eq!(first.send[0].trigger.message_id.as_deref(), Some("m-1"));
-        assert_eq!(first.send[0].destination_ids, ["twitch:main"]);
-        assert_eq!(lane.utterance_source(&first.send[0].id), None);
-        let cooled = lane.route_answer(&auto, answer(), start + Duration::from_secs(5), &now_iso());
-        assert!(cooled.send.is_empty());
+        assert_eq!(first.bubble[0].trigger.message_id.as_deref(), Some("m-1"));
+        assert_eq!(first.bubble[0].destination_ids, ["twitch:main"]);
+        assert_eq!(lane.utterance_source(&first.bubble[0].id), None);
+        let cooled = lane.route_answer(
+            &bubble,
+            answer(),
+            start + Duration::from_secs(5),
+            &now_iso(),
+        );
+        assert!(cooled.bubble.is_empty());
         assert_eq!(cooled.log.len(), 1);
-        let later = lane.route_answer(&auto, answer(), start + Duration::from_secs(21), &now_iso());
-        assert_eq!(later.send.len(), 1);
+        let later = lane.route_answer(
+            &bubble,
+            answer(),
+            start + Duration::from_secs(21),
+            &now_iso(),
+        );
+        assert_eq!(later.bubble.len(), 1);
         let mut unknown = answer();
         unknown.destination_id = None;
-        let dropped =
-            lane.route_answer(&auto, unknown, start + Duration::from_secs(60), &now_iso());
-        assert!(dropped.send.is_empty() && dropped.log.len() == 1);
-        let mut off = auto.clone();
+        let dropped = lane.route_answer(
+            &bubble,
+            unknown,
+            start + Duration::from_secs(60),
+            &now_iso(),
+        );
+        assert!(dropped.bubble.is_empty() && dropped.log.len() == 1);
+        let mut off = bubble.clone();
         off.answers.enabled = false;
         assert_eq!(
             lane.route_answer(&off, answer(), start + Duration::from_secs(90), &now_iso()),
             AutoChatPass::default()
         );
-        let suggest = settings(CohostAutoChatMode::Suggest);
+        let suggest = settings(CohostTalkMode::Suggest);
         let card = lane.route_answer(
             &suggest,
             answer(),
@@ -2157,82 +2186,238 @@ mod tests {
             &now_iso(),
         );
         assert_eq!(card.propose.len(), 1);
-        assert!(card.send.is_empty());
+        assert!(card.bubble.is_empty());
     }
 
+    /// S-D4, plan 211 S-A2: the quiet minute runs from an approved card
+    /// that landed and from a bubble line alike; only the card counts as a
+    /// send.
     #[test]
-    fn banter_waits_for_its_cooldown_and_a_quiet_minute_after_a_send() {
+    fn banter_waits_for_its_cooldown_and_a_quiet_minute_after_a_send_or_a_bubble_line() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let auto = settings(CohostAutoChatMode::Auto);
-        assert!(lane.banter_allowed(&auto, start));
+        let bubble = settings(CohostTalkMode::Bubble);
+        assert!(lane.banter_allowed(&bubble, start));
         lane.note_sent(start);
-        assert!(!lane.banter_allowed(&auto, start + Duration::from_secs(30)));
-        assert!(lane.banter_allowed(&auto, start + Duration::from_secs(60)));
+        assert_eq!(lane.sends(), 1);
+        assert!(!lane.banter_allowed(&bubble, start + Duration::from_secs(30)));
+        assert!(lane.banter_allowed(&bubble, start + Duration::from_secs(60)));
+        lane.note_spoken(start + Duration::from_secs(60));
+        assert_eq!(lane.sends(), 1, "a bubble line is not a send");
+        assert!(!lane.banter_allowed(&bubble, start + Duration::from_secs(90)));
+        assert!(lane.banter_allowed(&bubble, start + Duration::from_secs(120)));
         lane.note_banter_requested(start + Duration::from_secs(60));
-        assert!(!lane.banter_allowed(&auto, start + Duration::from_secs(200)));
-        assert!(lane.banter_allowed(&auto, start + Duration::from_secs(300)));
-        let mut off = auto.clone();
+        assert!(!lane.banter_allowed(&bubble, start + Duration::from_secs(200)));
+        assert!(lane.banter_allowed(&bubble, start + Duration::from_secs(300)));
+        let mut off = bubble.clone();
         off.banter.enabled = false;
         assert!(!lane.banter_allowed(&off, start + Duration::from_secs(300)));
         let pass = lane.route_banter(
-            &auto,
+            &bubble,
             " Nice stream. ",
             CohostUtteranceState::Laugh,
             start,
             &now_iso(),
         );
-        assert_eq!(pass.send.len(), 1);
-        assert_eq!(pass.send[0].text, "Nice stream.");
+        assert_eq!(pass.bubble.len(), 1);
+        assert_eq!(pass.bubble[0].text, "Nice stream.");
         assert!(
-            pass.send[0].destination_ids.is_empty(),
+            pass.bubble[0].destination_ids.is_empty(),
             "every writable destination"
         );
         assert_eq!(
-            pass.send[0].trigger.kind,
+            pass.bubble[0].trigger.kind,
             CohostUtteranceTriggerKind::Banter
         );
         assert!(
             lane.route_banter(&off, "x", CohostUtteranceState::Talk, start, &now_iso())
-                .send
+                .bubble
                 .is_empty()
         );
     }
 
+    /// Plan 211 D1: Say is bubble-only whatever the mode (the lane does not
+    /// even read it), and the lane keeps twenty utterances.
     #[test]
-    fn say_sends_only_in_auto_and_the_lane_keeps_twenty_utterances() {
+    fn say_is_bubble_only_in_every_mode_and_the_lane_keeps_twenty_utterances() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let (card, send) = lane.say(
-            &settings(CohostAutoChatMode::Suggest),
-            "Hi",
-            CohostUtteranceState::Talk,
-            start,
-            &now_iso(),
-        );
-        assert!(!send);
+        let card = lane.say("  Hi  ", CohostUtteranceState::Talk, start, &now_iso());
         assert_eq!(card.status, CohostUtteranceStatus::BubbleOnly);
         assert_eq!(card.trigger.kind, CohostUtteranceTriggerKind::Manual);
-        let (_, send) = lane.say(
-            &settings(CohostAutoChatMode::Auto),
-            "Hi",
-            CohostUtteranceState::Talk,
-            start,
-            &now_iso(),
-        );
-        assert!(send);
+        assert_eq!(card.text, "Hi");
+        assert!(card.destination_ids.is_empty());
+        assert_eq!(card.expires_at, None);
+        assert_eq!(lane.sends(), 0);
         for _ in 0..30 {
-            lane.say(
-                &settings(CohostAutoChatMode::Off),
-                "x",
-                CohostUtteranceState::Talk,
-                start,
-                &now_iso(),
-            );
+            lane.say("x", CohostUtteranceState::Talk, start, &now_iso());
         }
         assert_eq!(lane.snapshot(start).len(), UTTERANCES_KEPT);
         lane.register_operation("op-1");
         assert!(lane.is_own_operation("op-1"));
         assert!(!lane.is_own_operation("op-2"));
+    }
+
+    /// Plan 211 D2, the invariant: nothing the lane decides on its own
+    /// reaches chat. Every entry is driven in Bubble and in Suggest:
+    /// Activity rows, a welcome, a held burst through `drain`, an AI greet
+    /// result, an answer, banter and Say. In Bubble every line is
+    /// `bubble-only` and nothing is proposed; in Suggest every line is a
+    /// `proposed` card and nothing is `sent` until `approve` runs. A pass
+    /// has no send list at all, so the compiler keeps the rest.
+    #[test]
+    fn nothing_automatic_reaches_chat() {
+        let start = Instant::now();
+        for talk in [CohostTalkMode::Bubble, CohostTalkMode::Suggest] {
+            let settings = bare_settings(talk);
+            let mut lane = AutoChatLane::default();
+            let mut passes = Vec::new();
+            let mut now = start;
+            // Activity rows: the raid now, the follow held for the gap and
+            // released by the drain below.
+            passes.push(lane.note_activity(&settings, None, &raid_and_follow(), now, &now_iso()));
+            // A welcome, on its own destination.
+            let mut ana = chat_row("Ana", true, true);
+            ana.target_id = Some("chat-2".to_string());
+            passes.push(lane.note_activity(&settings, None, &[ana], now, &now_iso()));
+            // A burst of follows: one now, the rest held.
+            now += Duration::from_secs(20);
+            passes.push(lane.note_activity(&settings, None, &follows(4), now, &now_iso()));
+            // Every held bucket, through the drain.
+            for _ in 0..8 {
+                let Some(due) = lane.next_due() else { break };
+                now = due.max(now);
+                passes.push(lane.drain(&settings, None, now, &now_iso()));
+            }
+            assert_eq!(lane.next_due(), None);
+            // An AI greet result, on its own destination.
+            now += Duration::from_secs(1);
+            let mut cheer = event("cheer");
+            cheer.target_id = Some("chat-3".to_string());
+            let pass = lane.note_activity(&settings, Some(&ai()), &[cheer], now, &now_iso());
+            let pending = pass.greet.clone().expect("the cheer waits for the AI");
+            passes.push(pass);
+            let item_id = pending.request.items[0].id.clone();
+            passes.push(lane.apply_greet_result(
+                &settings,
+                pending,
+                Ok(CohostGreetResponse {
+                    lines: vec![CohostGreetLine {
+                        id: item_id,
+                        text: "Bits! Thank you.".to_string(),
+                        mood: Some(CohostTickMood::Amused),
+                    }],
+                    model: String::new(),
+                }),
+                now,
+                &now_iso(),
+            ));
+            // An answer, banter and the Say box.
+            passes.push(lane.route_answer(&settings, answer(), now, &now_iso()));
+            passes.push(lane.route_banter(
+                &settings,
+                "A joke.",
+                CohostUtteranceState::Laugh,
+                now,
+                &now_iso(),
+            ));
+            let said = lane.say("Hello horde", CohostUtteranceState::Talk, now, &now_iso());
+            assert_eq!(said.status, CohostUtteranceStatus::BubbleOnly, "{talk:?}");
+            assert_eq!(said.trigger.kind, CohostUtteranceTriggerKind::Manual);
+
+            let lines: Vec<&CohostUtterance> = passes
+                .iter()
+                .flat_map(|pass| pass.bubble.iter().chain(pass.propose.iter()))
+                .collect();
+            // Every entry produced its line: the raid, the welcome, the AI
+            // cheer (its fallback never routed), the answer and the banter,
+            // plus the follows, which the throttle collapses as it sees fit
+            // (that is `cohost_throttle`'s business, tested there).
+            for expected in [
+                "raider42 is raiding! Welcome, everyone!",
+                "Hi Ana, welcome to the stream!",
+                "Bits! Thank you.",
+                "It is a Keychron.",
+                "A joke.",
+            ] {
+                assert!(
+                    lines.iter().any(|u| u.text == expected),
+                    "{talk:?}: no line {expected:?} in {passes:?}"
+                );
+            }
+            assert!(
+                lines
+                    .iter()
+                    .any(|u| u.text.contains("Thanks for the follow")),
+                "{talk:?}: the follows were greeted"
+            );
+            assert!(
+                lines
+                    .iter()
+                    .all(|u| u.text != "Thanks for the bits, sarzdotmd!"),
+                "{talk:?}: the AI line replaced the cheer's fallback"
+            );
+            assert!(lines.len() >= 6, "{talk:?}: {} lines", lines.len());
+            for kind in [
+                CohostUtteranceTriggerKind::Greeting,
+                CohostUtteranceTriggerKind::Answer,
+                CohostUtteranceTriggerKind::Banter,
+            ] {
+                assert!(
+                    lines.iter().any(|u| u.trigger.kind == kind),
+                    "{talk:?}: no {kind:?} line"
+                );
+            }
+            assert_eq!(lane.sends(), 0, "{talk:?}: nothing counted as a send");
+            match talk {
+                CohostTalkMode::Bubble => {
+                    assert!(passes.iter().all(|pass| pass.propose.is_empty()));
+                    assert!(
+                        lines
+                            .iter()
+                            .all(|u| u.status == CohostUtteranceStatus::BubbleOnly)
+                    );
+                    assert!(lines.iter().all(|u| u.expires_at.is_none()));
+                    assert!(
+                        lane.snapshot(now)
+                            .iter()
+                            .all(|u| u.status == CohostUtteranceStatus::BubbleOnly)
+                    );
+                }
+                CohostTalkMode::Suggest => {
+                    assert!(passes.iter().all(|pass| pass.bubble.is_empty()));
+                    assert!(
+                        lines
+                            .iter()
+                            .all(|u| u.status == CohostUtteranceStatus::Proposed)
+                    );
+                    assert!(lines.iter().all(|u| u.expires_at.is_some()));
+                    assert!(
+                        lane.snapshot(now)
+                            .iter()
+                            .all(|u| u.status != CohostUtteranceStatus::Sent)
+                    );
+                    // Only the streamer's click, then the send landing, makes
+                    // a line `sent`.
+                    let id = lines.last().unwrap().id.clone();
+                    lane.approve(&id, now).unwrap();
+                    assert!(
+                        lane.snapshot(now)
+                            .iter()
+                            .all(|u| u.status != CohostUtteranceStatus::Sent),
+                        "approved is not yet sent"
+                    );
+                    assert!(lane.mark(&id, CohostUtteranceStatus::Sent));
+                    assert_eq!(
+                        lane.snapshot(now)
+                            .iter()
+                            .filter(|u| u.status == CohostUtteranceStatus::Sent)
+                            .count(),
+                        1
+                    );
+                }
+                CohostTalkMode::Off => unreachable!(),
+            }
+        }
     }
 }
