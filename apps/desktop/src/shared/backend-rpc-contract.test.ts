@@ -1172,7 +1172,11 @@ describe('backend RPC contract', () => {
         immutableTextureUploads: 0,
         immutableTextureReuses: 0,
         liveBackgroundPrograms: 2,
-        liveBackgroundScratchBytes: 8_294_400
+        liveBackgroundScratchBytes: 8_294_400,
+        // Plan 205 S6: the Preview's own picture, inside the bounded
+        // pipeline payload, never a top-level field the strict schema
+        // would reject.
+        previewProgramLeg: true
       },
       updatedAt: '2026-10-24T00:00:00Z'
     } satisfies CompositorStatus

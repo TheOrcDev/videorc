@@ -62,6 +62,8 @@ import {
   type SavedScene
 } from '@/lib/scene-presets'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
+import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
+import type { FirstRunLook } from '@/lib/first-run-look'
 import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
@@ -103,7 +105,7 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
-import { replayStartWaitsForGrant } from '@/lib/replay-buffer-grants'
+import { replayStartWaitsForGrant, replayStartWaitsForScreen } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -1448,6 +1450,14 @@ export type StudioContextValue = {
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   applyCameraPreset: (patch: Partial<LayoutSettings>) => void
+  /**
+   * Plan 207 S4: the look chosen in first-run setup, written as state only so
+   * the idle scene reload commits it without opening a device. While a
+   * backend session runs (the Clips ring during a replay of setup) the look
+   * is held here and applied through one transaction when setup closes.
+   */
+  firstRunLookHold: FirstRunLook | null
+  applyFirstRunLook: (look: FirstRunLook) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
   savedScenePendingId: string | null
@@ -1683,6 +1693,12 @@ export interface ReplayBufferControls {
    * the user turns it on themselves.
    */
   blockedReason: string | null
+  /**
+   * Why the ring is waiting rather than starting (plan 203 S2, plan 207 S2):
+   * a grant macOS has not asked for yet, or a screen the layout shows that
+   * nobody has chosen. The Output page's Clips row says it; never a toast.
+   */
+  waitReason?: string | null
   /** The one switch (Output → Clips → Keep the last seconds). */
   setEnabled: (enabled: boolean) => void
 }
@@ -1788,7 +1804,9 @@ export type StudioBannersContextValue = {
   /** The banner the Scene page selects (Assets → Place on Scene); null when none, or deleted. */
   selectedBannerId: string | null
   selectBanner: (id: string | null) => void
-  /** Assets → Import image…: the picker, then `banners.importImage`. Never shows the new banner. */
+  /** Assets → Import image…: the picker, then `banners.importImage`, which shows the new banner
+   * (plan 205 D3) unless four already show or a running session can't take one: then it
+   * arrives hidden (with four showing, the Scene list's limit reason says why). */
   importBanner: () => Promise<void>
   updateBanner: (id: string, patch: Omit<BannerUpdateParams, 'id'>) => Promise<Banner | null>
   /** Every banner id in the new Assets order (`bannerOrderAfterMove`). */
@@ -2387,6 +2405,7 @@ const REPLAY_BUFFER_OFF_CONTROLS: ReplayBufferControls = Object.freeze({
   state: REPLAY_STATE_OFF,
   armed: false,
   blockedReason: null,
+  waitReason: null,
   setEnabled: () => {}
 })
 
@@ -2449,6 +2468,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Plan 209 S14: `update_settings` sets the theme through next-themes, like
   // Settings → General's control.
   const { theme: appTheme, setTheme: setAppTheme } = useTheme()
+
+  // Plan 207 S4: a look chosen in setup while a session holds the idle
+  // reload back (the Clips ring in a replay); applied once setup closes.
+  const [firstRunLookHold, setFirstRunLookHold] = useState<FirstRunLook | null>(null)
+  const firstRunLookHoldRef = useRef<FirstRunLook | null>(null)
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -10143,15 +10167,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Library edits request a new working background. Only the committed target
   // drives preview/session parameters; applying a saved snapshot never edits the library.
+  // Plan 207 S4: held while first-run setup is open (the transaction starts
+  // the scene's devices), and run once when the workspace shows. Setup's own
+  // background choice goes through the idle reload and keeps the applied
+  // fingerprint in step, so the held sync usually finds nothing to do.
   useEffect(() => {
     const fingerprint = JSON.stringify(snapshotBackground(desiredLibraryBackground))
-    if (fingerprint === libraryBackgroundFingerprintRef.current) return
+    if (
+      backgroundLibrarySyncDecision({
+        setupOpen: firstRunSetupOpen,
+        fingerprint,
+        applied: libraryBackgroundFingerprintRef.current
+      }) !== 'apply'
+    )
+      return
     libraryBackgroundFingerprintRef.current = fingerprint
     void requestLayoutTransaction(captureConfigRef.current.layout, {
       pendingIndicator: false,
       backgroundOverride: desiredLibraryBackground
     })
-  }, [desiredLibraryBackground, requestLayoutTransaction])
+  }, [desiredLibraryBackground, firstRunSetupOpen, requestLayoutTransaction])
 
   // Resolves whether the layout committed (an agent's `set_scene_item` reads
   // it, plan 209 S11b); the inspector ignores it.
@@ -10230,7 +10265,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [requestLayoutTransaction])
 
   const requestCameraPresetTransaction = useCallback(
-    (patch: Partial<LayoutSettings>) => {
+    (
+      patch: Partial<LayoutSettings>,
+      options?: { backgroundOverride?: Scene['background'] | null }
+    ) => {
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
       if (patch.layoutPreset !== undefined) {
@@ -10302,6 +10340,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           captureConfigPatch,
           ...(patch.layoutPreset !== undefined
             ? { savedSceneId: null, origin: 'builtin' as const }
+            : {}),
+          ...(options && 'backgroundOverride' in options
+            ? { backgroundOverride: options.backgroundOverride }
             : {})
         }
       )
@@ -10539,6 +10580,74 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [requestCameraPresetTransaction]
   )
+
+  // Plan 207 S4: "Your look" writes state only. The scene reload commits it
+  // idle (`scene.load_from_capture_config` starts nothing and carries the
+  // background), so no device opens while setup is open. The library sync
+  // above sees the fingerprint already applied. Setup's changes start the
+  // Studio with no undo history and no saved-scene origin (a built-in look).
+  // The setup chunk has already loaded the look's helpers when this runs.
+  const applyFirstRunLook = useCallback(
+    (look: FirstRunLook): void => {
+      if (firstRunLookWritesHeld(recordingRef.current)) {
+        firstRunLookHoldRef.current = look
+        setFirstRunLookHold(look)
+        return
+      }
+      // The session that held an earlier look has ended: this write wins.
+      if (firstRunLookHoldRef.current) {
+        firstRunLookHoldRef.current = null
+        setFirstRunLookHold(null)
+      }
+      void import('@/lib/first-run-look').then(
+        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+          const current = captureConfigRef.current
+          if (current.layout.arrangementMode === 'freeform') {
+            noteLayoutLeavingFreeform(current.layout)
+          }
+          const next = firstRunLookPatch(current, look)
+          latestRequestedLayoutRef.current = next.layout.layoutPreset
+          workingOriginRef.current = 'builtin'
+          activeSavedSceneIdRef.current = null
+          setActiveSavedSceneId(null)
+          setCaptureConfig((latest) => firstRunLookPatch(latest, look))
+          const registry = backgroundRegistryRef.current
+          const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
+          const background = effectiveSceneBackground(nextRegistry)
+          libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
+          workingBackgroundRef.current = background
+          setWorkingBackground(background)
+          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+        }
+      )
+    },
+    [setBackgroundRegistry]
+  )
+  // A look held behind a running session lands when setup closes, through
+  // the Studio's own transaction: one commit with the preset, the shape and
+  // the background. It may open the layout's devices, as a Studio change does.
+  useEffect(() => {
+    if (firstRunSetupOpen) return
+    const held = firstRunLookHoldRef.current
+    if (!held) return
+    firstRunLookHoldRef.current = null
+    setFirstRunLookHold(null)
+    void import('@/lib/first-run-look').then(
+      ({ cameraShapeLayoutPatch, firstRunBackgroundChoice, firstRunLookPreset }) => {
+        const registry = firstRunBackgroundChoice(
+          backgroundRegistryRef.current,
+          held.liveBackgroundId
+        )
+        void requestCameraPresetTransaction(
+          {
+            layoutPreset: firstRunLookPreset(captureConfigRef.current, held),
+            ...cameraShapeLayoutPatch(held.cameraShape)
+          },
+          { backgroundOverride: effectiveSceneBackground(registry) }
+        )
+      }
+    )
+  }, [firstRunSetupOpen, requestCameraPresetTransaction])
 
   const switchSourceDeviceLive = useCallback(
     async (sourceKind: LiveSourceDeviceSwitchPending, sources: SourceSelection) => {
@@ -11608,7 +11717,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       },
       isCurrent: () => clientRef.current === client && wsStatusRef.current === 'connected',
       onPhase: setBannerImportPhase,
-      // The new tile is the confirmation. An import never shows the banner.
+      // The new tile is the confirmation. The backend shows the new banner
+      // unless it can't (plan 205 D3); the answer says which, as `shown`.
       onImported: (banner) => {
         if (bannerListEventRevision.current === revision) commitBanner(banner)
       },
@@ -16116,13 +16226,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // recording does; on a never-asked Mac that was a cold OS prompt at launch.
   // First-run setup holds the preview back, so a start would find no frames
   // and say Clips couldn't start over setup: the ring waits for it too.
+  // Plan 207 S2: a layout that shows a screen nobody has chosen (a fresh
+  // profile without Screen Recording) waits the same way; the Clips row says
+  // what Sources says. A chosen screen without frames still fails as today.
   const replayGrantWait =
     firstRunSetupOpen ||
     replayStartWaitsForGrant({
       mediaAccess,
       sources: captureConfig.sources,
       layoutPreset: captureConfig.layout.layoutPreset
-    })
+    }) ||
+    replayStartWaitsForScreen({ sources: captureConfig.sources, layout: captureConfig.layout })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
     if (recordBlockedReason || replayGrantWait) {
@@ -16338,9 +16452,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       state: replayState,
       armed: replayArmed,
       blockedReason: replayBlockedReason,
+      waitReason: typeof replayGrantWait === 'string' ? replayGrantWait : null,
       setEnabled: setReplayEnabled
     }),
-    [replayArmed, replayBlockedReason, replayState, setReplayEnabled]
+    [replayArmed, replayBlockedReason, replayGrantWait, replayState, setReplayEnabled]
   )
 
   const assessRecording = useCallback(
@@ -18169,6 +18284,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       savedScenes: sceneLibrary.scenes,
       activeSavedSceneId,
       savedScenePendingId,
@@ -18408,6 +18525,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneEditorDraft,
       clearSceneEditorDraft,
       applyCameraPreset,
+      firstRunLookHold,
+      applyFirstRunLook,
       sceneLibrary.scenes,
       sceneLibrary.error,
       sceneLibrary.rename,

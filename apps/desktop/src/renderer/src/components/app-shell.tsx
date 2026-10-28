@@ -27,8 +27,8 @@ import { useWhatsNew } from '@/hooks/use-whats-new'
 import {
   createFirstRunStartup,
   firstRunShellSurface,
-  type FirstRunCompletion,
   type FirstRunDecision,
+  type FirstRunLeave,
   type FirstRunSetupMode
 } from '@/lib/first-run'
 import {
@@ -369,17 +369,19 @@ function AppShellContent(): ReactElement {
   // record (every fresh install sees setup once, D2) and opens the Studio; a
   // replay writes nothing and returns to the page it came from.
   const leaveFirstRunSetup = useCallback(
-    (completion: FirstRunCompletion) => {
+    ({ completion, openTab }: FirstRunLeave) => {
+      // "Open Livestream" (plan 207 D10) lands on Setup, where stream keys go.
+      if (openTab === 'live') selectLivestreamView('setup')
       if (replay) {
         setReplay(null)
-        setActive(replay.returnTo)
+        setActive(openTab ?? replay.returnTo)
         return
       }
       firstRunStartup?.complete(completion)
       setFirstRunVisibility('hide')
-      setActive('studio')
+      setActive(openTab ?? 'studio')
     },
-    [replay, setActive]
+    [replay, selectLivestreamView, setActive]
   )
 
   // The shell's chords (plan 174 S3.21): ⌘ on macOS, Ctrl elsewhere (A-17),
@@ -510,7 +512,14 @@ function AppShellContent(): ReactElement {
         // title band and the card, in place of the sidebar and the page. The
         // solid placeholder holds the window while its chunk loads.
         <Suspense fallback={<FirstRunPlaceholder />}>
-          <FirstRunSetup mode={setupMode} onLeave={leaveFirstRunSetup} />
+          <FirstRunSetup
+            mode={setupMode}
+            initialStep={replay ? 'permissions' : firstRunStartup?.step}
+            initialGoal={firstRunStartup?.goal ?? null}
+            onEnterStep={(step) => firstRunStartup?.enterStep(step, setupMode)}
+            onGoalChange={(goal) => firstRunStartup?.setGoal(goal, setupMode)}
+            onLeave={leaveFirstRunSetup}
+          />
         </Suspense>
       ) : surface === 'placeholder' ? (
         <FirstRunPlaceholder />

@@ -124,8 +124,8 @@ function ClipsSection(): ReactElement {
                 ? 'Off. A clip can only be marked while you record.'
                 : running
                   ? 'The newest seconds are on disk, ready to save, and deleted as they age. Nothing is kept for longer.'
-                  : recordBlockedReason
-                    ? `Starts once a source is ready. ${recordBlockedReason}`
+                  : (recordBlockedReason ?? clips.waitReason)
+                    ? `Starts once a source is ready. ${recordBlockedReason ?? clips.waitReason}`
                     : 'Not running right now. It tries again after the next recording or source change.'
           }
           label={KEEP_LAST_SECONDS_LABEL}

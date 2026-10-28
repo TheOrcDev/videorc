@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   evaluateBlankFallback,
+  evaluateClearGlassLaunch,
   evaluateCrashRecovery,
   evaluateDefaultLaunch,
   evaluateRememberedFallback,
@@ -11,6 +12,7 @@ import {
 } from './main-window-recovery-gates.mjs'
 
 const mica = { kind: 'mica', reason: null, paintCheck: 'painted' }
+const ground = { kind: 'ground', reason: null, paintCheck: 'skipped' }
 const solid = (reason, paintCheck = 'skipped') => ({ kind: 'solid', reason, paintCheck })
 const recoveryLog = [
   'Renderer process gone (crashed, exit 1) for index.html.',
@@ -22,24 +24,35 @@ test('reads the Windows build', () => {
   assert.equal(windowsBuildFromRelease('nope'), undefined)
 })
 
-test('default launch passes on a painted Mica window and on a solid Windows 10 window', () => {
+test('default launch passes on the chrome ground on every Windows build (plan 208)', () => {
+  assert.deepEqual(evaluateDefaultLaunch({ mounted: true, glass: ground }), [])
+})
+
+test('default launch fails on an unmounted page, a missing verdict, or any other material', () => {
+  assert.equal(evaluateDefaultLaunch({ mounted: false, glass: ground }).length, 1)
+  assert.equal(evaluateDefaultLaunch({ mounted: true, glass: mica }).length, 1)
+  assert.equal(evaluateDefaultLaunch({ mounted: true, glass: solid('platform') }).length, 1)
+  assert.equal(evaluateDefaultLaunch({ mounted: true, glass: undefined }).length, 1)
+})
+
+test('a clear-glass launch passes on a painted Mica window and on a solid Windows 10 window', () => {
   assert.deepEqual(
-    evaluateDefaultLaunch({ mounted: true, glass: mica, osRelease: '10.0.26100' }),
+    evaluateClearGlassLaunch({ mounted: true, glass: mica, osRelease: '10.0.26100' }),
     []
   )
   assert.deepEqual(
-    evaluateDefaultLaunch({ mounted: true, glass: solid('platform'), osRelease: '10.0.19045' }),
+    evaluateClearGlassLaunch({ mounted: true, glass: solid('platform'), osRelease: '10.0.19045' }),
     []
   )
 })
 
-test('default launch fails on an unmounted page, a missing verdict, or the wrong material', () => {
+test('a clear-glass launch fails on an unmounted page, a missing verdict, or the wrong material', () => {
   assert.equal(
-    evaluateDefaultLaunch({ mounted: false, glass: mica, osRelease: '10.0.26100' }).length,
+    evaluateClearGlassLaunch({ mounted: false, glass: mica, osRelease: '10.0.26100' }).length,
     1
   )
   assert.equal(
-    evaluateDefaultLaunch({
+    evaluateClearGlassLaunch({
       mounted: true,
       glass: { ...mica, paintCheck: 'pending' },
       osRelease: '10.0.26100'
@@ -47,11 +60,14 @@ test('default launch fails on an unmounted page, a missing verdict, or the wrong
     1
   )
   assert.equal(
-    evaluateDefaultLaunch({ mounted: true, glass: solid('platform'), osRelease: '10.0.26100' })
+    evaluateClearGlassLaunch({ mounted: true, glass: solid('platform'), osRelease: '10.0.26100' })
       .length,
     1
   )
-  assert.equal(evaluateDefaultLaunch({ mounted: true, glass: undefined, osRelease: 'x' }).length, 1)
+  assert.equal(
+    evaluateClearGlassLaunch({ mounted: true, glass: undefined, osRelease: 'x' }).length,
+    1
+  )
 })
 
 test('crash recovery needs the remount and both log lines', () => {

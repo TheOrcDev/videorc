@@ -199,6 +199,8 @@ import {
   parseMainBannersChangedEvent,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
+  parseMainOverlayLayout,
+  parseMainOverlayLayoutEvent,
   parseMainPreviewSurfaceStatus,
   parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
@@ -209,8 +211,9 @@ import {
   previewSurfaceBannerLayers,
   previewSurfaceCanvasFromCompositor,
   previewSurfaceCanvasFromOutputs,
-  withPreviewSurfaceBanners
+  type PreviewSurfaceCanvas
 } from './preview-surface-banners'
+import { previewSurfaceBuddyLayer, withPreviewSurfaceOverlays } from './preview-surface-buddy'
 import {
   PREVIEW_SURFACE_LIVE_BACKGROUND_RUNTIME_SCRIPT,
   previewSurfaceBackgroundLayer,
@@ -433,6 +436,7 @@ import {
   solidWindowBase,
   WINDOW_HEADER_HEIGHT,
   windowGlassOptions,
+  windowGroundForMode,
   type AppliedGlass,
   type GlassMode,
   type GlassStyle,
@@ -622,8 +626,11 @@ import type {
   CommentsHistoryStats,
   SessionChatTotals,
   VideorcAccountSnapshot,
-  ViewerSample
+  ViewerSample,
+  RecordingStatus,
+  OverlayLayout
 } from '../shared/backend'
+import { previewProgramShape } from '../shared/preview-program'
 import {
   COHOST_ACTION_KINDS,
   normalizeCommentHighlightAnchor,
@@ -897,6 +904,7 @@ let backendManagedAssetRoots: ManagedAssetRoots | null = null
 let backendAuthorityReady: Promise<void> = Promise.resolve()
 const mainResourceCapabilities = new MainResourceCapabilityRegistry()
 let mainCaptureState: MainCaptureState = 'unknown'
+let mainPreviewProgramShape: ReturnType<typeof previewProgramShape> = null
 // Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
 // the renderer's End livestream question (exit-guard.ts).
 const liveExitGuard = new LiveExitGuard()
@@ -909,6 +917,10 @@ let nativePreviewSurfaceScene: PreviewSurfaceSceneState | null = null
 // surface draws the showing banners as image layers. Kept across reconnects;
 // a new connection re-reads `banners.list`.
 let previewSurfaceBanners: readonly Banner[] = []
+// The overlay layout (plan 205 S9) from the same socket: the proof surface
+// draws the Buddy's layer while the program carries it (its two switches).
+// Kept across reconnects; a new connection re-reads `overlays.layout.get`.
+let previewSurfaceOverlayLayout: OverlayLayout | null = null
 let nativePreviewCommittedCompositorScene: PreviewSurfaceSceneState | null = null
 let nativePreviewCommittedCompositorRunId: string | undefined
 const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
@@ -948,8 +960,9 @@ nativeTheme.on('updated', () => {
   repinDarkAlwaysWindows()
   restyleGlassWindows()
 })
-// Window glass is real macOS vibrancy (window-glass.ts, plan 050). VIDEORC_GLASS=0
-// paints the solid palette; a material name overrides the material.
+// The window material (window-glass.ts): the opaque chrome ground by default
+// (plan 208). VIDEORC_GLASS=clear is the plan 091 vibrancy for one release (a
+// material name picks its material), and VIDEORC_GLASS=0 the solid palette.
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
@@ -1996,20 +2009,27 @@ function restyleGlassWindows(): void {
   }
 }
 
-/** Vibrancy tints by OS appearance; the renderer's theme toggle drives it so
- * the blur material always matches the in-app theme (videorc-design). */
+/** The renderer's theme toggle drives the OS appearance, so every window's
+ * opaque base (and, under the clear glass, the vibrancy material) matches the
+ * in-app theme (videorc-design). */
 function applyNativeTheme(theme: string): void {
   nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
   repinDarkAlwaysWindows()
   // AppKit rebuilds each material for the new appearance; the clear glass
   // strips it again (plan 091).
   restyleGlassWindows()
-  // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
-  // with the theme; the glass windows' material follows nativeTheme itself,
-  // and every window's page follows it through prefers-color-scheme.
+  // An opaque window (the chrome ground, plan 208; or the solid palette)
+  // repaints its base with the theme, so the backing under the renderer's
+  // ground never shows the other theme's tone; the glass windows' material
+  // follows nativeTheme itself, and every window's page follows it through
+  // prefers-color-scheme.
   for (const window of [mainWindow, commentsWindow, captionsWindow, notesWindow]) {
     const applied = appliedGlass(window)
-    if (window && !window.isDestroyed() && applied?.mode.kind === 'solid') {
+    if (
+      window &&
+      !window.isDestroyed() &&
+      (applied?.mode.kind === 'solid' || applied?.mode.kind === 'ground')
+    ) {
       window.setBackgroundColor(solidWindowBase(applied.role, theme !== 'light'))
     }
   }
@@ -2239,21 +2259,22 @@ function applyMicaBlankFallback(window: BrowserWindow): void {
 }
 
 function createWindow(): void {
+  const chrome = glassWindowChrome('main')
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 960,
     minHeight: 660,
     title: 'Videorc',
-    // Hold the (transparent) window until the renderer has painted its first
-    // frame — showing it at create time put an empty pane on screen that then
+    // Hold the window until the renderer has painted its first frame —
+    // showing it at create time put an empty pane on screen that then
     // visibly filled in piece by piece.
     show: false,
-    ...glassWindowChrome('main').options,
+    ...chrome.options,
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('main'),
+      ...rendererWindowWebPreferences('main', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy),
       // Plan 189: the soundboard's monitor plays a press from a Stream Deck,
       // the phone or Stream Manager, none of which is a gesture in this
@@ -2956,7 +2977,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('notes'),
+      ...rendererWindowWebPreferences('notes', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('notes', electronBackgroundPolicy)
     }
   })
@@ -3802,7 +3823,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('comments'),
+      ...rendererWindowWebPreferences('comments', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('comments', electronBackgroundPolicy)
     }
   })
@@ -4021,7 +4042,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      ...rendererWindowWebPreferences('captions'),
+      ...rendererWindowWebPreferences('captions', windowGroundForMode(chrome.mode)),
       backgroundThrottling: backgroundThrottlingFor('captions', electronBackgroundPolicy)
     }
   })
@@ -4942,6 +4963,40 @@ function backendPreviewFrameUrl(
   return nativePreviewProofFrameUrl(baseUrl, maxWidth)
 }
 
+// Plan 205 S9: the Buddy's layer for the proof surface, drawn by the backend
+// for the canvas main places the surface's layers against. Polled like the
+// camera and screen frames (the same cursor headers), but by the page's
+// overlay poller, so it never counts as a source for liveness. The smoke
+// frame server stands in for the source routes only, never for this one.
+function previewBuddyFrameUrl(canvas: PreviewSurfaceCanvas): string | undefined {
+  if (
+    !nativePreviewFramePollingEnabled ||
+    nativePreviewSurfaceFramePollingSuppressed ||
+    !backendConnection ||
+    process.env.VIDEORC_SMOKE_PREVIEW_FRAME_POLLING === '1'
+  ) {
+    return undefined
+  }
+  const params = new URLSearchParams({
+    token: backendConnection.token,
+    canvasWidth: String(Math.max(1, Math.round(canvas.width))),
+    canvasHeight: String(Math.max(1, Math.round(canvas.height)))
+  })
+  return `http://${backendConnection.host}:${backendConnection.port}/preview/buddy/latest.bmp?${params.toString()}`
+}
+
+function previewSurfaceBuddyLayerFor(
+  canvas: PreviewSurfaceCanvas,
+  suppressFramePolling: boolean
+): PreviewSurfaceSceneLayer | null {
+  return previewSurfaceBuddyLayer(
+    previewSurfaceOverlayLayout?.buddy ?? null,
+    mainPreviewProgramShape,
+    canvas,
+    suppressFramePolling ? undefined : previewBuddyFrameUrl(canvas)
+  )
+}
+
 function fileUrlFromPath(path: string): string {
   if (path.startsWith(`${MANAGED_ASSET_SCHEME}://`)) {
     return path
@@ -5152,7 +5207,18 @@ function buildPreviewSurfaceScene(
     previewSurfaceCanvasFromOutputs(params.scene?.outputs) ??
     nativePreviewSurfaceScene?.bannerCanvas ??
     fallbackPreviewSurfaceCanvas(params.layout)
-  layers.push(...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas))
+  layers.push(
+    ...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas, mainPreviewProgramShape)
+  )
+  // Plan 205 S9: the Buddy's layer above the banners, while the program
+  // carries it.
+  const buddyLayer = previewSurfaceBuddyLayerFor(
+    bannerCanvas,
+    nativePreviewSurfaceFramePollingSuppressed
+  )
+  if (buddyLayer) {
+    layers.push(buddyLayer)
+  }
 
   return {
     revision: params.revision,
@@ -5209,7 +5275,15 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
     previewSurfaceCanvasFromCompositor(status) ??
     nativePreviewSurfaceScene?.bannerCanvas ??
     fallbackPreviewSurfaceCanvas(status.sceneLayout)
-  layers.push(...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas))
+  layers.push(
+    ...previewSurfaceBannerLayers(previewSurfaceBanners, bannerCanvas, mainPreviewProgramShape)
+  )
+  // Plan 205 S9: the Buddy's layer above the banners, while the program
+  // carries it and the surface polls frames.
+  const buddyLayer = previewSurfaceBuddyLayerFor(bannerCanvas, suppressFramePolling)
+  if (buddyLayer) {
+    layers.push(buddyLayer)
+  }
 
   return {
     revision: status.sceneRevision,
@@ -5581,6 +5655,9 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           for (const id of Array.from(pollers.keys())) {
             stopLayerPoller(id);
           }
+          for (const id of Array.from(overlayPollers.keys())) {
+            stopOverlayPoller(id);
+          }
         }
 
         function setFramePollingSuppressed(suppressed) {
@@ -5724,6 +5801,181 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           poll();
         }
 
+        // --- Overlay layers the backend draws (plan 205 S9: the Buddy) ---
+        // Polled like a source frame (the same cursor headers, the same
+        // latest-wins BMP), but kept apart from \`pollers\`: an overlay is
+        // not a source, so it never feeds liveness, blank-frame or source
+        // transport accounting. A 204 with \`x-videorc-layer-empty: 1\` means
+        // the program does not carry the layer: the image is cleared.
+        const overlayPollers = new Map();
+        const overlayFrames = new Map();
+
+        function placeOverlayElement(element, rect) {
+          element.style.left = percent(rect.x);
+          element.style.top = percent(rect.y);
+          element.style.width = percent(rect.width);
+          element.style.height = percent(rect.height);
+        }
+
+        function overlayRectFromHeaders(response) {
+          const raw = response.headers.get('x-videorc-layer-rect');
+          if (typeof raw !== 'string') {
+            return null;
+          }
+          const parts = raw.split(',').map((part) => Number(part));
+          if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part))) {
+            return null;
+          }
+          return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+        }
+
+        function clearOverlayFrame(poller) {
+          if (poller.objectUrl) {
+            if (poller.image.src === poller.objectUrl) {
+              poller.image.removeAttribute('src');
+            }
+            URL.revokeObjectURL(poller.objectUrl);
+            poller.objectUrl = null;
+          }
+          poller.image.dataset.loaded = '0';
+        }
+
+        function stopOverlayPoller(id) {
+          const poller = overlayPollers.get(id);
+          if (!poller) {
+            return;
+          }
+          poller.cancelled = true;
+          poller.abortController?.abort();
+          clearOverlayFrame(poller);
+          overlayPollers.delete(id);
+          overlayFrames.delete(id);
+        }
+
+        function stopMissingOverlayPollers(activeIds) {
+          for (const id of Array.from(overlayPollers.keys())) {
+            if (!activeIds.has(id)) {
+              stopOverlayPoller(id);
+            }
+          }
+        }
+
+        function startOverlayPolling(id, element, image, url) {
+          if (framePollingSuppressed) {
+            stopOverlayPoller(id);
+            return;
+          }
+          const existing = overlayPollers.get(id);
+          if (existing?.url === url && existing?.image === image) {
+            return;
+          }
+          stopOverlayPoller(id);
+          const poller = {
+            url,
+            element,
+            image,
+            cancelled: false,
+            pending: false,
+            generation: null,
+            sequence: null,
+            objectUrl: null,
+            rect: null,
+            abortController: null
+          };
+          overlayPollers.set(id, poller);
+
+          const poll = async () => {
+            if (poller.cancelled) {
+              return;
+            }
+            if (poller.pending) {
+              window.setTimeout(poll, framePollingIntervalMs);
+              return;
+            }
+            poller.pending = true;
+            let retryDelayMs = framePollingIntervalMs;
+            const abortController = new AbortController();
+            poller.abortController = abortController;
+            try {
+              const response = await fetch(frameRequestUrl(url, poller), {
+                cache: 'no-store',
+                signal: abortController.signal
+              });
+              if (poller.cancelled) {
+                return;
+              }
+              const cursor = responseFrameCursor(response);
+              if (response.status === 204) {
+                if (response.headers.get('x-videorc-layer-empty') === '1') {
+                  // Nothing to draw: the program does not carry the layer.
+                  clearOverlayFrame(poller);
+                  poller.generation = null;
+                  poller.sequence = null;
+                } else if (cursor) {
+                  poller.generation = cursor.generation;
+                  poller.sequence = cursor.sequence;
+                }
+                return;
+              }
+              if (!response.ok) {
+                throw new Error('Overlay frame request failed with status ' + response.status);
+              }
+              const rect = overlayRectFromHeaders(response);
+              const blob = await response.blob();
+              if (poller.cancelled) {
+                return;
+              }
+              const objectUrl = URL.createObjectURL(blob);
+              const next = new Image();
+              next.decoding = 'async';
+              try {
+                await new Promise((resolve, reject) => {
+                  next.onload = resolve;
+                  next.onerror = reject;
+                  next.src = objectUrl;
+                });
+              } catch (error) {
+                URL.revokeObjectURL(objectUrl);
+                throw error;
+              }
+              if (poller.cancelled) {
+                URL.revokeObjectURL(objectUrl);
+                return;
+              }
+              if (rect) {
+                poller.rect = rect;
+                placeOverlayElement(poller.element, rect);
+              }
+              const previousObjectUrl = poller.objectUrl;
+              poller.image.src = objectUrl;
+              poller.image.dataset.loaded = '1';
+              poller.objectUrl = objectUrl;
+              if (previousObjectUrl && previousObjectUrl !== objectUrl) {
+                URL.revokeObjectURL(previousObjectUrl);
+              }
+              if (cursor) {
+                poller.generation = cursor.generation;
+                poller.sequence = cursor.sequence;
+              }
+              overlayFrames.set(id, (overlayFrames.get(id) ?? 0) + 1);
+            } catch (error) {
+              if (!poller.cancelled && error?.name !== 'AbortError') {
+                retryDelayMs = Math.max(250, framePollingIntervalMs);
+              }
+            } finally {
+              if (poller.abortController === abortController) {
+                poller.abortController = null;
+              }
+              poller.pending = false;
+              if (!poller.cancelled) {
+                window.setTimeout(poll, retryDelayMs);
+              }
+            }
+          };
+
+          poll();
+        }
+
         function upsertLayer(layer, order) {
           const id = String(layer.id);
           let entry = layers.get(id);
@@ -5752,12 +6004,16 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           element.style.borderRadius = layerBorderRadius(layer);
           // Banners stack above every scene layer in list order (plan 186
           // D5); DOM order alone would keep a reordered banner where it was.
+          // The Buddy sits above every banner (plan 205 S9, the program's z
+          // order: scene, takeover, banners, captions, Buddy, highlight).
           element.style.zIndex =
             layer.kind === 'background'
               ? '0'
               : layer.kind === 'banner'
                 ? String(2 + (Number.isInteger(order) ? order : 0))
-                : '1';
+                : layer.kind === 'buddy'
+                  ? '1000'
+                  : '1';
           element.style.opacity =
             typeof layer.opacity === 'number' && Number.isFinite(layer.opacity)
               ? String(Math.min(1, Math.max(0, layer.opacity)))
@@ -5777,6 +6033,24 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             image.removeAttribute('src');
             image.dataset.live = '1';
             markLive(layer.kind, id);
+            return;
+          }
+
+          if (layer.kind === 'buddy') {
+            // Plan 205 S9: the Buddy's layer, drawn by the backend. Each
+            // frame names its own rect (the pet moves, a bubble appears), so
+            // a placed layer keeps that rect over the scene's transform. An
+            // overlay, not a source: polled apart, never marked live.
+            stopLayerPoller(id);
+            const placed = overlayPollers.get(id)?.rect;
+            if (placed) {
+              placeOverlayElement(element, placed);
+            }
+            if (layer.frameUrl) {
+              startOverlayPolling(id, element, image, layer.frameUrl);
+            } else {
+              stopOverlayPoller(id);
+            }
             return;
           }
 
@@ -5836,6 +6110,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           const nextLayers = Array.isArray(scene?.sources) ? scene.sources.filter((layer) => layer.visible !== false) : [];
           const activeIds = new Set(nextLayers.map((layer) => String(layer.id)));
           stopMissingPollers(activeIds);
+          stopMissingOverlayPollers(activeIds);
           for (const [id, entry] of layers) {
             if (!activeIds.has(id)) {
               teardownLiveBackground(id);
@@ -6027,6 +6302,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               liveLayerCount,
               freshSourceLayerCount,
               sourceFrames: Object.fromEntries(sourceFrames),
+              // Plan 205 S9: the overlay layers the backend draws (the
+              // Buddy), apart from the sources; diagnostics only.
+              overlayLayerCount: overlayPollers.size,
+              overlayFrames: Object.fromEntries(overlayFrames),
               sourceFrameAgeMs,
               sourceTransportAgeMs,
               healthySourceTransportCount,
@@ -6796,6 +7075,23 @@ function acceptPreviewSurfaceBanners(read: () => Banner[], source: string): void
   })
 }
 
+// Plan 205 S9: the overlay layout (`overlays.layout.get` on connect, then
+// `overlays.layout`) decides whether the proof surface draws the Buddy's
+// layer; a change re-places the program overlays on the current scene.
+function acceptPreviewSurfaceOverlayLayout(read: () => OverlayLayout, source: string): void {
+  let layout: OverlayLayout
+  try {
+    layout = read()
+  } catch (error) {
+    logBackend('warn', `Main dropped an invalid ${source} payload: ${errorMessageText(error)}`)
+    return
+  }
+  previewSurfaceOverlayLayout = layout
+  void updateNativePreviewSurfaceBanners().catch((error) => {
+    logBackend('warn', `Preview Buddy layer failed to update: ${errorMessageText(error)}`)
+  })
+}
+
 async function updateNativePreviewSurfaceBanners(): Promise<PreviewSurfaceStatus> {
   const generation = previewWindowSurfaceGeneration()
   return runNativePreviewSurfaceMutation(
@@ -6809,7 +7105,15 @@ async function applyNativePreviewSurfaceBanners(generation: number): Promise<Pre
   if (!current || !nativePreviewPresentationAllowedForGeneration(generation)) {
     return nativePreviewSurfaceStatus
   }
-  const next = withPreviewSurfaceBanners(current, previewSurfaceBanners)
+  // The banners and the Buddy's layer (plan 205 S9) re-placed together: both
+  // follow the program shape and sit above the scene.
+  const next = withPreviewSurfaceOverlays(
+    current,
+    previewSurfaceBanners,
+    previewSurfaceOverlayLayout?.buddy ?? null,
+    mainPreviewProgramShape,
+    previewBuddyFrameUrl
+  )
   if (JSON.stringify(next.sources) === JSON.stringify(current.sources)) {
     return nativePreviewSurfaceStatus
   }
@@ -9628,13 +9932,15 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const recordingStatusRequestId = `main-recording-status-${Date.now()}`
   const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
   const bannersListRequestId = `main-banners-list-${Date.now()}`
+  const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
       logBackend('info', 'Main process connected to backend events.')
-      // Plan 186: the proof surface draws the showing banners.
-      const includedEvents = ['recording.status', 'banners.changed']
+      // Plan 186: the proof surface draws the showing banners; plan 205 S9:
+      // and the Buddy's layer while its switches put it in the program.
+      const includedEvents = ['recording.status', 'banners.changed', 'overlays.layout']
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
       }
@@ -9667,6 +9973,9 @@ function connectBackendEventSocket(connection: BackendConnection): void {
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
             socket.send(JSON.stringify({ id: bannersListRequestId, method: 'banners.list' }))
+            socket.send(
+              JSON.stringify({ id: overlayLayoutRequestId, method: 'overlays.layout.get' })
+            )
             if (process.platform === 'win32') {
               previewSurfaceStatusRequestGeneration = previewWindowSurfaceGeneration()
               socket.send(
@@ -9714,6 +10023,20 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        if (parsed.id === overlayLayoutRequestId) {
+          // Never fatal either: the Buddy layer is a drawing, not capture state.
+          if (parsed.ok === true) {
+            acceptPreviewSurfaceOverlayLayout(
+              () => parseMainOverlayLayout(parsed.payload),
+              'overlays.layout.get'
+            )
+          } else {
+            logBackend(
+              'warn',
+              `Main could not read the overlay layout: ${parsed.error?.message ?? 'unknown error'}`
+            )
+          }
+        }
         // Responses to fire-and-forget present reports are deliberately ignored.
         return
       }
@@ -9726,6 +10049,13 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         acceptPreviewSurfaceBanners(
           () => parseMainBannersChangedEvent(parsed.payload),
           'banners.changed'
+        )
+        return
+      }
+      if (parsed.event === 'overlays.layout') {
+        acceptPreviewSurfaceOverlayLayout(
+          () => parseMainOverlayLayoutEvent(parsed.payload),
+          'overlays.layout'
         )
         return
       }
@@ -13783,7 +14113,16 @@ async function runPermissionBackendRestart(reason: string): Promise<MediaAccessR
   }
 }
 
-function updateMainCaptureState(payload: unknown): void {
+function updateMainCaptureState(payload: RecordingStatus): void {
+  // Plan 205: the proof surface draws the program's banners, so a session
+  // that starts or stops re-plans them; other status ticks change nothing.
+  const nextProgramShape = previewProgramShape(payload)
+  if (JSON.stringify(nextProgramShape) !== JSON.stringify(mainPreviewProgramShape)) {
+    mainPreviewProgramShape = nextProgramShape
+    void updateNativePreviewSurfaceBanners().catch((error) => {
+      logBackend('warn', `Preview program banners failed to update: ${errorMessageText(error)}`)
+    })
+  }
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)

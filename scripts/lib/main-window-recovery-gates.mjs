@@ -12,8 +12,28 @@ function glassText(glass) {
   return glass ? `${glass.kind}/${glass.reason ?? 'none'}/${glass.paintCheck}` : 'missing'
 }
 
-/** A normal launch: the page mounts, and a Mica window's paint check says painted. */
-export function evaluateDefaultLaunch({ mounted, glass, osRelease }) {
+/**
+ * A normal launch (plan 208): the page mounts on the opaque chrome ground, on
+ * every Windows build. Mica is only the VIDEORC_GLASS=clear A/B now.
+ */
+export function evaluateDefaultLaunch({ mounted, glass }) {
+  const failures = []
+  if (!mounted) failures.push('the main window never mounted its UI')
+  if (!glass) {
+    failures.push('runtime info carries no windowGlass')
+    return failures
+  }
+  if (glass.kind !== 'ground') {
+    failures.push(`expected the chrome ground window, got ${glassText(glass)}`)
+  }
+  return failures
+}
+
+/**
+ * A VIDEORC_GLASS=clear launch (the plan 091 A/B, one release): the page
+ * mounts, and a Mica window's paint check says painted.
+ */
+export function evaluateClearGlassLaunch({ mounted, glass, osRelease }) {
   const failures = []
   if (!mounted) failures.push('the main window never mounted its UI')
   if (!glass) {

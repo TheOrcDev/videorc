@@ -554,14 +554,14 @@ export const ParameterSliderControl = ({
           data-slot="parameter-slider-track"
         >
           <div
-            className="bg-primary absolute inset-y-0 left-(--parameter-range-start) w-(--parameter-range-size) rounded-full"
+            className="chrome-fill absolute inset-y-0 left-(--parameter-range-start) w-(--parameter-range-size) rounded-full"
             data-slot="parameter-slider-range"
             style={range}
           />
           <SliderPrimitive.Thumb
             aria-describedby={descriptionId}
             aria-labelledby={labelId}
-            className="bg-background ring-foreground/15 hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block size-4 shrink-0 rounded-full shadow-sm ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-dragging:ring-4"
+            className="chrome-bead ring-knob-ring hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block size-4 shrink-0 rounded-full ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-dragging:ring-4"
             data-slot="parameter-slider-thumb"
             getAriaValueText={() => format(value)}
             onDoubleClick={() => {

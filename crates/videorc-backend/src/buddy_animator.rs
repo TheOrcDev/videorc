@@ -340,7 +340,9 @@ pub struct BuddyAnimator {
     wake: Option<Wake>,
     playing: Option<Playing>,
     queue: VecDeque<QueuedReaction>,
-    legs: [LegMemory; 2],
+    /// Per leg (`BuddySpriteLeg::index`): the two output legs and the Preview
+    /// leg (plan 205 S9).
+    legs: [LegMemory; 3],
 }
 
 impl BuddyAnimator {
@@ -369,7 +371,7 @@ impl BuddyAnimator {
             wake: None,
             playing: None,
             queue: VecDeque::new(),
-            legs: [LegMemory::default(); 2],
+            legs: [LegMemory::default(); 3],
         }
     }
 

@@ -184,7 +184,7 @@ function SegmentedControl<T extends string>({
             className={cn(
               tabsTriggerBaseClassName,
               size === 'sm' ? 'h-5 px-2 text-xs' : 'h-6',
-              'aria-checked:text-foreground aria-checked:glass-chip',
+              'aria-checked:text-foreground aria-checked:chrome-plate',
               optionClassName
             )}
             data-slot="segmented-control-item"
