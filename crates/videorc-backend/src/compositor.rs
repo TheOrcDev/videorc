@@ -1312,6 +1312,8 @@ struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
     /// Plan 205 S6: the program leg's store (see `CompositorRuntime`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // only the macOS program leg reads it; elsewhere the session draws the program
     program_frame_store: CompositorFrameStore,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
@@ -6652,6 +6654,8 @@ struct CompositorPublishResult {
 /// not), the program's verdict for the two layout-driven items, and whether
 /// a Preview surface is live to show the picture (no surface, no twin).
 struct ProgramLeg<'a> {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // only the macOS program leg composes; elsewhere the session draws the program
     gpu: &'a mut Option<GpuCompositor>,
     highlight_on_program: bool,
     buddy_on_program: bool,
@@ -22550,14 +22554,13 @@ mod program_leg_tests {
             );
             // Captions exist only in a session; their program is any leg,
             // so an aux-only bar needs the twin and a primary bar never does.
-            assert_eq!(
+            assert!(
                 preview_needs_program_leg(
                     session,
                     replay_only,
                     overlays(OverlayLegFlags::default_for_test(), (false, true)),
                     &none
                 ),
-                true,
                 "{name}: captions on the aux leg only"
             );
             assert!(!preview_needs_program_leg(
@@ -22623,6 +22626,7 @@ mod program_leg_tests {
 
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
+    #[cfg(target_os = "macos")]
     const PET: [u8; 3] = [230, 40, 40];
 
     fn state_with_scene() -> AppState {
@@ -22667,6 +22671,7 @@ mod program_leg_tests {
     }
 
     /// The pet's box on `canvas`, as an oracle rect around its centre.
+    #[cfg(target_os = "macos")]
     fn pet_rect() -> crate::preview_debug_sample::Rect {
         let [x, y, w, h] = crate::buddy_sprite::buddy_box(
             OverlayLayout::default().buddy.horizontal,
@@ -22681,6 +22686,7 @@ mod program_leg_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn sample(store: &CompositorFrameStore) -> [f64; 3] {
         let value = crate::preview_debug_sample::sample_frame_store(store, &[pet_rect()])
             .expect("the leg published a readable frame");
@@ -22692,6 +22698,7 @@ mod program_leg_tests {
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn is_pet(rgb: [f64; 3]) -> bool {
         rgb.iter()
             .zip(PET)
@@ -23043,6 +23050,7 @@ mod program_leg_tests {
 
     /// The idle run's configuration a Clips lease parks (a stream-only
     /// Buddy is in the idle program).
+    #[cfg(target_os = "macos")]
     fn idle_config() -> CompositorLoopConfig {
         CompositorLoopConfig {
             target_fps: 30,
