@@ -1,5 +1,7 @@
-// Plan 178 U6 (plan 176 L2 step 2). Drives the real Go Live dialog over CDP,
-// in any build (VIDEORC_REMOTE_DEBUG_PORT, apps/desktop/src/main/index.ts).
+// Plan 178 U6 (plan 176 L2 step 2). Drives the real Go Live dialog over CDP
+// (VIDEORC_REMOTE_DEBUG_PORT, apps/desktop/src/main/index.ts). Packaged
+// builds honour it only as a packaged test build (VIDEORC_PACKAGED_TEST_HOOKS=1
+// at build time, apps/desktop/src/main/packaged-test-hooks.ts).
 //
 // The page side is one helper (pageHelper below) installed on every document
 // with Page.addScriptToEvaluateOnNewDocument. It reads the dialog through its
