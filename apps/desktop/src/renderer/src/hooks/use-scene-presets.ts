@@ -1,6 +1,9 @@
 import { useCallback, useRef, useState } from 'react'
+import type { AppPreviewsParams, AppPreviewsResult } from '@/lib/backend'
 import { toast } from '@/lib/toast'
 import { loadJson } from '@/lib/capture'
+import { sceneAutosave } from '@/lib/scene-autosave'
+import { movedScenes } from '@/lib/scene-list'
 import {
   hydrateSceneLibrary,
   normalizeSceneAudio,
@@ -11,6 +14,25 @@ import {
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
+
+/**
+ * Plan 210 S5: what New scene…, the scene list and its ⋯ menu need beyond
+ * apply, save, rename and delete. The Studio provides it.
+ */
+export type SceneLibraryActions = {
+  readOnly: boolean
+  /** Where the working scene came from: a built-in layout, or a saved scene (on, or left). */
+  workingOrigin: 'builtin' | 'saved'
+  /** The look on stream: New scene… makes its scenes in it. */
+  workingVisual: SceneVisual
+  /** What's on now: Save audio to scene writes it. */
+  workingAudio: SceneAudio
+  insert: (scenes: readonly SavedScene[], afterId?: string) => boolean
+  move: (id: string, toIndex: number) => boolean
+  replace: (scene: SavedScene) => boolean
+  /** S4's pictures of each app's front window, only while the picker is open. */
+  listAppPreviews: (params?: AppPreviewsParams) => Promise<AppPreviewsResult>
+}
 
 export function useScenePresets() {
   const [state, setState] = useState(() => hydrateSceneLibrary(loadJson(SCENE_LIBRARY_KEY, null)))
@@ -78,12 +100,66 @@ export function useScenePresets() {
       write(current.current.library.scenes.filter((entry) => entry.id !== id)),
     [write]
   )
+  // Plan 210 S5. New scene…'s scenes go to the top of the library, a
+  // duplicate right after its original; a drag or ⌥↑ ⌥↓ moves one. Names
+  // stay unique: a scene whose name is taken is refused, never renamed here.
+  const insert = useCallback(
+    (added: readonly SavedScene[], afterId?: string): boolean => {
+      const scenes = current.current.library.scenes
+      const names = [...scenes]
+      for (const scene of added) {
+        if (sceneNameError(scene.name, names)) return false
+        names.push(scene)
+      }
+      const at = afterId ? scenes.findIndex((entry) => entry.id === afterId) + 1 : 0
+      return write([...scenes.slice(0, at), ...added, ...scenes.slice(at)])
+    },
+    [write]
+  )
+  const move = useCallback(
+    (id: string, toIndex: number): boolean => {
+      const next = movedScenes(current.current.library.scenes, id, toIndex)
+      return next ? write(next) : false
+    },
+    [write]
+  )
+  /** A ⋯ edit (Change app…, following, audio): the scene in its place. */
+  const replace = useCallback(
+    (scene: SavedScene): boolean => {
+      const scenes = current.current.library.scenes
+      if (
+        !scenes.some((entry) => entry.id === scene.id) ||
+        sceneNameError(scene.name, scenes, scene.id)
+      )
+        return false
+      return write(scenes.map((entry) => (entry.id === scene.id ? scene : entry)))
+    },
+    [write]
+  )
+  /** D3: a commit made while the scene was on writes its look (never its sources or audio). */
+  const autosave = useCallback(
+    (previousSceneId: string | null, sceneId: string | null, visual: SceneVisual): boolean => {
+      const scene = sceneAutosave({
+        previousSceneId,
+        sceneId,
+        scenes: current.current.library.scenes,
+        visual,
+        now: new Date().toISOString()
+      })
+      return scene ? replace(scene) : false
+    },
+    [replace]
+  )
   return {
     scenes: state.library.scenes,
     error: state.error,
     readOnly: state.readOnly,
     save,
     rename,
-    remove
+    remove,
+    insert,
+    move,
+    replace,
+    autosave
   }
 }

@@ -44,7 +44,8 @@ import {
 import type { AppExitKind } from '@/lib/backend'
 import { useTheme } from 'next-themes'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
-import { useScenePresets } from '@/hooks/use-scene-presets'
+import { useScenePresets, type SceneLibraryActions } from '@/hooks/use-scene-presets'
+import { capturePickLeavesScene } from '@/lib/scene-autosave'
 import {
   hydrateWorkingScene,
   WORKING_SCENE_KEY,
@@ -1124,6 +1125,8 @@ type LayoutTransactionSnapshot = {
   sources?: SourceSelection
   sceneApp?: SceneApp
   savedSceneId?: string | null
+  /** Plan 210 D3: putting a saved scene on stream, never an edit that saves into it. */
+  sceneSwitch?: boolean
 }
 
 type LayoutTransactionSceneEvidence = {
@@ -1426,7 +1429,8 @@ export type StudioContextValue = {
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
-  applyCameraPreset: (patch: Partial<LayoutSettings>) => void
+  /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
+  applyCameraPreset: (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => void
   /**
    * Plan 207 S4: the look chosen in first-run setup, written as state only so
    * the idle scene reload commits it without opening a device. While a
@@ -1447,6 +1451,8 @@ export type StudioContextValue = {
   deleteSavedScene: (id: string) => boolean
   savedSceneWindowApps: Readonly<Record<string, string>>
   savedSceneAppStates: Readonly<Record<string, SceneAppState | undefined>>
+  /** Plan 210 S5: New scene…, the scene list's order and its ⋯ edits. */
+  sceneLibraryActions: SceneLibraryActions
   applySavedSceneResult: (id: string, repaired?: SceneVisual) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
   applyBackgroundSlot: (slotId: string | null) => void
@@ -4582,7 +4588,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       /* Device memory is best effort. */
     }
   }, [sceneLibrary.scenes])
-  const { save: saveSceneEntry, remove: removeSceneEntry } = sceneLibrary
+  const {
+    save: saveSceneEntry,
+    remove: removeSceneEntry,
+    autosave: autosaveSavedScene
+  } = sceneLibrary
   const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(
     () => hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.sceneId ?? null
   )
@@ -4591,6 +4601,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.origin ??
       (activeSavedSceneId ? 'saved' : 'builtin')
   )
+  // Plan 210 S5: the scene list says "Unsaved scene" for a saved scene's look
+  // that left it, so the origin is state too.
+  const [workingOrigin, setWorkingOriginState] = useState(workingOriginRef.current)
+  const setWorkingOrigin = useCallback((origin: 'builtin' | 'saved') => {
+    workingOriginRef.current = origin
+    setWorkingOriginState(origin)
+  }, [])
+  // The saved scene and look last persisted, so a commit that only repeats
+  // them (an updater run twice) is not mistaken for an edit.
+  const persistedWorkingRef = useRef<{ sceneId: string | null; key: string }>({
+    sceneId: activeSavedSceneId,
+    key: ''
+  })
   const [visualTransactionPending, setVisualTransactionPending] = useState(false)
   const [sceneGesturePending, setSceneGesturePending] = useState(false)
   const [sceneTransformPending, setSceneTransformPending] = useState(false)
@@ -4642,6 +4665,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         background: snapshotBackground(background)
       })
       confirmedVisualRef.current = visual
+      // Plan 210 D3: every confirmed edit made while a saved scene is on
+      // saves its look into it (never its sources or audio). Out of band,
+      // because some callers run inside a state updater.
+      const key = JSON.stringify(visual)
+      const persisted = persistedWorkingRef.current
+      if (persisted.sceneId !== savedSceneId || persisted.key !== key) {
+        persistedWorkingRef.current = { sceneId: savedSceneId, key }
+        queueMicrotask(() => autosaveSavedScene(persisted.sceneId, savedSceneId, visual))
+      }
       try {
         localStorage.setItem(
           WORKING_SCENE_KEY,
@@ -4659,7 +4691,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
       }
     },
-    []
+    [autosaveSavedScene]
   )
 
   const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutPreset | null>(null)
@@ -9649,7 +9681,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         )
         setBackgroundRegistry(nextRegistry)
       }
-      workingOriginRef.current = snapshot.origin ?? 'builtin'
+      setWorkingOrigin(snapshot.origin ?? 'builtin')
+      // A scene going on stream is not an edit of it (D3): its commit saves
+      // nothing, even when it was already on (a repaired apply).
+      if (snapshot.sceneSwitch) persistedWorkingRef.current = { sceneId: null, key: '' }
       const savedId = snapshot.savedSceneId ?? null
       activeSavedSceneIdRef.current = savedId
       setActiveSavedSceneId(savedId)
@@ -9691,7 +9726,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return next
       })
     },
-    [applyScene, persistWorkingVisual, setBackgroundRegistry]
+    [applyScene, persistWorkingVisual, setBackgroundRegistry, setWorkingOrigin]
   )
 
   const readLayoutTransactionBackendTruth = useCallback(async () => {
@@ -9840,6 +9875,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         strictSources?: boolean
         savedSceneId?: string | null
         origin?: 'builtin' | 'saved'
+        sceneSwitch?: boolean
       }
     ): Promise<boolean> => {
       const crossesOrientation =
@@ -9992,7 +10028,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               options && 'savedSceneId' in options
                 ? options.savedSceneId
                 : activeSavedSceneIdRef.current,
-            origin: options?.origin ?? workingOriginRef.current
+            origin: options?.origin ?? workingOriginRef.current,
+            sceneSwitch: options?.sceneSwitch
           }
           // This is the remote-control acknowledgement edge: the backend has
           // returned an authoritative commit. Presentation proof and React
@@ -10119,7 +10156,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                       options && 'savedSceneId' in options
                         ? options.savedSceneId
                         : activeSavedSceneIdRef.current,
-                    origin: options?.origin ?? workingOriginRef.current
+                    origin: options?.origin ?? workingOriginRef.current,
+                    sceneSwitch: options?.sceneSwitch
                   }
                 : backendTruth
             const reconciliation = layoutTransactionFailureReconciliation({
@@ -10275,7 +10313,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const requestCameraPresetTransaction = useCallback(
     (
       patch: Partial<LayoutSettings>,
-      options?: { backgroundOverride?: Scene['background'] | null }
+      options?: { backgroundOverride?: Scene['background'] | null; keepScene?: boolean }
     ) => {
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
@@ -10346,7 +10384,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         {
           videoOverride,
           captureConfigPatch,
-          ...(patch.layoutPreset !== undefined
+          ...(patch.layoutPreset !== undefined && !options?.keepScene
             ? { savedSceneId: null, origin: 'builtin' as const }
             : {}),
           ...(options && 'backgroundOverride' in options
@@ -10444,7 +10482,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const id = saveSceneEntry(name, workingVisual, workingAudio, updateId)
       if (!id) return false
       activeSavedSceneIdRef.current = id
-      workingOriginRef.current = 'saved'
+      setWorkingOrigin('saved')
       setActiveSavedSceneId(id)
       persistWorkingVisual(
         captureConfigRef.current.layout,
@@ -10454,7 +10492,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
       return true
     },
-    [canSaveScene, saveSceneEntry, workingVisual, workingAudio, persistWorkingVisual]
+    [
+      canSaveScene,
+      saveSceneEntry,
+      workingVisual,
+      workingAudio,
+      persistWorkingVisual,
+      setWorkingOrigin
+    ]
   )
   const deleteSavedScene = useCallback(
     (id: string): boolean => {
@@ -10554,6 +10599,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         backgroundOverride: resolveSavedBackground(visual.background),
         savedSceneId: id,
         origin: 'saved',
+        sceneSwitch: true,
         strictSources: true,
         ...(coupling
           ? {
@@ -10647,11 +10693,38 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const applyCameraPreset = useCallback(
-    (patch: Partial<LayoutSettings>) => {
+    (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => {
       sceneShortcutRequestedRef.current = null
-      void requestCameraPresetTransaction(patch)
+      void requestCameraPresetTransaction(
+        patch,
+        options?.keepScene ? { keepScene: true } : undefined
+      )
     },
     [requestCameraPresetTransaction]
+  )
+  const sceneLibraryActions = useMemo<SceneLibraryActions>(
+    () => ({
+      readOnly: sceneLibrary.readOnly,
+      workingOrigin,
+      workingVisual,
+      workingAudio,
+      insert: sceneLibrary.insert,
+      move: sceneLibrary.move,
+      replace: sceneLibrary.replace,
+      listAppPreviews: async (params) => {
+        if (!clientRef.current) throw offlineError()
+        return clientRef.current.requestTyped('sources.app_previews', params)
+      }
+    }),
+    [
+      sceneLibrary.readOnly,
+      sceneLibrary.insert,
+      sceneLibrary.move,
+      sceneLibrary.replace,
+      workingOrigin,
+      workingVisual,
+      workingAudio
+    ]
   )
 
   // Plan 207 S4: "Your look" writes state only. The scene reload commits it
@@ -10680,7 +10753,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           const next = firstRunLookPatch(current, look)
           latestRequestedLayoutRef.current = next.layout.layoutPreset
-          workingOriginRef.current = 'builtin'
+          setWorkingOrigin('builtin')
           activeSavedSceneIdRef.current = null
           setActiveSavedSceneId(null)
           setCaptureConfig((latest) => firstRunLookPatch(latest, look))
@@ -10694,7 +10767,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       )
     },
-    [setBackgroundRegistry]
+    [setBackgroundRegistry, setWorkingOrigin]
   )
   // A look held behind a running session lands when setup closes, through
   // the Studio's own transaction: one commit with the preset, the shape and
@@ -10733,7 +10806,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
         return
       }
-      if (sourceKind === 'capture') workingAppRef.current = undefined
+      if (sourceKind === 'capture') {
+        // Plan 210 D3: another screen or window leaves the saved scene on
+        // stream instead of rewriting it; the list then says "Unsaved scene".
+        const leaves =
+          activeSavedSceneIdRef.current !== null &&
+          capturePickLeavesScene(
+            { ...captureConfigRef.current.sources, app: workingAppRef.current },
+            sources
+          )
+        workingAppRef.current = undefined
+        if (leaves) {
+          activeSavedSceneIdRef.current = null
+          setActiveSavedSceneId(null)
+          persistWorkingVisual(
+            captureConfigRef.current.layout,
+            captureConfigRef.current.sources,
+            workingBackgroundRef.current,
+            null
+          )
+        }
+      }
       if (!sessionOwnsTransport(recordingRef.current)) {
         // Pickers build `sources` from a render-time snapshot; merge only the
         // picked kind so a concurrent confirmation or reconcile is not undone.
@@ -10803,7 +10896,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error, { action: 'switch', object: 'the source' })
       }
     },
-    [sourceSelectionController, sourceSwitchReason, loadScene, reportError, sceneEditMode]
+    [
+      sourceSelectionController,
+      sourceSwitchReason,
+      loadScene,
+      reportError,
+      sceneEditMode,
+      persistWorkingVisual
+    ]
   )
 
   const ensureNativePreviewCamera = useCallback(async () => {
@@ -18064,6 +18164,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       savedScenes: sceneLibrary.scenes,
       savedSceneWindowApps: rememberedAppsRef.current,
       savedSceneAppStates,
+      sceneLibraryActions,
       activeSavedSceneId,
       savedScenePendingId,
       savedSceneModified,
@@ -18307,6 +18408,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyFirstRunLook,
       sceneLibrary.scenes,
       savedSceneAppStates,
+      sceneLibraryActions,
       sceneLibrary.error,
       sceneLibrary.rename,
       activeSavedSceneId,
