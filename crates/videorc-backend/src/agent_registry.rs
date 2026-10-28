@@ -126,10 +126,6 @@ impl AgentRegistry {
         }
     }
 
-    pub fn persist(&self) -> Result<()> {
-        self.persisted.persist()
-    }
-
     /// Create an agent and mint its token. The token is returned once and is
     /// never stored; the caller shows it and forgets it.
     pub fn create(
