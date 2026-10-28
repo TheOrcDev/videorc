@@ -127,7 +127,7 @@ export function commandChooserView(
 export interface CommandConfirmView {
   commandId: string
   /** A flagged comment to show, or (plan 209 D14) a planned call Buddy asks
-   * about out loud first: "End the livestream? Say yes." */
+   * about out loud first: 'End the livestream? Say "Buddy, yes".' */
   kind: 'highlight' | 'act'
   /** "Buddy flagged this (harassment). Show it anyway?" */
   title: string

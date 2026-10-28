@@ -973,7 +973,8 @@ mod tests {
             assert_eq!(tool.runs_in, *runs_in, "{name}");
             assert_eq!(tool.rate_family, *rate_family, "{name}");
             assert_eq!(tool.on_air, *on_air, "{name}");
-            assert!(tool.buddy, "{name}: D15");
+            // Review fix 18: Buddy never imports an image from a path.
+            assert_eq!(tool.buddy, *name != "edit_banner", "{name}: D15");
         }
         assert_eq!(
             catalog

@@ -114,7 +114,7 @@ fn join_words(words: &[String]) -> String {
 
 /// The session in one word, and whether something real runs. A session that
 /// only feeds the Clips ring (plan 181) is idle to everyone.
-fn session_word(status: &crate::protocol::RecordingStatus) -> (&'static str, bool) {
+pub(crate) fn session_word(status: &crate::protocol::RecordingStatus) -> (&'static str, bool) {
     use crate::protocol::RecordingState;
     if status.replay_only {
         return ("idle", false);

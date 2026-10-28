@@ -336,12 +336,20 @@ pub fn removal_outcome(
 
 pub async fn remove_chat_message(
     state: &AppState,
-    _agent: &AgentIdentity,
+    agent: &AgentIdentity,
     args: Value,
 ) -> ToolOutcome {
     let Some(message_id) = text_of(&args, "messageId") else {
         return ToolOutcome::refused("Say which message: messageId from read_chat.");
     };
+    // Review fix 12: Buddy's removals (a typed `/buddy remove …`) keep
+    // Buddy's own gates, Videorc's removal switch and Premium, as its voice
+    // removals do.
+    if agent.id == crate::buddy_act::BUDDY_AGENT_ID
+        && let Err(refusal) = crate::live_chat_moderation::buddy_removal_gate(state).await
+    {
+        return ToolOutcome::refused(refusal.message);
+    }
     let request = ModerationRequest {
         operation_id: uuid::Uuid::new_v4().to_string(),
         message_id: message_id.to_string(),
@@ -693,6 +701,56 @@ mod tests {
             missing,
             ToolOutcome::refused("This message is not in chat.")
         );
+    }
+
+    /// Review fix 12: Buddy's removals (a typed `/buddy remove …`) keep
+    /// Buddy's own gates: Videorc's removal switch and Premium.
+    #[tokio::test]
+    async fn buddy_s_removals_keep_buddy_s_removal_gates() {
+        let state = test_state();
+        let buddy = crate::buddy_act::identity();
+        let (agent, _) = connect_agent(&state, "Claude Desktop");
+        let twitch = viewer_message(StreamPlatform::Twitch, 1);
+        let other = viewer_message(StreamPlatform::Twitch, 2);
+        seed(
+            &state,
+            &[(
+                StreamPlatform::Twitch,
+                CommentsWriteState::Ready,
+                FakeChatSendBehavior::Sent,
+            )],
+            &[twitch.clone(), other.clone()],
+        )
+        .await;
+        crate::live_chat_moderation::set_premium_check_for_tests(
+            &state,
+            std::sync::Arc::new(|| false),
+        )
+        .await;
+        let refused = remove_chat_message(&state, &buddy, json!({ "messageId": twitch.id })).await;
+        assert_eq!(
+            refused,
+            ToolOutcome::refused(crate::live_chat_moderation::PREMIUM_REQUIRED_MESSAGE)
+        );
+        crate::live_chat_moderation::set_premium_check_for_tests(
+            &state,
+            std::sync::Arc::new(|| true),
+        )
+        .await;
+        let flags = crate::service_flags::parse_service_flags(
+            r#"{"version":1,"orcle":{"remove":false}}"#,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::youtube_quota::apply_service_flags(&state, flags);
+        let paused = remove_chat_message(&state, &buddy, json!({ "messageId": twitch.id })).await;
+        assert_eq!(
+            paused,
+            ToolOutcome::refused(crate::live_chat_moderation::REMOVE_PAUSED_MESSAGE)
+        );
+        // An agent's removal is free and has no Buddy switch.
+        let removed = remove_chat_message(&state, &agent, json!({ "messageId": other.id })).await;
+        assert_eq!(removed.text, "Removed the message from Twitch.");
     }
 
     #[tokio::test]

@@ -6482,6 +6482,30 @@ impl CohostEngine {
         self.buddy_act.seq
     }
 
+    /// Plan 209 review fix 17: the open card is a D14 question (going live
+    /// or ending what runs), whose yes must name Buddy.
+    fn act_confirm_waiting(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(|session| session.command.as_ref())
+            .is_some_and(|record| record.pending == CommandPending::ActConfirm)
+    }
+
+    /// Plan 209 review fix 3: the grammar's question for a comment Buddy
+    /// flagged high, as `highlight_or_ask` would put it on its card.
+    fn flagged_comment_question(&self, message_id: &str) -> Option<String> {
+        let flag = self.session.as_ref()?.flags.iter().find(|flag| {
+            flag.message_id == message_id && flag.severity == CohostFlagSeverity::High
+        })?;
+        Some(match command_flag_label(flag.kind) {
+            Some(label) => format!(
+                "Buddy flagged this ({label}). Show it from the Stream Manager if you still want it."
+            ),
+            None => "Buddy flagged this. Show it from the Stream Manager if you still want it."
+                .to_string(),
+        })
+    }
+
     /// The latest command's id in the running session, to tell a stale
     /// planner answer from a current one.
     fn latest_command_id(&self) -> Option<String> {
@@ -8427,6 +8451,13 @@ async fn run_detected_command(
     );
     let intent = match command.kind {
         CommandKind::Confirm => {
+            // Plan 209 review fix 17 (D14): going live or ending what runs
+            // needs "Buddy, yes". A bare "yes" (a text-to-speech alert, a
+            // viewer's words read out) leaves the question open.
+            if !command.wake_word && state.cohost.lock().await.act_confirm_waiting() {
+                tracing::info!("Buddy kept its question open: a yes to it must name Buddy.");
+                return;
+            }
             return answer_by_voice(state, scope, CommandAnswer::Confirm, premium).await;
         }
         CommandKind::Cancel => {
@@ -9239,8 +9270,32 @@ fn run_voice_act<'a>(
                 )
                 .await;
             }
+            Halt::Highlight { message_id } => {
+                // Review fix 3: the grammar's own highlight, which asks
+                // "Buddy flagged this… Show it anyway?" first for a comment
+                // Buddy flagged.
+                execute_resolved_command(
+                    state,
+                    scope,
+                    CommandKind::Highlight,
+                    vec![message_id],
+                    act.heard.clone(),
+                    None,
+                )
+                .await;
+            }
         }
     })
+}
+
+/// Plan 209 review fix 3: a typed `/buddy` can't ask "Show it anyway?", so a
+/// comment Buddy flagged high is refused with this sentence instead of shown.
+pub(crate) async fn buddy_flagged_comment(state: &AppState, message_id: &str) -> Option<String> {
+    state
+        .cohost
+        .lock()
+        .await
+        .flagged_comment_question(message_id)
 }
 
 async fn finish_act_card(
@@ -22475,7 +22530,7 @@ mod tests {
             (
                 CohostCommandKind::Act,
                 CohostCommandStatus::Confirm,
-                "Go live? Say yes."
+                "Go live? Say \"Buddy, yes\"."
             )
         );
         assert!(card.expires_at.is_some());
@@ -22489,7 +22544,31 @@ mod tests {
                 .context
                 .awaiting_answer
         );
-        answer_by_voice(&state, &scope, CommandAnswer::Confirm, true).await;
+        // Review fix 17: a bare "yes" (no wake word) leaves it open.
+        run_detected_command(
+            &state,
+            &scope,
+            DetectedCommand {
+                wake_word: false,
+                ..detected(CommandKind::Confirm, CommandTarget::None, "yes", None)
+            },
+            true,
+        )
+        .await;
+        let still = state_command(&state).await;
+        assert_eq!(
+            (still.id.as_str(), still.status),
+            (card.id.as_str(), CohostCommandStatus::Confirm)
+        );
+        assert!(buddy_rows(&state).is_empty(), "a bare yes ran nothing");
+        // "Buddy, yes" runs it.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Confirm, CommandTarget::None, "buddy yes", None),
+            true,
+        )
+        .await;
         let done = state_command(&state).await;
         assert_eq!(done.id, card.id, "the yes updates the same command");
         assert_ne!(done.status, CohostCommandStatus::Confirm);
@@ -22540,13 +22619,14 @@ mod tests {
         let (id, expires_at) = {
             let mut engine = state.cohost.lock().await;
             let session = engine.command_session_mut(&scope).unwrap();
-            let effects = session.open_act_confirm(act, "End the livestream? Say yes.", &ctx);
+            let effects =
+                session.open_act_confirm(act, "End the livestream? Say \"Buddy, yes\".", &ctx);
             effects.expire_card.unwrap()
         };
         let card = state_command(&state).await;
         assert_eq!(
             card.message,
-            "Switched to BRB. End the livestream? Say yes."
+            "Switched to BRB. End the livestream? Say \"Buddy, yes\"."
         );
         let expired = {
             let mut engine = state.cohost.lock().await;
@@ -22602,6 +22682,82 @@ mod tests {
         // It waits for a yes (a target the cloud picked never counts down);
         // nothing was removed and no Buddy call ran yet.
         assert!(buddy_rows(&state).is_empty());
+    }
+
+    /// Review fix 3: a planned highlight by voice is the grammar's own, so a
+    /// comment Buddy flagged asks "Show it anyway?" first; typed, it is
+    /// refused in those words instead of shown.
+    #[tokio::test]
+    async fn a_planned_highlight_of_a_flagged_comment_asks_first() {
+        let rows = vec![command_row(
+            1,
+            "grumpy_gus",
+            StreamPlatform::Twitch,
+            "you are bad",
+        )];
+        let (state, scope) = command_state(&rows, None).await;
+        {
+            let mut engine = state.cohost.lock().await;
+            let session = engine.session.as_mut().unwrap();
+            session.flags.push(command_flag(
+                &rows[0].id,
+                CohostFlagSeverity::High,
+                chrono::Utc::now().to_rfc3339(),
+            ));
+        }
+        let plan = || crate::buddy_act::Plan {
+            line: "Showing it.".into(),
+            unknown: false,
+            steps: vec![crate::buddy_act::PlannedStep::Run {
+                tool: "set_highlight".into(),
+                args: serde_json::json!({ "messageId": rows[0].id }),
+            }],
+        };
+        run_voice_act(
+            &state,
+            &scope,
+            None,
+            crate::buddy_act::PendingAct::new("buddy show gus's comment", plan()),
+            false,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status, card.message.as_str()),
+            (
+                CohostCommandKind::Highlight,
+                CohostCommandStatus::Confirm,
+                "Buddy flagged this (harassment). Show it anyway?"
+            )
+        );
+        assert!(
+            state
+                .cohost
+                .lock()
+                .await
+                .snapshot()
+                .auto_highlight
+                .is_none(),
+            "nothing on stream before a yes"
+        );
+
+        let mut typed = crate::buddy_act::PendingAct::new("show gus's comment", plan());
+        crate::buddy_act::run_steps(&state, &mut typed, false, false).await;
+        assert_eq!(
+            typed.results,
+            vec![
+                "Buddy flagged this (harassment). Show it from the Stream Manager if you still want it."
+                    .to_string()
+            ]
+        );
+        assert_eq!(typed.final_status(), CohostCommandStatus::Refused);
+        let rows = buddy_rows(&state);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool, "set_highlight");
+        assert_eq!(
+            rows[0].outcome,
+            crate::storage::AgentActivityOutcome::Refused
+        );
     }
 
     #[tokio::test]

@@ -21,8 +21,10 @@
 //      the catalog has no `move_on_scene` (the orchestrator re-runs it after
 //      PR B merges).
 //   4. By voice, while recording: "Buddy, stop the recording." The planner
-//      answers `stop`; Buddy asks "Stop the recording? Say yes." and the
-//      recording runs on until "Yes.", then stops (D14).
+//      answers `stop`; Buddy asks 'Stop the recording? Say "Buddy, yes".'
+//      and the recording runs on through a bare "Yes." (review fix 17: a yes
+//      to going live or stopping must name Buddy) until "Buddy, yes.", then
+//      stops (D14).
 
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -60,7 +62,7 @@ const BUDDY_TOOLS = catalog.tools.filter((tool) => tool.buddy).map((tool) => too
 const smokeSessionToken = `buddy-act-smoke-${randomUUID()}`
 const chatSessionId = `buddy-act-smoke-${Date.now()}`
 const SOUND_NAME = 'Drum roll'
-const STOP_QUESTION = 'Stop the recording? Say yes.'
+const STOP_QUESTION = 'Stop the recording? Say "Buddy, yes".'
 
 function fail(message) {
   throw new Error(`buddy-act smoke FAIL: ${message}`)
@@ -486,14 +488,24 @@ try {
             (event.payload?.status === 'off' && event.payload?.command?.id !== card.id)),
         60_000
       )
+      // Review fix 17: a bare yes (a text-to-speech alert could say it)
+      // leaves the question open and the recording running.
       await say('Yes.')
+      await sleep(3_000)
+      const afterBareYes = await request(renderer, timeoutMs, 'recording.status')
+      if (afterBareYes?.state !== 'recording' || afterBareYes?.sessionId !== captureSessionId) {
+        fail(`a bare "Yes." stopped the recording: ${JSON.stringify(afterBareYes)}`)
+      }
+      await say('Buddy, yes.')
       await stopped.promise
       const answered = (await finished.promise).payload
       const ending =
         answered.command?.id === card.id
           ? answered.command.message
           : 'the stop ended the session, Buddy stopped and the card went with it'
-      results.push(`4 voice: "${STOP_QUESTION}" held the recording until "Yes." (${ending})`)
+      results.push(
+        `4 voice: "${STOP_QUESTION}" held the recording through "Yes." until "Buddy, yes." (${ending})`
+      )
       log('step 4: a spoken stop waited for a spoken yes')
     } finally {
       pumping = false

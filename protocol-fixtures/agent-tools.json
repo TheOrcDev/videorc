@@ -2807,7 +2807,7 @@
         "openWorldHint": false
       },
       "runsIn": "backend",
-      "buddy": true,
+      "buddy": false,
       "onAir": false,
       "rateFamily": "action",
       "notice": null

@@ -328,6 +328,27 @@ pub fn new_moderation_slot() -> ModerationSlot {
     }))
 }
 
+/// Buddy's removals, by voice or through its tools (plan 209 review fix
+/// 12): Videorc's removal switch and Premium, checked again at the moment.
+pub(crate) async fn buddy_removal_gate(state: &AppState) -> Result<(), ModerationRefusal> {
+    if !crate::service_flags::buddy_remove_enabled(state) {
+        return Err(ModerationRefusal::new("disabled", REMOVE_PAUSED_MESSAGE));
+    }
+    let premium = state
+        .live_chat_moderation
+        .lock()
+        .await
+        .premium_check
+        .clone();
+    if !premium() {
+        return Err(ModerationRefusal::new(
+            "premium-required",
+            PREMIUM_REQUIRED_MESSAGE,
+        ));
+    }
+    Ok(())
+}
+
 fn premium_entitled() -> bool {
     crate::entitlements::require_feature(
         &crate::entitlements::current_entitlements(),
@@ -566,21 +587,7 @@ pub async fn request(
     }
 
     if req.source == ModerationSource::BuddyVoice {
-        if !crate::service_flags::buddy_remove_enabled(state) {
-            return Err(ModerationRefusal::new("disabled", REMOVE_PAUSED_MESSAGE));
-        }
-        let premium = state
-            .live_chat_moderation
-            .lock()
-            .await
-            .premium_check
-            .clone();
-        if !premium() {
-            return Err(ModerationRefusal::new(
-                "premium-required",
-                PREMIUM_REQUIRED_MESSAGE,
-            ));
-        }
+        buddy_removal_gate(state).await?;
     }
 
     let (message, session_id) = find_live_message(state, &message_id).await?;

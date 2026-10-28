@@ -445,24 +445,32 @@ pub struct StudioSnapshot {
 }
 
 /// What runs, in the contract's words: `idle`, `recording`, `live` or
-/// `clips` (only the Clips ring).
+/// `clips` (only the Clips ring). `agent_look::session_word`'s rule (review
+/// fix 2): Go Live records too, so a recording that carries a stream URL is
+/// live.
 pub fn activity_word(status: &crate::protocol::RecordingStatus) -> &'static str {
-    use crate::protocol::RecordingState;
     if status.replay_only {
         return "clips";
     }
-    match status.state {
-        RecordingState::Recording => "recording",
-        RecordingState::Streaming => "live",
-        RecordingState::Idle
-        | RecordingState::Starting
-        | RecordingState::Stopping
-        | RecordingState::Failed => "idle",
+    match crate::agent_look::session_word(status).0 {
+        "live" => "live",
+        "recording" => "recording",
+        _ => "idle",
     }
 }
 
-pub async fn activity_now(state: &AppState) -> &'static str {
-    activity_word(&crate::current_recording_status(state).await)
+/// What D14 asks about before a spoken `stop`: the planner's word, except
+/// that a session still starting counts as live (review fix 2), so a spoken
+/// stop while Go Live starts asks first.
+pub fn confirm_activity_word(status: &crate::protocol::RecordingStatus) -> &'static str {
+    if !status.replay_only && crate::agent_look::session_word(status).0 == "starting" {
+        return "live";
+    }
+    activity_word(status)
+}
+
+pub async fn confirm_activity_now(state: &AppState) -> &'static str {
+    confirm_activity_word(&crate::current_recording_status(state).await)
 }
 
 fn text_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -721,12 +729,96 @@ const COMMENT_WORDS: &[&str] = &[
     "pin",
 ];
 
+/// Words a one-word display name may not match on (review fix 6): the
+/// commands and places Buddy is asked about, and the parts of its tools'
+/// names. A viewer called "Stop" or "Left" is not what "stop the recording"
+/// or "move to the top left" is about.
+const COMMAND_WORDS: &[&str] = &[
+    "background",
+    "banner",
+    "banners",
+    "bottom",
+    "camera",
+    "captions",
+    "center",
+    "centre",
+    "clip",
+    "corner",
+    "drum",
+    "end",
+    "frame",
+    "full",
+    "go",
+    "hide",
+    "large",
+    "left",
+    "live",
+    "marker",
+    "medium",
+    "mic",
+    "microphone",
+    "middle",
+    "move",
+    "mute",
+    "pause",
+    "play",
+    "put",
+    "record",
+    "recording",
+    "right",
+    "roll",
+    "scene",
+    "screen",
+    "show",
+    "small",
+    "sound",
+    "sounds",
+    "start",
+    "stop",
+    "stream",
+    "switch",
+    "top",
+    "turn",
+    "unmute",
+];
+
+/// Whether a viewer's spoken name can stand for them in a sentence: never a
+/// name Buddy answers to, and never a single everyday or command word.
+fn name_can_match(author: &str) -> bool {
+    if author.is_empty() {
+        return false;
+    }
+    let words: Vec<&str> = author.split_whitespace().collect();
+    if words
+        .iter()
+        .all(|word| crate::cohost_command::is_any_wake_word(word))
+    {
+        return false;
+    }
+    match words.as_slice() {
+        [word] => {
+            !crate::cohost_ack::is_stop_word(word)
+                && !COMMAND_WORDS.contains(word)
+                && !agent_tools::catalog()
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name.split('_').any(|part| part == *word))
+        }
+        _ => true,
+    }
+}
+
 /// Whether a sentence is about a comment, so the recent comments go along
 /// (contract part E's rule, kept for part F: comments only when needed). A
-/// chat word, "this one" / "that one", or an author's name.
+/// chat word, "this one" / "that one", or an author's name. The wake word
+/// and Buddy's names are not part of the sentence for that (review fix 6): a
+/// viewer named "Buddy" must not ride along with every request.
 pub fn about_comment(sentence: &str, authors: &[String]) -> bool {
     let spoken = crate::cohost_command::spoken_form(sentence);
-    let words: Vec<&str> = spoken.split_whitespace().collect();
+    let words: Vec<&str> = spoken
+        .split_whitespace()
+        .filter(|word| !crate::cohost_command::is_any_wake_word(word))
+        .collect();
     if words.iter().any(|word| COMMENT_WORDS.contains(word)) {
         return true;
     }
@@ -736,10 +828,10 @@ pub fn about_comment(sentence: &str, authors: &[String]) -> bool {
     {
         return true;
     }
-    let padded = format!(" {spoken} ");
+    let padded = format!(" {} ", words.join(" "));
     authors.iter().any(|author| {
         let author = crate::cohost_command::spoken_form(author);
-        !author.is_empty() && padded.contains(&format!(" {author} "))
+        name_can_match(&author) && padded.contains(&format!(" {author} "))
     })
 }
 
@@ -936,12 +1028,14 @@ pub fn resolve_one(said: &str, list: &[Named]) -> Option<String> {
 
 /// D14: by voice, Buddy asks out loud before going live and before ending
 /// what runs. The plan names the livestream; a recording asks too (speech
-/// mishears, and an ended recording cannot be resumed).
+/// mishears, and an ended recording cannot be resumed). The yes must name
+/// Buddy (review fix 17): a plain "yes" read out by a text-to-speech alert
+/// never ends a stream.
 pub fn spoken_confirm(tool: &str, activity: &str) -> Option<&'static str> {
     match (tool, activity) {
-        ("go_live", _) => Some("Go live? Say yes."),
-        ("stop", "live") => Some("End the livestream? Say yes."),
-        ("stop", "recording") => Some("Stop the recording? Say yes."),
+        ("go_live", _) => Some("Go live? Say \"Buddy, yes\"."),
+        ("stop", "live") => Some("End the livestream? Say \"Buddy, yes\"."),
+        ("stop", "recording") => Some("Stop the recording? Say \"Buddy, yes\"."),
         _ => None,
     }
 }
@@ -1045,10 +1139,21 @@ pub enum Halt {
         message_id: String,
         reason: Option<String>,
     },
+    /// Review fix 3: a highlight goes to the grammar's own highlight (and
+    /// its "Buddy flagged this… Show it anyway?" card); the steps after it
+    /// do not run.
+    Highlight { message_id: String },
 }
 
 /// What a halt check sees: the tool, its arguments and what runs now.
 pub fn spoken_halt(tool: &str, args: &Value, activity: &str) -> Option<Halt> {
+    if tool == "set_highlight"
+        && let Some(message_id) = args.get("messageId").and_then(Value::as_str)
+    {
+        return Some(Halt::Highlight {
+            message_id: message_id.to_string(),
+        });
+    }
     if tool == "remove_chat_message" {
         let message_id = args.get("messageId").and_then(Value::as_str)?;
         return Some(Halt::Removal {
@@ -1091,13 +1196,35 @@ pub async fn run_steps(
             }
             PlannedStep::Run { tool, args } => {
                 if spoken && !std::mem::take(&mut skip_halt) {
-                    let activity = activity_now(state).await;
+                    let activity = confirm_activity_now(state).await;
                     if let Some(halt) = spoken_halt(&tool, &args, activity) {
-                        if matches!(halt, Halt::Removal { .. }) {
+                        if matches!(halt, Halt::Removal { .. } | Halt::Highlight { .. }) {
                             act.next += 1;
                         }
                         return halt;
                     }
+                }
+                // Review fix 3, typed: no card can ask, so a comment Buddy
+                // flagged is refused in the card's words instead of shown.
+                if !spoken
+                    && tool == "set_highlight"
+                    && let Some(message_id) = args.get("messageId").and_then(Value::as_str)
+                    && let Some(sentence) =
+                        crate::cohost::buddy_flagged_comment(state, message_id).await
+                {
+                    crate::agent_mcp::log_activity(
+                        state,
+                        &identity(),
+                        &tool,
+                        agent_call::summarize_arguments(&args),
+                        AgentActivityOutcome::Refused,
+                        Some(sentence.clone()),
+                        None,
+                    );
+                    act.results.push(sentence);
+                    act.any_not_ok = true;
+                    act.next += 1;
+                    continue;
                 }
                 let read_only = agent_tools::catalog()
                     .tool(&tool)
@@ -1357,14 +1484,17 @@ mod tests {
 
     #[test]
     fn d14_asks_before_going_live_and_before_ending_what_runs() {
-        assert_eq!(spoken_confirm("go_live", "idle"), Some("Go live? Say yes."));
+        assert_eq!(
+            spoken_confirm("go_live", "idle"),
+            Some("Go live? Say \"Buddy, yes\".")
+        );
         assert_eq!(
             spoken_confirm("stop", "live"),
-            Some("End the livestream? Say yes.")
+            Some("End the livestream? Say \"Buddy, yes\".")
         );
         assert_eq!(
             spoken_confirm("stop", "recording"),
-            Some("Stop the recording? Say yes.")
+            Some("Stop the recording? Say \"Buddy, yes\".")
         );
         // Nothing runs: the tool refuses on its own; nothing to ask.
         assert_eq!(spoken_confirm("stop", "idle"), None);
@@ -1385,10 +1515,66 @@ mod tests {
         assert_eq!(
             spoken_halt("stop", &json!({}), "live"),
             Some(Halt::Confirm {
-                question: "End the livestream? Say yes."
+                question: "End the livestream? Say \"Buddy, yes\"."
             })
         );
         assert_eq!(spoken_halt("set_banner", &json!({}), "live"), None);
+        // Review fix 3: a highlight goes to the grammar's highlight (and its
+        // flagged card); clearing runs as the tool.
+        assert_eq!(
+            spoken_halt("set_highlight", &json!({ "messageId": "m1" }), "idle"),
+            Some(Halt::Highlight {
+                message_id: "m1".into()
+            })
+        );
+        assert_eq!(
+            spoken_halt("set_highlight", &json!({ "messageId": null }), "live"),
+            None
+        );
+    }
+
+    /// Review fix 2: the D14 word follows `get_status`'s rule. Recording
+    /// with a stream URL is live (Go Live records too), and a session still
+    /// starting counts as live for a spoken stop.
+    #[test]
+    fn the_activity_words_read_a_recorded_livestream_as_live() {
+        use crate::protocol::{RecordingState, RecordingStatus};
+        let status = |state, stream_url: Option<&str>, replay_only| RecordingStatus {
+            state,
+            session_id: Some("s".to_string()),
+            output_path: None,
+            stream_url: stream_url.map(str::to_string),
+            started_at: None,
+            audio_tracks: Vec::new(),
+            pipeline: None,
+            duration_ms: None,
+            message: None,
+            replay_only,
+        };
+        let live_and_recording = status(RecordingState::Recording, Some("rtmp://x/live/k"), false);
+        assert_eq!(activity_word(&live_and_recording), "live");
+        assert_eq!(confirm_activity_word(&live_and_recording), "live");
+        assert_eq!(
+            spoken_confirm("stop", confirm_activity_word(&live_and_recording)),
+            Some("End the livestream? Say \"Buddy, yes\".")
+        );
+        let recording = status(RecordingState::Recording, None, false);
+        assert_eq!(activity_word(&recording), "recording");
+        let starting = status(RecordingState::Starting, None, false);
+        assert_eq!(activity_word(&starting), "idle");
+        assert_eq!(confirm_activity_word(&starting), "live");
+        assert!(spoken_confirm("stop", confirm_activity_word(&starting)).is_some());
+        assert_eq!(
+            activity_word(&status(RecordingState::Streaming, None, false)),
+            "live"
+        );
+        let clips = status(RecordingState::Recording, None, true);
+        assert_eq!(activity_word(&clips), "clips");
+        assert_eq!(confirm_activity_word(&clips), "clips");
+        assert_eq!(
+            activity_word(&status(RecordingState::Idle, None, false)),
+            "idle"
+        );
     }
 
     #[tokio::test]
@@ -1411,7 +1597,7 @@ mod tests {
         assert_eq!(
             run_steps(&state, &mut act, true, false).await,
             Halt::Confirm {
-                question: "Go live? Say yes."
+                question: "Go live? Say \"Buddy, yes\"."
             }
         );
         assert_eq!(act.next, 0);
@@ -1541,6 +1727,31 @@ mod tests {
             &authors
         ));
         assert!(!about_comment("end the stream", &authors));
+        // Review fix 6: Buddy's own name, a one-word everyday or command
+        // name, or a tool word never pulls chat in.
+        let viewers = vec![
+            "Buddy".to_string(),
+            "Stop".to_string(),
+            "left".to_string(),
+            "banner".to_string(),
+            "the".to_string(),
+            "orcle".to_string(),
+        ];
+        assert!(!about_comment("Buddy, stop the recording", &viewers));
+        assert!(!about_comment(
+            "buddy move the banner to the top left",
+            &viewers
+        ));
+        assert!(!about_comment("buddy switch to the brb scene", &viewers));
+        // A real name still counts, one word or more.
+        assert!(about_comment(
+            "buddy what did zelda say",
+            &["Zelda".to_string()]
+        ));
+        assert!(about_comment(
+            "buddy put stop motion up",
+            &["Stop Motion".to_string()]
+        ));
         assert!(!about_comment("move yourself to the top left", &authors));
     }
 

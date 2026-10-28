@@ -195,7 +195,7 @@ describe('Buddy asks before a planned call (plan 209 D14)', () => {
     kind: 'act',
     heard: 'buddy end the stream',
     status: 'confirm',
-    message: 'End the livestream? Say yes.',
+    message: 'End the livestream? Say "Buddy, yes".',
     target: undefined,
     expiresAt: '2026-10-04T12:00:28Z'
   })
@@ -204,7 +204,7 @@ describe('Buddy asks before a planned call (plan 209 D14)', () => {
     expect(commandConfirmView(asking, NOW)).toEqual({
       commandId: 'cmd-1',
       kind: 'act',
-      title: 'End the livestream? Say yes.',
+      title: 'End the livestream? Say "Buddy, yes".',
       target: null,
       timer: 'Expires in 18s',
       busy: false

@@ -293,7 +293,8 @@ describe('the agent tool catalog (plan 209 S1)', () => {
       expect(tool!.runsIn, name).toBe(runsIn)
       expect(tool!.rateFamily, name).toBe(rateFamily)
       expect(tool!.onAir, name).toBe(onAir)
-      expect(tool!.buddy, name).toBe(true)
+      // Review fix 18: Buddy never imports an image from a path.
+      expect(tool!.buddy, name).toBe(name !== 'edit_banner')
     }
     expect(agentTool('go_live')!.notice).toBe('{agent} started the livestream.')
     // S11: set_audio's objects take gain and the microphone beside S6's switches.
