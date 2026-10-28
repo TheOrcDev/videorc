@@ -78,7 +78,7 @@ export function updateRowView(status: UpdateStatus, captureActive: boolean): Upd
       // Linux: the app never downloads it; the downloads page has it.
       return {
         kind: 'row',
-        description: `Videorc ${status.version} is available — download it from videorc.com.`,
+        description: `Videorc ${status.version} is available. Download it from videorc.com.`,
         control: { kind: 'link', label: 'Open downloads page', link: 'download' }
       }
     case 'unsupported':

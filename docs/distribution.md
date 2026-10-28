@@ -111,7 +111,7 @@ The development smoke test opens the Electron app through `electron-vite`, waits
 - Updater feed filename: `latest-linux.yml` only
 - In-app update notice: Linux builds never run electron-updater. They read
   the public `https://www.videorc.com/api/changelog?since=<core>-alpha.0`
-  and show "Videorc X is available — download it from videorc.com" for the
+  and show "Videorc X is available. Download it from videorc.com" for the
   newest entry whose `platforms` include `linux` and whose version is newer
   (`apps/desktop/src/main/linux-update-notice.ts`). Publishing a Linux
   release must therefore publish its `linux` changelog entry; until the
