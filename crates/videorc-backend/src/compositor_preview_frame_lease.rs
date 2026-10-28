@@ -2,6 +2,34 @@
 //! storage alive when a resize replaces the compositor target ring.
 use super::*;
 
+/// The single source for Preview leases and the read-only pixel oracle: the
+/// program leg's store while the Preview's own picture is current (plan 205
+/// S6), else the primary's. Current means the program leg published this
+/// tick or the one before: the loop publishes the primary first and the
+/// twin last in one tick, and a twin tick that retained its frame (the ring
+/// busy) still shows the program a tick late rather than flipping to a
+/// primary without it. The first tick the leg is off empties its store, so
+/// the switch back is immediate; neither switch drops a frame, because the
+/// lease keeps the surface it holds until main takes the next one.
+pub(crate) fn presented_frame_store(compositor: &CompositorRuntime) -> CompositorFrameStore {
+    let latest_sequence = |store: &CompositorFrameStore| {
+        store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()
+            .map(|frame| frame.sequence)
+    };
+    let primary = latest_sequence(&compositor.frame_store);
+    let program = latest_sequence(&compositor.program_frame_store);
+    match (program, primary) {
+        (Some(program), Some(primary)) if program.saturating_add(1) >= primary => {
+            compositor.program_frame_store.clone()
+        }
+        (Some(_), None) => compositor.program_frame_store.clone(),
+        _ => compositor.frame_store.clone(),
+    }
+}
+
 pub(crate) struct CompositorPreviewFrameLease {
     pub frame: CompositorFrameReady,
     _retained: FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>,
@@ -33,8 +61,7 @@ fn acquire(
         .clone()
         .try_acquire_owned()
         .ok()?;
-    let frame = compositor
-        .frame_store
+    let frame = presented_frame_store(compositor)
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .latest()?;
@@ -64,6 +91,56 @@ fn acquire(
         _retained: frame,
         _permit: permit,
     })
+}
+
+#[cfg(test)]
+mod presented_store_tests {
+    use super::*;
+
+    fn publish(store: &CompositorFrameStore, sequence: u64) {
+        store.lock().unwrap().publish_with_metadata(
+            sequence,
+            2,
+            2,
+            CompositorPixelFormat::yuv420p_cpu_buffer(),
+            CompositorFrameExportHandle::default(),
+            Instant::now(),
+            vec![0; 6],
+        );
+    }
+
+    /// Plan 205 S6: the presented store is the program leg's while its
+    /// frame is current (this tick or the one before), the primary's else;
+    /// emptying the program store switches back at once.
+    #[test]
+    fn presented_frame_store_follows_a_current_program_frame() {
+        let runtime = initial_compositor_state();
+        let is_program = |runtime: &CompositorRuntime| {
+            Arc::ptr_eq(
+                &presented_frame_store(runtime),
+                &runtime.program_frame_store,
+            )
+        };
+        assert!(!is_program(&runtime), "nothing published: the primary");
+        publish(&runtime.frame_store, 5);
+        assert!(!is_program(&runtime), "no program frame: the primary");
+        publish(&runtime.program_frame_store, 5);
+        assert!(is_program(&runtime), "the same tick: the program");
+        publish(&runtime.frame_store, 6);
+        assert!(
+            is_program(&runtime),
+            "one tick behind (a retained twin frame): still the program"
+        );
+        publish(&runtime.frame_store, 7);
+        assert!(!is_program(&runtime), "two ticks behind: the primary");
+        publish(&runtime.program_frame_store, 7);
+        assert!(is_program(&runtime));
+        *runtime.program_frame_store.lock().unwrap() = FrameStore::new(2);
+        assert!(
+            !is_program(&runtime),
+            "emptied (the leg went off): the primary"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -113,6 +190,16 @@ mod tests {
         assert!(acquire(&runtime, "preview-run", None).is_none());
         assert!(acquire(&runtime, "preview-run", Some(6)).is_none());
         let lease = acquire(&runtime, "preview-run", Some(7)).unwrap();
+        // The oracle's store remains readable while main owns the only lease.
+        let oracle_frame = presented_frame_store(&runtime)
+            .lock()
+            .unwrap()
+            .latest()
+            .unwrap();
+        assert_eq!(oracle_frame.sequence, 42);
+        assert_eq!(runtime.preview_frame_lease_capacity.available_permits(), 0);
+        drop(oracle_frame);
+
         assert_eq!(lease.frame.scene_revision, Some(7));
         assert!(
             acquire(&runtime, "preview-run", Some(7)).is_none(),

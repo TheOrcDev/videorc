@@ -56,3 +56,12 @@ are an explicit `null`.
 - Regenerate after a deliberate schema change (bump `schemaVersion`):
   `cargo test -p videorc-backend metrics_journal::tests::write_shared_fixture -- --ignored`
 - Rust: `cargo test -p videorc-backend metrics_journal`
+
+## `preview-program.json`
+
+The program (plan 205): whether an item with a given pair of output switches
+is in the picture the Preview shows, for every session shape. It is edited by
+hand; both functions must reproduce every case:
+
+- Rust: `cargo test -p videorc-backend preview_program`
+- TypeScript: `pnpm --filter @videorc/desktop test -- overlay-layout.test.ts`

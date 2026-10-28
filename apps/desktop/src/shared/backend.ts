@@ -4,6 +4,7 @@ import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 import type { LiveBackgroundId, LiveBackgroundMotion } from './live-background-ids'
 import type { TwitchGifMode } from './chat-gif'
+import type { WindowGround } from './window-ground'
 import type {
   BuddyAvatar,
   BuddyMotionSettings,
@@ -2388,6 +2389,13 @@ export interface CompositorFramePipelineStatus {
   /** Plan 190: live background programs built and scratch bytes held (0 while off). */
   liveBackgroundPrograms?: number
   liveBackgroundScratchBytes?: number
+  /**
+   * Plan 205 S6: the Preview presents its own picture (the program leg)
+   * because the program differs from the primary leg: Clips at idle or a
+   * split record + stream with a stream-only item. Left off the wire while
+   * the primary leg is the program.
+   */
+  previewProgramLeg?: boolean
 }
 
 export interface CompositorStatus {
@@ -2448,6 +2456,8 @@ export type PreviewSurfaceSceneLayerKind =
   | 'screen-image'
   | 'background'
   | 'banner'
+  /** Plan 205 S9: the Buddy's frame-polled layer (`main/preview-surface-buddy.ts`). */
+  | 'buddy'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
@@ -4172,7 +4182,8 @@ export interface RuntimeInfo {
    * verdict on whether the page drew anything; `skipped` off Mica.
    */
   windowGlass?: {
-    kind: 'material' | 'mica' | 'solid'
+    /** `ground` is the opaque chrome ground, the default since plan 208. */
+    kind: 'ground' | 'material' | 'mica' | 'solid'
     reason: string | null
     paintCheck: 'pending' | 'painted' | 'blank' | 'unknown' | 'skipped'
     /**
@@ -4755,6 +4766,12 @@ export type SessionMediaGrantResult =
 export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
+  /**
+   * What this window sits on (plan 208): the chrome ground, the OS glass, or
+   * the solid base. Main decides it per window and the preload reads it from
+   * the window's argv, so the theme bootstrap knows it before the first paint.
+   */
+  windowGround?: WindowGround
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
   /** While armed, main suspends Videorc's global shortcuts and forwards every
@@ -4997,7 +5014,8 @@ export interface VideorcApi {
   updateNativePreviewSurfaceCompositor: (
     status: PreviewSurfaceCompositorUpdateParams
   ) => Promise<PreviewSurfaceStatus>
-  // Keeps the macOS vibrancy material in step with the in-app theme.
+  // Keeps the windows' opaque base (and the clear glass's vibrancy) in step
+  // with the in-app theme.
   setNativeTheme: (theme: 'dark' | 'light') => Promise<void>
   // True while the MAIN process pumps presents from its own backend socket;
   // the renderer pump stays dormant then and resumes only as a fallback.

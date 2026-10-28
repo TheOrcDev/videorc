@@ -15,6 +15,16 @@ name is Buddy. Saved and wire values keep `orcle` (plan 170 D22): the
 moderation source `orcle-voice`, the service-flags `orcle` key and the
 `videorc.orcleTab` storage key.
 
+The Preview shows the program: Buddy appears whenever a running output
+carries it, or either switch is on while nothing runs. An off Buddy is never
+drawn, even while selected. That holds in every row: with Clips on and Buddy
+"Show on stream" only, the Preview shows the pet while a saved clip does
+not, and during a split record + stream the Preview shows a stream-only
+Buddy the recording leaves out (the program leg,
+[overlays.md](overlays.md)). On Windows and Linux, where the Preview is
+the proof surface, Buddy is drawn there by the same rule, alive and with
+its bubble.
+
 ## The promise
 
 **Buddy posts only in the modes you turn on. Everything is off by
@@ -598,6 +608,18 @@ Buddy on stream (Phase C):
   or its state images as a flat pack (Still) is pre-scaled per output leg
   into a BGRA atlas and drawn as one quad per leg by the CPU, Metal and
   D3D11 paths. The renderer pushes the bubble only.
+- The proof surface (Windows idle, Linux) has no compositor leg, so the
+  backend serves Buddy's layer on its own (plan 205 S9,
+  `preview_buddy_layer.rs`): `GET /preview/buddy/latest.bmp?token=&canvasWidth=&canvasHeight=`
+  draws the sprite slot's `Preview` leg (its own atlas) and the bubble
+  into one straight-alpha BGRA BMP, with its rect in canvas fractions in
+  `x-videorc-layer-rect`. It answers `204` to an unchanged cursor, and
+  `204` with `x-videorc-layer-empty: 1` while the program does not carry
+  Buddy. The Preview leg reads an output leg's frame clock while one has
+  drawn in the last 500 ms, so the pet animates in step with the legs.
+  Main (`main/preview-surface-buddy.ts`) places it above the banners and
+  polls it apart from the source pollers, so it never counts toward
+  source liveness.
 - Renderer: `lib/buddy-overlay.ts` (lazy) lays out and paints the bubble per
   target canvas (`renderBuddyBubblePng`, its tail tip on the bitmap's
   bottom-centre, which the compositor puts on the pet's head) and the

@@ -121,12 +121,15 @@ export function SessionTransport({
         {active ? <SessionClock /> : null}
       </div>
       <div className="flex gap-2">
+        {/* D8 (plan 208): Record and the stop button are the red LED, lit
+            while the session runs; Go Live… is the chrome primary. */}
         {active ? (
           <Button
             className="flex-1"
+            data-lit
             disabled={!canStop}
             size="lg"
-            variant="destructive"
+            variant="record"
             onClick={onStop}
           >
             <StopIcon data-icon="inline-start" weight="fill" />
@@ -141,7 +144,7 @@ export function SessionTransport({
                 className="flex-1"
                 disabled={Boolean(recordBlockedReason) || startsBusy}
                 size="lg"
-                variant="destructive"
+                variant="record"
                 onClick={onRecord}
               >
                 <RecordIcon data-icon="inline-start" weight="fill" />
@@ -161,7 +164,7 @@ export function SessionTransport({
                 data-testid="go-live-button"
                 disabled={Boolean(liveStreamBlockedReason) || startsBusy}
                 size="lg"
-                variant="outline"
+                variant="default"
                 onClick={onLiveStream}
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />

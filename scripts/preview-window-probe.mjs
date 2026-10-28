@@ -159,7 +159,7 @@ async function main() {
   // Give the production CAMetalLayer a deterministic compositor target. The
   // older helper-only probe could validate window geometry before any pixels
   // existed; the in-process drawable contract must exercise an actual present.
-  await smokeCommand('enable-synthetic-source', { settleMs: 250 })
+  await smokeCommandWhenShellReady('enable-synthetic-source', { settleMs: 250 })
   await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
   if (expectWindowsD3d11) {
     return runWindowsD3d11WindowProbe()
@@ -1437,6 +1437,24 @@ async function smokeCommand(command, params = {}) {
     throw new Error(payload?.error ?? `${command} smoke command failed`)
   }
   return payload.result
+}
+
+// The app answers smoke commands before the renderer has drawn its shell
+// (the first-run placeholder paints first since plan 203), so the first tab
+// command retries until the sidebar exists, as the perf probes do.
+async function smokeCommandWhenShellReady(command, params = {}) {
+  const deadline = Date.now() + 30000
+  for (;;) {
+    try {
+      return await smokeCommand(command, params)
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      const notReady =
+        message.includes('Main window is not ready') || message.includes('Could not find tab')
+      if (!notReady || Date.now() >= deadline) throw error
+      await sleep(250)
+    }
+  }
 }
 
 function windowList() {
