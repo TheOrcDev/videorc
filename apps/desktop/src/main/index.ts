@@ -213,7 +213,11 @@ import {
   previewSurfaceCanvasFromOutputs,
   type PreviewSurfaceCanvas
 } from './preview-surface-banners'
-import { previewSurfaceBuddyLayer, withPreviewSurfaceOverlays } from './preview-surface-buddy'
+import {
+  previewSurfaceBuddyLayer,
+  previewSurfaceDrawsBuddyLayer,
+  withPreviewSurfaceOverlays
+} from './preview-surface-buddy'
 import {
   PREVIEW_SURFACE_LIVE_BACKGROUND_RUNTIME_SCRIPT,
   previewSurfaceBackgroundLayer,
@@ -4993,6 +4997,7 @@ function backendPreviewFrameUrl(
 // frame server stands in for the source routes only, never for this one.
 function previewBuddyFrameUrl(canvas: PreviewSurfaceCanvas): string | undefined {
   if (
+    !previewSurfaceDrawsBuddyLayer(process.platform) ||
     !nativePreviewFramePollingEnabled ||
     nativePreviewSurfaceFramePollingSuppressed ||
     !backendConnection ||

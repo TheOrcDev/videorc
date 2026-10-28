@@ -223,6 +223,7 @@
     "probe:release-storage-compat": "node scripts/probe-release-storage-compat.mjs",
     "probe:live-audio-controls": "node scripts/probe-live-audio-controls.mjs",
     "smoke:preview-surface": "node scripts/smoke-preview-surface-app.mjs",
+    "smoke:preview-overlay-presentation": "env -u ELECTRON_RUN_AS_NODE node scripts/smoke-preview-overlay-presentation-app.mjs",
     "smoke:preview-endurance": "node scripts/run-with-env.mjs VIDEORC_SMOKE_TIMEOUT_MS=720000 VIDEORC_PREVIEW_SURFACE_SAMPLE_MS=600000 -- node scripts/smoke-preview-surface-app.mjs",
     "smoke:preview-performance": "node scripts/perf-idle-probe.mjs --gate",
     "smoke:preview-performance:native": "node scripts/perf-idle-probe.mjs --gate",
