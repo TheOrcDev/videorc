@@ -189,6 +189,9 @@ const fn windows_d3d11_primary_sequence_is_newer(
 }
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
+/// A FIFO write turn this long means the process itself was not scheduled
+/// (see `write_all_until_with_timing`); far above any turn's own wait.
+const FIFO_WRITE_FROZEN_PROCESS_GAP: Duration = Duration::from_secs(1);
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
@@ -7024,11 +7027,12 @@ fn write_all_until_with_timing<W: StdWrite>(
         hard_timeout,
         cancel_on_stop,
     } = budget;
-    let hard_deadline = timing
+    let mut hard_deadline = timing
         .now()
         .checked_add(hard_timeout)
         .unwrap_or_else(|| timing.now());
     let mut consecutive_no_progress = 0_u32;
+    let mut last_turn = timing.now();
     while !bytes.is_empty() {
         if cancel_on_stop && stop.load(Ordering::Relaxed) {
             return Err(io::Error::new(
@@ -7036,7 +7040,24 @@ fn write_all_until_with_timing<W: StdWrite>(
                 "Encoder FIFO writer stopped during a bounded write",
             ));
         }
-        if timing.now() >= deadline || timing.now() >= hard_deadline {
+        // One turn of this loop is a nonblocking write plus a sub-millisecond
+        // wait. A turn that took seconds means this process was not running
+        // (SIGSTOP, a VM pause, a suspend the monotonic clock counted): the
+        // reader was frozen with us, so that time is not a stalled reader.
+        // Without this, a 30 s freeze mid-frame expired the budget, left a
+        // torn raw frame in the pipe and failed the recording (retest 152).
+        let now = timing.now();
+        let frozen = now.saturating_duration_since(last_turn);
+        last_turn = now;
+        if frozen >= FIFO_WRITE_FROZEN_PROCESS_GAP {
+            deadline = deadline.checked_add(frozen).unwrap_or(deadline);
+            hard_deadline = hard_deadline.checked_add(frozen).unwrap_or(hard_deadline);
+            tracing::warn!(
+                frozen_ms = frozen.as_millis() as u64,
+                "Encoder FIFO writer was frozen mid-frame; the delivery budget excludes the freeze"
+            );
+        }
+        if now >= deadline || now >= hard_deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Encoder FIFO write exceeded the complete-frame delivery budget",
@@ -11742,6 +11763,105 @@ mod tests {
                 FifoWriteWait::Sleep(duration) => duration,
             };
         }
+    }
+
+    /// A pipe that takes one 64 KiB chunk, refuses `refusals` writes (the
+    /// reader is busy), then takes the rest.
+    struct FirstChunkThenBusySink {
+        written: usize,
+        refusals: u32,
+    }
+
+    impl std::io::Write for FirstChunkThenBusySink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.written > 0 && self.refusals > 0 {
+                self.refusals -= 1;
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let accepted = if self.written == 0 {
+                bytes.len().min(64 * 1024)
+            } else {
+                bytes.len()
+            };
+            self.written += accepted;
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Virtual clock that jumps `freeze` on its `freeze_on_wait`th wait: the
+    /// whole process (writer and reader) was stopped there.
+    struct FreezingFifoWriteTiming {
+        now: Instant,
+        waits: u32,
+        freeze_on_wait: u32,
+        freeze: Duration,
+    }
+
+    impl FifoWriteTiming for FreezingFifoWriteTiming {
+        fn now(&self) -> Instant {
+            self.now
+        }
+
+        fn wait(&mut self, action: FifoWriteWait) {
+            self.waits += 1;
+            self.now += match action {
+                FifoWriteWait::Yield => Duration::from_micros(1),
+                FifoWriteWait::Sleep(duration) => duration,
+            };
+            if self.waits == self.freeze_on_wait {
+                self.now += self.freeze;
+            }
+        }
+    }
+
+    #[test]
+    fn a_process_freeze_mid_frame_finishes_the_frame_instead_of_tearing_it() {
+        let frame = vec![3; raw_yuv420p_len(1280, 720).expect("720p frame size")];
+        let stop = AtomicBool::new(false);
+        let write = |freeze: Duration, refusals: u32| {
+            let mut sink = FirstChunkThenBusySink {
+                written: 0,
+                refusals,
+            };
+            let mut timing = FreezingFifoWriteTiming {
+                now: Instant::now(),
+                waits: 0,
+                freeze_on_wait: 3,
+                freeze,
+            };
+            let result = write_all_until_with_timing(
+                &mut sink,
+                &frame,
+                &stop,
+                FifoWriteBudget {
+                    deadline: timing.now() + RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                    progress_timeout: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                    hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+                    cancel_on_stop: false,
+                },
+                &mut timing,
+            );
+            (result, sink.written)
+        };
+
+        // SIGSTOP of the app for 30 s with 64 KiB of the frame in the pipe
+        // (retest 152): the frame completes once both sides run again.
+        let (result, written) = write(Duration::from_secs(30), 5);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(written, frame.len());
+
+        // A reader that really stops taking bytes still fails, without any
+        // freeze: the no-progress budget is unchanged.
+        let (result, written) = write(Duration::ZERO, u32::MAX);
+        assert_eq!(
+            result.expect_err("a wedged reader times out").kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(written, 64 * 1024);
     }
 
     #[test]
