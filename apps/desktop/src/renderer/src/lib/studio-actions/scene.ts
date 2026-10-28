@@ -5,6 +5,14 @@ import type { StudioActionExecutor } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
 
 export const sceneApply: StudioActionExecutor = async (context, fields) => {
+  if (typeof fields.sceneId === 'string') {
+    if (!fields.sceneId.trim() || fields.sceneId.length > 128 || !context.applySavedSceneResult)
+      return { ok: false, message: REMOTE_INTENT_COPY.sceneMissing }
+    const result = await context.applySavedSceneResult(fields.sceneId)
+    return result.ok
+      ? result
+      : { ok: false, message: result.message ?? REMOTE_INTENT_COPY.sceneFailed }
+  }
   const layoutPreset = fields.layoutPreset as LayoutPreset | undefined
   if (!layoutPreset || !(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)) {
     return { ok: false, message: REMOTE_INTENT_COPY.sceneMissing }

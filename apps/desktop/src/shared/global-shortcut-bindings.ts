@@ -15,12 +15,12 @@ const ACTION_CONFIG_KEYS = {
   'layout-next': 'layoutNext',
   'layout-previous': 'layoutPrevious'
 } as const satisfies Record<
-  Exclude<GlobalShortcutAction, `layout:${string}`>,
-  Exclude<keyof GlobalShortcutsConfig, 'layouts'>
+  Exclude<GlobalShortcutAction, `layout:${string}` | `scene:${string}`>,
+  Exclude<keyof GlobalShortcutsConfig, 'layouts' | 'scenes'>
 >
 
 /** A single-action key a GlobalShortcutsConfig may carry (besides
- * `layouts`): the IPC schema admits exactly these. */
+ * `layouts` and `scenes`): the IPC schema admits exactly these. */
 export function isGlobalShortcutConfigKey(key: string): boolean {
   return (Object.values(ACTION_CONFIG_KEYS) as string[]).includes(key)
 }
@@ -31,6 +31,9 @@ export function withGlobalShortcut(
   action: GlobalShortcutAction,
   accelerator: string
 ): GlobalShortcutsConfig {
+  if (action.startsWith('scene:')) {
+    return { ...config, scenes: { ...config?.scenes, [action.slice(6)]: accelerator } }
+  }
   const layout = globalShortcutLayout(action)
   if (layout) {
     return { ...config, layouts: { ...config?.layouts, [layout]: accelerator } }
@@ -39,4 +42,14 @@ export function withGlobalShortcut(
     ...config,
     [ACTION_CONFIG_KEYS[action as keyof typeof ACTION_CONFIG_KEYS]]: accelerator
   }
+}
+
+/** Deletion releases the OS chord; renaming never changes an id's binding. */
+export function withoutSceneShortcut(
+  config: GlobalShortcutsConfig | undefined,
+  id: string
+): GlobalShortcutsConfig {
+  const scenes = { ...config?.scenes }
+  delete scenes[id]
+  return { ...config, scenes }
 }

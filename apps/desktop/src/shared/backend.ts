@@ -4907,6 +4907,7 @@ export interface GlobalShortcutsConfig {
   layoutNext?: string
   layoutPrevious?: string
   layouts?: Partial<Record<LayoutPreset, string>>
+  scenes?: Record<string, string>
   recordToggle?: string
   streamToggle?: string
   micToggle?: string

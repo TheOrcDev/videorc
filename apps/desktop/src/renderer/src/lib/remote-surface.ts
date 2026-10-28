@@ -12,6 +12,8 @@ export interface RemoteSurfaceState {
   streamEnabled: boolean
   micMuted: boolean
   layoutPreset: LayoutPreset
+  savedScenes?: { id: string; name: string }[]
+  activeSavedSceneId?: string | null
   activeTakeoverId: string | null
   windows: {
     notes: boolean
@@ -99,7 +101,9 @@ export type RemoteSurfaceValues = readonly [
   takeovers: { id: string; name: string }[],
   systemAudioStatus: DeviceStatus | undefined,
   systemAudioShown: boolean,
-  banners: readonly BannerSummary[]
+  banners: readonly BannerSummary[],
+  savedScenes?: readonly { id: string; name: string }[],
+  activeSavedSceneId?: string | null
 ]
 
 function snapshotFromValues(
@@ -108,6 +112,8 @@ function snapshotFromValues(
 ): RemoteSurfaceSnapshot {
   return {
     state: {
+      savedScenes: (values[15] ?? []).map(({ id, name }) => ({ id, name })),
+      activeSavedSceneId: values[16] ?? null,
       sessionState: values[0],
       sessionActive: values[1],
       recordEnabled: values[2],

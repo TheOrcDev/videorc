@@ -10,6 +10,8 @@ type State = {
   micMuted: boolean
   systemAudioAvailable: boolean
   systemAudioOn: boolean
+  savedScenes?: Array<{ id: string; name: string }>
+  activeSavedSceneId?: string | null
   layoutPreset: string
 }
 type FakeClient = {
@@ -598,4 +600,17 @@ describe('shipping phone remote sounds (plan 189 S10)', () => {
     await settle()
     expect(soundKeys().at(-1)).toEqual({ name: 'Stop all sounds', hint: null, disabled: true })
   })
+})
+
+it('shows saved scenes above layouts and sends their ids, marking confirmed state', () => {
+  stateUpdate({
+    savedScenes: [{ id: 'figma', name: 'Figma <script>' }],
+    activeSavedSceneId: 'figma'
+  })
+  const keys = [...page.document.querySelectorAll<HTMLButtonElement>('#deck-scenes .key')]
+  expect(keys[0].querySelector('.name')!.textContent).toBe('Figma <script>')
+  expect(keys[0].getAttribute('aria-pressed')).toBe('true')
+  expect(keys[1].getAttribute('aria-pressed')).toBe('false')
+  keys[0].click()
+  expect(client().intent).toHaveBeenCalledWith({ kind: 'sceneApply', sceneId: 'figma' })
 })

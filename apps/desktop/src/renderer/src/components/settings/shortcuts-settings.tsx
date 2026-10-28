@@ -54,7 +54,7 @@ export function globalShortcutRows(input: {
  * so the in-app list does not repeat them.
  */
 export function ShortcutsSettings(): ReactElement {
-  const { settings, setSettings, runtimeInfo, deviceList } = useStudioCore()
+  const { settings, setSettings, runtimeInfo, deviceList, savedScenes } = useStudioCore()
   const systemAudio = systemAudioDevice(deviceList)
   const actionRows = globalShortcutRows({
     systemAudioAvailable: Boolean(systemAudio && systemAudio.status !== 'unavailable'),
@@ -82,7 +82,13 @@ export function ShortcutsSettings(): ReactElement {
         action,
         runtimeInfo?.platform
       )
-      return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
+      const label = owner?.startsWith('scene:')
+        ? (savedScenes.find((scene) => scene.id === owner.slice(6))?.name ??
+          globalShortcutLabel(owner))
+        : owner
+          ? globalShortcutLabel(owner)
+          : null
+      return label ? `Already used by ${label}.` : null
     }
 
   return (
@@ -105,6 +111,30 @@ export function ShortcutsSettings(): ReactElement {
             />
           ))}
         </FieldGroup>
+        {savedScenes.length > 0 && (
+          <FieldSet className="min-w-0 gap-0">
+            <FieldLegend className="mb-1.5 px-1" variant="label">
+              <SectionLabel>Scenes</SectionLabel>
+            </FieldLegend>
+            <FieldGroup variant="grouped">
+              {savedScenes.map(({ id, name }) => {
+                const action = `scene:${id}` as const
+                return (
+                  <ShortcutRecorderField
+                    key={id}
+                    id={`global-scene-${id}`}
+                    label={name}
+                    platform={runtimeInfo?.platform}
+                    validate={validateGlobalShortcut(action)}
+                    registrationFailed={shortcutRegistration[action] === false}
+                    value={globalShortcutValue(action)}
+                    onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
+                  />
+                )
+              })}
+            </FieldGroup>
+          </FieldSet>
+        )}
         {/* One inset group per orientation, rows shaped like the ones
             above: the headers and fields used to sit loose inside the
             group, flush against its border. */}

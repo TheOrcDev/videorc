@@ -11,14 +11,24 @@ export const GLOBAL_SHORTCUT_ACTIONS = [
   'layout-previous',
   ...LAYOUT_PRESET_VALUES.map((id) => `layout:${id}` as const)
 ] as const
-export type GlobalShortcutAction = (typeof GLOBAL_SHORTCUT_ACTIONS)[number]
+export type GlobalShortcutAction = (typeof GLOBAL_SHORTCUT_ACTIONS)[number] | `scene:${string}`
 export function isGlobalShortcutAction(value: unknown): value is GlobalShortcutAction {
-  return typeof value === 'string' && (GLOBAL_SHORTCUT_ACTIONS as readonly string[]).includes(value)
+  return (
+    typeof value === 'string' &&
+    ((GLOBAL_SHORTCUT_ACTIONS as readonly string[]).includes(value) ||
+      (value.startsWith('scene:') &&
+        value.slice(6).trim().length > 0 &&
+        value.slice(6).length <= 128))
+  )
 }
 export function globalShortcutEntries(
   config: GlobalShortcutsConfig
 ): Array<[GlobalShortcutAction, string | undefined]> {
   return [
+    ...Object.entries(config.scenes ?? {}).map(([id, key]): [GlobalShortcutAction, string] => [
+      `scene:${id}`,
+      key
+    ]),
     ['record-toggle', config.recordToggle],
     ['stream-toggle', config.streamToggle],
     ['mic-toggle', config.micToggle],

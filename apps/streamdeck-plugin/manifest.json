@@ -73,7 +73,7 @@
     },
     {
       "UUID": "com.videorc.streamdeck.scene-apply",
-      "Name": "Scene",
+      "Name": "Layout",
       "Icon": "imgs/scene",
       "Tooltip": "Switch to a layout preset.",
       "States": [
@@ -82,6 +82,23 @@
         }
       ],
       "PropertyInspectorPath": "ui/property-inspector.html"
+    },
+    {
+      "UUID": "com.videorc.streamdeck.saved-scene",
+      "Name": "Scene",
+      "Icon": "imgs/scene",
+      "Tooltip": "Switch to a saved scene.",
+      "PropertyInspectorPath": "ui/property-inspector.html",
+      "States": [
+        {
+          "Image": "imgs/scene"
+        },
+        {
+          "Image": "imgs/scene",
+          "TitleColor": "#ffffff"
+        }
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.takeover-toggle",

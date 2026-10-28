@@ -6,7 +6,7 @@ import {
 } from './chat-delivery'
 import { AGENT_TOKEN_PATTERN } from './agent-config-entry'
 import { isGlobalShortcutConfigKey } from './global-shortcut-bindings'
-import { GLOBAL_SHORTCUT_ACTIONS, type GlobalShortcutAction } from './global-shortcuts'
+import { isGlobalShortcutAction, type GlobalShortcutAction } from './global-shortcuts'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -774,7 +774,14 @@ const globalShortcutsSchema = runtimeSchema<GlobalShortcutsConfig>(
       throw new RuntimeSchemaError(path, 'shortcut bindings')
     const bindings = value as Record<string, unknown>
     for (const [key, entry] of Object.entries(bindings)) {
-      if (key === 'layouts') {
+      if (key === 'scenes') {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+          throw new RuntimeSchemaError(path, 'scene bindings')
+        for (const [id, accelerator] of Object.entries(entry)) {
+          if (!id.trim() || id.length > 128) throw new RuntimeSchemaError(path, 'a scene ID')
+          stringSchema({ maxLength: 160 }).parse(accelerator, `${path}.scenes.${id}`)
+        }
+      } else if (key === 'layouts') {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry))
           throw new RuntimeSchemaError(path, 'layout bindings')
         for (const [id, accelerator] of Object.entries(entry)) {
@@ -2004,7 +2011,14 @@ const specificRuntimeEventSchemas = {
   // A recording or livestream is running (never a Clips-only ring). Every
   // window hears it; the chrome ground holds still while it is true.
   'session:take-running': booleanSchema,
-  'global-shortcuts:triggered': enumSchema(GLOBAL_SHORTCUT_ACTIONS),
+  'global-shortcuts:triggered': runtimeSchema<GlobalShortcutAction>(
+    'shortcut action',
+    (value, path) => {
+      if (!isGlobalShortcutAction(value))
+        throw new RuntimeSchemaError(path, 'a known shortcut action')
+      return value
+    }
+  ),
   // Plan 062: keys main captured while the Settings shortcut recorder is armed.
   'shortcut-recorder:key': objectSchema({
     type: enumSchema(['keyDown', 'keyUp']),

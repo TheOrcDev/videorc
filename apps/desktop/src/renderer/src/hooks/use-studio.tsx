@@ -15,7 +15,9 @@ import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-l
 import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
-import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
+import { globalShortcutLayout } from '../../../shared/global-shortcuts'
+import { withoutSceneShortcut } from '../../../shared/global-shortcut-bindings'
+import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
 import { acceleratorLabel } from '../../../shared/accelerator-format'
 import {
   DEFAULT_CLIP_SECONDS,
@@ -4187,6 +4189,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     lastSettled: null
   })
   const layoutShortcutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const sceneShortcutRequestedRef = useRef<string | null>(null)
   useEffect(
     () => () => {
       if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
@@ -9871,7 +9874,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return Promise.resolve(false)
       }
 
-      if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
+      if (layoutShortcutTimerRef.current) {
+        clearTimeout(layoutShortcutTimerRef.current)
+        layoutShortcutTimerRef.current = null
+        sceneShortcutRequestedRef.current = null
+      }
       latestRequestedLayoutRef.current = layout.layoutPreset
       const intentId = Math.max(layoutIntentIdRef.current + 1, Date.now())
       layoutIntentIdRef.current = intentId
@@ -10452,6 +10459,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const deleteSavedScene = useCallback(
     (id: string): boolean => {
       if (!removeSceneEntry(id)) return false
+      setSettings((current) => ({
+        ...current,
+        globalShortcuts: withoutSceneShortcut(current.globalShortcuts, id)
+      }))
       if (activeSavedSceneIdRef.current === id) {
         activeSavedSceneIdRef.current = null
         setActiveSavedSceneId(null)
@@ -10464,7 +10475,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return true
     },
-    [removeSceneEntry, persistWorkingVisual]
+    [removeSceneEntry, persistWorkingVisual, setSettings]
   )
   // A shortcut or remote request is sent even when it repeats the last one:
   // the retry after a failed start or a lost update.
@@ -10637,6 +10648,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const applyCameraPreset = useCallback(
     (patch: Partial<LayoutSettings>) => {
+      sceneShortcutRequestedRef.current = null
       void requestCameraPresetTransaction(patch)
     },
     [requestCameraPresetTransaction]
@@ -17398,7 +17410,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     screens.map((screen) => ({ id: screen.id, name: screen.name })),
     systemAudioStatus,
     systemAudioShown,
-    bannerList ?? NO_BANNERS
+    bannerList ?? NO_BANNERS,
+    sceneLibrary.scenes,
+    activeSavedSceneId
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on
@@ -17565,29 +17579,58 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ).length === 0
         )
         const step = layoutAction === 'layout-previous' ? -1 : 1
-        const target =
-          direct ??
-          nextEligibleLayout(
-            from,
-            step,
-            eligible.map(({ id }) => id)
-          )
-        if (!target) {
+        const next = layoutAction.startsWith('scene:')
+          ? layoutAction
+          : direct
+            ? `layout:${direct}`
+            : nextEligibleScene({
+                current:
+                  sceneShortcutRequestedRef.current ??
+                  (activeSavedSceneIdRef.current
+                    ? `scene:${activeSavedSceneIdRef.current}`
+                    : `layout:${from}`),
+                direction: step,
+                scenes: sceneLibrary.scenes,
+                unavailableSceneIds: sceneLibrary.scenes
+                  .filter(
+                    (scene) =>
+                      sceneSourceProblems(scene.visual, deviceListRef.current.devices).length > 0
+                  )
+                  .map((scene) => scene.id),
+                orientation,
+                sessionActive: sessionOwnsTransport(recordingRef.current),
+                appStates: savedSceneAppStates,
+                layouts: eligible.map(({ id }) => id)
+              })
+        if (!next) {
           toast.info('No other scene to switch to', { id: 'layout-shortcut-empty' })
           return
         }
+        const target = globalShortcutLayout(next as GlobalShortcutAction)
         if (
+          target &&
           layoutIntentAwaitingProofRef.current !== null &&
           latestRequestedLayoutRef.current === target
         )
           return
-        latestRequestedLayoutRef.current = target
+        sceneShortcutRequestedRef.current = next
+        if (target) latestRequestedLayoutRef.current = target
         if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
-        // Coalesce repeat bursts while retaining their latest requested index.
+        // Coalesce repeat bursts across the entire scene list.
         layoutShortcutTimerRef.current = setTimeout(() => {
           layoutShortcutTimerRef.current = null
-          void requestCameraPresetTransaction({ layoutPreset: target }).then((accepted) => {
-            if (!accepted && latestRequestedLayoutRef.current === target)
+          const apply = target
+            ? requestCameraPresetTransaction({ layoutPreset: target })
+            : applySavedSceneResult(next.slice(6)).then((result) => {
+                if (!result.ok)
+                  toast.info(result.message ?? "That scene couldn't be applied", {
+                    id: 'scene-shortcut-refused'
+                  })
+                return result.ok
+              })
+          void apply.then((accepted) => {
+            if (sceneShortcutRequestedRef.current === next) sceneShortcutRequestedRef.current = null
+            if (!accepted && target && latestRequestedLayoutRef.current === target)
               latestRequestedLayoutRef.current = captureConfigRef.current.layout.layoutPreset
           })
         }, 70)

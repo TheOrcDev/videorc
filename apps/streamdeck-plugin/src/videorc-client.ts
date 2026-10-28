@@ -21,6 +21,8 @@ export interface RemoteState {
   /** Plan 069; absent from apps that predate system audio. */
   systemAudioOn?: boolean
   systemAudioAvailable?: boolean
+  savedScenes?: Array<{ id: string; name: string }>
+  activeSavedSceneId?: string | null
   layoutPreset?: string
   activeTakeoverId?: string | null
   windows?: { notes?: boolean; comments?: boolean; preview?: boolean }
@@ -345,4 +347,18 @@ export class VideorcClient extends EventEmitter {
       }
     }, RECONNECT_DELAY_MS)
   }
+}
+
+export function sceneKeyTitle(
+  state: RemoteState | null,
+  sceneId: string | undefined,
+  connected: boolean
+): string {
+  if (!connected) return 'Videorc\noffline'
+  const scene = state?.savedScenes?.find((scene) => scene.id === sceneId)
+  if (!scene) return 'Scene'
+  return state?.activeSavedSceneId === scene.id ? `${scene.name}\nON` : scene.name
+}
+export function sceneKeyIntent(sceneId: string | undefined): Record<string, unknown> | null {
+  return sceneId ? { kind: 'sceneApply', sceneId } : null
 }

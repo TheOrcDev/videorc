@@ -1517,3 +1517,23 @@ describe('Stream Manager clip IPC (plan 199)', () => {
     }
   })
 })
+
+it('admits saved scene key maps and rejects empty or oversized ids', () => {
+  expect(() =>
+    validateElectronInvokeArgs('global-shortcuts:set', [{ scenes: { figma: 'Control+F13' } }])
+  ).not.toThrow()
+  for (const id of ['', ' '.repeat(2), 'a'.repeat(129)]) {
+    expect(() =>
+      validateElectronInvokeArgs('global-shortcuts:set', [{ scenes: { [id]: 'Control+F13' } }])
+    ).toThrow()
+  }
+})
+
+it('delivers saved-scene actions through the validated global shortcut event', () => {
+  expect(validateElectronEventPayload('global-shortcuts:triggered', 'scene:figma')).toBe(
+    'scene:figma'
+  )
+  for (const value of ['scene:', `scene:${'a'.repeat(129)}`, 'unknown']) {
+    expect(() => validateElectronEventPayload('global-shortcuts:triggered', value)).toThrow()
+  }
+})

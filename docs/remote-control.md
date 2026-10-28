@@ -102,7 +102,7 @@ Intent params (`kind` + fields):
 | `streamStart` / `streamStop`                             | —                                        | go live or end the livestream; `streamStart` needs a ready destination                                                                                                                  |
 | `micMute` / `micUnmute` / `micToggle`                    | —                                        | microphone mute                                                                                                                                                                         |
 | `systemAudioOn` / `systemAudioOff` / `systemAudioToggle` | —                                        | system audio on/off (plan 069); refused while the device cannot run                                                                                                                     |
-| `sceneApply`                                             | `layoutPreset`                           | switch layout preset                                                                                                                                                                    |
+| `sceneApply`                                             | `sceneId?`, `screenId?`, `layoutPreset?` | switch saved scene by id, or a built-in layout (at least one target required; `sceneId` takes precedence)                                                                               |
 | `takeoverShow`                                           | `assetId`                                | show a takeover image (BRB etc.)                                                                                                                                                        |
 | `takeoverHide`                                           | —                                        | hide the takeover                                                                                                                                                                       |
 | `bannerShow`                                             | `bannerId`                               | show that banner (plan 186; explicit, idempotent)                                                                                                                                       |
@@ -139,7 +139,7 @@ would refuse. The failed ack carries the reason, so a deck key can say why.
 
 - `remote.state` — the full projection on every change:
   `{ sessionState, sessionActive, recordEnabled, streamEnabled, micMuted,
-layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable }`.
+layoutPreset, activeTakeoverId, windows, systemAudioOn, systemAudioAvailable, savedScenes, activeSavedSceneId }`.
   Render keys from THIS, not from optimistic intent. `systemAudioOn` is what
   the session mixes (the request while idle, or until the session reports
   it) and is always `false` while `systemAudioAvailable` is `false`. An app
@@ -417,3 +417,15 @@ Unit coverage: `cargo test -p videorc-backend remote_` (handshake, replay,
 limiter, projection leak test, router isolation over a real socket) and
 `scripts/lib/remote-lan-client.test.mjs` in `pnpm test:scripts` (pure-JS HMAC
 vs `node:crypto`, and the client against an independent node-crypto desktop).
+
+### Saved scene names on the phone (plan 210)
+
+`remote.state` includes `savedScenes: { id, name }[]` in library order and
+`activeSavedSceneId: string | null`. Only opaque ids and typed display names
+cross the socket; scene sources, app identities, paths, window titles and
+scene snapshots stay on the desktop. Takeover names are the precedent: typed
+names already reach a paired phone. Names may contain personal text the owner
+chose, so paired phones can now read those scene labels. A paired device can
+apply a saved scene through `sceneApply { sceneId }` (non-empty, at most 128
+characters), with the same orientation and app-availability refusals as Studio.
+No new route, method or event is added; `LAN_EVENTS` and the router are unchanged.

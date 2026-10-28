@@ -240,3 +240,16 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
     }
   })
 })
+
+it('dispatches saved-scene keys through the scene handler', () => {
+  const switchLayout = vi.fn()
+  executeGlobalShortcut('scene:figma', {
+    sessionActive: false,
+    startRecording: vi.fn(),
+    startLivestream: vi.fn(),
+    stopSession: vi.fn(),
+    toggleMicrophoneMute: vi.fn(),
+    switchLayout
+  })
+  expect(switchLayout).toHaveBeenCalledWith('scene:figma')
+})

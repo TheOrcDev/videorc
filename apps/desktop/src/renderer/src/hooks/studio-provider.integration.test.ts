@@ -7111,13 +7111,21 @@ describe('real StudioProvider lifecycle', () => {
     })
     const saved = latest().savedScenes[0]
     await act(async () => {
-      emit('onGlobalShortcut', 'layout:screen-camera')
-      await latest().applySavedScene(saved.id)
+      latest().setSettings((current) => ({
+        ...current,
+        globalShortcuts: { scenes: { [saved.id]: 'Control+F13' } }
+      }))
+      latest().renameSavedScene(saved.id, 'Renamed shortcut target')
+      emit('onGlobalShortcut', 'layout:screen-only')
     })
+    await waitForObservation(() => latest().activeSavedSceneId === null && latest().canSaveScene)
+    expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBe('Control+F13')
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 120))
+      emit('onGlobalShortcut', `scene:${saved.id}`)
     })
-    expect(latest().activeSavedSceneId).toBe(saved.id)
+    await waitForObservation(
+      () => latest().activeSavedSceneId === saved.id && latest().canSaveScene
+    )
     let start = backend.sentCommands.length
     await act(async () => {
       emit('onGlobalShortcut', 'layout-next')
@@ -7125,7 +7133,7 @@ describe('real StudioProvider lifecycle', () => {
       emit('onGlobalShortcut', 'layout-next')
     })
     await waitForObservation(
-      () => latest().captureConfig.layout.layoutPreset === 'side-by-side' && latest().canSaveScene
+      () => latest().captureConfig.layout.layoutPreset === 'camera-only' && latest().canSaveScene
     )
     expect(
       backend.sentCommands
@@ -7187,6 +7195,10 @@ describe('real StudioProvider lifecycle', () => {
         .slice(start)
         .filter((entry) => entry.method.startsWith('scene.layout.apply'))
     ).toHaveLength(0)
+    await act(async () => {
+      expect(latest().deleteSavedScene(saved.id)).toBe(true)
+    })
+    expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBeUndefined()
   }, 15000)
 
   it('restores a modified saved checkpoint and saveability across a renderer remount with synthetic preview mapping', async () => {

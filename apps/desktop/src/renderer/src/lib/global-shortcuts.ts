@@ -49,7 +49,7 @@ export function executeGlobalShortcut(
   context: GlobalShortcutContext
 ): void {
   if (!isGlobalShortcutAction(action)) return
-  if (action.startsWith('layout')) {
+  if (action.startsWith('layout') || action.startsWith('scene:')) {
     context.switchLayout?.(action)
     return
   }

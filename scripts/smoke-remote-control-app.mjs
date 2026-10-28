@@ -326,6 +326,56 @@ try {
     console.log('remote-control smoke: systemAudioToggle refused without the device OK')
   }
 
+  // Plan 210 S6: a saved-scene key uses only the projected id and name.
+  const saved = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `return window.__videorcSmokeScenePresets.save('Figma');`
+    },
+    { timeoutMs }
+  )
+  if (saved?.result !== true) fail(`could not save the Figma fixture: ${JSON.stringify(saved)}`)
+  const catalog = await waitForBackendState(
+    renderer,
+    'remote.describe',
+    (surface) => surface?.state?.savedScenes?.some((scene) => scene.name === 'Figma'),
+    'saved scene projection'
+  )
+  const savedScene = catalog.state.savedScenes.find((scene) => scene.name === 'Figma')
+  if (Object.keys(savedScene).sort().join(',') !== 'id,name')
+    fail('saved scene projection leaked extra fields')
+  await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `window.__videorcSmokeScenePresets.layout({ layoutPreset: 'screen-only' }); return true;`
+    },
+    { timeoutMs }
+  )
+  await waitForBackendState(
+    renderer,
+    'remote.describe',
+    (surface) => surface?.state?.activeSavedSceneId === null,
+    'built-in layout confirmation'
+  )
+  const savedAckPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const savedStatePromise = waitForRemoteEvent(
+    remote,
+    'remote.state',
+    (state) => state?.activeSavedSceneId === savedScene.id
+  )
+  const savedTicket = await remoteRequest(remote, 'remote.intent', {
+    kind: 'sceneApply',
+    sceneId: savedScene.id
+  })
+  if (!savedTicket.payload?.accepted) fail('saved scene intent not accepted')
+  const savedAck = await savedAckPromise
+  if (savedAck?.intentId !== savedTicket.payload.intentId || savedAck?.ok !== true)
+    fail(`saved scene intent refused: ${JSON.stringify(savedAck)}`)
+  await savedStatePromise
+  console.log('remote-control smoke: saved Figma scene ack + confirmed state OK')
+
   // 5. Regenerate cuts the paired client.
   const closed = new Promise((resolveClose) => remote.once('close', resolveClose))
   await request(renderer, timeoutMs, 'remote.control.regenerate')
