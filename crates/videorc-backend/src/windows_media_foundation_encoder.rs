@@ -260,7 +260,7 @@ pub struct MediaFoundationH264Encoder {
     accounts_session_frames: bool,
     input_credit_timeouts: u64,
     /// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame.
-    stream_change_renegotiations: u32,
+    stream_changes: StreamChangeBudget,
     drained: bool,
     mf_started: bool,
     com_started: bool,
@@ -447,7 +447,7 @@ pub(crate) struct MediaFoundationD3d11H264Encoder {
     last_output_pts: Option<i64>,
     started_at: Instant,
     /// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame.
-    stream_change_renegotiations: u32,
+    stream_changes: StreamChangeBudget,
     drained: bool,
     mf_started: bool,
     com_started: bool,
@@ -806,7 +806,7 @@ impl MediaFoundationH264Encoder {
             saw_first_input_credit: false,
             accounts_session_frames: false,
             input_credit_timeouts: 0,
-            stream_change_renegotiations: 0,
+            stream_changes: StreamChangeBudget::default(),
             drained: false,
             mf_started,
             com_started,
@@ -1308,16 +1308,16 @@ impl MediaFoundationH264Encoder {
         let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
         let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
         match process_result {
-            Ok(()) => self.stream_change_renegotiations = 0,
+            Ok(()) => self.stream_changes.output_produced(),
             Err(error)
                 if is_mf_stream_change(error.code())
-                    && self.stream_change_renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
+                    && self.stream_changes.allows_renegotiation() =>
             {
-                self.stream_change_renegotiations += 1;
+                let attempt = self.stream_changes.renegotiated();
                 tracing::info!(
                     "Media Foundation encoder {:?} requested output-type renegotiation (attempt {}/{}); re-selecting output type and waiting for the next HaveOutput",
                     self.identity,
-                    self.stream_change_renegotiations,
+                    attempt,
                     MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
                 );
                 renegotiate_mft_output_type(
@@ -2469,7 +2469,7 @@ impl MediaFoundationD3d11H264Encoder {
             submitted_pts: VecDeque::new(),
             last_output_pts: None,
             started_at: Instant::now(),
-            stream_change_renegotiations: 0,
+            stream_changes: StreamChangeBudget::default(),
             drained: false,
             mf_started,
             com_started,
@@ -2938,16 +2938,16 @@ impl MediaFoundationD3d11H264Encoder {
         let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
         let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
         match process_result {
-            Ok(()) => self.stream_change_renegotiations = 0,
+            Ok(()) => self.stream_changes.output_produced(),
             Err(error)
                 if is_mf_stream_change(error.code())
-                    && self.stream_change_renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
+                    && self.stream_changes.allows_renegotiation() =>
             {
-                self.stream_change_renegotiations += 1;
+                let attempt = self.stream_changes.renegotiated();
                 tracing::info!(
                     "Media Foundation D3D11 encoder {:?} requested output-type renegotiation (attempt {}/{}); re-selecting output type and waiting for the next HaveOutput",
                     self.identity,
-                    self.stream_change_renegotiations,
+                    attempt,
                     MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
                 );
                 renegotiate_mft_output_type(
@@ -4143,6 +4143,29 @@ fn is_mf_stream_change(hresult: windows::core::HRESULT) -> bool {
 /// output frame in between.
 const MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS: u32 = 2;
 
+/// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame,
+/// shared by both encoders so the cap is one tested rule.
+#[derive(Debug, Default)]
+struct StreamChangeBudget {
+    consecutive: u32,
+}
+
+impl StreamChangeBudget {
+    fn allows_renegotiation(&self) -> bool {
+        self.consecutive < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
+    }
+
+    /// Records one renegotiation and returns its 1-based attempt number.
+    fn renegotiated(&mut self) -> u32 {
+        self.consecutive += 1;
+        self.consecutive
+    }
+
+    fn output_produced(&mut self) {
+        self.consecutive = 0;
+    }
+}
+
 /// Human-facing annotations for the Media Foundation HRESULTs an operator can
 /// act on. Unknown codes return `None` so logs stay free of guesses.
 fn mf_hresult_annotation(hresult: windows::core::HRESULT) -> Option<&'static str> {
@@ -4217,6 +4240,26 @@ mod tests {
             0xC00D6D62_u32 as i32
         )));
         assert!(!is_mf_stream_change(windows::core::HRESULT(0)));
+    }
+
+    #[test]
+    fn stream_change_budget_caps_consecutive_renegotiations_and_resets_on_output() {
+        let mut budget = StreamChangeBudget::default();
+        assert!(budget.allows_renegotiation());
+        assert_eq!(budget.renegotiated(), 1);
+        assert!(budget.allows_renegotiation());
+        assert_eq!(budget.renegotiated(), 2);
+        assert!(
+            !budget.allows_renegotiation(),
+            "a third consecutive stream change without output is a failure"
+        );
+        budget.output_produced();
+        assert!(budget.allows_renegotiation());
+        assert_eq!(
+            budget.renegotiated(),
+            1,
+            "a frame in between resets the count"
+        );
     }
 
     #[test]

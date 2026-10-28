@@ -29087,7 +29087,8 @@ mod tests {
     /// DXGI_ERROR_UNSUPPORTED, so every call minted a fresh UUID identity and
     /// no MF rejection, perf-check verdict or Quick Sync detection ever held.
     /// CI runners without a hardware adapter may still fail with
-    /// `no-hardware-dxgi-adapter`; only the unsupported-interface error is a bug.
+    /// `no-hardware-dxgi-adapter`; any other error leaves the identity
+    /// uncacheable and is a bug.
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_graphics_adapter_driver_identity_query_is_supported_and_stable() {
@@ -29104,9 +29105,9 @@ mod tests {
                     "screen capture and recording must key verdicts on the same identity"
                 );
             }
-            Err(reason) => assert!(
-                !reason.contains("887a0004"),
-                "DXGI rejected the driver-version interface: {reason}"
+            Err(reason) => assert_eq!(
+                reason, "no-hardware-dxgi-adapter",
+                "only an adapter-free host may fail the driver identity query"
             ),
         }
     }

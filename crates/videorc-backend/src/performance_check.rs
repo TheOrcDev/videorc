@@ -974,15 +974,23 @@ async fn measure_rung(
 /// worthless, and on a below-realtime machine flushing it outlasted
 /// `YIELD_TO_CAPTURE_TIMEOUT`, so Record failed with "A capture session is
 /// active or finalizing" (UHD 620 field log: 13 s drain vs 8 s yield).
+///
+/// The stop runs as its own task: it holds `state.recording` across awaits,
+/// and the kill needs that lock, so a stop that is only polled from this
+/// `select!` would deadlock against the kill branch.
 async fn stop_rung_yielding_to_capture(
     state: &AppState,
 ) -> Result<crate::protocol::RecordingStatus> {
-    let stop = crate::recording::stop_recording(state.clone());
-    tokio::pin!(stop);
+    let stop_state = state.clone();
+    let mut stop = tokio::spawn(async move { crate::recording::stop_recording(stop_state).await });
     let mut killed = false;
     loop {
         tokio::select! {
-            stopped = &mut stop => return stopped,
+            stopped = &mut stop => {
+                return stopped.unwrap_or_else(|error| {
+                    Err(anyhow::anyhow!("benchmark stop task failed: {error}"))
+                });
+            }
             () = tokio::time::sleep(CANCEL_POLL), if !killed => {
                 if state.performance_check.cancelled() {
                     killed = true;

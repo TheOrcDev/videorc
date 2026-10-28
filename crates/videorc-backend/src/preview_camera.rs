@@ -53,8 +53,16 @@ const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 const WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT: Duration = Duration::from_secs(7);
 #[cfg(target_os = "windows")]
 const WINDOWS_CAMERA_START_BUDGET: Duration = Duration::from_secs(6);
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(4);
+/// Kept free for the `-framerate`/default-format attempts so a stalled MJPEG
+/// mode cannot spend them; the HP HD Camera's default format delivered its
+/// first frame in ~1.3 s.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE: Duration = Duration::from_millis(2500);
+/// An MJPEG attempt with less time than this cannot realistically go live.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_MIN_MJPEG_ATTEMPT: Duration = Duration::from_secs(1);
 #[cfg(target_os = "windows")]
 const WINDOWS_CAMERA_LIST_OPTIONS_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(target_os = "windows")]
@@ -4349,6 +4357,25 @@ fn windows_dshow_error_is_mode_independent(stderr: &str) -> bool {
         || stderr.contains("could not find video device")
 }
 
+/// First-frame deadline for one attempt, or `None` to skip it. MJPEG attempts
+/// leave `WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE` of the start budget unspent.
+#[cfg(any(target_os = "windows", test))]
+fn windows_camera_attempt_first_frame_timeout(
+    remaining: Duration,
+    mjpeg: bool,
+) -> Option<Duration> {
+    let available = if mjpeg {
+        remaining.saturating_sub(WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE)
+    } else {
+        remaining
+    };
+    let timeout = available.min(WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT);
+    if timeout.is_zero() || (mjpeg && timeout < WINDOWS_CAMERA_MIN_MJPEG_ATTEMPT) {
+        return None;
+    }
+    Some(timeout)
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn order_windows_camera_capture_modes(
     mut modes: Vec<(u32, u32)>,
@@ -4871,6 +4898,12 @@ mod windows {
                 ));
                 break;
             }
+            let Some(first_frame_timeout) =
+                windows_camera_attempt_first_frame_timeout(remaining, mjpeg_capture_size.is_some())
+            else {
+                // MJPEG may not eat the time the default-format attempts need.
+                continue;
+            };
             let attempt_started_at = Instant::now();
             let outcome = run_windows_camera_preview_attempt(
                 &config,
@@ -4883,7 +4916,7 @@ mod windows {
                 frame_len,
                 request_fps,
                 mjpeg_capture_size,
-                remaining.min(WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT),
+                first_frame_timeout,
             );
             let mode = windows_camera_attempt_label(request_fps, mjpeg_capture_size);
             let attempt_ms = attempt_started_at.elapsed().as_millis() as u64;
@@ -5015,6 +5048,9 @@ mod windows {
         first_frame_timeout: Duration,
     ) -> CameraPreviewAttempt {
         let attempt_started_at = Instant::now();
+        // Fixed before the spawn: a slow spawn spends this attempt's budget,
+        // never the startup receiver's.
+        let first_frame_deadline = attempt_started_at + first_frame_timeout;
         let args = windows_camera_preview_ffmpeg_args_mode(
             config,
             width,
@@ -5039,6 +5075,14 @@ mod windows {
                 ));
             }
         };
+        if Instant::now() >= first_frame_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return CameraPreviewAttempt::FailedBeforeFirstFrame(format!(
+                "FFmpeg took longer than {} ms to start",
+                first_frame_timeout.as_millis()
+            ));
+        }
         let Some(mut stdout) = child.stdout.take() else {
             let _ = child.kill();
             let _ = child.wait();
@@ -5056,7 +5100,7 @@ mod windows {
             Arc::clone(&done),
             Arc::clone(stop_flag),
             FirstFrameDeadline {
-                at: Instant::now() + first_frame_timeout,
+                at: first_frame_deadline,
                 live: Arc::clone(&live),
                 timed_out: Arc::clone(&timed_out),
             },
@@ -9273,6 +9317,38 @@ Error opening input file video=HP HD Camera."#;
         assert!(!windows_dshow_error_is_mode_independent(
             "ended before the first frame: Could not set video options | Error opening input: I/O error"
         ));
+    }
+
+    #[test]
+    fn windows_camera_mjpeg_attempts_leave_time_for_the_default_format() {
+        let secs = Duration::from_secs_f64;
+        // Fresh budget: MJPEG gets its full deadline.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(6.0), true),
+            Some(secs(3.5))
+        );
+        // A 2 s mode probe: MJPEG is cut short so the reserve survives.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(4.0), true),
+            Some(secs(1.5))
+        );
+        // Too little left for MJPEG: skip it, but the fallbacks still run.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(3.0), true),
+            None
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(3.0), false),
+            Some(secs(3.0))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(9.0), false),
+            Some(secs(4.0))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(Duration::ZERO, false),
+            None
+        );
     }
 
     #[test]
