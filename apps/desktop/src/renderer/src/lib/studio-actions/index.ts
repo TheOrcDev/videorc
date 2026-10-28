@@ -2,9 +2,10 @@
 // for everything that drives the Studio from away from the desk.
 //
 // The shape:
-// - `StudioActionContext` (context.ts): what hooks/use-studio.tsx assembles
-//   per intent from the latest render's handlers. Remote intents and agent
-//   tools run against the same one.
+// - `StudioActionContext` (context.ts): what `studioActionContext`
+//   (studio-context.ts) builds per intent from the latest render's handlers
+//   hooks/use-studio.tsx hands over. Remote intents and agent tools run
+//   against the same one.
 // - One pure executor per action (session.ts, audio.ts, scene.ts, banners.ts,
 //   sounds.ts, windows.ts, comments.ts, clips.ts):
 //   `(context, fields) => Promise<{ok, message?}>`. None acks or toasts.
@@ -53,5 +54,6 @@ export { REMOTE_INTENT_EXECUTORS, executeRemoteIntent } from './remote'
 export { sceneApply, takeoverHide, takeoverShow } from './scene'
 export { recordStart, recordStop, recordToggle, streamStart, streamStop } from './session'
 export { soundPlay, soundStop } from './sounds'
+export { studioActionContext, type StudioActionSource } from './studio-context'
 export { AGENT_TOOL_COPY, STUDIO_AGENT_TOOLS } from './tools'
 export { windowFront } from './windows'

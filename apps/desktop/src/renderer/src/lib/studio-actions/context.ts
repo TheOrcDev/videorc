@@ -1,10 +1,11 @@
 // The Studio's action context (plan 209 S5): what every action needs from the
-// Studio, assembled per intent in hooks/use-studio.tsx from the latest render's
-// handlers. A Stream Deck key, the phone and (S6) an agent's tool call all run
-// against the same one, through the same handlers as the on-screen buttons, so
-// nothing away from the desk can start what the Studio would refuse. A tool
-// that needs more than a key does (a notice, a headless Go Live) adds its
-// field here, and the Studio fills it in the one place the context is built.
+// Studio, built per intent (studio-context.ts) from the latest render's
+// handlers that hooks/use-studio.tsx hands over. A Stream Deck key, the phone
+// and (S6) an agent's tool call all run against the same one, through the
+// same handlers as the on-screen buttons, so nothing away from the desk can
+// start what the Studio would refuse. A tool that needs more than a key does
+// (a notice, a headless Go Live) adds its field here, and studio-context.ts
+// fills it in, the one place the context is built.
 
 import type {
   Banner,

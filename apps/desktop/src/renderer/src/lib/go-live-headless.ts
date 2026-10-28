@@ -1,25 +1,43 @@
+import { sessionOwnsTransport } from '../../../shared/capture-state'
 import type {
+  AiCapabilities,
+  EntitlementsSnapshot,
   GoLivePreflight,
+  RecordingStatus,
   StreamMetadataDraft,
   StreamPlatform,
   StreamingSettings
 } from './backend'
-import type { GoLiveCaptionsReadiness } from './captions-preflight'
-import type { EntitlementUiGate } from './entitlement-ui'
+import type { CaptureConfig, WsStatus } from './capture'
+import {
+  decideGoLiveCaptionsReadiness,
+  type CaptionSessionOutputReadiness,
+  type GoLiveCaptionsReadiness
+} from './captions-preflight'
+import { goLiveEntitlementGate, type EntitlementUiGate } from './entitlement-ui'
 import { goLiveConfirmGate } from './go-live-dialog-view'
-import type { GoLivePartialSetup } from './go-live-flow'
+import { streamingWithoutTargets } from './go-live-exclusions'
+import {
+  LIVESTREAM_STILL_SETTLING,
+  shouldIgnoreGoLiveAction,
+  type GoLivePartialSetup
+} from './go-live-flow'
 import { destinationLabel, platformLabel } from './platform-copy'
+import { sessionStartFailureMessage } from './session-start-failure'
+import { livestreamIntent, type SessionStartIntent } from './session-start-intent'
+import { connectionBlockedReason, START_BLOCKED_COPY } from './start-blocked-copy'
 
 // Going live without the dialog (plan 209 S10, D13). An agent's `go_live`
 // runs the Go Live dialog's own preflight and confirm in the Studio
-// (hooks/use-studio.tsx) and decides here, purely, what the dialog would have
+// (hooks/use-studio.tsx) and decides here what the dialog would have
 // shown: the same gate the dialog disables its primary on
 // (`goLiveConfirmGate`), the same blockers in the dialog's words, and the
 // two ways out the dialog offers, "Go live without {destination}" for every
 // destination that isn't ready (`allowPartial`) and "Go live without
 // captions" (`withoutCaptions`). A blocker only the streamer can fix (sign
 // in, a missing key, Premium) is always a refusal: agents never connect
-// accounts. Loaded with the first agent Go Live, never in the eager bundle.
+// accounts. Loaded with the first agent Go Live, never in the eager bundle:
+// the Studio hands `goLiveWithoutDialog` its handlers and latest state.
 
 /** What an agent's `go_live` asks for, beside the saved setup. */
 export interface HeadlessGoLiveRequest {
@@ -218,4 +236,252 @@ function sentences(...parts: string[]): string {
     .filter(Boolean)
     .map((part) => (/[.!?…]$/.test(part) ? part : `${part}.`))
     .join(' ')
+}
+
+/** The Go Live dialog's preflight answer (plan 209 S10: shared with `go_live`). */
+export type GoLivePreflightRun =
+  | {
+      kind: 'ready'
+      preflight: GoLivePreflight
+      draft: StreamMetadataDraft | null
+      capabilities: AiCapabilities | null
+    }
+  | { kind: 'refused'; reason: string }
+  /** The previous livestream is still settling (said in the Studio already). */
+  | { kind: 'settling' }
+  | { kind: 'offline' }
+
+/**
+ * What a Go Live without the dialog decided before it confirms (plan 209
+ * S10): the destinations it left out, the draft it goes out with, the
+ * preflight it decided on (its scheduled events), and the captions' answer
+ * with "Go live without captions" folded in. Passed explicitly, so the
+ * confirm never waits for a render to see them.
+ */
+export type HeadlessGoLiveConfirmation = {
+  excludedTargetIds: readonly string[]
+  draft: StreamMetadataDraft | null
+  preflight: GoLivePreflight
+  captionsReadiness: GoLiveCaptionsReadiness
+  suppressCaptions: boolean
+}
+
+/** Where the Go Live dialog's confirm ended (plan 209 S10). */
+export type GoLiveConfirmOutcome =
+  /** Another confirm or start owns the transport. */
+  | { kind: 'ignored' }
+  | { kind: 'captions'; description: string }
+  | { kind: 'scheduled-changed'; preflight: GoLivePreflight }
+  /** The fresh preflight still blocks; the dialog shows it. */
+  | { kind: 'blocked'; preflight: GoLivePreflight }
+  | { kind: 'partial'; setup: GoLivePartialSetup }
+  | { kind: 'started'; started: boolean; streaming: StreamingSettings }
+  | { kind: 'failed'; error: unknown }
+
+/**
+ * What a Go Live without the dialog reads and drives in the Studio
+ * (hooks/use-studio.tsx): the latest render's state and the dialog's own
+ * handlers. The in-flight refs are the Studio's own, so a Go Live here owns
+ * the transport exactly as the dialog's does (B-7, B-14).
+ */
+export interface HeadlessGoLiveStudio {
+  /** The Studio has a backend client. */
+  connected: boolean
+  wsStatus: WsStatus
+  recording: RecordingStatus
+  /** The Go Live dialog is open. */
+  dialogOpen: boolean
+  goLiveConfirmationPending: boolean
+  startRequestPending: boolean
+  openGoLiveConfirmationInFlightRef: { current: Promise<void> | null }
+  confirmGoLiveInFlightPromiseRef: { readonly current: unknown }
+  sessionStartInFlightRef: { readonly current: unknown }
+  config: CaptureConfig
+  streamMetadataDraft: StreamMetadataDraft | null
+  captionsPlatformUnavailable: string | null
+  goLiveCaptionOutputReadiness: CaptionSessionOutputReadiness | undefined
+  entitlements: EntitlementsSnapshot | null
+  setGoLiveConfirmationPending: (pending: boolean) => void
+  setSuppressCaptionsForSession: (suppress: boolean) => void
+  runGoLivePreflight: (
+    intent: SessionStartIntent,
+    streaming: StreamingSettings,
+    draft: StreamMetadataDraft | null
+  ) => Promise<GoLivePreflightRun>
+  revalidateGoLive: (
+    streaming: StreamingSettings,
+    excludedTargetIds: readonly string[]
+  ) => Promise<GoLivePreflight | null>
+  runGoLiveConfirmation: (headless: HeadlessGoLiveConfirmation) => Promise<GoLiveConfirmOutcome>
+  settlePreparedPlatformLifecycle: (streaming: StreamingSettings) => Promise<unknown>
+  startOnReadyDestinations: (headless: {
+    setup: GoLivePartialSetup
+    suppressCaptions: boolean
+  }) => Promise<boolean>
+}
+
+/**
+ * An agent's `go_live`, without the dialog (plan 209 S10, D13). It runs the
+ * dialog's own preflight (`runGoLivePreflight`), decides on the dialog's own
+ * gate (`decideHeadlessGoLive`), presses its two ways out when the call asks
+ * ("Go live without {destination}" for `allowPartial`, "Go live without
+ * captions" for `withoutCaptions`) and confirms through the dialog's own
+ * confirm and "Go live on {ready}". Anything only the streamer can fix (sign
+ * in, a key, Premium) is refused in the dialog's words. Go Live records too
+ * only when Output's recording is on, as the dialog does. Stream Deck and the
+ * phone keep opening the dialog (D2, D19).
+ */
+export async function goLiveWithoutDialog(
+  request: HeadlessGoLiveRequest,
+  studio: HeadlessGoLiveStudio
+): Promise<HeadlessGoLiveOutcome> {
+  const copy = HEADLESS_GO_LIVE_COPY
+  if (!studio.connected) {
+    return { ok: false, message: connectionBlockedReason(studio.wsStatus) ?? copy.inFlight }
+  }
+  if (sessionOwnsTransport(studio.recording)) {
+    return { ok: false, message: START_BLOCKED_COPY.sessionRunning }
+  }
+  if (studio.dialogOpen) return { ok: false, message: copy.dialogOpen }
+  // A Go Live in flight owns the transport (B-14), this one included.
+  if (
+    shouldIgnoreGoLiveAction({
+      goLiveConfirmationPending:
+        studio.goLiveConfirmationPending ||
+        studio.openGoLiveConfirmationInFlightRef.current !== null ||
+        studio.confirmGoLiveInFlightPromiseRef.current !== null,
+      startRequestPending:
+        studio.startRequestPending || studio.sessionStartInFlightRef.current !== null
+    })
+  ) {
+    return { ok: false, message: copy.inFlight }
+  }
+  const config = studio.config
+  const exclusions = headlessExclusions(config.streaming, request.destinations)
+  if (!exclusions.ok) return { ok: false, message: exclusions.message }
+  let excludedTargetIds = exclusions.excludedTargetIds
+  const intent = livestreamIntent(config.recordEnabled)
+  const allowPartial = request.allowPartial === true
+  const suppressCaptions = request.withoutCaptions === true
+
+  // The dialog's preflight, owning the transport as the dialog's does
+  // (B-7): Record, ⌘K and the remotes wait, and Go Live says Checking….
+  const preflightRun = (async () => {
+    studio.setGoLiveConfirmationPending(true)
+    try {
+      return await studio.runGoLivePreflight(
+        intent,
+        streamingWithoutTargets(config.streaming, excludedTargetIds),
+        headlessDraft(studio.streamMetadataDraft, request.title)
+      )
+    } finally {
+      studio.setGoLiveConfirmationPending(false)
+    }
+  })()
+  const preflightGate = preflightRun.then(
+    () => undefined,
+    () => undefined
+  )
+  studio.openGoLiveConfirmationInFlightRef.current = preflightGate
+  let run: GoLivePreflightRun
+  try {
+    run = await preflightRun
+  } catch (error) {
+    return { ok: false, message: sessionStartFailureMessage(error) }
+  } finally {
+    if (studio.openGoLiveConfirmationInFlightRef.current === preflightGate) {
+      studio.openGoLiveConfirmationInFlightRef.current = null
+    }
+  }
+  if (run.kind === 'refused') return { ok: false, message: run.reason }
+  if (run.kind === 'settling') return { ok: false, message: LIVESTREAM_STILL_SETTLING }
+  if (run.kind === 'offline') {
+    return { ok: false, message: connectionBlockedReason(studio.wsStatus) ?? copy.inFlight }
+  }
+
+  // "Go live without captions" folds into captions' answer, as in the dialog.
+  const captionsReadiness = decideGoLiveCaptionsReadiness({
+    persistedEnabled: config.captions.enabled,
+    suppressForSession: suppressCaptions || studio.captionsPlatformUnavailable !== null,
+    capabilities: run.capabilities,
+    outputReadiness: studio.goLiveCaptionOutputReadiness,
+    platformUnavailable: studio.captionsPlatformUnavailable
+  })
+  const entitlementGate = goLiveEntitlementGate({
+    entitlements: studio.entitlements,
+    streaming: config.streaming
+  })
+  let preflight = run.preflight
+  const decide = (partial: boolean) =>
+    decideHeadlessGoLive({
+      preflight,
+      draft: run.draft,
+      sentStreaming: streamingWithoutTargets(config.streaming, excludedTargetIds),
+      captionsReadiness,
+      entitlementGate,
+      allowPartial: partial
+    })
+  let decision = decide(allowPartial)
+  if (decision.kind === 'exclude') {
+    // "Go live without {destination}" for each one that isn't ready; the
+    // dialog checks again after every one.
+    excludedTargetIds = [...excludedTargetIds, ...decision.targetIds]
+    const rechecked = await studio.revalidateGoLive(config.streaming, excludedTargetIds)
+    if (!rechecked) return { ok: false, message: copy.didNotStart }
+    preflight = rechecked
+    decision = decide(false)
+  }
+  if (decision.kind !== 'confirm') {
+    return { ok: false, message: decision.kind === 'refuse' ? decision.message : copy.inFlight }
+  }
+
+  if (suppressCaptions) studio.setSuppressCaptionsForSession(true)
+  const outcome = await studio.runGoLiveConfirmation({
+    excludedTargetIds,
+    draft: run.draft,
+    preflight,
+    captionsReadiness,
+    suppressCaptions
+  })
+  const live = (streaming: StreamingSettings): HeadlessGoLiveOutcome => ({
+    ok: true,
+    destinations: streaming.targets
+      .filter((target) => target.enabled)
+      .map((target) => ({ id: target.id, platform: target.platform, label: target.label })),
+    recording: intent.record
+  })
+  switch (outcome.kind) {
+    case 'ignored':
+      return { ok: false, message: copy.inFlight }
+    case 'captions':
+      return {
+        ok: false,
+        message: `${copy.captionsTitle}: ${outcome.description} ${copy.withoutCaptionsHint}`
+      }
+    case 'scheduled-changed':
+      return { ok: false, message: copy.scheduledChanged }
+    case 'blocked': {
+      preflight = outcome.preflight
+      const blocked = decide(false)
+      return {
+        ok: false,
+        message: blocked.kind === 'refuse' ? blocked.message : copy.didNotStart
+      }
+    }
+    case 'failed':
+      return { ok: false, message: sessionStartFailureMessage(outcome.error) }
+    case 'partial': {
+      const next = decideHeadlessPartialSetup(outcome.setup, allowPartial)
+      if (next.kind === 'refuse') {
+        // What Cancel does with a partial setup: nothing prepared stays behind.
+        void studio.settlePreparedPlatformLifecycle(outcome.setup.streaming)
+        return { ok: false, message: next.message }
+      }
+      return (await studio.startOnReadyDestinations({ setup: outcome.setup, suppressCaptions }))
+        ? live(outcome.setup.streaming)
+        : { ok: false, message: copy.didNotStart }
+    }
+    case 'started':
+      return outcome.started ? live(outcome.streaming) : { ok: false, message: copy.didNotStart }
+  }
 }

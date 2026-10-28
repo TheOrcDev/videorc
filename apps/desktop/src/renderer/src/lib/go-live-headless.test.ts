@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type {
   GoLiveDestinationPreflight,
@@ -7,16 +7,23 @@ import type {
   StreamTargetSettings,
   StreamingSettings
 } from './backend'
+import { defaultCaptureConfig } from './capture'
 import { decideGoLiveCaptionsReadiness } from './captions-preflight'
+import { DEFAULT_BASIC_ENTITLEMENTS } from './entitlements'
 import { goLiveConfirmGate } from './go-live-dialog-view'
 import { streamingWithoutTargets } from './go-live-exclusions'
+import { LIVESTREAM_STILL_SETTLING } from './go-live-flow'
 import {
   HEADLESS_GO_LIVE_COPY,
   decideHeadlessGoLive,
   decideHeadlessPartialSetup,
+  goLiveWithoutDialog,
   headlessDraft,
-  headlessExclusions
+  headlessExclusions,
+  type GoLiveConfirmOutcome,
+  type HeadlessGoLiveStudio
 } from './go-live-headless'
+import { START_BLOCKED_COPY } from './start-blocked-copy'
 
 // Plan 209 S10 (D13): `go_live` without the dialog decides on the dialog's
 // own gate and refuses in the dialog's own words.
@@ -349,6 +356,163 @@ describe('go_live without the dialog (plan 209 S10, D13)', () => {
     expect(decideHeadlessPartialSetup(setup, false)).toEqual({
       kind: 'refuse',
       message: `Some destinations couldn't be set up. YouTube: YouTube. YouTube didn't create the broadcast. Ready: Twitch. ${HEADLESS_GO_LIVE_COPY.allowPartialHint}`
+    })
+  })
+})
+
+// The orchestration the Studio hands its handlers to (moved out of the eager
+// Studio bundle): what it refuses before the dialog's preflight runs, and how
+// the preflight and confirm it drives own the transport.
+describe('goLiveWithoutDialog (plan 209 S10, D13)', () => {
+  function studio(overrides: Partial<HeadlessGoLiveStudio> = {}): HeadlessGoLiveStudio {
+    const preflight: GoLivePreflight = {
+      valid: true,
+      destinations: [destination('youtube-1'), destination('twitch-1')],
+      issues: []
+    }
+    return {
+      connected: true,
+      wsStatus: 'connected',
+      recording: { state: 'idle', message: 'Ready.' },
+      dialogOpen: false,
+      goLiveConfirmationPending: false,
+      startRequestPending: false,
+      openGoLiveConfirmationInFlightRef: { current: null },
+      confirmGoLiveInFlightPromiseRef: { current: null },
+      sessionStartInFlightRef: { current: null },
+      config: { ...defaultCaptureConfig, streaming: twoOn },
+      streamMetadataDraft: draft,
+      captionsPlatformUnavailable: null,
+      goLiveCaptionOutputReadiness: undefined,
+      entitlements: DEFAULT_BASIC_ENTITLEMENTS,
+      setGoLiveConfirmationPending: vi.fn(),
+      setSuppressCaptionsForSession: vi.fn(),
+      runGoLivePreflight: vi.fn(async () => ({
+        kind: 'ready' as const,
+        preflight,
+        draft,
+        capabilities: null
+      })),
+      revalidateGoLive: vi.fn(async () => preflight),
+      runGoLiveConfirmation: vi.fn(
+        async (): Promise<GoLiveConfirmOutcome> => ({
+          kind: 'started',
+          started: true,
+          streaming: twoOn
+        })
+      ),
+      settlePreparedPlatformLifecycle: vi.fn(async () => undefined),
+      startOnReadyDestinations: vi.fn(async () => true),
+      ...overrides
+    }
+  }
+
+  it('refuses before the preflight when the Studio cannot go live now', async () => {
+    const cases: [Partial<HeadlessGoLiveStudio>, string][] = [
+      [{ connected: false, wsStatus: 'connecting' }, "Starting Videorc's capture engine…"],
+      [
+        { recording: { state: 'recording', message: 'Recording.' } },
+        START_BLOCKED_COPY.sessionRunning
+      ],
+      [{ dialogOpen: true }, HEADLESS_GO_LIVE_COPY.dialogOpen],
+      [{ goLiveConfirmationPending: true }, HEADLESS_GO_LIVE_COPY.inFlight],
+      [
+        { openGoLiveConfirmationInFlightRef: { current: Promise.resolve() } },
+        HEADLESS_GO_LIVE_COPY.inFlight
+      ],
+      [{ sessionStartInFlightRef: { current: {} } }, HEADLESS_GO_LIVE_COPY.inFlight]
+    ]
+    for (const [overrides, message] of cases) {
+      const fake = studio(overrides)
+      expect(await goLiveWithoutDialog({}, fake)).toEqual({ ok: false, message })
+      expect(fake.runGoLivePreflight).not.toHaveBeenCalled()
+    }
+  })
+
+  it("owns the transport for the dialog's preflight and releases it", async () => {
+    let release: () => void = () => undefined
+    const fake = studio({
+      runGoLivePreflight: vi.fn(
+        () =>
+          new Promise<{ kind: 'refused'; reason: string }>((resolve) => {
+            release = () => resolve({ kind: 'refused', reason: 'Turn on a destination.' })
+          })
+      )
+    })
+    const outcome = goLiveWithoutDialog({ title: 'From the agent' }, fake)
+    await vi.waitFor(() => expect(fake.runGoLivePreflight).toHaveBeenCalled())
+    // Record, ⌘K and the remotes wait while it checks (B-7).
+    expect(fake.setGoLiveConfirmationPending).toHaveBeenLastCalledWith(true)
+    expect(fake.openGoLiveConfirmationInFlightRef.current).not.toBeNull()
+    // The call's title rides the draft the preflight saves.
+    expect(vi.mocked(fake.runGoLivePreflight).mock.calls[0]?.[2]).toEqual({
+      ...draft,
+      title: 'From the agent'
+    })
+    release()
+    expect(await outcome).toEqual({ ok: false, message: 'Turn on a destination.' })
+    expect(fake.setGoLiveConfirmationPending).toHaveBeenLastCalledWith(false)
+    expect(fake.openGoLiveConfirmationInFlightRef.current).toBeNull()
+    expect(fake.runGoLiveConfirmation).not.toHaveBeenCalled()
+  })
+
+  it('says the last livestream is still settling', async () => {
+    const fake = studio({ runGoLivePreflight: vi.fn(async () => ({ kind: 'settling' as const })) })
+    expect(await goLiveWithoutDialog({}, fake)).toEqual({
+      ok: false,
+      message: LIVESTREAM_STILL_SETTLING
+    })
+  })
+
+  it("confirms through the dialog's own confirm and reports where it went live", async () => {
+    const fake = studio()
+    expect(await goLiveWithoutDialog({ withoutCaptions: true }, fake)).toEqual({
+      ok: true,
+      destinations: [
+        { id: 'youtube-1', platform: 'youtube', label: 'YouTube' },
+        { id: 'twitch-1', platform: 'twitch', label: 'Twitch' }
+      ],
+      recording: defaultCaptureConfig.recordEnabled
+    })
+    expect(fake.setSuppressCaptionsForSession).toHaveBeenCalledWith(true)
+    expect(fake.runGoLiveConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({ excludedTargetIds: [], draft, suppressCaptions: true })
+    )
+  })
+
+  it('refuses a partial setup without allowPartial and cleans up what was prepared', async () => {
+    const setup = {
+      streaming: twoOn,
+      failures: [
+        { targetId: 'twitch-1', platform: 'twitch' as const, label: 'Twitch', message: 'Offline.' }
+      ],
+      readyLabels: ['YouTube']
+    }
+    const fake = studio({
+      runGoLiveConfirmation: vi.fn(
+        async (): Promise<GoLiveConfirmOutcome> => ({
+          kind: 'partial',
+          setup
+        })
+      )
+    })
+    const outcome = await goLiveWithoutDialog({}, fake)
+    expect(outcome.ok).toBe(false)
+    expect(fake.settlePreparedPlatformLifecycle).toHaveBeenCalledWith(twoOn)
+    expect(fake.startOnReadyDestinations).not.toHaveBeenCalled()
+
+    const partial = studio({
+      runGoLiveConfirmation: vi.fn(
+        async (): Promise<GoLiveConfirmOutcome> => ({
+          kind: 'partial',
+          setup
+        })
+      )
+    })
+    expect((await goLiveWithoutDialog({ allowPartial: true }, partial)).ok).toBe(true)
+    expect(partial.startOnReadyDestinations).toHaveBeenCalledWith({
+      setup,
+      suppressCaptions: false
     })
   })
 })
