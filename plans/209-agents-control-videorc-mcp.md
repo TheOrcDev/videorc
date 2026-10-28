@@ -45,9 +45,12 @@
 | S21   | `smoke:buddy-act` and the gates                                    | D   | DONE  |
 | S22   | One-click Connect, Claude Desktop extension, MCP prompts           | E   | DONE  |
 
-- **Status**: PLANNED 2026-10-27. The owner answered the four shaping
-  questions the same day (see Owner answers). The remaining decisions below
-  carry recommendations; Open questions lists the four worth a second look.
+- **Status**: BUILT 2026-10-28, all 23 slices in one desktop PR (owner:
+  "execute the entire plan and create a pr") plus the videorc.com PR for
+  S17 and the agents page (deploy the web PR first). Local gates and smokes
+  green (see As built, Gates and Review fixes). Owed: the owner acceptance
+  below, the packaged by-eye in both themes, the planner's live eval
+  (p50/p95), and Windows/Linux runs. Open questions lists the owner calls.
 - **Priority**: P1 (owner request, 2026-10-27).
 - **Effort**: XL in total. PR A is L (a new listener, role, binary and
   settings section, plus a refactor of the remote executor). PR B is L
@@ -1011,6 +1014,17 @@ On the packaged app, with a test channel:
    in PR A?
 4. **D11**: notices for the six big actions only. Or one for every agent
    action, or none?
+5. **D14, as built**: Buddy's spoken stop also asks while only recording
+   ("Stop the recording? Say 'Buddy, yes'."), and the go-live and stop yes
+   needs the wake word ("Buddy, yes"; review fix #17). Keep both?
+6. **S18, as built**: Buddy's banner commands run through the agent tools;
+   highlight, clear, removal and voice markers keep their engine path and are
+   only logged in Activity as Buddy (`smoke:buddy-commands` must stay
+   unchanged). Move them too in a later PR?
+7. **D22, as built**: a named place keeps the item's current size (the
+   inspector's snap button resets it), and camera or screen moves off a
+   corner are refused while recording or live (the canvas allows no source
+   drag then). Keep?
 
 ## As built
 

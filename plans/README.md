@@ -14,9 +14,12 @@
   deletes go to the Trash, and YouTube removals still wait for a click (API
   policy). Free; Buddy's tool use is Premium, triggered only by the
   streamer's voice or `/buddy`, through a new videorc.com planner whose
-  calls the desktop checks against Buddy's subset. Five PRs (A to E).
-  **PLANNED**; four questions open (Buddy's spoken confirms, the picture,
-  one-click Connect, notices).
+  calls the desktop checks against Buddy's subset.
+  **BUILT** 2026-10-28 as one desktop PR (all 23 slices, plus one-click
+  Connect, a `.mcpb` and two MCP prompts) and a videorc.com PR (the planner
+  route and an agents page; deploy it first). Local gates and smokes green;
+  owner acceptance, packaged by-eye, the planner's live eval and
+  Windows/Linux runs owed; seven owner questions open.
 - 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
   colours. Owner request: redesign Videorc's colour after the Welcome
   screen's Liquid Chrome, metallic black with its shine, and the other way
@@ -38,6 +41,7 @@
   glass for one release. Gates in the
   [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
   the owner's by-eye in both themes and a Windows pass are owed.
+
 - 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
   steps 2 to 5. Owner request: after permissions, "What are you making?",
   "Your look", "Sound check" and "Where you stream". The goal (Recordings,
