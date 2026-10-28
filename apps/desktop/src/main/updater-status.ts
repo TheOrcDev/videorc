@@ -12,7 +12,8 @@ export type UpdaterEvent =
   | { type: 'progress'; percent: number }
   | { type: 'downloaded'; version: string }
   | { type: 'error'; message: string }
-  | { type: 'unsupported'; reason?: 'windows-feed-unpublished' }
+  | { type: 'download-available'; version: string }
+  | { type: 'unsupported'; reason?: 'windows-feed-unpublished' | 'linux-version-unknown' }
 
 // electron-updater surfaces an unpublished feed — no `latest*.yml` for this
 // build's platform/channel — as a 404 / "Cannot find channel" error. That is
@@ -61,6 +62,8 @@ export function updateStatusFromEvent(event: UpdaterEvent): UpdateStatus {
       return { phase: 'downloaded', version: event.version }
     case 'error':
       return { phase: 'error', message: event.message }
+    case 'download-available':
+      return { phase: 'download-available', version: event.version }
     case 'unsupported':
       return event.reason
         ? { phase: 'unsupported', reason: event.reason }
@@ -92,21 +95,26 @@ export const BACKGROUND_RECHECK_INTERVAL_MS = 30 * 60 * 1000
 // flight, never once an update is staged (it applies on the next quit), and
 // never when updates are unsupported — except a Windows build whose feed is not
 // published yet: signing in or a public Alpha can open one at any time, and the
-// check is one small yml fetch. 'available' with no download running means the
-// background download failed — re-checking retries it.
+// check is one small yml fetch — and Linux, whose notice check keeps watching
+// for the next release (or for videorc.com to answer at all). 'available' with
+// no download running means the background download failed — re-checking
+// retries it.
 export function shouldBackgroundRecheck(status: UpdateStatus): boolean {
   switch (status.phase) {
     case 'idle':
     case 'not-available':
     case 'error':
     case 'available':
+    case 'download-available':
       return true
     case 'checking':
     case 'downloading':
     case 'downloaded':
       return false
     case 'unsupported':
-      return status.reason === 'windows-feed-unpublished'
+      return (
+        status.reason === 'windows-feed-unpublished' || status.reason === 'linux-version-unknown'
+      )
   }
 }
 

@@ -71,6 +71,23 @@ describe('updateRowView (plan 174 I-20)', () => {
     })
   })
 
+  it('sends a Linux build to the downloads page for a newer release, never a download', () => {
+    expect(
+      updateRowView({ phase: 'download-available', version: '0.15.0-alpha.1' }, false)
+    ).toEqual({
+      kind: 'row',
+      description: 'Videorc 0.15.0-alpha.1 is available. Download it from videorc.com.',
+      control: { kind: 'link', label: 'Open downloads page', link: 'download' }
+    })
+    const unknown = updateRowView({ phase: 'unsupported', reason: 'linux-version-unknown' }, false)
+    expect(unknown).toMatchObject({
+      kind: 'row',
+      control: { kind: 'link', label: 'Open downloads page', link: 'download' }
+    })
+    // Not knowing is never "You're on the latest version".
+    expect(unknown.kind === 'row' && unknown.description).not.toMatch(/latest/)
+  })
+
   it('offers Check again once up to date', () => {
     expect(updateRowView({ phase: 'not-available', currentVersion: '1.1.0' }, false)).toEqual({
       kind: 'row',

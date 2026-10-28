@@ -88,8 +88,23 @@ describe('updater status mapping', () => {
     expect(
       shouldBackgroundRecheck({ phase: 'unsupported', reason: 'windows-feed-unpublished' })
     ).toBe(true)
+    // Linux keeps asking videorc.com: after an offline launch, and for the
+    // release after the one it already announces.
+    expect(shouldBackgroundRecheck({ phase: 'unsupported', reason: 'linux-version-unknown' })).toBe(
+      true
+    )
+    expect(shouldBackgroundRecheck({ phase: 'download-available', version: '1.2.3' })).toBe(true)
 
     expect(BACKGROUND_RECHECK_INTERVAL_MS).toBe(30 * 60 * 1000)
+  })
+
+  it('maps a Linux notice to its own phase, never a download', () => {
+    expect(
+      updateStatusFromEvent({ type: 'download-available', version: '0.15.0-alpha.1' })
+    ).toEqual({ phase: 'download-available', version: '0.15.0-alpha.1' })
+    expect(shouldAutoDownload({ phase: 'download-available', version: '0.15.0-alpha.1' })).toBe(
+      false
+    )
   })
 
   it('auto-downloads only when an update is available', () => {
