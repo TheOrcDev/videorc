@@ -127,6 +127,7 @@ mod scheduled_streams_service;
 mod scheduled_x;
 mod scheduled_youtube;
 mod screen_capture;
+mod screen_privacy;
 mod secrets;
 #[cfg(test)]
 mod served_page_palette;

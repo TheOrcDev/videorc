@@ -58,7 +58,7 @@ objc2-core-audio-types = { version = "0.3.2", default-features = false, features
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2", "objc2-core-audio-types", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal", "objc2-io-surface"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSValue"] }
-objc2-io-surface = { version = "0.3.2", default-features = false, features = ["IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
+objc2-io-surface = { version = "0.3.2", default-features = false, features = ["IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }
 # `objc2-core-foundation` exposes MTLCommandBuffer GPUStartTime/GPUEndTime: the
 # live background guard times its own command buffer with them (plan 190).
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLBlitCommandEncoder", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "MTLBuffer", "MTLVertexDescriptor", "MTLArgument", "MTLDepthStencil", "MTLSampler", "MTLDrawable", "objc2-io-surface", "objc2-core-foundation"] }

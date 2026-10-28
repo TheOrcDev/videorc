@@ -4951,6 +4951,39 @@ pub struct ScreenIdParams {
     pub screen_id: String,
 }
 
+/// Who hid the screen (plan 210 D9/D11): the streamer, or the password-manager
+/// list acting on their behalf. Only the streamer's own surfaces show it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenPrivacyReason {
+    You,
+    PasswordManager,
+}
+
+/// Hide screen state (plan 210 S7), in memory only and cleared at launch.
+/// `screen.privacy.get` returns it, `screen.privacy.changed` carries it on
+/// every hide and show. Absent fields are omitted, never `null`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPrivacy {
+    pub hidden: bool,
+    /// RFC 3339, the moment of the hide; present only while hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ScreenPrivacyReason>,
+    /// Why `screen.hide` would be refused right now (a legacy FFmpeg session
+    /// reads the display through FFmpeg itself); absent when it would work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenHideParams {
+    pub reason: ScreenPrivacyReason,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameScreenParams {
