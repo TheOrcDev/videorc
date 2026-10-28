@@ -4,7 +4,9 @@ import { constants as fsConstants, promises as fsPromises } from 'node:fs'
 import { posix, win32 } from 'node:path'
 
 import {
+  AGENT_BRIDGE_MOVE_FIRST,
   AGENT_SERVER_NAME,
+  agentBridgeRunsFromTemporaryCopy,
   agentClaudeCodeAddArgs,
   agentCodexTomlLines,
   agentJsonRootKey,
@@ -29,8 +31,10 @@ import { mergeCodexToml } from './agent-config-toml'
 //   copy the line instead;
 // - a timestamped backup beside the file before every change, and the new
 //   file written beside it and renamed over it (a crash leaves the old file
-//   or the new one, never half of one), keeping its permissions; a new file
-//   is owner-only, since it holds the agent's token;
+//   or the new one, never half of one);
+// - on macOS and Linux the file is owner-only (0600) once it holds a token,
+//   and so are its backups, which may hold an earlier one (review #13); only
+//   the newest 3 of Videorc's backups beside a file are kept;
 // - a symlinked config (dotfiles) is written through to its target.
 
 /** `claude mcp add` gets this long; the CLI answers in well under a second. */
@@ -67,6 +71,8 @@ export interface AgentConfigEnvironment {
   homeDir: string
   /** `%APPDATA%` (Windows). */
   appData?: string
+  /** `%LOCALAPPDATA%` (Windows), where Store apps keep their packages. */
+  localAppData?: string
   /** `$XDG_CONFIG_HOME` (Linux). */
   xdgConfigHome?: string
   /** `$CODEX_HOME`, where Codex keeps config.toml when it is set. */
@@ -116,6 +122,39 @@ export function agentConfigTarget(
         file: path.join(environment.codexHome || path.join(homeDir, '.codex'), 'config.toml')
       }
   }
+}
+
+/**
+ * Review #21: Claude Desktop from the Microsoft Store (MSIX) reads its
+ * config from its package's private AppData,
+ * `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\`, not
+ * `%APPDATA%\Claude\`. With such a package on this computer its file wins
+ * (the first package by name, should there be two).
+ */
+export async function claudeDesktopMsixConfigFile(
+  environment: AgentConfigEnvironment,
+  fs: Pick<AgentConfigFs, 'readdir'> = nodeAgentConfigFs
+): Promise<string | null> {
+  if (environment.platform !== 'win32') return null
+  const local = environment.localAppData || win32.join(environment.homeDir, 'AppData', 'Local')
+  const packages = win32.join(local, 'Packages')
+  const names = await fs.readdir(packages).catch(() => [] as string[])
+  const claude = names.filter((name) => /^Claude_/i.test(name)).sort()[0]
+  return claude
+    ? win32.join(packages, claude, 'LocalCache', 'Roaming', 'Claude', 'claude_desktop_config.json')
+    : null
+}
+
+/** `agentConfigTarget`, looking on disk for what the path alone can't say. */
+export async function resolveAgentConfigTarget(
+  app: AgentConfigApp,
+  environment: AgentConfigEnvironment,
+  fs: Pick<AgentConfigFs, 'readdir'> = nodeAgentConfigFs
+): Promise<AgentConfigTarget> {
+  const target = agentConfigTarget(app, environment)
+  if (app !== 'claude-desktop') return target
+  const msix = await claudeDesktopMsixConfigFile(environment, fs)
+  return msix ? { ...target, file: msix } : target
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +223,8 @@ export interface AgentConfigFs {
   rename: (from: string, to: string) => Promise<void>
   rm: (path: string) => Promise<void>
   access: (path: string, mode: number) => Promise<void>
+  readdir: (path: string) => Promise<string[]>
+  chmod: (path: string, mode: number) => Promise<void>
 }
 
 export const nodeAgentConfigFs: AgentConfigFs = {
@@ -204,7 +245,9 @@ export const nodeAgentConfigFs: AgentConfigFs = {
   },
   rename: (from, to) => fsPromises.rename(from, to),
   rm: (path) => fsPromises.rm(path, { force: true }),
-  access: (path, mode) => fsPromises.access(path, mode)
+  access: (path, mode) => fsPromises.access(path, mode),
+  readdir: (path) => fsPromises.readdir(path),
+  chmod: (path, mode) => fsPromises.chmod(path, mode)
 }
 
 const errorCode = (error: unknown): string | undefined =>
@@ -218,19 +261,62 @@ export function backupStamp(now: Date): string {
   return `${iso.slice(0, 10).replaceAll('-', '')}-${iso.slice(11, 19).replaceAll(':', '')}`
 }
 
-/** A copy of `file` beside it, never over an earlier backup. */
-async function backUp(fs: AgentConfigFs, file: string, now: Date): Promise<string> {
+/** A file holding a token is owner-only, on the platforms with modes. */
+const OWNER_ONLY = 0o600
+
+/** Videorc's backups kept beside each config file (review #13). */
+export const AGENT_CONFIG_BACKUPS_KEPT = 3
+
+/** A copy of `file` beside it, never over an earlier backup; owner-only
+ * where modes exist, since it may hold an earlier agent's token. */
+async function backUp(
+  fs: AgentConfigFs,
+  file: string,
+  now: Date,
+  platform: NodeJS.Platform
+): Promise<string> {
   const base = `${file}.videorc-backup-${backupStamp(now)}`
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`
     try {
       await fs.copyFile(file, candidate, fsConstants.COPYFILE_EXCL)
+      if (platform !== 'win32') await fs.chmod(candidate, OWNER_ONLY)
       return candidate
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') throw error
     }
   }
   throw new Error(`Too many backups of ${file} this second.`)
+}
+
+/** `<stamp>` or `<stamp>-<n>` after `.videorc-backup-`. */
+const BACKUP_SUFFIX = /^(\d{8}-\d{6})(?:-(\d+))?$/
+
+/**
+ * Only the newest `AGENT_CONFIG_BACKUPS_KEPT` of Videorc's own backups beside
+ * `file` stay, owner-only; older ones go. Names Videorc didn't make are never
+ * touched.
+ */
+export async function pruneAgentConfigBackups(
+  fs: AgentConfigFs,
+  file: string,
+  platform: NodeJS.Platform
+): Promise<void> {
+  const path = pathFor(platform)
+  const dir = path.dirname(file)
+  const prefix = `${path.basename(file)}.videorc-backup-`
+  const backups = (await fs.readdir(dir))
+    .flatMap((name) => {
+      const match = name.startsWith(prefix) ? BACKUP_SUFFIX.exec(name.slice(prefix.length)) : null
+      return match ? [{ name, stamp: match[1], copy: Number(match[2] ?? 1) }] : []
+    })
+    // Newest first: by the stamp, then by the copy number within a second.
+    .sort((a, b) => (a.stamp === b.stamp ? b.copy - a.copy : a.stamp < b.stamp ? 1 : -1))
+  for (const [index, backup] of backups.entries()) {
+    const backupPath = path.join(dir, backup.name)
+    if (index >= AGENT_CONFIG_BACKUPS_KEPT) await fs.rm(backupPath)
+    else if (platform !== 'win32') await fs.chmod(backupPath, OWNER_ONLY)
+  }
 }
 
 /** Write `text` beside `file`, then rename it over `file`. */
@@ -318,11 +404,34 @@ export async function writeAgentConfig(
       }
       merged = result
     }
-    if (!merged.changed) return { outcome: 'unchanged', file }
+    // Review #13: a file holding a token is owner-only where modes exist
+    // (another app's 0644 config included); Windows keeps its ACLs.
+    const holdsToken = platform !== 'win32' && merged.text.includes(connection.token)
+    if (!merged.changed) {
+      if (holdsToken && (mode & 0o077) !== 0) {
+        await fs
+          .chmod(file, OWNER_ONLY)
+          .catch((error: unknown) =>
+            log(
+              `Couldn't make ${file} owner-only: ${error instanceof Error ? error.message : String(error)}`
+            )
+          )
+      }
+      return { outcome: 'unchanged', file }
+    }
 
     const backup =
-      existing === null ? null : await backUp(fs, file, (deps.now ?? (() => new Date()))())
-    await replaceAtomically(fs, file, merged.text, mode, platform)
+      existing === null
+        ? null
+        : await backUp(fs, file, (deps.now ?? (() => new Date()))(), platform)
+    await replaceAtomically(fs, file, merged.text, holdsToken ? OWNER_ONLY : mode, platform)
+    if (backup) {
+      await pruneAgentConfigBackups(fs, file, platform).catch((error: unknown) =>
+        log(
+          `Couldn't tidy the backups of ${file}: ${error instanceof Error ? error.message : String(error)}`
+        )
+      )
+    }
     return { outcome: 'added', file, backup }
   } catch (error) {
     log(
@@ -517,12 +626,17 @@ export async function addAgentToApp(
   environment: AgentAddEnvironment,
   deps: AgentConfigInstallDeps & ClaudeCodeInstallDeps = {}
 ): Promise<AgentAddResult> {
+  // Review #19: a line naming a disk image or macOS's temporary copy breaks
+  // at the next launch, so nothing is written.
+  if (agentBridgeRunsFromTemporaryCopy(connection.bridgePath)) {
+    return { added: false, message: AGENT_BRIDGE_MOVE_FIRST }
+  }
   if (app === 'claude-code') {
     const install = await addToClaudeCode(connection, environment, deps)
     return { added: install.outcome === 'added', message: claudeCodeInstallMessage(install) }
   }
   const write = await writeAgentConfig(
-    agentConfigTarget(app, environment),
+    await resolveAgentConfigTarget(app, environment, deps.fs),
     connection,
     environment.platform,
     deps

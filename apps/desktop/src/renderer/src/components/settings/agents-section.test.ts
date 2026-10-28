@@ -390,6 +390,27 @@ describe('Connect an agent… (plan 209 S7, D6)', () => {
     expect(byTestId('connect-agent-dialog')!.textContent).toContain('missing its agent bridge')
   })
 
+  it('refuses to connect while Videorc runs from a disk image (review #19)', async () => {
+    const dmg = '/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp'
+    mocked.snapshot = snapshot({ bridge: { path: dmg, exists: true }, connectOpen: true })
+    await render()
+    expect(byTestId('connect-agent-move-first')!.textContent).toContain(
+      'Move Videorc to Applications first.'
+    )
+    expect((byTestId('connect-agent-create') as HTMLButtonElement).disabled).toBe(true)
+
+    // The path Connect prepares is checked too: no token, no line.
+    mocked.snapshot = snapshot({ connectOpen: true })
+    mocked.actions.prepareBridge = vi.fn(async () => ({ path: dmg, exists: true }))
+    await render()
+    await act(async () => byTestId('connect-agent-create')!.click())
+    expect(mocked.actions.create).not.toHaveBeenCalled()
+    expect(byTestId('connect-agent-line')).toBeNull()
+    expect(byTestId('connect-agent-dialog')!.textContent).toContain(
+      'Move Videorc to Applications first.'
+    )
+  })
+
   it("shows the backend's refusal under the name", async () => {
     mocked.actions.create = vi.fn(async () => {
       throw Object.assign(new Error('16 agents are connected. Remove one first.'), {

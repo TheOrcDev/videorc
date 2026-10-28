@@ -3,9 +3,10 @@ import { describe, expect, it } from 'vitest'
 import { AGENT_TOOL_CATALOG } from '../../../shared/agent-tools'
 import {
   AGENT_APPS,
+  AGENT_BRIDGE_MOVE_FIRST,
   AGENT_SERVER_NAME,
   AGENT_TOKEN_ENV,
-  agentBridgePathWarning,
+  agentBridgePathRefusal,
   agentConnectLine,
   agentConnectLineDisplay,
   defaultAgentName,
@@ -141,16 +142,20 @@ describe('agent connect lines (plan 209 S7, D6)', () => {
     expect(agentConnectLineDisplay(line, TOKEN, true)).toBe(line.text)
   })
 
-  it('warns when Videorc runs from a disk image or a translocated copy', () => {
-    expect(agentBridgePathWarning(MAC)).toBeNull()
-    expect(agentBridgePathWarning(WINDOWS)).toBeNull()
+  it('refuses a bridge on a disk image or in a translocated copy (review #19)', () => {
+    expect(agentBridgePathRefusal(MAC)).toBeNull()
+    expect(agentBridgePathRefusal(WINDOWS)).toBeNull()
     expect(
-      agentBridgePathWarning('/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp')
-    ).toMatch(/Move Videorc to Applications/)
+      agentBridgePathRefusal('/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp')
+    ).toBe('Move Videorc to Applications first.')
     expect(
-      agentBridgePathWarning(
+      agentBridgePathRefusal(
         '/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp'
       )
-    ).toMatch(/temporary copy/)
+    ).toBe(AGENT_BRIDGE_MOVE_FIRST)
+    // An external drive's own Applications folder stays put.
+    expect(
+      agentBridgePathRefusal('/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp')
+    ).toBeNull()
   })
 })

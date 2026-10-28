@@ -1,7 +1,7 @@
 import { CopyIcon, PreviewIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
-import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -27,8 +27,9 @@ import { SectionLabel } from '@/components/section-label'
 import type { AgentsActions } from '@/lib/agents-store'
 import {
   AGENT_APPS,
+  AGENT_BRIDGE_MOVE_FIRST_DETAIL,
   agentAppLabel,
-  agentBridgePathWarning,
+  agentBridgePathRefusal,
   agentConnectLine,
   agentConnectLineDisplay,
   defaultAgentName,
@@ -118,8 +119,9 @@ function ChooseStep({
   const [error, setError] = useState<string | null>(null)
   const name = typedName ?? defaultAgentName(app)
   const bridgeMissing = bridge !== null && !bridge.exists
-  const pathWarning = bridge?.exists ? agentBridgePathWarning(bridge.path) : null
-  const canConnect = name.trim().length > 0 && !pending && !bridgeMissing
+  // Review #19: a path that moves never gets a token or a line.
+  const pathRefusal = bridge?.exists ? agentBridgePathRefusal(bridge.path) : null
+  const canConnect = name.trim().length > 0 && !pending && !bridgeMissing && !pathRefusal
 
   const connect = async (): Promise<void> => {
     setPending(true)
@@ -130,6 +132,11 @@ function ChooseStep({
       const prepared = await actions.prepareBridge()
       if (!prepared.exists) {
         setError(AGENT_BRIDGE_MISSING)
+        return
+      }
+      const refusal = agentBridgePathRefusal(prepared.path)
+      if (refusal) {
+        setError(refusal)
         return
       }
       if (!enabled) await actions.enable()
@@ -208,9 +215,10 @@ function ChooseStep({
           <Alert className="mt-4" variant="warning">
             <AlertTitle>{AGENT_BRIDGE_MISSING}</AlertTitle>
           </Alert>
-        ) : pathWarning ? (
-          <Alert className="mt-4" variant="warning">
-            <AlertTitle>{pathWarning}</AlertTitle>
+        ) : pathRefusal ? (
+          <Alert className="mt-4" data-testid="connect-agent-move-first" variant="warning">
+            <AlertTitle>{pathRefusal}</AlertTitle>
+            <AlertDescription>{AGENT_BRIDGE_MOVE_FIRST_DETAIL}</AlertDescription>
           </Alert>
         ) : null}
       </DialogBody>

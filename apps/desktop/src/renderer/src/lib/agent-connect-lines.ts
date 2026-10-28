@@ -1,7 +1,9 @@
 import type { AgentClientKind } from '@/lib/backend'
 import {
+  AGENT_BRIDGE_MOVE_FIRST,
   AGENT_SERVER_NAME,
   AGENT_TOKEN_ENV,
+  agentBridgeRunsFromTemporaryCopy,
   agentClaudeCodeAddArgs,
   agentCodexTomlLines,
   agentJsonRootKey,
@@ -15,7 +17,12 @@ import {
 // Electron main, which writes the same ones for "Add to …" (S22). Pure: no
 // DOM, no backend client.
 
-export { AGENT_SERVER_NAME, AGENT_TOKEN_ENV, tomlString } from '../../../shared/agent-config-entry'
+export {
+  AGENT_BRIDGE_MOVE_FIRST,
+  AGENT_SERVER_NAME,
+  AGENT_TOKEN_ENV,
+  tomlString
+} from '../../../shared/agent-config-entry'
 
 /** The apps Connect knows, in the order the picker lists them. */
 export const AGENT_APPS: ReadonlyArray<{ id: AgentClientKind; label: string }> = [
@@ -155,14 +162,16 @@ export function agentConnectLineDisplay(
   return shown || !token ? line.text : line.text.replaceAll(token, maskedAgentToken(token))
 }
 
+/** Why Connect refuses a bridge path that moves, under its title. */
+export const AGENT_BRIDGE_MOVE_FIRST_DETAIL =
+  "Videorc is running from a disk image or a temporary copy, so an agent's line would stop working. Open it from Applications, then connect."
+
 /**
  * Videorc runs from somewhere that moves (a disk image, or macOS's
  * temporary copy of an app that was never moved out of Downloads): a line
- * pointing there breaks later. The sentence that says so, or null.
+ * pointing there breaks later, so Connect refuses (review #19) and main's
+ * "Add to …" does too. The refusal, or null.
  */
-export function agentBridgePathWarning(path: string): string | null {
-  if (path.includes('/AppTranslocation/') || path.startsWith('/Volumes/')) {
-    return 'Videorc is running from a disk image or a temporary copy, so this path will stop working. Move Videorc to Applications, open it from there, then connect.'
-  }
-  return null
+export function agentBridgePathRefusal(path: string): string | null {
+  return agentBridgeRunsFromTemporaryCopy(path) ? AGENT_BRIDGE_MOVE_FIRST : null
 }

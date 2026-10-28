@@ -9360,6 +9360,7 @@ async function addAgentToInstalledApp(app: AgentAddApp, token: string): Promise<
       platform: process.platform,
       homeDir: homedir(),
       appData: process.env.APPDATA,
+      localAppData: process.env.LOCALAPPDATA,
       xdgConfigHome: process.env.XDG_CONFIG_HOME,
       codexHome: process.env.CODEX_HOME,
       pathVariable: process.env.PATH ?? process.env.Path
@@ -9376,7 +9377,9 @@ function agentBridgeLocation(): AgentBridgeLocation {
     resourcesPath: process.resourcesPath,
     workspaceRoot: workspaceRoot(),
     cargoProfile: devBackendCargoProfile(),
-    homeDir: homedir()
+    homeDir: homedir(),
+    localAppData: process.env.LOCALAPPDATA,
+    appExecutable: process.execPath
   }
 }
 
@@ -15656,8 +15659,9 @@ app.whenReady().then(async () => {
   installRendererSessionPermissions(session.defaultSession)
   moveLegacyBuddyAssetsOnce()
   scheduleStaleHttpCacheCleanup()
-  // Plan 209 D20: a Linux agent app runs the bridge copied out of the
-  // AppImage; after an update that copy is the old version, so refresh it.
+  // Plan 209 D20 and review #8: a Linux or Windows agent app runs the bridge
+  // copied out of the AppImage or the install; after an update that copy is
+  // the old version, so refresh it.
   void refreshAgentBridgeCopy(agentBridgeLocation()).catch((error: unknown) =>
     logBackend('warn', `Couldn't refresh the agent bridge copy: ${errorMessage(error)}`)
   )
@@ -15766,7 +15770,8 @@ app.whenReady().then(async () => {
     revealSupportBundle(path)
   )
   // Settings → Remote → Agents (plan 209 S7): the bridge's absolute path for
-  // the config line; Connect (`install`) puts the Linux copy in place (D20).
+  // the config line; Connect (`install`) puts the Linux or Windows copy in
+  // place (D20, review #8).
   secureIpcHandle('agents:bridge', (_event, install: unknown) =>
     resolveAgentBridge(agentBridgeLocation(), install === true)
   )

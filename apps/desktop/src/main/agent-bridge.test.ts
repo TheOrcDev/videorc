@@ -1,19 +1,22 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  AGENT_BRIDGE_APP_POINTER,
   agentBridgeUsesCopy,
   bundledAgentBridgePath,
   installAgentBridgeCopy,
   linuxAgentBridgeCopyPath,
   refreshAgentBridgeCopy,
   resolveAgentBridge,
+  windowsAgentBridgeCopyPath,
   type AgentBridgeFs,
   type AgentBridgeLocation
 } from './agent-bridge'
 
-// Plan 209 S7 (D6, D20): the path a config line names. macOS and Windows
-// point at the app's own copy; Linux copies it out of the AppImage and
-// refreshes that copy after an update; development uses the cargo build.
+// Plan 209 S7 (D6, D20): the path a config line names. macOS points at the
+// app's own copy; Linux copies it out of the AppImage and Windows out of the
+// install (review #8), and both refresh that copy after an update;
+// development uses the cargo build.
 
 const MAC: AgentBridgeLocation = {
   packaged: true,
@@ -29,7 +32,9 @@ const WINDOWS: AgentBridgeLocation = {
   resourcesPath: 'C:\\Users\\Ana\\AppData\\Local\\Programs\\Videorc\\resources',
   workspaceRoot: 'C:\\Users\\Ana\\AppData\\Local\\Programs\\Videorc',
   cargoProfile: 'debug',
-  homeDir: 'C:\\Users\\Ana'
+  homeDir: 'C:\\Users\\Ana',
+  localAppData: 'C:\\Users\\Ana\\AppData\\Local',
+  appExecutable: 'D:\\Apps\\Videorc\\Videorc.exe'
 }
 const LINUX: AgentBridgeLocation = {
   packaged: true,
@@ -63,13 +68,14 @@ function memoryFs(files: Record<string, string>) {
       store.set(to, store.get(from)!)
       store.delete(from)
     }),
-    rm: vi.fn(async (path: string) => void store.delete(path))
+    rm: vi.fn(async (path: string) => void store.delete(path)),
+    writeFile: vi.fn(async (path: string, text: string) => void store.set(path, Buffer.from(text)))
   }
   return { fs, store }
 }
 
 describe('the agent bridge path (plan 209 S7, D20)', () => {
-  it("points macOS and Windows at the app's own bridge", () => {
+  it("points macOS at the app's own bridge, and Windows at a copy outside the install", () => {
     expect(bundledAgentBridgePath(MAC)).toBe(
       '/Applications/Videorc.app/Contents/Resources/videorc-mcp'
     )
@@ -77,7 +83,15 @@ describe('the agent bridge path (plan 209 S7, D20)', () => {
       'C:\\Users\\Ana\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe'
     )
     expect(agentBridgeUsesCopy(MAC)).toBe(false)
-    expect(agentBridgeUsesCopy(WINDOWS)).toBe(false)
+    expect(agentBridgeUsesCopy(WINDOWS)).toBe(true)
+    expect(agentBridgeUsesCopy({ ...WINDOWS, packaged: false })).toBe(false)
+    expect(windowsAgentBridgeCopyPath('C:\\Users\\Ana', 'E:\\Local')).toBe(
+      'E:\\Local\\Videorc\\bin\\videorc-mcp.exe'
+    )
+    // %LOCALAPPDATA% unset: the profile's own.
+    expect(windowsAgentBridgeCopyPath('C:\\Users\\Ana')).toBe(
+      'C:\\Users\\Ana\\AppData\\Local\\Videorc\\bin\\videorc-mcp.exe'
+    )
   })
 
   it("points development at the repo's cargo build", () => {
@@ -137,6 +151,85 @@ describe('the agent bridge path (plan 209 S7, D20)', () => {
     expect(current.fs.copyFile).not.toHaveBeenCalled()
 
     await expect(refreshAgentBridgeCopy(MAC, current.fs)).resolves.toBe('skipped')
+  })
+
+  it('copies the Windows bridge out of the install on Connect and names Videorc beside it', async () => {
+    const bundled = bundledAgentBridgePath(WINDOWS)
+    const copy = 'C:\\Users\\Ana\\AppData\\Local\\Videorc\\bin\\videorc-mcp.exe'
+    const pointer = `C:\\Users\\Ana\\AppData\\Local\\Videorc\\bin\\${AGENT_BRIDGE_APP_POINTER}`
+    const { fs, store } = memoryFs({ [bundled]: 'v1' })
+
+    await expect(resolveAgentBridge(WINDOWS, false, fs)).resolves.toEqual({
+      path: copy,
+      exists: true
+    })
+    expect(store.has(copy)).toBe(false)
+
+    await expect(resolveAgentBridge(WINDOWS, true, fs)).resolves.toEqual({
+      path: copy,
+      exists: true
+    })
+    expect(store.get(copy)?.toString()).toBe('v1')
+    // The folder from the Windows path, not a POSIX reading of it.
+    expect(fs.mkdir).toHaveBeenCalledWith('C:\\Users\\Ana\\AppData\\Local\\Videorc\\bin', {
+      recursive: true,
+      mode: 0o755
+    })
+    expect(store.get(pointer)?.toString()).toBe('D:\\Apps\\Videorc\\Videorc.exe\r\n')
+
+    // After an update: refreshed, and the pointer rewritten only when it moved.
+    store.set(bundled, Buffer.from('v2'))
+    await expect(refreshAgentBridgeCopy(WINDOWS, fs)).resolves.toBe('installed')
+    expect(store.get(copy)?.toString()).toBe('v2')
+    expect(fs.writeFile).toHaveBeenCalledTimes(1)
+    await refreshAgentBridgeCopy({ ...WINDOWS, appExecutable: 'E:\\Videorc\\Videorc.exe' }, fs)
+    expect(store.get(pointer)?.toString()).toBe('E:\\Videorc\\Videorc.exe\r\n')
+  })
+
+  it('moves a Windows copy an agent app is running aside, or keeps it and says busy', async () => {
+    const bundled = bundledAgentBridgePath(WINDOWS)
+    const copy = 'C:\\Users\\Ana\\AppData\\Local\\Videorc\\bin\\videorc-mcp.exe'
+    const running = (path: string): boolean => path === copy
+    const busy = (): Error => Object.assign(new Error('EPERM'), { code: 'EPERM' })
+
+    // Windows won't replace a running .exe but renames one: the running copy
+    // moves aside, the new one takes its name.
+    const swap = memoryFs({ [bundled]: 'v2', [copy]: 'v1' })
+    const rename = swap.fs.rename
+    swap.fs.rename = vi.fn(async (from: string, to: string) => {
+      if (running(to) && swap.store.has(to)) throw busy()
+      return rename(from, to)
+    })
+    // The aside copy is still running, so removing it fails quietly.
+    swap.fs.rm = vi.fn(async (path: string) => {
+      if (path === `${copy}.old`) throw busy()
+      swap.store.delete(path)
+    })
+    await expect(refreshAgentBridgeCopy(WINDOWS, swap.fs)).resolves.toBe('installed')
+    expect(swap.store.get(copy)?.toString()).toBe('v2')
+    expect(swap.store.get(`${copy}.old`)?.toString()).toBe('v1')
+    expect([...swap.store.keys()].some((path) => path.endsWith('.tmp'))).toBe(false)
+
+    // Neither replace nor rename: the old copy stays and still runs.
+    const stuck = memoryFs({ [bundled]: 'v2', [copy]: 'v1' })
+    stuck.fs.rename = vi.fn(async () => {
+      throw busy()
+    })
+    await expect(refreshAgentBridgeCopy(WINDOWS, stuck.fs)).resolves.toBe('busy')
+    expect(stuck.store.get(copy)?.toString()).toBe('v1')
+    expect([...stuck.store.keys()].some((path) => path.endsWith('.tmp'))).toBe(false)
+    // Connect still names the old copy, which works.
+    await expect(resolveAgentBridge(WINDOWS, true, stuck.fs)).resolves.toEqual({
+      path: copy,
+      exists: true
+    })
+
+    // The same error elsewhere is a real failure.
+    const linux = memoryFs({ '/b': 'v2', '/c': 'v1' })
+    linux.fs.rename = vi.fn(async () => {
+      throw busy()
+    })
+    await expect(installAgentBridgeCopy('/b', '/c', linux.fs, 7, 'linux')).rejects.toThrow('EPERM')
   })
 
   it('cleans up its staging file when the copy fails', async () => {

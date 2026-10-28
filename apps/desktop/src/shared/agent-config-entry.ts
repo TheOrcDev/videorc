@@ -15,6 +15,22 @@ export const AGENT_TOKEN_ENV = 'VIDEORC_AGENT_TOKEN'
 /** The shape `agents.create` mints: the prefix and 64 hex characters. */
 export const AGENT_TOKEN_PATTERN = /^vrc_agent_[0-9a-f]{64}$/
 
+/** Plan 209 review #19: what Connect and "Add to …" answer when Videorc runs
+ * from a disk image or macOS's temporary copy of it. */
+export const AGENT_BRIDGE_MOVE_FIRST = 'Move Videorc to Applications first.'
+
+/**
+ * macOS runs this Videorc from somewhere that goes away: an app opened from
+ * Downloads without being moved runs from a per-launch `AppTranslocation`
+ * copy, and an app opened inside its disk image sits at the volume's root
+ * (`/Volumes/Videorc/Videorc.app`). A config line naming either path breaks
+ * at the next launch or eject. An app on an external drive's own folder
+ * (`/Volumes/SSD/Applications/Videorc.app`) stays put and is fine.
+ */
+export function agentBridgeRunsFromTemporaryCopy(path: string): boolean {
+  return path.includes('/AppTranslocation/') || /^\/Volumes\/[^/]+\/[^/]+\.app\//.test(path)
+}
+
 /** The apps whose JSON config takes a `videorc` entry. */
 export type AgentJsonConfigApp = 'claude-desktop' | 'cursor' | 'vs-code'
 

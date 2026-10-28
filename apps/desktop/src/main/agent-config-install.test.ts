@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { agentCodexTomlLines } from '../shared/agent-config-entry'
 import {
+  AGENT_CONFIG_BACKUPS_KEPT,
   addAgentToApp,
   addToClaudeCode,
   agentConfigTarget,
@@ -27,6 +28,7 @@ import {
   claudeCodeInstallMessage,
   mergeJsonConfig,
   nodeAgentConfigFs,
+  resolveAgentConfigTarget,
   writeAgentConfig,
   type AgentConfigTarget,
   type ExecFile
@@ -103,6 +105,50 @@ describe('where each app keeps its servers (plan 209 S22)', () => {
     expect(
       agentConfigTarget('claude-desktop', { platform: 'win32', homeDir: 'C:\\Users\\Ana Lee' }).file
     ).toBe('C:\\Users\\Ana Lee\\AppData\\Roaming\\Claude\\claude_desktop_config.json')
+  })
+
+  it("Windows: Claude Desktop from the Microsoft Store reads its package's own folder", async () => {
+    const env = {
+      platform: 'win32' as const,
+      homeDir: 'C:\\Users\\Ana Lee',
+      appData: 'C:\\Users\\Ana Lee\\AppData\\Roaming',
+      localAppData: 'C:\\Users\\Ana Lee\\AppData\\Local'
+    }
+    const readdir = vi.fn(async (path: string) => {
+      expect(path).toBe('C:\\Users\\Ana Lee\\AppData\\Local\\Packages')
+      return ['Microsoft.WindowsTerminal_8wekyb3d8bbwe', 'Claude_pzs8sxrjxfjjc', 'Claude_zz']
+    })
+    expect((await resolveAgentConfigTarget('claude-desktop', env, { readdir })).file).toBe(
+      'C:\\Users\\Ana Lee\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\claude_desktop_config.json'
+    )
+    // No package (or no Packages folder): the installer's %APPDATA% file.
+    const none = vi.fn(async () => ['Microsoft.WindowsTerminal_8wekyb3d8bbwe'])
+    expect((await resolveAgentConfigTarget('claude-desktop', env, { readdir: none })).file).toBe(
+      'C:\\Users\\Ana Lee\\AppData\\Roaming\\Claude\\claude_desktop_config.json'
+    )
+    const missing = vi.fn(async () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    })
+    expect((await resolveAgentConfigTarget('claude-desktop', env, { readdir: missing })).file).toBe(
+      'C:\\Users\\Ana Lee\\AppData\\Roaming\\Claude\\claude_desktop_config.json'
+    )
+    // %LOCALAPPDATA% unset: the profile's AppData\Local.
+    await resolveAgentConfigTarget(
+      'claude-desktop',
+      { platform: 'win32', homeDir: 'C:\\Users\\Ana Lee' },
+      { readdir }
+    )
+    // Other apps, and other platforms, never look.
+    const unused = vi.fn(async () => ['Claude_x'])
+    expect((await resolveAgentConfigTarget('vs-code', env, { readdir: unused })).file).toBe(
+      'C:\\Users\\Ana Lee\\AppData\\Roaming\\Code\\User\\mcp.json'
+    )
+    await resolveAgentConfigTarget(
+      'claude-desktop',
+      { platform: 'darwin', homeDir: '/Users/ana' },
+      { readdir: unused }
+    )
+    expect(unused).not.toHaveBeenCalled()
   })
 
   it('Linux, from $XDG_CONFIG_HOME or ~/.config, and Codex from $CODEX_HOME', () => {
@@ -188,7 +234,7 @@ describe('mergeJsonConfig (plan 209 S22)', () => {
 })
 
 describe('writeAgentConfig (plan 209 S22)', () => {
-  it('keeps the other servers, backs the old file up beside it, and keeps its permissions', async () => {
+  it('keeps the other servers, backs the old file up beside it, and makes both owner-only', async () => {
     const dir = await folder('Claude')
     const file = join(dir, 'claude_desktop_config.json')
     const original = JSON.stringify({ mcpServers: { github: { command: 'gh' } } }, null, 2)
@@ -209,7 +255,12 @@ describe('writeAgentConfig (plan 209 S22)', () => {
       videorc: ENTRY
     })
     expect(await readFile(`${file}.videorc-backup-20261027-221530`, 'utf8')).toBe(original)
-    if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o640)
+    // Review #13: the file now holds the token, and a backup may hold an
+    // earlier one: neither stays readable by others.
+    if (process.platform !== 'win32') {
+      expect((await stat(file)).mode & 0o777).toBe(0o600)
+      expect((await stat(`${file}.videorc-backup-20261027-221530`)).mode & 0o777).toBe(0o600)
+    }
     // Nothing else beside it: no staging file left behind.
     expect((await readdir(dir)).sort()).toEqual([
       'claude_desktop_config.json',
@@ -272,6 +323,67 @@ describe('writeAgentConfig (plan 209 S22)', () => {
       'mcp.json.videorc-backup-20261027-221530-2'
     ])
     expect(await readFile(join(dir, 'mcp.json.videorc-backup-20261027-221530'), 'utf8')).toBe('{}')
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    "makes an unchanged file holding the token owner-only, and keeps Windows' modes alone",
+    async () => {
+      const dir = await folder('.cursor')
+      const file = join(dir, 'mcp.json')
+      await writeAgentConfig(target('cursor', file), CONNECTION, 'darwin')
+      await chmod(file, 0o644)
+      const again = await writeAgentConfig(target('cursor', file), CONNECTION, 'darwin')
+      expect(again).toEqual({ outcome: 'unchanged', file })
+      expect((await stat(file)).mode & 0o777).toBe(0o600)
+
+      // Windows has no modes to set: nothing is chmodded there.
+      const chmodSpy = vi.fn(async () => undefined)
+      await chmod(file, 0o644)
+      await writeAgentConfig(target('cursor', file), CONNECTION, 'win32', {
+        fs: { ...nodeAgentConfigFs, chmod: chmodSpy }
+      })
+      expect(chmodSpy).not.toHaveBeenCalled()
+    }
+  )
+
+  it("keeps only Videorc's newest backups, owner-only, and never touches other files", async () => {
+    const dir = await folder('.cursor')
+    const file = join(dir, 'mcp.json')
+    await writeFile(file, '{}')
+    // Someone's own copy, which only looks like ours.
+    await writeFile(join(dir, 'mcp.json.videorc-backup-mine'), 'keep')
+    const stamps = [
+      '2026-10-27T22:15:30Z',
+      '2026-10-27T22:15:31Z',
+      '2026-10-27T22:15:31Z',
+      '2026-10-28T09:00:00Z',
+      '2026-10-28T09:00:01Z'
+    ]
+    for (const [index, at] of stamps.entries()) {
+      const write = await writeAgentConfig(
+        target('cursor', file),
+        { bridgePath: MAC, token: `vrc_agent_${index}` },
+        'darwin',
+        { now: () => new Date(at) }
+      )
+      expect(write.outcome).toBe('added')
+    }
+    expect(AGENT_CONFIG_BACKUPS_KEPT).toBe(3)
+    // The second write of 22:15:31 (`-2`) is newer than the first, so it is
+    // the third one kept.
+    const kept = await backups(dir)
+    expect(kept).toEqual([
+      'mcp.json.videorc-backup-20261027-221531-2',
+      'mcp.json.videorc-backup-20261028-090000',
+      'mcp.json.videorc-backup-20261028-090001',
+      'mcp.json.videorc-backup-mine'
+    ])
+    expect(await readFile(join(dir, 'mcp.json.videorc-backup-mine'), 'utf8')).toBe('keep')
+    if (process.platform !== 'win32') {
+      for (const name of kept.filter((name) => !name.endsWith('-mine'))) {
+        expect((await stat(join(dir, name))).mode & 0o777).toBe(0o600)
+      }
+    }
   })
 
   it.skipIf(process.platform === 'win32')(
@@ -487,6 +599,34 @@ describe('addAgentToApp (plan 209 S22)', () => {
     const refused = await addAgentToApp('cursor', CONNECTION, environment)
     expect(refused.added).toBe(false)
     expect(refused.message).toContain("Videorc can't find Cursor's settings folder")
+  })
+
+  it('refuses a bridge on a disk image or in a temporary copy, and writes nothing', async () => {
+    const dir = await folder('Library', 'Application Support', 'Claude')
+    const environment = { platform: 'darwin' as const, homeDir: root, pathVariable: '' }
+    const execFile = vi.fn<ExecFile>(async () => ({ stdout: '', stderr: '' }))
+    for (const bridgePath of [
+      '/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp',
+      '/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp'
+    ]) {
+      for (const app of ['claude-desktop', 'claude-code'] as const) {
+        expect(
+          await addAgentToApp(app, { bridgePath, token: TOKEN }, environment, { execFile })
+        ).toEqual({ added: false, message: 'Move Videorc to Applications first.' })
+      }
+    }
+    expect(execFile).not.toHaveBeenCalled()
+    expect(await readdir(dir)).toEqual([])
+    // An app kept in an external drive's Applications folder stays put.
+    const external = await addAgentToApp(
+      'claude-desktop',
+      {
+        bridgePath: '/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp',
+        token: TOKEN
+      },
+      environment
+    )
+    expect(external.added).toBe(true)
   })
 
   it('runs the CLI for Claude Code', async () => {
