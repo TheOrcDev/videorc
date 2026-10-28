@@ -7955,8 +7955,9 @@ impl Mp4ExportProbe {
             .is_none_or(|codec| codec == "h264")
     }
 
-    /// Plan 200 C2: AAC already (record+stream takes) is copied, never
-    /// encoded a second time.
+    /// Plan 200 C2: AAC already (record+stream takes, and record-only takes
+    /// that don't keep the lossless MKV) is copied, never encoded a second
+    /// time.
     fn audio_is_aac(&self) -> bool {
         self.audio_codec.as_deref() == Some("aac")
     }
@@ -8603,17 +8604,19 @@ fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> V
     args.extend(["-c:v".to_string(), "copy".to_string()]);
     if options.copy_audio {
         // Plan 200 C2: record+stream takes already hold AAC; a second encode
-        // only loses quality.
+        // only loses quality. Record-only takes hold AAC too unless they keep
+        // the lossless MKV, so finalize is a copy, not a whole-track encode.
         args.extend(["-c:a".to_string(), "copy".to_string()]);
     } else {
         // 256k stereo AAC: transparent for voice+music mixes; the capture
         // MKV's PCM is the lossless source when the keep-original setting is
-        // on (recording-quality plan Q4).
+        // on (recording-quality plan Q4). Its bitrate is the record-only
+        // take's (`RECORD_AAC_BITRATE`).
         args.extend([
             "-c:a".to_string(),
             "aac".to_string(),
             "-b:a".to_string(),
-            "256k".to_string(),
+            RECORD_AAC_BITRATE.to_string(),
         ]);
     }
     args.extend(["-movflags".to_string(), "+faststart".to_string()]);
@@ -20321,7 +20324,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
             &mut args,
             &input_layout,
             &params.audio,
-            !stream_targets.is_empty(),
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
             true,
         );
     }
@@ -20338,7 +20341,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &mut args,
                 &input_layout,
                 &params.audio,
-                true,
+                OutputAudioCodec::StreamAac,
                 video_output,
                 params.output.video.fps,
                 path,
@@ -20550,7 +20553,13 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
         ) {
             append_media_foundation_h264_copy_metadata_args(&mut args, params.output.video.fps);
         }
-        append_audio_encoding_with_video_clock(&mut args, &input_layout, &params.audio, true, true);
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            OutputAudioCodec::StreamAac,
+            true,
+        );
         args.push(ffmpeg_file_path(output_path));
     }
     // Plan 181: the ring copies the recording leg's encode (the clean
@@ -20866,19 +20875,12 @@ fn append_bridge_copy_file_output(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming_audio: bool,
+    audio_codec: OutputAudioCodec,
     video_output: EncoderBridgeVideoOutput,
     fps: u32,
     path: &Path,
 ) {
-    append_bridge_copy_output_args(
-        args,
-        input_layout,
-        audio,
-        streaming_audio,
-        video_output,
-        fps,
-    );
+    append_bridge_copy_output_args(args, input_layout, audio, audio_codec, video_output, fps);
     args.push(ffmpeg_file_path(path));
 }
 
@@ -20898,7 +20900,14 @@ fn append_bridge_copy_flv_output(
     } else {
         audio
     };
-    append_bridge_copy_output_args(args, input_layout, audio, true, video_output, fps);
+    append_bridge_copy_output_args(
+        args,
+        input_layout,
+        audio,
+        OutputAudioCodec::StreamAac,
+        video_output,
+        fps,
+    );
     // FLV's H264 codec tag, explicitly: the mpegts input carries tag [27]
     // (stream_type) through -c:v copy, wrapper muxers clone it verbatim into
     // the inner flv muxer, and "-tag:v 0" is a no-op for copy (0 = keep).
@@ -20945,7 +20954,7 @@ fn append_bridge_copy_output_args(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming_audio: bool,
+    audio_codec: OutputAudioCodec,
     video_output: EncoderBridgeVideoOutput,
     fps: u32,
 ) {
@@ -20961,7 +20970,7 @@ fn append_bridge_copy_output_args(
     ) {
         append_media_foundation_h264_copy_metadata_args(args, fps);
     }
-    append_audio_encoding_with_video_clock(args, input_layout, audio, streaming_audio, true);
+    append_audio_encoding_with_video_clock(args, input_layout, audio, audio_codec, true);
 }
 
 /// Output metadata for a stream copy of the Media Foundation MPEG-TS FIFO.
@@ -21160,7 +21169,7 @@ fn ffmpeg_args_with_encoder_and_replay(
             &mut args,
             &input_layout,
             &params.audio,
-            !stream_targets.is_empty(),
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
             false,
         );
     }
@@ -21655,11 +21664,59 @@ fn append_audio_output_args(args: &mut Vec<String>, input_layout: &InputLayout) 
     }
 }
 
+/// The audio codec of a session's primary output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputAudioCodec {
+    /// A stream, and the MKV a record+stream take tees from it: AAC 160k.
+    StreamAac,
+    /// A record-only take: AAC at the bitrate the MP4 export used to encode,
+    /// so the export copies it. Encoding the whole PCM track at Stop took
+    /// 11 min 53 s for a 75-minute take on a slow laptop (retest 152).
+    RecordAac,
+    /// A record-only take that keeps its capture MKV ("Keep original
+    /// recording": lossless audio, as promised) or arms separate source
+    /// recordings (their PCM legs align with the Combined file's PCM).
+    /// Encoded to AAC at export.
+    RecordPcm,
+}
+
+/// Record-only AAC bitrate: what the MP4 export encodes PCM at.
+const RECORD_AAC_BITRATE: &str = "256k";
+
+impl OutputAudioCodec {
+    fn for_session(params: &StartSessionParams, streaming: bool) -> Self {
+        let separate_sources = params
+            .output
+            .separate_source_recordings
+            .as_ref()
+            .is_some_and(|iso| iso.enabled);
+        if streaming {
+            Self::StreamAac
+        } else if params.output.keep_original_mkv || separate_sources {
+            Self::RecordPcm
+        } else {
+            Self::RecordAac
+        }
+    }
+
+    fn is_streaming(self) -> bool {
+        self == Self::StreamAac
+    }
+
+    fn encoder_args(self) -> &'static [&'static str] {
+        match self {
+            Self::StreamAac => &["-c:a", "aac", "-b:a", "160k"],
+            Self::RecordAac => &["-c:a", "aac", "-b:a", RECORD_AAC_BITRATE],
+            Self::RecordPcm => &["-c:a", "pcm_s16le"],
+        }
+    }
+}
+
 fn append_audio_encoding_args(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming: bool,
+    codec: OutputAudioCodec,
 ) {
     if input_layout.audio_inputs.is_empty() {
         return;
@@ -21673,13 +21730,8 @@ fn append_audio_encoding_args(
         "48000".to_string(),
         "-ac".to_string(),
         audio_output_channels(input_layout).to_string(),
-        "-c:a".to_string(),
-        if streaming { "aac" } else { "pcm_s16le" }.to_string(),
     ]);
-
-    if streaming {
-        args.extend(["-b:a".to_string(), "160k".to_string()]);
-    }
+    args.extend(codec.encoder_args().iter().map(|arg| arg.to_string()));
 }
 
 /// Applies audio encoding and its duration contract as one inseparable output
@@ -21693,17 +21745,17 @@ fn append_audio_encoding_with_video_clock(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming: bool,
+    codec: OutputAudioCodec,
     preserve_bridge_shortest: bool,
 ) {
-    append_audio_encoding_args(args, input_layout, audio, streaming);
+    append_audio_encoding_args(args, input_layout, audio, codec);
     let microphone_is_padded = input_layout
         .audio_inputs
         .iter()
         .any(|input| input.track.source == AudioTrackSource::Microphone);
     if preserve_bridge_shortest || microphone_is_padded {
         args.push("-shortest".to_string());
-        if !streaming
+        if !codec.is_streaming()
             && (input_layout.microphone_is_linux_pulse
                 || (microphone_is_padded && !preserve_bridge_shortest))
         {
@@ -21713,7 +21765,8 @@ fn append_audio_encoding_with_video_clock(
             // window can retain an entire short recording. Bound these dense
             // live A/V queues to 250 ms so the overflow heartbeat advances the
             // lagging stream, retaining PCM, apad and video-owned EOF. Encoded
-            // bridges and AAC outputs keep their existing synchronization.
+            // bridges and stream outputs keep their existing synchronization;
+            // a record-only take keeps the bound whether it writes PCM or AAC.
             args.extend(["-shortest_buf_duration".to_string(), "0.25".to_string()]);
         }
     }
@@ -34730,7 +34783,7 @@ mod tests {
                     &mut args,
                     &layout,
                     &params.audio,
-                    streaming,
+                    OutputAudioCodec::for_session(&params, streaming),
                     true,
                 );
 
@@ -34741,7 +34794,7 @@ mod tests {
                         .parse()
                         .unwrap();
                     assert!(seconds > 0.0 && seconds < FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_secs_f64());
-                    assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+                    assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
                     assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
                     let bound_index = args
                         .iter()
@@ -34761,26 +34814,116 @@ mod tests {
     }
 
     #[test]
+    fn record_only_takes_encode_aac_unless_the_lossless_mkv_is_kept() {
+        let record = base_params(true, false);
+        assert_eq!(
+            OutputAudioCodec::for_session(&record, false),
+            OutputAudioCodec::RecordAac
+        );
+        let mut keep = base_params(true, false);
+        keep.output.keep_original_mkv = true;
+        assert_eq!(
+            OutputAudioCodec::for_session(&keep, false),
+            OutputAudioCodec::RecordPcm
+        );
+        let mut iso = base_params(true, false);
+        iso.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            });
+        assert_eq!(
+            OutputAudioCodec::for_session(&iso, false),
+            OutputAudioCodec::RecordPcm
+        );
+        iso.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: false,
+                keep_combined: true,
+            });
+        assert_eq!(
+            OutputAudioCodec::for_session(&iso, false),
+            OutputAudioCodec::RecordAac
+        );
+        for params in [&record, &keep] {
+            assert_eq!(
+                OutputAudioCodec::for_session(params, true),
+                OutputAudioCodec::StreamAac
+            );
+        }
+    }
+
+    #[test]
+    fn record_only_aac_is_what_the_mp4_export_copies() {
+        let layout = microphone_input_layout(false);
+        let mut args = Vec::new();
+        append_audio_encoding_args(
+            &mut args,
+            &layout,
+            &AudioSettings::default(),
+            OutputAudioCodec::RecordAac,
+        );
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        // The bitrate the export used to encode the PCM track at.
+        assert_eq!(arg_value(&args, "-b:a"), Some(RECORD_AAC_BITRATE));
+        assert_eq!(arg_value(&args, "-ar"), Some("48000"));
+        // ...so the export is a copy, and its chapters/faststart are unchanged.
+        let probe = Mp4ExportProbe {
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            ..Mp4ExportProbe::default()
+        };
+        let export = mp4_export_args(
+            Path::new("/tmp/take.mkv"),
+            Path::new("/tmp/take.mp4"),
+            &Mp4ExportOptions::plan(&probe, None),
+        );
+        assert_eq!(arg_value(&export, "-c:a"), Some("copy"));
+        assert_eq!(export.iter().filter(|arg| *arg == "-c:a").count(), 1);
+        assert_eq!(arg_value(&export, "-b:a"), None);
+        assert_eq!(arg_value(&export, "-movflags"), Some("+faststart"));
+
+        let mut pcm = Vec::new();
+        append_audio_encoding_args(
+            &mut pcm,
+            &layout,
+            &AudioSettings::default(),
+            OutputAudioCodec::RecordPcm,
+        );
+        assert_eq!(arg_value(&pcm, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&pcm, "-b:a"), None);
+    }
+
+    #[test]
     fn legacy_pcm_sync_bound_preserves_aac_and_bridge_policies() {
         let layout = microphone_input_layout(false);
-        for streaming in [false, true] {
+        for codec in [
+            OutputAudioCodec::RecordPcm,
+            OutputAudioCodec::RecordAac,
+            OutputAudioCodec::StreamAac,
+        ] {
+            let streaming = codec.is_streaming();
             for bridge in [false, true] {
                 let mut args = Vec::new();
                 append_audio_encoding_with_video_clock(
                     &mut args,
                     &layout,
                     &AudioSettings::default(),
-                    streaming,
+                    codec,
                     bridge,
                 );
                 assert_eq!(
                     arg_value(&args, "-shortest_buf_duration"),
                     (!streaming && !bridge).then_some("0.25"),
-                    "streaming={streaming}, bridge={bridge}: {args:?}"
+                    "codec={codec:?}, bridge={bridge}: {args:?}"
                 );
                 assert_eq!(
                     arg_value(&args, "-c:a"),
-                    Some(if streaming { "aac" } else { "pcm_s16le" })
+                    Some(if codec == OutputAudioCodec::RecordPcm {
+                        "pcm_s16le"
+                    } else {
+                        "aac"
+                    })
                 );
                 assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
                 assert!(args.iter().any(|arg| arg == "-shortest"));
@@ -35307,7 +35450,7 @@ mod tests {
         }
 
         #[test]
-        fn record_only_bridge_keeps_pcm_and_adds_the_ring() {
+        fn record_only_bridge_keeps_its_audio_and_adds_the_ring() {
             let mut params = base_params(true, false);
             params.replay = Some(ReplayParams {
                 seconds: 30,
@@ -35323,9 +35466,9 @@ mod tests {
                 Some(&ring()),
             )
             .unwrap();
-            // The file output is untouched: PCM audio, then the MKV path.
+            // The file output is untouched: its own AAC, then the MKV path.
             assert_eq!(all_values(&args, "-c:v"), vec!["copy", "copy"]);
-            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
             let mkv = position(&args, "/tmp/videorc-replay-record.mkv");
             assert!(
                 position(&args, "segment") > mkv,
@@ -35405,7 +35548,7 @@ mod tests {
                 "{maps:?}"
             );
             assert_eq!(all_values(&args, "-c:v").len(), 2, "two encodes: {args:?}");
-            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
             assert_ring_output(&args);
         }
 
@@ -35516,7 +35659,7 @@ mod tests {
             .unwrap();
             let filter = arg_value(&args, "-filter_complex").unwrap();
             assert!(filter.contains("split=2[v_main][v_replay]"), "{filter}");
-            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
             assert_ring_output(&args);
         }
 
@@ -35783,7 +35926,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "[preview]"));
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_current_h264_encoder_args(&args, false);
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
 
         let filter = arg_value(&args, "-filter_complex").unwrap();
@@ -35894,7 +36037,7 @@ mod tests {
             "-video_size"
         ));
         assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
@@ -35965,7 +36108,7 @@ mod tests {
             "-pix_fmt"
         ));
         assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
@@ -41139,8 +41282,8 @@ mod tests {
         );
         assert_eq!(arg_value(&args, "-ar"), Some("48000"));
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
-        assert_eq!(arg_value(&args, "-b:a"), None);
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        assert_eq!(arg_value(&args, "-b:a"), Some(RECORD_AAC_BITRATE));
     }
 
     #[test]
@@ -41188,7 +41331,7 @@ mod tests {
             Some("aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
     }
 
     #[test]
@@ -41455,7 +41598,7 @@ mod tests {
             &mut args,
             &input_layout,
             &AudioSettings::default(),
-            true,
+            OutputAudioCodec::StreamAac,
             true,
         );
 
@@ -42515,7 +42658,13 @@ mod tests {
         ];
         append_audio_output_args(&mut args, &input_layout);
         args.extend(["-c:v".to_string(), "mpeg4".to_string()]);
-        append_audio_encoding_with_video_clock(&mut args, &input_layout, &audio, true, false);
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &audio,
+            OutputAudioCodec::StreamAac,
+            false,
+        );
         args.push(output.display().to_string());
 
         let status = std::process::Command::new("ffmpeg")
@@ -42820,7 +42969,7 @@ mod tests {
             Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&with_mic, "-ac"), Some("2"));
-        assert_eq!(arg_value(&with_mic, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&with_mic, "-c:a"), Some("aac"));
         assert_eq!(
             ffmpeg_inputs(&without_mic),
             vec![
@@ -42834,7 +42983,7 @@ mod tests {
             Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
         );
         assert_eq!(arg_value(&without_mic, "-ac"), Some("2"));
-        assert_eq!(arg_value(&without_mic, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&without_mic, "-c:a"), Some("aac"));
     }
 
     #[test]
