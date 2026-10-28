@@ -196,7 +196,8 @@ export function SceneList(): ReactElement {
                 icon={<SceneGlyphIcon glyph={glyphs.get(entry.id)!} icons={icons} />}
                 menu={dialogs.menuItems(entry)}
                 needsSources={!entry.visual.sources.app && dialogs.needsSources(entry)}
-                pending={savedScenePendingId === entry.id || dialogs.busy}
+                busy={dialogs.busy}
+                switching={savedScenePendingId === entry.id}
                 platform={platform}
                 readOnly={readOnly}
                 scene={entry}
@@ -269,7 +270,8 @@ function SavedSceneRow({
   active,
   blocked,
   needsSources,
-  pending,
+  busy,
+  switching,
   readOnly,
   shortcut,
   platform,
@@ -289,7 +291,10 @@ function SavedSceneRow({
   /** Why it can't go on stream now ("Figma isn't open"), or null. */
   blocked: string | null
   needsSources: boolean
-  pending: boolean
+  /** Another scene is going on stream: rows wait for it. */
+  busy: boolean
+  /** This scene is going on stream. */
+  switching: boolean
   readOnly: boolean
   shortcut: string | undefined
   platform: string | undefined
@@ -323,7 +328,7 @@ function SavedSceneRow({
         dropEdge === 'bottom' && 'before:bottom-0'
       )}
       context={
-        pending && active
+        switching
           ? 'Switching…'
           : (blocked ?? (needsSources ? 'Resolve sources' : sceneShows(scene)))
       }
@@ -342,7 +347,7 @@ function SavedSceneRow({
                 : `${shortcutAriaKeys(MOVE_SCENE_UP_ACCELERATOR, platform)} ${shortcutAriaKeys(MOVE_SCENE_DOWN_ACCELERATOR, platform)}`
             }
             className="disabled:text-muted-foreground"
-            disabled={blocked !== null || pending}
+            disabled={blocked !== null || busy || switching}
             onClick={onSelect}
             onKeyDown={moveFromKeyboard}
           >

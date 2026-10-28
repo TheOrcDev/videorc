@@ -163,6 +163,18 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(container.querySelector('[data-saved-scene="t3"]')!.textContent).not.toContain('Follows')
   })
 
+  it('says Switching… on the scene going on stream, and holds the others', async () => {
+    mocked.core.savedScenePendingId = 'display'
+    await render()
+    expect(container.querySelector('[data-saved-scene="display"]')!.textContent).toContain(
+      'Switching…'
+    )
+    expect(rowButton('Desk').disabled).toBe(true)
+    expect(container.querySelector('[data-saved-scene="figma"]')!.textContent).not.toContain(
+      'Switching…'
+    )
+  })
+
   it("disables a scene whose app isn't open, saying so on the row", async () => {
     await render()
     const t3Row = container.querySelector('[data-saved-scene="t3"]')!
