@@ -42,7 +42,11 @@ import {
   type GoLivePhase
 } from '@/lib/go-live-dialog-view'
 import { streamingWithoutTargets } from '@/lib/go-live-exclusions'
-import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
+import {
+  goLiveStepDownDescription,
+  streamPerformanceAdvice as adviseStreamPerformance,
+  type SoftwareStreamAdvice
+} from '@/lib/go-live-output'
 import { START_NOTICE_LABELS, overlayAndBannerStartNotices } from '@/lib/banner-start-notices'
 import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
@@ -168,9 +172,10 @@ export function GoLiveConfirmationDialog({
   // stream as configured, before anything starts.
   const streamPerformanceAdvice =
     streamOutputTopologyPreflight.state === 'ready' && !simulcast
-      ? softwareStreamAdvice({
+      ? adviseStreamPerformance({
           streamVideo: streamOutputTopologyPreflight.result.streamProfile,
           encodeBackend: streamOutputTopologyPreflight.result.effectiveEncodeBackend,
+          streaming: sentStreaming,
           state: performanceCheck
         })
       : null
@@ -525,14 +530,36 @@ export function GoLiveOutputAdvice({
       </Alert>
     )
   }
+  if (advice?.kind === 'go-live-heavy') {
+    return (
+      <Alert data-videorc-go-live-output-advice="go-live-heavy" variant="warning">
+        <AlertTitle>{outputLabel(advice.requested)} may stutter while live</AlertTitle>
+        <AlertDescription>
+          Going live takes about twice the work of a recording on this computer, and its performance
+          check found no room for that. Viewers may see a stuttering picture.{' '}
+          {outputLabel(advice.video)} holds steady.
+        </AlertDescription>
+      </Alert>
+    )
+  }
   if (advice?.kind === 'step-down') {
     return (
-      <Alert>
+      <Alert data-videorc-go-live-output-advice={advice.reason}>
         <AlertTitle>Streaming at {outputLabel(advice.video)}</AlertTitle>
         <AlertDescription>
-          This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
-          session uses the largest output that held steady in its performance check
-          {recordEnabled ? ', for the recording too' : ''}. Your saved settings stay as they are.
+          {advice.reason === 'go-live-headroom' ? (
+            <>
+              {goLiveStepDownDescription(advice)}
+              {recordEnabled ? ' The recording uses it too.' : ''}
+            </>
+          ) : (
+            <>
+              This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
+              session uses the largest output that held steady in its performance check
+              {recordEnabled ? ', for the recording too' : ''}. Your saved settings stay as they
+              are.
+            </>
+          )}
         </AlertDescription>
       </Alert>
     )
