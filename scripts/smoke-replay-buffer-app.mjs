@@ -63,7 +63,8 @@ import {
   waitForRemoteEvent
 } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
-import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
+import { FORGET_WORKING_SCENE_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const { values: args } = parseArgs({
@@ -144,6 +145,7 @@ async function seedRendererProfile(smoke) {
           replayBuffer: { enabled: true, explicit: false }
         };
         localStorage.setItem(key, JSON.stringify(seeded));
+        ${FORGET_WORKING_SCENE_JS}
         setTimeout(() => location.reload(), 50);
         return true;
       `,
@@ -166,6 +168,7 @@ async function waitForBackendState(method, predicate, label, waitMs = timeoutMs)
 }
 
 async function setReplayBuffer(smoke, armed) {
+  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
   const outcome = await requestSmokeCommand(
     smoke,
     'eval-js',
