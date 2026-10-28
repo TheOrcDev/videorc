@@ -192,6 +192,30 @@ const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
 /// A FIFO write turn this long means the process itself was not scheduled
 /// (see `write_all_until_with_timing`); far above any turn's own wait.
 const FIFO_WRITE_FROZEN_PROCESS_GAP: Duration = Duration::from_secs(1);
+/// The longest freeze a raw-video write waits out (see [`FifoFreezeGrace`]).
+const FIFO_FREEZE_GRACE_MAX: Duration = Duration::from_secs(10 * 60);
+
+/// Set when the bridge schedule skips a frozen gap (SIGSTOP, a suspend).
+/// FFmpeg stamps raw video with the wall clock and audio by its sample
+/// count, so after a 30 s freeze its audio input is 30 s behind and FFmpeg
+/// stops reading video until the audio bus has written that gap. That wait
+/// is the freeze's aftermath, not a stalled reader: a write's delivery
+/// budget runs from the end of it (retest 152/153: the video write timed out
+/// 15 s after resume, tore a frame and failed the recording).
+#[derive(Debug, Default)]
+struct FifoFreezeGrace(StdMutex<Option<Instant>>);
+
+impl FifoFreezeGrace {
+    fn extend(&self, now: Instant, gap: Duration) {
+        let until = now + gap.min(FIFO_FREEZE_GRACE_MAX);
+        let mut current = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        *current = Some(current.map_or(until, |current| current.max(until)));
+    }
+
+    fn until(&self) -> Option<Instant> {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
@@ -1260,6 +1284,15 @@ fn refresh_raw_fifo_write_progress(
     if current_epoch != *observed_epoch {
         *observed_epoch = current_epoch;
         *last_output_progress_at = Instant::now();
+    }
+    // A full queue during a freeze's aftermath is FFmpeg catching up (its
+    // audio, then the CFR fill of the gap), not a wedged output: no-progress
+    // age counts from the end of the grace, like the writer's own budget.
+    if let Some(until) = writer.freeze_grace.until() {
+        let anchor = until.min(Instant::now());
+        if anchor > *last_output_progress_at {
+            *last_output_progress_at = anchor;
+        }
     }
 }
 
@@ -4268,6 +4301,16 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 skipped_ms,
                 "encoder bridge schedule stalled; dropped intervals as an explicit gap"
             );
+            let gap = Duration::from_millis(skipped_ms);
+            if gap >= FIFO_WRITE_FROZEN_PROCESS_GAP
+                && let Some(writer) = raw_fifo_writer.as_ref()
+            {
+                writer.note_schedule_freeze(now, gap);
+                tracing::warn!(
+                    gap_ms = skipped_ms,
+                    "Encoder FIFO delivery budget waits out the freeze while FFmpeg catches up its audio"
+                );
+            }
         }
         let sleep_started_at = Instant::now();
         if now < next_frame_at {
@@ -5919,6 +5962,7 @@ struct RawVideoFifoWriter {
     policy: EncoderBridgeOutputQueuePolicy,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     write_progress_epoch: Arc<AtomicU64>,
+    freeze_grace: Arc<FifoFreezeGrace>,
     result_rx: std_mpsc::Receiver<RawVideoFifoWriterResult>,
     join: Option<thread::JoinHandle<()>>,
     lifecycle: Option<EncoderBridgeWriterLifecycle>,
@@ -6177,6 +6221,8 @@ impl RawVideoFifoWriter {
         let writer_terminal_failure = terminal_failure.clone();
         let write_progress_epoch = Arc::new(AtomicU64::new(0));
         let writer_progress_epoch = write_progress_epoch.clone();
+        let freeze_grace = Arc::new(FifoFreezeGrace::default());
+        let writer_freeze_grace = freeze_grace.clone();
         let join = spawn_registered_fifo_writer(
             lifecycle.clone(),
             thread::Builder::new().name(format!("videorc-{:?}-raw-video-fifo-writer", policy.role)),
@@ -6189,6 +6235,7 @@ impl RawVideoFifoWriter {
                     writer_terminal_failure,
                     policy.role,
                     writer_progress_epoch,
+                    writer_freeze_grace,
                 );
             },
         )
@@ -6198,10 +6245,16 @@ impl RawVideoFifoWriter {
             policy,
             terminal_failure,
             write_progress_epoch,
+            freeze_grace,
             result_rx,
             join: Some(join),
             lifecycle,
         }
+    }
+
+    /// The bridge schedule skipped `gap` because the process was frozen.
+    fn note_schedule_freeze(&self, now: Instant, gap: Duration) {
+        self.freeze_grace.extend(now, gap);
     }
 
     fn enqueue(
@@ -6327,6 +6380,7 @@ fn run_raw_video_fifo_writer_loop_with_receiver<W, F>(
         terminal_failure,
         role,
         Arc::new(AtomicU64::new(0)),
+        Arc::new(FifoFreezeGrace::default()),
     );
 }
 
@@ -6357,6 +6411,7 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
     terminal_failure: Arc<StdMutex<Option<String>>>,
     role: EncoderBridgeOutputRole,
     write_progress_epoch: Arc<AtomicU64>,
+    freeze_grace: Arc<FifoFreezeGrace>,
 ) where
     W: StdWrite,
     F: FnMut() -> Option<QueuedRawVideoFrame>,
@@ -6377,14 +6432,18 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
         // misalign every following YUV plane and can corrupt the final file.
         // Finish the in-flight frame; closing the queue prevents any new work
         // from being admitted during stop.
-        match write_all_until(
+        match write_all_until_with_timing(
             &mut sink,
             frame.bytes(),
             &stop,
-            deadline,
-            RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
-            RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
-            false,
+            FifoWriteBudget {
+                deadline,
+                progress_timeout: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+                cancel_on_stop: false,
+                freeze_grace: Some(&freeze_grace),
+            },
+            &mut SystemFifoWriteTiming,
         ) {
             Ok(()) => {
                 let had_metal_target = frame.had_metal_target;
@@ -6982,11 +7041,12 @@ impl FifoWriteTiming for SystemFifoWriteTiming {
     }
 }
 
-struct FifoWriteBudget {
+struct FifoWriteBudget<'a> {
     deadline: Instant,
     progress_timeout: Duration,
     hard_timeout: Duration,
     cancel_on_stop: bool,
+    freeze_grace: Option<&'a FifoFreezeGrace>,
 }
 
 fn write_all_until<W: StdWrite>(
@@ -7007,6 +7067,7 @@ fn write_all_until<W: StdWrite>(
             progress_timeout,
             hard_timeout,
             cancel_on_stop,
+            freeze_grace: None,
         },
         &mut SystemFifoWriteTiming,
     )
@@ -7018,7 +7079,7 @@ fn write_all_until_with_timing<W: StdWrite>(
     sink: &mut W,
     mut bytes: &[u8],
     stop: &AtomicBool,
-    budget: FifoWriteBudget,
+    budget: FifoWriteBudget<'_>,
     timing: &mut impl FifoWriteTiming,
 ) -> io::Result<()> {
     let FifoWriteBudget {
@@ -7026,6 +7087,7 @@ fn write_all_until_with_timing<W: StdWrite>(
         progress_timeout,
         hard_timeout,
         cancel_on_stop,
+        freeze_grace,
     } = budget;
     let mut hard_deadline = timing
         .now()
@@ -7056,6 +7118,11 @@ fn write_all_until_with_timing<W: StdWrite>(
                 frozen_ms = frozen.as_millis() as u64,
                 "Encoder FIFO writer was frozen mid-frame; the delivery budget excludes the freeze"
             );
+        }
+        if let Some(until) = freeze_grace.and_then(FifoFreezeGrace::until) {
+            let resumed_by = until.checked_add(progress_timeout).unwrap_or(until);
+            deadline = deadline.max(resumed_by);
+            hard_deadline = hard_deadline.max(resumed_by);
         }
         if now >= deadline || now >= hard_deadline {
             return Err(io::Error::new(
@@ -9920,6 +9987,27 @@ mod tests {
         );
 
         assert_eq!(last_output_progress_at, stopped_progress_at);
+
+        // After a freeze the same blocked sink is FFmpeg catching up: the
+        // queue pauses instead of failing until the grace ends.
+        writer.note_schedule_freeze(Instant::now(), Duration::from_secs(30));
+        refresh_raw_fifo_write_progress(
+            Some(&writer),
+            &mut observed_epoch,
+            &mut last_output_progress_at,
+        );
+        assert!(last_output_progress_at <= Instant::now());
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                policy.max_frames as u64,
+                Some(Duration::from_millis(528)),
+                last_output_progress_at.elapsed(),
+                no_progress_timeout,
+            ),
+            EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+            "a full queue during a freeze's catch-up must not fail"
+        );
         release_tx.send(()).expect("release owned writer");
         writer.close_and_join();
     }
@@ -11842,6 +11930,7 @@ mod tests {
                     progress_timeout: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
                     hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
                     cancel_on_stop: false,
+                    freeze_grace: None,
                 },
                 &mut timing,
             );
@@ -11862,6 +11951,79 @@ mod tests {
             io::ErrorKind::TimedOut
         );
         assert_eq!(written, 64 * 1024);
+    }
+
+    #[test]
+    fn after_a_freeze_a_write_waits_for_ffmpeg_to_catch_up_its_audio() {
+        let frame = vec![5; raw_yuv420p_len(1280, 720).expect("720p frame size")];
+        let stop = AtomicBool::new(false);
+        // After a 30 s SIGSTOP, FFmpeg read no video for ~15 s while its
+        // audio input caught up (retest 153): 60k refusals is ~15 s here.
+        let write = |grace: Option<&FifoFreezeGrace>, start: Instant| {
+            let mut sink = FirstChunkThenBusySink {
+                written: 0,
+                refusals: 60_000,
+            };
+            let mut timing = FreezingFifoWriteTiming {
+                now: start,
+                waits: 0,
+                freeze_on_wait: 0,
+                freeze: Duration::ZERO,
+            };
+            let result = write_all_until_with_timing(
+                &mut sink,
+                &frame,
+                &stop,
+                FifoWriteBudget {
+                    deadline: start + RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                    progress_timeout: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                    hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+                    cancel_on_stop: false,
+                    freeze_grace: grace,
+                },
+                &mut timing,
+            );
+            (result, sink.written, timing.now - start)
+        };
+
+        let start = Instant::now();
+        let (result, _, waited) = write(None, start);
+        assert_eq!(
+            result
+                .expect_err("no freeze: the stall budget applies")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(waited < Duration::from_secs(11), "{waited:?}");
+
+        let grace = FifoFreezeGrace::default();
+        grace.extend(start, Duration::from_secs(30));
+        let (result, written, waited) = write(Some(&grace), start);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(written, frame.len());
+        assert!(waited > Duration::from_secs(10), "{waited:?}");
+
+        // A reader that stays stuck past the freeze still times out.
+        let start = Instant::now();
+        let grace = FifoFreezeGrace::default();
+        grace.extend(start, Duration::from_secs(2));
+        let (result, _, _) = write(Some(&grace), start);
+        assert_eq!(
+            result.expect_err("grace is bounded").kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    #[test]
+    fn freeze_grace_keeps_the_latest_end_and_is_capped() {
+        let now = Instant::now();
+        let grace = FifoFreezeGrace::default();
+        assert_eq!(grace.until(), None);
+        grace.extend(now, Duration::from_secs(30));
+        grace.extend(now, Duration::from_secs(5));
+        assert_eq!(grace.until(), Some(now + Duration::from_secs(30)));
+        grace.extend(now, Duration::from_secs(24 * 3600));
+        assert_eq!(grace.until(), Some(now + FIFO_FREEZE_GRACE_MAX));
     }
 
     #[test]
@@ -11890,6 +12052,7 @@ mod tests {
                     progress_timeout: Duration::from_millis(500),
                     hard_timeout: Duration::from_millis(500),
                     cancel_on_stop: false,
+                    freeze_grace: None,
                 },
                 &mut timing,
             )
@@ -11924,6 +12087,7 @@ mod tests {
                 progress_timeout: Duration::from_secs(1),
                 hard_timeout,
                 cancel_on_stop: false,
+                freeze_grace: None,
             },
             &mut timing,
         )
@@ -11963,6 +12127,7 @@ mod tests {
                 progress_timeout: Duration::from_millis(500),
                 hard_timeout: Duration::from_millis(500),
                 cancel_on_stop: true,
+                freeze_grace: None,
             },
             &mut timing,
         )
