@@ -57,12 +57,17 @@ const WINDOWS_CAMERA_START_BUDGET: Duration = Duration::from_secs(6);
 const WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(4);
 /// Kept free for the `-framerate`/default-format attempts so a stalled MJPEG
 /// mode cannot spend them; the HP HD Camera's default format delivered its
-/// first frame in ~1.3 s.
+/// first frame in ~1.0-1.3 s.
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE: Duration = Duration::from_millis(2500);
-/// An MJPEG attempt with less time than this cannot realistically go live.
+/// Kept free by the `-framerate` attempt for the final negotiated-default
+/// attempt, so a stalled exact rate cannot leave it no time.
 #[cfg(any(target_os = "windows", test))]
-const WINDOWS_CAMERA_MIN_MJPEG_ATTEMPT: Duration = Duration::from_secs(1);
+const WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE: Duration = Duration::from_millis(1250);
+/// An attempt that still has a fallback after it is skipped below this: it
+/// cannot realistically go live, and the fallback gets the time instead.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_MIN_EARLY_ATTEMPT: Duration = Duration::from_secs(1);
 #[cfg(target_os = "windows")]
 const WINDOWS_CAMERA_LIST_OPTIONS_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(target_os = "windows")]
@@ -4357,20 +4362,48 @@ fn windows_dshow_error_is_mode_independent(stderr: &str) -> bool {
         || stderr.contains("could not find video device")
 }
 
-/// First-frame deadline for one attempt, or `None` to skip it. MJPEG attempts
-/// leave `WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE` of the start budget unspent.
+/// The Windows camera start ladder: MJPEG modes, then the exact rate in the
+/// default format, then whatever the driver negotiates.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowsCameraAttemptKind {
+    Mjpeg,
+    ExactRate,
+    NegotiatedDefault,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsCameraAttemptKind {
+    fn of(request_fps: Option<u32>, mjpeg_capture_size: Option<(u32, u32)>) -> Self {
+        match (request_fps, mjpeg_capture_size) {
+            (_, Some(_)) => Self::Mjpeg,
+            (Some(_), None) => Self::ExactRate,
+            (None, None) => Self::NegotiatedDefault,
+        }
+    }
+
+    /// Start budget this attempt must leave for the attempts after it.
+    fn reserve(self) -> Duration {
+        match self {
+            Self::Mjpeg => WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE,
+            Self::ExactRate => WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE,
+            Self::NegotiatedDefault => Duration::ZERO,
+        }
+    }
+}
+
+/// First-frame deadline for one attempt, or `None` to skip it. Every attempt
+/// but the last leaves its kind's reserve of the start budget unspent.
 #[cfg(any(target_os = "windows", test))]
 fn windows_camera_attempt_first_frame_timeout(
     remaining: Duration,
-    mjpeg: bool,
+    kind: WindowsCameraAttemptKind,
 ) -> Option<Duration> {
-    let available = if mjpeg {
-        remaining.saturating_sub(WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE)
-    } else {
-        remaining
-    };
-    let timeout = available.min(WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT);
-    if timeout.is_zero() || (mjpeg && timeout < WINDOWS_CAMERA_MIN_MJPEG_ATTEMPT) {
+    let timeout = remaining
+        .saturating_sub(kind.reserve())
+        .min(WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT);
+    let has_fallback = kind != WindowsCameraAttemptKind::NegotiatedDefault;
+    if timeout.is_zero() || (has_fallback && timeout < WINDOWS_CAMERA_MIN_EARLY_ATTEMPT) {
         return None;
     }
     Some(timeout)
@@ -4898,10 +4931,11 @@ mod windows {
                 ));
                 break;
             }
+            let kind = WindowsCameraAttemptKind::of(request_fps, mjpeg_capture_size);
             let Some(first_frame_timeout) =
-                windows_camera_attempt_first_frame_timeout(remaining, mjpeg_capture_size.is_some())
+                windows_camera_attempt_first_frame_timeout(remaining, kind)
             else {
-                // MJPEG may not eat the time the default-format attempts need.
+                // An early attempt may not eat the time its fallbacks need.
                 continue;
             };
             let attempt_started_at = Instant::now();
@@ -9320,33 +9354,67 @@ Error opening input file video=HP HD Camera."#;
     }
 
     #[test]
-    fn windows_camera_mjpeg_attempts_leave_time_for_the_default_format() {
+    fn windows_camera_early_attempts_leave_time_for_their_fallbacks() {
+        use WindowsCameraAttemptKind::{ExactRate, Mjpeg, NegotiatedDefault};
         let secs = Duration::from_secs_f64;
+        assert_eq!(
+            WindowsCameraAttemptKind::of(Some(30), Some((1280, 720))),
+            Mjpeg
+        );
+        assert_eq!(WindowsCameraAttemptKind::of(Some(30), None), ExactRate);
+        assert_eq!(WindowsCameraAttemptKind::of(None, None), NegotiatedDefault);
+
         // Fresh budget: MJPEG gets its full deadline.
         assert_eq!(
-            windows_camera_attempt_first_frame_timeout(secs(6.0), true),
+            windows_camera_attempt_first_frame_timeout(secs(6.0), Mjpeg),
             Some(secs(3.5))
         );
         // A 2 s mode probe: MJPEG is cut short so the reserve survives.
         assert_eq!(
-            windows_camera_attempt_first_frame_timeout(secs(4.0), true),
+            windows_camera_attempt_first_frame_timeout(secs(4.0), Mjpeg),
             Some(secs(1.5))
         );
         // Too little left for MJPEG: skip it, but the fallbacks still run.
         assert_eq!(
-            windows_camera_attempt_first_frame_timeout(secs(3.0), true),
+            windows_camera_attempt_first_frame_timeout(secs(3.0), Mjpeg),
             None
         );
+
+        // The exact rate keeps its full deadline while the budget is fresh...
         assert_eq!(
-            windows_camera_attempt_first_frame_timeout(secs(3.0), false),
-            Some(secs(3.0))
+            windows_camera_attempt_first_frame_timeout(secs(5.5), ExactRate),
+            Some(secs(4.0))
+        );
+        // ...but after a 2 s probe it leaves the negotiated default its share.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(4.0), ExactRate),
+            Some(secs(2.75))
+        );
+        // What MJPEG left behind still fits both fallbacks.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(2.5), ExactRate),
+            Some(secs(1.25))
         );
         assert_eq!(
-            windows_camera_attempt_first_frame_timeout(secs(9.0), false),
+            windows_camera_attempt_first_frame_timeout(secs(2.0), ExactRate),
+            None
+        );
+
+        // The last attempt takes whatever is left, capped at the deadline.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(1.25), NegotiatedDefault),
+            Some(secs(1.25))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(0.5), NegotiatedDefault),
+            Some(secs(0.5))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(9.0), NegotiatedDefault),
             Some(secs(4.0))
         );
         assert_eq!(
-            windows_camera_attempt_first_frame_timeout(Duration::ZERO, false),
+            windows_camera_attempt_first_frame_timeout(Duration::ZERO, NegotiatedDefault),
             None
         );
     }
