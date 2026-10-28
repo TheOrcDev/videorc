@@ -137,6 +137,8 @@ impl ScreenStartupPhase {
         match self {
             Self::Starting => SCREEN_PREVIEW_STARTING_MESSAGE,
             Self::AwaitingConsent => SHARE_DIALOG_PENDING_MESSAGE,
+            // Mirrored as `SCREEN_SHARE_GRANTED_MESSAGE` in the renderer's
+            // replay-buffer-grants.ts: Clips waits for this run's grant.
             Self::AwaitingFirstFrame => "Screen share granted. Waiting for its first frame.",
         }
     }
