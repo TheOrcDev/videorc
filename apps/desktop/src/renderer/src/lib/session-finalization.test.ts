@@ -6,6 +6,7 @@ import {
   finalizationEventNeedsRefresh,
   finalizationFailed,
   finalizingBadgeLabel,
+  interruptedTakeBadge,
   isFinalizingSession
 } from './session-finalization'
 
@@ -73,6 +74,32 @@ describe('session finalization helpers', () => {
       updatedAt: 't'
     })
     expect(failed[0]).toMatchObject({ finalizationState: 'failed', finalizationError: 'disk full' })
+  })
+
+  it('badges only a recovered interrupted take', () => {
+    expect(interruptedTakeBadge(row())).toBeNull()
+    expect(interruptedTakeBadge(row({ interruptionRecovery: 'failed' }))).toBeNull()
+    const badge = interruptedTakeBadge(row({ interruptionRecovery: 'recovered' }))
+    expect(badge?.label).toBe('Recovered')
+    expect(badge?.detail).toContain('Videorc stopped during this recording')
+  })
+
+  it('carries the recovery outcome from the finalized event onto the row', () => {
+    const sessions = [row({ status: 'failed', finalizationState: 'finalizing' as const })]
+    const next = applyFinalizationEvent(sessions, {
+      sessionId: 's-1',
+      state: 'finalized',
+      mp4Path: '/tmp/a.mp4',
+      durationMs: 41_666,
+      interruptionRecovery: 'recovered',
+      updatedAt: '2026-10-27T00:00:00Z'
+    })
+    expect(next[0]).toMatchObject({
+      interruptionRecovery: 'recovered',
+      mp4Path: '/tmp/a.mp4',
+      durationMs: 41_666
+    })
+    expect(interruptedTakeBadge(next[0])?.label).toBe('Recovered')
   })
 
   it('asks for a refresh only when a finalized row is not loaded', () => {

@@ -2321,6 +2321,7 @@ const sceneCommitStatusSchema = boundedSemanticValue(
 )
 
 const recordingFinalizationStateSchema = enumSchema(['none', 'finalizing', 'finalized', 'failed'])
+const interruptionRecoverySchema = enumSchema(['recovered', 'failed'])
 
 const recordingFinalizationEventSchema = boundedSemanticValue(
   'a recording finalization event',
@@ -2334,6 +2335,7 @@ const recordingFinalizationEventSchema = boundedSemanticValue(
       durationMs: optionalSchema(nonNegativeInteger),
       fileSizeBytes: optionalSchema(nonNegativeInteger),
       error: optionalSchema(stringSchema({ maxLength: 16_384 })),
+      interruptionRecovery: optionalSchema(interruptionRecoverySchema),
       updatedAt: timestamp
     },
     { allowUnknown: false }
@@ -2392,7 +2394,9 @@ const sessionSummarySchema = boundedSemanticValue(
       finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 })),
       // Plan 157: separate-source take membership.
       takeId: optionalSchema(boundedString),
-      recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera']))
+      recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera'])),
+      // A take Videorc stopped mid-recording, recovered on the next start.
+      interruptionRecovery: optionalSchema(interruptionRecoverySchema)
     },
     { allowUnknown: false }
   )

@@ -766,6 +766,9 @@ async fn run_backend() -> Result<()> {
     noise_cleanup::resume_interrupted(&state);
     clean_cut::resume_interrupted(&state);
     recording::resume_pending_recording_finalizations(&state);
+    // A take the previous run stopped in the middle of (crash, killed
+    // backend, power loss) becomes an MP4 marked recovered.
+    recording::recover_interrupted_takes(&state, None);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.clone()))
         .await?;

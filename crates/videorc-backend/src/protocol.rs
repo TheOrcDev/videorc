@@ -4276,6 +4276,11 @@ pub struct SessionListItem {
     /// `combined`, `screen` or `camera` (plan 157); absent on ordinary rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_role: Option<String>,
+    /// A take Videorc stopped in the middle of (crash, killed backend, power
+    /// loss): `recovered` once its MKV was finalized to an MP4 on the next
+    /// start, `failed` when that did not work. Absent on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption_recovery: Option<String>,
 }
 
 /// Progress of a background recording finalization job.
@@ -4296,6 +4301,10 @@ pub struct RecordingFinalizationEvent {
     pub file_size_bytes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Set when this job finished the recovery of an interrupted take
+    /// (`recovered` | `failed`), so the Library row updates without a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption_recovery: Option<String>,
     pub updated_at: String,
 }
 
