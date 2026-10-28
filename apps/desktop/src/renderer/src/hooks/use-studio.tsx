@@ -4609,9 +4609,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setWorkingOriginState(origin)
   }, [])
   // The saved scene and look last persisted, so a commit that only repeats
-  // them (an updater run twice) is not mistaken for an edit.
+  // them (an updater run twice) is not mistaken for an edit. Launch starts
+  // with none: the scene coming back on stream is not an edit of it, so a
+  // working look that drifted before this build (Modified, never Updated)
+  // is never written into the scene without the streamer's action.
   const persistedWorkingRef = useRef<{ sceneId: string | null; key: string }>({
-    sceneId: activeSavedSceneId,
+    sceneId: null,
     key: ''
   })
   const [visualTransactionPending, setVisualTransactionPending] = useState(false)

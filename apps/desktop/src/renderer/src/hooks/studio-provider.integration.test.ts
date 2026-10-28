@@ -7325,6 +7325,66 @@ describe('real StudioProvider lifecycle', () => {
     })
   })
 
+  // Plan 210 STOP condition: a saved scene is never rewritten without the
+  // streamer's action. A look that drifted before auto-save existed
+  // (Modified, never Updated) stays out of the scene at launch.
+  it('never writes a drifted working look into its saved scene at launch (plan 210 D3)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), previewSmokeMode: true })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest().canSaveScene)
+    await act(async () => {
+      expect(latest().saveScene('Launch')).toBe(true)
+    })
+    const saved = latest().savedScenes[0]
+    await act(async () => root!.unmount())
+    observations.length = 0
+    const working = JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!)
+    localStorage.setItem(
+      WORKING_SCENE_KEY,
+      JSON.stringify({
+        ...working,
+        visual: { ...working.visual, layout: { ...working.visual.layout, cameraZoom: 160 } }
+      })
+    )
+    const start = backend.sentCommands.length
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        backend.sentCommands
+          .slice(start)
+          .some((command) => command.method === 'scene.load_from_capture_config') &&
+        latest().canSaveScene
+    )
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    expect(latest().activeSavedSceneId).toBe(saved.id)
+    expect(latest().captureConfig.layout.cameraZoom).toBe(160)
+    expect(latest().savedScenes[0].visual.layout.cameraZoom).toBe(saved.visual.layout.cameraZoom)
+    expect(
+      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout.cameraZoom
+    ).toBe(saved.visual.layout.cameraZoom)
+    // The streamer's next edit is theirs: it saves.
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 170 }))
+    await waitForObservation(() => latest().savedScenes[0].visual.layout.cameraZoom === 170)
+  })
+
   it('keeps named metadata and the committed background when native presentation proof times out', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
