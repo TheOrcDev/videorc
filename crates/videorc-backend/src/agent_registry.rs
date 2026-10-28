@@ -112,6 +112,10 @@ pub struct AgentRegistry {
     /// A presence watch is running (`agent_mcp::watch_presence`): it
     /// publishes `agents.status` when a connected agent's 45 s lapse.
     presence_watch: bool,
+    /// Review fix 15: every change to `persisted` the caller writes out gets
+    /// the next number, so an older snapshot written outside this lock never
+    /// lands over a newer one (`agent_mcp::persist`).
+    pub persist_generation: u64,
 }
 
 impl AgentRegistry {
@@ -187,8 +191,19 @@ impl AgentRegistry {
         self.persisted.agents.iter().find(|agent| agent.id == id)
     }
 
-    /// Note a call or heartbeat. Returns true when `lastUsedAt` should be
-    /// persisted now (at most once a minute per agent).
+    /// A heartbeat: presence only, in memory (review fix 15). Nothing is
+    /// persisted. True when the agent is known.
+    pub fn see(&mut self, id: &str, now: Instant) -> bool {
+        if self.agent(id).is_none() {
+            return false;
+        }
+        self.last_seen.insert(id.to_string(), now);
+        true
+    }
+
+    /// A tool call: presence, and `lastUsedAt`. Returns true when
+    /// `lastUsedAt` should be persisted now (at most once a minute per
+    /// agent).
     pub fn touch(&mut self, id: &str, now: Instant, wall: &str) -> bool {
         let Some(agent) = self
             .persisted
@@ -465,6 +480,13 @@ mod tests {
         registry.disconnect_all();
         assert!(!registry.connected(&record.id, start + Duration::from_secs(61)));
         assert!(!registry.touch("missing", start, "t"));
+        // Review fix 15: a heartbeat is presence only; it never changes
+        // what is persisted.
+        let before = registry.agent(&record.id).unwrap().last_used_at.clone();
+        assert!(registry.see(&record.id, start + Duration::from_secs(120)));
+        assert!(registry.connected(&record.id, start + Duration::from_secs(120)));
+        assert_eq!(registry.agent(&record.id).unwrap().last_used_at, before);
+        assert!(!registry.see("missing", start));
     }
 
     #[test]

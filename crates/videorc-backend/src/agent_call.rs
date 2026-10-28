@@ -166,7 +166,7 @@ pub async fn call_tool(
     agent: &AgentIdentity,
     request: CallToolRequestParams,
 ) -> CallToolResult {
-    agent_mcp::touch_agent(state, agent);
+    agent_mcp::touch_agent(state, agent, true);
     let name = request.name.to_string();
     let arguments = request
         .arguments

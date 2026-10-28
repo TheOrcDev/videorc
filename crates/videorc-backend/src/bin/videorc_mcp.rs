@@ -3,10 +3,13 @@
 //! Every MCP client speaks stdio, so this small binary ships inside the app
 //! and turns stdio JSON-RPC into calls on the backend's Agents listener
 //! (`http://127.0.0.1:<port>/mcp`, Bearer `VIDEORC_AGENT_TOKEN`). It answers
-//! `initialize`, `ping`, `tools/list` and the prompts (`prompts/list`,
-//! `prompts/get`, S22) itself from the compiled-in catalog and fixture
-//! (D7), so an agent app never marks the server as failed and opening the
-//! agent app never opens Videorc. The first `tools/call` with no listener
+//! `initialize`, `ping` and `prompts/get` itself. `tools/list` and
+//! `prompts/list` are the running app's own when its listener is up and
+//! takes the token (review fix 22: a copy of the bridge outside the app, the
+//! Claude Desktop extension or the Linux copy, may be older than the app);
+//! otherwise they come from the compiled-in catalog and fixture (D7), so an
+//! agent app never marks the server as failed and opening the agent app
+//! never opens Videorc. The first `tools/call` with no listener
 //! opens Videorc and waits up to 30 s; if Agents is off, the answer is
 //! "Turn on Agents in Videorc → Settings → Remote."
 //!
@@ -47,6 +50,11 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(75);
 /// Presence for the Session line: the backend counts an agent as connected
 /// for 45 s after its last call or heartbeat.
 const HEARTBEAT: Duration = Duration::from_secs(15);
+/// A running app whose port refused a connection gets this long to come
+/// back (review fix 16).
+const REFUSED_WAIT: Duration = Duration::from_secs(5);
+/// `tools/list` from the app answers fast or falls back to the catalog.
+const LIST_TIMEOUT: Duration = Duration::from_secs(3);
 const MACOS_BUNDLE_ID: &str = "dev.theorcdev.videorc";
 
 const TURN_ON_AGENTS: &str = "Turn on Agents in Videorc → Settings → Remote.";
@@ -133,6 +141,16 @@ fn process_alive(_pid: u32) -> bool {
     // shutdown; only a crash leaves a stale one, and the port check below
     // catches that case for an enabled file.
     true
+}
+
+/// Whether something takes connections on this loopback port now.
+async fn port_accepts(port: u16) -> bool {
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .is_ok_and(|connected| connected.is_ok())
 }
 
 fn log(message: impl AsRef<str>) {
@@ -266,14 +284,35 @@ fn reach(path: &Path) -> Reach {
     }
 }
 
-/// Windows: the install this bridge sits in (`<install>\\resources\\`), else
-/// the default per-user install, for a copy outside it (S22: the Claude
-/// Desktop extension unpacks the bridge into Claude's own folder).
+/// The file Videorc writes beside its per-user copy of the bridge on
+/// Windows (`%LOCALAPPDATA%\\Videorc\\bin\\`, review fix 8): the first line
+/// is the Videorc.exe that wrote it, wherever it was installed.
+const WINDOWS_APP_POINTER: &str = "videorc-app-path.txt";
+
+/// The Videorc.exe a pointer file names, from its first line.
+fn app_pointer_target(text: &str) -> Option<PathBuf> {
+    text.lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Windows: the Videorc.exe named beside this bridge (Videorc's own copy in
+/// `%LOCALAPPDATA%\\Videorc\\bin\\`), the install this bridge sits in
+/// (`<install>\\resources\\`), else the default per-user install, for a copy
+/// outside it (S22: the Claude Desktop extension unpacks the bridge into
+/// Claude's own folder).
 fn windows_videorc_exe(
     bridge: Option<&Path>,
     local_app_data: Option<&str>,
     exists: &dyn Fn(&Path) -> bool,
+    read: &dyn Fn(&Path) -> Option<String>,
 ) -> Option<PathBuf> {
+    let named = bridge
+        .and_then(Path::parent)
+        .and_then(|folder| read(&folder.join(WINDOWS_APP_POINTER)))
+        .and_then(|text| app_pointer_target(&text));
     let beside = bridge
         .and_then(Path::parent)
         .and_then(Path::parent)
@@ -284,7 +323,7 @@ fn windows_videorc_exe(
             .join("Videorc")
             .join("Videorc.exe")
     });
-    [beside, installed]
+    [named, beside, installed]
         .into_iter()
         .flatten()
         .find(|exe| exists(exe))
@@ -302,6 +341,7 @@ fn open_videorc() -> Result<(), String> {
             std::env::current_exe().ok().as_deref(),
             env_var("LOCALAPPDATA").as_deref(),
             &|path| path.exists(),
+            &|path| std::fs::read_to_string(path).ok(),
         )
         .ok_or_else(|| "Videorc.exe isn't beside this bridge.".to_string())?;
         std::process::Command::new(exe)
@@ -359,6 +399,83 @@ impl Bridge {
             }
         }
         Err(DID_NOT_OPEN.to_string())
+    }
+
+    /// The port refused a connection. The discovery file is the app's, so
+    /// it is never deleted (review fix 16): it is read again until it names
+    /// another port, or the same port takes connections again. Videorc is
+    /// opened only when nothing that wrote it still runs (a crash, or a
+    /// Windows host, where the bridge can't tell).
+    async fn find_port_after_refusal(&self, refused: u16) -> Result<u16, String> {
+        let mut opened = false;
+        let mut deadline = Instant::now() + OPEN_WAIT;
+        loop {
+            match read_discovery(&self.discovery) {
+                Some(discovery) if !discovery.enabled => return Err(TURN_ON_AGENTS.to_string()),
+                Some(discovery) if process_alive(discovery.pid) => match discovery.port {
+                    Some(port) if port != refused => return Ok(port),
+                    Some(port) if port_accepts(port).await => return Ok(port),
+                    _ if cfg!(unix) && !opened => {
+                        // The app runs: its listener is restarting or
+                        // closing. Give it a moment, without opening it.
+                        deadline = deadline.min(Instant::now() + REFUSED_WAIT);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            let running_here = cfg!(unix)
+                && read_discovery(&self.discovery)
+                    .is_some_and(|discovery| process_alive(discovery.pid));
+            if !opened && !running_here {
+                log("Videorc's listener is gone; opening Videorc.");
+                open_videorc()?;
+                opened = true;
+                deadline = Instant::now() + OPEN_WAIT;
+            }
+            if Instant::now() >= deadline {
+                return Err(if opened {
+                    DID_NOT_OPEN.to_string()
+                } else {
+                    TURN_ON_AGENTS.to_string()
+                });
+            }
+            tokio::time::sleep(OPEN_POLL).await;
+        }
+    }
+
+    /// Review fix 22: `tools/list` and `prompts/list` from the running app
+    /// when its listener is up and takes the token, never opening it; the
+    /// compiled-in answer otherwise.
+    async fn list_from_app(&self, request: &Value) -> Option<Value> {
+        let token = self.token.as_deref()?;
+        let Reach::Port(port) = reach(&self.discovery) else {
+            return None;
+        };
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        let http = self
+            .client
+            .post(format!("http://127.0.0.1:{port}/mcp"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", BACKEND_PROTOCOL_VERSION)
+            .bearer_auth(token)
+            .timeout(LIST_TIMEOUT)
+            .body(request.to_string())
+            .send()
+            .await
+            .ok()?;
+        if !http.status().is_success() {
+            return None;
+        }
+        let content_type = http
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = http.text().await.ok()?;
+        answer_in_body(&content_type, &body, &id).filter(|message| message.get("result").is_some())
     }
 
     async fn post(
@@ -432,10 +549,10 @@ impl Bridge {
                     };
                 }
                 Err(reason) if reason == "connect" && attempts == 1 => {
-                    // A stale file: the port is gone. Open Videorc once.
-                    debug("the listener refused the connection; opening Videorc");
-                    let _ = std::fs::remove_file(&self.discovery);
-                    port = match self.find_port().await {
+                    // The port is gone: read the app's file again (never
+                    // delete it), opening Videorc only if it isn't running.
+                    debug("the listener refused the connection");
+                    port = match self.find_port_after_refusal(port).await {
                         Ok(port) => port,
                         Err(sentence) => return response(&id, refusal(&sentence)),
                     };
@@ -485,8 +602,14 @@ async fn handle(bridge: Arc<Bridge>, message: Value) -> Option<Value> {
         (None, _) => None,
         (Some(id), "initialize") => Some(response(&id, initialize_result(&params))),
         (Some(id), "ping") => Some(response(&id, json!({}))),
-        (Some(id), "tools/list") => Some(response(&id, tools_list_result())),
-        (Some(id), "prompts/list") => Some(response(&id, prompts_list_result())),
+        (Some(id), "tools/list") => Some(match bridge.list_from_app(&message).await {
+            Some(answer) => answer,
+            None => response(&id, tools_list_result()),
+        }),
+        (Some(id), "prompts/list") => Some(match bridge.list_from_app(&message).await {
+            Some(answer) => answer,
+            None => response(&id, prompts_list_result()),
+        }),
         (Some(id), "prompts/get") => Some(prompts_get_answer(&id, &params)),
         (Some(_), "tools/call") => Some(bridge.forward(message).await),
         (Some(id), "") => Some(error_response(&id, -32600, "Invalid request: no method.")),
@@ -660,17 +783,49 @@ mod tests {
             .join("Videorc")
             .join("Videorc.exe");
         let only = |wanted: PathBuf| move |path: &Path| path == wanted.as_path();
+        let nothing = |_: &Path| None;
         assert_eq!(
-            windows_videorc_exe(Some(bridge), Some("/local"), &only(beside.clone())),
+            windows_videorc_exe(
+                Some(bridge),
+                Some("/local"),
+                &only(beside.clone()),
+                &nothing
+            ),
             Some(beside.clone())
         );
         // The extension's copy lives in Claude's folder: the default install.
         let extension = Path::new("/claude/extensions/videorc/server/videorc-mcp.exe");
         assert_eq!(
-            windows_videorc_exe(Some(extension), Some("/local"), &only(default.clone())),
+            windows_videorc_exe(
+                Some(extension),
+                Some("/local"),
+                &only(default.clone()),
+                &nothing
+            ),
+            Some(default.clone())
+        );
+        assert_eq!(
+            windows_videorc_exe(Some(extension), None, &|_| false, &nothing),
+            None
+        );
+        // Review fix 8: Videorc's own copy outside the install names the
+        // exe that wrote it, wherever that was installed.
+        let copy = Path::new("/local/Videorc/bin/videorc-mcp.exe");
+        let custom = PathBuf::from("D:/Apps/Videorc/Videorc.exe");
+        let pointer = |path: &Path| {
+            (path == Path::new("/local/Videorc/bin").join(WINDOWS_APP_POINTER))
+                .then(|| "D:/Apps/Videorc/Videorc.exe\r\n".to_string())
+        };
+        assert_eq!(
+            windows_videorc_exe(Some(copy), Some("/local"), &only(custom.clone()), &pointer),
+            Some(custom)
+        );
+        // A pointer to an exe that is gone falls back to the default install.
+        assert_eq!(
+            windows_videorc_exe(Some(copy), Some("/local"), &only(default.clone()), &pointer),
             Some(default)
         );
-        assert_eq!(windows_videorc_exe(Some(extension), None, &|_| false), None);
+        assert_eq!(app_pointer_target("  \n"), None);
     }
 
     #[test]
@@ -824,17 +979,38 @@ mod tests {
             token: Some("vrc_agent_good".to_string()),
             heartbeat: tokio::sync::Mutex::new(true),
         });
-        let answer = handle(good, call.clone()).await.unwrap();
+        let answer = handle(good.clone(), call.clone()).await.unwrap();
         assert_eq!(answer["id"], 5);
         assert_eq!(answer["result"]["content"][0]["text"], "Done.");
+        // Review fix 22: with the app up and the token taken, the lists are
+        // the app's own (the fake answers every request with its result).
+        let listed = handle(
+            good,
+            json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed["id"], 6);
+        assert_eq!(listed["result"]["content"][0]["text"], "Done.");
         let bad = Arc::new(Bridge {
             client: reqwest::Client::new(),
             discovery: discovery.clone(),
             token: Some("vrc_agent_bad".to_string()),
             heartbeat: tokio::sync::Mutex::new(true),
         });
-        let answer = handle(bad, call.clone()).await.unwrap();
+        let answer = handle(bad.clone(), call.clone()).await.unwrap();
         assert_eq!(answer["result"]["content"][0]["text"], BAD_TOKEN);
+        // A token the app refuses: the compiled catalog, as offline.
+        let listed = handle(
+            bad,
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            listed["result"]["tools"].as_array().unwrap().len(),
+            agent_tools::catalog().tools.len()
+        );
         // Agents off: the sentence, at once.
         std::fs::write(
             &discovery,
@@ -847,8 +1023,46 @@ mod tests {
             token: Some("vrc_agent_good".to_string()),
             heartbeat: tokio::sync::Mutex::new(true),
         });
-        let answer = handle(off, call).await.unwrap();
+        let answer = handle(off, call.clone()).await.unwrap();
         assert_eq!(answer["result"]["content"][0]["text"], TURN_ON_AGENTS);
+
+        // Review fix 16: a port that refuses never deletes the app's file.
+        // The app (this test's pid) still runs, so the bridge reads the file
+        // again instead of opening Videorc, and answers once it gives up.
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        std::fs::write(
+            &discovery,
+            json!({ "protocol": 1, "pid": std::process::id(), "enabled": true, "port": closed })
+                .to_string(),
+        )
+        .unwrap();
+        let refused = Arc::new(Bridge {
+            client: reqwest::Client::new(),
+            discovery: discovery.clone(),
+            token: Some("vrc_agent_good".to_string()),
+            heartbeat: tokio::sync::Mutex::new(true),
+        });
+        // Agents goes off while the bridge waits: that sentence, and the
+        // file is still the app's.
+        let writer = {
+            let discovery = discovery.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                std::fs::write(
+                    &discovery,
+                    json!({ "protocol": 1, "pid": std::process::id(), "enabled": false })
+                        .to_string(),
+                )
+                .unwrap();
+            })
+        };
+        let answer = handle(refused, call).await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(answer["result"]["content"][0]["text"], TURN_ON_AGENTS);
+        assert!(discovery.exists(), "the app's discovery file stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

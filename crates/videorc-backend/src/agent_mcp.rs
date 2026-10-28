@@ -183,6 +183,8 @@ pub struct AgentMcpShared {
     /// sockets (the Agents store, a Settings row's own client) never count:
     /// they would neither run nor ack an intent.
     pub studio_sockets: AtomicUsize,
+    /// Review fix 15: the newest registry snapshot written (`persist`).
+    pub persisted_generation: StdMutex<u64>,
 }
 
 pub type AgentMcpSlot = std::sync::Arc<AgentMcpShared>;
@@ -191,6 +193,7 @@ pub fn new_agent_mcp_slot() -> AgentMcpSlot {
     std::sync::Arc::new(AgentMcpShared {
         runtime: StdMutex::new(AgentMcpRuntime::default()),
         studio_sockets: AtomicUsize::new(0),
+        persisted_generation: StdMutex::new(0),
     })
 }
 
@@ -495,8 +498,27 @@ pub fn publish_status(state: &AppState) -> AgentsStatus {
     status
 }
 
+/// Write the registry out. The snapshot is taken under the registry lock
+/// and written after it (review fix 15): a secrets-file write and its fsync
+/// never hold up a call, a heartbeat or a status read. Writes are ordered:
+/// an older snapshot that finishes later never lands over a newer one.
 fn persist(state: &AppState) -> Result<()> {
-    registry(state).persist()
+    let (generation, snapshot) = {
+        let mut registry = registry(state);
+        registry.persist_generation += 1;
+        (registry.persist_generation, registry.persisted.clone())
+    };
+    let mut written = state
+        .agents
+        .persisted_generation
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *written >= generation {
+        return Ok(());
+    }
+    snapshot.persist()?;
+    *written = generation;
+    Ok(())
 }
 
 pub async fn enable(state: &AppState) -> Result<AgentsStatus> {
@@ -652,14 +674,20 @@ pub fn clip_chars(text: &str, max: usize) -> String {
     cut
 }
 
-/// A call or heartbeat from an agent: presence for the Session line, and
-/// `lastUsedAt` persisted at most once a minute.
-pub fn touch_agent(state: &AppState, agent: &AgentIdentity) {
+/// A call or heartbeat from an agent: presence for the Session line. A
+/// tool call (`used`) also sets `lastUsedAt`, persisted at most once a
+/// minute; a heartbeat stays in memory (review fix 15).
+pub fn touch_agent(state: &AppState, agent: &AgentIdentity, used: bool) {
     let now = Instant::now();
     let (was_connected, persist_due, start_watch) = {
         let mut registry = registry(state);
         let was = registry.connected(&agent.id, now);
-        let due = registry.touch(&agent.id, now, &chrono::Utc::now().to_rfc3339());
+        let due = if used {
+            registry.touch(&agent.id, now, &chrono::Utc::now().to_rfc3339())
+        } else {
+            registry.see(&agent.id, now);
+            false
+        };
         (was, due, registry.claim_presence_watch())
     };
     if persist_due && let Err(error) = persist(state) {
@@ -1103,9 +1131,9 @@ impl rmcp::ServerHandler for VideorcMcp {
         &self,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> std::result::Result<(), rmcp::ErrorData> {
-        // The bridge's heartbeat: presence for the Session line.
+        // The bridge's heartbeat: presence for the Session line, in memory.
         if let Some(agent) = identity_from_context(&context) {
-            touch_agent(&self.state, &agent);
+            touch_agent(&self.state, &agent, false);
         }
         Ok(())
     }
@@ -1713,7 +1741,7 @@ mod tests {
     fn status_never_serialises_a_token_or_null() {
         let state = test_state();
         let (agent, token) = connect_agent(&state, "Codex");
-        touch_agent(&state, &agent);
+        touch_agent(&state, &agent, true);
         let status = status(&state);
         assert_eq!(status.agents.len(), 1);
         assert!(status.agents[0].connected);
@@ -1883,6 +1911,30 @@ mod tests {
         assert!(failed["bindError"].as_str().unwrap().contains("all in use"));
         stop(&state);
         assert!(status(&state).bind_error_kind.is_none());
+    }
+
+    /// Review fix 15: a heartbeat keeps presence in memory and writes
+    /// nothing; a tool call writes `lastUsedAt` (at most once a minute), and
+    /// writes are ordered by the snapshot's generation.
+    #[tokio::test]
+    async fn heartbeats_stay_in_memory_and_calls_persist_last_use() {
+        let state = test_state();
+        let (agent, _) = connect_agent(&state, "Claude Desktop");
+        let written = || *state.agents.persisted_generation.lock().unwrap();
+        let before = written();
+        touch_agent(&state, &agent, false);
+        assert!(status(&state).agents[0].connected);
+        assert_eq!(written(), before, "a heartbeat writes nothing");
+        assert!(status(&state).agents[0].last_used_at.is_none());
+        touch_agent(&state, &agent, true);
+        assert_eq!(written(), before + 1, "a call writes its last use");
+        assert!(status(&state).agents[0].last_used_at.is_some());
+        touch_agent(&state, &agent, true);
+        assert_eq!(written(), before + 1, "at most once a minute");
+        // An older snapshot never lands over a newer one.
+        *state.agents.persisted_generation.lock().unwrap() = u64::MAX;
+        persist(&state).unwrap();
+        assert_eq!(written(), u64::MAX);
     }
 
     #[tokio::test]
