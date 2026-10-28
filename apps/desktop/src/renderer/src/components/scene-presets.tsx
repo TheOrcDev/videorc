@@ -31,6 +31,7 @@ export function ScenePresetControls(): ReactElement {
     sceneLibraryActions,
     sceneLibraryError,
     captureConfig,
+    deviceList,
     settings,
     runtimeInfo,
     isSessionActive,
@@ -98,7 +99,8 @@ export function ScenePresetControls(): ReactElement {
               scene: entry,
               appState: savedSceneAppStates[entry.id],
               sessionActive: isSessionActive,
-              orientation
+              orientation,
+              devices: deviceList.devices
             })
             const shortcut = settings.globalShortcuts?.scenes?.[entry.id]
             // One SceneCard for every scene (plan 174 S3.3, B-20): the

@@ -69,10 +69,11 @@ describe("New scene…'s apps without S4 (plan 210 S5)", () => {
     ])
   })
 
-  it('never offers Videorc, palettes, unavailable windows, the login window or windows with no app', () => {
+  it('never offers Videorc, the Dock, palettes, unavailable windows, the login window or windowless apps', () => {
     const choices = appChoicesFromDevices(
       [
         window('window:1', 'dev.theorcdev.videorc', 'Videorc'),
+        window('window:6', 'com.apple.dock', 'Dock'),
         window('window:2', 'com.figma.Desktop', 'Figma', { width: 320, height: 200 }),
         window('window:3', 'com.figma.Desktop', 'Figma', { status: 'unavailable' }),
         window('window:4', 'com.apple.loginwindow', 'loginwindow', { name: 'loginwindow' }),
@@ -107,6 +108,16 @@ describe("New scene…'s apps without S4 (plan 210 S5)", () => {
       ['Figma', 3, false],
       ['T3 Code', 1, true]
     ])
+  })
+
+  it('drops a front window title that only repeats the app name', () => {
+    const [choice] = appChoicesFromDevices([
+      {
+        ...window('window:1', 'com.apple.ActivityMonitor', 'Activity Monitor'),
+        windowTitle: 'Activity Monitor'
+      }
+    ])
+    expect(choice?.frontWindowTitle).toBeUndefined()
   })
 
   it('searches names and front window titles', () => {
@@ -169,6 +180,13 @@ describe('the scenes New scene… makes', () => {
       'vertical-screen-camera'
     )
     expect(lookForAppScenes(look('vertical-split')).layout.layoutPreset).toBe('vertical-split')
+    // A camera layout with the camera off becomes its screen-only twin.
+    const cameraOff = look()
+    cameraOff.sources = { ...cameraOff.sources, cameraId: undefined, cameraOff: true }
+    expect(lookForAppScenes(cameraOff).layout.layoutPreset).toBe('screen-only')
+    expect(
+      lookForAppScenes({ ...cameraOff, layout: look('camera-only').layout }).layout.layoutPreset
+    ).toBe('screen-only')
     const hidden = look()
     hidden.layout.sourceVisibility = { camera: true, capture: false }
     expect(lookForAppScenes(hidden).layout.sourceVisibility?.capture).toBe(true)

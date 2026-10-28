@@ -37,6 +37,7 @@ const scene = (
 })
 const figmaApp = { bundleId: 'com.figma.Desktop', name: 'Figma', follows: true }
 const figma = () => scene('figma', 'Figma', { windowId: 'window:7', app: figmaApp })
+const camera: Device = { id: 'camera', name: 'FaceTime', kind: 'camera', status: 'available' }
 const window = (id: string, bundleId: string, name: string): Device => ({
   id,
   name: `${name} - Untitled`,
@@ -127,7 +128,8 @@ describe('the scene list (plan 210 D6)', () => {
         scene: figma(),
         appState,
         sessionActive: false,
-        orientation: 'horizontal'
+        orientation: 'horizontal',
+        devices: [camera]
       })
     expect(blocked('ready')).toBeNull()
     expect(blocked(undefined)).toBeNull()
@@ -140,7 +142,8 @@ describe('the scene list (plan 210 D6)', () => {
         scene: vertical,
         appState: undefined,
         sessionActive: true,
-        orientation: 'horizontal'
+        orientation: 'horizontal',
+        devices: [camera]
       })
     ).toBe('Stop the recording or stream before switching orientation.')
     expect(
@@ -148,9 +151,20 @@ describe('the scene list (plan 210 D6)', () => {
         scene: vertical,
         appState: undefined,
         sessionActive: false,
-        orientation: 'horizontal'
+        orientation: 'horizontal',
+        devices: [camera]
       })
     ).toBeNull()
+    // An app's scene can't ask to resolve its sources: a camera it can't use says so.
+    expect(
+      savedSceneBlockedReason({
+        scene: figma(),
+        appState: 'ready',
+        sessionActive: false,
+        orientation: 'horizontal',
+        devices: []
+      })
+    ).toBe('Camera unavailable. Choose a replacement in Sources.')
   })
 
   it('names a scene uniquely and suggests the name of what it shows', () => {

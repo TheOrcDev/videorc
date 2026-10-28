@@ -38,6 +38,34 @@ export type AppChoice = {
 const MIN_WINDOW_WIDTH = 400
 const MIN_WINDOW_HEIGHT = 300
 
+/**
+ * macOS's own surfaces own screen-sized windows that are never an app you
+ * show (the Dock draws the desktop's edges, the others its overlays).
+ */
+const SYSTEM_BUNDLE_IDS = new Set([
+  'com.apple.dock',
+  'com.apple.windowmanager',
+  'com.apple.controlcenter',
+  'com.apple.notificationcenterui',
+  'com.apple.spotlight',
+  'com.apple.wallpaper.agent',
+  'com.apple.loginwindow',
+  'com.apple.screencaptureui'
+])
+
+function offered(bundleId: string, self: ReadonlySet<string>): boolean {
+  const key = bundleId.toLowerCase()
+  return !self.has(key) && !SYSTEM_BUNDLE_IDS.has(key)
+}
+
+/** A front window's title, unless it only repeats the app's name. */
+function windowTitle(title: string | undefined, name: string): string | undefined {
+  const trimmed = title?.trim()
+  return trimmed && trimmed.toLocaleLowerCase() !== name.trim().toLocaleLowerCase()
+    ? trimmed
+    : undefined
+}
+
 function isAppWindow(device: Device): boolean {
   return (
     device.kind === 'window' &&
@@ -69,7 +97,7 @@ export function appChoicesFromDevices(
     if (!isAppWindow(device)) continue
     const app = device.app!
     const key = app.bundleId.toLowerCase()
-    if (self.has(key)) continue
+    if (!offered(app.bundleId, self)) continue
     const existing = apps.get(key)
     if (existing) {
       existing.windowCount += 1
@@ -80,7 +108,7 @@ export function appChoicesFromDevices(
       name: app.name,
       windowCount: 1,
       frontWindowId: device.id,
-      frontWindowTitle: device.windowTitle
+      frontWindowTitle: windowTitle(device.windowTitle, app.name)
     })
   }
   return [...apps.values()].sort(byName)
@@ -96,14 +124,14 @@ export function appChoicesFromPreviews(
   const apps: AppChoice[] = []
   for (const preview of previews) {
     const key = preview.bundleId.toLowerCase()
-    if (self.has(key) || seen.has(key) || preview.windowCount < 1) continue
+    if (!offered(preview.bundleId, self) || seen.has(key) || preview.windowCount < 1) continue
     seen.add(key)
     apps.push({
       bundleId: preview.bundleId,
       name: preview.name,
       windowCount: preview.windowCount,
       frontWindowId: preview.frontWindowId,
-      frontWindowTitle: preview.frontWindowTitle,
+      frontWindowTitle: windowTitle(preview.frontWindowTitle, preview.name),
       picture: preview.picture,
       width: preview.width,
       height: preview.height
@@ -133,8 +161,8 @@ export function windowCountLabel(count: number): string | null {
   return count > 1 ? plural(count, 'window') : null
 }
 
-function screenLayoutFor(preset: LayoutPreset): LayoutPreset {
-  const camera = layoutPresetNeedsCamera(preset)
+function screenLayoutFor(preset: LayoutPreset, cameraOn: boolean): LayoutPreset {
+  const camera = cameraOn && layoutPresetNeedsCamera(preset)
   if (layoutPresetOrientation(preset) === 'vertical')
     return camera ? 'vertical-screen-camera' : 'vertical-screen-only'
   return camera ? 'screen-camera' : 'screen-only'
@@ -143,16 +171,19 @@ function screenLayoutFor(preset: LayoutPreset): LayoutPreset {
 /**
  * The current look, made to show a screen: a scene made for an app that
  * showed no screen (the Studio on Camera only, or its screen hidden) would
- * never show the app. The orientation never changes, so new scenes follow
- * the Studio's.
+ * never show the app. A camera layout with the camera off becomes its
+ * screen-only twin, so every new scene can go on stream. The orientation
+ * never changes, so new scenes follow the Studio's.
  */
 export function lookForAppScenes(look: SceneVisual): SceneVisual {
   const { layout } = look
   const freeform = layout.arrangementMode === 'freeform'
-  const layoutPreset =
-    freeform || layoutPresetNeedsScreen(layout.layoutPreset)
-      ? layout.layoutPreset
-      : screenLayoutFor(layout.layoutPreset)
+  const cameraOn = Boolean(look.sources.cameraId) && look.sources.cameraOff !== true
+  const fits =
+    freeform ||
+    (layoutPresetNeedsScreen(layout.layoutPreset) &&
+      (cameraOn || !layoutPresetNeedsCamera(layout.layoutPreset)))
+  const layoutPreset = fits ? layout.layoutPreset : screenLayoutFor(layout.layoutPreset, cameraOn)
   return normalizeSceneVisual({
     ...look,
     layout: {

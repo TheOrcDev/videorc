@@ -178,7 +178,8 @@ export function SceneList(): ReactElement {
               scene: entry,
               appState: savedSceneAppStates[entry.id],
               sessionActive: isSessionActive,
-              orientation
+              orientation,
+              devices: deviceList.devices
             })
             return (
               <SavedSceneRow
