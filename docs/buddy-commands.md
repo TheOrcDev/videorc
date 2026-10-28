@@ -63,9 +63,12 @@ destinations or scheduling. Videorc checks every step against that list on
 your computer, whatever the planner said.
 
 - **It asks out loud first** before going live and before stopping a
-  recording or a livestream: "End the livestream? Say yes." Say "yes" or
-  press Enter; "no", Esc or 20 seconds without an answer and nothing more
-  happens. Removing a message uses the removal card above.
+  recording or a livestream: 'End the livestream? Say "Buddy, yes".' Say
+  "Buddy, yes" or press Enter; a bare "yes" (a text-to-speech alert could
+  say one) leaves the question open. "No", Esc or 20 seconds without an
+  answer and nothing more happens. Removing a message uses the removal card
+  above, and showing a comment Buddy flagged asks "Show it anyway?" as the
+  highlight command does (typed, Buddy says it flagged it instead).
 - **Type it** in the Stream Manager: `/buddy switch to BRB`. No "Buddy"
   first and no spoken yes, because typing is deliberate. The answer shows
   under the composer.

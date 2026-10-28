@@ -2219,6 +2219,57 @@ mod tests {
         assert_eq!(done.phase, ModerationPhase::Removed);
     }
 
+    /// Plan 209 review fix 20: a source this build doesn't know (a newer
+    /// Videorc wrote it) reads as `manual`, and the row still loads.
+    #[tokio::test]
+    async fn an_unknown_stored_source_reads_as_manual() {
+        let (state, _events) = test_state();
+        let now = Utc::now().to_rfc3339();
+        state
+            .database
+            .save_chat_moderation_operation(&ModerationOperation {
+                operation_id: "future".to_string(),
+                session_id: SESSION.to_string(),
+                message_id: "m".to_string(),
+                platform: StreamPlatform::Twitch,
+                target_id: None,
+                provider_message_id: "p".to_string(),
+                author_name: "viewer".to_string(),
+                excerpt: "hello".to_string(),
+                source: ModerationSource::Agent,
+                reason: None,
+                phase: ModerationPhase::Removed,
+                confirm_mode: RemoveConfirmMode::Confirm,
+                requires_explicit_confirm: false,
+                confirm_by: None,
+                execute_at: None,
+                outcome: None,
+                outcome_code: None,
+                attempts: 1,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .unwrap();
+        let read = |id: &str| {
+            state
+                .database
+                .get_chat_moderation_operation(id)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(read("future").source, ModerationSource::Agent);
+        state
+            .database
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE live_chat_moderation_operations SET source_json = '\"from-a-newer-videorc\"' WHERE id = 'future'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(read("future").source, ModerationSource::Manual);
+    }
+
     #[tokio::test]
     async fn the_restart_sweep_cancels_pending_and_marks_executing_unknown() {
         let (state, _events) = test_state();

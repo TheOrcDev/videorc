@@ -462,14 +462,19 @@ the Trash.
   - Go Live records too only when Output's recording is on (D19 of plan
     174), as in the dialog.
 - **D14 Buddy confirms the big four out loud.** Speech mishears, and a
-  streamer reading chat aloud could say a viewer's words. Buddy asks "End the
-  livestream? Say yes." before `go_live`, `stop` while live, and
-  `remove_chat_message` (the existing removal card), and it never deletes
-  recordings (D15). Typed `/buddy` runs at once like an agent. This differs
+  streamer reading chat aloud could say a viewer's words. Buddy asks 'End
+  the livestream? Say "Buddy, yes".' before `go_live`, `stop` while live
+  (and while recording, as built), and `remove_chat_message` (the existing
+  removal card), and it never deletes recordings (D15). The yes to `go_live`
+  and `stop` must name Buddy (review fix 17): a bare "yes", which a
+  text-to-speech donation alert could say, leaves the question open. The
+  removal card's own yes is unchanged. Typed `/buddy` runs at once like an agent. This differs
   from D2 on purpose; see Open questions.
 - **D15 Buddy's tool subset.** Buddy may use the Look tools except
   `get_settings` and `get_recording`, everything in Run the show and Arrange
-  the picture ("Buddy, move to the top left"), and `send_chat_message`,
+  the picture ("Buddy, move to the top left") except `edit_banner` (it
+  imports any image path on this computer; a rename-only split tool isn't
+  worth it, review fix 18), and `send_chat_message`,
   `remove_chat_message`, `buddy_say`, `set_buddy`, and
   `update_stream_info`. Not Library, not `update_settings`,
   `set_destinations` or `schedule_stream`. The **desktop** enforces the subset
@@ -556,17 +561,17 @@ the Trash.
 Threats and what stops them. PR A's description carries this as the leak
 argument AGENTS.md asks for.
 
-| Threat                                                                                   | Stop                                                                                                                                                                                   |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A web page in the user's browser calls `http://127.0.0.1:7440/mcp` (CSRF, DNS rebinding) | A request with any `Origin` header is refused (native clients send none); `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; Bearer token required; no CORS headers              |
-| Another process on the LAN                                                               | The listener binds `127.0.0.1` only                                                                                                                                                    |
-| A stolen or old agent token                                                              | Per-agent tokens, stored hashed; Remove revokes one; Stop disconnects all; turning Agents off closes the listener                                                                      |
-| A tool result leaks a secret                                                             | Results come from allowlisted projections (D9); the smoke scans every result for the seeded fake keys, OAuth tokens and all four credentials                                           |
-| A viewer's chat steers the agent                                                         | D18 marking and instructions; D11 notices; D12 Stop; Trash for deletes; YouTube's confirm                                                                                              |
-| A viewer's chat steers Buddy                                                             | The desktop enforces Buddy's subset (D15) and the D14 confirms; the wake word is required by voice                                                                                     |
-| An agent floods actions                                                                  | Per agent: 20 actions per 10 s; chat posts 1 per 2 s and 20 a minute; removals 10 a minute (the existing cap); `go_live` and `stop` once per 10 s; the remote debounce families reused |
-| The Agent role reaches other methods                                                     | The `/mcp` router is the only door, and it calls the catalog's executors only; `/ws` refuses agent tokens; tests in `backend_authority.rs`                                             |
-| The phone or Stream Deck gains power                                                     | D19's byte-identical allowlist test                                                                                                                                                    |
+| Threat                                                                                   | Stop                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A web page in the user's browser calls `http://127.0.0.1:7440/mcp` (CSRF, DNS rebinding) | A request with any `Origin` header is refused (native clients send none); `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; Bearer token required; no CORS headers                                                                                                                                                                  |
+| Another process on the LAN                                                               | The listener binds `127.0.0.1` only                                                                                                                                                                                                                                                                                                        |
+| A stolen or old agent token                                                              | Per-agent tokens, stored hashed; Remove revokes one; Stop disconnects all; turning Agents off closes the listener                                                                                                                                                                                                                          |
+| A tool result leaks a secret                                                             | Results come from allowlisted projections (D9); the smoke scans every result for the seeded fake keys, OAuth tokens and all four credentials                                                                                                                                                                                               |
+| A viewer's chat steers the agent                                                         | D18 marking and instructions; D11 notices; D12 Stop; Trash for deletes; YouTube's confirm                                                                                                                                                                                                                                                  |
+| A viewer's chat steers Buddy                                                             | The desktop enforces Buddy's subset (D15) and the D14 confirms; the wake word is required by voice                                                                                                                                                                                                                                         |
+| An agent floods actions                                                                  | Per agent: 20 actions per 10 s; chat posts 1 per 2 s and 20 a minute; removals 10 a minute (the existing cap); `go_live` once per 10 s; `stop` 5 per 10 s; `get_picture` once a second; a refused call gives its slot back. Agents don't use the remote debounce families (as built: each call runs to its own answer on the agents' lane) |
+| The Agent role reaches other methods                                                     | The `/mcp` router is the only door, and it calls the catalog's executors only; `/ws` refuses agent tokens; tests in `backend_authority.rs`                                                                                                                                                                                                 |
+| The phone or Stream Deck gains power                                                     | D19's byte-identical allowlist test                                                                                                                                                                                                                                                                                                        |
 
 ## Slices
 
@@ -1991,3 +1996,96 @@ videorc-backend` filtered to agent, buddy, remote*, backend_authority,
     notarized or uploaded.
   - The release build's 24 warnings are older release-cfg warnings
     (encoder_bridge, compositor, captions); none are in plan 209's files.
+
+### Review fixes (2026-10-28, the independent review of `766a4459`)
+
+All 22 findings are fixed. Where a fix took a different shape, it says so.
+
+- **1, cancels and deadlines.** Every `agent.intent` carries `deadlineAt`
+  and `generation`. Stop agents, Off and Remove send the renderer-only
+  `agent.intent.cancel {generation, agentId?}`, which reaches listening
+  sockets only. Buddy's intents are never cut by Stop agents.
+  - The lane drops a cancelled or late intent when its turn comes. The
+    check is in `executeAgentIntent`, not in `remote-intent-queue.ts`, to
+    keep it out of the eager bundle.
+  - `go_live` checks the cancel before it confirms and again after platform
+    setup (a new `cancelled` confirm outcome), then cleans up what it
+    prepared.
+  - A call that ended unanswered is kept for 10 minutes. A late ack that
+    says it happened updates the Activity row and fires the notice; a late
+    refusal changes nothing.
+- **2.** `activity_word` uses `session_word`'s rule, so a recording with a
+  stream URL counts as live. `confirm_activity_word` also counts Starting
+  as live, for a spoken stop.
+- **3.** By voice, a planned `set_highlight` becomes the grammar's
+  `CommandKind::Highlight` (`Halt::Highlight`), which asks "Show it
+  anyway?" for a comment Buddy flagged. Changed approach: a typed `/buddy`
+  has no card, so a flagged comment is refused with the same reason instead.
+- **4, 11.** New rate families:
+  - `stop`: 5 per 10 s.
+  - `picture`: 1 per second.
+  - `session` now covers `go_live` only.
+  - A refused call gives its slot back.
+  - `get_picture` caches the last JPEG per program or preview frame.
+- **5, 9, 10.**
+  - `withoutCaptions` applies only when captions would block the start.
+  - "Without captions" is reset on every outcome that didn't start.
+  - One in-flight hold covers the whole headless call.
+  - The Studio reads `dialogOpenRef`, set as soon as the dialog opens.
+- **6.** `about_comment` ignores the wake word and Buddy's names, and
+  one-word names that are stop words, command or place words, or parts of
+  tool names.
+- **7, 14.** `move_on_scene` answers from what it saved. A sized place is
+  clamped only when it leaves the canvas, so every snap is byte-identical.
+  Buddy stays square.
+- **8.** On Windows, Connect copies the bridge to
+  `%LOCALAPPDATA%\Videorc\bin\` and refreshes it at startup.
+  - A running copy is renamed aside. If that fails, the old copy stays and
+    the refresh reports `busy`.
+  - `videorc-app-path.txt` beside the copy names `Videorc.exe`, and the
+    bridge reads it first.
+- **12.** `remove_chat_message` from Buddy runs `buddy_removal_gate`: the
+  remove switch and Premium.
+- **13.** On POSIX, a config that holds a token, and every backup, is 0600.
+  The newest 3 backups are kept.
+- **15.** A heartbeat records presence in memory only.
+  - `lastUsedAt` is persisted on `tools/call`, at most once a minute.
+  - The write happens after the registry lock is released, ordered by
+    generation.
+- **16.** The bridge never deletes `agents.json`. It re-reads the file, and
+  opens Videorc only when nothing that wrote it still runs.
+- **17.** The `go_live` and `stop` questions take only "Buddy, yes".
+  - The question now says 'Say "Buddy, yes".' (D14).
+  - The removal card's yes is unchanged.
+  - `smoke:buddy-act` now proves that a bare "Yes." leaves the recording
+    running.
+- **18.** `edit_banner` is `buddy: false` (D15).
+- **19.** For a disk-image or AppTranslocation bridge, Add and the Connect
+  dialog refuse with "Move Videorc to Applications first."
+  - Changed approach: `/Volumes/` counts only for an app at a volume's
+    root. An external drive's Applications folder stays allowed.
+- **20.** A source the storage doesn't know reads as `manual`. A rollback
+  to a build before plan 209 can't read `agent` removal rows. The PR body
+  must say so.
+- **21.** On Windows, the Claude Desktop MSIX path wins when
+  `Packages\Claude_*` exists.
+- **22.** The bridge forwards `tools/list` and `prompts/list` to a reachable
+  app that accepts the token. The compiled lists are used only offline.
+- **Debounce text.** Agents never used the remote debounce families. The
+  Security table now says what was built.
+- **Eager bundle**: 2,014,476 raw / 405,989 gzip (was 2,014,460 /
+  406,010). Raw passes; gzip is still over the 405,000 ceiling.
+  - What kept it from growing: the lane's refusals and two derived flags
+    moved into `studio-context.ts`, and `scene-layout` has its own on-canvas
+    check instead of importing `overlayRectValid`.
+- **Gates**: all passed.
+  - `pnpm typecheck`, `pnpm lint` (one older warning), `pnpm format:check`.
+  - vitest on 21 touched files, including `studio-provider.integration`
+    (482 tests).
+  - `pnpm test:scripts`: 2,714 pass, 1 skipped.
+  - `cargo fmt --check --all`, and `cargo clippy -p videorc-backend -- -D
+warnings`.
+  - `cargo test -p videorc-backend` filtered to agent, buddy, cohost,
+    live*chat, backend_authority and websocket*, plus the bridge's 22 tests.
+  - Smokes: `smoke:agent-mcp`, `smoke:buddy-act` (step 4 with the bare
+    yes), and `smoke:buddy-commands`, unchanged.

@@ -27,7 +27,11 @@ developers, and carries the leak argument AGENTS.md asks for (Security).
    fingerprint of it. If you lose it, remove the agent and connect it again.
 
 **Add to …** changes only the `videorc` entry: every other server and
-setting in the file stays as it was. If the file isn't something Videorc can
+setting in the file stays as it was. On a Mac and on Linux the file that
+holds the token, and Videorc's backups of it, are readable by you only, and
+Videorc keeps only the newest three backups of each file. Claude Desktop from
+the Microsoft Store keeps its settings in its own package folder; Videorc
+writes there when it finds it. If the file isn't something Videorc can
 read with certainty (JSON with comments, an unusual shape, a Codex
 `config.toml` that defines `videorc` some other way), or the app's settings
 folder isn't on this computer, Videorc leaves it alone and says to copy the
@@ -59,10 +63,15 @@ For example, Claude Desktop's entry on a Mac looks like this:
 }
 ```
 
-On Windows the program is `resources\videorc-mcp.exe` in the folder Videorc
-is installed in (`%LOCALAPPDATA%\Programs\Videorc` for a normal install). On
+On Windows, Connect copies it to `%LOCALAPPDATA%\Videorc\bin\videorc-mcp.exe`,
+outside the folder Videorc is installed in: an update or an uninstall closes
+everything running from that folder, which would cut your agents off. On
 Linux, Connect copies it to `~/.local/share/videorc/bin/videorc-mcp`, because
-the AppImage moves every time it starts.
+the AppImage moves every time it starts. On both, Videorc refreshes the copy
+after an update. On a Mac, Videorc must run from Applications: while it runs
+from the disk image or a temporary copy macOS made, Connect and **Add to …**
+say "Move Videorc to Applications first.", because a line pointing there
+would stop working.
 
 Your agent app can start before Videorc does: it lists Videorc's tools
 without opening Videorc, and the first time the agent uses one, Videorc
@@ -158,8 +167,12 @@ sentence back instead ("Choose a screen or a camera first.").
   billing.
 - **Stop.** While an agent is connected, the Studio's Session section shows
   "Claude Desktop connected · Stop". Stop disconnects every agent at once and
-  turns Agents off. ⌘K has "Stop agents" too.
-- **Remove** an agent in the list to revoke its token for good.
+  turns Agents off. ⌘K has "Stop agents" too. Anything an agent asked for
+  that Videorc hasn't started yet is dropped, and a Go Live an agent started
+  stops before it goes public (what it set up on a platform is cleaned up).
+  Buddy isn't an agent: Stop never cuts what you asked Buddy for.
+- **Remove** an agent in the list to revoke its token for good. What that
+  agent asked for and Videorc hasn't started is dropped the same way.
 
 ### Privacy
 
@@ -190,8 +203,11 @@ start. When the dialog would hold you back, the agent gets the dialog's own
 words instead ("YouTube: Sign in to YouTube in Livestream → Setup, then go
 live."). The agent may pass `allowPartial` to go live on the destinations
 that are ready (the dialog's "Go live without …") and `withoutCaptions` to
-skip captions that can't start; anything only you can fix, such as signing
-in, a missing stream key or Premium, is always refused. It records too only
+skip captions that can't start (captions that can start stay on, as the
+dialog offers "Go live without captions" only when they can't); anything
+only you can fix, such as signing in, a missing stream key or Premium, is
+always refused. While an agent's Go Live runs, the Go Live button and the
+dialog wait for it. It records too only
 when Output's recording is on, as the dialog does.
 
 ### Arranging the picture
@@ -249,17 +265,27 @@ what it now covers.
   `agents.create`'s answer.
 - **Discovery.** `agents.json` next to the database (0600) carries
   `{protocol, pid, enabled, port?}`, never a secret. The bridge reads it
-  (`VIDEORC_AGENTS_DISCOVERY` overrides its path, which the smoke uses).
+  (`VIDEORC_AGENTS_DISCOVERY` overrides its path, which the smoke uses) and
+  never writes or deletes it: when the port refuses a connection it reads
+  the file again until it names another port or the port answers, and opens
+  Videorc only when nothing that wrote the file still runs.
 - **The bridge** (`src/bin/videorc_mcp.rs`, shipped as `videorc-mcp`)
-  speaks newline-delimited JSON-RPC on stdio, answers `initialize`, `ping`,
-  `tools/list`, `prompts/list` and `prompts/get` from its compiled-in
-  catalog and prompts, forwards `tools/call` with
+  speaks newline-delimited JSON-RPC on stdio, answers `initialize`, `ping`
+  and `prompts/get` itself, forwards `tools/call` with
   `VIDEORC_AGENT_TOKEN`, opens Videorc on the first call when it isn't
-  running (D7) and logs to stderr only. It pings every 15 s while alive, so
-  the Session line knows the agent is there. An agent unheard from for 45 s
-  is no longer connected: the backend publishes `agents.status` when that
-  happens (one task sleeps until the next lapse while any agent is
-  connected), so nothing in the renderer polls.
+  running (D7) and logs to stderr only. `tools/list` and `prompts/list` are
+  the running app's own when its listener is up and takes the token (a copy
+  of the bridge, the Claude Desktop extension or the Linux copy, can be
+  older than the app); otherwise, and without ever opening Videorc, they
+  come from its compiled-in catalog and prompts. On Windows Videorc's own
+  copy has `videorc-app-path.txt` beside it, naming the Videorc.exe to open.
+  It pings every 15 s while alive, so the Session line knows the agent is
+  there; a ping is presence in memory only, and `lastUsedAt` is written on
+  tool calls (at most once a minute per agent, outside the registry lock).
+  An agent unheard from for 45 s is no longer connected: the backend
+  publishes `agents.status` when that happens (one task sleeps until the
+  next lapse while any agent is connected), so nothing in the renderer
+  polls.
 - **Prompts** (S22, `protocol-fixtures/agent-prompts.json`, loaded by
   `agent_prompts.rs` into the backend and the bridge): `name`, `title`,
   `description`, the `tools` the text names (never on the wire; a test holds
@@ -288,10 +314,18 @@ what it now covers.
     an inline table, `mcp_servers` as an inline table, an array of tables,
     a duplicate, or anything unterminated is refused;
   - the app's folder is never created; a timestamped backup
-    (`<file>.videorc-backup-<UTC stamp>`) is taken before every change; the
-    new file is written beside the old one and renamed over it, keeping its
-    mode (a new file is 0600); a symlinked file is written through to its
-    target; an unchanged entry writes nothing;
+    (`<file>.videorc-backup-<UTC stamp>`) is taken before every change and
+    only the newest three are kept; the new file is written beside the old
+    one and renamed over it, keeping its mode, except that on macOS and
+    Linux a file holding a token, and every backup, is 0600 (a new file is
+    0600); a symlinked file is written through to its target; an unchanged
+    entry writes nothing;
+  - Claude Desktop from the Microsoft Store reads
+    `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`;
+    that path wins when the package folder exists;
+  - a macOS bridge inside a disk image (`/Volumes/<name>/<X>.app/`) or an
+    AppTranslocation copy is refused with "Move Videorc to Applications
+    first.", by main and by the Connect dialog, which then shows no line;
   - Claude Code: `claude mcp remove --scope user videorc`, then the line's
     `claude mcp add`, by `execFile` (no shell, 20 s timeout, stdin closed)
     from the PATH plus the installers' folders a Finder-opened app's PATH
@@ -329,6 +363,20 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
   (renderer-only). 15 s timeout (60 s for `go_live`); "Videorc's Studio
   isn't open." at once with no socket listening (the Agents store's own
   socket, or a Settings row's client, never counts).
+- **Cancels and deadlines.** Every `agent.intent` carries `deadlineAt`
+  (epoch ms, when the agent stops waiting) and `generation`. Stop agents,
+  Off and Remove send `agent.intent.cancel {generation, agentId?}`
+  (renderer-only, listening sockets only; no `agentId` means every agent
+  but Buddy). The Studio's link (`lib/agent-studio-link.ts`) marks the
+  intents it holds; the agents' lane drops a cancelled or late intent when
+  its turn comes (`agentIntentDropReason`), and `go_live` checks the cancel
+  right before it confirms and again after platform setup, cleaning up what
+  it prepared. A call that ended unanswered (a timeout, or Stop closing the
+  port) is kept for ten minutes: if the Studio's ack still comes and says it
+  happened, the call's Activity row takes that outcome and the D11 notice
+  fires (`agents.activity` again under the row's id). Agent calls never use
+  the remote debounce families: each runs to its own answer, in order, on
+  the agents' lane.
 - **`get_status` and the `list_*` tools** merge the backend's truth (the
   session, destinations' health while live, viewers, banners, the comment
   on stream, Clips) with the Studio's projection, which the renderer
@@ -342,7 +390,9 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
 - **`get_picture`** reads the compositor's latest program frame (CPU
   YUV 4:2:0 or the Metal BGRA target; the JPEG polling preview as a
   fallback), scales it to at most 1280 px wide and returns MCP image
-  content. A Windows D3D11 frame is not read back yet: the tool says there
+  content. It has a budget of its own (one a second per agent), and the
+  last JPEG is kept per frame, so asking again for the same frame never
+  encodes it twice. A Windows D3D11 frame is not read back yet: the tool says there
   is no picture.
 - **`read_chat`** projects through the Phone remote's chat allowlist
   (`remote_lan::project_chat_message`), renames viewer-written fields to
@@ -352,7 +402,9 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
 - **Chat (S12).** `send_chat_message` is the Stream Manager's send with an
   operation id minted per call (1 post per 2 s and 20 a minute per agent),
   answered per destination. `remove_chat_message` is chat moderation with
-  `ModerationSource::Agent` (wire `agent`): at once like the row menu,
+  `ModerationSource::Agent` (wire `agent`; a Videorc older than plan 209
+  can't read those rows after a rollback, and from this build on a source
+  it doesn't know reads as `manual`): at once like the row menu,
   except on YouTube, where it starts in `pending-confirm` with
   `requiresExplicitConfirm` and shows the existing removal card (10 a
   minute). The fake chat connectors (`FakeChatConfig`) delete on every
@@ -378,7 +430,14 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
   the same path: id `buddy`, never a registry agent, no token, no presence.
   Its calls are admitted only for catalog tools marked `buddy` (D15, checked
   by the backend and again by `executeAgentIntent`), take Buddy's own rate
-  limit, and are logged as "Buddy". The Studio projection is published
+  limit, and are logged as "Buddy". `edit_banner` is not Buddy's (it imports
+  any image path). By voice, a planned `set_highlight` is the grammar's own
+  highlight (a comment Buddy flagged asks "Show it anyway?" first; typed, it
+  is refused in those words), a removal is the grammar's removal card, and
+  Buddy's removals keep its gates (Videorc's removal switch, Premium) on
+  the typed path too. Buddy's D14 questions take only "Buddy, yes": a bare
+  "yes" leaves the question open. A viewer whose name is Buddy's, or a single
+  everyday or command word, never pulls chat into a planner request. The Studio projection is published
   while Agents is on or Buddy may act (Premium), because Buddy's planner
   reads its scene and destination names. A tool marked `buddy` joins
   Buddy's planner request on its own; check its D14 question
@@ -402,17 +461,17 @@ args}` to the Studio's socket: the one that sent `agent.intent.listen`
 This is the leak argument for the Agents surface. Remote control and Phone
 remote keep their own allowlists, byte for byte (D19).
 
-| Threat                                                                                   | Stop                                                                                                                                                                                   |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A web page in the user's browser calls `http://127.0.0.1:7440/mcp` (CSRF, DNS rebinding) | A request with any `Origin` header is refused (native clients send none); `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; Bearer token required; no CORS headers              |
-| Another process on the LAN                                                               | The listener binds `127.0.0.1` only                                                                                                                                                    |
-| A stolen or old agent token                                                              | Per-agent tokens, stored hashed; Remove revokes one; Stop disconnects all; turning Agents off closes the listener                                                                      |
-| A tool result leaks a secret                                                             | Results come from allowlisted projections (D9); the smoke scans every result for the seeded fake keys, OAuth tokens and all four credentials                                           |
-| A viewer's chat steers the agent                                                         | D18 marking and instructions; D11 notices; D12 Stop; Trash for deletes; YouTube's confirm                                                                                              |
-| A viewer's chat steers Buddy                                                             | The desktop enforces Buddy's subset (D15) and the D14 confirms; the wake word is required by voice                                                                                     |
-| An agent floods actions                                                                  | Per agent: 20 actions per 10 s; chat posts 1 per 2 s and 20 a minute; removals 10 a minute (the existing cap); `go_live` and `stop` once per 10 s; the remote debounce families reused |
-| The Agent role reaches other methods                                                     | The `/mcp` router is the only door, and it calls the catalog's executors only; `/ws` refuses agent tokens; tests in `backend_authority.rs`                                             |
-| The phone or Stream Deck gains power                                                     | D19's byte-identical allowlist test                                                                                                                                                    |
+| Threat                                                                                   | Stop                                                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A web page in the user's browser calls `http://127.0.0.1:7440/mcp` (CSRF, DNS rebinding) | A request with any `Origin` header is refused (native clients send none); `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; Bearer token required; no CORS headers                                                                                                      |
+| Another process on the LAN                                                               | The listener binds `127.0.0.1` only                                                                                                                                                                                                                                            |
+| A stolen or old agent token                                                              | Per-agent tokens, stored hashed; Remove revokes one; Stop disconnects all; turning Agents off closes the listener                                                                                                                                                              |
+| A tool result leaks a secret                                                             | Results come from allowlisted projections (D9); the smoke scans every result for the seeded fake keys, OAuth tokens and all four credentials                                                                                                                                   |
+| A viewer's chat steers the agent                                                         | D18 marking and instructions; D11 notices; D12 Stop; Trash for deletes; YouTube's confirm                                                                                                                                                                                      |
+| A viewer's chat steers Buddy                                                             | The desktop enforces Buddy's subset (D15) and the D14 confirms; the wake word is required by voice, and a D14 yes must be "Buddy, yes"                                                                                                                                         |
+| An agent floods actions                                                                  | Per agent: 20 actions per 10 s; chat posts 1 per 2 s and 20 a minute; removals 10 a minute (the existing cap); `go_live` once per 10 s; `stop` 5 per 10 s; `get_picture` once a second; a refused call gives its slot back. Agent calls don't use the remote debounce families |
+| The Agent role reaches other methods                                                     | The `/mcp` router is the only door, and it calls the catalog's executors only; `/ws` refuses agent tokens; tests in `backend_authority.rs`                                                                                                                                     |
+| The phone or Stream Deck gains power                                                     | D19's byte-identical allowlist test                                                                                                                                                                                                                                            |
 
 What crosses, and what never does (D9):
 

@@ -630,10 +630,11 @@ do not run).
 
 `CohostCommand.kind` gains `act`:
 
-- `status: "confirm"` with `expiresAt` 20 s out: "Go live? Say yes.", "End
-  the livestream? Say yes." or "Stop the recording? Say yes.", after what
-  ran so far. "Yes" (or `cohost.command.confirm`) runs the plan on from that
-  call; while it runs the card keeps `confirm` without `expiresAt` ("On
+- `status: "confirm"` with `expiresAt` 20 s out: 'Go live? Say "Buddy,
+  yes".', 'End the livestream? Say "Buddy, yes".' or 'Stop the recording?
+  Say "Buddy, yes".', after what ran so far. "Buddy, yes" (or
+  `cohost.command.confirm`) runs the plan on from that call; a spoken yes
+  without the wake word leaves the card open (plan 209 review fix 17); while it runs the card keeps `confirm` without `expiresAt` ("On
   it…"), then finishes in place (same `id`). "No" is `cancelled`
   ("Cancelled. Nothing stopped."), no answer is `expired`.
 - `done` or `refused` with what the calls said ("Switched to BRB. Pressed

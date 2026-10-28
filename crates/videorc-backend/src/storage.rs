@@ -9315,7 +9315,10 @@ fn chat_moderation_operation_from_row(
         provider_message_id: row.get(5)?,
         author_name: row.get(6)?,
         excerpt: row.get(7)?,
-        source: json_column(row, 8)?,
+        // Plan 209 review fix 20: a source this build doesn't know (one a
+        // newer Videorc wrote) reads as `manual` instead of failing the row.
+        source: serde_json::from_str(&row.get::<_, String>(8)?)
+            .unwrap_or(crate::live_chat_moderation::ModerationSource::Manual),
         reason: row.get(9)?,
         phase: json_column(row, 10)?,
         confirm_mode: json_column(row, 11)?,
