@@ -15,6 +15,92 @@ export const CHROME_GROUND_ASSETS = Object.freeze({
 
 const subscribeNever = (): (() => void) => () => {}
 
+/**
+ * The ground's drift (owner, 2026-10-28: "move a little bit, just slightly",
+ * without costing memory or CPU). The same still, no second image and no
+ * shader: it slides a few px along two sines whose periods share no factor,
+ * so it never visibly loops. Translation only: a changing scale would make
+ * the compositor re-raster the still, a slide only moves its layer. The
+ * stills overhang the window by `marginPx`, more than the largest offset, so
+ * no edge ever shows. At 5 updates a second each step is under a third of a
+ * pixel on a σ 24 blur: smooth to the eye.
+ */
+export const CHROME_GROUND_DRIFT = Object.freeze({
+  tickMs: 200,
+  marginPx: 16,
+  amplitudePx: Object.freeze({ x: 10, y: 7 }),
+  periodS: Object.freeze({ x: 53, y: 67 })
+})
+
+/** Where the drift is after `seconds` of running, in px from the centre. */
+export function chromeGroundDriftAt(seconds: number): { x: number; y: number } {
+  const { amplitudePx, periodS } = CHROME_GROUND_DRIFT
+  const wave = (period: number): number => Math.sin((2 * Math.PI * seconds) / period)
+  return { x: amplitudePx.x * wave(periodS.x), y: amplitudePx.y * wave(periodS.y) }
+}
+
+/**
+ * The drift layer's transform. Moving, a 3D translate gives it its own
+ * compositor layer, so a step costs no paint; paused, a 2D translate at the
+ * same place hands the layer back, so a window you are not looking at holds
+ * no extra GPU memory.
+ */
+export function chromeGroundTransform(seconds: number, moving: boolean): string {
+  const { x, y } = chromeGroundDriftAt(seconds)
+  return moving
+    ? `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)`
+    : `translate(${x.toFixed(2)}px, ${y.toFixed(2)}px)`
+}
+
+/**
+ * Runs the drift while this is the window you are looking at: visible,
+ * focused and Reduce Motion off. Anything else pauses it where it is, so a
+ * window behind another app (as while you record a game or a screen) costs
+ * nothing. A 200 ms timer rather than a per-frame callback: the compositor
+ * draws 5 frames a second, not one per display refresh, and each changes
+ * only the transform of a composited layer (no layout, no paint). Its clock
+ * advances only while it runs, so it resumes without a jump. The
+ * root says `data-chrome-ground-drift="moving|paused"` (probe:ui-glass waits
+ * for paused before it compares pixels).
+ */
+function startChromeGroundDrift(node: HTMLDivElement): () => void {
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+  let runningMs = 0
+  let lastTick = 0
+  let timer: number | undefined
+  const tick = (): void => {
+    const now = performance.now()
+    runningMs += now - lastTick
+    lastTick = now
+    node.style.transform = chromeGroundTransform(runningMs / 1000, true)
+  }
+  const update = (): void => {
+    const run =
+      document.visibilityState === 'visible' && document.hasFocus() && !reducedMotion.matches
+    node.dataset.chromeGroundDrift = run ? 'moving' : 'paused'
+    node.style.transform = chromeGroundTransform(runningMs / 1000, run)
+    if (run && timer === undefined) {
+      lastTick = performance.now()
+      timer = window.setInterval(tick, CHROME_GROUND_DRIFT.tickMs)
+    } else if (!run && timer !== undefined) {
+      window.clearInterval(timer)
+      timer = undefined
+    }
+  }
+  update()
+  document.addEventListener('visibilitychange', update)
+  window.addEventListener('focus', update)
+  window.addEventListener('blur', update)
+  reducedMotion.addEventListener('change', update)
+  return () => {
+    window.clearInterval(timer)
+    document.removeEventListener('visibilitychange', update)
+    window.removeEventListener('focus', update)
+    window.removeEventListener('blur', update)
+    reducedMotion.removeEventListener('change', update)
+  }
+}
+
 /** What the theme bootstrap wrote on the root before the first paint: chrome, glass or solid. */
 function groundSnapshot(): string {
   return document.documentElement.dataset.ground ?? ''
@@ -44,9 +130,9 @@ function displaySizeSnapshot(): string {
  * while the root says `data-ground="chrome"`; the VIDEORC_GLASS escape
  * hatches (clear glass, solid) leave it unmounted.
  *
- * - Sized to the display and centred on the window (D11): a resize shows
- *   more or less chrome and never rescales it. The 1280 × 720 still is
- *   blurred, so the upscale is invisible.
+ * - Sized to the display, plus the drift's margin, and centred on the window
+ *   (D11): a resize shows more or less chrome and never rescales it. The
+ *   1280 × 720 still is blurred, so the upscale is invisible.
  * - Both themes' images stay mounted and the `.dark` class picks one, so a
  *   theme toggle swaps the ground in the same style pass as the coats:
  *   no frame shows the other theme's ground.
@@ -54,7 +140,9 @@ function displaySizeSnapshot(): string {
  *   coat, but as the canvas under this layer, where it only covers the first
  *   paint before the image decodes. The sidebar and the panes add their
  *   deltas above, so every region composites to exactly its cover.
- * - No CSS filter, transition, animation or backdrop-filter. Decoration only:
+ * - Both stills sit in one drift layer (`startChromeGroundDrift`) under the
+ *   coat, which stays put: the chrome slides slightly, the frosting does not.
+ * - No CSS filter, transition, keyframes or backdrop-filter. Decoration only:
  *   hidden from assistive tech and from the pointer. styles.css hides it under
  *   `prefers-reduced-transparency` and while first-run setup is open.
  */
@@ -65,7 +153,9 @@ export function ChromeGround(): ReactElement | null {
     return null
   }
   const [width, height] = size.split('x').map(Number)
-  const imageStyle = { width, height }
+  // Display-sized, plus the margin on every side the drift slides into.
+  const overhang = 2 * CHROME_GROUND_DRIFT.marginPx
+  const imageStyle = { width: width + overhang, height: height + overhang }
   const imageClass =
     'absolute top-1/2 left-1/2 max-w-none -translate-x-1/2 -translate-y-1/2 object-cover'
   return (
@@ -74,24 +164,28 @@ export function ChromeGround(): ReactElement | null {
       className="pointer-events-none fixed inset-0 -z-10 overflow-hidden"
       data-chrome-ground=""
     >
-      <img
-        alt=""
-        className={`${imageClass} dark:hidden`}
-        data-chrome-ground-image="light"
-        decoding="sync"
-        draggable={false}
-        src={CHROME_GROUND_ASSETS.light}
-        style={imageStyle}
-      />
-      <img
-        alt=""
-        className={`${imageClass} hidden dark:block`}
-        data-chrome-ground-image="dark"
-        decoding="sync"
-        draggable={false}
-        src={CHROME_GROUND_ASSETS.dark}
-        style={imageStyle}
-      />
+      {/* The drift layer: the window plus the margin, clipped there, so its
+          compositor layer is never the size of the display. */}
+      <div className="absolute -inset-4 overflow-hidden" ref={startChromeGroundDrift}>
+        <img
+          alt=""
+          className={`${imageClass} dark:hidden`}
+          data-chrome-ground-image="light"
+          decoding="sync"
+          draggable={false}
+          src={CHROME_GROUND_ASSETS.light}
+          style={imageStyle}
+        />
+        <img
+          alt=""
+          className={`${imageClass} hidden dark:block`}
+          data-chrome-ground-image="dark"
+          decoding="sync"
+          draggable={false}
+          src={CHROME_GROUND_ASSETS.dark}
+          style={imageStyle}
+        />
+      </div>
       <div className="absolute inset-0 bg-glass-window" data-chrome-ground-coat="" />
     </div>
   )

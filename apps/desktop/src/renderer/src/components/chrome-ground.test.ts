@@ -6,10 +6,17 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { CHROME_GROUND_ASSETS, ChromeGround } from './chrome-ground'
+import {
+  CHROME_GROUND_ASSETS,
+  CHROME_GROUND_DRIFT,
+  ChromeGround,
+  chromeGroundDriftAt
+} from './chrome-ground'
 
 // Plan 208 S2: the chrome ground is decoration under every window, sized to
-// the display, swapped by the theme class, and never filtered or animated.
+// the display, swapped by the theme class, and never filtered. It drifts
+// slightly (owner, 2026-10-28) on a 5-a-second timer, only in the window you
+// are looking at.
 
 let root: Root
 let container: HTMLDivElement
@@ -31,6 +38,31 @@ function ground(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-chrome-ground]')
 }
 
+function drift(): HTMLElement {
+  const element = document.querySelector<HTMLElement>('[data-chrome-ground-drift]')
+  if (!element) throw new Error('no drift layer')
+  return element
+}
+
+let focused = true
+let reducedMotion = false
+const motionListeners = new Set<() => void>()
+
+function stubWindowState(): void {
+  vi.spyOn(document, 'hasFocus').mockImplementation(() => focused)
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      get matches() {
+        return query.includes('prefers-reduced-motion') && reducedMotion
+      },
+      media: query,
+      addEventListener: (_: string, listener: () => void) => motionListeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => motionListeners.delete(listener)
+    }))
+  )
+}
+
 function image(theme: 'dark' | 'light'): HTMLImageElement {
   const element = document.querySelector<HTMLImageElement>(
     `img[data-chrome-ground-image="${theme}"]`
@@ -41,6 +73,10 @@ function image(theme: 'dark' | 'light'): HTMLImageElement {
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  focused = true
+  reducedMotion = false
+  motionListeners.clear()
+  stubWindowState()
   setDisplay(1728, 1117)
   setViewport(1180, 780)
   container = document.createElement('div')
@@ -54,6 +90,8 @@ afterEach(async () => {
   document.body.innerHTML = ''
   delete document.documentElement.dataset.ground
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('ChromeGround', () => {
@@ -101,21 +139,22 @@ describe('ChromeGround', () => {
     expect(element?.lastElementChild).toBe(coat)
   })
 
-  it('sizes the still to the display and re-reads it on resize, never to the window (D11)', async () => {
+  it('sizes the still to the display plus the drift margin, re-read on resize, never to the window (D11)', async () => {
     document.documentElement.dataset.ground = 'chrome'
     await render()
-    expect(image('dark').style.width).toBe('1728px')
-    expect(image('dark').style.height).toBe('1117px')
-    expect(image('light').style.width).toBe('1728px')
+    // 16 px on every side for the drift to slide into.
+    expect(image('dark').style.width).toBe('1760px')
+    expect(image('dark').style.height).toBe('1149px')
+    expect(image('light').style.width).toBe('1760px')
     // A resize alone changes nothing: the window's size is not the still's.
     setViewport(1400, 900)
     await act(async () => window.dispatchEvent(new Event('resize')))
-    expect(image('dark').style.width).toBe('1728px')
+    expect(image('dark').style.width).toBe('1760px')
     // A new display is read on the next resize.
     setDisplay(2560, 1440)
     await act(async () => window.dispatchEvent(new Event('resize')))
-    expect(image('dark').style.width).toBe('2560px')
-    expect(image('dark').style.height).toBe('1440px')
+    expect(image('dark').style.width).toBe('2592px')
+    expect(image('dark').style.height).toBe('1472px')
   })
 
   it('never lets the still be smaller than the viewport: a window can outgrow its screen', async () => {
@@ -123,14 +162,91 @@ describe('ChromeGround', () => {
     setDisplay(1440, 900)
     setViewport(2000, 1200)
     await render()
-    expect(image('dark').style.width).toBe('2000px')
-    expect(image('dark').style.height).toBe('1200px')
+    expect(image('dark').style.width).toBe('2032px')
+    expect(image('dark').style.height).toBe('1232px')
   })
 
-  it('has no CSS filter, transition, animation or backdrop-filter (plan 208 D5)', () => {
+  it('has no CSS filter, transition, keyframes, blur or backdrop, and no per-frame loop', () => {
     const source = readFileSync(join(__dirname, 'chrome-ground.tsx'), 'utf8')
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-    expect(code).not.toMatch(/\bfilter\b|\btransition|\banimat|\bbackdrop|\bblur/)
+    // The drift moves one composited layer by its transform, nothing else.
+    expect(code).not.toMatch(/\bfilter\b|\btransition|\banimat|\bkeyframes|\bbackdrop|blur\(/)
+    expect(code).toMatch(/setInterval\(tick, CHROME_GROUND_DRIFT\.tickMs\)/)
+  })
+
+  it('drifts slightly and never shows an edge: the margin outruns the offset', () => {
+    const { amplitudePx, marginPx, tickMs } = CHROME_GROUND_DRIFT
+    // The drift layer is the window plus the margin (-inset-4 is 16 px), and
+    // the stills fill it, so an offset under the margin never uncovers the window.
+    expect(marginPx).toBe(16)
+    expect(marginPx).toBeGreaterThan(Math.max(amplitudePx.x, amplitudePx.y))
+    let largestStepPx = 0
+    let previous = chromeGroundDriftAt(0)
+    for (let ms = tickMs; ms <= 10 * 60 * 1000; ms += tickMs) {
+      const next = chromeGroundDriftAt(ms / 1000)
+      expect(Math.abs(next.x)).toBeLessThanOrEqual(amplitudePx.x)
+      expect(Math.abs(next.y)).toBeLessThanOrEqual(amplitudePx.y)
+      largestStepPx = Math.max(largestStepPx, Math.hypot(next.x - previous.x, next.y - previous.y))
+      previous = next
+    }
+    // Slight: under a third of a pixel per update.
+    expect(largestStepPx).toBeLessThan(0.3)
+  })
+
+  it('moves only while the window is visible, focused and Reduce Motion is off, and resumes without a jump', async () => {
+    vi.useFakeTimers()
+    document.documentElement.dataset.ground = 'chrome'
+    await render()
+    const layer = drift()
+    expect(layer.dataset.chromeGroundDrift).toBe('moving')
+    const start = layer.style.transform
+    await act(async () => vi.advanceTimersByTime(2000))
+    const moved = layer.style.transform
+    expect(moved).not.toBe(start)
+    // Its own compositor layer while moving.
+    expect(moved).toMatch(/^translate3d\(-?\d+\.\d\dpx, -?\d+\.\d\dpx, 0\)$/)
+    expect(layer.classList.contains('-inset-4')).toBe(true)
+    expect(layer.classList.contains('overflow-hidden')).toBe(true)
+
+    // Another app in front: paused where it is.
+    focused = false
+    await act(async () => window.dispatchEvent(new Event('blur')))
+    expect(layer.dataset.chromeGroundDrift).toBe('paused')
+    // The same place, as a 2D translate: the layer is handed back.
+    const paused = layer.style.transform
+    expect(paused).toBe(moved.replace('translate3d(', 'translate(').replace(', 0)', ')'))
+    await act(async () => vi.advanceTimersByTime(60_000))
+    expect(layer.style.transform).toBe(paused)
+
+    // Back: it picks up from where it stopped, not 60 s later.
+    focused = true
+    await act(async () => window.dispatchEvent(new Event('focus')))
+    expect(layer.dataset.chromeGroundDrift).toBe('moving')
+    await act(async () => vi.advanceTimersByTime(CHROME_GROUND_DRIFT.tickMs))
+    const resumed = layer.style.transform
+    const offset = (transform: string): number[] =>
+      (transform.match(/-?\d+\.\d+/g) ?? []).slice(0, 2).map(Number)
+    const [x0, y0] = offset(moved)
+    const [x1, y1] = offset(resumed)
+    expect(Math.hypot(x1 - x0, y1 - y0)).toBeLessThan(0.3)
+
+    // Reduce Motion: a still.
+    reducedMotion = true
+    await act(async () => motionListeners.forEach((listener) => listener()))
+    expect(layer.dataset.chromeGroundDrift).toBe('paused')
+    const still = layer.style.transform
+    await act(async () => vi.advanceTimersByTime(10_000))
+    expect(layer.style.transform).toBe(still)
+  })
+
+  it('stops its timer and listeners when the ground unmounts', async () => {
+    vi.useFakeTimers()
+    document.documentElement.dataset.ground = 'chrome'
+    await render()
+    expect(vi.getTimerCount()).toBe(1)
+    await act(async () => root.render(null))
+    expect(vi.getTimerCount()).toBe(0)
+    expect(motionListeners.size).toBe(0)
   })
 
   it('hides under Reduce Transparency and while first-run setup is open, from the stylesheet', () => {

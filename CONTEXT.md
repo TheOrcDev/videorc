@@ -268,10 +268,11 @@ _Avoid_: Teleprompter, Preview window (as a title)
 **Chrome ground**:
 The still of Liquid Chrome under every Videorc window (plan 208): black
 metal with soft silver streaks in dark, and the same turned around,
-porcelain with graphite streaks, in light. It never moves, and the desktop
+porcelain with graphite streaks, in light. It drifts a few px, slowly, in
+the window you are looking at and is still everywhere else, and the desktop
 never shows through it. The Preview has none, because it frames video.
 _Avoid_: wallpaper, background (a scene has one), live background (it never
-moves), glass
+plays a look), glass
 
 **Chrome controls**:
 The polished controls you touch: the chrome primary button (Go Live…,
