@@ -1,5 +1,28 @@
 # Implementation Plans
 
+- 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
+  Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
+  needs to be much smarter", quoting a user who switches between T3 Code and
+  Figma on stream and hides a sign-in behind a blurry picture in OBS. Today
+  that takes about nine clicks, the scene breaks when the app relaunches (a
+  window id), every switch stops one capture and starts another (a frozen
+  picture, probably a black frame, never measured), saved scenes have no
+  key, Deck or phone button, and nothing can blur the screen.
+  - Phase A (macOS): New scene… makes one scene per app in your current look.
+    The scene follows the app's front window and survives a relaunch. Swap in
+    place on one capture, holding the last frame (no black). A scene list on
+    the Scene page with auto-save. Keys, Deck and phone for saved scenes.
+  - Phase B (all platforms): Hide screen, a frosted still of the screen on
+    every output while the camera and microphone stay on, done at the
+    capture source. A default key (⌃⌥H) and every other surface. Agents can
+    hide, never show.
+  - Phase C (macOS): Follow the app in front, and Hide screen when a password
+    manager comes to the front on a display scene.
+  - Phase D: the smoke, docs and acceptance.
+
+  **EXECUTING** 2026-10-28: the owner took every recommended answer (D1
+  to D13) and asked for the whole plan in one PR.
+
 - 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
   agents and Buddy run the studio. Owner request: a complete MCP so people
   control everything from their agents, with Buddy using it too. Agents on
