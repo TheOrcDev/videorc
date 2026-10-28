@@ -4309,7 +4309,7 @@ mod runtime {
                 prepare_banner_bitmap(&image, width as u32, height as u32, banner.opacity),
             );
         }
-        let layer = |banner: &crate::banners::Banner| BannerLayer {
+        let layer = |banner: &crate::protocol::Banner| BannerLayer {
             image_path: Arc::from(std::path::Path::new("/nonexistent").join(&banner.image_file)),
             banner: banner.clone(),
             file_revision: Some(file_revision),
