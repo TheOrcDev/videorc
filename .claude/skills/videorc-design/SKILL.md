@@ -467,8 +467,19 @@ links home.
   on one audiocn Mixer scale (plan 201 D1).
 - **Takeovers**: Assets → Takeovers manages them (import, rename, reorder,
   delete). Studio's Takeover section puts one on stream and takes it off.
-- **Scenes**: the Scene page edits a scene; Studio's Scenes gallery switches
-  between them.
+- **Scenes**: the Scene page is home (plan 210): its Scene list (your saved
+  scenes, then Layouts) with "New scene…" and the "Follow the app in front"
+  switch in its header, each row's ⋯ menu (Set key…, Change app…, Stop
+  following, Save as new scene…), and the canvas that edits the scene on
+  stream. Studio's Scenes gallery mirrors the list to switch between them;
+  keys, the Deck, the phone and agents switch the same saved scenes.
+- **Hide screen**: the Scene page's Hide screen section is home (the key,
+  the password-manager switch and list). The control itself sits where the
+  streamer is: Studio's Screen row in Sources (never the transport area),
+  the Stream Manager status bar, ⌘K, `/hide` and `/show`, the Deck, the
+  phone and MCP's `hide_screen`. Agents and Buddy hide, never show. While
+  hidden, the Screen row and the Stream Manager show a "Screen hidden" chip
+  and nothing toasts.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
 - **Buddy**: the Buddy page (Profile, Chat, Voice, Reports, Clean cut)

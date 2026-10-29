@@ -21,7 +21,10 @@
   - Phase D: the smoke, docs and acceptance.
 
   **EXECUTING** 2026-10-28: the owner took every recommended answer (D1
-  to D13) and asked for the whole plan in one PR.
+  to D13) and asked for the whole plan in one PR. S11's smoke and docs
+  landed 2026-10-29:
+  [acceptance record](../docs/acceptance/2026-10-29-smarter-scenes-acceptance.md)
+  (owner by-eye checks owed).
 
 - 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
   agents and Buddy run the studio. Owner request: a complete MCP so people

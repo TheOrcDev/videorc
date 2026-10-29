@@ -124,6 +124,14 @@ app's scene. Each scene for an app follows; its ⋯ menu's "Stop following"
 turns that off, and its row says "Follows" while it does. macOS only.
 _Avoid_: auto-switch, smart switching
 
+**Swap in place**:
+How a scene switch changes the screen or window on stream (plan 210 D5): the
+one running capture changes its target instead of stopping and starting, and
+the program keeps the outgoing picture (the **held frame**) until the new
+window's first frame, then cuts. No black frame, no frame of the new window
+under the old scene's layout. Budget: 150 ms p95 from the click.
+_Avoid_: crossfade (there is none), warm capture, restart
+
 **Hide screen**:
 Covers the screen on every output (the recording, every stream, Clips and the
 Screen file) with a frosted still of it, while the camera and microphone stay
