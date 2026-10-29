@@ -543,6 +543,39 @@ describe('Go Live headroom on a CPU compositor (retest 153)', () => {
     ).toMatchObject({ kind: 'step-down', video: videoPresets['tutorial-540p30'] })
   })
 
+  it('steps down to the floor when not even the floor held', () => {
+    // ogre under load: every rung failed, 540p came closest (27.5 fps).
+    const belowFloor = {
+      ...cpu(
+        [
+          ['tutorial-1080p30', 'failed'],
+          ['tutorial-720p30', 'failed'],
+          ['tutorial-540p30', 'failed']
+        ],
+        'tutorial-540p30'
+      ),
+      belowFloor: true
+    }
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: untouched,
+        state: fresh(belowFloor)
+      })
+    ).toMatchObject({
+      kind: 'step-down',
+      reason: 'go-live-headroom',
+      video: videoPresets['tutorial-540p30']
+    })
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: picked,
+        state: fresh(belowFloor)
+      })
+    ).toMatchObject({ kind: 'go-live-heavy', video: videoPresets['tutorial-540p30'] })
+  })
+
   it('only warns about a stream quality the user picked', () => {
     expect(
       cpuCompositorStreamAdvice({ streamVideo: stream1080, streaming: picked, state: fresh(ogre) })
