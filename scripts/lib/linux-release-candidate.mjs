@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 
@@ -94,7 +95,7 @@ export function classifyLinuxCandidateObjectHead({ artifact, response }) {
   }
   const contentLength = response.headers.get('content-length')
   const remoteSha256 = response.headers.get('x-amz-meta-sha256')?.trim().toLowerCase()
-  const sizeMismatch = contentLength !== null && Number(contentLength) !== artifact.sizeBytes
+  const sizeMismatch = contentLength !== String(artifact.sizeBytes)
   if (sizeMismatch || remoteSha256 !== artifact.sha256) {
     throw new LinuxReleaseCandidateError(
       'candidate-storage-collision',
@@ -104,6 +105,42 @@ export function classifyLinuxCandidateObjectHead({ artifact, response }) {
     )
   }
   return 'identical'
+}
+
+// Metadata alone is not evidence of stored bytes. Verify every new or reused
+// object by reading it back. The caller must bound the request AND body read
+// with an AbortSignal; memory stays bounded even for a multi-GB AppImage.
+export async function verifyLinuxCandidateObjectBody({ artifact, response }) {
+  if (
+    response.status !== 200 ||
+    !response.body ||
+    response.headers.get('content-length') !== String(artifact.sizeBytes) ||
+    ![null, 'identity'].includes(response.headers.get('content-encoding'))
+  ) {
+    await response.body?.cancel()
+    throw new LinuxReleaseCandidateError(
+      'candidate-storage-readback-failed',
+      `Candidate readback failed for ${artifact.objectKey}: HTTP ${response.status} or unexpected body headers.`
+    )
+  }
+  const hash = createHash('sha256')
+  let bytes = 0
+  for await (const chunk of response.body) {
+    bytes += chunk.byteLength
+    if (bytes > artifact.sizeBytes) {
+      throw new LinuxReleaseCandidateError(
+        'candidate-storage-readback-mismatch',
+        `Candidate readback exceeds the expected size: ${artifact.objectKey}.`
+      )
+    }
+    hash.update(chunk)
+  }
+  if (bytes !== artifact.sizeBytes || hash.digest('hex') !== artifact.sha256) {
+    throw new LinuxReleaseCandidateError(
+      'candidate-storage-readback-mismatch',
+      `Candidate stored bytes differ from the local artifact: ${artifact.objectKey}.`
+    )
+  }
 }
 
 export function assertPendingLinuxCandidateManifest(

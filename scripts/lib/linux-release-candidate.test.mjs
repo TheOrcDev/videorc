@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +13,8 @@ import {
   classifyLinuxCandidateObjectHead,
   LinuxReleaseCandidateError,
   linuxCandidateIdentity,
-  linuxCandidatePrefix
+  linuxCandidatePrefix,
+  verifyLinuxCandidateObjectBody
 } from './linux-release-candidate.mjs'
 
 const sourceCommit = 'b'.repeat(40)
@@ -192,6 +194,110 @@ describe('Linux Alpha candidate storage', () => {
       (error) =>
         error instanceof LinuxReleaseCandidateError &&
         error.code === 'insecure-candidate-storage-endpoint'
+    )
+  })
+
+  it('refuses a HEAD without an exact byte length even when checksum metadata matches', () => {
+    const artifact = { objectKey: 'candidate/AppImage', sizeBytes: 8, sha256: 'a'.repeat(64) }
+    for (const length of [null, '7', '8.0', '8e0', '-8', 'unknown']) {
+      const headers = new Headers({ 'x-amz-meta-sha256': artifact.sha256 })
+      if (length !== null) headers.set('content-length', length)
+      assert.throws(
+        () =>
+          classifyLinuxCandidateObjectHead({
+            artifact,
+            response: { ok: true, status: 200, headers }
+          }),
+        { code: 'candidate-storage-collision' }
+      )
+    }
+  })
+})
+
+describe('Linux candidate stored-byte verification', () => {
+  const bytes = Buffer.from('exact candidate bytes')
+  const artifact = {
+    objectKey: 'candidates/linux-beta/version/source/AppImage',
+    sizeBytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex')
+  }
+  const response = (body = bytes, init = {}) =>
+    new Response(body, {
+      headers: { 'content-length': String(bytes.length), 'x-amz-meta-sha256': artifact.sha256 },
+      ...init
+    })
+
+  it('hashes the complete stream across chunk boundaries', async () => {
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, 4))
+        controller.enqueue(bytes.subarray(4))
+        controller.close()
+      }
+    })
+    await verifyLinuxCandidateObjectBody({ artifact, response: response(body) })
+  })
+
+  it('rejects corrupt bytes despite matching checksum metadata and length', async () => {
+    await assert.rejects(
+      verifyLinuxCandidateObjectBody({
+        artifact,
+        response: response(Buffer.alloc(bytes.length, 0))
+      }),
+      { code: 'candidate-storage-readback-mismatch' }
+    )
+  })
+
+  it('rejects truncated bytes despite a correct Content-Length', async () => {
+    await assert.rejects(
+      verifyLinuxCandidateObjectBody({ artifact, response: response(bytes.subarray(1)) }),
+      { code: 'candidate-storage-readback-mismatch' }
+    )
+  })
+
+  it('cancels an oversized body instead of draining unbounded data', async () => {
+    let cancelled = false
+    const body = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(Buffer.alloc(bytes.length + 1))
+      },
+      cancel() {
+        cancelled = true
+      }
+    })
+    await assert.rejects(verifyLinuxCandidateObjectBody({ artifact, response: response(body) }), {
+      code: 'candidate-storage-readback-mismatch'
+    })
+    assert.equal(cancelled, true)
+  })
+
+  for (const [name, init] of [
+    ['missing after upload', { status: 404 }],
+    ['partial response', { status: 206 }],
+    ['missing length', { headers: {} }],
+    ['incorrect length', { headers: { 'content-length': '1' } }],
+    [
+      'compressed response',
+      { headers: { 'content-length': String(bytes.length), 'content-encoding': 'gzip' } }
+    ]
+  ]) {
+    it(`rejects ${name}`, async () => {
+      await assert.rejects(
+        verifyLinuxCandidateObjectBody({ artifact, response: response(bytes, init) }),
+        { code: 'candidate-storage-readback-failed' }
+      )
+    })
+  }
+
+  it('propagates a body read failure instead of certifying a partial object', async () => {
+    const body = new ReadableStream({
+      pull(controller) {
+        controller.error(new Error('readback aborted'))
+      }
+    })
+    await assert.rejects(
+      verifyLinuxCandidateObjectBody({ artifact, response: response(body) }),
+      /readback aborted/
     )
   })
 })

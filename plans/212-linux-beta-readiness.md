@@ -158,9 +158,13 @@ strict CI reuse and recording verdicts, the acceptance contract, Linux gate
 runner and first-run setup. These are engineering changes, not passed physical
 acceptance rows. The initial source gates passed typecheck, lint, format, build,
 JS/Rust advisory audits and 2,763 Node tests with no skips; onboarding added
-155 passing focused desktop tests and 121 script tests. The bounded full
-desktop rerun and cold backend build are still running. Caption enablement is
-being investigated separately and is not certified by these results.
+155 passing focused desktop tests and 121 script tests. The production frontend rebuild passed. The bounded full desktop run passed
+577 files and failed the Studio integration file; the test fixture omitted
+the backend ready/listener handshake before sending an agent intent. With that
+fixture corrected (no timeout or production change), all 198 tests in the
+remaining file pass. One unrelated skipped desktop test remains a skip, not
+acceptance evidence. The cold backend build is still running. Caption
+enablement is being investigated separately and is not certified by these results.
 
 GitHub rejected the push because the current OAuth credential lacks the
 `workflow` scope. The release-workflow exit fix and its executable Bash
@@ -180,3 +184,23 @@ They address the earlier overlaps;
 their merge does not supply the new candidate's physical acceptance.
 
 Draft source PR: https://github.com/TheOrcDev/videorc/pull/930.
+
+### Engineering checkpoint, 2026-10-30
+
+Candidate storage now requires exact HEAD lengths and streams every uploaded
+or reused object back through SHA-256 verification. A missing post-upload
+object, incorrect metadata, partial/compressed response, short body, excess
+bytes or mismatched content fails. Requests and body reads have deadlines.
+The 60 focused release tests pass, including stored-byte negative cases.
+
+Live Linux microphone replacement is a local implementation draft, pending
+backend/runtime gates. The shared bus keeps output identity and supports
+replace/remove; direct FFmpeg inputs remain refused. A maintained Pulse smoke
+uses two owned null sinks/remapped sources, verifies 440/880 Hz identities in
+encoded output, None, loss, failed replacement, duplicate fencing and unchanged
+encoder/RTMP identity. Its fixture lifecycle and measurement tests pass (13);
+the real fixture itself produces both exact tones through this host's Pulse
+server and cleans up its owned modules/processes. That is fixture evidence
+only: the complete app smoke, physical microphones, recording matrix, latency
+and cross-platform regression gates have not passed yet. Camera and screen
+replacement remain unsupported.

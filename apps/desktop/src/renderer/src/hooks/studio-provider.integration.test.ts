@@ -2331,7 +2331,16 @@ describe('real StudioProvider lifecycle', () => {
   // own saves, landing where the Scene inspector's snaps would.
   it('moves Buddy and a banner from an agent with the editor snaps, and reads them back', async () => {
     const { backend, latest } = await mountBannerProvider([testBanner('sponsor', 0)])
-    await waitForObservation(() => latest().core.wsStatus === 'connected')
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'backend.ready', payload: null })
+      })
+    })
+    // The real backend sends intents only after this socket registers. A live
+    // socket alone does not mean the lazily loaded agent listener is ready.
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'agent.intent.listen')
+    )
     const pushIntent = async (intentId: string, tool: string, args: Record<string, unknown>) => {
       await act(async () => {
         backend.sockets[0]?.onmessage?.({
