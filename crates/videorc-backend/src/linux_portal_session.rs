@@ -109,6 +109,29 @@ fn is_cancelled(error: &ashpd::Error) -> bool {
     )
 }
 
+/// The portal ended a share dialog without the person choosing: its backend
+/// (xdg-desktop-portal-hyprland, ...) or the picker went away mid-dialog, so
+/// the frontend answered `Other` (ogre, 2026-10-29). With a restore token no
+/// dialog was shown, so that stays a refused token (the caller asks again).
+fn dialog_lost(error: &ashpd::Error, dialog_shown: bool) -> bool {
+    dialog_shown
+        && matches!(
+            error,
+            ashpd::Error::Response(ashpd::desktop::ResponseError::Other)
+        )
+}
+
+/// A picker step's error, as the state that explains it.
+fn picker_step_failed(step: &str, error: ashpd::Error, dialog_shown: bool) -> PortalStart {
+    if is_cancelled(&error) {
+        PortalStart::Denied(PortalCaptureState::Cancelled)
+    } else if dialog_lost(&error, dialog_shown) {
+        PortalStart::Denied(PortalCaptureState::PortalLost)
+    } else {
+        denied(format!("{step} failed: {error}"))
+    }
+}
+
 /// `CreateSession` → `SelectSources` → `Start` → `OpenPipeWireRemote`.
 /// A refused restore token falls back to the picker once (the caller
 /// forgets the token when `restore_token_refused` is set on the outcome).
@@ -137,8 +160,14 @@ pub async fn start_portal_session(
         Err(_) => return denied("CreateSession did not answer within 10s"),
     };
     let session = Arc::new(session);
+    // Subscribe before the first picker call so a portal that dies while its
+    // dialog is open cannot slip between the call and the watch.
+    let portal_lost = portal_owner_lost(&proxy).await;
     let outcome = tokio::select! {
-        outcome = negotiate_stream(&proxy, &session, source, restore_token, include_cursor) => outcome,
+        outcome = until_portal_lost(
+            negotiate_stream(&proxy, &session, source, restore_token, include_cursor),
+            portal_lost,
+        ) => outcome,
         () = cancelled => PortalStart::Abandoned,
     };
     match outcome {
@@ -146,12 +175,73 @@ pub async fn start_portal_session(
         // The portal answers Close only after its share dialog is gone, so
         // waiting here held the next transition (and Record) for the whole
         // 10 s call bound (ogre, 2026-10-12). Close on the persistent portal
-        // runtime instead; nothing waits for the answer.
-        PortalStart::Abandoned => {
+        // runtime instead; nothing waits for the answer. A portal that went
+        // away may be restarting and answer late (or not at all), too.
+        PortalStart::Abandoned | PortalStart::Denied(PortalCaptureState::PortalLost) => {
             let session = Arc::clone(&session);
             tokio::spawn(async move { close_session(&session).await });
         }
         PortalStart::Denied(_) => close_session(&session).await,
+    }
+    outcome
+}
+
+/// Resolves when `org.freedesktop.portal.Desktop` loses or changes its bus
+/// owner. The share dialog's answer arrives as a `Response` signal from the
+/// owner that was asked; once that owner is gone (the portal crashed or was
+/// restarted, ogre 2026-10-29) the answer never comes, and without this watch
+/// the source waited for a person on a dialog that no longer existed.
+async fn portal_owner_lost(
+    proxy: &Screencast,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let changes = match proxy.receive_owner_changed().await {
+        Ok(changes) => Some(changes),
+        Err(error) => {
+            tracing::warn!(error = %error, "portal screen capture: cannot watch the portal's bus owner");
+            None
+        }
+    };
+    async move {
+        let Some(mut changes) = changes else {
+            return std::future::pending().await;
+        };
+        // Any change ends the wait: a new owner never saw this request.
+        let new_owner = changes.next().await.flatten();
+        tracing::warn!(
+            new_owner = ?new_owner.as_ref().map(|owner| owner.as_str()),
+            "portal screen capture: the portal went away while its share dialog was open"
+        );
+    }
+}
+
+/// How long a failed portal answer waits to learn whether the portal itself
+/// is going away. Stopping the compositor backend first makes the frontend
+/// fail the pending call a few ms before it loses its own bus name (ogre,
+/// 2026-10-29: 21 ms), and that failure is the portal going away, not a
+/// missing portal.
+const PORTAL_LOSS_GRACE: Duration = Duration::from_millis(500);
+
+/// Races the picker negotiation against the portal going away. A finished
+/// negotiation wins a tie: its answer is real. A failure, though, that the
+/// portal's loss follows within [`PORTAL_LOSS_GRACE`] is reported as the loss.
+async fn until_portal_lost(
+    negotiation: impl std::future::Future<Output = PortalStart>,
+    portal_lost: impl std::future::Future<Output = ()>,
+) -> PortalStart {
+    tokio::pin!(portal_lost);
+    let outcome = tokio::select! {
+        biased;
+        outcome = negotiation => outcome,
+        () = &mut portal_lost => return PortalStart::Denied(PortalCaptureState::PortalLost),
+    };
+    if matches!(
+        outcome,
+        PortalStart::Denied(PortalCaptureState::MissingSource { .. })
+    ) && tokio::time::timeout(PORTAL_LOSS_GRACE, portal_lost)
+        .await
+        .is_ok()
+    {
+        return PortalStart::Denied(PortalCaptureState::PortalLost);
     }
     outcome
 }
@@ -178,31 +268,24 @@ async fn negotiate_stream(
         .set_multiple(false)
         .set_persist_mode(PersistMode::ExplicitlyRevoked)
         .set_restore_token(restore_token.as_deref());
+    let dialog_shown = restore_token.is_none();
     let selected = match proxy.select_sources(session, options).await {
         Ok(request) => request.response(),
         Err(error) => Err(error),
     };
     if let Err(error) = selected {
-        if is_cancelled(&error) {
-            return PortalStart::Denied(PortalCaptureState::Cancelled);
-        }
-        return denied(format!("SelectSources failed: {error}"));
+        return picker_step_failed("SelectSources", error, dialog_shown);
     }
-    let streams = match proxy
+    let started = match proxy
         .start(session, None, StartCastOptions::default())
         .await
     {
-        Ok(request) => match request.response() {
-            Ok(streams) => streams,
-            Err(error) if is_cancelled(&error) => {
-                return PortalStart::Denied(PortalCaptureState::Cancelled);
-            }
-            Err(error) => return denied(format!("Start failed: {error}")),
-        },
-        Err(error) if is_cancelled(&error) => {
-            return PortalStart::Denied(PortalCaptureState::Cancelled);
-        }
-        Err(error) => return denied(format!("Start failed: {error}")),
+        Ok(request) => request.response(),
+        Err(error) => Err(error),
+    };
+    let streams = match started {
+        Ok(streams) => streams,
+        Err(error) => return picker_step_failed("Start", error, dialog_shown),
     };
     let Some(stream) = streams.streams().first() else {
         return denied("the portal granted no stream");
@@ -254,6 +337,102 @@ mod tests {
         ));
         assert!(!session_already_gone(
             "org.freedesktop.DBus.Error.AccessDenied"
+        ));
+    }
+
+    #[test]
+    fn a_share_dialog_the_portal_ended_is_portal_lost_not_a_missing_source() {
+        use ashpd::desktop::ResponseError;
+        let other = || ashpd::Error::Response(ResponseError::Other);
+        assert!(matches!(
+            picker_step_failed("SelectSources", other(), true),
+            PortalStart::Denied(PortalCaptureState::PortalLost)
+        ));
+        // No dialog was shown for a restore token: still a refused token,
+        // which the caller answers by showing the picker once.
+        assert!(matches!(
+            picker_step_failed("Start", other(), false),
+            PortalStart::Denied(PortalCaptureState::MissingSource { .. })
+        ));
+        assert!(matches!(
+            picker_step_failed(
+                "Start",
+                ashpd::Error::Response(ResponseError::Cancelled),
+                true
+            ),
+            PortalStart::Denied(PortalCaptureState::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn portal_loss_ends_a_share_dialog_wait_as_portal_lost() {
+        let (lost_tx, lost_rx) = tokio::sync::oneshot::channel::<()>();
+        let wait = tokio::spawn(until_portal_lost(std::future::pending(), async move {
+            let _ = lost_rx.await;
+        }));
+        tokio::task::yield_now().await;
+        assert!(
+            !wait.is_finished(),
+            "nothing ends the wait before the portal goes"
+        );
+        lost_tx.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("portal loss must end the wait")
+            .expect("wait task");
+        assert!(matches!(
+            outcome,
+            PortalStart::Denied(PortalCaptureState::PortalLost)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_the_portal_loss_follows_is_the_portal_loss() {
+        let failed =
+            || async { denied("SelectSources failed: org.freedesktop.DBus.Error.NoReply") };
+        let lost_soon = until_portal_lost(failed(), async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        })
+        .await;
+        assert!(matches!(
+            lost_soon,
+            PortalStart::Denied(PortalCaptureState::PortalLost)
+        ));
+        // A portal that stays up keeps the real failure.
+        let still_up = until_portal_lost(failed(), std::future::pending()).await;
+        assert!(matches!(
+            still_up,
+            PortalStart::Denied(PortalCaptureState::MissingSource { .. })
+        ));
+        let lost_late = until_portal_lost(failed(), async {
+            tokio::time::sleep(PORTAL_LOSS_GRACE * 2).await;
+        })
+        .await;
+        assert!(matches!(
+            lost_late,
+            PortalStart::Denied(PortalCaptureState::MissingSource { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn portal_loss_watch_never_overrides_a_finished_answer() {
+        let cancelled = until_portal_lost(
+            async { PortalStart::Denied(PortalCaptureState::Cancelled) },
+            async {},
+        )
+        .await;
+        assert!(matches!(
+            cancelled,
+            PortalStart::Denied(PortalCaptureState::Cancelled)
+        ));
+        let answered = until_portal_lost(
+            async { PortalStart::Denied(PortalCaptureState::Cancelled) },
+            std::future::pending(),
+        )
+        .await;
+        assert!(matches!(
+            answered,
+            PortalStart::Denied(PortalCaptureState::Cancelled)
         ));
     }
 
