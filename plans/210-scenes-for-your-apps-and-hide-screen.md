@@ -1097,3 +1097,105 @@ per-frame classes (`*-frames.json`) and `dev-app.log` land in the evidence
 directory. Frozen counts are meaningful only for full-bleed scenes (the shrunk
 scene moves the motion strip off the sampled canvas strip): read
 `oldWindowFrames` for the layout variant's marked scene.
+
+### S3 result (2026-10-29)
+
+**What changed.** A window or display switch on macOS now changes the running
+SCStream's target in place (`updateContentFilter`, then `updateConfiguration`
+with the new size: `preview_screen.rs`, `swap_stream` on the capture thread and
+`swap_screen_in_place` on the transition worker). The slot's source id and
+generation move on; its frame store does not. Every published frame carries its
+capture generation (`PreviewScreenShared::latest_frame_generation`), and a
+`PreviewScreenFrameSource` hands the compositor only frames of the generation
+it adopted. The compositor (`CompositorLiveSources`) keeps the frame on air
+across any source change (swap, restart, window gone) and replaces it only with
+a frame of the adopted generation once a leg's scene names that source, so the
+next window is never drawn under the previous scene and nothing clears to black
+while a picture exists. Evidence (the fingerprint, delivery health, the
+source-edit proof) counts only current-generation frames of the named device.
+The aux and vertical legs read the same handle; their commit paths are
+unchanged. A refused or timed-out in-place change (250 ms for both SCK
+updates, 250 ms for the first frame) falls back to today's stop-then-start
+under the same hold, and `compositor.status.screenSwitch` says which path ran
+and why (`{ mode: "in-place" | "restart", reason, sourceId, generation,
+firstFrameMs }`; strict contract, optional).
+
+**Which frame is which.** ScreenCaptureKit delivered the next target's first
+frame before the update's completion handler in about 1 switch in 10 (13/85 and
+8/127 swaps), and once in ~120 switches one more frame of the previous target
+after it. Each frame's `SCStreamFrameInfoScreenRect` says which window or
+display it came from, so while a swap is in flight the stamp follows the frame,
+not the clock (`SwapAttribution`, `frame_capture_generation`): the next
+target's early frame begins its generation itself, and a straggler of the
+previous target after that is discarded rather than published over the next
+target's first frame in the depth-one store. Two targets at the same screen
+rectangle are told apart by the completion alone (today's behaviour).
+
+**Hide screen (S7).** A generation change is a fresh capture for the gate: the
+cursor resets at the swap, so the next window's first frame publishes frosted
+and its live pixels wait for the show. A show between the swap and that first
+frame publishes the previous window's held live frame under its own generation.
+
+**Renderer preflight.** `lib/scene-apply-preflight.ts`: the strict check judges
+the device list the Studio already holds, refuses a source turned off at once,
+refetches `devices.list` once only for a chosen source missing from the held
+list, takes S2's resolver as the proof for an app scene's window, and runs the
+background asset IPC, the Notes-window IPC and the baseline `compositor.status`
+read side by side. Preflight p50 18 to 35 ms in every run (S0: 321 ms).
+
+**Setup.** As S0: `node scripts/probe-scene-window-switch.mjs --switches 40`
+on this branch, dev app on an isolated profile, 1920x1080@30, Fixture Alpha
+(red) and Fixture Beta (blue), A->B->A. Other agents compiled Rust during the
+runs; each row names its load.
+
+**Recording, Screen only -> Screen only (what viewers see):**
+
+| run                               | host load | click -> new window p50 / p95 / max | black (40 switches) | wrong layout | old-window frames before the cut p50 / max |
+| --------------------------------- | --------- | ----------------------------------- | ------------------- | ------------ | ------------------------------------------ |
+| S0 baseline (run 2, 20 switches)  | 24 -> 15  | 467 / 731 / 776 ms                  | 39                  | 0            | 12 / -                                     |
+| S3 run 1 (completion stamp only)  | 13 -> 5   | 106 / 135 / 141 ms                  | 0                   | 0            | 3 / 4                                      |
+| S3 run 2 (completion stamp only)  | 4 -> 4    | 97 / 128 / 137 ms                   | 0                   | 0            | 2 / 4                                      |
+| S3 budget run (completion stamp)  | 4 -> 4    | 88 / 116 / 126 ms                   | 0                   | 0            | 2 / 3                                      |
+| S3 budget run (final code)        | 21 -> 9   | 89 / 116 / 117 ms                   | 0                   | 0            | 2 / 3                                      |
+| S3 run 4 (final code)             | 5 -> 5    | 82 / 118 / 120 ms                   | 0                   | 0            | 2 / 3                                      |
+
+**Recording, layout change** (Alpha full-bleed <-> Beta freeform at 70%):
+
+| run                               | host load | click -> new window p50 / p95 / max | black | wrong layout | old-window frames p50 / max |
+| --------------------------------- | --------- | ----------------------------------- | ----- | ------------ | --------------------------- |
+| S0 baseline (run 2, 20 switches)  | 24 -> 15  | 678 / 1109 / 1323 ms                | 58    | 0            | -                           |
+| S3 run 1 (completion stamp only)  | 5 -> 4    | 81 / 125 / 140 ms                   | 0     | 2            | 2 / 4                       |
+| S3 run 2 (completion stamp only)  | 4 -> 4    | 125 / 159 / 182 ms                  | 0     | 1            | 3 / 5                       |
+| S3 budget run (completion stamp)  | 4 -> 3    | 102 / 127 / 141 ms                  | 0     | 0            | 3 / 4                       |
+| S3 budget run (final code)        | 8 -> 6    | 77 / 111 / 133 ms                   | 0     | 0            | 2 / 3                       |
+| S3 run 4 (final code)             | 4 -> 4    | 100 / 116 / 135 ms                  | 0     | 0            | 3 / 4                       |
+
+`--budget-ms 150` on the recording variants: **PASS** on both budget runs. Two
+intermediate runs with the screen-rect attribution but before the straggler
+discard, under load 10 to 20: recording 84 / 167 / 218 and 78 / 132 / 167 ms,
+layout 106 / 197 / 374 and 123 / 243 / 330 ms, 1 wrong-layout frame (the
+straggler case), budget FAIL on p95; every number stretched with load, as S0
+found.
+
+**Idle** (status edges): click -> first captured frame of the new window p50
+34 / p95 50 to 124 ms (S0: 590 / 1552), with one 2.6 s outlier per run on the
+first switch after launch while the idle compositor run restarts (unchanged
+from S0). "click -> compositor shows it (status, coarse)" ~800 ms in every row
+is the status snapshot cadence, not the program; the pixel columns are the
+measure.
+
+**Where the gap goes now** (final runs, p50 / p95): renderer preflight 18 to 35
+/ 50 ms; shareable content loaded by the swap itself 25 to 30 / 39 ms (the S1
+cache was cold on every probe switch, `content_cached=false`: fixed-window
+scenes never call the resolver; app scenes will hit it); both SCK updates to
+their completions 42 to 50 / 100 ms; transition worker start -> first frame of
+the new target 90 / 115 to 180 ms; then readiness, commit and the next
+compositor tick. Every switch in every run went in place (0 fallbacks).
+
+**Follow-ups, not S3.** (1) A cheap "warm discovery" RPC the renderer fires at
+click time would take the content load off the swap for fixed-window scenes
+(~25 to 30 ms p50). (2) The renderer sends the vertical leg's scene after the
+program commit; for that round trip the vertical leg draws the new window
+under its previous layout (before S3 it drew nothing there). Per-leg holds
+would need the aux commit path, which S3 left alone. (3) Two windows at the
+same screen rectangle fall back to the completion stamp.
