@@ -8,6 +8,7 @@ import { soundActionContext } from './sounds'
 import {
   OFFLINE_REASON,
   OFFLINE_TOAST_ID,
+  SECURE_STORAGE_REASON,
   UNKNOWN_REASON,
   UserFacingError,
   couldNotTitle,
@@ -52,6 +53,21 @@ describe('userErrorMessage', () => {
     expect(copy.raw).toBe("Videorc's engine isn't connected.")
     expect(copy.kind).toBe('offline')
     expect(copy.text).not.toContain('invoking remote method')
+  })
+
+  it('names the missing keyring when protected persistence refuses', () => {
+    const copy = userErrorMessage(
+      new Error(
+        "Error invoking remote method 'system:pick-directory': Error: Protected desktop persistence is unavailable."
+      ),
+      { action: 'use', object: 'that folder' }
+    )
+    expect(copy).toMatchObject({
+      kind: 'known',
+      title: "Couldn't use that folder",
+      description: SECURE_STORAGE_REASON,
+      tone: 'error'
+    })
   })
 
   it('says Videorc is reconnecting for every offline shape, as a warning', () => {
