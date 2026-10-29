@@ -99,6 +99,8 @@ beforeEach(() => {
     sessions: SESSIONS,
     sessionsNextCursor: null,
     sessionsLoadingMore: false,
+    sessionDetails: {},
+    loadSessionDetails: vi.fn(async () => undefined),
     loadMoreSessions: vi.fn(),
     sessionStorageTotals: null,
     settings: {},
