@@ -80,6 +80,8 @@ beforeEach(() => {
   }
   mocked.core = {
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false, captionsWindowEnabled: false },
+    screenPrivacy: { hidden: false },
+    toggleScreenHidden: vi.fn(async () => true),
     savedScenes: [],
     applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true),
