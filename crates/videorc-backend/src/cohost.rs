@@ -21630,7 +21630,9 @@ mod tests {
                 start + Duration::from_secs(2),
                 "2026-08-22T10:00:02Z",
             ));
-            let pass = engine.route_answer_candidates(generation, true,
+            let pass = engine.route_answer_candidates(
+                generation,
+                true,
                 start + Duration::from_secs(2),
                 "2026-08-22T10:00:02Z",
             );
@@ -21662,7 +21664,10 @@ mod tests {
         assert!(suggest.bubble.is_empty());
         assert_eq!(suggest.propose.len(), 1);
         assert_eq!(suggest.propose[0].status, CohostUtteranceStatus::Proposed);
-        assert_eq!(suggest.propose[0].text, "Keychron Q1!", "a card is unchanged");
+        assert_eq!(
+            suggest.propose[0].text, "Keychron Q1!",
+            "a card is unchanged"
+        );
         assert_eq!(suggest.propose[0].destination_ids, ["twitch"]);
 
         let (engine, off) = run(CohostTalkMode::Off, true);
@@ -21804,7 +21809,13 @@ mod tests {
                 .find(|row| row.raw_provider_type.as_deref() == Some("follow"))
                 .unwrap();
         follow.published_at = chrono::Utc::now().to_rfc3339();
-        let pass = engine.note_activity(&[follow], false, true, start, &chrono::Utc::now().to_rfc3339());
+        let pass = engine.note_activity(
+            &[follow],
+            false,
+            true,
+            start,
+            &chrono::Utc::now().to_rfc3339(),
+        );
         assert_eq!(pass.propose.len(), 1);
         let id = pass.propose[0].id.clone();
         assert_eq!(engine.auto_chat_session_id().as_deref(), Some("session-1"));
@@ -22369,7 +22380,10 @@ mod tests {
             engine.settings.auto_chat = auto_chat_settings(CohostTalkMode::Suggest);
             engine.set_web_greet_version(Some(1));
             engine.start_session("session-1".to_string(), true, None, Instant::now());
-            let pass = engine.note_activity(&[fresh_follow()], true, true,
+            let pass = engine.note_activity(
+                &[fresh_follow()],
+                true,
+                true,
                 Instant::now(),
                 &chrono::Utc::now().to_rfc3339(),
             );
@@ -22420,7 +22434,10 @@ mod tests {
                     .unwrap();
             raid.published_at = chrono::Utc::now().to_rfc3339();
             engine
-                .note_activity(&[raid], true, true,
+                .note_activity(
+                    &[raid],
+                    true,
+                    true,
                     Instant::now() + Duration::from_secs(10),
                     &chrono::Utc::now().to_rfc3339(),
                 )
@@ -22474,8 +22491,7 @@ mod tests {
         let pass = tick(&mut engine, 3, "2026-08-22T10:01:02Z", open());
         assert_eq!(pass.bubble.len(), 1, "{pass:?}");
         assert_eq!(
-            pass.bubble[0].text,
-            "@Viewer 0 Keychron Q1!",
+            pass.bubble[0].text, "@Viewer 0 Keychron Q1!",
             "the bubble names the asker (plan 211 D8)"
         );
         assert_eq!(
@@ -22818,12 +22834,13 @@ mod tests {
         let (engine, generation) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         *state.cohost.lock().await = engine;
         let now_iso = chrono::Utc::now().to_rfc3339();
-        let pass =
-            state
-                .cohost
-                .lock()
-                .await
-                .note_activity(&[fresh_follow()], false, true, start, &now_iso);
+        let pass = state.cohost.lock().await.note_activity(
+            &[fresh_follow()],
+            false,
+            true,
+            start,
+            &now_iso,
+        );
         assert_eq!(pass.bubble.len(), 1, "{pass:?}");
         assert_eq!(pass.bubble[0].status, CohostUtteranceStatus::BubbleOnly);
         assert!(pass.propose.is_empty());

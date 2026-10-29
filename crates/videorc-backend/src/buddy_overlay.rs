@@ -385,7 +385,8 @@ impl BuddyOverlayState {
 
 /// [`BUDDY_BUBBLE_GAP`] as chrono counts it.
 fn gap() -> chrono::Duration {
-    chrono::Duration::from_std(BUDDY_BUBBLE_GAP).unwrap_or_else(|_| chrono::Duration::milliseconds(500))
+    chrono::Duration::from_std(BUDDY_BUBBLE_GAP)
+        .unwrap_or_else(|_| chrono::Duration::milliseconds(500))
 }
 
 pub type BuddyOverlayStateSlot = Arc<tokio::sync::Mutex<BuddyOverlayState>>;
@@ -1372,7 +1373,10 @@ mod tests {
         assert_eq!(buddy.arm_for_next(), Some(at(14)));
         assert_eq!(buddy.arm_for_next(), None, "armed once");
         assert_eq!(buddy.waiting(), 1);
-        assert_eq!(buddy.pump(at(14)).show.unwrap().utterance.text, "Welcome, Bo!");
+        assert_eq!(
+            buddy.pump(at(14)).show.unwrap().utterance.text,
+            "Welcome, Bo!"
+        );
         assert_eq!(buddy.waiting(), 0);
         assert_eq!(buddy.dropped(), 0);
     }
@@ -1526,10 +1530,7 @@ mod tests {
         assert!(clipped.ends_with('…'));
         assert!(clipped.chars().count() <= BUDDY_SAY_MAX_CHARS);
         assert!(validate_say_text(&clipped).is_ok());
-        assert!(matches!(
-            bubble_text("   "),
-            Err(BuddySayError::Empty)
-        ));
+        assert!(matches!(bubble_text("   "), Err(BuddySayError::Empty)));
     }
 
     /// Plan 211 D7 at the runtime: Buddy's own lines queue behind the bubble
