@@ -764,8 +764,14 @@ timeline as Linux pulse (`PulseTimeline`):
 The overlap refusal still applies to the placed count.
 
 A failure before the microphone's readiness check falls back to direct
-DirectShow capture. A failure after readiness is a mid-session source loss:
-the microphone is replaced with silence and a health warning.
+DirectShow capture. A failure after readiness is a mid-session source loss.
+Like the Linux pulse worker (retest 151), the session then reopens the same
+microphone, up to five times. Only the moments in between are silent. The
+field retest hit this 32 s into an idle session while the post-recording
+quality check ran. That stop was a bare `VIDEORC_DSHOW_CLOCK_INVALID`, so
+every refusal now names the check it failed (`reason=wall-bracket`,
+`delivery-delay` and so on) and its raw values, and the backend's stop
+reason carries them.
 
 ### Build and distribution
 

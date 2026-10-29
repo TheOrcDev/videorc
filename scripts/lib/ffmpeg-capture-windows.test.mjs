@@ -201,3 +201,27 @@ test('the DirectShow clock patch accepts an unticked clock and drops pre-roll', 
     /\(hr == S_OK \|\| hr == VFW_S_NO_STOP_TIME\) && sampletime < 0\)\n\+\s+return S_OK;/
   )
 })
+
+test('every refused DirectShow clock record names the check it failed', () => {
+  // A field stop 32 s into an idle session printed a bare INVALID record, so
+  // a starved capture thread could not be told from a broken device.
+  const patch = readFileSync(
+    new URL('../patches/dshow-capture-clock.patch', import.meta.url),
+    'utf8'
+  )
+  assert.doesNotMatch(patch, /VIDEORC_DSHOW_CLOCK_INVALID\\n/)
+  for (const reason of [
+    'receive-times',
+    'buffer',
+    'missing',
+    'status',
+    'sample-time',
+    'delivery-delay',
+    'wall-bracket',
+    'format',
+    'packet-length',
+    'packet-mismatch'
+  ])
+    assert.ok(patch.includes(`"${reason}"`) || patch.includes(`reason=${reason}`), reason)
+  assert.match(patch, /capture_clock\.valid = !capture_clock\.invalid;/)
+})

@@ -10129,7 +10129,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             if microphone_auto_reopen_due(
                 source_loss_after_ms.reason,
                 microphone_reopen_attempts,
-                cfg!(target_os = "linux"),
+                cfg!(any(target_os = "linux", target_os = "windows")),
             ) {
                 microphone_reopen_attempts += 1;
                 tokio::spawn(reopen_stopped_microphone(
@@ -10376,7 +10376,10 @@ fn emit_microphone_input_lost_health_event(
 /// session recorded and streamed 27 minutes of silence. Such a stop now opens
 /// the same microphone again through the path that choosing it again uses, a
 /// bounded number of times per session. A timeline loss keeps its own
-/// re-anchor (plan 076); other platforms keep their behaviour.
+/// re-anchor (plan 076). The Windows capture worker stops the same way: on
+/// the field Intel SST microphone it refused one packet's clock record 32 s
+/// into an idle session while the post-recording quality check ran, and the
+/// session stayed silent. macOS keeps its behaviour.
 const MICROPHONE_AUTO_REOPEN_LIMIT: u32 = 5;
 const MICROPHONE_AUTO_REOPEN_DELAY: Duration = Duration::from_secs(1);
 const MICROPHONE_REOPENED_CODE: &str = "microphone-input-recovered";
@@ -26614,7 +26617,7 @@ mod tests {
             MICROPHONE_AUTO_REOPEN_LIMIT,
             true
         ));
-        // A timeline loss keeps its own re-anchor; other platforms are unchanged.
+        // A timeline loss keeps its own re-anchor; macOS is unchanged.
         assert!(!microphone_auto_reopen_due(TimelineRejected, 0, true));
         assert!(!microphone_auto_reopen_due(CaptureStopped, 0, false));
         // The `-recovered` code clears the renderer's "stopped" notice.

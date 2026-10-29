@@ -198,6 +198,26 @@ const DSHOW_STAMP_JITTER: Duration = Duration::from_millis(10);
 /// late is lost audio.
 const DSHOW_DROPOUT_FRAMES: i64 = DSHOW_STAMP_JITTER.as_millis() as i64 * 48;
 
+/// The worker names the check a refused packet failed (`reason=wall-bracket
+/// sample_100ns=...`). A field stop 32 s into an idle session carried no
+/// reason, so it could not be told from a broken device. Bounded, printable.
+fn dshow_invalid_detail(line: &str) -> String {
+    let Some((_, detail)) = line.split_once("VIDEORC_DSHOW_CLOCK_INVALID") else {
+        return String::new();
+    };
+    let detail: String = detail
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(200)
+        .collect();
+    if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({detail})")
+    }
+}
+
 const WALL_TOLERANCE_NS: u128 = 5_000_000;
 const WALL_STEP_NS: u128 = 50_000_000;
 const WALL_STEP_STREAK: u8 = 3;
@@ -1501,7 +1521,10 @@ fn assemble_pcm(
             }
         };
         if line.contains("VIDEORC_DSHOW_CLOCK_INVALID") {
-            bail!("DirectShow could not map the selected device capture clock");
+            bail!(
+                "DirectShow could not map the selected device capture clock{}",
+                dshow_invalid_detail(&line)
+            );
         }
         if line.contains("VIDEORC_DSHOW_CLOCK version=") {
             observe_wall(
@@ -2067,6 +2090,24 @@ mod tests {
                 .contains("outside its captured packet clock interval"),
             "{exact:#}"
         );
+    }
+
+    #[test]
+    fn a_refused_directshow_packet_names_its_failed_check() {
+        assert_eq!(
+            dshow_invalid_detail(
+                "[in#0/dshow @ 0x1] VIDEORC_DSHOW_CLOCK_INVALID reason=wall-bracket sample_100ns=5 graph_100ns=9 wall_bracket_100ns=12000 bytes=3528"
+            ),
+            " (reason=wall-bracket sample_100ns=5 graph_100ns=9 wall_bracket_100ns=12000 bytes=3528)"
+        );
+        // A worker from before the reasons existed still stops cleanly.
+        assert_eq!(dshow_invalid_detail("VIDEORC_DSHOW_CLOCK_INVALID"), "");
+        let long = format!(
+            "VIDEORC_DSHOW_CLOCK_INVALID reason=\u{7}{}",
+            "x".repeat(400)
+        );
+        let detail = dshow_invalid_detail(&long);
+        assert!(detail.len() <= 203 && !detail.contains('\u{7}'), "{detail}");
     }
 
     #[test]

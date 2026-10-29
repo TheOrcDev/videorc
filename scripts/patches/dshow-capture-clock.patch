@@ -1,12 +1,13 @@
 --- a/libavdevice/dshow_capture.h
 +++ b/libavdevice/dshow_capture.h
-@@ -247,6 +247,14 @@
+@@ -247,6 +247,15 @@
  /*****************************************************************************
   * DShowFilter
   ****************************************************************************/
 +/* Exact packet capture-clock metadata, opt-in protocol 1. */
 +typedef struct VideorcAudioClock {
 +    int valid;
++    const char *invalid; /* the first failed check when not valid */
 +    int64_t sample_100ns, graph_100ns;
 +    uint64_t wall_before_100ns, wall_after_100ns;
 +    int bytes, frames, rate, channels, bits, format;
@@ -15,7 +16,7 @@
  struct DShowFilter {
      IBaseFilterVtbl *vtbl;
      long ref;
-@@ -259,7 +267,7 @@
+@@ -259,7 +268,7 @@
      void *priv_data;
      int stream_index;
      int64_t start_time;
@@ -24,7 +25,7 @@
  };
  
  long          WINAPI ff_dshow_filter_QueryInterface (DShowFilter *, const GUID *, void **);
-@@ -298,6 +306,7 @@
+@@ -298,6 +307,7 @@
      int   list_options;
      int   list_devices;
      int   audio_buffer_size;
@@ -77,7 +78,7 @@
              chosentime = graphtime;
              use_sample_time = 0;
              av_log(s, AV_LOG_DEBUG,
-@@ -339,19 +348,72 @@
+@@ -339,19 +348,84 @@
          } else
              chosentime = sampletime;
      }
@@ -92,7 +93,9 @@
 +     * read, which the wave capture filter makes just before each buffer. */
 +    if (ctx->videorc_audio_clock && devtype == AudioDevice &&
 +        ((clock_hr != S_OK && clock_hr != S_FALSE) || graphtime < 0 || (hr != S_OK && hr != VFW_S_NO_STOP_TIME) || sampletime < 0 || pin->filter->start_time < 0 || sampletime > INT64_MAX - pin->filter->start_time)) {
-+        av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID\n");
++        av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID reason=receive-times hr=0x%08lx clock_hr=0x%08lx"
++               " sample_100ns=%"PRId64" graph_100ns=%"PRId64"\n",
++               (unsigned long)hr, (unsigned long)clock_hr, sampletime, graphtime);
 +        return E_FAIL;
 +    }
      // media sample time is relative to graph start time
@@ -112,7 +115,8 @@
 +    if (ctx->videorc_audio_clock && devtype == AudioDevice) {
 +        WAVEFORMATEX *wave = (void *)pin->type.pbFormat;
 +        if (pointer_hr != S_OK || !buf || buf_size <= 0) {
-+            av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID\n");
++            av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID reason=buffer pointer_hr=0x%08lx bytes=%d\n",
++                   (unsigned long)pointer_hr, buf_size);
 +            return E_FAIL;
 +        }
 +        uint64_t before = ((uint64_t)wall_before.dwHighDateTime << 32) | wall_before.dwLowDateTime;
@@ -124,28 +128,37 @@
 +            else if (IsEqualGUID(&extended->SubFormat, &videorc_float)) format = WAVE_FORMAT_IEEE_FLOAT;
 +            else format = 0;
 +        }
-+        capture_clock.valid = (hr == S_OK || hr == VFW_S_NO_STOP_TIME) && (clock_hr == S_OK || clock_hr == S_FALSE) && pointer_hr == S_OK && buf &&
-+            use_sample_time && chosentime == sampletime && sampletime >= 0 && graphtime >= sampletime &&
-+            graphtime - sampletime <= 1000000 && before >= 116444736000000000ULL && after >= before && after - before <= 10000 &&
-+            wave && pin->type.cbFormat >= sizeof(WAVEFORMATEX) && wave->nSamplesPerSec >= 8000 && wave->nSamplesPerSec <= 384000 &&
++        capture_clock.sample_100ns = sampletime;
++        capture_clock.graph_100ns = graphtime;
++        capture_clock.wall_before_100ns = before >= 116444736000000000ULL ? before - 116444736000000000ULL : 0;
++        capture_clock.wall_after_100ns = after >= 116444736000000000ULL ? after - 116444736000000000ULL : 0;
++        capture_clock.bytes = buf_size;
++        /* Name the first failed check: the backend reports it with the stop. */
++        if (!((hr == S_OK || hr == VFW_S_NO_STOP_TIME) && (clock_hr == S_OK || clock_hr == S_FALSE) && pointer_hr == S_OK && buf))
++            capture_clock.invalid = "status";
++        else if (!use_sample_time || chosentime != sampletime || sampletime < 0)
++            capture_clock.invalid = "sample-time";
++        else if (graphtime < sampletime || graphtime - sampletime > 1000000)
++            capture_clock.invalid = "delivery-delay";
++        else if (before < 116444736000000000ULL || after < before || after - before > 10000)
++            capture_clock.invalid = "wall-bracket";
++        else if (!(wave && pin->type.cbFormat >= sizeof(WAVEFORMATEX) && wave->nSamplesPerSec >= 8000 && wave->nSamplesPerSec <= 384000 &&
 +            wave->nChannels > 0 && wave->nChannels <= 32 &&
 +            ((format == WAVE_FORMAT_PCM && (wave->wBitsPerSample == 8 || wave->wBitsPerSample == 16 || wave->wBitsPerSample == 24 || wave->wBitsPerSample == 32)) ||
 +             (format == WAVE_FORMAT_IEEE_FLOAT && (wave->wBitsPerSample == 32 || wave->wBitsPerSample == 64))) &&
 +            wave->nBlockAlign == wave->nChannels * (wave->wBitsPerSample / 8) &&
-+            buf_size > 0 && buf_size % wave->nBlockAlign == 0;
-+        if (capture_clock.valid) {
-+            capture_clock.sample_100ns = sampletime;
-+            capture_clock.graph_100ns = graphtime;
-+            capture_clock.wall_before_100ns = before - 116444736000000000ULL;
-+            capture_clock.wall_after_100ns = after - 116444736000000000ULL;
-+            capture_clock.bytes = buf_size;
++            buf_size > 0 && buf_size % wave->nBlockAlign == 0))
++            capture_clock.invalid = "format";
++        else {
 +            capture_clock.frames = buf_size / wave->nBlockAlign;
 +            capture_clock.rate = wave->nSamplesPerSec;
 +            capture_clock.channels = wave->nChannels;
 +            capture_clock.bits = wave->wBitsPerSample;
 +            capture_clock.format = format;
-+            capture_clock.valid = (int64_t)capture_clock.frames * 10 <= capture_clock.rate;
++            if ((int64_t)capture_clock.frames * 10 > capture_clock.rate)
++                capture_clock.invalid = "packet-length";
 +        }
++        capture_clock.valid = !capture_clock.invalid;
 +    }
 +    pin->filter->callback(priv_data, index, buf, buf_size, chosentime, devtype,
 +                         ctx->videorc_audio_clock && devtype == AudioDevice ? &capture_clock : NULL);
@@ -180,7 +193,7 @@
      }
  
      pktl_next->pkt.stream_index = index;
-@@ -1885,12 +1895,31 @@
+@@ -1885,12 +1895,38 @@
          }
      }
  
@@ -189,7 +202,14 @@
 +        s->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
 +        VideorcAudioClock *clock = pkt->opaque_ref ? (void *)pkt->opaque_ref->data : NULL;
 +        if (!clock || !clock->valid || clock->sample_100ns != pkt->pts || clock->bytes != pkt->size) {
-+            av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID\n");
++            if (!clock)
++                av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID reason=missing\n");
++            else
++                av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID reason=%s sample_100ns=%"PRId64
++                       " graph_100ns=%"PRId64" wall_bracket_100ns=%"PRId64" bytes=%d\n",
++                       clock->valid ? "packet-mismatch" : clock->invalid,
++                       clock->sample_100ns, clock->graph_100ns,
++                       (int64_t)(clock->wall_after_100ns - clock->wall_before_100ns), clock->bytes);
 +            av_packet_unref(pkt);
 +            return AVERROR_INVALIDDATA;
 +        }
