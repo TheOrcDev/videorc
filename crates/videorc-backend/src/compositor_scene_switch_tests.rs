@@ -636,6 +636,168 @@ async fn each_leg_cuts_to_the_next_window_only_when_its_own_scene_names_it() {
     assert_eq!(vertical_bytes(), alpha_vertical);
 }
 
+/// Plan 210 D5: the commit can land a tick or more before the compositor
+/// adopts the next capture (the preview slot's lock is contended; the
+/// stop-then-start path installs the new capture later still). For those
+/// ticks the leg must not draw the previous window under the next layout:
+/// it keeps the scene it drew, with its frame, and cuts layout and window
+/// together. Red before the fix: Alpha's frame drawn inside Beta's shrunk
+/// layout for one tick.
+#[tokio::test]
+async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    assert_eq!(
+        publish(&state, &mut sources, &mut cache)
+            .await
+            .fingerprint
+            .screen,
+        Some(11)
+    );
+    let alpha_full = latest_bytes(&state).await;
+    assert!(
+        alpha_full[0] > 100,
+        "Alpha fills the canvas: a bright corner"
+    );
+
+    // Beta's capture replaces Alpha's in place and delivers its first frame.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    crate::preview_screen::test_publish_screen_pixels(&state, 22, [255, 0, 0, 255], Instant::now())
+        .await;
+    // The commit names Beta in a shrunk freeform layout...
+    let mut shrunk = scene.clone();
+    shrunk.revision = 2;
+    shrunk.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+    {
+        let source = &mut shrunk.scene.as_mut().unwrap().sources[0];
+        source.device_id = Some("window:beta".into());
+        source.transform = SceneTransform {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+    }
+    state.compositor.lock().await.scene = Some(shrunk.clone());
+    // ...but the compositor cannot adopt the capture this tick: the preview
+    // slot is busy (a swap installing, a metrics poll, a status read).
+    let busy_slot = state.preview_screen.lock().await;
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(
+        result.fingerprint.screen, None,
+        "no Beta frame proves anything yet"
+    );
+    assert_eq!(
+        latest_bytes(&state).await,
+        alpha_full,
+        "Alpha's frame stays under Alpha's layout: never Alpha inside Beta's shrunk layout"
+    );
+    publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(latest_bytes(&state).await, alpha_full, "the hold is steady");
+    drop(busy_slot);
+
+    // The next tick adopts Beta: layout and window cut together.
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, Some(22));
+    let beta_shrunk = latest_bytes(&state).await;
+    assert_ne!(beta_shrunk, alpha_full);
+    assert!(
+        beta_shrunk[0] < 40,
+        "Beta's shrunk layout leaves the corner dark"
+    );
+    publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(latest_bytes(&state).await, beta_shrunk, "and the cut holds");
+
+    // A layout edit on the same, delivering capture cuts at once: no hold.
+    let mut edited = shrunk.clone();
+    edited.revision = 3;
+    edited.scene.as_mut().unwrap().sources[0].transform.x = 0.0;
+    state.compositor.lock().await.scene = Some(edited);
+    publish(&state, &mut sources, &mut cache).await;
+    assert_ne!(latest_bytes(&state).await, beta_shrunk);
+}
+
+/// Plan 210 D5: the hold is bounded. A scene naming a capture that never
+/// delivers takes the layout after `LEG_SCENE_HOLD_MAX`, with the frame on
+/// air, rather than pinning the previous layout for good.
+#[test]
+fn a_leg_scene_hold_is_bounded() {
+    let drawn = snapshot(SceneSourceKind::Window);
+    let mut next = drawn.clone();
+    next.revision = 2;
+    next.scene.as_mut().unwrap().sources[0].device_id = Some("window:gone".into());
+    let t0 = Instant::now();
+    let frame = crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+        storage: crate::frame_store::FrameStorage::untracked(),
+        sequence: 1,
+        width: 1,
+        height: 1,
+        pixel_format: PreviewScreenPixelFormat::Bgra8,
+        metadata: (),
+        bytes: vec![0, 0, 0, 255],
+        source_iosurface: None,
+        source_pixel_buffer: None,
+        source_d3d11_texture: None,
+        recycle_pool: None,
+        captured_at: t0,
+    });
+    let hold = LegScreenHold {
+        frame: Some(frame),
+        scene: Some(drawn.clone()),
+        waiting_since: None,
+    };
+    let (scene, since) = leg_scene_for_tick(Some(next.clone()), &hold, false, None, t0);
+    assert_eq!(
+        scene.as_ref().map(|s| s.revision),
+        Some(1),
+        "holds the drawn scene"
+    );
+    assert_eq!(since, Some(t0));
+    let waiting = LegScreenHold {
+        waiting_since: since,
+        ..hold.clone()
+    };
+    let (scene, since) = leg_scene_for_tick(
+        Some(next.clone()),
+        &waiting,
+        false,
+        None,
+        t0 + LEG_SCENE_HOLD_MAX / 2,
+    );
+    assert_eq!(scene.as_ref().map(|s| s.revision), Some(1));
+    assert_eq!(since, Some(t0), "the wait keeps its start");
+    let (scene, since) = leg_scene_for_tick(
+        Some(next.clone()),
+        &waiting,
+        false,
+        None,
+        t0 + LEG_SCENE_HOLD_MAX,
+    );
+    assert_eq!(
+        scene.as_ref().map(|s| s.revision),
+        Some(2),
+        "the bound releases"
+    );
+    assert_eq!(since, None);
+    // A current frame of the named capture cuts at once.
+    let key = crate::source_registry::SourceKey {
+        kind: crate::source_registry::SourceKind::Window,
+        id: "window:gone".into(),
+    };
+    let (scene, since) = leg_scene_for_tick(Some(next), &hold, true, Some(&key), t0);
+    assert_eq!(scene.as_ref().map(|s| s.revision), Some(2));
+    assert_eq!(since, None);
+}
+
 /// Plan 210 S3: the stop-then-start fallback retires the old capture before
 /// the new one exists. The frame on air holds through the gap instead of
 /// going black, and the new capture's first frame cuts in at its commit.

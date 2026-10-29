@@ -1823,8 +1823,60 @@ fn scene_shows_screen_source(snapshot: Option<&CompositorSceneSnapshot>) -> bool
 /// its own frame.
 #[derive(Debug, Clone, Default)]
 struct LegScreenHolds {
-    primary: Option<FrameHandle<PreviewScreenPixelFormat>>,
-    simulcast: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    primary: LegScreenHold,
+    simulcast: LegScreenHold,
+}
+
+/// What one scene slot drew last tick (plan 210 S3, D5).
+#[derive(Debug, Clone, Default)]
+struct LegScreenHold {
+    /// The screen frame the leg drew.
+    frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    /// The scene the leg drew.
+    scene: Option<CompositorSceneSnapshot>,
+    /// Since when the leg has been given a scene that names a capture
+    /// without a current frame on hand (see `leg_scene_for_tick`).
+    waiting_since: Option<Instant>,
+}
+
+/// Plan 210 D5: how long a leg keeps drawing the scene it drew last tick
+/// while the scene it was given names a capture that has not delivered.
+const LEG_SCENE_HOLD_MAX: Duration = Duration::from_secs(1);
+
+/// Plan 210 D5: the scene a leg draws this tick, and since when it has been
+/// waiting. A scene that names a screen capture cuts in together with that
+/// capture's first frame: until a current frame of the capture the scene
+/// names is on hand, the leg keeps the scene it drew last tick, with the
+/// frame it drew (`leg_screen_frame`), so the previous window is never
+/// drawn under the next layout and the next window never under the
+/// previous one. The commit lands a tick or more before the compositor
+/// adopts the next capture when the preview slot's lock is contended, and
+/// longer on the stop-then-start path; this rule holds for both. The wait
+/// is bounded, so a capture that never delivers cannot pin the layout.
+fn leg_scene_for_tick(
+    next: Option<CompositorSceneSnapshot>,
+    hold: &LegScreenHold,
+    screen_frame_current: bool,
+    screen_key: Option<&SourceKey>,
+    now: Instant,
+) -> (Option<CompositorSceneSnapshot>, Option<Instant>) {
+    let waits = match (next.as_ref(), hold.scene.as_ref()) {
+        (Some(next), Some(drawn)) => {
+            next.revision != drawn.revision
+                && hold.frame.is_some()
+                && scene_shows_screen_source(Some(next))
+                && !(screen_frame_current && scene_accepts_source(Some(next), screen_key))
+        }
+        _ => false,
+    };
+    if !waits {
+        return (next, None);
+    }
+    let since = hold.waiting_since.unwrap_or(now);
+    if now.duration_since(since) >= LEG_SCENE_HOLD_MAX {
+        return (next, None);
+    }
+    (hold.scene.clone(), Some(since))
 }
 
 /// Plan 210 S3: the screen frame a leg draws, judged by that leg's OWN
@@ -9253,36 +9305,68 @@ async fn publish_compositor_frame(
         .filter(|_| scene_accepts_source(snapshot.as_ref(), camera_key))
         .map(|(frame, _)| frame);
     let screen_frame_current = live_sources.screen_frame_is_current();
+    // Evidence is judged by the scene as committed, never by the scene a leg
+    // keeps drawing while it waits (below): the previous device's frame is
+    // no proof for the scene that names the next.
+    let evidence_screen = evidence_screen_frame(
+        screen_frame.as_ref(),
+        screen_frame_current,
+        snapshot.as_ref(),
+        screen_key,
+    )
+    .map(|frame| (frame.sequence, frame.captured_at));
+    // Plan 210 D5: a scene that names a new capture cuts in together with
+    // that capture's first frame; until then each scene slot keeps the scene
+    // it drew last tick (`leg_scene_for_tick`). The ISO legs were derived
+    // above from the scene as committed: they draw one source full-frame,
+    // so no layout can be wrong there.
+    let hold_now = Instant::now();
+    let leg_screen_holds = live_sources.leg_screen_holds.clone();
+    let (snapshot, primary_waiting_since) = leg_scene_for_tick(
+        snapshot,
+        &leg_screen_holds.primary,
+        screen_frame_current,
+        screen_key,
+        hold_now,
+    );
+    let (simulcast_snapshot, simulcast_waiting_since) = leg_scene_for_tick(
+        simulcast_snapshot,
+        &leg_screen_holds.simulcast,
+        screen_frame_current,
+        screen_key,
+        hold_now,
+    );
     // Plan 210 S3: each scene slot cuts to the adopted capture only when its
     // own scene names it, and remembers what it drew for the next tick.
-    let leg_screen_holds = live_sources.leg_screen_holds.clone();
     let primary_screen_frame = leg_screen_frame(
         screen_frame.as_ref(),
         screen_frame_current,
-        leg_screen_holds.primary.as_ref(),
+        leg_screen_holds.primary.frame.as_ref(),
         snapshot.as_ref(),
         screen_key,
     );
     let simulcast_screen_frame = leg_screen_frame(
         screen_frame.as_ref(),
         screen_frame_current,
-        leg_screen_holds.simulcast.as_ref(),
+        leg_screen_holds.simulcast.frame.as_ref(),
         simulcast_snapshot.as_ref(),
         screen_key,
     );
     live_sources.leg_screen_holds = LegScreenHolds {
-        primary: primary_screen_frame.cloned(),
-        simulcast: simulcast_screen_frame.cloned(),
+        primary: LegScreenHold {
+            frame: primary_screen_frame.cloned(),
+            scene: snapshot.clone(),
+            waiting_since: primary_waiting_since,
+        },
+        simulcast: LegScreenHold {
+            frame: simulcast_screen_frame.cloned(),
+            scene: simulcast_snapshot.clone(),
+            waiting_since: simulcast_waiting_since,
+        },
     };
     let fingerprint = evidence_fingerprint(
         primary_camera_frame.map(|frame| (frame.sequence, frame.captured_at)),
-        evidence_screen_frame(
-            screen_frame.as_ref(),
-            screen_frame_current,
-            snapshot.as_ref(),
-            screen_key,
-        )
-        .map(|frame| (frame.sequence, frame.captured_at)),
+        evidence_screen,
     );
     let published_at = Instant::now();
     // Plan 190: every leg of this tick reads the live background at
@@ -9743,7 +9827,7 @@ async fn publish_compositor_frame(
             let leg_screen_frame = leg_screen_frame(
                 screen_frame.as_ref(),
                 screen_frame_current,
-                leg_screen_holds.primary.as_ref(),
+                leg_screen_holds.primary.frame.as_ref(),
                 leg_snapshot,
                 screen_key,
             );
