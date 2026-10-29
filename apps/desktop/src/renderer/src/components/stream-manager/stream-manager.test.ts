@@ -310,7 +310,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
   })
 })
 
-describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () => {
+describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, plan 211 D1)', () => {
   const autoChat = {
     talk: 'suggest' as const,
     mode: 'suggest' as const,
@@ -352,20 +352,21 @@ describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () =
     )
   })
 
-  it('shows the posting mode and the read-only behaviour chips under the header', () => {
+  it('shows how Buddy talks and the read-only behaviour chips under the header', () => {
     const markup = renderWith({ onCohostOpenChatSettings: () => undefined })
     const controls = between(
       markup,
       'data-slot="buddy-chat-controls"',
-      'data-slot="buddy-mode-hint"'
+      'data-slot="buddy-talk-hint"'
     )
-    expect(controls).toContain('Chat posting')
-    expect(controls).toMatch(/data-buddy-mode="suggest"[^>]*aria-checked="true"/)
+    expect(controls).toContain('Buddy talks')
+    expect(controls).toMatch(/data-buddy-talk="suggest"[^>]*aria-checked="true"/)
+    expect(controls).not.toContain('data-buddy-talk="auto"')
     expect(controls).not.toContain('role="switch"')
     expect(controls).toContain('Greetings on')
     expect(controls).toContain('Answers off')
     expect(controls).toContain('Banter off')
-    expect(markup).toContain('Each message is a card here; one click sends it.')
+    expect(markup).toContain('Each message is a card here; one click posts it to chat as you.')
   })
 
   it('says the greetings are written with AI only with Premium and cloud AI (plan 192 D7)', () => {

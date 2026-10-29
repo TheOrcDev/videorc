@@ -3,12 +3,11 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { CohostAutoChat, CohostAutoChatMode } from '@/lib/backend'
+import type { CohostAutoChat, CohostTalkMode } from '@/lib/backend'
 import {
   BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY,
-  BUDDY_AUTO_CONFIRM_SENTENCE,
-  BUDDY_MODE_HINTS,
-  buddyPostingConsentSentence
+  buddyPostingConsentSentence,
+  buddyTalkHint
 } from '@/lib/buddy-auto-chat-view'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -17,7 +16,7 @@ import { BuddyChatControls } from './buddy-chat-controls'
 
 let root: Root
 let container: HTMLDivElement
-let onModeChange: ReturnType<typeof vi.fn<(mode: CohostAutoChatMode) => void>>
+let onTalkChange: ReturnType<typeof vi.fn<(talk: CohostTalkMode) => void>>
 let onOpenChatSettings: ReturnType<typeof vi.fn<() => void>>
 
 function autoChat(overrides: Partial<CohostAutoChat> = {}): CohostAutoChat {
@@ -37,7 +36,7 @@ beforeEach(() => {
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
-  onModeChange = vi.fn()
+  onTalkChange = vi.fn()
   onOpenChatSettings = vi.fn()
 })
 
@@ -66,7 +65,7 @@ async function render(
           aiGreetings,
           name,
           picture,
-          onModeChange,
+          onTalkChange,
           ...(link ? { onOpenChatSettings } : {})
         })
       )
@@ -74,10 +73,14 @@ async function render(
   )
 }
 
-function modeButton(mode: string): HTMLButtonElement {
-  const button = document.querySelector(`[data-buddy-mode="${mode}"]`) as HTMLButtonElement | null
+function talkButton(talk: string): HTMLButtonElement {
+  const button = document.querySelector(`[data-buddy-talk="${talk}"]`) as HTMLButtonElement | null
   expect(button).toBeTruthy()
   return button!
+}
+
+function hint(): string | null | undefined {
+  return document.querySelector('[data-slot="buddy-talk-hint"]')?.textContent
 }
 
 function chips(): HTMLButtonElement[] {
@@ -102,61 +105,91 @@ function dialogButton(testId: string): HTMLButtonElement {
   return button!
 }
 
-describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
-  it('asks for consent the first time, lands in Suggest, and remembers it', async () => {
-    await render(autoChat())
-    await press(modeButton('suggest'))
-    expect(onModeChange).not.toHaveBeenCalled()
-    expect(dialog()?.textContent).toContain('Let Buddy post as you?')
-    expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
-    await act(async () => dialogButton('buddy-chat-accept').click())
-    expect(onModeChange).toHaveBeenLastCalledWith('suggest')
-    expect(dialog()).toBeNull()
-    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
+describe('How Buddy talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)', () => {
+  it('offers Off, Bubble and Suggest in that order, and no Auto', async () => {
+    await render(autoChat({ talk: 'bubble' }))
+    const options = [...document.querySelectorAll<HTMLButtonElement>('[data-buddy-talk]')]
+    expect(options.map((option) => [option.dataset.buddyTalk, option.textContent])).toEqual([
+      ['off', 'Off'],
+      ['bubble', 'Bubble'],
+      ['suggest', 'Suggest']
+    ])
+    expect(document.querySelector('[data-buddy-talk="auto"]')).toBeNull()
+    expect(document.body.textContent).not.toMatch(/\bAuto\b/)
+    // The selected value is `talk`, never the legacy `mode` riding along.
+    expect(talkButton('bubble').getAttribute('aria-checked')).toBe('true')
+    await render(autoChat({ talk: 'suggest', mode: 'off' }))
+    expect(talkButton('suggest').getAttribute('aria-checked')).toBe('true')
+    expect(talkButton('off').getAttribute('aria-checked')).toBe('false')
   })
 
-  it('never reaches Auto without the second explicit click', async () => {
-    await render(autoChat())
-    await press(modeButton('auto'))
-    expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
-    await act(async () => dialogButton('buddy-chat-accept').click())
-    // Consent lands in Suggest; Auto still waits for its own sentence.
-    expect(onModeChange).toHaveBeenCalledTimes(1)
-    expect(onModeChange).toHaveBeenLastCalledWith('suggest')
-    expect(dialog()?.textContent).toContain(BUDDY_AUTO_CONFIRM_SENTENCE)
-    await act(async () => dialogButton('buddy-chat-confirm-auto').click())
-    expect(onModeChange).toHaveBeenLastCalledWith('auto')
+  it('applies Bubble and Off at once, without asking: Buddy posts nothing as you', async () => {
+    await render(autoChat({ talk: 'off' }))
+    await press(talkButton('bubble'))
     expect(dialog()).toBeNull()
+    expect(onTalkChange).toHaveBeenLastCalledWith('bubble')
+    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
 
-    // Consented already: Auto still asks, every time; Not now changes nothing.
-    onModeChange.mockClear()
-    await render(autoChat({ mode: 'suggest' }))
-    await press(modeButton('auto'))
-    expect(onModeChange).not.toHaveBeenCalled()
-    expect(dialog()?.textContent).toContain(BUDDY_AUTO_CONFIRM_SENTENCE)
+    await render(autoChat({ talk: 'suggest' }))
+    await press(talkButton('off'))
+    expect(dialog()).toBeNull()
+    expect(onTalkChange).toHaveBeenLastCalledWith('off')
+    // Choosing the value already chosen sends nothing.
+    onTalkChange.mockClear()
+    await press(talkButton('suggest'))
+    expect(onTalkChange).not.toHaveBeenCalled()
+  })
+
+  it('asks for consent the first time Suggest is chosen, lands there, and remembers it', async () => {
+    await render(autoChat({ talk: 'bubble' }))
+    await press(talkButton('suggest'))
+    expect(onTalkChange).not.toHaveBeenCalled()
+    expect(dialog()?.textContent).toContain('Let Buddy post as you?')
+    expect(dialog()?.textContent).toContain(buddyPostingConsentSentence(null))
+    expect(dialog()?.textContent).not.toMatch(/\bAuto\b/)
+    await act(async () => dialogButton('buddy-chat-accept').click())
+    expect(onTalkChange).toHaveBeenCalledTimes(1)
+    expect(onTalkChange).toHaveBeenLastCalledWith('suggest')
+    expect(dialog()).toBeNull()
+    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
+
+    // Consented already: Suggest applies at once.
+    onTalkChange.mockClear()
+    await render(autoChat({ talk: 'off' }))
+    await press(talkButton('suggest'))
+    expect(dialog()).toBeNull()
+    expect(onTalkChange).toHaveBeenLastCalledWith('suggest')
+  })
+
+  it('changes nothing on Not now', async () => {
+    await render(autoChat({ talk: 'bubble' }))
+    await press(talkButton('suggest'))
     const notNow = [...document.querySelectorAll('button')].find(
       (candidate) => candidate.textContent?.trim() === 'Not now'
     )
     await act(async () => notNow?.click())
-    expect(onModeChange).not.toHaveBeenCalled()
+    expect(onTalkChange).not.toHaveBeenCalled()
     expect(dialog()).toBeNull()
+    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
   })
 
-  it("asks in the streamer's name for Buddy, and names the control Chat posting (plan 174 J2-20)", async () => {
+  it("names the control and asks in the streamer's name for Buddy (plan 174 J2-20)", async () => {
     await render(autoChat(), { name: 'Grum' })
-    const control = document.querySelector('[aria-labelledby="buddy-chat-posting-label"]')
-    expect(control).toBeTruthy()
-    expect(document.getElementById('buddy-chat-posting-label')?.textContent).toBe('Chat posting')
-    await press(modeButton('suggest'))
+    const control = document.querySelector('[aria-labelledby="buddy-talk-label"]')
+    expect(control?.getAttribute('role')).toBe('radiogroup')
+    expect(document.getElementById('buddy-talk-label')?.textContent).toBe('Grum talks')
+    await press(talkButton('suggest'))
     expect(dialog()?.textContent).toContain('Let Grum post as you?')
     expect(dialog()?.textContent).toContain(buddyPostingConsentSentence('Grum'))
     expect(dialog()?.textContent).not.toMatch(/the Buddy/i)
+    await render(autoChat())
+    expect(document.getElementById('buddy-talk-label')?.textContent).toBe('Buddy talks')
   })
 
   it('shows the Buddy it names, not the emblem, when it has its own picture', async () => {
     const orc = 'videorc-asset://buddy/official-orc/idle.png'
     await render(autoChat(), { name: 'Golmar', picture: orc })
-    await press(modeButton('suggest'))
+    await press(talkButton('suggest'))
     expect(dialog()?.textContent).toContain('Let Golmar post as you?')
     const picture = dialog()?.querySelector('[data-slot="buddy-chat-consent-picture"]')
     expect(picture?.getAttribute('src')).toBe(orc)
@@ -165,25 +198,22 @@ describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
 
   it('keeps the emblem when the Buddy has no picture to show', async () => {
     await render(autoChat(), { name: 'Buddy' })
-    await press(modeButton('suggest'))
+    await press(talkButton('suggest'))
     expect(dialog()?.querySelector('[data-slot="buddy-emblem"]')).toBeTruthy()
     expect(dialog()?.querySelector('[data-slot="buddy-chat-consent-picture"]')).toBeNull()
   })
 
-  it('turns Off without asking, and Off only stops posting (D7)', async () => {
-    await render(autoChat({ mode: 'auto' }))
-    await press(modeButton('off'))
-    expect(dialog()).toBeNull()
-    expect(onModeChange).toHaveBeenLastCalledWith('off')
-    // The mode's meaning is a visible line, never a title (plan 174 F-12).
-    expect(document.querySelector('[data-slot="buddy-mode-hint"]')?.textContent).toBe(
-      BUDDY_MODE_HINTS.auto
+  it("says what the chosen value means as a visible line, in the Buddy's name (plan 174 F-12)", async () => {
+    await render(autoChat({ talk: 'bubble' }), { name: 'Golmar' })
+    expect(hint()).toBe('Golmar talks on stream in its bubble. Nothing goes to chat.')
+    expect(talkButton('bubble').closest('[role="radiogroup"]')?.getAttribute('aria-describedby')).toBe(
+      'buddy-talk-hint'
     )
-    expect(document.querySelector('[data-buddy-mode][title]')).toBeNull()
-    await render(autoChat({ mode: 'off' }))
-    expect(document.querySelector('[data-slot="buddy-mode-hint"]')?.textContent).toBe(
-      'Nothing is posted.'
-    )
+    expect(document.querySelector('[data-buddy-talk][title]')).toBeNull()
+    await render(autoChat({ talk: 'off' }), { name: 'Golmar' })
+    expect(hint()).toBe('Golmar says nothing on its own.')
+    await render(autoChat({ talk: 'suggest' }), { name: 'Golmar' })
+    expect(hint()).toBe(buddyTalkHint('suggest', 'Golmar'))
   })
 
   it('shows Greetings, Answers and Banter as read-only chips that open Buddy → Chat', async () => {
@@ -197,6 +227,10 @@ describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
     await render(autoChat({ greetings: { enabled: true, templates: [line] } }))
     // No switches: the behaviours have one home (plan 174 F-24, H-8).
     expect(document.querySelector('[role="switch"]')).toBeNull()
+    // Plan 211 D1: what Buddy says, not what it posts.
+    expect(
+      document.querySelector('[data-slot="buddy-behaviour-chips"]')?.getAttribute('aria-label')
+    ).toBe('What Buddy says')
     expect(chips().map((chip) => chip.textContent)).toEqual([
       'Greetings on',
       'Answers off',
@@ -211,7 +245,7 @@ describe('Buddy chat posting (plan 164 S-D6, plan 174 S3.14a)', () => {
     expect(answers!.getAttribute('data-variant')).toBe('neutral')
     await act(async () => answers!.click())
     expect(onOpenChatSettings).toHaveBeenCalledTimes(1)
-    expect(onModeChange).not.toHaveBeenCalled()
+    expect(onTalkChange).not.toHaveBeenCalled()
   })
 
   it('never warns about an empty list: it posts the built-in lines (plan 192 D1)', async () => {

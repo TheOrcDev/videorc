@@ -134,3 +134,43 @@ describe('StreamManager: a proposed Buddy post behind a tab (plan 174 S0.2)', ()
     expect(onCohostUtteranceApprove).toHaveBeenCalledWith(proposed)
   })
 })
+
+describe('StreamManager: how Buddy talks reaches the relay (plan 211 S-C1, D3)', () => {
+  const autoChat = {
+    talk: 'off' as const,
+    // The legacy projection rides along; the control never reads or sends it.
+    mode: 'suggest' as const,
+    greetings: { enabled: true, templates: [] },
+    answers: { enabled: false, cooldownSeconds: 20 },
+    banter: { enabled: false, cooldownSeconds: 240 }
+  }
+
+  /** Radix-style segments check on mousedown with the primary button, then click. */
+  async function choose(talk: string): Promise<void> {
+    const option = container.querySelector<HTMLButtonElement>(`[data-buddy-talk="${talk}"]`)
+    expect(option, talk).toBeTruthy()
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+      option!.click()
+    })
+  }
+
+  it('sends `{ talk }` alone for each value, never `mode`', async () => {
+    localStorage.setItem('videorc.buddyAutoChatConsent', '1')
+    const onCohostAutoChatChange = vi.fn()
+    await render([], { cohostAutoChat: autoChat, onCohostAutoChatChange })
+    expect(
+      container.querySelector('[data-buddy-talk="off"]')?.getAttribute('aria-checked')
+    ).toBe('true')
+    await choose('bubble')
+    await choose('suggest')
+    await render([], { cohostAutoChat: { ...autoChat, talk: 'bubble' }, onCohostAutoChatChange })
+    await choose('off')
+    expect(onCohostAutoChatChange.mock.calls).toEqual([
+      [{ talk: 'bubble' }],
+      [{ talk: 'suggest' }],
+      [{ talk: 'off' }]
+    ])
+    localStorage.clear()
+  })
+})

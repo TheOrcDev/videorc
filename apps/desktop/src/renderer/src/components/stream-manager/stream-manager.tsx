@@ -362,9 +362,10 @@ export interface StreamManagerProps {
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
   onBuddyReact?: (reaction: string) => void
   /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's
-   * posting mode control and behaviour chips; unknown hides them. */
+   * talk control and behaviour chips; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
-  /** The posting mode (plan 174 S3.14a): `{mode}` alone, never `enabled`. */
+  /** How Buddy talks (plan 174 S3.14a, plan 211 D3): `{talk}` alone, never
+   * `enabled` and never the legacy `mode`. */
   onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
   /** The behaviour chips' link to Buddy → Chat, their one home (plan 174 D7). */
   onCohostOpenChatSettings?: () => void
@@ -956,21 +957,17 @@ export function StreamManager({
           />
         ) : null}
       </div>
-      {/* Plan 164 S-D6, plan 174 S3.14a: the posting mode governs only what
-          Buddy posts; the behaviours are read-only chips linking to Buddy →
-          Chat. Neither touches Buddy Live. */}
+      {/* Plan 164 S-D6, plan 174 S3.14a, plan 211 D1: the talk control
+          governs only how Buddy talks on its own; the behaviours are
+          read-only chips linking to Buddy → Chat. Neither touches Buddy Live. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
         <BuddyChatControls
           aiGreetings={cohostGate?.allowed === true && cohostConsented}
           autoChat={cohostAutoChat}
           name={buddyName}
           picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
-          // plan 211 Phase C (S-C1): the control still offers the old Auto
-          // choice; until it is redesigned, Auto saves as Bubble (D4) and
-          // the relay carries `talk`, never the legacy `mode`.
-          onModeChange={(mode) =>
-            onCohostAutoChatChange({ talk: mode === 'auto' ? 'bubble' : mode })
-          }
+          // Plan 211 D3: the relay carries `talk` alone, never the legacy `mode`.
+          onTalkChange={(talk) => onCohostAutoChatChange({ talk })}
           onOpenChatSettings={onCohostOpenChatSettings}
         />
       ) : null}

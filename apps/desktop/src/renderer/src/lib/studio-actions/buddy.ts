@@ -6,7 +6,7 @@
 // own choice, with its own disclosure). Turning Buddy on needs Premium and
 // the streamer's Cloud AI consent, which an agent cannot give.
 
-import { BUDDY_MODE_LABELS } from '@/lib/buddy-auto-chat-view'
+import { BUDDY_TALK_LABELS } from '@/lib/buddy-auto-chat-view'
 import { BUDDY_CONSENT_OFF_REASON } from '@/lib/buddy-tab-view'
 import { cohostEnableRelayPatch, mergeAutoChatRelayPatch } from '@/lib/cohost-state'
 import type { CohostAutoChatMode } from '../../../../shared/backend'
@@ -63,7 +63,8 @@ export const setBuddy: AgentToolExecutor = async (context, args) => {
     )
     if (Object.keys(patch).length > 0) saved = await buddy.saveSettings(patch)
     if (on !== undefined) said.push(on ? 'Buddy Live is on.' : 'Buddy Live is off.')
-    if (chatMode) said.push(`Chat posting: ${BUDDY_MODE_LABELS[chatMode]}.`)
+    if (chatMode)
+      said.push(`Chat posting: ${BUDDY_TALK_LABELS[chatMode === 'auto' ? 'bubble' : chatMode]}.`)
   }
   if (onStream !== undefined) {
     if (onStream !== buddy.showOnStream) await buddy.setShowOnStream(onStream)

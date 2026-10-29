@@ -11,9 +11,9 @@ import {
   BUDDY_BEHAVIOUR_HOME,
   BUDDY_BUILTIN_GREETINGS,
   BUDDY_SAMPLE_FIELDS,
-  BUDDY_MODE_HINTS,
-  BUDDY_POSTING_LABEL,
   BUDDY_POSTS_PROMISE,
+  BUDDY_TALK_LABELS,
+  BUDDY_TALK_MODES,
   BUDDY_WELCOME_FIELDS,
   BUDDY_WELCOME_TITLES,
   buddyBehaviourChips,
@@ -21,6 +21,8 @@ import {
   buddyModeChangeStep,
   buddyPostingConsentSentence,
   buddyPostingConsentTitle,
+  buddyTalkHint,
+  buddyTalkLabel,
   builtinGreeting,
   greetingTemplateWarnings,
   greetingWelcomes,
@@ -48,14 +50,15 @@ describe('Buddy in copy (plan 174 J2-20, F-26)', () => {
     expect(buddyDisplayName(null)).toBe('Buddy')
     expect(buddyPostingConsentTitle('Grum')).toBe('Let Grum post as you?')
     expect(buddyPostingConsentSentence('Grum')).toBe(
-      'Grum posts to your chats as you, on the platforms you stream to, only in the modes you turn on. You can read every message later in Buddy → Reports.'
+      'Grum posts to your chats as you, on the platforms you stream to, only when you click its card. You can read every message later in Buddy → Reports.'
     )
   })
 
   it('never writes "the Buddy": the feature is Buddy, with no article', () => {
     for (const line of [
       BUDDY_POSTS_PROMISE,
-      ...Object.values(BUDDY_MODE_HINTS),
+      buddyTalkLabel(null),
+      ...BUDDY_TALK_MODES.map((talk) => buddyTalkHint(talk, null)),
       buddyPostingConsentSentence(null)
     ]) {
       expect(line).not.toMatch(/\b[Tt]he Buddy\b/)
@@ -63,13 +66,39 @@ describe('Buddy in copy (plan 174 J2-20, F-26)', () => {
   })
 })
 
-describe('Chat posting and the behaviour chips (plan 174 S3.14a, D7)', () => {
-  it('governs only what Buddy posts: Off never means Buddy Live off', () => {
-    expect(BUDDY_POSTING_LABEL).toBe('Chat posting')
-    expect(BUDDY_MODE_HINTS.off).toBe('Nothing is posted.')
-    for (const hint of Object.values(BUDDY_MODE_HINTS)) {
-      expect(hint).not.toContain('Buddy Live')
+describe('How Buddy talks and the behaviour chips (plan 174 S3.14a, D7, plan 211 D1)', () => {
+  it('offers Off, Bubble and Suggest, from least reach to most, and Auto is gone', () => {
+    expect(BUDDY_TALK_MODES).toEqual(['off', 'bubble', 'suggest'])
+    expect(BUDDY_TALK_MODES.map((talk) => BUDDY_TALK_LABELS[talk])).toEqual([
+      'Off',
+      'Bubble',
+      'Suggest'
+    ])
+    expect(Object.keys(BUDDY_TALK_LABELS)).not.toContain('auto')
+  })
+
+  it("names the control after the streamer's Buddy, else Buddy", () => {
+    expect(buddyTalkLabel('Golmar')).toBe('Golmar talks')
+    expect(buddyTalkLabel('  ')).toBe('Buddy talks')
+    expect(buddyTalkLabel(null)).toBe('Buddy talks')
+  })
+
+  it('says what each value means, and only Suggest ever reaches chat (plan 211 D1, D6)', () => {
+    expect(buddyTalkHint('off', 'Golmar')).toBe('Golmar says nothing on its own.')
+    expect(buddyTalkHint('bubble', 'Golmar')).toBe(
+      'Golmar talks on stream in its bubble. Nothing goes to chat.'
+    )
+    expect(buddyTalkHint('suggest', 'Golmar')).toBe(
+      'Each message is a card here; one click posts it to chat as you.'
+    )
+    expect(buddyTalkHint('bubble', null)).toBe(
+      'Buddy talks on stream in its bubble. Nothing goes to chat.'
+    )
+    // Off never means Buddy Live off: that is its own switch.
+    for (const talk of BUDDY_TALK_MODES) {
+      expect(buddyTalkHint(talk, null)).not.toContain('Buddy Live')
     }
+    expect(BUDDY_POSTS_PROMISE).toBe('Buddy never posts in your chat on its own.')
   })
 
   it('summarises each behaviour as a read-only chip that names its one home', () => {
@@ -334,16 +363,16 @@ describe('welcomes (plan 192 D2, S1.1)', () => {
   })
 })
 
-describe('mode changes (plan 164 S-D6)', () => {
-  it('asks for consent the first time the mode leaves Off, and lands in Suggest', () => {
+describe('talk changes (plan 164 S-D6, plan 211 D5)', () => {
+  it('asks for the posting consent only on the way to Suggest, the first time', () => {
     expect(buddyModeChangeStep({ next: 'suggest', consented: false })).toBe('consent')
-    expect(buddyModeChangeStep({ next: 'auto', consented: false })).toBe('consent')
-    expect(buddyModeChangeStep({ next: 'off', consented: false })).toBe('apply')
+    expect(buddyModeChangeStep({ next: 'suggest', consented: true })).toBe('apply')
   })
 
-  it('never reaches Auto without its own second confirm', () => {
-    expect(buddyModeChangeStep({ next: 'auto', consented: true })).toBe('confirm-auto')
-    expect(buddyModeChangeStep({ next: 'suggest', consented: true })).toBe('apply')
-    expect(buddyModeChangeStep({ next: 'off', consented: true })).toBe('apply')
+  it('applies Off and Bubble at once: Buddy posts nothing as you in either', () => {
+    for (const consented of [false, true]) {
+      expect(buddyModeChangeStep({ next: 'off', consented })).toBe('apply')
+      expect(buddyModeChangeStep({ next: 'bubble', consented })).toBe('apply')
+    }
   })
 })
