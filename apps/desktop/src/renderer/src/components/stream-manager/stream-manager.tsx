@@ -105,7 +105,7 @@ import {
   type StreamManagerPane,
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
-import { chatDraftMaxChars, sendablePlatforms } from '@/lib/chat-send'
+import { sendablePlatforms } from '@/lib/chat-send'
 import { shortcutLabel } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
@@ -1098,9 +1098,7 @@ export function StreamManager({
           })}
           packReactions={buddyPackReactions}
           previewRef={buddyPreviewRef}
-          sayChatCap={sendTargets.length > 0 ? chatDraftMaxChars(sendTargets) : null}
           sayPending={buddyPending}
-          sayPostsToChat={live && cohostAutoChat?.mode === 'auto'}
           onReact={onBuddyReact}
           onSay={onBuddySay}
           onShowOnStreamChange={onBuddyShowOnStream}
