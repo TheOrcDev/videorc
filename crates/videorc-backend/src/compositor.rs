@@ -110,6 +110,11 @@ const COMPOSITOR_WORKER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 pub type CompositorSlot = std::sync::Arc<tokio::sync::Mutex<CompositorRuntime>>;
 pub type CompositorFrameStore =
     Arc<StdMutex<FrameStore<CompositorPixelFormat, CompositorFrameExportHandle>>>;
+type CompositorFrameHandle = FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>;
+/// `get_picture` callers waiting for the metadata-only preview to compose
+/// one frame with pixels (see `latest_program_picture`).
+type ProgramPictureWaiters =
+    Arc<StdMutex<Vec<tokio::sync::oneshot::Sender<CompositorFrameHandle>>>>;
 
 #[derive(Clone, Default)]
 pub struct CompositorFrameExportHandle {
@@ -435,6 +440,11 @@ pub struct CompositorRuntime {
     /// else. Allocated per run beside `frame_store` (a handle store, no
     /// pixels of its own until the twin composes).
     program_frame_store: CompositorFrameStore,
+    /// Agents asking for the picture while the preview publishes metadata
+    /// frames only (no GPU: the Linux proof surface). The next such tick
+    /// composes CPU pixels once and hands them over. Lives for the runtime,
+    /// not per run, so a stale render cache still shares it.
+    program_picture_waiters: ProgramPictureWaiters,
     /// Plan 157: Screen/Camera ISO stores while a separate-source capture runs.
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     preview_frame_lease_capacity: Arc<tokio::sync::Semaphore>,
@@ -1304,6 +1314,7 @@ struct CompositorRenderCache {
     stream_frame_store: Option<CompositorFrameStore>,
     /// Plan 205 S6: the program leg's store (see `CompositorRuntime`).
     program_frame_store: CompositorFrameStore,
+    program_picture_waiters: ProgramPictureWaiters,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
@@ -1387,6 +1398,7 @@ impl CompositorRenderCache {
             frame_store: compositor.frame_store.clone(),
             stream_frame_store: compositor.stream_frame_store.clone(),
             program_frame_store: compositor.program_frame_store.clone(),
+            program_picture_waiters: compositor.program_picture_waiters.clone(),
             source_iso_frame_stores: compositor.source_iso_frame_stores.clone(),
             snapshot: compositor.scene.clone(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
@@ -3218,6 +3230,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         stream_frame_store: None,
         program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
+        program_picture_waiters: Arc::default(),
         source_iso_frame_stores: None,
         preview_frame_lease_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         frame_evidence: VecDeque::new(),
@@ -4284,14 +4297,41 @@ pub(crate) async fn latest_program_sequence(state: &AppState) -> Option<u64> {
     Some(frame.sequence)
 }
 
+/// How long `get_picture` waits for the metadata-only preview to compose a
+/// frame with pixels (a few ticks at any shipping rate).
+const PROGRAM_PICTURE_COMPOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
 pub(crate) async fn latest_program_picture(state: &AppState) -> Option<ProgramPicture> {
-    let frame = {
+    let (frame, waiters) = {
         let compositor = state.compositor.lock().await;
-        compositor
+        let frame = compositor
             .frame_store
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .latest()?
+            .latest()?;
+        (frame, compositor.program_picture_waiters.clone())
+    };
+    // The no-GPU native preview (the Linux proof surface) publishes frames
+    // without pixels (#680): ask the next tick to compose this one picture.
+    let frame = if frame.bytes.is_empty()
+        && matches!(
+            frame.pixel_format,
+            CompositorPixelFormat::Yuv420p {
+                export: CompositorFrameExportKind::CpuYuv420p,
+            }
+        ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut waiters = waiters.lock().unwrap_or_else(|p| p.into_inner());
+            waiters.retain(|waiter| !waiter.is_closed());
+            waiters.push(tx);
+        }
+        tokio::time::timeout(PROGRAM_PICTURE_COMPOSE_TIMEOUT, rx)
+            .await
+            .ok()?
+            .ok()?
+    } else {
+        frame
     };
     tokio::task::spawn_blocking(move || program_picture_from_frame(&frame))
         .await
@@ -9233,6 +9273,8 @@ async fn publish_compositor_frame(
     // the proof surface draws the source layers itself, so that frame is the
     // tick's output even though it carries no pixels.
     let mut metadata_only_preview = false;
+    // Agents waiting for this metadata-only preview to compose pixels once.
+    let mut picture_waiters = Vec::new();
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -9308,13 +9350,21 @@ async fn publish_compositor_frame(
                     compositor_backend = CompositorBackend::Cpu;
                     compositor_fallback_reason = None;
                     metadata_only_preview = true;
+                    picture_waiters = std::mem::take(
+                        &mut *render_cache
+                            .program_picture_waiters
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner()),
+                    );
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason.to_string());
                 } else {
                     let _ = reason;
                 }
-                if !retain_previous_native_frame && frame_consumer.composes_cpu_pixels() {
+                if !retain_previous_native_frame
+                    && (frame_consumer.composes_cpu_pixels() || !picture_waiters.is_empty())
+                {
                     bytes = {
                         let mut store = frame_store
                             .lock()
@@ -9372,6 +9422,13 @@ async fn publish_compositor_frame(
                 captured_at,
                 bytes,
             );
+        }
+        if !picture_waiters.is_empty()
+            && let Some(frame) = store.latest().filter(|frame| frame.sequence == sequence)
+        {
+            for waiter in picture_waiters.drain(..) {
+                let _ = waiter.send(frame.clone());
+            }
         }
         timings.frame_store_publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
     }
@@ -12807,6 +12864,7 @@ mod tests {
                 frame_store: stores.screen.clone(),
                 stream_frame_store: None,
                 program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
+                program_picture_waiters: Arc::default(),
                 source_iso_frame_stores: Some(stores.clone()),
                 snapshot: Some(snapshot),
                 simulcast_snapshot: None,
@@ -14958,6 +15016,96 @@ mod tests {
         assert_eq!(result.timings.gpu_readbacks, 0);
         assert_eq!(result.timings.bgra_bytes_copied, 0);
         assert_eq!(result.timings.yuv_frames_converted, 0);
+    }
+
+    async fn publish_native_preview_tick_without_gpu(
+        state: &AppState,
+        sequence: u64,
+        live_sources: &mut CompositorLiveSources,
+        render_cache: &mut CompositorRenderCache,
+    ) {
+        publish_compositor_frame(
+            state,
+            "metadata-preview-picture-test",
+            sequence,
+            16,
+            8,
+            live_sources,
+            render_cache,
+            None,
+            CompositorFrameConsumer::NativePreview,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
+        )
+        .await;
+    }
+
+    fn latest_frame_bytes_len(store: &CompositorFrameStore) -> usize {
+        store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .latest()
+            .expect("native preview frame")
+            .bytes
+            .len()
+    }
+
+    // C5 (Linux idle): the no-GPU native preview publishes metadata frames
+    // only, so `get_picture` had nothing to read. Asking for the picture
+    // makes the next tick compose CPU pixels once.
+    #[tokio::test]
+    async fn metadata_only_preview_composes_one_picture_when_an_agent_asks() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_native_preview_tick_without_gpu(&state, 1, &mut live_sources, &mut render_cache)
+            .await;
+        let store = compositor_frame_store(&state).await;
+        assert_eq!(latest_frame_bytes_len(&store), 0);
+
+        let asking = tokio::spawn({
+            let state = state.clone();
+            async move { latest_program_picture(&state).await }
+        });
+        // The test runtime is single-threaded: let the request register.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        publish_native_preview_tick_without_gpu(&state, 2, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(latest_frame_bytes_len(&store), raw_yuv420p_len(16, 8));
+        let picture = asking.await.unwrap().expect("the composed preview picture");
+        assert_eq!(picture.sequence, 2);
+        assert_eq!((picture.width, picture.height), (16, 8));
+        assert_eq!(picture.rgb.len(), 16 * 8 * 3);
+
+        // Nobody asking: back to metadata frames (Linux plan 0014).
+        publish_native_preview_tick_without_gpu(&state, 3, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(latest_frame_bytes_len(&store), 0);
+    }
+
+    #[tokio::test]
+    async fn metadata_only_preview_picture_gives_up_without_a_tick() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_native_preview_tick_without_gpu(&state, 1, &mut live_sources, &mut render_cache)
+            .await;
+        tokio::time::pause();
+        assert!(latest_program_picture(&state).await.is_none());
     }
 
     #[tokio::test]
