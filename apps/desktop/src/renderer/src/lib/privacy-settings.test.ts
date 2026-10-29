@@ -34,7 +34,7 @@ import {
 const names = (settings: PrivacySettings): string[] =>
   passwordManagerEntries(settings).map((entry) => entry.name)
 
-/** Whether S10's follower would hide for this app on a display scene. */
+/** Whether S10's follower would hide for this app on a display scene (D11: on the front change itself). */
 function hidesFor(settings: PrivacySettings, bundleId: string): boolean {
   const context: FollowFrontAppContext = {
     now: 1000,
@@ -53,7 +53,10 @@ function hidesFor(settings: PrivacySettings, bundleId: string): boolean {
     { ...context, now: 0 }
   )
   const settled = reduceFollowFrontApp(front.state, { type: 'tick', now: 1000 }, context)
-  return settled.actions.some((action) => action.type === 'hide')
+  const hidden = front.actions.some((action) => action.type === 'hide')
+  // The settle never hides on its own: what the front change hid stays hidden.
+  expect(settled.actions.some((action) => action.type === 'hide')).toBe(false)
+  return hidden
 }
 
 describe('privacy settings (plan 210 D11)', () => {
