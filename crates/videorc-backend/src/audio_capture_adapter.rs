@@ -183,7 +183,20 @@ struct CaptureAnchor {
     captured_start: Instant,
     input_duration: Option<Duration>,
     uncertainty: Duration,
+    /// How far the packet's own stamp may sit from the PCM sample count.
+    stamp_jitter: Duration,
 }
+
+/// A legacy DirectShow wave capture filter (field Intel SST microphone) stamps
+/// each buffer from the 1 ms system clock at delivery: 1-3 ms of jitter around
+/// a constant offset from the sample count, with no drift over 60 s. The PCM
+/// interval match allows this much, and the mapping uncertainty carries it.
+const DSHOW_STAMP_JITTER: Duration = Duration::from_millis(10);
+/// FFmpeg carries those stamps into the PCM `pts` (one packet started 95
+/// samples before the previous one ended), so DirectShow PCM is placed on a
+/// sample count by `PulseTimeline`; only a stamp more than the jitter allowance
+/// late is lost audio.
+const DSHOW_DROPOUT_FRAMES: i64 = DSHOW_STAMP_JITTER.as_millis() as i64 * 48;
 
 const WALL_TOLERANCE_NS: u128 = 5_000_000;
 const WALL_STEP_NS: u128 = 50_000_000;
@@ -327,6 +340,7 @@ fn avf_anchor(line: &str, clock: &ClockPair) -> Result<CaptureAnchor> {
         captured_start: clock.instant_from_host(host)?,
         input_duration: Some(duration),
         uncertainty: clock.uncertainty,
+        stamp_jitter: Duration::ZERO,
     })
 }
 
@@ -381,7 +395,8 @@ fn dshow_anchor(line: &str, clock: &ClockPair) -> Result<CaptureAnchor> {
         pts_us: sample / 10,
         captured_start,
         input_duration: Some(Duration::from_secs_f64(frames as f64 / rate as f64)),
-        uncertainty,
+        uncertainty: uncertainty + DSHOW_STAMP_JITTER,
+        stamp_jitter: DSHOW_STAMP_JITTER,
     })
 }
 
@@ -423,10 +438,17 @@ impl PulseTimeline {
     /// The packet's sample position and the stamp (1/48000 s, wall clock) of
     /// its capture instant.
     fn place(&mut self, stamp: i64, frames: usize) -> (i64, i64) {
+        self.place_within(stamp, frames, PULSE_DROPOUT_FRAMES)
+    }
+
+    /// [`Self::place`] with the stamp lateness that counts as lost audio.
+    /// DirectShow reuses this timeline (plan 046 amendment 2026-10-28): FFmpeg
+    /// carries a delivery-stamped wave buffer's stamp into the PCM `pts`.
+    fn place_within(&mut self, stamp: i64, frames: usize, dropout_frames: i64) -> (i64, i64) {
         let (position, offset) = match (self.next, self.offset) {
             (Some(next), Some(offset)) => {
                 let late = stamp - (next + offset);
-                if late > PULSE_DROPOUT_FRAMES {
+                if late > dropout_frames {
                     // Audio was lost: the gap goes into the count, and the
                     // clock moves with it, so both stay continuous.
                     (next + late, offset)
@@ -490,6 +512,7 @@ fn pulse_anchor(
         captured_start,
         input_duration: Some(Duration::from_secs_f64(frames as f64 / 48_000.0)),
         uncertainty: clock.uncertainty + PULSE_CLOCK_UNCERTAINTY,
+        stamp_jitter: Duration::ZERO,
     })
 }
 
@@ -532,6 +555,18 @@ impl CaptureClock {
         Ok(())
     }
     fn interval(&mut self, packet: PcmDescription, now: Instant) -> Result<(u64, Instant)> {
+        self.interval_at(packet, packet.pts, now)
+    }
+
+    /// `packet.pts` is the sample-count position; `clock_pts` (same 1/48000 s
+    /// scale) is the stamp matched against the capture clock anchors. They
+    /// differ only for DirectShow, whose stamps `PulseTimeline` smooths.
+    fn interval_at(
+        &mut self,
+        packet: PcmDescription,
+        clock_pts: i64,
+        now: Instant,
+    ) -> Result<(u64, Instant)> {
         if self.last_sequence.is_none() && packet.sequence != 0 {
             bail!("Initial PCM metadata is missing");
         }
@@ -544,7 +579,7 @@ impl CaptureClock {
         }
         // i128: a Linux pulse PTS is the wall clock in 1/48000 s (about 9e13),
         // so the microsecond product overflows i64 (release test 147).
-        let pts_us = i64::try_from(i128::from(packet.pts) * 1_000_000 / 48000)
+        let pts_us = i64::try_from(i128::from(clock_pts) * 1_000_000 / 48000)
             .context("PCM timestamp overflow")?;
         let anchor = self
             .anchors
@@ -555,13 +590,15 @@ impl CaptureClock {
         // PCM may start up to one packet after its anchor (plus 25 µs of
         // resampler slack). A 500 ms DirectShow packet (plan 195 W2) is as
         // valid as a 10 ms one; only an anchor of unknown length keeps the
-        // 100 ms bound.
+        // 100 ms bound. A delivery-stamped DirectShow packet widens both sides
+        // by its stamp jitter.
         let delta_us = pts_us - anchor.pts_us;
+        let slack_us = anchor.stamp_jitter.as_micros() as i64 + 25;
         let max_delta_us = anchor
             .input_duration
             .map_or(100_000, |duration| duration.as_micros() as i64)
-            + 25;
-        if delta_us < -25 || delta_us > max_delta_us {
+            + slack_us;
+        if delta_us < -slack_us || delta_us > max_delta_us {
             bail!("PCM lies outside its captured packet clock interval");
         }
         let start = if delta_us >= 0 {
@@ -1447,7 +1484,8 @@ fn assemble_pcm(
     };
     let mut queued = VecDeque::<u8>::new();
     let mut diagnostics = CaptureDiagnostics::default();
-    // Pulse only: the sample count and capture clock (see `PulseTimeline`).
+    // Pulse and DirectShow: the sample count and capture clock (see
+    // `PulseTimeline`).
     let mut pulse = PulseTimeline::default();
     let mut last_diagnostic = Instant::now();
     let mut wall_watch = WallStepWatch::default();
@@ -1501,6 +1539,11 @@ fn assemble_pcm(
                 &clock_pair,
             )?)?;
         }
+        let mut clock_pts = packet.pts;
+        if protocol == CaptureProtocol::DirectShow {
+            (packet.pts, clock_pts) =
+                pulse.place_within(packet.pts, packet.frames, DSHOW_DROPOUT_FRAMES);
+        }
         let wanted = packet.frames * 8;
         let deadline = Instant::now() + Duration::from_millis(100);
         while queued.len() < wanted {
@@ -1527,7 +1570,8 @@ fn assemble_pcm(
             bail!("Capture PCM contains a non-finite sample");
         }
         diagnostics.pcm(packet, clock.last_end_pts);
-        let (timestamp_micros, captured_at) = clock.interval(packet, Instant::now())?;
+        let (timestamp_micros, captured_at) =
+            clock.interval_at(packet, clock_pts, Instant::now())?;
         if last_diagnostic.elapsed() >= Duration::from_secs(5) {
             tracing::info!(
                 packets = diagnostics.packets,
@@ -1581,6 +1625,7 @@ mod tests {
                     captured_start: now - Duration::from_millis(10) + Duration::from_micros(ahead),
                     input_duration: Some(Duration::from_millis(10)),
                     uncertainty: Duration::from_millis(2),
+                    stamp_jitter: Duration::ZERO,
                 }]),
                 last_sequence: None,
                 first_pts: None,
@@ -1649,6 +1694,7 @@ mod tests {
                 captured_start: now,
                 input_duration: Some(Duration::from_secs_f64(512.0 / 48_000.0)),
                 uncertainty: Duration::ZERO,
+                stamp_jitter: Duration::ZERO,
             };
             diagnostics
                 .input(
@@ -1689,6 +1735,7 @@ mod tests {
                 captured_start: now - Duration::from_millis(40),
                 input_duration: Some(Duration::from_millis(40)),
                 uncertainty: Duration::ZERO,
+                stamp_jitter: Duration::ZERO,
             }]),
             last_sequence: None,
             first_pts: None,
@@ -1793,6 +1840,7 @@ mod tests {
                     captured_start: now + Duration::from_millis(50),
                     input_duration: None,
                     uncertainty: Duration::ZERO,
+                    stamp_jitter: Duration::ZERO,
                 })
                 .is_err()
         );
@@ -1942,6 +1990,102 @@ mod tests {
         assert_eq!(stats.captured_frames(), 24_000);
         assert_eq!(stats.dropped_frames(), 0);
         assert!(frames[0].captured_at.elapsed() < MAX_CAPTURE_AGE);
+    }
+
+    /// Contiguous 20 ms PCM from 20 ms DirectShow packets stamped at delivery:
+    /// packet `n` is stamped `late_ms[n]` after its sample-count position and
+    /// read from the graph clock 20 ms later. FFmpeg carries the stamp into
+    /// the PCM `pts`; `placed` runs it through the production placement. Returns
+    /// each packet's sample position.
+    fn delivery_stamped_intervals(
+        late_ms: &[i64],
+        stamp_jitter: Duration,
+        placed: bool,
+    ) -> Result<Vec<i64>> {
+        let pair = ClockPair::sample().unwrap();
+        let mut clock = CaptureClock {
+            anchors: VecDeque::new(),
+            last_sequence: None,
+            first_pts: None,
+            last_end_pts: None,
+        };
+        let count = late_ms.len() as i64;
+        let mut timeline = PulseTimeline::default();
+        let mut positions = Vec::new();
+        // The worker prints each packet's clock record just before its PCM.
+        for (n, late) in late_ms.iter().enumerate() {
+            let sample_100ns = n as i64 * 200_000 + late * 10_000;
+            let callback_wall_100ns =
+                pair.wall_ns as i64 / 100 - (count - n as i64) * 200_000 + late * 10_000;
+            let line = format!(
+                "VIDEORC_DSHOW_CLOCK version=1 sample_100ns={sample_100ns} graph_100ns={} wall_before_100ns={callback_wall_100ns} wall_after_100ns={callback_wall_100ns} bytes=3840 frames=960 rate=48000 channels=2 bits=16 format=1",
+                sample_100ns + 200_000
+            );
+            let mut anchor = dshow_anchor(&line, &pair)?;
+            anchor.stamp_jitter = stamp_jitter;
+            clock.push(anchor)?;
+            let stamp = (n as i64 * 20 + late) * 48;
+            let (position, clock_pts) = if placed {
+                timeline.place_within(stamp, 960, DSHOW_DROPOUT_FRAMES)
+            } else {
+                (stamp, stamp)
+            };
+            clock.interval_at(
+                PcmDescription {
+                    sequence: n as u64,
+                    pts: position,
+                    frames: 960,
+                },
+                clock_pts,
+                pair.monotonic,
+            )?;
+            positions.push(position);
+        }
+        Ok(positions)
+    }
+
+    #[test]
+    fn delivery_stamped_directshow_packets_map_within_their_stamp_jitter() {
+        // Field Intel SST microphone, 60 s: the legacy wave filter stamps each
+        // buffer from the 1 ms system clock at delivery, 0-4 ms around a
+        // constant offset from the sample count, and FFmpeg carries each stamp
+        // into the PCM `pts`.
+        let field = [3, 0, 4, 1, 3, 0, 2, 4, 1, 0];
+        let positions = delivery_stamped_intervals(&field, DSHOW_STAMP_JITTER, true).unwrap();
+        assert!(
+            positions.windows(2).all(|pair| pair[1] - pair[0] == 960),
+            "jitter is not lost or doubled audio: {positions:?}"
+        );
+        // Taken raw, packet 1 starts 3 ms before packet 0 ends (field retest:
+        // "Capture PCM metadata sequence regressed or skipped an interval").
+        let raw = delivery_stamped_intervals(&field, DSHOW_STAMP_JITTER, false).unwrap_err();
+        assert!(raw.to_string().contains("regressed"), "{raw:#}");
+        let exact = delivery_stamped_intervals(&field, Duration::ZERO, true).unwrap_err();
+        assert!(
+            exact
+                .to_string()
+                .contains("outside its captured packet clock interval"),
+            "{exact:#}"
+        );
+    }
+
+    #[test]
+    fn delivery_stamped_directshow_follows_drift_and_counts_a_lost_buffer() {
+        let jitter = [3, 0, 4, 1, 3, 0, 2, 4, 1, 0];
+        // 1 ms of drift per second (far beyond a sound card's) for 20 s.
+        let drift: Vec<i64> = (0..1000)
+            .map(|n| n / 50 + jitter[n as usize % 10])
+            .collect();
+        delivery_stamped_intervals(&drift, DSHOW_STAMP_JITTER, true).unwrap();
+        // A lost 20 ms buffer moves every later stamp: the gap goes into the
+        // count instead of failing the session.
+        let lost: Vec<i64> = (0..40)
+            .map(|n| jitter[n % 10] + if n >= 20 { 20 } else { 0 })
+            .collect();
+        let positions = delivery_stamped_intervals(&lost, DSHOW_STAMP_JITTER, true).unwrap();
+        let steps: Vec<i64> = positions.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert_eq!(steps.iter().filter(|step| **step != 960).count(), 1);
+        assert!(steps[19] >= 960 + DSHOW_DROPOUT_FRAMES, "{steps:?}");
     }
 
     #[test]

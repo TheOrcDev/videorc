@@ -180,3 +180,24 @@ WARNING: Option ${option} did not match anything
     )
   }
 })
+
+test('the DirectShow clock patch accepts an unticked clock and drops pre-roll', () => {
+  // Field Intel SST microphone, first packet: clock_hr=S_FALSE and a sample
+  // time 10 ms before the graph start. IReferenceClock::GetTime answers
+  // S_FALSE, with a valid time, when its 1 ms tick has not advanced since the
+  // wave capture filter's own read.
+  const patch = readFileSync(
+    new URL('../patches/dshow-capture-clock.patch', import.meta.url),
+    'utf8'
+  )
+  assert.match(patch, /\(clock_hr != S_OK && clock_hr != S_FALSE\)/)
+  assert.match(patch, /\(clock_hr == S_OK \|\| clock_hr == S_FALSE\)/)
+  assert.doesNotMatch(patch, /clock_hr != S_OK \|\|/)
+  assert.doesNotMatch(patch, /&& clock_hr == S_OK &&/)
+  // The pre-roll buffer is dropped, not refused: it must not start the PCM
+  // timeline 18 ms off the delivery-stamped buffers after it.
+  assert.match(
+    patch,
+    /\(hr == S_OK \|\| hr == VFW_S_NO_STOP_TIME\) && sampletime < 0\)\n\+\s+return S_OK;/
+  )
+})

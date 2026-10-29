@@ -721,6 +721,52 @@ is authorized by this amendment.
    DirectShow alternative name. MediaFoundation inventory uniqueness alone is
    insufficient to establish DirectShow identity.
 
+### Amendment 2026-10-28: delivery-stamped wave capture filters
+
+Approved by the owner on 2026-10-28 (PR 884). This amendment narrows items 1-3
+for one measured device class; it does not loosen the clock-mapping budget.
+
+A legacy DirectShow wave capture filter (field Intel Smart Sound Technology
+microphone array on the UHD 620 laptop) never produced clock metadata:
+
+- Its graph uses the system reference clock, which ticks at 1 ms.
+  `IReferenceClock::GetTime` returns `S_FALSE`, with a valid time, when the
+  clock has not advanced since its last read. The filter reads it just before
+  each buffer, so 1,999 of 2,000 back-to-back reads returned `S_FALSE`. That is
+  a valid reading, not an HRESULT failure.
+- Its first buffer is stamped 10 ms before the graph start, at stream start,
+  while every later buffer is stamped at delivery minus its duration. That
+  pre-roll buffer sits 18 ms off the sample count of the buffers after it.
+- After the first buffer, stamps sit 1-3 ms around a constant offset from the
+  sample count (graph minus sample about 20 ms). Over 60 s there was no drift.
+
+The worker therefore accepts `S_OK` and `S_FALSE` from `GetTime`, and drops a
+buffer with a negative graph-relative sample time before it reaches FFmpeg
+instead of failing the capture. The backend gives each DirectShow anchor a
+10 ms stamp-jitter allowance (`DSHOW_STAMP_JITTER`, about 2x the measured
+range). The PCM interval match widens by that allowance on both sides, and
+the anchor's mapping uncertainty carries it. The 2 ms wall-clock bracket
+budget, the 10 ms anchor continuity check, and every other refusal in items
+1-3 are unchanged. A stamp beyond the allowance still fails explicitly.
+
+FFmpeg also carries each delivery stamp into the PCM `pts` (`aresample`
+with `async=0` passes input timestamps through), so on the field retest one
+packet started 95 samples before the previous one ended. Taken raw, that is a
+"regressed" PCM sequence. DirectShow PCM is therefore placed by the same
+timeline as Linux pulse (`PulseTimeline`):
+
+- Samples are counted contiguously.
+- The stamp matched against the anchors slews toward each packet's own stamp
+  by at most 1 ms per packet, which absorbs jitter and follows drift.
+- Only a stamp more than the 10 ms allowance late counts as lost audio. Then
+  the gap goes into the count.
+
+The overlap refusal still applies to the placed count.
+
+A failure before the microphone's readiness check falls back to direct
+DirectShow capture. A failure after readiness is a mid-session source loss:
+the microphone is replaced with silence and a health warning.
+
 ### Build and distribution
 
 - Verified upstream source: `https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz`,
