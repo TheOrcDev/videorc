@@ -111,8 +111,8 @@ describe('set_buddy (plan 209 S13)', () => {
         }
       }
     })
-    // plan 211 Phase D (S-D1) reshapes this call to `talk`; the merge-alone
-    // intent is what this test keeps.
+    // Plan 211 D12: `talk` merges into the stored block, so the templates
+    // and cooldowns stay and Buddy Live isn't touched.
     const outcome = await executeAgentIntent(
       call('set_buddy', { talk: 'suggest' }),
       context({ buddy: access })
