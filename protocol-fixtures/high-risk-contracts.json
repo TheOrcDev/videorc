@@ -1046,6 +1046,21 @@
             "destinations": ["twitch"],
             "result": "sent"
           }
+        ],
+        "said": [
+          {
+            "id": "utt-4-fixture",
+            "at": "2026-08-22T10:08:00Z",
+            "trigger": "greeting",
+            "text": "Welcome, Ada!",
+            "source": "line"
+          },
+          {
+            "id": "utt-5-fixture",
+            "at": "2026-08-22T10:09:00Z",
+            "trigger": "manual",
+            "text": "Hello horde"
+          }
         ]
       },
       "moments": [

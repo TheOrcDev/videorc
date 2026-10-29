@@ -4212,6 +4212,17 @@ const cohostReportPostSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 211 D11: what Buddy said in its bubble on stream, written when it showed.
+const cohostReportSaidSchema = objectSchema(
+  {
+    id: boundedString,
+    at: timestamp,
+    trigger: enumSchema(['greeting', 'answer', 'banter', 'manual']),
+    text: stringSchema({ maxLength: 2000 }),
+    source: optionalSchema(enumSchema(['ai', 'line']))
+  },
+  { allowUnknown: false }
+)
 const cohostSessionReportSchema = objectSchema(
   {
     version: literalSchema(1),
@@ -4229,7 +4240,8 @@ const cohostSessionReportSchema = objectSchema(
     alerts: optionalSchema(arraySchema(cohostReportAlertSchema, { maxLength: 8 })),
     recap: cohostReportRecapSchema,
     commands: optionalSchema(cohostReportCommandsSchema),
-    posts: optionalSchema(arraySchema(cohostReportPostSchema, { maxLength: 200 }))
+    posts: optionalSchema(arraySchema(cohostReportPostSchema, { maxLength: 200 })),
+    said: optionalSchema(arraySchema(cohostReportSaidSchema, { maxLength: 200 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSessionReport>

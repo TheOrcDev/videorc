@@ -3230,6 +3230,9 @@ impl CohostSession {
             // Plan 164 D10: posts are written as they land (`append_post`),
             // never rebuilt here; the merge keeps them.
             posts: Vec::new(),
+            // Plan 211 D11: said lines are written as they show
+            // (`append_cohost_report_said`); the merge keeps them.
+            said: Vec::new(),
         }
     }
 
@@ -7769,14 +7772,43 @@ fn utterance_trigger_label(kind: CohostUtteranceTriggerKind) -> &'static str {
 /// One of Buddy's lines actually showed in its bubble (plan 211 D7): the
 /// bubble queue calls this when the line goes up, now or after its wait.
 /// Banter's quiet minute runs from here for Buddy's own lines (never from
-/// the streamer's Say line), as it ran from a send.
+/// the streamer's Say line), as it ran from a send; and the line lands on
+/// the session's report as `said` (D11), manual lines too, under the
+/// live-chat session the lane follows. A queued line that was dropped never
+/// gets here, so it is not "said".
 pub(crate) async fn note_bubble_shown(
     state: &AppState,
     utterance: &CohostUtterance,
-    _source: Option<crate::protocol::CohostReportPostSource>,
+    source: Option<crate::protocol::CohostReportPostSource>,
 ) {
-    if utterance.trigger.kind != CohostUtteranceTriggerKind::Manual {
-        state.cohost.lock().await.note_buddy_spoke(Instant::now());
+    let manual = utterance.trigger.kind == CohostUtteranceTriggerKind::Manual;
+    let session_id = {
+        let mut engine = state.cohost.lock().await;
+        if !manual {
+            engine.note_buddy_spoke(Instant::now());
+        }
+        engine.auto_chat_session_id()
+    };
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let said = crate::protocol::CohostReportSaid {
+        id: utterance.id.clone(),
+        at: chrono::Utc::now().to_rfc3339(),
+        trigger: utterance.trigger.kind,
+        text: crate::buddy_overlay::clip_bubble_text(&utterance.text),
+        source,
+    };
+    match state.database.append_cohost_report_said(&session_id, said) {
+        Ok(true) => {}
+        Ok(false) => state.emit_log(
+            "info",
+            "Buddy report said line skipped: the session row is gone.".to_string(),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Buddy report said line could not be saved: {error}"),
+        ),
     }
 }
 

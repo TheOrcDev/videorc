@@ -7044,6 +7044,24 @@ export interface CohostSessionReport {
   commands?: CohostReportCommands
   /** Plan 164 D10: what the Buddy posted as you, oldest first, at most 200; absent while empty. */
   posts?: CohostReportPost[]
+  /**
+   * Plan 211 D11: what Buddy said in its bubble on stream (your Say lines
+   * too), oldest first, at most 200; absent while empty and in older reports.
+   */
+  said?: CohostReportSaid[]
+}
+
+/** Plan 211 D11: one line Buddy said in its bubble on stream, written when it showed. */
+export interface CohostReportSaid {
+  /** The utterance id. */
+  id: string
+  /** When it showed. */
+  at: string
+  trigger: CohostUtteranceTriggerKind
+  /** The text as shown, clipped to the bubble's 200 characters. */
+  text: string
+  /** Greetings only: Buddy's AI or a line; absent on answers, banter and Say lines. */
+  source?: CohostReportPostSource
 }
 
 export type CohostReportPostResult = 'sent' | 'partial' | 'failed'
