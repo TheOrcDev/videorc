@@ -53,7 +53,7 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
 
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { LayoutTab } from '@/components/tabs/layout-tab'
-import { sourceVisibilityFromScene } from '@/lib/scene-presets'
+import { scenesForApps, sourceVisibilityFromScene } from '@/lib/scene-presets'
 import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
 import type {
   AccountCallbackEnvelope,
@@ -716,6 +716,19 @@ class StudioBackend {
           throw new Error('Temporary devices.list failure.')
         }
         return this.deviceList
+      case 'sources.resolve_app_window': {
+        // Plan 210: the app's front window is the listed window the scene
+        // prefers, when the device list has it; otherwise the app is not open.
+        const preferred = this.deviceList.devices.find(
+          (device) =>
+            device.kind === 'window' &&
+            device.status === 'available' &&
+            device.id === params.preferWindowId
+        )
+        return preferred
+          ? { ok: true, windowId: preferred.id, title: preferred.name, width: 1280, height: 720 }
+          : { ok: false, reason: 'not-running' }
+      }
       case 'audio.meter.sample':
         if (this.audioMeterFailuresRemaining > 0) {
           this.audioMeterFailuresRemaining -= 1
@@ -5896,6 +5909,123 @@ describe('real StudioProvider lifecycle', () => {
       () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
     )
     expect(latest().captureConfig.layout.cameraZoom).toBe(175)
+  })
+
+  // Plan 210 D3 on a scene made for an app (S2): the Scene page's Freeform
+  // entry (an arrangement and a placement, no preset) saves into the scene on
+  // stream as it lands, with its app kept and still no audio. The same
+  // placement sent with a layout preset and no `keepScene` is a switch to a
+  // built-in layout and leaves the scene: the two are not the same edit.
+  it('auto-saves a freeform placement into the app scene on stream and keeps its app and silence', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList.devices.push({
+      id: 'window:2',
+      name: 'Presentation',
+      kind: 'window',
+      status: 'available'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    // The mount's own scene load lands first, so the apply below is not
+    // crossed by it (an app scene resolves its window before committing).
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 150 }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.cameraZoom === 150 && latest().layoutSwitchPending === null
+    )
+    const [appScene] = scenesForApps(
+      [
+        {
+          bundleId: 'com.example.presentation',
+          name: 'Presentation',
+          frontWindowId: 'window:2',
+          frontWindowName: 'Presentation'
+        }
+      ],
+      latest().sceneLibraryActions.workingVisual,
+      [],
+      { id: () => 'app-scene-presentation', now: () => '2026-10-29T10:00:00.000Z' }
+    )
+    expect(appScene.audio).toBeUndefined()
+    expect(appScene.visual.layout.arrangementMode).toBe('preset')
+    await act(async () => {
+      expect(latest().sceneLibraryActions.insert([appScene])).toBe(true)
+    })
+    await waitForObservation(() => latest().savedScenes[0]?.id === appScene.id)
+    await act(async () => {
+      expect(await latest().applySavedSceneResult(appScene.id)).toEqual({ ok: true })
+    })
+    await waitForObservation(
+      () =>
+        latest().activeSavedSceneId === appScene.id &&
+        latest().layoutSwitchPending === null &&
+        latest().captureConfig.sources.windowId === 'window:2'
+    )
+    // Putting the scene on stream is a switch, not an edit: nothing written.
+    expect(latest().savedScenes[0].updatedAt).toBe('2026-10-29T10:00:00.000Z')
+
+    const placement = { 'source:base': { x: 0.15, y: 0.15, width: 0.7, height: 0.7 } }
+    await act(async () =>
+      latest().applyCameraPreset({
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: placement
+      })
+    )
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.arrangementMode === 'freeform' &&
+        latest().layoutSwitchPending === null &&
+        latest().savedScenes[0].visual.layout.arrangementMode === 'freeform'
+    )
+    const saved = latest().savedScenes[0]
+    expect(latest().activeSavedSceneId).toBe(appScene.id)
+    // The look is what the scene keeps now, with its own sources
+    // (`savedSceneModified` stays true for every scene made for an app: it
+    // compares audio too, and such a scene keeps none by D4).
+    expect(
+      sameSceneVisual(saved.visual, {
+        ...latest().sceneLibraryActions.workingVisual,
+        sources: saved.visual.sources
+      })
+    ).toBe(true)
+    expect(saved.visual.layout.sourceTransformOverrides).toEqual(placement)
+    expect(saved.visual.sources.app).toEqual(appScene.visual.sources.app)
+    expect(saved.visual.sources.windowId).toBe('window:2')
+    expect(saved.audio).toBeUndefined()
+    expect(saved.updatedAt).not.toBe('2026-10-29T10:00:00.000Z')
+    expect(
+      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout
+        .sourceTransformOverrides
+    ).toEqual(placement)
+
+    // The same placement with a layout preset and no `keepScene` is a switch
+    // to a built-in layout: it leaves the scene and writes nothing into it.
+    await act(async () =>
+      latest().applyCameraPreset({
+        layoutPreset: 'screen-only',
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: { 'source:base': { x: 0.2, y: 0.2, width: 0.6, height: 0.6 } }
+      })
+    )
+    await waitForObservation(
+      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
+    )
+    expect(latest().savedScenes[0].visual.layout.sourceTransformOverrides).toEqual(placement)
   })
 
   // Owner, 2026-10-27: a saved scene keeps its screen, microphone and System

@@ -285,24 +285,33 @@ try {
   // Beta becomes a shrunk freeform layout (edits auto-save into the scene on
   // stream, D3), so every switch also changes the layout and a wrong-layout
   // frame is countable. Alpha stays full-bleed for the frost checks.
+  // The edit is the Scene page's Freeform entry (`freeformEntryPatch`): the
+  // arrangement and the placement, never a layout preset. A preset without
+  // `keepScene` is a switch to a built-in layout, which leaves the saved scene
+  // by design (D3), so it would never save into Beta.
   await renderer.goTo(targets.beta)
   await waitForScreenLive(targets.beta.fixture.windowId)
   await renderer.applyLayout(
     {
-      layoutPreset: 'screen-only',
       arrangementMode: 'freeform',
       sourceTransformOverrides: { 'source:base': { x: 0.15, y: 0.15, width: 0.7, height: 0.7 } }
     },
     (state) =>
       state.canSave &&
+      state.activeId === targets.beta.sceneId &&
       state.visual.layout.arrangementMode === 'freeform' &&
       state.visual.sources.windowId === targets.beta.fixture.windowId,
     'Beta as a shrunk freeform layout'
   )
-  await renderer.ensureSceneSaved(
+  await renderer.waitForSceneToCarry(
     targets.beta.sceneId,
     'Fixture Beta',
-    (scene) => scene.visual.layout.arrangementMode === 'freeform'
+    (scene) =>
+      scene.visual.layout.arrangementMode === 'freeform' &&
+      scene.visual.layout.sourceTransformOverrides?.['source:base']?.width === 0.7 &&
+      Boolean(scene.visual.sources.app) &&
+      !scene.audio,
+    'the freeform placement, its app and no audio'
   )
   await renderer.goTo(targets.alpha)
   await renderer.waitFor(
@@ -1254,31 +1263,27 @@ function createRendererDriver(smoke) {
     }
     throw lastError
   }
-  const save = async (name, id) => {
-    const ok = await evaluate(
-      `return window.__videorcSmokeScenePresets.save(${JSON.stringify(name)}${id ? `, ${JSON.stringify(id)}` : ''})`
-    )
-    if (ok !== true) throw new Error(`Saving scene "${name}" returned ${JSON.stringify(ok)}`)
-    const scene = (await state()).scenes.find((entry) =>
-      id ? entry.id === id : entry.name === name
-    )
-    if (!scene) throw new Error(`Saved scene "${name}" is not in the library`)
-    return scene.id
-  }
-  /** D3 auto-saves edits into the scene on stream; an explicit save covers a build without it. */
-  const ensureSceneSaved = async (id, name, predicate) => {
+  /**
+   * D3: an edit made while a saved scene is on saves into it as it lands.
+   * The smoke never saves on the scene's behalf: a scene that does not carry
+   * the edit is a product failure, and the message says what it holds.
+   */
+  const waitForSceneToCarry = async (id, name, predicate, what) => {
     try {
       await waitFor(
         (current) => {
           const scene = current.scenes.find((entry) => entry.id === id)
           return Boolean(scene && predicate(scene))
         },
-        `scene ${name} carries the edit`,
-        3000
+        `scene ${name} carries ${what}`,
+        5000
       )
-    } catch {
-      log(`scene ${name} did not auto-save the edit; saving explicitly`)
-      await save(name, id)
+    } catch (error) {
+      const current = await state()
+      const scene = current.scenes.find((entry) => entry.id === id)
+      throw new Error(
+        `D3 auto-save: scene "${name}" did not carry ${what} within 5 s of the edit (active scene ${JSON.stringify(current.activeId)}, working layout ${JSON.stringify(current.visual?.layout?.arrangementMode)}; saved layout ${JSON.stringify(scene?.visual?.layout ?? null).slice(0, 300)}; audio ${JSON.stringify(scene?.audio ?? null)}): ${error?.message?.split('\n')[0]}`
+      )
     }
   }
   /** The refusal copy a scene apply toasts, so a refused switch names its reason. */
@@ -1344,8 +1349,7 @@ function createRendererDriver(smoke) {
     chooseCameraOff,
     setClips,
     selectDisplay,
-    save,
-    ensureSceneSaved,
+    waitForSceneToCarry,
     goTo,
     requestSwitch,
     waitForSwitchDone,
