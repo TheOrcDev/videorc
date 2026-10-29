@@ -476,7 +476,11 @@ function RecordingsFolderSection(): ReactElement {
   })
 
   const chooseFolder = async (): Promise<void> => {
-    const selection = await window.videorc?.pickDirectory?.()
+    // A refusal (no keyring for the folder grant) says so; never silent.
+    const selection = await window.videorc?.pickDirectory?.().catch((error: unknown) => {
+      toastUserError(error, { action: 'use', object: 'that folder' })
+      return null
+    })
     if (selection) {
       setSettings((current) => ({
         ...current,

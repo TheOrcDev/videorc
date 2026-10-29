@@ -32,6 +32,8 @@ vi.mock('@/hooks/use-studio', () => ({
     setEnabled: () => {}
   })
 }))
+const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
+vi.mock('@/lib/toast', () => ({ toast }))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: () => {} })
 }))
@@ -330,6 +332,26 @@ describe('the Output page is the one home for the local file (plan 174 S3.6)', (
     expect(button('Use default')).toBeUndefined()
     expect(button('Show in Finder')).toBeUndefined()
     expect(document.body.textContent).not.toMatch(/Browse|Reveal|Output directory|Blank uses/)
+  })
+
+  it('says why Choose… failed instead of doing nothing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    vi.stubGlobal('videorc', {
+      pickDirectory: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "Error invoking remote method 'system:pick-directory': Error: Protected desktop persistence is unavailable."
+          )
+        )
+    })
+    await renderOutputPage()
+    await act(async () => button('Choose…')!.click())
+    expect(toast.error).toHaveBeenCalledWith(
+      "Couldn't use that folder",
+      expect.objectContaining({ description: expect.stringContaining('keyring') })
+    )
+    expect(storedSettings).toMatchObject({ outputDirectory: '', outputDirectoryHandle: undefined })
   })
 
   it('puts a chosen folder back to the default with Use default', async () => {

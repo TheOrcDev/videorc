@@ -344,6 +344,7 @@ import {
   DISABLE_FEATURES_SWITCH,
   mergeDisabledFeatures
 } from './chromium-disabled-features'
+import { linuxPasswordStoreSwitch, PASSWORD_STORE_SWITCH } from './linux-password-store'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
 import {
   flushPermissionRestart,
@@ -1281,6 +1282,20 @@ const disabledChromiumFeatures = mergeDisabledFeatures(
 )
 if (disabledChromiumFeatures) {
   app.commandLine.appendSwitch(DISABLE_FEATURES_SWITCH, disabledChromiumFeatures)
+}
+// Linux: Chromium gives safeStorage a real password store only on desktops it
+// recognizes (KDE, GNOME, XFCE, …). On Hyprland, Sway, i3 and other window
+// managers it falls back to basic_text, and protected persistence (folder
+// grants, sign-in, provider OAuth) refuses. Ask for the Secret Service there;
+// Chromium still falls back to basic_text when none answers. A user's own
+// --password-store always wins. See linux-password-store.ts.
+const passwordStore = linuxPasswordStoreSwitch(
+  process.platform,
+  process.env,
+  app.commandLine.hasSwitch(PASSWORD_STORE_SWITCH)
+)
+if (passwordStore) {
+  app.commandLine.appendSwitch(PASSWORD_STORE_SWITCH, passwordStore)
 }
 const packagedSmokeHarnessCapability =
   app.isPackaged && process.env.VIDEORC_PACKAGED_SMOKE_TEST === '1'
