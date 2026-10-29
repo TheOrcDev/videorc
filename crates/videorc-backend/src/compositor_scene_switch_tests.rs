@@ -1668,3 +1668,316 @@ async fn windows_source_render_edit_samples_glide_without_mutating_committed_pro
     assert!(compositor.source_edit_is_current(&committed));
     assert!(!compositor.source_edit_is_current(&rendered));
 }
+
+/// Plan 210 S7: while the screen is hidden every leg carries the frosted
+/// still and never a live frame: the program (which Clips and the native
+/// preview read), the vertical aux leg (its own composition from the
+/// simulcast snapshot) and the Screen ISO leg, on CPU and on Metal. The
+/// camera inset is untouched.
+#[tokio::test]
+async fn hidden_screen_frost_reaches_every_leg() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 36;
+    const AUX_WIDTH: u32 = 36;
+    const AUX_HEIGHT: u32 = 64;
+    const CAMERA_WIDTH: u32 = 48;
+    const CAMERA_HEIGHT: u32 = 36;
+    let stripes = || {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let value = if (index % WIDTH as usize) / 2 % 2 == 0 {
+                255
+            } else {
+                0
+            };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    };
+    let white = || vec![0xff_u8; (WIDTH * HEIGHT * 4) as usize];
+    for metal in [false, true] {
+        if metal && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let mut gpus = if metal {
+            (0..4)
+                .map(|_| new_gpu_compositor(false))
+                .collect::<Vec<_>>()
+        } else {
+            vec![None, None, None, None]
+        };
+        if metal && gpus.iter().any(Option::is_none) {
+            eprintln!("SKIP: Metal fixture unavailable");
+            continue;
+        }
+        let mode = if metal { "metal" } else { "cpu" };
+        let state = state();
+        // Program: the screen full-frame with the camera inset top-right.
+        let mut combined = snapshot(SceneSourceKind::Screen);
+        combined.layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
+        let mut camera_source = snapshot(SceneSourceKind::Camera).scene.unwrap().sources[0].clone();
+        camera_source.id = "source:camera".into();
+        camera_source.device_id = Some("camera:fixture".into());
+        camera_source.transform.x = 0.7;
+        camera_source.transform.y = 0.0;
+        camera_source.transform.width = 0.3;
+        camera_source.transform.height = 0.3;
+        camera_source.default_transform = camera_source.transform.clone();
+        combined.scene.as_mut().unwrap().sources.push(camera_source);
+        // The vertical leg: its own scene, the screen alone on a portrait canvas.
+        let mut vertical = snapshot(SceneSourceKind::Screen);
+        vertical.revision = 2;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:fixture",
+            &combined.layout,
+            &crate::protocol::VideoSettings {
+                width: CAMERA_WIDTH,
+                height: CAMERA_HEIGHT,
+                ..video()
+            },
+        )
+        .await;
+        install_screen(&state, "screen:fixture", 1, 1, [0, 255, 0, 255]).await;
+        let stream_store = Arc::new(StdMutex::new(FrameStore::new(2)));
+        let iso_stores = CompositorSourceIsoFrameStores {
+            batches: Arc::new(crate::compositor::source_iso_batch::SourceIsoBatchStore::default()),
+            screen: Arc::new(StdMutex::new(FrameStore::new(2))),
+            camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+            camera_size: (CAMERA_WIDTH, CAMERA_HEIGHT),
+        };
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.stream_frame_store = Some(stream_store.clone());
+            compositor.source_iso_frame_stores = Some(iso_stores.clone());
+            compositor.scene = Some(combined.clone());
+            compositor.simulcast_scene = Some(vertical.clone());
+        }
+        let mut sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let stream_output = CompositorAuxiliaryOutput {
+            width: AUX_WIDTH,
+            height: AUX_HEIGHT,
+            frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+            composes_simulcast_scene: true,
+        };
+        let latest =
+            |store: &CompositorFrameStore| store.lock().unwrap().latest().unwrap().bytes.to_vec();
+        // Luma samples of the screen on each leg, away from the mirrored
+        // borders: the program below and left of the inset, the aux leg's
+        // middle row, the Screen ISO frame's interior columns.
+        let program_screen = |bytes: &[u8]| -> Vec<u8> {
+            (24..36)
+                .flat_map(|y| (8..40).map(move |x| (y, x)))
+                .map(|(y, x)| bytes[(y * WIDTH + x) as usize])
+                .collect()
+        };
+        let aux_screen = |bytes: &[u8]| -> Vec<u8> {
+            (6..AUX_WIDTH - 6)
+                .map(|x| bytes[(32 * AUX_WIDTH + x) as usize])
+                .collect()
+        };
+        let iso_screen = |bytes: &[u8]| -> Vec<u8> {
+            (0..HEIGHT)
+                .flat_map(|y| (8..WIDTH - 8).map(move |x| (y, x)))
+                .map(|(y, x)| bytes[(y * WIDTH + x) as usize])
+                .collect()
+        };
+        let mean = |samples: &[u8]| {
+            samples.iter().map(|&v| f64::from(v)).sum::<f64>() / samples.len() as f64
+        };
+        let max_step = |samples: &[u8]| {
+            samples
+                .windows(2)
+                .map(|pair| pair[0].abs_diff(pair[1]))
+                .max()
+                .unwrap_or(0)
+        };
+        // 1. Visible: the live stripes reach every leg.
+        assert!(
+            crate::preview_screen::test_publish_screen_bgra(&state, 2, stripes(), Instant::now())
+                .await
+        );
+        crate::preview_camera::test_publish_camera_pixels(
+            &state,
+            2,
+            [0, 0, 200, 255],
+            Instant::now(),
+        )
+        .await;
+        hide_screen_render(
+            &state,
+            1,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        assert_eq!(program.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+        assert_eq!(aux.len(), raw_yuv420p_len(AUX_WIDTH, AUX_HEIGHT));
+        assert_eq!(iso.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+        assert!(
+            max_step(&program_screen(&program)) > 150,
+            "{mode}: live stripes on the program"
+        );
+        assert!(
+            max_step(&aux_screen(&aux)) > 100,
+            "{mode}: live stripes on the vertical leg"
+        );
+        assert!(
+            max_step(&iso_screen(&iso)) > 150,
+            "{mode}: live stripes on the Screen ISO"
+        );
+        let inset_live = program[(3 * WIDTH + 55) as usize];
+
+        // 2. Hide: the still replaces the stripes on every leg, and the live
+        //    frames published while hidden (pure white) never show.
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(crate::preview_screen::hold_screen_now(&state).await);
+        for tick in 2..6_u64 {
+            assert!(
+                crate::preview_screen::test_publish_screen_bgra(
+                    &state,
+                    tick + 1,
+                    white(),
+                    Instant::now()
+                )
+                .await
+            );
+            crate::preview_camera::test_publish_camera_pixels(
+                &state,
+                tick + 1,
+                [0, 0, 200, 255],
+                Instant::now(),
+            )
+            .await;
+            hide_screen_render(
+                &state,
+                tick,
+                &mut gpus,
+                &mut sources,
+                &mut cache,
+                stream_output,
+                metal,
+            )
+            .await;
+            let program = latest(&compositor_frame_store(&state).await);
+            let aux = latest(&stream_store);
+            let iso = latest(&iso_stores.screen);
+            for (leg, samples) in [
+                ("program", program_screen(&program)),
+                ("vertical leg", aux_screen(&aux)),
+                ("Screen ISO", iso_screen(&iso)),
+            ] {
+                let mean = mean(&samples);
+                assert!(
+                    (70.0..=190.0).contains(&mean),
+                    "{mode} tick {tick}: the {leg} does not carry the frost (mean luma {mean})"
+                );
+                assert!(
+                    max_step(&samples) < 24,
+                    "{mode} tick {tick}: live stripes on the {leg} while hidden"
+                );
+                assert!(
+                    samples.iter().all(|&v| v < 200),
+                    "{mode} tick {tick}: a live white frame reached the {leg} while hidden"
+                );
+            }
+            let inset = program[(3 * WIDTH + 55) as usize];
+            assert!(
+                inset.abs_diff(inset_live) <= 2,
+                "{mode} tick {tick}: the camera inset changed while hidden ({inset} vs {inset_live})"
+            );
+        }
+        assert_eq!(
+            crate::preview_screen::test_privacy_held_frames(&state).await,
+            4
+        );
+
+        // 3. Show: the held live frame (white) is on every leg at once.
+        state.screen_privacy.show();
+        assert!(crate::preview_screen::release_screen_now(&state).await);
+        hide_screen_render(
+            &state,
+            6,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        for (leg, samples) in [
+            ("program", program_screen(&program)),
+            ("vertical leg", aux_screen(&aux)),
+            ("Screen ISO", iso_screen(&iso)),
+        ] {
+            assert!(
+                samples.iter().all(|&v| v > 200),
+                "{mode}: the {leg} did not return to the live picture after show"
+            );
+        }
+    }
+}
+
+/// One program + vertical aux + Screen/Camera ISO tick for the Hide screen
+/// fixture, at the fixture's canvas sizes.
+async fn hide_screen_render(
+    state: &AppState,
+    tick: u64,
+    gpus: &mut [Option<GpuCompositor>],
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    stream_output: CompositorAuxiliaryOutput,
+    metal: bool,
+) -> CompositorPublishResult {
+    let [gpu, stream_gpu, iso_screen_gpu, iso_camera_gpu] = gpus else {
+        unreachable!()
+    };
+    let result = publish_compositor_frame(
+        state,
+        "hide-screen-test",
+        tick,
+        64,
+        36,
+        sources,
+        cache,
+        gpu.as_mut(),
+        CompositorFrameConsumer::RawYuvEncoder,
+        Some(stream_output),
+        stream_gpu.as_mut(),
+        Some(CompositorSourceIsoOutput {
+            width: 64,
+            height: 36,
+            camera_width: 48,
+            camera_height: 36,
+            frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+        }),
+        iso_screen_gpu.as_mut(),
+        iso_camera_gpu.as_mut(),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        super::LiveBackgroundLeg::unmeasured(&mut None),
+        super::ProgramLeg::off(&mut None),
+    )
+    .await;
+    if metal {
+        assert_eq!(result.compositor_backend, CompositorBackend::Metal);
+    }
+    result
+}

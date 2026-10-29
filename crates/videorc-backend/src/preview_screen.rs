@@ -27,7 +27,12 @@ use crate::diagnostics::{
     apply_preview_source_frame_store_stats,
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
-use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackingTrackerHandle};
+#[cfg(target_os = "windows")]
+use crate::frame_store::RetainedD3D11Texture;
+use crate::frame_store::{
+    FrameHandle, FrameStore, FrameStoreStats, RetainedIoSurface, RetainedPixelBuffer,
+    SurfaceBackingTrackerHandle,
+};
 use crate::linux_portal_capture::parse_portal_source_id;
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
@@ -40,6 +45,9 @@ use crate::screen_capture::{
     ScreenCaptureCallbackCadence, is_windows_gdigrab_desktop_screen_id,
     parse_screencapturekit_display_id, parse_screencapturekit_window_id,
     parse_windows_dxgi_output_index,
+};
+use crate::screen_privacy::{
+    ScreenFrameAdmission, ScreenPrivacyCursor, ScreenPrivacyGate, admit_screen_frame, frost_bgra,
 };
 use crate::source_registry::{
     SourceConsumerReason, SourceIdentityConfidence, SourceKey, SourceKind,
@@ -761,6 +769,36 @@ pub struct PreviewScreenShared {
     /// until the metrics poll decides between a restart and a failure.
     stream_stop: Option<ScreenStreamStop>,
     capture_timings: ScreenCaptureTimingWindow,
+    /// Plan 210 S7: the Hide screen gate this capture publishes through, and
+    /// each store's memory of the span it last frosted for.
+    privacy: Arc<ScreenPrivacyGate>,
+    privacy_cursor: ScreenPrivacyCursor,
+    #[cfg(target_os = "windows")]
+    d3d11_privacy_cursor: ScreenPrivacyCursor,
+    /// The latest live frame kept out of each store while hidden, so a show
+    /// publishes the current picture at once (a static screen sends nothing).
+    held_live: Option<HeldLiveFrame>,
+    #[cfg(target_os = "windows")]
+    held_live_d3d11: Option<HeldLiveFrame>,
+    /// Storage identity of the still in the CPU store, so a show never puts a
+    /// held frame over a newer live one.
+    still_identity: Option<u64>,
+    /// Live frames held back while hidden.
+    privacy_held_frames: u64,
+}
+
+/// Plan 210 S7: a live frame kept out of every store while the screen is
+/// hidden. It has its own type on purpose: no `latest()` reader can reach it,
+/// and only [`release_cpu_store_now`] publishes it, after the gate opens.
+#[derive(Debug, Default)]
+struct HeldLiveFrame {
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+    source_iosurface: Option<RetainedIoSurface>,
+    source_pixel_buffer: Option<RetainedPixelBuffer>,
+    #[cfg(target_os = "windows")]
+    source_d3d11_texture: Option<RetainedD3D11Texture>,
 }
 
 /// `SCStreamErrorUserStopped`: the person ended sharing from the macOS menu
@@ -825,12 +863,373 @@ fn screen_stream_stop_disposition(
 static SCREEN_STREAM_STOP_RESTARTS: StdMutex<VecDeque<Instant>> = StdMutex::new(VecDeque::new());
 
 impl PreviewScreenShared {
-    fn with_surface_backing_tracker(tracker: SurfaceBackingTrackerHandle) -> Self {
+    /// A capture session's store, publishing through the process-wide gate.
+    fn new_capture(tracker: SurfaceBackingTrackerHandle, privacy: Arc<ScreenPrivacyGate>) -> Self {
         Self {
             frame_store: FrameStore::new_with_surface_backing_tracker(1, tracker),
+            privacy,
             ..Self::default()
         }
     }
+
+    #[cfg(test)]
+    fn with_privacy(privacy: Arc<ScreenPrivacyGate>) -> Self {
+        Self {
+            privacy,
+            ..Self::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan 210 S7: Hide screen, held at the source
+// ---------------------------------------------------------------------------
+
+/// The one way a CPU-bytes publish point (Linux PipeWire, the Windows FFmpeg
+/// and WGC readback paths, the test publisher) puts a frame in the store.
+/// Visible, it publishes; hidden, it publishes the frosted still once per
+/// hide and holds every later live frame. Returns a buffer for the caller's
+/// next frame (the one it held last, when it fits). macOS publishes through
+/// ScreenCaptureKit's own callback, so its production build has no caller.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows", test)),
+    allow(dead_code)
+)]
+fn publish_gated_bgra_frame(
+    guard: &mut PreviewScreenShared,
+    sequence: u64,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+    captured_at: Instant,
+) -> Vec<u8> {
+    let frame_len = bytes.len();
+    match admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor) {
+        ScreenFrameAdmission::Publish => {
+            guard.held_live = None;
+            guard.frame_store.publish_with_metadata(
+                sequence,
+                width,
+                height,
+                PreviewScreenPixelFormat::Bgra8,
+                (),
+                captured_at,
+                bytes,
+            );
+            guard.frame_store.checkout_overwrite_buffer(frame_len)
+        }
+        ScreenFrameAdmission::Frost => {
+            let still = frost_bgra(width, height, Some(&bytes));
+            publish_cpu_still(guard, sequence, width, height, still, captured_at);
+            hold_live_frame(
+                guard,
+                HeldLiveFrame {
+                    width,
+                    height,
+                    bytes,
+                    ..HeldLiveFrame::default()
+                },
+            );
+            guard.frame_store.checkout_overwrite_buffer(frame_len)
+        }
+        ScreenFrameAdmission::Hold => {
+            let previous = hold_live_frame(
+                guard,
+                HeldLiveFrame {
+                    width,
+                    height,
+                    bytes,
+                    ..HeldLiveFrame::default()
+                },
+            );
+            match previous.map(|held| held.bytes) {
+                Some(buffer) if buffer.len() == frame_len => buffer,
+                _ => guard.frame_store.checkout_overwrite_buffer(frame_len),
+            }
+        }
+    }
+}
+
+fn hold_live_frame(guard: &mut PreviewScreenShared, frame: HeldLiveFrame) -> Option<HeldLiveFrame> {
+    guard.privacy_held_frames = guard.privacy_held_frames.saturating_add(1);
+    guard.held_live.replace(frame)
+}
+
+/// The frosted still into the CPU store: the bytes always, and on macOS an
+/// IOSurface of the same pixels so the Metal path keeps its zero-copy import.
+fn publish_cpu_still(
+    guard: &mut PreviewScreenShared,
+    sequence: u64,
+    width: u32,
+    height: u32,
+    still: Vec<u8>,
+    captured_at: Instant,
+) {
+    #[cfg(target_os = "macos")]
+    let surface = crate::screen_privacy::macos::create_bgra_iosurface(width, height, &still);
+    #[cfg(not(target_os = "macos"))]
+    let surface: Option<RetainedIoSurface> = None;
+    let handle = guard.frame_store.publish_with_source_handles(
+        sequence,
+        width,
+        height,
+        PreviewScreenPixelFormat::Bgra8,
+        captured_at,
+        still,
+        surface,
+        None,
+    );
+    guard.still_identity = Some(handle.storage_identity());
+}
+
+/// The live pixels of a stored frame: its bytes, or on macOS a readback of
+/// its retained surface when the capture skipped the CPU copy.
+fn stored_frame_pixels(frame: &FrameHandle<PreviewScreenPixelFormat>) -> Option<Cow<'_, [u8]>> {
+    let frame_len = frame.width as usize * frame.height as usize * 4;
+    if frame.width > 0 && frame.height > 0 && frame.bytes.len() >= frame_len {
+        return Some(Cow::Borrowed(&frame.bytes[..frame_len]));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(surface) = frame.source_iosurface.as_ref()
+            && let Some(bytes) = crate::screen_privacy::macos::read_bgra_from_iosurface(
+                surface,
+                frame.width,
+                frame.height,
+            )
+        {
+            return Some(Cow::Owned(bytes));
+        }
+        if let Some(pixel_buffer) = frame.source_pixel_buffer.as_ref()
+            && let Some(bytes) = crate::screen_privacy::macos::read_bgra_from_pixel_buffer(
+                pixel_buffer,
+                frame.width,
+                frame.height,
+            )
+        {
+            return Some(Cow::Owned(bytes));
+        }
+    }
+    None
+}
+
+/// The hide RPC's synchronous half for the CPU store: frost whatever is
+/// published now, so a static screen (no new frame coming) can't keep its
+/// live picture in the store. The capture's next frame then holds. Returns
+/// whether a still was published here.
+fn frost_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
+    let view = guard.privacy.view();
+    if !view.hidden {
+        return false;
+    }
+    let Some(frame) = guard.frame_store.latest() else {
+        // Nothing published yet: the first frame frosts itself at the
+        // publish point (a fresh cursor), so there is nothing to cover.
+        return false;
+    };
+    if admit_screen_frame(view, &mut guard.privacy_cursor) != ScreenFrameAdmission::Frost {
+        return false;
+    }
+    let (width, height) = (frame.width, frame.height);
+    let still = {
+        let pixels = stored_frame_pixels(&frame);
+        frost_bgra(width, height, pixels.as_deref())
+    };
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    publish_cpu_still(guard, sequence, width, height, still, Instant::now());
+    // The live picture stays private for the show.
+    guard.held_live = Some(HeldLiveFrame {
+        width,
+        height,
+        bytes: frame.bytes.clone(),
+        source_iosurface: frame.source_iosurface.clone(),
+        source_pixel_buffer: frame.source_pixel_buffer.clone(),
+        #[cfg(target_os = "windows")]
+        source_d3d11_texture: None,
+    });
+    true
+}
+
+/// The show RPC's half for the CPU store: publish the held live frame at
+/// once, unless the capture already published a newer live one.
+fn release_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
+    if guard.privacy.view().hidden {
+        return false;
+    }
+    let Some(held) = guard.held_live.take() else {
+        return false;
+    };
+    let store_shows_still = guard
+        .frame_store
+        .latest()
+        .is_some_and(|frame| Some(frame.storage_identity()) == guard.still_identity);
+    if !store_shows_still {
+        return false;
+    }
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    guard.frame_store.publish_with_source_handles(
+        sequence,
+        held.width,
+        held.height,
+        PreviewScreenPixelFormat::Bgra8,
+        Instant::now(),
+        held.bytes,
+        held.source_iosurface,
+        held.source_pixel_buffer,
+    );
+    guard.still_identity = None;
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn hold_live_d3d11_frame(
+    guard: &mut PreviewScreenShared,
+    frame: HeldLiveFrame,
+) -> Option<HeldLiveFrame> {
+    guard.privacy_held_frames = guard.privacy_held_frames.saturating_add(1);
+    guard.held_live_d3d11.replace(frame)
+}
+
+/// The frosted still of a WGC texture into the texture store, and into the
+/// CPU store when that one has no still for this span yet. When the still
+/// can't be built, the texture store is emptied: no frame beats a live one.
+#[cfg(target_os = "windows")]
+fn frost_d3d11_texture_into_store(
+    guard: &mut PreviewScreenShared,
+    sequence: u64,
+    texture: &RetainedD3D11Texture,
+    captured_at: Instant,
+) {
+    match crate::screen_privacy::d3d11::frost_texture(texture) {
+        Ok((width, height, still, frosted)) => {
+            guard.d3d11_frame_store.publish_with_d3d11_texture(
+                sequence,
+                width,
+                height,
+                PreviewScreenPixelFormat::Bgra8,
+                captured_at,
+                Vec::new(),
+                still,
+            );
+            if admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor)
+                == ScreenFrameAdmission::Frost
+            {
+                publish_cpu_still(guard, sequence, width, height, frosted, captured_at);
+            }
+        }
+        Err(error) => {
+            guard.d3d11_frame_store.retire();
+            let message = format!(
+                "Hide screen could not build the D3D11 still ({error}); the texture store was emptied"
+            );
+            tracing::error!(error = %error, "{message}");
+            guard.last_error = Some(message);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn frost_d3d11_store_now(guard: &mut PreviewScreenShared) -> bool {
+    let view = guard.privacy.view();
+    if !view.hidden {
+        return false;
+    }
+    let Some(frame) = guard.d3d11_frame_store.latest() else {
+        return false;
+    };
+    let Some(texture) = frame.source_d3d11_texture.clone() else {
+        return false;
+    };
+    if admit_screen_frame(view, &mut guard.d3d11_privacy_cursor) != ScreenFrameAdmission::Frost {
+        return false;
+    }
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    frost_d3d11_texture_into_store(guard, sequence, &texture, Instant::now());
+    guard.held_live_d3d11 = Some(HeldLiveFrame {
+        width: frame.width,
+        height: frame.height,
+        source_d3d11_texture: Some(texture),
+        ..HeldLiveFrame::default()
+    });
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn release_d3d11_store_now(guard: &mut PreviewScreenShared) -> bool {
+    if guard.privacy.view().hidden {
+        return false;
+    }
+    let Some(held) = guard.held_live_d3d11.take() else {
+        return false;
+    };
+    let Some(texture) = held.source_d3d11_texture else {
+        return false;
+    };
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    guard.d3d11_frame_store.publish_with_d3d11_texture(
+        sequence,
+        held.width,
+        held.height,
+        PreviewScreenPixelFormat::Bgra8,
+        Instant::now(),
+        Vec::new(),
+        texture,
+    );
+    true
+}
+
+/// `screen.hide`: cover the active capture's stores now. The gate is already
+/// hidden, so a frame arriving before this frosts itself and this finds
+/// nothing left to do; a frame arriving after it holds. Either way exactly
+/// one still per store per hide.
+pub async fn hold_screen_now(state: &AppState) -> bool {
+    let shared = state
+        .preview_screen
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .map(|active| Arc::clone(&active.shared));
+    let Some(shared) = shared else {
+        return false;
+    };
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cpu = frost_cpu_store_now(&mut guard);
+    #[cfg(target_os = "windows")]
+    let texture = frost_d3d11_store_now(&mut guard);
+    #[cfg(not(target_os = "windows"))]
+    let texture = false;
+    cpu || texture
+}
+
+/// `screen.show`: publish the held live picture at once. Nothing restarts;
+/// the capture's next frame publishes as always.
+pub async fn release_screen_now(state: &AppState) -> bool {
+    let shared = state
+        .preview_screen
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .map(|active| Arc::clone(&active.shared));
+    let Some(shared) = shared else {
+        return false;
+    };
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cpu = release_cpu_store_now(&mut guard);
+    #[cfg(target_os = "windows")]
+    let texture = release_d3d11_store_now(&mut guard);
+    #[cfg(not(target_os = "windows"))]
+    let texture = false;
+    cpu || texture
 }
 
 #[derive(Debug, Default)]
@@ -1385,9 +1784,10 @@ async fn execute_registered_preview_screen(
         .await
         .surface_backing_tracker
         .clone();
-    let shared = Arc::new(StdMutex::new(
-        PreviewScreenShared::with_surface_backing_tracker(surface_backing_tracker),
-    ));
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::new_capture(
+        surface_backing_tracker,
+        Arc::clone(&state.screen_privacy),
+    )));
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let consent_cancel = Arc::new(AtomicBool::new(false));
@@ -3080,15 +3480,23 @@ pub(crate) async fn test_install_live_screen_generation(
         window_id: None,
     };
     let source_key = source_key_for_source(&source);
-    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
-    shared.lock().unwrap().frame_store.publish(
-        sequence,
-        video.width,
-        video.height,
-        PreviewScreenPixelFormat::Bgra8,
-        Instant::now(),
-        vec![0; video.width as usize * video.height as usize * 4],
-    );
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
+        Arc::clone(&state.screen_privacy),
+    )));
+    {
+        // Through the gate, like a real first frame: a fixture installed while
+        // hidden starts frosted.
+        let mut guard = shared.lock().unwrap();
+        guard.frames_captured = sequence;
+        publish_gated_bgra_frame(
+            &mut guard,
+            sequence,
+            video.width,
+            video.height,
+            vec![0; video.width as usize * video.height as usize * 4],
+            Instant::now(),
+        );
+    }
     let mut slot = state.preview_screen.lock().await;
     slot.start_generation = generation.max(1);
     slot.active_generation = Some(slot.start_generation);
@@ -3120,6 +3528,44 @@ pub(crate) async fn test_install_live_screen_generation(
     });
 }
 
+/// Test-only: publish arbitrary BGRA bytes through the installed fixture
+/// capture's real publish point (the Hide screen gate included). Returns
+/// false without a live fixture.
+#[cfg(test)]
+pub(crate) async fn test_publish_screen_bgra(
+    state: &AppState,
+    sequence: u64,
+    bytes: Vec<u8>,
+    captured_at: Instant,
+) -> bool {
+    let (width, height, shared) = {
+        let slot = state.preview_screen.lock().await;
+        let Some(active) = slot.active.as_ref() else {
+            return false;
+        };
+        (
+            active.video.width,
+            active.video.height,
+            Arc::clone(&active.shared),
+        )
+    };
+    assert_eq!(bytes.len(), width as usize * height as usize * 4);
+    let mut shared = shared.lock().unwrap();
+    shared.frames_captured = sequence;
+    publish_gated_bgra_frame(&mut shared, sequence, width, height, bytes, captured_at);
+    true
+}
+
+/// Test-only: live frames the fixture capture held back while hidden.
+#[cfg(test)]
+pub(crate) async fn test_privacy_held_frames(state: &AppState) -> u64 {
+    let slot = state.preview_screen.lock().await;
+    slot.active
+        .as_ref()
+        .map(|active| active.shared.lock().unwrap().privacy_held_frames)
+        .unwrap_or(0)
+}
+
 /// Paint an installed fixture capture without a native producer. The frame's
 /// identity, generation and publication still use the real capture store.
 #[cfg(test)]
@@ -3144,18 +3590,13 @@ pub(crate) async fn test_publish_screen_pixels(
     let admitted = Instant::now();
     let pixels = pixel.repeat((width * height) as usize);
     // Match native callbacks: publishing owns a generation's shared store,
-    // independently of the source admission authority.
+    // independently of the source admission authority, and goes through the
+    // Hide screen gate (plan 210 S7).
     let allocated = Instant::now();
     let mut shared = shared.lock().unwrap();
     let locked = Instant::now();
-    shared.frame_store.publish(
-        sequence,
-        width,
-        height,
-        PreviewScreenPixelFormat::Bgra8,
-        captured_at,
-        pixels,
-    );
+    shared.frames_captured = sequence;
+    publish_gated_bgra_frame(&mut shared, sequence, width, height, pixels, captured_at);
     let published = Instant::now();
     [
         admitted.duration_since(began).as_micros() as u64,
@@ -3248,15 +3689,21 @@ pub(crate) async fn test_advance_live_screen_generation(state: &AppState, sequen
     let protected_overlay_window_ids = active.protected_overlay_window_ids.clone();
     let width = slot.status.width.unwrap_or(video.width).max(1);
     let height = slot.status.height.unwrap_or(video.height).max(1);
-    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
-    shared.lock().unwrap().frame_store.publish(
-        sequence,
-        width,
-        height,
-        PreviewScreenPixelFormat::Bgra8,
-        Instant::now(),
-        vec![0; width as usize * height as usize * 4],
-    );
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
+        Arc::clone(&state.screen_privacy),
+    )));
+    {
+        let mut guard = shared.lock().unwrap();
+        guard.frames_captured = sequence;
+        publish_gated_bgra_frame(
+            &mut guard,
+            sequence,
+            width,
+            height,
+            vec![0; width as usize * height as usize * 4],
+            Instant::now(),
+        );
+    }
     slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
     let generation = slot.start_generation;
     slot.active_generation = Some(generation);
@@ -4770,19 +5217,11 @@ mod linux {
         let frame_len = bgra.len();
         // Plan 191: publish the converted frame itself and hand the stream the
         // store's checked-out buffer as its next conversion target, instead of
-        // copying every frame into that buffer under this lock.
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
-        let buffer = std::mem::replace(bgra, next_buffer);
+        // copying every frame into that buffer under this lock. Plan 210 S7:
+        // through the Hide screen gate.
+        let buffer = std::mem::take(bgra);
         let publish_started_at = Instant::now();
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            (),
-            now,
-            buffer,
-        );
+        *bgra = publish_gated_bgra_frame(&mut guard, sequence, width, height, buffer, now);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
@@ -5175,16 +5614,8 @@ mod windows {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            (),
-            now,
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+        // Plan 210 S7: through the Hide screen gate.
+        let next_buffer = publish_gated_bgra_frame(&mut guard, sequence, width, height, bytes, now);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
@@ -5218,15 +5649,46 @@ mod windows {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.d3d11_frame_store.publish_with_d3d11_texture(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            now,
-            Vec::new(),
-            texture,
-        );
+        // Plan 210 S7: the texture store has its own cursor; the still is a
+        // texture on the capture's device, so the direct D3D11 recording and
+        // the D3D11 compositor keep reading textures.
+        match admit_screen_frame(guard.privacy.view(), &mut guard.d3d11_privacy_cursor) {
+            ScreenFrameAdmission::Publish => {
+                guard.held_live_d3d11 = None;
+                guard.d3d11_frame_store.publish_with_d3d11_texture(
+                    sequence,
+                    width,
+                    height,
+                    PreviewScreenPixelFormat::Bgra8,
+                    now,
+                    Vec::new(),
+                    texture,
+                );
+            }
+            ScreenFrameAdmission::Frost => {
+                frost_d3d11_texture_into_store(&mut guard, sequence, &texture, now);
+                hold_live_d3d11_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        source_d3d11_texture: Some(texture),
+                        ..HeldLiveFrame::default()
+                    },
+                );
+            }
+            ScreenFrameAdmission::Hold => {
+                hold_live_d3d11_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        source_d3d11_texture: Some(texture),
+                        ..HeldLiveFrame::default()
+                    },
+                );
+            }
+        }
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
@@ -5248,16 +5710,9 @@ mod windows {
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            (),
-            Instant::now(),
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+        // Plan 210 S7: through the Hide screen gate.
+        let next_buffer =
+            publish_gated_bgra_frame(&mut guard, sequence, width, height, bytes, Instant::now());
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard.capture_timings.record_valid_frame(
             0.0,
@@ -6122,16 +6577,63 @@ mod macos {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_source_handles(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            now,
-            bytes,
-            source_iosurface,
-            source_pixel_buffer,
-        );
+        // Plan 210 S7: the Hide screen gate, decided under the store's lock at
+        // the publish itself. A held frame keeps exactly what a live publish
+        // would have published (handles, and bytes unless the copy is
+        // skipped), so a show can publish it at once.
+        match admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor) {
+            ScreenFrameAdmission::Publish => {
+                guard.held_live = None;
+                guard.frame_store.publish_with_source_handles(
+                    sequence,
+                    width,
+                    height,
+                    PreviewScreenPixelFormat::Bgra8,
+                    now,
+                    bytes,
+                    source_iosurface,
+                    source_pixel_buffer,
+                );
+            }
+            ScreenFrameAdmission::Frost => {
+                let still = {
+                    let pixels: Option<Cow<'_, [u8]>> = if bytes.len() >= frame_bytes {
+                        Some(Cow::Borrowed(&bytes[..frame_bytes]))
+                    } else {
+                        crate::screen_privacy::macos::read_bgra_from_pixel_buffer(
+                            &crate::frame_store::RetainedPixelBuffer::new(pixel_buffer.clone()),
+                            width,
+                            height,
+                        )
+                        .map(Cow::Owned)
+                    };
+                    frost_bgra(width, height, pixels.as_deref())
+                };
+                publish_cpu_still(&mut guard, sequence, width, height, still, now);
+                hold_live_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        bytes,
+                        source_iosurface,
+                        source_pixel_buffer,
+                    },
+                );
+            }
+            ScreenFrameAdmission::Hold => {
+                hold_live_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        bytes,
+                        source_iosurface,
+                        source_pixel_buffer,
+                    },
+                );
+            }
+        }
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard.capture_timings.record_valid_frame(
             pixel_buffer_lock_ms,
@@ -6638,6 +7140,277 @@ mod tests {
             fps: 30,
             bitrate_kbps: 6000,
         }
+    }
+
+    // --- Plan 210 S7: Hide screen at the publish point ---
+
+    const PRIVACY_W: u32 = 64;
+    const PRIVACY_H: u32 = 36;
+
+    /// Vertical stripes two pixels wide: structure the frost removes.
+    fn privacy_stripes(phase: usize) -> Vec<u8> {
+        let mut bytes = vec![0_u8; (PRIVACY_W * PRIVACY_H * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let x = index % PRIVACY_W as usize;
+            let value = if (x / 2 + phase) % 2 == 0 { 255 } else { 0 };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    }
+
+    fn privacy_white() -> Vec<u8> {
+        vec![0xff; (PRIVACY_W * PRIVACY_H * 4) as usize]
+    }
+
+    /// Mid-grey with no stripe left, away from the mirrored borders: the
+    /// still, not a live frame. Every pixel is opaque.
+    fn assert_frosted_stripes(bytes: &[u8]) {
+        assert_eq!(bytes.len(), (PRIVACY_W * PRIVACY_H * 4) as usize);
+        assert!(bytes.chunks_exact(4).all(|px| px[3] == 0xff));
+        for y in 0..PRIVACY_H as usize {
+            let row: Vec<&[u8]> = bytes
+                [y * PRIVACY_W as usize * 4..(y + 1) * PRIVACY_W as usize * 4]
+                .chunks_exact(4)
+                .collect();
+            for px in &row[8..PRIVACY_W as usize - 8] {
+                assert!(
+                    (100..=160).contains(&px[0]) && (100..=160).contains(&px[1]),
+                    "not the frost: {px:?}"
+                );
+            }
+            for pair in row[8..PRIVACY_W as usize - 8].windows(2) {
+                assert!(
+                    pair[0][0].abs_diff(pair[1][0]) <= 4,
+                    "a stripe edge survived"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_screen_publishes_one_frosted_still_then_holds_live_frames() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        let live = shared.frame_store.latest().unwrap();
+        assert_eq!(live.bytes, privacy_stripes(0));
+
+        // The hide RPC frosts the store at once: a static screen sends nothing.
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        let still = shared.frame_store.latest().unwrap();
+        assert_ne!(still.storage_identity(), live.storage_identity());
+        assert!(still.sequence > live.sequence);
+        assert_frosted_stripes(&still.bytes);
+        #[cfg(target_os = "macos")]
+        assert!(
+            still.source_iosurface.is_some(),
+            "the still is IOSurface-backed for the Metal path"
+        );
+        assert!(!frost_cpu_store_now(&mut shared), "one still per hide");
+
+        // Live frames while hidden are held, never published.
+        for sequence in 2..5 {
+            shared.frames_captured = sequence;
+            publish_gated_bgra_frame(
+                &mut shared,
+                sequence,
+                PRIVACY_W,
+                PRIVACY_H,
+                privacy_white(),
+                Instant::now(),
+            );
+            let latest = shared.frame_store.latest().unwrap();
+            assert_eq!(latest.storage_identity(), still.storage_identity());
+        }
+        assert_eq!(shared.privacy_held_frames, 3);
+
+        // Show publishes the held live frame at once; the next frame is live.
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(shared.frame_store.latest().unwrap().bytes, privacy_white());
+        shared.frames_captured = 5;
+        publish_gated_bgra_frame(
+            &mut shared,
+            5,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(1),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(1)
+        );
+
+        // A second hide builds a new still from the latest live picture.
+        gate.hide(
+            crate::protocol::ScreenPrivacyReason::PasswordManager,
+            "t2".into(),
+        );
+        assert!(frost_cpu_store_now(&mut shared));
+        let second = shared.frame_store.latest().unwrap();
+        assert_ne!(second.storage_identity(), still.storage_identity());
+        assert_frosted_stripes(&second.bytes);
+        shared.frames_captured = 6;
+        publish_gated_bgra_frame(
+            &mut shared,
+            6,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().storage_identity(),
+            second.storage_identity()
+        );
+    }
+
+    #[test]
+    fn a_capture_started_while_hidden_frosts_its_first_frame() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        // The hide found nothing to cover: nothing is published yet.
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        assert!(!frost_cpu_store_now(&mut shared));
+        assert!(shared.frame_store.latest().is_none());
+        // The swapped-in source's first frame is frosted, never live.
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        let still = shared.frame_store.latest().unwrap();
+        assert_frosted_stripes(&still.bytes);
+        shared.frames_captured = 2;
+        publish_gated_bgra_frame(
+            &mut shared,
+            2,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().storage_identity(),
+            still.storage_identity()
+        );
+        assert_eq!(shared.privacy_held_frames, 2);
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(shared.frame_store.latest().unwrap().bytes, privacy_white());
+    }
+
+    #[test]
+    fn show_never_puts_a_held_frame_over_a_newer_live_one() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        shared.frames_captured = 2;
+        publish_gated_bgra_frame(
+            &mut shared,
+            2,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        gate.show();
+        // The capture publishes a live frame before the show RPC's release.
+        shared.frames_captured = 3;
+        publish_gated_bgra_frame(
+            &mut shared,
+            3,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(1),
+            Instant::now(),
+        );
+        assert!(!release_cpu_store_now(&mut shared));
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(1)
+        );
+        // And a show with nothing held changes nothing.
+        assert!(!release_cpu_store_now(&mut shared));
+    }
+
+    #[tokio::test]
+    async fn hold_and_release_cover_the_installed_capture_through_the_state() {
+        let state = test_state();
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: PRIVACY_W,
+            height: PRIVACY_H,
+            fps: 30,
+            bitrate_kbps: 2000,
+        };
+        test_install_live_screen_generation(&state, "screen:fixture", 1, 1, &video).await;
+        assert!(test_publish_screen_bgra(&state, 2, privacy_stripes(0), Instant::now()).await);
+        let source = preview_screen_frame_source(&state).await.unwrap();
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().bytes,
+            privacy_stripes(0)
+        );
+
+        assert!(!hold_screen_now(&state).await, "visible: nothing to hold");
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(hold_screen_now(&state).await);
+        let still = source.latest_frame_blocking().unwrap();
+        assert_frosted_stripes(&still.bytes);
+        assert!(test_publish_screen_bgra(&state, 3, privacy_white(), Instant::now()).await);
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().storage_identity(),
+            still.storage_identity()
+        );
+        assert_eq!(test_privacy_held_frames(&state).await, 1);
+
+        state.screen_privacy.show();
+        assert!(release_screen_now(&state).await);
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().bytes,
+            privacy_white()
+        );
+
+        // A new generation installed while hidden starts frosted.
+        state.screen_privacy.hide(
+            crate::protocol::ScreenPrivacyReason::PasswordManager,
+            "t".into(),
+        );
+        test_install_live_screen_generation(&state, "screen:other", 2, 1, &video).await;
+        let swapped = preview_screen_frame_source(&state).await.unwrap();
+        let first = swapped.latest_frame_blocking().unwrap();
+        assert!(
+            first.bytes.chunks_exact(4).all(|px| px[3] == 0xff),
+            "the swapped source's first frame is the still, not the zero frame"
+        );
+        state.screen_privacy.show();
     }
 
     fn test_video_with_dimensions(width: u32, height: u32) -> VideoSettings {
