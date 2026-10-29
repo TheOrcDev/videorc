@@ -137,6 +137,36 @@ export function shouldRunPerformanceCheck(state: PerformanceCheckState | undefin
   )
 }
 
+/**
+ * Whether the packaged launch auto-run may ask for a check now. The default
+ * Clips ring is a replay-only session, not a take: it counts as idle (the run
+ * steps it aside). A run that measured nothing because capture was not ready
+ * yet (a Linux portal screen not chosen) gets one more try in this app run,
+ * once capture is ready; never more, so a failing machine is not looped.
+ */
+export function shouldAutoRunPerformanceCheck(input: {
+  isPackaged: boolean
+  state: PerformanceCheckState | undefined
+  recordingState: string
+  recordingReplayOnly: boolean
+  /** Auto-runs already asked for in this app run. */
+  autoRuns: number
+  /** Capture was ready when the previous auto-run was asked for. */
+  captureReadyAtLastRun: boolean
+  captureReady: boolean
+}): boolean {
+  if (!input.isPackaged || !shouldRunPerformanceCheck(input.state)) {
+    return false
+  }
+  if (input.recordingState !== 'idle' && !input.recordingReplayOnly) {
+    return false
+  }
+  if (input.autoRuns === 0) {
+    return true
+  }
+  return input.autoRuns === 1 && !input.captureReadyAtLastRun && input.captureReady
+}
+
 /** "1080p · 30 fps": the one video spelling (plan 174 S1.4). */
 export function outputLabel(video: Pick<VideoSettings, 'width' | 'height' | 'fps'>): string {
   return formatVideoQuality(video)
