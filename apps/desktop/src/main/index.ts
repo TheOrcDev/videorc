@@ -473,6 +473,7 @@ import {
   type WatchdogRunToken
 } from './native-preview-first-frame'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
+import { PREVIEW_SURFACE_STAGE_RUNTIME_SCRIPT } from './preview-surface-stage'
 import {
   NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT,
   resetNativePreviewProofMeasurementStatus
@@ -5444,6 +5445,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         background: transparent;
       }
 
+      /* The stage: the whole window, or, when the window is not the
+         canvas's shape (a tiling window manager ignores the aspect lock), the
+         canvas fitted and centred in it by layoutSceneStage. Outside it the
+         body shows through, as it does around a surface with no frames. */
       #scene-root {
         position: fixed;
         inset: 0;
@@ -5625,6 +5630,36 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             Math.max(0, Number(scene?.layout?.cameraCornerRadiusPct ?? 0))
           );
           return String(Math.min(width, height) * radiusPct / 100) + 'px';
+        }
+
+        ${PREVIEW_SURFACE_STAGE_RUNTIME_SCRIPT}
+
+        // Fit #scene-root to the scene's canvas so layer percentages scale
+        // uniformly; the full window (no inline rect) when the shapes match.
+        function layoutSceneStage() {
+          const canvas = scene?.bannerCanvas;
+          const rect = previewSurfaceStageRect(
+            window.innerWidth,
+            window.innerHeight,
+            Number(canvas?.width),
+            Number(canvas?.height)
+          );
+          const next = rect
+            ? {
+                right: 'auto',
+                bottom: 'auto',
+                left: String(rect.left) + 'px',
+                top: String(rect.top) + 'px',
+                width: String(rect.width) + 'px',
+                height: String(rect.height) + 'px'
+              }
+            : { right: '', bottom: '', left: '', top: '', width: '', height: '' };
+          for (const [property, value] of Object.entries(next)) {
+            if (root.style[property] !== value) {
+              root.style[property] = value;
+            }
+          }
+          root.dataset.stageFit = rect ? 'contain' : 'window';
         }
 
         function refreshLayerMasks() {
@@ -6135,6 +6170,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           scene = nextScene;
           window.__videorcNativePreviewSceneRevision = scene?.revision ?? null;
           document.body.dataset.sceneRevision = String(scene?.revision ?? '');
+          layoutSceneStage();
           const nextLayers = Array.isArray(scene?.sources) ? scene.sources.filter((layer) => layer.visible !== false) : [];
           const activeIds = new Set(nextLayers.map((layer) => String(layer.id)));
           stopMissingPollers(activeIds);
@@ -6157,7 +6193,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         window.__videorcSetPreviewScene = applyScene;
         window.__videorcSetFramePollingSuppressed = setFramePollingSuppressed;
         window.__videorcSetFramePollingProfile = setFramePollingProfile;
-        window.addEventListener('resize', refreshLayerMasks);
+        window.addEventListener('resize', () => {
+          layoutSceneStage();
+          refreshLayerMasks();
+        });
 
         function applyCompositorStatus(nextStatus) {
           pendingCompositorStatus = nextStatus;
@@ -6362,7 +6401,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               liveBackground: liveBackgroundMetrics(),
               blankFrames: measurement.blankFrames,
               width: window.innerWidth,
-              height: window.innerHeight
+              height: window.innerHeight,
+              stageFit: root.dataset.stageFit ?? 'window',
+              stageWidth: root.clientWidth,
+              stageHeight: root.clientHeight
             };
           };
           scheduleTick();
