@@ -13,7 +13,10 @@
   is saved as `mode: off`). New installs and saved Auto start in Bubble;
   saved Off stays Off. Agents' `set_buddy` takes `talk`. One desktop PR in
   five phases, plus an eval-fixture tidy on the web. Supersedes plan 202
-  Phases B to D. **PLANNED**; owner answers recorded 2026-10-28.
+  Phases B to D. **BUILT** 2026-10-29 as one desktop PR (all five phases)
+  and a web eval-fixture PR; owner answers recorded 2026-10-28. Owed: the
+  owner's by-eye pass in both themes, a live take, and `smoke:agent-mcp`
+  B1 (local RTMP go-live), red on this Mac before Buddy's step.
 - 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
   agents and Buddy run the studio. Owner request: a complete MCP so people
   control everything from their agents, with Buddy using it too. Agents on

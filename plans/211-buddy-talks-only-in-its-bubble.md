@@ -19,14 +19,20 @@
 
 ## Status
 
-| Phase | What                                                          | State   |
-| ----- | ------------------------------------------------------------- | ------- |
-| A     | The engine: Bubble replaces Auto; nothing automatic posts     | PLANNED |
-| B     | Bubble pacing, answers name the asker, visibility, reports    | PLANNED |
-| C     | The Stream Manager control, the Say box, copy, reports        | PLANNED |
-| D     | Agents (MCP): `set_buddy` and `buddy_say` follow the new mode | PLANNED |
-| E     | Smokes, docs, the release note and the owner's live take      | PLANNED |
+| Phase | What                                                          | State                     |
+| ----- | ------------------------------------------------------------- | ------------------------- |
+| A     | The engine: Bubble replaces Auto; nothing automatic posts     | BUILT                     |
+| B     | Bubble pacing, answers name the asker, visibility, reports    | BUILT                     |
+| C     | The Stream Manager control, the Say box, copy, reports        | BUILT (owner by-eye owed) |
+| D     | Agents (MCP): `set_buddy` and `buddy_say` follow the new mode | BUILT                     |
+| E     | Smokes, docs, the release note and the owner's live take      | BUILT (live take owed)    |
 
+- **Built**: 2026-10-29 as one desktop PR on `plan-211-buddy-bubble-only`,
+  plus a web eval-fixture PR (`videorcweb` `plan-211-buddy-talk-eval-fixture`,
+  no deploy needed). Owed: the owner's by-eye pass in both themes, the live
+  take (S-E4), and `smoke:agent-mcp` B1 (going live to the local RTMP sink),
+  which fails on this Mac before Buddy's B7 runs. B7 passed once with B1
+  bypassed.
 - **Status**: PLANNED 2026-10-28. The owner answered all three questions the
   same day (see Owner answers). Ready to execute from Phase A.
 - **Priority**: P0. The owner hit it live twice (2026-10-26 and 2026-10-28).
