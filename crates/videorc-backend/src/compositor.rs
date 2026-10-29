@@ -1229,6 +1229,11 @@ struct CompositorLiveSources {
     last_screen_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
     /// The capture generation `last_screen_frame` came from.
     last_screen_frame_generation: Option<u64>,
+    /// The screen frame each scene slot drew last tick (plan 210 S3): a leg
+    /// whose own scene has not yet named the adopted capture keeps drawing
+    /// it, so a commit that lands on one leg before the other never puts
+    /// the next window under the other leg's layout.
+    leg_screen_holds: LegScreenHolds,
     camera_fetch: LiveSourceFetchState,
     screen_fetch: LiveSourceFetchState,
     adopted_scene_revisions: Option<(Option<u64>, Option<u64>)>,
@@ -1567,6 +1572,7 @@ impl CompositorLiveSources {
         {
             self.last_screen_frame = None;
             self.last_screen_frame_generation = None;
+            self.leg_screen_holds = LegScreenHolds::default();
         }
         let missing_binding = [&cache.snapshot, &cache.simulcast_snapshot]
             .into_iter()
@@ -1811,20 +1817,41 @@ fn scene_shows_screen_source(snapshot: Option<&CompositorSceneSnapshot>) -> bool
     scene_needs_live_screen_frame(snapshot, None)
 }
 
-/// Plan 210 S3: the screen frame a leg draws. The compositor holds the last
-/// screen frame across a switch, so a leg whose scene shows a screen source
-/// draws it even while the adopted capture is not yet the one the scene
-/// names (the switch is in flight) or no longer is (its window went away):
-/// never black while a picture exists. Evidence stays strict: see
-/// `evidence_screen_frame`.
+/// Plan 210 S3: the screen frame each scene slot drew last tick. The
+/// program's hold also serves the legs that follow its scene (the classic
+/// aux, the Screen file); the vertical leg composes its own scene and holds
+/// its own frame.
+#[derive(Debug, Clone, Default)]
+struct LegScreenHolds {
+    primary: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    simulcast: Option<FrameHandle<PreviewScreenPixelFormat>>,
+}
+
+/// Plan 210 S3: the screen frame a leg draws, judged by that leg's OWN
+/// scene. A leg whose scene names the adopted capture draws the frame on
+/// air (the adopted generation's newest frame, or the previous frame held
+/// until that generation delivers). A leg whose scene shows a screen source
+/// it does not name keeps the frame it drew last tick: its commit may land
+/// after the other leg's (the renderer sends the vertical scene after the
+/// program commit), and the next window is never drawn under this leg's
+/// previous layout. With nothing held yet it draws the frame on air only
+/// while that is itself a hold from before the switch, never a frame of a
+/// capture this leg has not adopted. Never black while a picture exists.
+/// Evidence stays strict: see `evidence_screen_frame`.
 fn leg_screen_frame<'a>(
-    frame: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    on_air: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    on_air_current: bool,
+    held: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
     snapshot: Option<&CompositorSceneSnapshot>,
     screen_key: Option<&SourceKey>,
 ) -> Option<&'a FrameHandle<PreviewScreenPixelFormat>> {
-    frame.filter(|_| {
-        scene_accepts_source(snapshot, screen_key) || scene_shows_screen_source(snapshot)
-    })
+    if scene_accepts_source(snapshot, screen_key) {
+        return on_air;
+    }
+    if !scene_shows_screen_source(snapshot) {
+        return None;
+    }
+    held.or(on_air.filter(|_| !on_air_current))
 }
 
 /// The screen frame that proves the scene's named source delivers: a frame
@@ -9226,8 +9253,27 @@ async fn publish_compositor_frame(
         .filter(|_| scene_accepts_source(snapshot.as_ref(), camera_key))
         .map(|(frame, _)| frame);
     let screen_frame_current = live_sources.screen_frame_is_current();
-    let primary_screen_frame =
-        leg_screen_frame(screen_frame.as_ref(), snapshot.as_ref(), screen_key);
+    // Plan 210 S3: each scene slot cuts to the adopted capture only when its
+    // own scene names it, and remembers what it drew for the next tick.
+    let leg_screen_holds = live_sources.leg_screen_holds.clone();
+    let primary_screen_frame = leg_screen_frame(
+        screen_frame.as_ref(),
+        screen_frame_current,
+        leg_screen_holds.primary.as_ref(),
+        snapshot.as_ref(),
+        screen_key,
+    );
+    let simulcast_screen_frame = leg_screen_frame(
+        screen_frame.as_ref(),
+        screen_frame_current,
+        leg_screen_holds.simulcast.as_ref(),
+        simulcast_snapshot.as_ref(),
+        screen_key,
+    );
+    live_sources.leg_screen_holds = LegScreenHolds {
+        primary: primary_screen_frame.cloned(),
+        simulcast: simulcast_screen_frame.cloned(),
+    };
     let fingerprint = evidence_fingerprint(
         primary_camera_frame.map(|frame| (frame.sequence, frame.captured_at)),
         evidence_screen_frame(
@@ -9574,7 +9620,11 @@ async fn publish_compositor_frame(
                 .as_ref()
                 .filter(|_| scene_accepts_source(aux_snapshot, camera_key))
                 .map(|(frame, _)| frame),
-            screen_frame: leg_screen_frame(screen_frame.as_ref(), aux_snapshot, screen_key),
+            screen_frame: if stream_output.composes_simulcast_scene {
+                simulcast_screen_frame
+            } else {
+                primary_screen_frame
+            },
             // The auxiliary leg carries the bar per the leg plan. On the
             // vertical simulcast leg the renderer rasterizes the Auxiliary
             // bar for that portrait canvas (plan 077).
@@ -9688,8 +9738,15 @@ async fn publish_compositor_frame(
                 .as_ref()
                 .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
                 .map(|(frame, _)| frame);
-            let leg_screen_frame =
-                leg_screen_frame(screen_frame.as_ref(), leg_snapshot, screen_key);
+            // The ISO legs derive from the program's scene, so they share
+            // its hold.
+            let leg_screen_frame = leg_screen_frame(
+                screen_frame.as_ref(),
+                screen_frame_current,
+                leg_screen_holds.primary.as_ref(),
+                leg_snapshot,
+                screen_key,
+            );
             // A contended capture authority cannot prove current source pixels.
             // Keep the last published ISO frame instead of encoding a black
             // frame; the supervisor owns committed removal/terminal failure.

@@ -1195,7 +1195,43 @@ compositor tick. Every switch in every run went in place (0 fallbacks).
 **Follow-ups, not S3.** (1) A cheap "warm discovery" RPC the renderer fires at
 click time would take the content load off the swap for fixed-window scenes
 (~25 to 30 ms p50). (2) The renderer sends the vertical leg's scene after the
-program commit; for that round trip the vertical leg draws the new window
-under its previous layout (before S3 it drew nothing there). Per-leg holds
-would need the aux commit path, which S3 left alone. (3) Two windows at the
-same screen rectangle fall back to the completion stamp.
+program commit; for that round trip the vertical leg drew the new window
+under its previous layout (before S3 it drew nothing there). Fixed in the S3
+follow-up below, in the compositor, with no commit-path change. (3) Two
+windows at the same screen rectangle fall back to the completion stamp.
+
+### S3 follow-up: each leg cuts on its own scene (2026-10-29)
+
+**Root cause.** `publish_compositor_frame` stored a frame of the adopted
+generation as soon as ANY leg's scene named it, and `leg_screen_frame` let
+every leg that shows a screen source draw that one frame. In a
+dual-orientation session the program commit lands first and the vertical
+scene one round trip later, so for those ticks the vertical leg drew the
+next window under its previous layout. The same held the other way round
+(a vertical commit first put the next window under the program's layout).
+
+**Fix.** `CompositorLiveSources::leg_screen_holds` remembers the screen
+frame each scene slot (program, vertical) drew last tick. `leg_screen_frame`
+now judges by the leg's OWN scene: a leg whose scene names the adopted
+capture draws the frame on air (newest adopted-generation frame, or the
+hold until it delivers); a leg whose scene shows a screen source it does
+not name keeps its own last frame, and with nothing held yet draws the
+frame on air only while that is itself a hold from before the switch. The
+classic aux and the Screen file leg follow the program's hold; the vertical
+leg has its own. Evidence, delivery health and the source-edit proof are
+unchanged (adopted generation, named device only). The frost is at the
+source, so Hide screen holds on every leg as before.
+
+**Why not an atomic program+vertical commit.** It would widen the live
+layout transaction API, the renderer's send path and `apply_simulcast_leg_scene`
+(the plan's S3 STOP), and it would still leave every other late vertical
+commit (follow the app in front, a slow renderer) able to draw the wrong
+window. The per-leg rule in the compositor is smaller and holds for any
+commit order. Cost: one extra `FrameHandle` clone per leg per tick.
+
+**Test.** `each_leg_cuts_to_the_next_window_only_when_its_own_scene_names_it`
+(`compositor_scene_switch_tests.rs`): Alpha -> Beta with the program commit
+first (the vertical leg keeps Alpha's frame until its own commit, then cuts),
+then Beta -> Alpha with the vertical commit first (the program keeps Beta's
+frame, no evidence, until its own commit). Red before the fix: the vertical
+leg's frame changed on the program commit.

@@ -479,6 +479,163 @@ async fn a_window_swap_holds_the_last_frame_until_the_commit_then_cuts() {
     assert_eq!(latest_bytes(&state).await, beta);
 }
 
+/// Publish one tick of a dual-orientation session: the program at 64x36 and
+/// the vertical leg (its own scene) at 36x64 into the stream frame store.
+async fn publish_dual(
+    state: &AppState,
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    sequence: u64,
+) -> CompositorPublishResult {
+    publish_compositor_frame(
+        state,
+        "scene-switch-test",
+        sequence,
+        64,
+        36,
+        sources,
+        cache,
+        None,
+        CompositorFrameConsumer::RawYuvEncoder,
+        Some(CompositorAuxiliaryOutput {
+            width: 36,
+            height: 64,
+            frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+            composes_simulcast_scene: true,
+        }),
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        super::LiveBackgroundLeg::unmeasured(&mut None),
+        super::ProgramLeg::off(&mut None),
+    )
+    .await
+}
+
+/// Plan 210 S3 follow-up: in a dual-orientation session the vertical leg
+/// composes its own scene, and the renderer sends that scene after the
+/// program commit. Each leg adopts the next window only when its OWN scene
+/// names it; until then it keeps the frame it drew before the cut. Never the
+/// next window under the vertical leg's previous layout, and the same rule
+/// the other way round when the vertical commit lands first.
+#[tokio::test]
+async fn each_leg_cuts_to_the_next_window_only_when_its_own_scene_names_it() {
+    let state = state();
+    let mut program = snapshot(SceneSourceKind::Window);
+    program.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    let mut vertical = program.clone();
+    let stream_store = Arc::new(StdMutex::new(FrameStore::new(2)));
+    {
+        let mut compositor = state.compositor.lock().await;
+        compositor.scene = Some(program.clone());
+        compositor.simulcast_scene = Some(vertical.clone());
+        compositor.stream_frame_store = Some(stream_store.clone());
+    }
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    let vertical_bytes = || {
+        stream_store
+            .lock()
+            .unwrap()
+            .latest()
+            .unwrap()
+            .bytes
+            .to_vec()
+    };
+
+    let result = publish_dual(&state, &mut sources, &mut cache, 1).await;
+    assert_eq!(result.fingerprint.screen, Some(11));
+    let alpha_program = latest_bytes(&state).await;
+    let alpha_vertical = vertical_bytes();
+
+    // Alpha -> Beta: the program commit lands first.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    crate::preview_screen::test_publish_screen_pixels(&state, 22, [255, 0, 0, 255], Instant::now())
+        .await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert!(matches!(
+        change,
+        Some(CompositorScreenSourceChange::Adopted { generation: 2, .. })
+    ));
+    program.revision = 2;
+    program.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(program.clone());
+    let result = publish_dual(&state, &mut sources, &mut cache, 2).await;
+    assert_eq!(
+        result.fingerprint.screen,
+        Some(22),
+        "the program cuts to Beta"
+    );
+    let beta_program = latest_bytes(&state).await;
+    assert_ne!(beta_program, alpha_program);
+    assert_eq!(
+        vertical_bytes(),
+        alpha_vertical,
+        "the vertical leg still names Alpha: it keeps Alpha's last frame, never Beta under Alpha's layout"
+    );
+    // Another tick before the vertical commit: the hold is steady.
+    publish_dual(&state, &mut sources, &mut cache, 3).await;
+    assert_eq!(latest_bytes(&state).await, beta_program);
+    assert_eq!(vertical_bytes(), alpha_vertical);
+
+    // The vertical commit names Beta: that leg cuts now.
+    vertical.revision = 2;
+    vertical.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.simulcast_scene = Some(vertical.clone());
+    publish_dual(&state, &mut sources, &mut cache, 4).await;
+    let beta_vertical = vertical_bytes();
+    assert_ne!(beta_vertical, alpha_vertical);
+    assert_eq!(latest_bytes(&state).await, beta_program);
+    publish_dual(&state, &mut sources, &mut cache, 5).await;
+    assert_eq!(vertical_bytes(), beta_vertical);
+
+    // Beta -> Alpha: this time the vertical commit lands first. The program
+    // holds Beta until its own scene names Alpha.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:alpha", 3).await;
+    crate::preview_screen::test_publish_screen_pixels(&state, 33, [0, 255, 0, 255], Instant::now())
+        .await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert!(matches!(
+        change,
+        Some(CompositorScreenSourceChange::Adopted { generation: 3, .. })
+    ));
+    vertical.revision = 3;
+    vertical.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.simulcast_scene = Some(vertical);
+    let result = publish_dual(&state, &mut sources, &mut cache, 6).await;
+    assert_eq!(
+        result.fingerprint.screen, None,
+        "Alpha's frame is no evidence for the program, which still names Beta"
+    );
+    assert_eq!(
+        vertical_bytes(),
+        alpha_vertical,
+        "the vertical leg cuts to Alpha"
+    );
+    assert_eq!(
+        latest_bytes(&state).await,
+        beta_program,
+        "the program still names Beta: it keeps Beta's last frame, never Alpha under Beta's layout"
+    );
+    program.revision = 3;
+    program.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(program);
+    let result = publish_dual(&state, &mut sources, &mut cache, 7).await;
+    assert_eq!(result.fingerprint.screen, Some(33));
+    assert_eq!(latest_bytes(&state).await, alpha_program);
+    assert_eq!(vertical_bytes(), alpha_vertical);
+}
+
 /// Plan 210 S3: the stop-then-start fallback retires the old capture before
 /// the new one exists. The frame on air holds through the gap instead of
 /// going black, and the new capture's first frame cuts in at its commit.
