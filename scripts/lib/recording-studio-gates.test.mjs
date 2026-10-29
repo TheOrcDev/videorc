@@ -22,6 +22,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend audio pipeline tests',
       'backend noise cleanup tests',
       'scene switch recording and stream pixel artifacts',
+      'app scenes, follow the app in front and Hide screen smoke (plan 210)',
       'separate source recordings fixture take',
       'soundboard fixture press',
       'separate source production session runtime',

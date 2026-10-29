@@ -46,13 +46,14 @@
 //   --variants idle,recording,layout --mode scenes|direct --canvas 1920x1080
 //   --fps 30 --settle-ms 1200 --out <dir>]
 
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { hostname, loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { buildFixtureApps } from './fixtures/build-fixture-apps.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { flashFixtureApp, launchFixtureApp, stopFixtureApps } from './lib/fixture-app-process.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { scenePresetStateReadCode } from './lib/scene-presets-smoke-state.mjs'
 import {
@@ -919,121 +920,21 @@ async function waitForScreenLive(windowId) {
 }
 
 // ---------------------------------------------------------------------------
-// Fixtures
+// Fixtures (shared with smoke:smart-scenes: scripts/lib/fixture-app-process.mjs)
 
-function launchFixture(app, { x, y }) {
-  return new Promise((resolveLaunch, rejectLaunch) => {
-    const child = spawn(
-      app.executablePath,
-      ['--width', '1280', '--height', '720', '--x', String(x), '--y', String(y)],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    )
-    const fixture = {
-      key: app.key,
-      name: app.name,
-      pid: child.pid,
-      child,
-      windowNumber: null,
-      windowId: null,
-      lines: [],
-      flashWaiters: []
-    }
-    fixtureProcesses.push(fixture)
-    let buffer = ''
-    const timer = setTimeout(
-      () => rejectLaunch(new Error(`${app.name} printed no ready line within 15 s`)),
-      15_000
-    )
-    child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (text) => {
-      buffer += text
-      let newline = buffer.indexOf('\n')
-      while (newline !== -1) {
-        const line = buffer.slice(0, newline).trim()
-        buffer = buffer.slice(newline + 1)
-        newline = buffer.indexOf('\n')
-        if (!line) continue
-        fixture.lines.push(line)
-        const ready = /^ready pid=(\d+) window_number=(\d+)/.exec(line)
-        if (ready) {
-          clearTimeout(timer)
-          fixture.windowNumber = Number(ready[2])
-          fixture.windowId = `window:screencapturekit:${ready[2]}`
-          resolveLaunch(fixture)
-        }
-        const drawn = /^flash drawn_at_ms=(\d+)/.exec(line)
-        if (drawn) {
-          const waiter = fixture.flashWaiters.shift()
-          waiter?.(Number(drawn[1]))
-        }
-      }
-    })
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (text) => {
-      for (const line of text.split(/\r?\n/)) if (line.trim()) fixture.lines.push(`stderr: ${line}`)
-    })
-    child.on('exit', (code, signal) => {
-      fixture.exited = { code, signal }
-      clearTimeout(timer)
-      rejectLaunch(
-        new Error(`${app.name} exited before it was ready: code=${code} signal=${signal}`)
-      )
-    })
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      rejectLaunch(error)
-    })
-  })
+async function launchFixture(app, { x, y }) {
+  const fixture = await launchFixtureApp(app, { x, y, width: 1280, height: 720 })
+  fixtureProcesses.push(fixture)
+  return fixture
 }
 
 /** SIGUSR1 → the fixture flashes white; returns when it drew the flash. */
 function flashFixture(fixture, label) {
-  return new Promise((resolveFlash) => {
-    const sentAtMs = Date.now()
-    const timer = setTimeout(() => {
-      fixture.flashWaiters = fixture.flashWaiters.filter((entry) => entry !== onDrawn)
-      resolveFlash({ label, sentAtMs, drawnAtMs: sentAtMs, drawnReported: false })
-    }, 1500)
-    const onDrawn = (drawnAtMs) => {
-      clearTimeout(timer)
-      resolveFlash({ label, sentAtMs, drawnAtMs, drawnReported: true })
-    }
-    fixture.flashWaiters.push(onDrawn)
-    try {
-      process.kill(fixture.pid, 'SIGUSR1')
-    } catch (error) {
-      clearTimeout(timer)
-      resolveFlash({
-        label,
-        sentAtMs,
-        drawnAtMs: sentAtMs,
-        drawnReported: false,
-        error: String(error)
-      })
-    }
-  })
+  return flashFixtureApp(fixture, label)
 }
 
 async function stopFixtures() {
-  for (const fixture of fixtureProcesses) {
-    if (fixture.exited || !fixture.pid) continue
-    try {
-      process.kill(fixture.pid, 'SIGTERM')
-    } catch {
-      continue
-    }
-    const exited = await Promise.race([
-      new Promise((resolveExit) => fixture.child.once('exit', () => resolveExit(true))),
-      sleep(2000).then(() => false)
-    ])
-    if (!exited) {
-      try {
-        process.kill(fixture.pid, 'SIGKILL')
-      } catch {
-        // gone
-      }
-    }
-  }
+  await stopFixtureApps(fixtureProcesses)
 }
 
 // ---------------------------------------------------------------------------
