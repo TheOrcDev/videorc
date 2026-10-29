@@ -3,10 +3,12 @@ import type { Device, ResolveAppWindowResult } from './backend'
 import { defaultCaptureConfig, mergeSourceKind } from './capture'
 import { hydrateWorkingScene, scenesForApps, type SceneVisual } from './scene-presets'
 import {
+  heldAppWindow,
   rememberedSceneApps,
   rememberSceneWindowApp,
   resolveSceneWindowForApply,
   reconcileWorkingSceneSources,
+  savedSceneApplyRetryAllowed,
   sceneAppState,
   sceneWindowRefusal,
   withoutSceneApp
@@ -148,5 +150,103 @@ describe('scene window wiring', () => {
     expect(
       mergeSourceKind(visual().sources, { screenId: screen.id }, 'capture')
     ).not.toHaveProperty('app')
+  })
+})
+
+describe('app scene switch without a resolver round trip (plan 210 D5)', () => {
+  const remembered: Device = {
+    id: 'window:screencapturekit:old',
+    name: 'Figma — Old design',
+    windowTitle: 'Old design',
+    kind: 'window',
+    status: 'available',
+    app: { ...app, pid: 12 },
+    width: 1280,
+    height: 720
+  }
+  it('answers from the held list when it lists the remembered window under the scene app', async () => {
+    const rpc = vi.fn(async () => success)
+    const result = await resolveSceneWindowForApply(visual(), [remembered, screen], rpc)
+    expect(result).toMatchObject({
+      kind: 'ready',
+      sources: {
+        windowId: remembered.id,
+        windowName: 'Old design',
+        app,
+        captureOff: false,
+        testPattern: false
+      }
+    })
+    expect(rpc).not.toHaveBeenCalled()
+  })
+  it("answers the follower's front window from the held list too", async () => {
+    const front: Device = {
+      ...remembered,
+      id: 'window:screencapturekit:front',
+      windowTitle: 'Front'
+    }
+    const rpc = vi.fn(async () => success)
+    const result = await resolveSceneWindowForApply(
+      visual(),
+      [remembered, front],
+      rpc,
+      undefined,
+      front.id
+    )
+    expect(result).toMatchObject({ kind: 'ready', sources: { windowId: front.id } })
+    expect(rpc).not.toHaveBeenCalled()
+  })
+  const askedCases: Array<[string, Device[], SceneVisual | undefined]> = [
+    ['the window is gone', [screen], undefined],
+    ['the window is listed unavailable', [{ ...remembered, status: 'unavailable' }], undefined],
+    [
+      'the window belongs to another app',
+      [{ ...remembered, app: { ...remembered.app!, bundleId: 'com.other' } }],
+      undefined
+    ],
+    ['the window is a palette', [{ ...remembered, width: 320, height: 200 }], undefined],
+    ['the scene remembers no window', [remembered], { ...visual(), sources: { app } }]
+  ]
+  it.each(askedCases)('asks the backend when %s', async (_case, devices, saved) => {
+    const rpc = vi.fn(async () => success)
+    const result = await resolveSceneWindowForApply(saved ?? visual(), devices, rpc)
+    expect(result).toMatchObject({ kind: 'ready', sources: { windowId: device.id } })
+    expect(rpc).toHaveBeenCalledTimes(1)
+  })
+  it('asks the backend on a forced retry even when the held list answers', async () => {
+    const rpc = vi.fn(async () => success)
+    const result = await resolveSceneWindowForApply(
+      visual(),
+      [remembered],
+      rpc,
+      undefined,
+      undefined,
+      {
+        forceResolve: true
+      }
+    )
+    expect(result).toMatchObject({ kind: 'ready', sources: { windowId: device.id } })
+    expect(rpc).toHaveBeenCalledWith({ bundleId: app.bundleId, preferWindowId: remembered.id })
+  })
+  it('judges a held window by id, app, availability and size', () => {
+    expect(heldAppWindow([remembered], app.bundleId, remembered.id)).toBe(remembered)
+    expect(heldAppWindow([remembered], app.bundleId, undefined)).toBeUndefined()
+    expect(
+      heldAppWindow(
+        [{ ...remembered, width: undefined, height: undefined }],
+        app.bundleId,
+        remembered.id
+      )
+    ).toBeDefined()
+    expect(
+      heldAppWindow([{ ...remembered, kind: 'screen' }], app.bundleId, remembered.id)
+    ).toBeUndefined()
+  })
+  it('retries a refused switch once, only while the pick is still the latest', () => {
+    const base = { attempt: 0, generation: 3, latestGeneration: 3, intent: 10, latestIntent: 10 }
+    expect(savedSceneApplyRetryAllowed(base)).toBe(true)
+    expect(savedSceneApplyRetryAllowed({ ...base, attempt: 1 })).toBe(false)
+    expect(savedSceneApplyRetryAllowed({ ...base, latestGeneration: 4 })).toBe(false)
+    expect(savedSceneApplyRetryAllowed({ ...base, latestIntent: 11 })).toBe(false)
   })
 })

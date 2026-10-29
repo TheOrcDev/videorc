@@ -554,7 +554,8 @@ export function appWindowFailureCopy(name: string, reason: AppWindowFailure): st
 
 /** Resolve before strict preflight; the returned projection never rewrites a snapshot.
  * An old fixed-window scene can pass remembered device ownership as fallbackBundleId.
- * App scenes always resolve anew, even when their old window is still listed.
+ * App scenes resolve anew: from the held device list when it lists the remembered
+ * window under the scene's app (plan 210 D5, `heldAppWindow`), else over the backend.
  */
 export function resolveSceneWindow(
   visual: SceneVisual,

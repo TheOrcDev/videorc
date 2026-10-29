@@ -65,7 +65,7 @@ import {
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
-import { runSavedScenePreflight } from '@/lib/scene-apply-preflight'
+import { judgeSceneSources, runSavedScenePreflight } from '@/lib/scene-apply-preflight'
 import {
   withoutSceneApp,
   SCENE_WINDOW_APPS_KEY,
@@ -73,6 +73,7 @@ import {
   rememberSceneWindowApp,
   sceneAppState,
   resolveSceneWindowForApply,
+  savedSceneApplyRetryAllowed,
   sceneWindowRefusal,
   reconcileWorkingSceneSources,
   type SceneAppState,
@@ -10602,80 +10603,113 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!saved) return { ok: false }
       if (options?.origin !== 'follow')
         for (const listener of manualSceneApplyListenersRef.current) listener(id)
-      let visual = normalizeSceneVisual(repaired ?? saved.visual)
       const generation = ++savedSceneResolveGenerationRef.current
-      const layoutIntentBefore = layoutIntentIdRef.current
-      try {
-        const resolved = await resolveSceneWindowForApply(
-          visual,
-          deviceListRef.current.devices,
-          (params) => {
-            if (!clientRef.current) throw offlineError()
-            return clientRef.current.requestTyped('sources.resolve_app_window', params)
-          },
-          rememberedAppsRef.current[id],
-          options?.preferWindowId
-        )
-        if (
-          generation !== savedSceneResolveGenerationRef.current ||
-          layoutIntentBefore !== layoutIntentIdRef.current
-        )
-          return { ok: false }
-        if (resolved.kind === 'blocked') {
-          setResolvedAppStates((current) => ({
-            ...current,
-            [id]: resolved.reason.slice(4) as SceneAppState
-          }))
-          const refusal = sceneWindowRefusal(visual, resolved.reason)
-          if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
-          return refusal
-        }
-        if (resolved.kind === 'ready') {
-          visual = { ...visual, sources: resolved.sources }
-          if (visual.sources.app) setResolvedAppStates((current) => ({ ...current, [id]: 'ready' }))
-        }
-      } catch (error) {
-        reportError(error, { action: 'switch', object: 'the scene' })
-        return { ok: false }
-      }
-      const current = captureConfigRef.current
-      // Idle, the scene's microphone rides in its sources and the commit makes
-      // it the pick. A recording or livestream switches to it after the
-      // commit, and only the session's confirmation changes the pick.
-      const microphone = saved.audio
-        ? sceneMicrophone(saved.audio, deviceListRef.current.devices)
-        : null
-      const live = sessionOwnsTransport(recordingRef.current)
-      const coupling = !isActiveRecordingState(recordingRef.current.state)
-        ? verticalOrientationVideoPatch(
-            current.layout.layoutPreset,
-            visual.layout.layoutPreset,
-            current.video,
-            current.verticalRestoreVideo
+      let layoutIntentBefore = layoutIntentIdRef.current
+      let visual = normalizeSceneVisual(repaired ?? saved.visual)
+      let current = captureConfigRef.current
+      let microphone: ReturnType<typeof sceneMicrophone> | null = null
+      let live = false
+      let applied = false
+      // Plan 210 D5: an app scene's window is answered from the held device
+      // list when it can be (no resolver round trip). A refused switch gets
+      // one more try, resolved over the backend, while the pick is still
+      // the latest: the held window may have gone since the list was read,
+      // or a capture restart (the Clips ring, recovery) may have superseded
+      // this switch's own start.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        visual = normalizeSceneVisual(repaired ?? saved.visual)
+        try {
+          const resolved = await resolveSceneWindowForApply(
+            visual,
+            deviceListRef.current.devices,
+            (params) => {
+              if (!clientRef.current) throw offlineError()
+              return clientRef.current.requestTyped('sources.resolve_app_window', params)
+            },
+            rememberedAppsRef.current[id],
+            options?.preferWindowId,
+            { forceResolve: attempt > 0 }
           )
-        : null
-      const applied = await requestLayoutTransaction(visual.layout, {
-        sceneApp: visual.sources.app,
-        sourcesOverride: withoutSceneApp({
-          ...current.sources,
-          ...visual.sources,
-          ...(live ? null : microphone)
-        }),
-        backgroundOverride: resolveSavedBackground(visual.background),
-        savedSceneId: id,
-        origin: 'saved',
-        sceneSwitch: true,
-        strictSources: true,
-        ...(coupling
-          ? {
-              videoOverride: coupling.video,
-              captureConfigPatch: {
-                video: coupling.video,
-                verticalRestoreVideo: coupling.verticalRestoreVideo
+          if (
+            generation !== savedSceneResolveGenerationRef.current ||
+            layoutIntentBefore !== layoutIntentIdRef.current
+          )
+            return { ok: false }
+          if (resolved.kind === 'blocked') {
+            setResolvedAppStates((current) => ({
+              ...current,
+              [id]: resolved.reason.slice(4) as SceneAppState
+            }))
+            const refusal = sceneWindowRefusal(visual, resolved.reason)
+            if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
+            return refusal
+          }
+          if (resolved.kind === 'ready') {
+            visual = { ...visual, sources: resolved.sources }
+            if (visual.sources.app)
+              setResolvedAppStates((current) => ({ ...current, [id]: 'ready' }))
+          }
+        } catch (error) {
+          reportError(error, { action: 'switch', object: 'the scene' })
+          return { ok: false }
+        }
+        current = captureConfigRef.current
+        // Idle, the scene's microphone rides in its sources and the commit makes
+        // it the pick. A recording or livestream switches to it after the
+        // commit, and only the session's confirmation changes the pick.
+        microphone = saved.audio
+          ? sceneMicrophone(saved.audio, deviceListRef.current.devices)
+          : null
+        live = sessionOwnsTransport(recordingRef.current)
+        const coupling = !isActiveRecordingState(recordingRef.current.state)
+          ? verticalOrientationVideoPatch(
+              current.layout.layoutPreset,
+              visual.layout.layoutPreset,
+              current.video,
+              current.verticalRestoreVideo
+            )
+          : null
+        const transaction = requestLayoutTransaction(visual.layout, {
+          sceneApp: visual.sources.app,
+          sourcesOverride: withoutSceneApp({
+            ...current.sources,
+            ...visual.sources,
+            ...(live ? null : microphone)
+          }),
+          backgroundOverride: resolveSavedBackground(visual.background),
+          savedSceneId: id,
+          origin: 'saved',
+          sceneSwitch: true,
+          strictSources: true,
+          ...(coupling
+            ? {
+                videoOverride: coupling.video,
+                captureConfigPatch: {
+                  video: coupling.video,
+                  verticalRestoreVideo: coupling.verticalRestoreVideo
+                }
               }
-            }
-          : {})
-      })
+            : {})
+        })
+        // The intent this switch minted, read before anything newer can.
+        const intent = layoutIntentIdRef.current
+        applied = await transaction
+        if (applied) break
+        if (
+          !savedSceneApplyRetryAllowed({
+            attempt,
+            generation,
+            latestGeneration: savedSceneResolveGenerationRef.current,
+            intent,
+            latestIntent: layoutIntentIdRef.current
+          }) ||
+          // A source turned off on purpose refuses the same way twice.
+          judgeSceneSources(visual, deviceListRef.current.devices, visual.sources.app).kind ===
+            'refused'
+        )
+          break
+        layoutIntentBefore = intent
+      }
       if (applied) {
         rememberedAppsRef.current = rememberSceneWindowApp(
           rememberedAppsRef.current,
