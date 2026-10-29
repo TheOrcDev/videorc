@@ -1091,6 +1091,7 @@ export function StreamManager({
           buddy={cohostBuddy}
           offOutputsNotice={buddyOffOutputsNotice({
             enabled: cohostEnabled,
+            talk: cohostAutoChat?.talk,
             onAir,
             showOnStream: cohostBuddy.showOnStream,
             showInRecording: cohostBuddy.showInRecording,
