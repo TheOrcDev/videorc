@@ -1,10 +1,11 @@
-// `set_buddy` (plan 209 S13): Buddy Live on or off, its chat posting mode and
-// whether it is on stream, saved exactly as the Stream Manager's commands
-// save them. The save is `cohostEnableRelayPatch`: `enabled` only when it
-// changes, the posting mode merged into the stored block so the templates
-// and cooldowns stay, and never the microphone (listening is the streamer's
-// own choice, with its own disclosure). Turning Buddy on needs Premium and
-// the streamer's Cloud AI consent, which an agent cannot give.
+// `set_buddy` (plan 209 S13, plan 211 D12): Buddy Live on or off, how Buddy
+// talks (`talk`: off, bubble or suggest) and whether it is on stream, saved
+// exactly as the Stream Manager's commands save them. The save is
+// `cohostEnableRelayPatch`: `enabled` only when it changes, the talk mode
+// merged into the stored block so the templates and cooldowns stay, and
+// never the microphone (listening is the streamer's own choice, with its own
+// disclosure). Turning Buddy Live on needs Premium and the streamer's Cloud
+// AI consent, which an agent cannot give; `talk` needs neither.
 
 import { BUDDY_TALK_LABELS, BUDDY_TALK_MODES, buddyTalkLabel } from '@/lib/buddy-auto-chat-view'
 import { BUDDY_CONSENT_OFF_REASON } from '@/lib/buddy-tab-view'
@@ -41,8 +42,10 @@ export const setBuddy: AgentToolExecutor = async (context, args) => {
   if ((on !== undefined || talk !== undefined) && !current) {
     return { ok: false, message: BUDDY_TOOL_COPY.loading }
   }
-  // Turning Buddy on, or choosing how it posts, is Buddy Live: Premium, and
-  // the Cloud AI consent only the streamer can give. Off is always allowed.
+  // Only turning Buddy Live on is gated: Premium, and the Cloud AI consent
+  // only the streamer can give. `talk` takes the Stream Manager control's own
+  // gate (Buddy present, settings loaded) and never Premium: Bubble with the
+  // built-in lines is free (plan 211 D12). Off is always allowed.
   const turningOn = on === true && current?.enabled !== true
   if (turningOn && !buddy.entitled) {
     return { ok: false, message: buddy.entitlementReason ?? BUDDY_TOOL_COPY.premium }
