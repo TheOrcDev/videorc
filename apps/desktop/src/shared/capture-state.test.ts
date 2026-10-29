@@ -11,7 +11,6 @@ import {
   sessionActivity,
   sessionIsReplayOnly,
   sessionOwnsTransport,
-  takeRunning,
   type MainCaptureState
 } from './capture-state'
 
@@ -132,27 +131,5 @@ describe('recordingStateFromPayload', () => {
     expect(captureStateAfterStatusPayload({ state: 'paused' })).toBe('unknown')
     expect(captureStateAfterStatusPayload(null)).toBe('unknown')
     expect(captureStateAfterTransportLoss()).toBe('unknown')
-  })
-})
-
-// 2026-10-28: the chrome ground holds still while a take runs.
-describe('takeRunning', () => {
-  it('is a recording or livestream from starting through stopping', () => {
-    for (const state of ['starting', 'recording', 'streaming', 'stopping'] as const) {
-      expect(takeRunning(state), state).toBe(true)
-    }
-    for (const state of ['idle', 'failed', 'unknown'] as const) {
-      expect(takeRunning(state), state).toBe(false)
-    }
-  })
-
-  it('is never a Clips-only ring, which main reads as idle', () => {
-    const ring = { state: 'recording', replayOnly: true, sessionId: 'ring' }
-    expect(takeRunning(captureStateAfterStatusPayload(ring))).toBe(false)
-    expect(takeRunning(captureStateAfterStatusPayload({ ...ring, replayOnly: false }))).toBe(true)
-  })
-
-  it('is no take after a lost socket, so the ground never holds still forever', () => {
-    expect(takeRunning(captureStateAfterTransportLoss())).toBe(false)
   })
 })

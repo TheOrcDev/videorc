@@ -100,17 +100,6 @@ export function sessionOwnsTransport(status: {
   )
 }
 
-/**
- * Whether a take is running, for the chrome ground's drift (2026-10-28): a
- * recording or a livestream, from starting through stopping. A buffer-only
- * Clips ring already reads idle here, as everywhere in main, and an unknown
- * state is no take: after a lost socket the ground would otherwise hold still
- * forever.
- */
-export function takeRunning(state: MainCaptureState): boolean {
-  return state !== 'unknown' && isActiveRecordingState(state)
-}
-
 /** A malformed status is not evidence of idleness. Fail closed until a valid
  * backend status arrives. */
 export function captureStateAfterStatusPayload(payload: unknown): MainCaptureState {

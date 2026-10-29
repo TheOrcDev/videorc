@@ -254,7 +254,6 @@ const api: VideorcApi = {
   onBuddyDeepLink: (callback) => subscribe('buddy:deep-link', callback),
   onShortcutModifier: (callback) => subscribe('shortcut:modifier', callback),
   onWindowVisible: (callback) => subscribe('window:visible', callback),
-  onTakeRunning: (callback) => subscribe('session:take-running', callback),
   onBackendConnection: (callback) => subscribe('backend:connection', callback),
   onBackendLifecycle: (callback) => subscribe('backend:lifecycle', callback),
   onBackendLog: (callback) => subscribe('backend:log', callback),
