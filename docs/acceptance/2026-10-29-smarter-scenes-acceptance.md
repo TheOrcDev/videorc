@@ -135,11 +135,16 @@ screen pressed is the owed check.
 
 ## Smoke notes worth knowing
 
-- The default Clips ring (R2) re-arms itself as a buffer-only session after
-  a session that carried `replay`, and restarts on every scene change while
-  it runs. A running session pins the sources, so the smoke turns Clips off
-  again through the Output switch's path and stops the ring's session before
-  the display pick.
+- The Clips ring does not re-arm after a session that carried `replay` while
+  the Output switch is off: a repro on the plan's base (`4f68c500`) and on
+  this branch (a record-only session started over the wire with `replay`,
+  stopped, then watched for 25 s) shows no buffer-only session on either.
+  Run 8's "ring stayed armed" was the hide step's own session, left running
+  when that step failed before `session.stop`. With the switch on (the
+  default), a scene change restarts the buffer-only ring by plan 181's
+  design (a source change while only the ring runs), which is why the smoke
+  turns Clips off first. The smoke still turns it off again and stops any
+  session before the display pick, which also covers a failed hide step.
 - `__videorcSmokeSelectFirstScreen` (the `select-screen-device` smoke
   command) keeps the previous scene's `app` on the working sources; the real
   Screen picker drops it. The follower ignores it with no saved scene on,
