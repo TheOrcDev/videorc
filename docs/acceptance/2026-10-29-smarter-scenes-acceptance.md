@@ -149,8 +149,12 @@ screen pressed is the owed check.
   1.3 s after the app printed its ready line; a scene applied before that is
   refused with "Fixture Beta isn't open", which is the plan's "waits for the
   app's next window".
-- D3's auto-save did not carry Beta's freeform edit into the saved scene
-  within 3 s on any run; the smoke saves explicitly and says so in its log.
+- Runs 8 to 10 saw D3's auto-save never carry Beta's freeform edit, and the
+  smoke saved explicitly. That was the smoke's edit, not the product: it sent
+  the placement with a layout preset and no `keepScene`, which is a switch to
+  a built-in layout and leaves the saved scene by design (D3). The smoke now
+  edits as the Scene page's Freeform entry does and fails if the scene does
+  not carry the edit; a provider test covers the app-scene case.
 
 ## Verification results
 
