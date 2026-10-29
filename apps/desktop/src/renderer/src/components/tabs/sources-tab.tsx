@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useStudioCore, useStudioPreview } from '@/hooks/use-studio'
 import { sourcesPageDescription } from '@/lib/platform-copy'
-import { screenShareNeedsAsking } from '@/lib/source-status'
+import { screenShareNeedsAsking } from '@/lib/screen-share-recovery'
 
 // The single home for every capture device (UI rewrite plan V1/V2,
 // 2026-06-10). Plan 173 rebuilt it as the Config-grid page `page.tsx` names:

@@ -5,12 +5,9 @@ import {
   selectedDeviceStatus,
   systemAudioStatus,
   unknownDeviceWarnings,
-  SCREEN_SHARE_DIALOG_LOST_MESSAGE,
   SCREEN_SHARE_DIALOG_PENDING_MESSAGE,
-  screenShareNeedsAsking,
   videoSourceStatus
 } from '@/lib/source-status'
-import type { PreviewScreenState } from '@/lib/backend'
 
 // Plan 173: one status vocabulary for the four Sources rows.
 
@@ -124,37 +121,6 @@ describe('videoSourceStatus', () => {
         preview: { state: 'starting', message: 'Starting screen capture.' }
       })
     ).toEqual({ label: 'Starting', tone: 'warn' })
-  })
-
-  it('says a Linux share dialog closed unexpectedly, and how to ask again', () => {
-    expect(
-      videoSourceStatus({
-        ...base,
-        kind: 'screen',
-        preview: { state: 'permission-needed', message: SCREEN_SHARE_DIALOG_LOST_MESSAGE }
-      })
-    ).toEqual({
-      label: 'Not shared',
-      tone: 'warn',
-      hint: 'The share dialog closed unexpectedly. Select Refresh to choose your screen again.'
-    })
-    expect(
-      videoSourceStatus({ ...base, kind: 'screen', preview: { state: 'permission-needed' } })
-    ).toEqual({ label: 'Needs permission', tone: 'warn' })
-  })
-
-  it('has Refresh ask again only for a portal share that is not live or waiting', () => {
-    const portal = (state: PreviewScreenState | undefined, selectedId = 'screen:portal:monitor') =>
-      screenShareNeedsAsking({ selectedId, state })
-    expect(portal('permission-needed')).toBe(true)
-    expect(portal('source-missing')).toBe(true)
-    expect(portal('failed')).toBe(true)
-    expect(portal('permission-needed', 'window:portal:window')).toBe(true)
-    expect(portal('live')).toBe(false)
-    expect(portal('starting')).toBe(false)
-    // macOS and Windows permission prompts are the OS's, never re-asked here.
-    expect(portal('permission-needed', 'screen:screencapturekit:1')).toBe(false)
-    expect(screenShareNeedsAsking({ selectedId: undefined, state: 'source-missing' })).toBe(false)
   })
 
   it('says Starting, then Failed with a retry hint, never the raw backend message', () => {

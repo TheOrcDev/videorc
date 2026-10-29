@@ -568,6 +568,14 @@ function showLiveOutputNews(event: HealthEvent): void {
       description: event.message,
       duration: 20_000
     })
+  } else if (event.code === 'disk-space-low') {
+    // Retest 154 A5: plan 200 C5's low-space notice reached only Diagnostics,
+    // and the take then died on a full disk with no warning at Record.
+    toast.warning('Recording space is low', {
+      id: 'disk-space-low',
+      description: event.message,
+      duration: 20_000
+    })
   }
 }
 

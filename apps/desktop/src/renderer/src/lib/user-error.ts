@@ -56,6 +56,12 @@ const OFFLINE_RAW = [
   /^Couldn't send the "[^"]+" request/
 ]
 const UNKNOWN_OUTCOME = /its outcome is unknown\.$/
+// SecurePersistenceCodec's refusal: safeStorage has no OS store to seal
+// folder grants or sign-in with (on Linux, no keyring answered).
+const SECURE_STORAGE_UNAVAILABLE = /^Protected desktop persistence is unavailable\.$/
+/** The sentence for that refusal. */
+export const SECURE_STORAGE_REASON =
+  "Videorc couldn't reach your system keyring to save this. Make sure a keyring is running and unlocked, then try again."
 
 const BUSY_REASON = "Videorc was busy and didn't do it. Try again in a moment."
 
@@ -150,6 +156,9 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
   }
   if (code && KNOWN_CODES[code]) {
     return shape('known', KNOWN_CODES[code], WARNING_CODES.has(code) ? 'warning' : 'error')
+  }
+  if (SECURE_STORAGE_UNAVAILABLE.test(raw)) {
+    return shape('known', SECURE_STORAGE_REASON, 'error')
   }
   if (UNKNOWN_OUTCOME.test(raw)) {
     return shape('known', KNOWN_CODES['request-outcome-unknown'], 'error')
