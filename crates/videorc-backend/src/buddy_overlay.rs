@@ -181,11 +181,13 @@ impl BuddyOverlayState {
     }
 
     /// Lines waiting for the bubble.
+    #[cfg(test)]
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }
 
     /// Lines dropped this session.
+    #[cfg(test)]
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
@@ -604,6 +606,7 @@ enum Offered {
 }
 
 /// Lines waiting for the bubble (the queue's length).
+#[cfg(test)]
 pub async fn waiting_lines(app: &AppState) -> usize {
     app.buddy_overlay_state.lock().await.waiting()
 }
