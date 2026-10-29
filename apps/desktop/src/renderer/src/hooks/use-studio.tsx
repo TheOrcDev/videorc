@@ -12783,6 +12783,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       textSize: captureConfig.captions.textSize,
       position: captureConfig.captions.position
     })
+    // Keep the existing narrow deps; adding captureConfig would re-push on every config edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     client,
     captionLines,
