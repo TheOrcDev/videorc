@@ -13,6 +13,7 @@ import {
   outputLabel,
   outputVerdict,
   performanceCheckCeiling,
+  performanceCheckMayAutoRun,
   performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from './performance-check'
@@ -638,5 +639,43 @@ describe('Go Live headroom on a CPU compositor (retest 153)', () => {
         state: fresh(ogre)
       })
     ).toMatchObject({ kind: 'step-down', reason: 'go-live-headroom' })
+  })
+})
+
+describe('performanceCheckMayAutoRun', () => {
+  const nothingMeasured = { running: false, stale: false }
+  const idle = { state: 'idle' }
+
+  it('runs on an idle launch with nothing measured and capture ready', () => {
+    expect(performanceCheckMayAutoRun(nothingMeasured, idle, true)).toBe(true)
+    expect(performanceCheckMayAutoRun(undefined, idle, true)).toBe(false)
+    expect(performanceCheckMayAutoRun({ running: true, stale: false }, idle, true)).toBe(false)
+  })
+
+  it('counts the replay-only Clips ring as idle', () => {
+    for (const state of ['starting', 'recording', 'stopping']) {
+      expect(performanceCheckMayAutoRun(nothingMeasured, { state, replayOnly: true }, true)).toBe(
+        true
+      )
+    }
+  })
+
+  it('never runs over a real recording or livestream', () => {
+    for (const state of ['starting', 'recording', 'streaming', 'stopping']) {
+      expect(performanceCheckMayAutoRun(nothingMeasured, { state }, true)).toBe(false)
+    }
+  })
+
+  it('waits for capture (a Linux portal screen not chosen yet measures nothing)', () => {
+    expect(performanceCheckMayAutoRun(nothingMeasured, idle, false)).toBe(false)
+  })
+
+  it('does not run once a verdict was recorded', () => {
+    const measured = {
+      running: false,
+      stale: false,
+      result: result([['tutorial-1080p30', 'passed']], 'tutorial-1080p30')
+    }
+    expect(performanceCheckMayAutoRun(measured, idle, true)).toBe(false)
   })
 })

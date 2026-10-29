@@ -221,8 +221,8 @@ import {
   isShippedDefaultOutput,
   isUntrustedPerformanceCheckResult,
   performanceCheckCeiling,
-  performanceCheckTooHeavyToast,
-  shouldRunPerformanceCheck
+  performanceCheckMayAutoRun,
+  performanceCheckTooHeavyToast
 } from '@/lib/performance-check'
 import type * as GoLiveOutput from '@/lib/go-live-output'
 import {
@@ -2529,6 +2529,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // canvas orientation, so the reconcile does not re-arm it in the old
   // orientation before the new layout lands.
   const replayReconcileHoldRef = useRef(false)
+  // A performance check needs an idle studio: the Clips ring steps aside
+  // from its request until its completed event.
+  const performanceCheckHoldRef = useRef(false)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
   // Plan 069: the newest system-audio health issue, kept apart from the
@@ -16269,7 +16272,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         startPending:
           sessionStartInFlightRef.current !== null || sessionStartLifecycleActiveRef.current,
         stopPending: stopSessionInFlightPromiseRef.current !== null,
-        replayStartInFlight: replayStartInFlightRef.current || replayReconcileHoldRef.current,
+        replayStartInFlight:
+          replayStartInFlightRef.current ||
+          replayReconcileHoldRef.current ||
+          performanceCheckHoldRef.current,
         failedStarts: replayFailedStartsRef.current
       })
       if (action === 'start') void startReplayBuffer()
@@ -16526,8 +16532,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [])
 
-  const runPerformanceCheck = useCallback(async () => {
-    if (!client) {
+  const releasePerformanceCheckHold = useCallback(() => {
+    performanceCheckHoldRef.current = false
+    scheduleReplayReconcile()
+  }, [scheduleReplayReconcile])
+
+  const requestPerformanceCheck = useCallback(async () => {
+    if (!client || performanceCheckHoldRef.current) {
       return
     }
     const display = {
@@ -16539,13 +16550,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const separateFiles =
       separateSourceRecordingsForSession(captureConfigRef.current, runtimeInfo?.platform) !==
       undefined
-    setPerformanceCheck(
-      await client.requestTyped(
-        'performance.check.run',
-        performanceCheckCeiling(captureConfigRef.current.video, display, separateFiles)
+    performanceCheckHoldRef.current = true
+    try {
+      if (sessionIsReplayOnly(recordingRef.current)) {
+        await stopReplayBuffer()
+        await waitForRecordingIdle(recordingRef, 5_000)
+      }
+      setPerformanceCheck(
+        await client.requestTyped(
+          'performance.check.run',
+          performanceCheckCeiling(captureConfigRef.current.video, display, separateFiles)
+        )
       )
-    )
-  }, [client, runtimeInfo?.platform])
+    } catch (error) {
+      releasePerformanceCheckHold()
+      throw error
+    }
+  }, [client, releasePerformanceCheckHold, runtimeInfo?.platform, stopReplayBuffer])
+
+  // "Check this computer": a refusal is said, never an unhandled rejection.
+  const runPerformanceCheck = useCallback(
+    () =>
+      requestPerformanceCheck().catch((error: unknown) =>
+        reportError(error, { action: 'check', object: 'this computer' })
+      ),
+    [reportError, requestPerformanceCheck]
+  )
 
   useEffect(() => {
     if (!client || wsStatus !== 'connected') {
@@ -16555,6 +16585,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client.on('performance.check.progress', setPerformanceCheckProgress),
       client.on('performance.check.completed', (next) => {
         commitPerformanceCheck(next)
+        if (performanceCheckHoldRef.current) releasePerformanceCheckHold()
         // News the interface does not already show: a chosen output this
         // computer measurably cannot hold. Said once per finished check.
         const chosen = captureConfigRef.current.video
@@ -16580,8 +16611,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .requestTyped('encoder.preference.get')
       .then(setEncoderPreferenceState)
       .catch(() => undefined)
-    return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
-  }, [client, commitPerformanceCheck, wsStatus])
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe())
+      // A lost connection never sends the completed event.
+      if (performanceCheckHoldRef.current) releasePerformanceCheckHold()
+    }
+  }, [client, commitPerformanceCheck, releasePerformanceCheckHold, wsStatus])
 
   // Plan 090 C5: which encoder the Windows fallback path may use. A change
   // invalidates both things measured under the old choice: the output check
@@ -16605,21 +16640,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Measure once per machine, after the app has settled. Packaged builds only:
   // dev sessions and smokes start captures immediately and use the button.
+  // The Clips ring counts as idle; capture must be ready (a Linux portal
+  // screen chosen), or the run measures nothing.
+  const performanceCheckMayRun = performanceCheckMayAutoRun(
+    performanceCheck,
+    recording,
+    !replayGrantWait
+  )
   useEffect(() => {
-    if (
-      performanceCheckAutoRunRef.current ||
-      !runtimeInfo?.isPackaged ||
-      recording.state !== 'idle' ||
-      !shouldRunPerformanceCheck(performanceCheck)
-    ) {
+    if (performanceCheckAutoRunRef.current || !runtimeInfo?.isPackaged || !performanceCheckMayRun) {
       return
     }
     const timer = window.setTimeout(() => {
       performanceCheckAutoRunRef.current = true
-      void runPerformanceCheck().catch(() => undefined)
+      void requestPerformanceCheck().catch(() => undefined)
     }, PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS)
     return () => window.clearTimeout(timer)
-  }, [performanceCheck, recording.state, runPerformanceCheck, runtimeInfo?.isPackaged])
+  }, [performanceCheckMayRun, requestPerformanceCheck, runtimeInfo?.isPackaged])
 
   const patchStreamingTarget = useCallback(
     (targetId: string, patch: Partial<StreamTargetSettings>) => {
