@@ -41,7 +41,9 @@
 //       pixels there; the camera's corner; set_scene_item on Buddy.
 //   B6. Chat on the fake providers: a post is seen (echoSends), a Twitch
 //       removal runs, a YouTube removal waits for the streamer's card.
-//   B7. buddy_say reaches the bubble; set_buddy round trips or refuses.
+//   B7. buddy_say reaches the bubble and is refused off the picture; set_buddy
+//       on/off round trips or refuses, onStream and talk round trip, and the
+//       old chatMode is refused in words (plan 211 D12).
 //   B8. Prepare: update_stream_info, set_destinations, schedule_stream,
 //       get_settings and update_settings.
 //   B9. Library: rename, get_recording with includeTranscript, export,
