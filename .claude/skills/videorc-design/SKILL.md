@@ -56,7 +56,8 @@ drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
    LED: red for record, live, and destructive; green for healthy; amber for
    attention.
    Never tint panels, rows, or text decoratively, and never colour a status
-   word: the tone rides on an icon, a dot, a chip or an Alert.
+   word: the tone rides on an icon, a dot, a chip or an Alert. The one row
+   exception is the member hue as a member row's chrome edge (plan 0011).
 5. **Keyboard-first, quietly.** Primary actions show their shortcut as a key
    chip. Global hints live in the status bar, not on every surface.
 6. **One primitive per job.** Confirmations, locks, disabled reasons,
@@ -94,6 +95,20 @@ for the owner, not a design choice.
       recording or livestream runs (a Clips-only ring is not a take), and
       under Reduce Motion.
     - No second image, no shader, no zoom.
+  - **Stream Manager's highlights and members are chrome** (2026-10-28,
+    plan 0011). The owner asked for the highlights and every member's entry
+    to look much stronger, in the Welcome screen's Liquid Chrome.
+    - The row on stream (chat, Studio chat and Activity) is a
+      `chrome-row-live` plate with a polished 2px edge, and its On stream
+      chip is the `chrome` Badge (chrome-fill, the green status dot kept).
+    - A member's chat row and a sub or membership in Activity is a
+      `chrome-row-member` plate at half strength, with the member hue only
+      as its 2px edge. Its Member chip is the `plate` Badge.
+    - One background per row: on stream, then paid, then the Buddy
+      pull-up, then member. A member's Super Chat still reads as paid.
+    - Static plates on the theme's solid, never on the bare ground: no
+      motion, no blur. Screens take the class from
+      `components/ui/chrome-row.ts`.
   - **Record and Stop are a red LED** (D8): the `record` Button, unlit at
     idle and lit while a recording or livestream runs. Go Live… is the
     chrome primary. Delete, Remove and every other destructive action keep

@@ -74,7 +74,7 @@ const GRADIENT_ALLOWLIST = new Set([
   // Caption style previews: stand-ins for the stream behind a caption.
   'src/components/captions/caption-preview.tsx'
 ])
-const CHROME_MATERIAL = /\bchrome-(?:fill|plate|bead|bead-ink|led)\b/
+const CHROME_MATERIAL = /\bchrome-(?:fill|plate|bead|bead-ink|led|row-live|row-member)\b/
 const CHROME_PRIMITIVES_OUTSIDE_UI = new Set([
   'src/components/sidebar.tsx',
   'src/components/media-card.tsx'
@@ -344,6 +344,10 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
       ).not.toEqual([])
     }
     expect(CHROME_MATERIAL.test('data-chrome-ground')).toBe(false)
+    // The chrome rows (plan 0011) are materials too: screens take them from
+    // components/ui/chrome-row.ts.
+    expect(CHROME_MATERIAL.test("'chrome-row-member'")).toBe(true)
+    expect(CHROME_MATERIAL.test("'chrome-row-live'")).toBe(true)
   })
 
   it('paints floating surfaces with glass-float, never the popover coat', () => {

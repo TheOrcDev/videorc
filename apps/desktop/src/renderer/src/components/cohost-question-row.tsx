@@ -115,7 +115,7 @@ export function CohostQuestionRow({
           <TooltipContent>You're talking about this question</TooltipContent>
         </Tooltip>
       ) : null}
-      {onStream ? <Badge variant="success">On stream</Badge> : null}
+      {onStream ? <Badge variant="chrome">On stream</Badge> : null}
       <CommandShortcut className="tabular-nums">{age}</CommandShortcut>
     </CommandItem>
   )

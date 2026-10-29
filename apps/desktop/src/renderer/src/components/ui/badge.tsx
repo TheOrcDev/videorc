@@ -27,6 +27,11 @@ const badgeVariants = cva(
         // Emphasis: tinted glass for what must interrupt.
         destructive: 'glass-chip-tinted tone-destructive',
         live: 'glass-chip-tinted tone-live',
+        // Chrome (plan 0011): a highlight's On stream is a polished chrome
+        // chip that keeps its green status dot; a member's chip is a chrome
+        // plate. No border, so the light and shade reach the edge.
+        chrome: `border-transparent chrome-fill tone-success ${STATUS_DOT}`,
+        plate: 'border-transparent chrome-plate text-foreground',
         ghost: 'border-transparent text-muted-foreground'
       }
     },

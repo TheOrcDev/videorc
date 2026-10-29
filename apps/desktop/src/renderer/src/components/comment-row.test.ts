@@ -8,6 +8,7 @@ import {
   RemovalStatus,
   commentCanHighlight,
   commentHighlightPresentationForMessage,
+  commentRowClass,
   commentRowDescription,
   commentRowMenu,
   formatCommentTime,
@@ -249,20 +250,33 @@ describe('CommentRow: Talking about this', () => {
   })
 })
 
+describe('commentRowClass (plan 0011)', () => {
+  it('gives on stream the chrome plate over every tint, and each tint its own class', () => {
+    for (const tint of ['paid', 'spotlight', 'member', null] as const) {
+      expect(commentRowClass(tint, true)).toBe('chrome-row-live')
+    }
+    expect(commentRowClass('member', false)).toBe('chrome-row-member')
+    expect(commentRowClass('paid', false)).toBe('bg-warning/10 ring-1 ring-warning/30')
+    expect(commentRowClass('spotlight', false)).toBe('bg-accent')
+    expect(commentRowClass(null, false)).toBeNull()
+  })
+})
+
 describe('CommentRow: member tint (plan 154)', () => {
   const member = (overrides: Partial<LiveChatMessage> = {}): LiveChatMessage =>
     message({ authorRoles: ['member'], ...overrides })
 
-  it("tints a member's row under both shells and keeps the Member chip", () => {
+  it("plates a member's row under both shells and keeps the Member chip in chrome", () => {
     for (const onHighlight of [() => undefined, undefined]) {
       const markup = renderToStaticMarkup(
         createElement(CommentRow, { message: member(), onHighlight })
       )
-      expect(markup).toContain('bg-member/8')
+      expect(markup).toContain('chrome-row-member')
       expect(markup).toContain('data-member="true"')
       expect(markup).toContain('data-row-tint="member"')
       expect(markup).toContain('data-testid="comment-role"')
-      expect(markup).toContain('>Member<')
+      expect(markup).toMatch(/data-variant="plate"[^>]*>Member</)
+      expect(markup).not.toContain('chrome-row-live')
       expect(markup).not.toContain('bg-accent')
       expect(markup).not.toContain('bg-warning/10')
     }
@@ -277,7 +291,7 @@ describe('CommentRow: member tint (plan 154)', () => {
     )
     expect(paid).toContain('bg-warning/10 ring-1 ring-warning/30')
     expect(paid).toContain('data-row-tint="paid"')
-    expect(paid).not.toContain('bg-member/8')
+    expect(paid).not.toContain('chrome-row-member')
     expect(paid).toContain('>Member<')
 
     const spotlight = renderToStaticMarkup(
@@ -289,7 +303,24 @@ describe('CommentRow: member tint (plan 154)', () => {
     )
     expect(spotlight).toContain('bg-accent')
     expect(spotlight).toContain('data-row-tint="spotlight"')
-    expect(spotlight).not.toContain('bg-member/8')
+    expect(spotlight).not.toContain('chrome-row-member')
+  })
+
+  it('plates the on-stream row under both shells, member or not (plan 0011)', () => {
+    for (const onHighlight of [() => undefined, undefined]) {
+      for (const author of [message(), member()]) {
+        const markup = renderToStaticMarkup(
+          createElement(CommentRow, { highlight: { phase: 'live' }, message: author, onHighlight })
+        )
+        expect(markup).toContain('chrome-row-live')
+        expect(markup).not.toContain('chrome-row-member')
+        expect(markup).not.toContain('data-variant="secondary"')
+      }
+    }
+    const idle = renderToStaticMarkup(
+      createElement(CommentRow, { message: message(), onHighlight: () => undefined })
+    )
+    expect(idle).not.toContain('chrome-row-live')
   })
 
   it('paints no tint on stream, on a removed message, or without the role', () => {
@@ -301,14 +332,17 @@ describe('CommentRow: member tint (plan 154)', () => {
         onHighlight: () => undefined
       })
     )
-    expect(onStream).not.toContain('bg-member/8')
+    expect(onStream).not.toContain('chrome-row-member')
     expect(onStream).not.toContain('bg-accent')
     expect(onStream).not.toContain('data-row-tint')
+    // On stream is the one chrome plate a row wears, and its chip is chrome.
+    expect(onStream.match(/chrome-row-live/g)).toHaveLength(1)
+    expect(onStream).toMatch(/data-variant="chrome"[^>]*>On stream</)
 
     const removed = renderToStaticMarkup(
       createElement(CommentRow, { message: member({ isDeleted: true }) })
     )
-    expect(removed).not.toContain('bg-member/8')
+    expect(removed).not.toContain('chrome-row-member')
     expect(removed).not.toContain('data-member')
 
     const viewer = renderToStaticMarkup(createElement(CommentRow, { message: message() }))
