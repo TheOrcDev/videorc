@@ -17,7 +17,12 @@ export const BUDDY_TOOL_COPY = {
   unavailable: "Buddy isn't available in this Studio.",
   loading: 'Loading your Buddy settings… Try again in a moment.',
   premium: 'Buddy requires Videorc Premium.',
-  consent: BUDDY_CONSENT_OFF_REASON
+  consent: BUDDY_CONSENT_OFF_REASON,
+  // Plan 211 D12: the old `chatMode` argument. The catalog keeps it as a
+  // string of any value so an agent holding the old schema reads these
+  // sentences instead of a schema error.
+  autoGone: 'Auto is gone: Buddy never posts in chat on its own. Use talk: bubble.',
+  chatMode: 'chatMode is now talk: off, bubble or suggest.'
 } as const
 
 export const setBuddy: AgentToolExecutor = async (context, args) => {
@@ -25,10 +30,7 @@ export const setBuddy: AgentToolExecutor = async (context, args) => {
   if ('chatMode' in args) {
     return {
       ok: false,
-      message:
-        args.chatMode === 'auto'
-          ? 'Auto is gone: Buddy never posts in chat on its own. Use talk: bubble.'
-          : 'chatMode is now talk: off, bubble or suggest.'
+      message: args.chatMode === 'auto' ? BUDDY_TOOL_COPY.autoGone : BUDDY_TOOL_COPY.chatMode
     }
   }
   const talk = BUDDY_TALK_MODES.find((mode) => mode === args.talk)
