@@ -204,3 +204,34 @@ server and cleans up its owned modules/processes. That is fixture evidence
 only: the complete app smoke, physical microphones, recording matrix, latency
 and cross-platform regression gates have not passed yet. Camera and screen
 replacement remain unsupported.
+
+### Web and storage checkpoint, 2026-10-30
+
+Web companion: https://github.com/TheOrcDev/videorc-web/pull/101
+(`feat/linux-beta-downloads`, isolated from the original web checkout).
+It adds an explicit, independently disabled Beta state; exact channel/source
+manifest validation; public-stage plus pinned PASS requirements; stable Beta
+manifest configuration; truthful download/guide copy; public Linux update routes
+that validate the selected origin's accepted manifest; and a separate
+operator-bearer Beta pilot streaming proxy with range validation. Alpha remains
+the default. No production configuration or deployment changed. The website
+checks manifest claims; protected publication still must verify full evidence
+and exact feed/artifact bytes. Packaged pilot enrollment and real update/rollback
+rehearsals remain open.
+
+Web typecheck and lint passed (five existing lint warnings); the focused
+cross-platform download/update suite passed 115 tests, and the final Beta/card
+delta passed 17. The full web suite passed 1,131 tests, with four skipped and no
+failures. Skips are not acceptance evidence. The direct framework production
+build passed with a clean environment, without database migrations or deployment
+credentials. The web PR is ready for review; this does not enable Beta.
+
+Candidate planning now also parses the actual `release.json` file and rejects
+any difference from the manifest whose identity was validated. A correctly
+hashed but semantically different manifest cannot be uploaded as that candidate.
+Sixty focused release tests pass, including source/hash/stage/acceptance drift
+and harmless JSON ordering. Runtime caption/microphone drafts remain uncommitted
+until app gates run; the optimized debug backend is still compiling.
+
+The current full desktop Node suite also passed all 2,783 tests with zero
+failures/skips, using the new web checkout for cross-repository contracts.

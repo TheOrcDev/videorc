@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 import {
   assertIsolatedLinuxObjectKey,
@@ -203,6 +204,15 @@ export async function buildLinuxCandidateStoragePlan({
   releaseDir
 }) {
   assertPendingLinuxCandidateManifest(manifest)
+  // The upload must carry the same identity we validate below. In particular,
+  // hashing a different release.json successfully cannot validate its claims.
+  const storedManifest = JSON.parse(await requiredText(manifestPath, 'candidate manifest'))
+  if (!isDeepStrictEqual(storedManifest, manifest)) {
+    throw new LinuxReleaseCandidateError(
+      'candidate-manifest-mismatch',
+      'Candidate release.json bytes describe a different manifest from the validated identity.'
+    )
+  }
   const feedYml = await requiredText(
     join(releaseDir, LINUX_UPDATE_FEED_NAME),
     LINUX_UPDATE_FEED_NAME

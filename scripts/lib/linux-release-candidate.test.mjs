@@ -76,6 +76,28 @@ async function seed() {
 }
 
 describe('Linux Alpha candidate storage', () => {
+  it('refuses release.json bytes that disagree with the validated candidate identity', async () => {
+    const seeded = await seed()
+    for (const override of [
+      { sourceCommit: 'c'.repeat(40) },
+      { sha256: 'c'.repeat(64) },
+      { acceptanceStatus: 'pass' },
+      { stage: 'public' }
+    ]) {
+      await writeFile(seeded.manifestPath, JSON.stringify({ ...seeded.manifest, ...override }))
+      await assert.rejects(buildLinuxCandidateStoragePlan(seeded), {
+        code: 'candidate-manifest-mismatch'
+      })
+    }
+    // JSON field order and whitespace do not change the represented identity.
+    await writeFile(
+      seeded.manifestPath,
+      JSON.stringify(Object.fromEntries(Object.entries(seeded.manifest).reverse()), null, 2)
+    )
+    const plan = await buildLinuxCandidateStoragePlan(seeded)
+    assert.equal(plan.sourceCommit, seeded.manifest.sourceCommit)
+  })
+
   it('plans only isolated linux-alpha candidate keys', async () => {
     const seeded = await seed()
     const plan = await buildLinuxCandidateStoragePlan(seeded)
