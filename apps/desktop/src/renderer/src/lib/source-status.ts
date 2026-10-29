@@ -47,33 +47,6 @@ const SWITCHING: SourceStatus = { label: 'Switching', tone: 'warn' }
 export const SCREEN_SHARE_DIALOG_PENDING_MESSAGE =
   'Waiting for you to choose a screen in the share dialog.'
 
-/**
- * The Permission needed message the backend publishes when a Linux portal
- * share dialog closed without an answer (the portal crashed or restarted;
- * `PortalCaptureState::PortalLost` in linux_portal_capture.rs).
- */
-export const SCREEN_SHARE_DIALOG_LOST_MESSAGE =
-  'The screen share dialog closed unexpectedly. Choose your screen again.'
-
-/**
- * Linux portal sources (`screen:portal:monitor`, `window:portal:window`) ask
- * the person through a share dialog. A selected one that is neither live nor
- * waiting on its dialog (cancelled, the dialog closed unexpectedly, the portal
- * did not answer) is asked again by Sources → Refresh: re-picking the same row
- * changes nothing, so Refresh is the way back.
- */
-export function screenShareNeedsAsking(input: {
-  /** The selected screen or window id. */
-  selectedId: string | undefined
-  state: PreviewScreenState | undefined
-}): boolean {
-  return (
-    /^(screen|window):portal:/.test(input.selectedId ?? '') &&
-    input.state !== 'live' &&
-    input.state !== 'starting'
-  )
-}
-
 function notFound(kind: 'screen' | 'camera' | 'microphone'): SourceStatus {
   return {
     label: 'Not found',
@@ -120,17 +93,6 @@ export function videoSourceStatus(input: {
     }
     // Producing frames reads "Receiving" (plan 174 D4): "On air" is the livestream's alone.
     return { label: SOURCE_RECEIVING_LABEL, tone: 'good' }
-  }
-  // Linux portal: no OS permission is missing, the share dialog went away.
-  if (
-    state === 'permission-needed' &&
-    input.preview?.message === SCREEN_SHARE_DIALOG_LOST_MESSAGE
-  ) {
-    return {
-      label: 'Not shared',
-      tone: 'warn',
-      hint: 'The share dialog closed unexpectedly. Select Refresh to choose your screen again.'
-    }
   }
   // The page's permission alert carries the fix (plan 174 C-8), so the chip
   // adds no second line.
