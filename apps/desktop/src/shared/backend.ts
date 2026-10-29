@@ -6947,7 +6947,7 @@ export interface CohostReportPromises {
 export interface CohostReportGreetingSkips {
   /** Nothing to say: every line for the kind was switched off. */
   noLine?: number
-  /** Chat posting was Off. */
+  /** Buddy was set to Off ("{name} talks: Off", plan 211; "Chat posting" before). */
   modeOff?: number
   /** Too old to greet by the time it arrived. */
   stale?: number
