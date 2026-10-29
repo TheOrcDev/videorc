@@ -314,4 +314,32 @@ describe('the agent tool catalog (plan 209 S1)', () => {
     ])
     expect(Object.keys(audio.properties.systemAudio!.properties)).toEqual(['on', 'gainDb'])
   })
+
+  // Plan 211 D12: Buddy's tools follow the talk mode. `set_buddy` takes and
+  // answers `talk`; the old `chatMode` stays in the input schema (any value)
+  // only so an agent holding the old schema reaches the Studio's sentence
+  // instead of a schema error. `buddy_say` answers `{ bubble }` alone.
+  it('Buddy tools take talk, not a chat mode (plan 211 D12)', () => {
+    const talk = ['off', 'bubble', 'suggest']
+    const setBuddy = agentTool('set_buddy')!
+    const input = setBuddy.inputSchema as {
+      properties: Record<string, { enum?: string[] }>
+    }
+    const output = setBuddy.outputSchema as {
+      properties: Record<string, { enum?: string[] }>
+      required: string[]
+    }
+    expect(input.properties.talk!.enum).toEqual(talk)
+    expect(input.properties.chatMode!.enum).toBeUndefined()
+    expect(output.properties.talk!.enum).toEqual(talk)
+    expect(output.required).toEqual(['on', 'talk', 'onStream'])
+    expect(validateAgentToolArguments(setBuddy, { talk: 'auto' })).toMatch(/must be one of/)
+    expect(validateAgentToolArguments(setBuddy, { chatMode: 'auto' })).toBeNull()
+    const said = agentTool('buddy_say')!.outputSchema as {
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(Object.keys(said.properties)).toEqual(['bubble'])
+    expect(said.required).toEqual(['bubble'])
+  })
 })

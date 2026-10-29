@@ -501,6 +501,7 @@ class StudioBackend {
       reactions: {}
     },
     autoChat: {
+      talk: 'off',
       mode: 'off',
       greetings: { enabled: false, templates: [] },
       answers: { enabled: false, cooldownSeconds: 20 },
@@ -10213,18 +10214,18 @@ describe('real StudioProvider lifecycle', () => {
     const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
       await mountBuddyLiveProvider('1')
 
-    // Buddy on without listening (a mode change the window sent no `listen` for).
+    // Buddy on without listening (a talk change the window sent no `listen` for).
     await act(async () => {
       emitApi('onCohostEnableRequest', {
         requestId: 'mode-1',
         enabled: true,
-        autoChat: { mode: 'suggest' }
+        autoChat: { talk: 'suggest' }
       })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
     expect(settingsWrites().at(-1)).toEqual({
       enabled: true,
-      autoChat: expect.objectContaining({ mode: 'suggest' })
+      autoChat: expect.objectContaining({ talk: 'suggest' })
     })
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
 
@@ -10237,9 +10238,12 @@ describe('real StudioProvider lifecycle', () => {
       })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
+    // Plan 211 D3: `talk` is the mode; the legacy `mode` rides along as
+    // stored and the backend re-projects it.
     expect(settingsWrites().at(-1)).toEqual({
       autoChat: {
-        mode: 'suggest',
+        talk: 'suggest',
+        mode: 'off',
         greetings: { enabled: true, templates: [] },
         answers: { enabled: false, cooldownSeconds: 20 },
         banter: { enabled: false, cooldownSeconds: 240 }

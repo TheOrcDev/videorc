@@ -6347,6 +6347,18 @@ impl Database {
         self.upsert_cohost_report(&CohostSessionReport::post_only(session_id, post))
     }
 
+    /// Plan 211 D11: fold one line Buddy said in its bubble into the
+    /// session's report as it shows, the same way posts land. Same
+    /// session-row rule as `upsert_cohost_report`: `false` when the session
+    /// row is gone.
+    pub fn append_cohost_report_said(
+        &self,
+        session_id: &str,
+        said: crate::protocol::CohostReportSaid,
+    ) -> Result<bool> {
+        self.upsert_cohost_report(&CohostSessionReport::said_only(session_id, said))
+    }
+
     /// Plan 192 D7: add greeting skip counts to the session's report as they
     /// happen, the same way posts land. Nothing is written for empty counts.
     pub fn append_cohost_report_greeting_skips(
@@ -11141,6 +11153,7 @@ mod tests {
             ended_at: ended_at.to_string(),
             segments: 1,
             posts: Vec::new(),
+            said: Vec::new(),
             stream_title: Some("Rust night".to_string()),
             messages_seen: 10,
             shown_on_stream: 1,
@@ -11328,6 +11341,68 @@ mod tests {
                 .append_cohost_report_greeting_skips("nope", expected, at)
                 .unwrap()
         );
+    }
+
+    /// Plan 211 D11: lines Buddy said in its bubble fold into the session's
+    /// report as they show, oldest first, capped at 200 (the oldest go),
+    /// kept once per id, survive the stop-time merge, and a report saved
+    /// without `said` reads and writes unchanged.
+    #[test]
+    fn said_lines_fold_into_the_session_report_as_they_show_and_cap_at_two_hundred() {
+        use crate::protocol::{COHOST_REPORT_SAID_CAP, CohostReportPostSource, CohostReportSaid};
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        let said = |n: usize| CohostReportSaid {
+            id: format!("utt-{n}"),
+            at: format!("2026-10-04T10:{:02}:{:02}Z", n / 60, n % 60),
+            trigger: crate::cohost::CohostUtteranceTriggerKind::Greeting,
+            text: format!("Welcome, Fan{n}!"),
+            source: (n % 2 == 0).then_some(CohostReportPostSource::Line),
+        };
+        for n in 0..=COHOST_REPORT_SAID_CAP {
+            assert!(database.append_cohost_report_said("s-1", said(n)).unwrap());
+        }
+        let report = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(report.said.len(), COHOST_REPORT_SAID_CAP);
+        assert_eq!(report.said[0].id, "utt-1", "the oldest went");
+        assert_eq!(
+            report.said.last().unwrap().id,
+            format!("utt-{COHOST_REPORT_SAID_CAP}")
+        );
+        assert_eq!(report.said[1].source, Some(CohostReportPostSource::Line));
+        assert_eq!(report.segments, 0);
+        assert!(report.posts.is_empty(), "a said line is not a post");
+        // The same line twice is kept once.
+        assert!(
+            database
+                .append_cohost_report_said("s-1", said(COHOST_REPORT_SAID_CAP))
+                .unwrap()
+        );
+        assert_eq!(
+            database
+                .get_cohost_report("s-1")
+                .unwrap()
+                .unwrap()
+                .said
+                .len(),
+            COHOST_REPORT_SAID_CAP
+        );
+        // The stop-time report folds in without clobbering them.
+        let stop = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&stop).unwrap());
+        let merged = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.said.len(), COHOST_REPORT_SAID_CAP);
+        assert_eq!(merged.said[0].id, "utt-1");
+        assert_eq!(merged.segments, 1);
+        // A report saved before `said` reads unchanged and writes no `said`.
+        let stored = serde_json::to_value(&stop).unwrap();
+        assert!(stored.get("said").is_none(), "empty is omitted");
+        let read = CohostSessionReport::from_stored_json(&stored.to_string()).unwrap();
+        assert!(read.said.is_empty());
+        assert_eq!(serde_json::to_value(&read).unwrap(), stored);
+        // A missing session is skipped, not an error.
+        assert!(!database.append_cohost_report_said("nope", said(1)).unwrap());
+        assert_eq!(database.get_cohost_report("nope").unwrap(), None);
     }
 
     #[test]

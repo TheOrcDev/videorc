@@ -362,6 +362,7 @@ import {
 } from '../shared/buddy-assets'
 import type { BuddyDeepLinkNavigation } from '../shared/electron-ipc-contract'
 import { parseBuddyDeepLink, runBuddyDeepLink, type BuddyDeepLink } from './buddy-deep-link'
+import { cohostAutoChatRelayPatch } from './cohost-auto-chat-relay'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -580,7 +581,6 @@ import type {
   CohostActionCommand,
   CohostBuddyActionCommand,
   CohostSessionActionCommand,
-  CohostAutoChatRelayPatch,
   CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostState,
@@ -3390,28 +3390,6 @@ function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId
   ) {
     throw new Error('Chat commands are available only for the selected live session.')
   }
-}
-
-/**
- * The Stream Manager's `autoChat` relay block (plan 164 S-D6): a partial of
- * the mode and the three switches. `undefined` when absent, `false` when
- * malformed, else the validated block.
- */
-function cohostAutoChatRelayPatch(value: unknown): CohostAutoChatRelayPatch | undefined | false {
-  if (value === undefined) return undefined
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const block = value as Record<string, unknown>
-  const patch: CohostAutoChatRelayPatch = {}
-  if (block.mode !== undefined) {
-    if (block.mode !== 'off' && block.mode !== 'suggest' && block.mode !== 'auto') return false
-    patch.mode = block.mode
-  }
-  for (const key of ['greetings', 'answers', 'banter'] as const) {
-    if (block[key] === undefined) continue
-    if (typeof block[key] !== 'boolean') return false
-    patch[key] = block[key]
-  }
-  return patch
 }
 
 function commentsCommandRequestId(value: unknown): string {

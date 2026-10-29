@@ -641,9 +641,10 @@ made it chat first: one thin stats bar and fewer words.
   row widen every row past the pane. Never reintroduce it per call site.
 - **The Buddy pane** has one header: Buddy's identity (the living preview at
   32 px, the name, the bubble while one is up), the Alpha tag, listening,
-  the status and the **Buddy Live** switch. Under it, "Chat posting" is a
-  `SegmentedControl` (Off · Suggest · Auto) with the chosen mode's meaning
-  as a line; it never turns Buddy on. Greetings, Answers and Banter are
+  the status and the **Buddy Live** switch. Under it, "{name} talks" is a
+  `SegmentedControl` (Off · Bubble · Suggest, plan 211) with the chosen
+  value's meaning as a line; it never turns Buddy on, and nothing Buddy
+  does on its own reaches chat. Greetings, Answers and Banter are
   read-only summary chips that link to their one home, Buddy → Chat. The
   footer holds the Say box, the reaction chips and the "{name} on stream"
   switch. Every card that waits on the streamer is a `BuddyCard`.

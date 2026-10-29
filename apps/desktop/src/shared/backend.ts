@@ -5815,7 +5815,17 @@ export interface CohostPersona {
   libraryAvatarId?: BuddyLibraryId
 }
 
-/** The chat posting mode (plan 164 D4). */
+/**
+ * How Buddy talks on its own (plan 211 D1): `off` says nothing, `bubble`
+ * speaks on stream in its bubble and never in chat, `suggest` proposes a
+ * card the streamer clicks to post. The one truth (`autoChat.talk`).
+ */
+export type CohostTalkMode = 'off' | 'bubble' | 'suggest'
+/**
+ * Legacy (plan 211 D3): the `autoChat.mode` apps from before plan 211 read.
+ * The backend writes it as the projection of `talk` (Bubble → `off`, never
+ * `auto`). The renderer never reads it; it only rides along in the block.
+ */
 export type CohostAutoChatMode = 'off' | 'suggest' | 'auto'
 /** The activity kinds a greeting template answers (plan 164). */
 export type CohostActivityTemplateKind =
@@ -5914,8 +5924,13 @@ export interface CohostGreetings {
   welcomes?: CohostGreetingWelcomes
 }
 
-/** Automatic chat (plan 164 D5): one mode, three behaviours. */
+/** Automatic chat (plan 164 D5): one talk mode, three behaviours. */
 export interface CohostAutoChat {
+  /** Plan 211 D3: how Buddy talks. The backend always returns it after
+   * normalization; the renderer reads and writes only this field. */
+  talk: CohostTalkMode
+  /** Legacy, for older apps (plan 211 D3): written by the backend as the
+   * projection of `talk`; never read. */
   mode: CohostAutoChatMode
   greetings: CohostGreetings
   /** Default on (plan 192 D5), cooldown 20 s. */
@@ -6932,7 +6947,7 @@ export interface CohostReportPromises {
 export interface CohostReportGreetingSkips {
   /** Nothing to say: every line for the kind was switched off. */
   noLine?: number
-  /** Chat posting was Off. */
+  /** Buddy was set to Off ("{name} talks: Off", plan 211; "Chat posting" before). */
   modeOff?: number
   /** Too old to greet by the time it arrived. */
   stale?: number
@@ -6944,6 +6959,8 @@ export interface CohostReportGreetingSkips {
   destinationFailed?: number
   /** YouTube chat was paused (the quota breaker). */
   youtubePaused?: number
+  /** Plan 211 D9: Bubble mode, and Buddy wasn't on stream, so nobody would have seen it. */
+  noBubble?: number
 }
 
 /** Greeting totals over every chatter of the session. */
@@ -7027,6 +7044,24 @@ export interface CohostSessionReport {
   commands?: CohostReportCommands
   /** Plan 164 D10: what the Buddy posted as you, oldest first, at most 200; absent while empty. */
   posts?: CohostReportPost[]
+  /**
+   * Plan 211 D11: what Buddy said in its bubble on stream (your Say lines
+   * too), oldest first, at most 200; absent while empty and in older reports.
+   */
+  said?: CohostReportSaid[]
+}
+
+/** Plan 211 D11: one line Buddy said in its bubble on stream, written when it showed. */
+export interface CohostReportSaid {
+  /** The utterance id. */
+  id: string
+  /** When it showed. */
+  at: string
+  trigger: CohostUtteranceTriggerKind
+  /** The text as shown, clipped to the bubble's 200 characters. */
+  text: string
+  /** Greetings only: Buddy's AI or a line; absent on answers, banter and Say lines. */
+  source?: CohostReportPostSource
 }
 
 export type CohostReportPostResult = 'sent' | 'partial' | 'failed'
@@ -7399,9 +7434,10 @@ export interface OpenBuddyTabCommand {
   tab: string
 }
 
-/** The part of `autoChat` the Stream Manager may change (plan 164 S-D6). */
+/** The part of `autoChat` the Stream Manager may change (plan 164 S-D6,
+ * plan 211 D3: `talk`, never the legacy `mode`). */
 export interface CohostAutoChatRelayPatch {
-  mode?: CohostAutoChatMode
+  talk?: CohostTalkMode
   greetings?: boolean
   answers?: boolean
   banter?: boolean

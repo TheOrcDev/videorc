@@ -631,7 +631,52 @@ impl Default for CohostPersona {
     }
 }
 
-/// The chat posting mode (plan 164 D4): everything is off by default.
+/// How Buddy talks on its own (plan 211 D1): `off` says nothing, `bubble`
+/// speaks on stream in its bubble and never in chat, `suggest` proposes a
+/// card the streamer clicks to post as themself. This is the one truth
+/// (`autoChat.talk`); [`CohostAutoChatMode`] is only its projection for
+/// older apps. Bubble is the default (D4).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostTalkMode {
+    Off,
+    #[default]
+    Bubble,
+    Suggest,
+}
+
+impl CohostTalkMode {
+    /// Whether Buddy says anything on its own: everything but Off.
+    pub(crate) fn speaks(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The legacy `mode` an app from before plan 211 reads (D3): Bubble is
+    /// saved as `off`, so an older app on a Bubble profile stays quiet.
+    /// `auto` is never written again.
+    pub(crate) fn legacy(self) -> CohostAutoChatMode {
+        match self {
+            Self::Off | Self::Bubble => CohostAutoChatMode::Off,
+            Self::Suggest => CohostAutoChatMode::Suggest,
+        }
+    }
+
+    /// The talk mode a block saved without `talk` means (D3, D4): `auto`
+    /// becomes Bubble, which never posts.
+    fn from_legacy(mode: CohostAutoChatMode) -> Self {
+        match mode {
+            CohostAutoChatMode::Off => Self::Off,
+            CohostAutoChatMode::Suggest => Self::Suggest,
+            CohostAutoChatMode::Auto => Self::Bubble,
+        }
+    }
+}
+
+/// Legacy storage only (plan 211 D3): the `autoChat.mode` an app from before
+/// plan 211 reads, written by `CohostAutoChat::normalize_talk` as the
+/// projection of [`CohostTalkMode`]. `auto` is read as Bubble and never
+/// written again. Nothing in the engine reads it; `CohostAutoChat::talk()`
+/// is the mode.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostAutoChatMode {
@@ -704,10 +749,11 @@ pub struct CohostUtteranceTrigger {
     pub message_id: Option<String>,
 }
 
-/// Where an utterance stands (plan 164 D7). `proposed` waits for the
-/// streamer (Suggest) or for the send (Auto); `sent` landed on at least one
+/// Where an utterance stands (plan 164 D7, plan 211 D2). `proposed` waits
+/// for the streamer's click (Suggest); `sent` landed on at least one
 /// destination; `failed` reached none (the log says why); `dismissed` was
-/// declined or expired; `bubble-only` never goes to chat.
+/// declined or expired; `bubble-only` never goes to chat: every Bubble line
+/// and every Say line.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostUtteranceStatus {
@@ -847,10 +893,19 @@ pub struct CohostCooldownBehaviour {
 }
 
 /// The automatic behaviours (plan 164 D5), each behind its own switch under
-/// the mode. Phase A stores them; Phase D acts on them.
+/// the talk mode (plan 211 D1). Phase A stores them; Phase D acts on them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostAutoChat {
+    /// How Buddy talks (plan 211 D3): the one truth. Absent only in a block
+    /// saved by an app from before plan 211 (or saved by one afterwards,
+    /// which drops the field); `normalize_talk` fills it from `mode` on
+    /// every load and every patch, so the engine always reads `talk()`.
+    /// `skip_serializing_if` keeps `null` off the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk: Option<CohostTalkMode>,
+    /// Legacy projection of `talk` for older apps (plan 211 D3): written by
+    /// `normalize_talk`, never read by the engine once `talk` is set.
     #[serde(default)]
     pub mode: CohostAutoChatMode,
     #[serde(default)]
@@ -878,13 +933,36 @@ fn default_banter() -> CohostCooldownBehaviour {
 }
 
 impl Default for CohostAutoChat {
+    /// A new install talks in its bubble (plan 211 D4); `mode` carries the
+    /// projection older apps read.
     fn default() -> Self {
         Self {
-            mode: CohostAutoChatMode::Off,
+            talk: Some(CohostTalkMode::Bubble),
+            mode: CohostTalkMode::Bubble.legacy(),
             greetings: CohostGreetingsSettings::default(),
             answers: default_answers(),
             banter: default_banter(),
         }
+    }
+}
+
+impl CohostAutoChat {
+    /// How Buddy talks (plan 211 D3): `talk` when the block carries it, else
+    /// what its legacy `mode` means (`auto` reads as Bubble).
+    pub fn talk(&self) -> CohostTalkMode {
+        self.talk
+            .unwrap_or_else(|| CohostTalkMode::from_legacy(self.mode))
+    }
+
+    /// Make `talk` and `mode` agree (plan 211 D3): `talk` wins when present,
+    /// otherwise it is taken from `mode`; then `mode` becomes the projection
+    /// older apps read (Bubble saves as `off`, nothing ever saves as `auto`).
+    /// Runs on every load and every patch, so a stored block always carries
+    /// both fields in agreement.
+    pub(crate) fn normalize_talk(&mut self) {
+        let talk = self.talk();
+        self.talk = Some(talk);
+        self.mode = talk.legacy();
     }
 }
 
@@ -973,6 +1051,10 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
 /// S-A2). Unknown kinds never reach here: the closed enum refuses them.
 pub(crate) fn validate_auto_chat(auto_chat: &CohostAutoChat) -> Result<CohostAutoChat, String> {
     let mut valid = auto_chat.clone();
+    // Plan 211 D3: a patch replaces the whole block, so `talk` is settled
+    // here: it wins when present, else it comes from `mode`, and `mode` is
+    // re-projected either way.
+    valid.normalize_talk();
     if valid.greetings.templates.len() > COHOST_GREETING_TEMPLATES_MAX {
         return Err(format!(
             "At most {COHOST_GREETING_TEMPLATES_MAX} greeting templates."
@@ -1078,8 +1160,9 @@ pub struct CohostSettings {
     /// before the field loads as the bundled default pack.
     #[serde(default)]
     pub persona: CohostPersona,
-    /// Automatic chat (plan 164 S-A2): mode off and every behaviour disabled
-    /// by default. `default` so a settings row from before the field loads.
+    /// Automatic chat (plan 164 S-A2): Buddy talks in its bubble by default
+    /// (plan 211 D4). `default` so a settings row from before the field
+    /// loads as Bubble.
     #[serde(default)]
     pub auto_chat: CohostAutoChat,
 }
@@ -1106,6 +1189,9 @@ impl CohostSettings {
     fn normalized(mut self) -> Self {
         self.notes = truncate_utf16(&self.notes, COHOST_NOTES_MAX_CHARS);
         self.rules = normalize_rules(self.rules);
+        // Plan 211 D3: a block saved before `talk` existed takes it from
+        // `mode` (`auto` reads as Bubble); `mode` is re-projected.
+        self.auto_chat.normalize_talk();
         // A stored welcome is bounded like every other text here; a reaction
         // that is not a reaction id is dropped (only a patch is refused).
         for line in [
@@ -1683,8 +1769,9 @@ pub enum CohostError {
     /// Plan 164 S-A2: the automatic chat settings on a patch are out of bounds.
     #[error("{0}")]
     InvalidAutoChat(String),
-    /// Plan 164 D4: a send was asked for while the chat mode is off.
-    #[error("The Buddy's chat mode is off. Turn on Suggest or Auto in Stream Manager.")]
+    /// Plan 164 D4, plan 211 D2: a card was approved while Buddy is not on
+    /// Suggest, the one mode whose cards post.
+    #[error("Buddy isn't on Suggest, so it has no card to post. Choose Suggest in Stream Manager.")]
     AutoChatOff,
     /// Plan 164 S-D2: the card to approve is gone, answered or expired.
     #[error("{0}")]
@@ -3143,6 +3230,9 @@ impl CohostSession {
             // Plan 164 D10: posts are written as they land (`append_post`),
             // never rebuilt here; the merge keeps them.
             posts: Vec::new(),
+            // Plan 211 D11: said lines are written as they show
+            // (`append_cohost_report_said`); the merge keeps them.
+            said: Vec::new(),
         }
     }
 
@@ -3841,14 +3931,18 @@ impl CohostSession {
                 && self.offered_answers.insert(incoming.id.clone())
             {
                 let message_id = message_ids.first().cloned();
-                let destination_id = message_id
-                    .as_deref()
-                    .and_then(|id| self.known.get(id))
-                    .map(|known| known.destination_id.clone());
+                let first_row = message_id.as_deref().and_then(|id| self.known.get(id));
+                let destination_id = first_row.map(|known| known.destination_id.clone());
+                // Plan 211 D8: the first asker's name, for the bubble.
+                let author_name = first_row
+                    .map(|known| known.author_name.trim())
+                    .filter(|name| !name.is_empty())
+                    .map(|name| truncate_utf16(name, QUESTION_ASKER_MAX_UNITS));
                 self.answer_candidates.push(AnswerCandidate {
                     question_id: incoming.id.clone(),
                     message_id,
                     destination_id,
+                    author_name,
                     text: truncate_utf16(&incoming.suggested_reply, QUESTION_TEXT_MAX_UNITS),
                     state: utterance_state_for_mood(incoming.mood),
                 });
@@ -7204,10 +7298,14 @@ impl CohostEngine {
     /// Chat rows just delivered: greetings and welcomes, by the mode (D4)
     /// and the throttle (D9). Runs with or without a tick session; `premium`
     /// only decides whether the AI may write the lines (plan 192 S2.2).
+    /// `bubble_visible` is `buddy_overlay::buddy_visible`, read before the
+    /// engine lock (plan 211 D9): in Bubble mode an unseen Buddy says
+    /// nothing and asks the AI for nothing.
     pub(crate) fn note_activity(
         &mut self,
         messages: &[LiveChatMessage],
         premium: bool,
+        bubble_visible: bool,
         now: Instant,
         now_iso: &str,
     ) -> AutoChatPass {
@@ -7215,6 +7313,7 @@ impl CohostEngine {
         self.auto_chat.note_activity(
             &self.settings.auto_chat,
             ai.as_ref(),
+            bubble_visible,
             messages,
             now,
             now_iso,
@@ -7225,12 +7324,18 @@ impl CohostEngine {
     pub(crate) fn drain_auto_chat(
         &mut self,
         premium: bool,
+        bubble_visible: bool,
         now: Instant,
         now_iso: &str,
     ) -> AutoChatPass {
         let ai = self.greet_ai_context(premium);
-        self.auto_chat
-            .drain(&self.settings.auto_chat, ai.as_ref(), now, now_iso)
+        self.auto_chat.drain(
+            &self.settings.auto_chat,
+            ai.as_ref(),
+            bubble_visible,
+            now,
+            now_iso,
+        )
     }
 
     /// Plan 192 S2.2: what the AI needs to write greetings, or `None` when
@@ -7309,9 +7414,11 @@ impl CohostEngine {
 
     /// The answer candidates the last tick produced (S-D3), routed by the
     /// lane: the answers switch, its cooldown, the limiter, then the mode.
+    /// `bubble_visible` (plan 211 D9) is read before the engine lock.
     pub(crate) fn route_answer_candidates(
         &mut self,
         generation: u64,
+        bubble_visible: bool,
         now: Instant,
         now_iso: &str,
     ) -> AutoChatPass {
@@ -7323,10 +7430,14 @@ impl CohostEngine {
         };
         let mut merged = AutoChatPass::default();
         for candidate in candidates {
-            let pass =
-                self.auto_chat
-                    .route_answer(&self.settings.auto_chat, candidate, now, now_iso);
-            merged.send.extend(pass.send);
+            let pass = self.auto_chat.route_answer(
+                &self.settings.auto_chat,
+                bubble_visible,
+                candidate,
+                now,
+                now_iso,
+            );
+            merged.bubble.extend(pass.bubble);
             merged.propose.extend(pass.propose);
             merged.log.extend(pass.log);
         }
@@ -7341,10 +7452,15 @@ impl CohostEngine {
         &mut self,
         generation: u64,
         signed_in_premium: bool,
+        bubble_visible: bool,
         voice: VoiceActivity,
         now: Instant,
     ) -> Option<PreparedTick> {
-        if !signed_in_premium || !self.auto_chat.banter_allowed(&self.settings.auto_chat, now) {
+        if !signed_in_premium
+            || !self
+                .auto_chat
+                .banter_allowed(&self.settings.auto_chat, bubble_visible, now)
+        {
             return None;
         }
         let settings = self.settings.clone();
@@ -7412,13 +7528,14 @@ impl CohostEngine {
     }
 
     /// `cohost.utterance.approve` (S-D2): the card to send, or why not. The
-    /// mode is checked here too: off refuses even an approved card (D4).
+    /// mode is checked here too (plan 211 D2): only Suggest has cards that
+    /// post, so Off and Bubble refuse even an approved card.
     pub(crate) fn approve_utterance(
         &mut self,
         utterance_id: &str,
         now: Instant,
     ) -> Result<CohostUtterance, CohostError> {
-        if self.settings.auto_chat.mode == CohostAutoChatMode::Off {
+        if self.talk_mode() != CohostTalkMode::Suggest {
             return Err(CohostError::AutoChatOff);
         }
         self.auto_chat
@@ -7430,16 +7547,16 @@ impl CohostEngine {
         self.auto_chat.dismiss(utterance_id)
     }
 
-    /// The Say box (D7): the utterance, and whether it goes to chat.
+    /// The Say box (D7, plan 211 D1): one bubble-only utterance, in every
+    /// mode.
     pub(crate) fn say(
         &mut self,
         text: &str,
         state: CohostUtteranceState,
         now: Instant,
         now_iso: &str,
-    ) -> (CohostUtterance, bool) {
-        self.auto_chat
-            .say(&self.settings.auto_chat, text, state, now, now_iso)
+    ) -> CohostUtterance {
+        self.auto_chat.say(text, state, now, now_iso)
     }
 
     pub(crate) fn mark_utterance(
@@ -7462,6 +7579,12 @@ impl CohostEngine {
         self.auto_chat.note_sent(now);
     }
 
+    /// A Bubble line showed on stream (plan 211 S-A2): Banter's quiet minute
+    /// runs from it, as it did from a send.
+    pub(crate) fn note_buddy_spoke(&mut self, now: Instant) {
+        self.auto_chat.note_spoken(now);
+    }
+
     /// The live-chat session the lane follows (for the Say box and the pump).
     pub(crate) fn auto_chat_session_id(&self) -> Option<String> {
         self.auto_chat.session_id().map(str::to_string)
@@ -7471,9 +7594,9 @@ impl CohostEngine {
         self.auto_chat.follow_session(session_id)
     }
 
-    /// Whether the chat mode allows a send right now (re-read at send time).
-    pub(crate) fn auto_chat_mode(&self) -> CohostAutoChatMode {
-        self.settings.auto_chat.mode
+    /// How Buddy talks right now (plan 211 D1), re-read at send time.
+    pub(crate) fn talk_mode(&self) -> CohostTalkMode {
+        self.settings.auto_chat.talk()
     }
 
     fn session_for_mut(&mut self, session_id: &str) -> Result<&mut CohostSession, CohostError> {
@@ -7554,9 +7677,10 @@ pub(crate) async fn is_buddy_operation(state: &AppState, operation_id: &str) -> 
     state.cohost.lock().await.is_buddy_operation(operation_id)
 }
 
-/// Act on a lane pass: log its lines, publish proposals, spawn its sends and
-/// arm the pump for what it held. `lifecycle_delivery` orders the state emit
-/// with chat delivery when the caller holds the fence; the pump takes one.
+/// Act on a lane pass: log its lines, publish proposals, show its bubble
+/// lines and arm the pump for what it held. `lifecycle_delivery` orders the
+/// state emit with chat delivery when the caller holds the fence; the pump
+/// takes one.
 async fn apply_auto_chat_pass(
     state: &AppState,
     pass: AutoChatPass,
@@ -7568,8 +7692,10 @@ async fn apply_auto_chat_pass(
     publish_auto_chat_pass(state, pass, lifecycle_delivery).await;
 }
 
-/// The pass minus the pump: logs, proposals, sends, the skip counts and the
-/// AI greet request. The pump itself calls this (it owns its own schedule).
+/// The pass minus the pump: logs, proposals, bubble lines, the skip counts
+/// and the AI greet request. The pump itself calls this (it owns its own
+/// schedule). Nothing here sends (plan 211 D2): a Suggest card posts only
+/// from `approve_utterance`, and a Bubble line goes to the bubble.
 async fn publish_auto_chat_pass(
     state: &AppState,
     pass: AutoChatPass,
@@ -7598,7 +7724,25 @@ async fn publish_auto_chat_pass(
                 ),
             );
         }
-        let snapshot = state.cohost.lock().await.snapshot();
+        for utterance in &pass.bubble {
+            state.emit_log(
+                "info",
+                format!(
+                    "Buddy says ({}): {}",
+                    utterance_trigger_label(utterance.trigger.kind),
+                    utterance.text
+                ),
+            );
+        }
+        let (snapshot, sources) = {
+            let engine = state.cohost.lock().await;
+            let sources: Vec<Option<crate::protocol::CohostReportPostSource>> = pass
+                .bubble
+                .iter()
+                .map(|utterance| engine.utterance_source(&utterance.id))
+                .collect();
+            (engine.snapshot(), sources)
+        };
         match lifecycle_delivery {
             Some(guard) => emit_state(state, &snapshot, guard),
             None => {
@@ -7606,12 +7750,13 @@ async fn publish_auto_chat_pass(
                 emit_state(state, &snapshot, &guard);
             }
         }
-    }
-    for utterance in pass.send {
-        let state = state.clone();
-        tokio::spawn(async move {
-            send_automatic(&state, utterance).await;
-        });
+        // Plan 211 D7: Buddy's lines go through the bubble queue, so a line
+        // waits for the bubble that is up instead of replacing it. The line
+        // counts as spoken (Banter's quiet minute) and lands on the report
+        // when it actually shows (`note_bubble_shown`), not here.
+        for (utterance, source) in pass.bubble.iter().zip(sources) {
+            crate::buddy_overlay::queue_for_utterance(state, utterance, source).await;
+        }
     }
 }
 
@@ -7622,6 +7767,66 @@ fn utterance_trigger_label(kind: CohostUtteranceTriggerKind) -> &'static str {
         CohostUtteranceTriggerKind::Banter => "banter",
         CohostUtteranceTriggerKind::Manual => "say",
     }
+}
+
+/// One of Buddy's lines actually showed in its bubble (plan 211 D7): the
+/// bubble queue calls this when the line goes up, now or after its wait.
+/// Banter's quiet minute runs from here for Buddy's own lines (never from
+/// the streamer's Say line), as it ran from a send; and the line lands on
+/// the session's report as `said` (D11), manual lines too, under the
+/// live-chat session the lane follows. A queued line that was dropped never
+/// gets here, so it is not "said".
+pub(crate) async fn note_bubble_shown(
+    state: &AppState,
+    utterance: &CohostUtterance,
+    source: Option<crate::protocol::CohostReportPostSource>,
+) {
+    let manual = utterance.trigger.kind == CohostUtteranceTriggerKind::Manual;
+    let session_id = {
+        let mut engine = state.cohost.lock().await;
+        if !manual {
+            engine.note_buddy_spoke(Instant::now());
+        }
+        engine.auto_chat_session_id()
+    };
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let said = crate::protocol::CohostReportSaid {
+        id: utterance.id.clone(),
+        at: chrono::Utc::now().to_rfc3339(),
+        trigger: utterance.trigger.kind,
+        text: crate::buddy_overlay::clip_bubble_text(&utterance.text),
+        source,
+    };
+    match state.database.append_cohost_report_said(&session_id, said) {
+        Ok(true) => {}
+        Ok(false) => state.emit_log(
+            "info",
+            "Buddy report said line skipped: the session row is gone.".to_string(),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Buddy report said line could not be saved: {error}"),
+        ),
+    }
+}
+
+/// A waiting line was dropped by the bubble queue (plan 211 D7: the queue
+/// was full, or it waited too long). A greeting counts as `stale` on the
+/// report, like a replayed row; nothing is counted for other lines.
+pub(crate) async fn note_bubble_dropped(state: &AppState, utterance: &CohostUtterance) {
+    if utterance.trigger.kind != CohostUtteranceTriggerKind::Greeting {
+        return;
+    }
+    persist_greeting_skips(
+        state,
+        CohostReportGreetingsSkipped {
+            stale: 1,
+            ..CohostReportGreetingsSkipped::default()
+        },
+    )
+    .await;
 }
 
 /// Plan 192 D7: fold skip counts into the live-chat session's report as
@@ -7715,9 +7920,15 @@ async fn arm_auto_chat_pump(state: &AppState, due: Instant) {
         while let Some(due) = next {
             tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
             let premium = premium_entitled();
+            let bubble_visible = crate::buddy_overlay::buddy_visible(&state);
             let pass = {
                 let mut engine = state.cohost.lock().await;
-                engine.drain_auto_chat(premium, Instant::now(), &chrono::Utc::now().to_rfc3339())
+                engine.drain_auto_chat(
+                    premium,
+                    bubble_visible,
+                    Instant::now(),
+                    &chrono::Utc::now().to_rfc3339(),
+                )
             };
             next = pass.schedule;
             publish_auto_chat_pass(&state, pass, None).await;
@@ -7855,14 +8066,17 @@ fn clip_for_platforms(text: &str, platforms: &[StreamPlatform]) -> (String, bool
     (format!("{}…", head.trim_end()), true)
 }
 
-/// Send one utterance as the streamer (D3, D10): a Buddy-owned
-/// `operationId`, the mode re-read, the destinations filtered, the text
-/// clipped, the outcome on the utterance, the state and the report.
-async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
+/// Post one Suggest card the streamer clicked, as the streamer (D3, D10,
+/// plan 211 D2). This is the one path from Buddy's lane to chat, and only
+/// `approve_utterance` reaches it: a Buddy-owned `operationId`, the mode
+/// re-read (Suggest, a `proposed` non-manual card, or it fails), the
+/// destinations filtered, the text clipped, the outcome on the utterance,
+/// the state and the report.
+async fn send_approved(state: &AppState, utterance: CohostUtterance) {
     let now_iso = chrono::Utc::now().to_rfc3339();
-    let (session_id, mode) = {
+    let (session_id, talk) = {
         let engine = state.cohost.lock().await;
-        (engine.auto_chat_session_id(), engine.auto_chat_mode())
+        (engine.auto_chat_session_id(), engine.talk_mode())
     };
     let trigger = utterance.trigger.kind;
     let manual = trigger == CohostUtteranceTriggerKind::Manual;
@@ -7872,15 +8086,12 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
     {
         crate::buddy_overlay::think(state).await;
     }
-    // The mode is the one gate every send passes, decided at send time (D4):
-    // Auto for anything automatic, Suggest or Auto for an approved card.
-    let mode_allows = match mode {
-        CohostAutoChatMode::Off => false,
-        CohostAutoChatMode::Suggest => {
-            utterance.status == CohostUtteranceStatus::Proposed && !manual
-        }
-        CohostAutoChatMode::Auto => true,
-    };
+    // The mode is the one gate every send passes, decided at send time (D4,
+    // plan 211 D2): only a proposed, non-manual card while Buddy is on
+    // Suggest. Off and Bubble never post.
+    let mode_allows = talk == CohostTalkMode::Suggest
+        && utterance.status == CohostUtteranceStatus::Proposed
+        && !manual;
     let session_id = match (session_id, mode_allows) {
         (Some(session_id), true) => session_id,
         (None, _) => {
@@ -8031,9 +8242,10 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
     if status == CohostUtteranceStatus::Failed {
         note_greeting_not_sent(state, &utterance, GreetingSkipReason::DestinationFailed).await;
     }
-    // D7: the words that reached chat reach the bubble as they land. A manual
-    // line bubbled when it was typed (`say_utterance`), so it is not shown
-    // twice; an answer that went nowhere stops thinking.
+    // D7: the words that reached chat reach the bubble as they land, through
+    // the bubble queue like any Buddy line (plan 211 D7). A manual line
+    // bubbled when it was typed (`say_utterance`), so it is not shown twice;
+    // an answer that went nowhere stops thinking.
     if status == CohostUtteranceStatus::Sent {
         if !manual {
             let landed = CohostUtterance {
@@ -8041,7 +8253,7 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
                 text: text.clone(),
                 ..utterance.clone()
             };
-            crate::buddy_overlay::show_for_utterance(state, &landed).await;
+            crate::buddy_overlay::queue_for_utterance(state, &landed, source).await;
         }
     } else if trigger == CohostUtteranceTriggerKind::Answer {
         crate::buddy_overlay::settle(state).await;
@@ -8134,7 +8346,7 @@ pub async fn approve_utterance(
     };
     let task_state = state.clone();
     tokio::spawn(async move {
-        send_automatic(&task_state, utterance).await;
+        send_approved(&task_state, utterance).await;
     });
     Ok(snapshot)
 }
@@ -8161,13 +8373,12 @@ pub async fn dismiss_utterance(
     Ok(snapshot)
 }
 
-/// `cohost.utterance.say` (D7): the streamer's own line, one utterance that
-/// both posts and bubbles. In Auto, with the live-chat session named, it goes
-/// to every writable destination like any utterance; otherwise (Off, Suggest,
-/// or no chat session: an empty `sessionId`) it is bubble-only. Either way
-/// the bubble shows at once when the Buddy is on some output (Phase C's
-/// `show_bubble`); a named session must be the active one (the lane follows
-/// it).
+/// `cohost.utterance.say` (D7, plan 211 D1): the streamer's own line, one
+/// bubble-only utterance in every mode; it never goes to chat. The bubble
+/// shows at once when the Buddy is on some output (`show_bubble`), and the
+/// line is on the state either way. A named session must be the active one
+/// (the lane follows it); an empty `sessionId` means no chat session, which
+/// is fine, because nothing is posted.
 pub async fn say_utterance(
     state: &AppState,
     params: crate::protocol::CohostSayParams,
@@ -8192,35 +8403,22 @@ pub async fn say_utterance(
         Some(session_id.to_string())
     };
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    let (utterance, send, snapshot) = {
+    let (utterance, snapshot) = {
         let mut engine = state.cohost.lock().await;
         if let Some(session_id) = session_id.as_deref() {
             engine.follow_auto_chat_session(session_id);
         }
-        let (mut utterance, mut send) = engine.say(
+        let utterance = engine.say(
             &text,
             params.state.unwrap_or_default(),
             Instant::now(),
             &chrono::Utc::now().to_rfc3339(),
         );
-        if send && session_id.is_none() {
-            // Auto mode without a chat session: nowhere to post, so the line
-            // is bubble-only rather than a send that fails.
-            send = false;
-            utterance.status = CohostUtteranceStatus::BubbleOnly;
-            engine.mark_utterance(&utterance.id, CohostUtteranceStatus::BubbleOnly);
-        }
-        (utterance, send, engine.snapshot())
+        (utterance, engine.snapshot())
     };
     emit_state(state, &snapshot, &lifecycle_delivery);
     drop(lifecycle_delivery);
     crate::buddy_overlay::show_for_utterance(state, &utterance).await;
-    if send {
-        let task_state = state.clone();
-        tokio::spawn(async move {
-            send_automatic(&task_state, utterance).await;
-        });
-    }
     Ok(snapshot)
 }
 
@@ -10382,6 +10580,9 @@ where
     let stopped = report.is_some();
     let mut snapshot = engine.snapshot();
     drop(engine);
+    // Plan 211 D7: the lines waiting for the bubble were for this chat
+    // session; the next one starts with an empty queue.
+    crate::buddy_overlay::clear_queue(state).await;
     save_session_report(state, report);
     if stopped {
         // The off state names why the backend ended the session (a Premium
@@ -10578,6 +10779,8 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
     // sends (and the AI greet call, plan 192) are spawned, never awaited
     // under the delivery fence.
     let premium = premium_entitled();
+    // Plan 211 D9: read before the engine lock (it loads the overlay layout).
+    let bubble_visible = crate::buddy_overlay::buddy_visible(state);
     let (auto_chat, buddy_events) = {
         let mut engine = state.cohost.lock().await;
         // Plan 168 S-C3: Activity rows make the Buddy react on stream (the
@@ -10590,6 +10793,7 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
         let auto_chat = engine.note_activity(
             messages,
             premium,
+            bubble_visible,
             Instant::now(),
             &chrono::Utc::now().to_rfc3339(),
         );
@@ -10983,10 +11187,13 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
     // Plan 164 S-D4: banter on dead air, on the tick lane (never two
-    // requests in flight), only on a v4 session.
+    // requests in flight), only on a v4 session. Plan 211 D9: in Bubble
+    // mode only while Buddy can be seen (read before the engine lock).
+    let bubble_visible = crate::buddy_overlay::buddy_visible(state);
     let banter = state.cohost.lock().await.prepare_banter(
         generation,
         token.is_some() && premium,
+        bubble_visible,
         voice,
         Instant::now(),
     );
@@ -11090,6 +11297,8 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         )),
     };
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    // Plan 211 D9: read before the engine lock (it loads the overlay layout).
+    let bubble_visible = crate::buddy_overlay::buddy_visible(state);
     let (snapshot, answers) = {
         let mut engine = state.cohost.lock().await;
         let now = Instant::now();
@@ -11103,7 +11312,8 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             return false;
         }
         // Plan 164 S-D3: replies the viewer asked the Buddy for by name.
-        let answers = engine.route_answer_candidates(prepared.generation, now, &now_iso);
+        let answers =
+            engine.route_answer_candidates(prepared.generation, bubble_visible, now, &now_iso);
         (engine.snapshot(), answers)
     };
     if let Some((level, message)) = log {
@@ -14946,6 +15156,7 @@ mod tests {
         assert_eq!(loaded.persona, CohostPersona::default());
         assert_eq!(loaded.persona.id, COHOST_DEFAULT_PERSONA_ID);
         assert_eq!(loaded.persona.name, COHOST_DEFAULT_PERSONA_NAME);
+        assert_eq!(loaded.auto_chat.talk(), CohostTalkMode::Bubble);
         assert_eq!(loaded.auto_chat.mode, CohostAutoChatMode::Off);
         assert!(loaded.auto_chat.greetings.enabled);
         assert!(loaded.auto_chat.greetings.templates.is_empty());
@@ -14986,6 +15197,7 @@ mod tests {
                 library_avatar_id: Some("official:orc".to_string()),
             }),
             auto_chat: Some(CohostAutoChat {
+                talk: Some(CohostTalkMode::Suggest),
                 mode: CohostAutoChatMode::Suggest,
                 greetings: CohostGreetingsSettings {
                     enabled: true,
@@ -21277,9 +21489,10 @@ mod tests {
 
     // --- Plan 164 Phase D: automatic chat at the engine level ---------------------
 
-    fn auto_chat_settings(mode: CohostAutoChatMode) -> CohostAutoChat {
+    fn auto_chat_settings(talk: CohostTalkMode) -> CohostAutoChat {
         CohostAutoChat {
-            mode,
+            talk: Some(talk),
+            mode: talk.legacy(),
             greetings: CohostGreetingsSettings {
                 enabled: true,
                 templates: vec![CohostGreetingTemplate {
@@ -21305,12 +21518,12 @@ mod tests {
     }
 
     fn running_engine_with(
-        mode: CohostAutoChatMode,
+        talk: CohostTalkMode,
         web_tick: Option<u32>,
         now: Instant,
     ) -> (CohostEngine, u64) {
         let mut settings = enabled_settings();
-        settings.auto_chat = auto_chat_settings(mode);
+        settings.auto_chat = auto_chat_settings(talk);
         let mut engine = CohostEngine::new(settings);
         engine.set_web_tick_version(web_tick);
         let generation = engine.start_session(
@@ -21342,7 +21555,7 @@ mod tests {
     #[test]
     fn a_v3_web_never_sends_the_persona_and_a_v4_web_does() {
         let start = Instant::now();
-        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, None, start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Off, None, start);
         engine.note_messages(&messages("session-1", 0..5));
         let prepared = engine
             .prepare_tick(generation, true, true, start + Duration::from_secs(1))
@@ -21357,7 +21570,7 @@ mod tests {
         );
         assert!(body.get("intent").is_none());
 
-        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Off, Some(4), start);
         engine.note_messages(&messages("session-1", 0..5));
         let prepared = engine
             .prepare_tick(generation, true, true, start + Duration::from_secs(1))
@@ -21388,7 +21601,7 @@ mod tests {
         assert_eq!(retried.request.prompt_version, 3);
         assert_eq!(retried.request.persona, None);
         // A web that reports a lower tick version keeps v3 for a new session.
-        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(3), start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Off, Some(3), start);
         engine.note_messages(&messages("session-1", 0..5));
         let prepared = engine
             .prepare_tick(generation, true, true, start + Duration::from_secs(1))
@@ -21398,11 +21611,11 @@ mod tests {
     }
 
     #[test]
-    fn an_addressed_question_is_answered_in_auto_proposed_in_suggest_and_ignored_off() {
+    fn an_addressed_question_is_bubbled_in_bubble_proposed_in_suggest_and_ignored_off() {
         let start = Instant::now();
         let rows = messages("session-1", 0..5);
-        let run = |mode: CohostAutoChatMode, addressed: bool| {
-            let (mut engine, generation) = running_engine_with(mode, Some(4), start);
+        let run = |talk: CohostTalkMode, addressed: bool| {
+            let (mut engine, generation) = running_engine_with(talk, Some(4), start);
             engine.note_messages(&rows);
             let prepared = engine
                 .prepare_tick(generation, true, true, start + Duration::from_secs(1))
@@ -21419,16 +21632,18 @@ mod tests {
             ));
             let pass = engine.route_answer_candidates(
                 generation,
+                true,
                 start + Duration::from_secs(2),
                 "2026-08-22T10:00:02Z",
             );
             (engine, pass)
         };
-        let (engine, auto) = run(CohostAutoChatMode::Auto, true);
-        assert_eq!(auto.send.len(), 1, "{auto:?}");
-        assert!(auto.propose.is_empty());
-        let answer = &auto.send[0];
-        assert_eq!(answer.text, "Keychron Q1!");
+        let (engine, bubbled) = run(CohostTalkMode::Bubble, true);
+        assert_eq!(bubbled.bubble.len(), 1, "{bubbled:?}");
+        assert!(bubbled.propose.is_empty());
+        let answer = &bubbled.bubble[0];
+        // Plan 211 D8: the bubble names the first asker (the row's author).
+        assert_eq!(answer.text, "@Viewer 0 Keychron Q1!");
         assert_eq!(
             answer.state,
             CohostUtteranceState::Laugh,
@@ -21439,24 +21654,31 @@ mod tests {
             answer.trigger.message_id.as_deref(),
             Some(rows[0].id.as_str())
         );
-        assert_eq!(answer.destination_ids, vec!["twitch".to_string()]);
+        assert!(
+            answer.destination_ids.is_empty(),
+            "a Bubble answer goes to no chat destination (plan 211 D7)"
+        );
         assert_eq!(engine.snapshot().utterances.len(), 1);
 
-        let (_, suggest) = run(CohostAutoChatMode::Suggest, true);
-        assert!(suggest.send.is_empty());
+        let (_, suggest) = run(CohostTalkMode::Suggest, true);
+        assert!(suggest.bubble.is_empty());
         assert_eq!(suggest.propose.len(), 1);
         assert_eq!(suggest.propose[0].status, CohostUtteranceStatus::Proposed);
+        assert_eq!(
+            suggest.propose[0].text, "Keychron Q1!",
+            "a card is unchanged"
+        );
+        assert_eq!(suggest.propose[0].destination_ids, ["twitch"]);
 
-        let (engine, off) = run(CohostAutoChatMode::Off, true);
+        let (engine, off) = run(CohostTalkMode::Off, true);
         assert_eq!(off, AutoChatPass::default());
         assert!(engine.snapshot().utterances.is_empty());
 
         // An unaddressed question stays a suggestion in the pane (S-D3).
-        let (_, unaddressed) = run(CohostAutoChatMode::Auto, false);
+        let (_, unaddressed) = run(CohostTalkMode::Bubble, false);
         assert_eq!(unaddressed, AutoChatPass::default());
         // The same question on a later tick is not answered twice.
-        let (mut engine, generation) =
-            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         for tick in 1..=2u64 {
             // Fresh chat each tick, past the idle interval.
             engine.note_messages(&messages(
@@ -21472,20 +21694,19 @@ mod tests {
                 at,
                 "2026-08-22T10:00:02Z",
             ));
-            let pass = engine.route_answer_candidates(generation, at, "2026-08-22T10:00:02Z");
-            assert_eq!(pass.send.len(), usize::from(tick == 1));
+            let pass = engine.route_answer_candidates(generation, true, at, "2026-08-22T10:00:02Z");
+            assert_eq!(pass.bubble.len(), usize::from(tick == 1));
         }
     }
 
     #[test]
     fn banter_rides_a_v4_session_on_dead_air_and_the_mode_gates_it() {
         let start = Instant::now();
-        let (mut engine, generation) =
-            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         // A live microphone, quiet for 40 s.
         let at = start + Duration::from_secs(30);
         let prepared = engine
-            .prepare_banter(generation, true, quiet_voice(at), at)
+            .prepare_banter(generation, true, true, quiet_voice(at), at)
             .expect("banter is due");
         assert_eq!(prepared.request.intent, Some(CohostTickIntent::Banter));
         assert!(prepared.request.messages.is_empty());
@@ -21495,7 +21716,7 @@ mod tests {
         assert!(engine.prepare_tick(generation, true, true, at).is_err());
         assert!(
             engine
-                .prepare_banter(generation, true, quiet_voice(at), at)
+                .prepare_banter(generation, true, true, quiet_voice(at), at)
                 .is_none()
         );
         let pass = engine.apply_banter_result(
@@ -21510,18 +21731,18 @@ mod tests {
             at + Duration::from_secs(1),
             "2026-08-22T10:00:31Z",
         );
-        assert_eq!(pass.send.len(), 1);
+        assert_eq!(pass.bubble.len(), 1);
         assert_eq!(
-            pass.send[0].text,
+            pass.bubble[0].text,
             "Chat, the keyboard is louder than the game."
         );
-        assert_eq!(pass.send[0].state, CohostUtteranceState::Think);
+        assert_eq!(pass.bubble[0].state, CohostUtteranceState::Think);
         assert_eq!(
-            pass.send[0].trigger.kind,
+            pass.bubble[0].trigger.kind,
             CohostUtteranceTriggerKind::Banter
         );
         assert!(
-            pass.send[0].destination_ids.is_empty(),
+            pass.bubble[0].destination_ids.is_empty(),
             "every writable destination"
         );
         // The lane is free again, and the cooldown holds the next one.
@@ -21534,33 +21755,32 @@ mod tests {
         );
         assert!(
             engine
-                .prepare_banter(generation, true, quiet_voice(later), later)
+                .prepare_banter(generation, true, true, quiet_voice(later), later)
                 .is_none()
         );
 
         // Off: never. v3: never. Not signed in or not Premium: never.
-        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Off, Some(4), start);
         assert!(
             engine
-                .prepare_banter(generation, true, quiet_voice(at), at)
+                .prepare_banter(generation, true, true, quiet_voice(at), at)
                 .is_none()
         );
-        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Auto, None, start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Bubble, None, start);
         assert!(
             engine
-                .prepare_banter(generation, true, quiet_voice(at), at)
+                .prepare_banter(generation, true, true, quiet_voice(at), at)
                 .is_none()
         );
-        let (mut engine, generation) =
-            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         assert!(
             engine
-                .prepare_banter(generation, false, quiet_voice(at), at)
+                .prepare_banter(generation, false, true, quiet_voice(at), at)
                 .is_none()
         );
         // A banter failure frees the lane without pausing the session.
         let prepared = engine
-            .prepare_banter(generation, true, quiet_voice(at), at)
+            .prepare_banter(generation, true, true, quiet_voice(at), at)
             .unwrap();
         let pass = engine.apply_banter_result(
             prepared.generation,
@@ -21568,7 +21788,7 @@ mod tests {
             at + Duration::from_secs(1),
             "2026-08-22T10:00:31Z",
         );
-        assert!(pass.send.is_empty());
+        assert!(pass.bubble.is_empty());
         assert_eq!(pass.log.len(), 1);
         assert_eq!(engine.snapshot().status, CohostStatus::Listening);
         engine.note_messages(&messages("session-1", 0..5));
@@ -21580,25 +21800,37 @@ mod tests {
     }
 
     #[test]
-    fn a_proposed_card_is_refused_once_the_mode_is_off() {
+    fn a_proposed_card_is_refused_once_the_mode_leaves_suggest() {
         let start = Instant::now();
-        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Suggest, None, start);
+        let (mut engine, _) = running_engine_with(CohostTalkMode::Suggest, None, start);
         let mut follow =
             crate::live_chat::fake_events_for_tests("session-1", StreamPlatform::Twitch, None)
                 .into_iter()
                 .find(|row| row.raw_provider_type.as_deref() == Some("follow"))
                 .unwrap();
         follow.published_at = chrono::Utc::now().to_rfc3339();
-        let pass = engine.note_activity(&[follow], false, start, &chrono::Utc::now().to_rfc3339());
+        let pass = engine.note_activity(
+            &[follow],
+            false,
+            true,
+            start,
+            &chrono::Utc::now().to_rfc3339(),
+        );
         assert_eq!(pass.propose.len(), 1);
         let id = pass.propose[0].id.clone();
         assert_eq!(engine.auto_chat_session_id().as_deref(), Some("session-1"));
-        engine.settings.auto_chat.mode = CohostAutoChatMode::Off;
+        engine.settings.auto_chat.talk = Some(CohostTalkMode::Off);
         assert_eq!(
             engine.approve_utterance(&id, start + Duration::from_secs(1)),
             Err(CohostError::AutoChatOff)
         );
-        engine.settings.auto_chat.mode = CohostAutoChatMode::Suggest;
+        // Plan 211 D2: Bubble has no card that posts either.
+        engine.settings.auto_chat.talk = Some(CohostTalkMode::Bubble);
+        assert_eq!(
+            engine.approve_utterance(&id, start + Duration::from_secs(1)),
+            Err(CohostError::AutoChatOff)
+        );
+        engine.settings.auto_chat.talk = Some(CohostTalkMode::Suggest);
         let approved = engine
             .approve_utterance(&id, start + Duration::from_secs(1))
             .unwrap();
@@ -21639,6 +21871,7 @@ mod tests {
     #[test]
     fn greetings_default_on_with_ai_and_welcomes_and_answers_on_for_new_installs() {
         let auto_chat = CohostAutoChat::default();
+        assert_eq!(auto_chat.talk(), CohostTalkMode::Bubble);
         assert_eq!(auto_chat.mode, CohostAutoChatMode::Off);
         assert!(auto_chat.greetings.enabled);
         assert!(auto_chat.greetings.ai);
@@ -21667,7 +21900,13 @@ mod tests {
             "banter": { "enabled": false, "cooldownSeconds": 240 }
         }))
         .unwrap();
-        assert_eq!(stored.mode, CohostAutoChatMode::Auto);
+        assert_eq!(stored.mode, CohostAutoChatMode::Auto, "raw, not normalized");
+        assert_eq!(stored.talk, None);
+        assert_eq!(
+            stored.talk(),
+            CohostTalkMode::Bubble,
+            "plan 211 D4: saved Auto means Bubble"
+        );
         assert!(!stored.answers.enabled, "saved settings are never flipped");
         assert!(stored.greetings.ai);
         assert_eq!(stored.greetings.welcomes, CohostWelcomes::default());
@@ -21708,6 +21947,183 @@ mod tests {
         // Nothing stored: the defaults.
         let database = Database::open_in_memory_for_tests();
         assert!(load_cohost_settings(&database).auto_chat.answers.enabled);
+    }
+
+    /// Plan 211 D3, D4: `talk` is the mode and `mode` its projection for
+    /// older apps. Each value round-trips through storage with the right
+    /// projection (Bubble saves as `off`; nothing ever saves as `bubbled`); a
+    /// block with only `mode` loads the right `talk` (`bubbled` → Bubble); no
+    /// block, and no stored settings at all, load Bubble; a patch settles
+    /// `talk` the same way (`talk` wins, else `mode`).
+    #[test]
+    fn talk_is_the_mode_and_mode_is_its_projection_for_older_apps() {
+        for (talk, projection) in [
+            (CohostTalkMode::Off, "off"),
+            (CohostTalkMode::Bubble, "off"),
+            (CohostTalkMode::Suggest, "suggest"),
+        ] {
+            let database = Database::open_in_memory_for_tests();
+            let mut settings = CohostSettings::default();
+            settings.auto_chat.talk = Some(talk);
+            // The projection is written by normalization, never by hand.
+            settings.auto_chat.mode = CohostAutoChatMode::Auto;
+            let patched = CohostSettings::validated_patch(CohostSettingsPatch {
+                auto_chat: Some(settings.auto_chat.clone()),
+                ..CohostSettingsPatch::default()
+            })
+            .unwrap()
+            .auto_chat
+            .unwrap();
+            assert_eq!(patched.talk, Some(talk));
+            assert_eq!(serde_json::to_value(&patched).unwrap()["mode"], projection);
+            settings.auto_chat = patched;
+            database
+                .save_setting(COHOST_SETTINGS_KEY, &settings)
+                .unwrap();
+            let raw: serde_json::Value =
+                database.load_setting(COHOST_SETTINGS_KEY).unwrap().unwrap();
+            assert_eq!(raw["autoChat"]["talk"], serde_json::to_value(talk).unwrap());
+            assert_eq!(raw["autoChat"]["mode"], projection);
+            assert_ne!(raw["autoChat"]["mode"], "auto", "never written again");
+            let loaded = load_cohost_settings(&database);
+            assert_eq!(loaded.auto_chat.talk(), talk);
+            assert_eq!(loaded.auto_chat.talk, Some(talk));
+            assert_eq!(loaded.auto_chat.mode, talk.legacy());
+        }
+        // A block saved before `talk` existed: `mode` decides, and the load
+        // fills `talk` and keeps `mode` as it was.
+        for (mode, talk) in [
+            ("off", CohostTalkMode::Off),
+            ("suggest", CohostTalkMode::Suggest),
+            ("auto", CohostTalkMode::Bubble),
+        ] {
+            let database = Database::open_in_memory_for_tests();
+            database
+                .save_setting(
+                    COHOST_SETTINGS_KEY,
+                    &serde_json::json!({
+                        "enabled": true,
+                        "tone": "short",
+                        "notes": "",
+                        "autoHighlight": false,
+                        "persona": { "id": "p-1", "name": "Grum", "personality": "", "bubbleStyle": "shout", "images": {}, "source": "uploaded" },
+                        "autoChat": {
+                            "mode": mode,
+                            "greetings": { "enabled": true, "templates": [] },
+                            "answers": { "enabled": false, "cooldownSeconds": 20 },
+                            "banter": { "enabled": false, "cooldownSeconds": 240 }
+                        }
+                    }),
+                )
+                .unwrap();
+            let loaded = load_cohost_settings(&database);
+            assert_eq!(loaded.auto_chat.talk, Some(talk), "mode {mode}");
+            assert_eq!(loaded.auto_chat.mode, talk.legacy(), "mode {mode}");
+            assert_eq!(loaded.persona.name, "Grum", "the persona is intact");
+            assert!(!loaded.auto_chat.answers.enabled, "nothing else changes");
+        }
+        // No `autoChat` block at all, and nothing stored at all: Bubble.
+        let database = Database::open_in_memory_for_tests();
+        database
+            .save_setting(
+                COHOST_SETTINGS_KEY,
+                &serde_json::json!({ "enabled": false, "tone": "friendly", "notes": "", "autoHighlight": false }),
+            )
+            .unwrap();
+        assert_eq!(
+            load_cohost_settings(&database).auto_chat.talk(),
+            CohostTalkMode::Bubble
+        );
+        let database = Database::open_in_memory_for_tests();
+        assert_eq!(
+            load_cohost_settings(&database).auto_chat.talk(),
+            CohostTalkMode::Bubble
+        );
+        assert_eq!(
+            CohostSettings::default().auto_chat.talk(),
+            CohostTalkMode::Bubble
+        );
+        // A patch with `talk` wins over a stale `mode`; one without takes
+        // `mode` (an older renderer's save), `bubbled` reading as Bubble.
+        let mut block = CohostAutoChat {
+            talk: Some(CohostTalkMode::Suggest),
+            mode: CohostAutoChatMode::Off,
+            ..CohostAutoChat::default()
+        };
+        let valid = validate_auto_chat(&block).unwrap();
+        assert_eq!(valid.talk, Some(CohostTalkMode::Suggest));
+        assert_eq!(valid.mode, CohostAutoChatMode::Suggest);
+        block.talk = None;
+        block.mode = CohostAutoChatMode::Auto;
+        let valid = validate_auto_chat(&block).unwrap();
+        assert_eq!(valid.talk, Some(CohostTalkMode::Bubble));
+        assert_eq!(valid.mode, CohostAutoChatMode::Off);
+        // `null` never reaches the wire for `talk` (the serde-null trap).
+        let json = serde_json::to_value(CohostAutoChat {
+            talk: None,
+            ..CohostAutoChat::default()
+        })
+        .unwrap();
+        assert!(json.get("talk").is_none());
+        assert_eq!(
+            serde_json::to_value(CohostAutoChat::default()).unwrap()["talk"],
+            "bubble"
+        );
+        // `speaks`: Off is the only quiet value.
+        assert!(!CohostTalkMode::Off.speaks());
+        assert!(CohostTalkMode::Bubble.speaks());
+        assert!(CohostTalkMode::Suggest.speaks());
+    }
+
+    /// Plan 211 D3 (the plan 192 S1.1 trap again): a Bubble block saved by
+    /// this build parses with the shape from before plan 211 (no `talk`, the
+    /// three-value `mode`), reading as Off, with the persona intact; an
+    /// older app therefore never loads defaults and never wipes anything.
+    #[test]
+    #[allow(dead_code)] // The pre-211 shape, parsed only.
+    fn a_bubble_block_still_parses_with_the_shape_from_before_plan_211() {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        enum OldMode {
+            Off,
+            Suggest,
+            Auto,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldAutoChat {
+            mode: OldMode,
+            greetings: CohostGreetingsSettings,
+            answers: CohostCooldownBehaviour,
+            banter: CohostCooldownBehaviour,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldSettings {
+            enabled: bool,
+            persona: CohostPersona,
+            auto_chat: OldAutoChat,
+        }
+        let mut settings = CohostSettings::default();
+        settings.persona.name = "Golmar".to_string();
+        for talk in [
+            CohostTalkMode::Off,
+            CohostTalkMode::Bubble,
+            CohostTalkMode::Suggest,
+        ] {
+            settings.auto_chat.talk = Some(talk);
+            settings.auto_chat.normalize_talk();
+            let json = serde_json::to_value(&settings).unwrap();
+            let old: OldSettings =
+                serde_json::from_value(json).expect("an older app ignores `talk`");
+            assert_eq!(old.persona.name, "Golmar");
+            assert!(old.auto_chat.answers.enabled);
+            match (talk, old.auto_chat.mode) {
+                (CohostTalkMode::Off | CohostTalkMode::Bubble, OldMode::Off) => {}
+                (CohostTalkMode::Suggest, OldMode::Suggest) => {}
+                (talk, mode) => panic!("{talk:?} projected as {mode:?}"),
+            }
+        }
     }
 
     /// Plan 192 S1.1 trap: `load_cohost_settings` falls back to defaults
@@ -21847,10 +22263,10 @@ mod tests {
     fn ai_greetings_need_premium_consent_the_capability_and_the_switch() {
         let start = Instant::now();
         let now_iso = chrono::Utc::now().to_rfc3339();
-        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, _) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         engine.set_web_greet_version(Some(1));
-        let pass = engine.note_activity(&[fresh_follow()], true, start, &now_iso);
-        assert!(pass.send.is_empty() && pass.propose.is_empty());
+        let pass = engine.note_activity(&[fresh_follow()], true, true, start, &now_iso);
+        assert!(pass.bubble.is_empty() && pass.propose.is_empty());
         let pending = pass
             .greet
             .expect("all four hold: the batch waits for the AI");
@@ -21884,43 +22300,46 @@ mod tests {
             start + Duration::from_secs(1),
             &now_iso,
         );
-        assert_eq!(routed.send.len(), 1);
-        assert_eq!(routed.send[0].text, "Fresh blood! Welcome, new_friend.");
-        assert_eq!(routed.send[0].state, CohostUtteranceState::Laugh);
+        assert_eq!(routed.bubble.len(), 1);
+        assert_eq!(routed.bubble[0].text, "Fresh blood! Welcome, new_friend.");
+        assert_eq!(routed.bubble[0].state, CohostUtteranceState::Laugh);
         assert_eq!(
-            engine.utterance_source(&routed.send[0].id),
+            engine.utterance_source(&routed.bubble[0].id),
             Some(crate::protocol::CohostReportPostSource::Ai)
         );
         assert_eq!(engine.snapshot().utterances.len(), 1);
 
         let line_at_once = |engine: &mut CohostEngine, premium: bool| {
-            let pass = engine.note_activity(&[fresh_follow()], premium, start, &now_iso);
+            let pass = engine.note_activity(&[fresh_follow()], premium, true, start, &now_iso);
             assert!(pass.greet.is_none(), "{pass:?}");
-            assert_eq!(pass.send.len(), 1);
-            assert_eq!(pass.send[0].text, "Welcome new_friend!", "the user's line");
+            assert_eq!(pass.bubble.len(), 1);
             assert_eq!(
-                engine.utterance_source(&pass.send[0].id),
+                pass.bubble[0].text, "Welcome new_friend!",
+                "the user's line"
+            );
+            assert_eq!(
+                engine.utterance_source(&pass.bubble[0].id),
                 Some(crate::protocol::CohostReportPostSource::Line)
             );
         };
         // No Premium.
-        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, _) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         engine.set_web_greet_version(Some(1));
         line_at_once(&mut engine, false);
         // No capability: absent, or 0.
-        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, _) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         line_at_once(&mut engine, true);
-        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, _) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         engine.set_web_greet_version(Some(0));
         line_at_once(&mut engine, true);
         // The switch off.
-        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, _) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         engine.set_web_greet_version(Some(1));
         engine.settings.auto_chat.greetings.ai = false;
         line_at_once(&mut engine, true);
         // No consent on the session.
         let mut settings = enabled_settings();
-        settings.auto_chat = auto_chat_settings(CohostAutoChatMode::Auto);
+        settings.auto_chat = auto_chat_settings(CohostTalkMode::Bubble);
         let mut engine = CohostEngine::new(settings.clone());
         engine.set_web_greet_version(Some(1));
         engine.start_session("session-1".to_string(), false, None, start);
@@ -21931,7 +22350,7 @@ mod tests {
         engine.set_web_greet_version(Some(1));
         line_at_once(&mut engine, true);
         // The pump's drain reads the same gate.
-        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, _) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         engine.set_web_greet_version(Some(1));
         let follows: Vec<LiveChatMessage> = (0..2)
             .map(|n| {
@@ -21942,9 +22361,9 @@ mod tests {
                 row
             })
             .collect();
-        let first = engine.note_activity(&follows, true, start, &now_iso);
+        let first = engine.note_activity(&follows, true, true, start, &now_iso);
         assert!(first.greet.is_some());
-        let drained = engine.drain_auto_chat(true, start + Duration::from_secs(10), &now_iso);
+        let drained = engine.drain_auto_chat(true, true, start + Duration::from_secs(10), &now_iso);
         assert!(drained.greet.is_some(), "{drained:?}");
         assert!(!drained.greet.unwrap().request.introduce);
     }
@@ -21958,11 +22377,12 @@ mod tests {
         let pending = {
             let mut engine = state.cohost.lock().await;
             engine.settings.enabled = true;
-            engine.settings.auto_chat = auto_chat_settings(CohostAutoChatMode::Suggest);
+            engine.settings.auto_chat = auto_chat_settings(CohostTalkMode::Suggest);
             engine.set_web_greet_version(Some(1));
             engine.start_session("session-1".to_string(), true, None, Instant::now());
             let pass = engine.note_activity(
                 &[fresh_follow()],
+                true,
                 true,
                 Instant::now(),
                 &chrono::Utc::now().to_rfc3339(),
@@ -22017,6 +22437,7 @@ mod tests {
                 .note_activity(
                     &[raid],
                     true,
+                    true,
                     Instant::now() + Duration::from_secs(10),
                     &chrono::Utc::now().to_rfc3339(),
                 )
@@ -22041,8 +22462,7 @@ mod tests {
     #[test]
     fn an_unanswered_question_is_answered_from_the_notes_after_a_minute() {
         let start = Instant::now();
-        let (mut engine, generation) =
-            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
         let rows = messages("session-1", 0..5);
         let tick = |engine: &mut CohostEngine,
                     n: u64,
@@ -22052,7 +22472,7 @@ mod tests {
             let at = start + Duration::from_secs(1 + (n - 1) * 30);
             engine.prepare_tick(generation, true, true, at).unwrap();
             assert!(engine.apply_tick_result(generation, 0, Ok(response(questions)), at, at_iso));
-            engine.route_answer_candidates(generation, at, at_iso)
+            engine.route_answer_candidates(generation, true, at, at_iso)
         };
         let notes = question("q_notes", &[&rows[0].id]);
         let mut card = question("q_card", &[&rows[1].id]);
@@ -22069,17 +22489,23 @@ mod tests {
         // T+60 s: the notes answer goes out; the card and the blank reply
         // stay suggestions.
         let pass = tick(&mut engine, 3, "2026-08-22T10:01:02Z", open());
-        assert_eq!(pass.send.len(), 1, "{pass:?}");
-        assert_eq!(pass.send[0].text, "Keychron Q1!");
+        assert_eq!(pass.bubble.len(), 1, "{pass:?}");
         assert_eq!(
-            pass.send[0].trigger.kind,
+            pass.bubble[0].text, "@Viewer 0 Keychron Q1!",
+            "the bubble names the asker (plan 211 D8)"
+        );
+        assert_eq!(
+            pass.bubble[0].trigger.kind,
             CohostUtteranceTriggerKind::Answer
         );
         assert_eq!(
-            pass.send[0].trigger.message_id.as_deref(),
+            pass.bubble[0].trigger.message_id.as_deref(),
             Some(rows[0].id.as_str())
         );
-        assert_eq!(pass.send[0].destination_ids, ["twitch"]);
+        assert!(
+            pass.bubble[0].destination_ids.is_empty(),
+            "a Bubble answer goes to no chat destination (plan 211 D7)"
+        );
         // T+90 s: never twice.
         let pass = tick(&mut engine, 4, "2026-08-22T10:01:32Z", open());
         assert_eq!(pass, AutoChatPass::default());
@@ -22098,7 +22524,7 @@ mod tests {
         let rows = messages("session-1", 0..5);
         let run = |close: &dyn Fn(&mut CohostEngine)| {
             let (mut engine, generation) =
-                running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+                running_engine_with(CohostTalkMode::Bubble, Some(4), start);
             engine.note_messages(&rows);
             engine
                 .prepare_tick(generation, true, true, start + Duration::from_secs(1))
@@ -22122,7 +22548,7 @@ mod tests {
                 at,
                 "2026-08-22T10:01:10Z",
             ));
-            let pass = engine.route_answer_candidates(generation, at, "2026-08-22T10:01:10Z");
+            let pass = engine.route_answer_candidates(generation, true, at, "2026-08-22T10:01:10Z");
             assert_eq!(pass, AutoChatPass::default());
             assert!(
                 engine.snapshot().questions.is_empty(),
@@ -22168,10 +22594,14 @@ mod tests {
         let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
         layout.buddy.show_on_stream = true;
         crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
-        assert_eq!(
-            state.cohost.lock().await.auto_chat_mode(),
-            CohostAutoChatMode::Off
-        );
+        // A fresh profile talks in its bubble (plan 211 D4); this test is
+        // about Off, so it is set.
+        {
+            let mut engine = state.cohost.lock().await;
+            assert_eq!(engine.talk_mode(), CohostTalkMode::Bubble);
+            engine.settings.auto_chat.talk = Some(CohostTalkMode::Off);
+            assert_eq!(engine.talk_mode(), CohostTalkMode::Off);
+        }
         let shown = say_utterance(
             &state,
             crate::protocol::CohostSayParams {
@@ -22246,6 +22676,217 @@ mod tests {
             "no bubble with the Buddy on no output"
         );
         assert_eq!(crate::buddy_overlay::status(&state).await.bubble, None);
+    }
+
+    /// Plan 211 S-A3: the Say box is bubble-only in Bubble and in Suggest
+    /// too, never a send, with the bubble shown at once.
+    #[tokio::test]
+    async fn say_is_bubble_only_in_bubble_and_suggest_too() {
+        let state = test_state();
+        let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        for (n, talk) in [CohostTalkMode::Bubble, CohostTalkMode::Suggest]
+            .into_iter()
+            .enumerate()
+        {
+            state.cohost.lock().await.settings.auto_chat.talk = Some(talk);
+            let text = format!("Hi from {talk:?}");
+            let shown = say_utterance(
+                &state,
+                crate::protocol::CohostSayParams {
+                    session_id: String::new(),
+                    text: text.clone(),
+                    state: Some(CohostUtteranceState::Laugh),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(shown.utterances.len(), n + 1);
+            let said = shown.utterances.last().unwrap();
+            assert_eq!(said.status, CohostUtteranceStatus::BubbleOnly, "{talk:?}");
+            assert_eq!(said.trigger.kind, CohostUtteranceTriggerKind::Manual);
+            assert_eq!(said.text, text);
+            assert_eq!(shown.auto_chat_sends, 0);
+            assert_eq!(
+                crate::buddy_overlay::status(&state)
+                    .await
+                    .bubble
+                    .unwrap()
+                    .text,
+                text
+            );
+        }
+    }
+
+    /// Plan 211 D2: `send_approved` is the one path from Buddy's lane to
+    /// chat, and it takes only a proposed, non-manual card while Buddy is on
+    /// Suggest. A `bubble-only` line and a manual one are refused in every
+    /// mode; a proposed greeting is refused in Off and Bubble and passes the
+    /// gate only in Suggest, where (with no chat destination here) it fails
+    /// one step later for want of a destination, which is the proof.
+    #[tokio::test]
+    async fn send_approved_refuses_bubble_only_and_manual_lines_in_every_mode() {
+        let state = test_state();
+        let mut rx = state.events.subscribe();
+        state
+            .cohost
+            .lock()
+            .await
+            .follow_auto_chat_session("session-1");
+        let utterance =
+            |kind: CohostUtteranceTriggerKind, status: CohostUtteranceStatus| CohostUtterance {
+                id: format!("utt-{kind:?}-{status:?}"),
+                text: "Welcome Ada!".to_string(),
+                state: CohostUtteranceState::Talk,
+                trigger: CohostUtteranceTrigger {
+                    kind,
+                    event_id: None,
+                    message_id: None,
+                },
+                destination_ids: Vec::new(),
+                status,
+                at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+            };
+        let mut refusal = || {
+            let mut why = None;
+            while let Ok(event) = rx.try_recv() {
+                if event.event == "log"
+                    && let Some(message) = event.payload["message"].as_str()
+                    && message.contains("Buddy did not send")
+                {
+                    why = Some(message.to_string());
+                }
+            }
+            why
+        };
+        for talk in [
+            CohostTalkMode::Off,
+            CohostTalkMode::Bubble,
+            CohostTalkMode::Suggest,
+        ] {
+            state.cohost.lock().await.settings.auto_chat.talk = Some(talk);
+            for (kind, status) in [
+                (
+                    CohostUtteranceTriggerKind::Greeting,
+                    CohostUtteranceStatus::BubbleOnly,
+                ),
+                (
+                    CohostUtteranceTriggerKind::Answer,
+                    CohostUtteranceStatus::BubbleOnly,
+                ),
+                (
+                    CohostUtteranceTriggerKind::Banter,
+                    CohostUtteranceStatus::BubbleOnly,
+                ),
+                (
+                    CohostUtteranceTriggerKind::Manual,
+                    CohostUtteranceStatus::BubbleOnly,
+                ),
+                (
+                    CohostUtteranceTriggerKind::Manual,
+                    CohostUtteranceStatus::Proposed,
+                ),
+            ] {
+                send_approved(&state, utterance(kind, status)).await;
+                let why = refusal().expect("the send is refused");
+                assert!(
+                    why.contains("the chat mode does not allow it"),
+                    "{talk:?} {kind:?} {status:?}: {why}"
+                );
+            }
+            send_approved(
+                &state,
+                utterance(
+                    CohostUtteranceTriggerKind::Greeting,
+                    CohostUtteranceStatus::Proposed,
+                ),
+            )
+            .await;
+            let why = refusal().expect("nothing can be sent here");
+            if talk == CohostTalkMode::Suggest {
+                assert!(
+                    why.contains("no destination can take it right now"),
+                    "the gate passed in Suggest: {why}"
+                );
+            } else {
+                assert!(
+                    why.contains("the chat mode does not allow it"),
+                    "{talk:?}: {why}"
+                );
+            }
+            assert_eq!(state.cohost.lock().await.snapshot().auto_chat_sends, 0);
+        }
+    }
+
+    /// Plan 211 S-A2: a Bubble pass shows its line in the bubble, puts it
+    /// on the state as `bubble-only`, counts no send and starts Banter's
+    /// quiet minute. Nothing is spawned towards chat.
+    #[tokio::test]
+    async fn a_bubble_pass_shows_the_line_and_sends_nothing() {
+        let state = test_state();
+        let mut rx = state.events.subscribe();
+        let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        let start = Instant::now();
+        let (engine, generation) = running_engine_with(CohostTalkMode::Bubble, Some(4), start);
+        *state.cohost.lock().await = engine;
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let pass = state.cohost.lock().await.note_activity(
+            &[fresh_follow()],
+            false,
+            true,
+            start,
+            &now_iso,
+        );
+        assert_eq!(pass.bubble.len(), 1, "{pass:?}");
+        assert_eq!(pass.bubble[0].status, CohostUtteranceStatus::BubbleOnly);
+        assert!(pass.propose.is_empty());
+        apply_auto_chat_pass(&state, pass, None).await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.utterances.len(), 1);
+        assert_eq!(
+            snapshot.utterances[0].status,
+            CohostUtteranceStatus::BubbleOnly
+        );
+        assert_eq!(snapshot.utterances[0].text, "Welcome new_friend!");
+        assert_eq!(snapshot.auto_chat_sends, 0);
+        assert_eq!(
+            crate::buddy_overlay::status(&state)
+                .await
+                .bubble
+                .unwrap()
+                .text,
+            "Welcome new_friend!"
+        );
+        let mut said_log = false;
+        let mut sent_log = false;
+        while let Ok(event) = rx.try_recv() {
+            if event.event != "log" {
+                continue;
+            }
+            let message = event.payload["message"].as_str().unwrap_or_default();
+            said_log |= message == "Buddy says (greeting): Welcome new_friend!";
+            sent_log |= message.contains("Buddy posted") || message.contains("Buddy did not send");
+        }
+        assert!(said_log, "the line is logged as said");
+        assert!(!sent_log, "nothing went near chat");
+        // Banter's quiet minute runs from the bubble line.
+        let mut engine = state.cohost.lock().await;
+        let soon = start + Duration::from_secs(30);
+        assert!(
+            engine
+                .prepare_banter(generation, true, true, quiet_voice(soon), soon)
+                .is_none()
+        );
+        let later = start + Duration::from_secs(61);
+        assert!(
+            engine
+                .prepare_banter(generation, true, true, quiet_voice(later), later)
+                .is_some()
+        );
     }
 
     // --- Plan 209 S18 to S20: Buddy uses the agent tools ---------------------

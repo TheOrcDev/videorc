@@ -1,11 +1,11 @@
 import type {
   CohostActivityTemplateKind,
   CohostAutoChat,
-  CohostAutoChatMode,
   CohostGreetingPlatform,
   CohostGreetings,
   CohostGreetingTemplate,
   CohostGreetingWelcomes,
+  CohostTalkMode,
   CohostUtteranceState,
   CohostUtteranceTriggerKind,
   CohostWelcomeKind,
@@ -16,7 +16,7 @@ import { CHAT_SEND_PLATFORM_MAX_CHARS } from '@/lib/chat-send'
 import { platformLabel } from '@/lib/platform-copy'
 
 // Automatic chat (plan 164 Phase D): the pure side of the greetings editor
-// (Buddy tab → Chat) and the Stream Manager's mode control. The backend
+// (Buddy tab → Chat) and the Stream Manager's talk control. The backend
 // resolves the real greetings (`cohost_greetings.rs`); this mirror only
 // previews and warns, so the editor never disagrees with what goes out.
 
@@ -29,28 +29,42 @@ export function buddyDisplayName(name: string | null | undefined): string {
   return name?.trim() || 'Buddy'
 }
 
-/** The product promise (plan 164 D4), everywhere the old one was. */
-export const BUDDY_POSTS_PROMISE =
-  'Buddy posts only in the modes you turn on. Everything is off by default.'
+/**
+ * The product promise (plan 164 D4, plan 211 D6), everywhere the old one
+ * was. True by structure: nothing Buddy does on its own reaches chat; only
+ * the streamer's click on a Suggest card posts as them.
+ */
+export const BUDDY_POSTS_PROMISE = 'Buddy never posts in your chat on its own.'
 
-export const BUDDY_MODE_LABELS: Record<CohostAutoChatMode, string> = {
+/** How Buddy talks (plan 211 D1), from least reach to most. */
+export const BUDDY_TALK_MODES: readonly CohostTalkMode[] = ['off', 'bubble', 'suggest']
+
+export const BUDDY_TALK_LABELS: Record<CohostTalkMode, string> = {
   off: 'Off',
-  suggest: 'Suggest',
-  auto: 'Auto'
+  bubble: 'Bubble',
+  suggest: 'Suggest'
 }
-export const BUDDY_MODES: readonly CohostAutoChatMode[] = ['off', 'suggest', 'auto']
 
 /**
- * The posting control's name (plan 174 S3.14a, D7): it governs only what
- * Buddy posts as you. Whether Buddy runs at all is Buddy Live, its own switch.
+ * The talk control's name (plan 211 D1, plan 202 D1): "Grum talks", in the
+ * streamer's name for Buddy. It governs only how Buddy talks on its own;
+ * whether Buddy runs at all is Buddy Live, its own switch.
  */
-export const BUDDY_POSTING_LABEL = 'Chat posting'
+export function buddyTalkLabel(name: string | null | undefined): string {
+  return `${buddyDisplayName(name)} talks`
+}
 
-/** What the chosen mode means, as the line under the control (plan 174 F-12). */
-export const BUDDY_MODE_HINTS: Record<CohostAutoChatMode, string> = {
-  off: 'Nothing is posted.',
-  suggest: 'Each message is a card here; one click sends it.',
-  auto: 'Messages go out by themselves, within the limits.'
+/** What the chosen value means, as the line under the control (plan 174 F-12). */
+export function buddyTalkHint(talk: CohostTalkMode, name: string | null | undefined): string {
+  const who = buddyDisplayName(name)
+  switch (talk) {
+    case 'off':
+      return `${who} says nothing on its own.`
+    case 'bubble':
+      return `${who} talks on stream in its bubble. Nothing goes to chat.`
+    case 'suggest':
+      return 'Each message is a card here; one click posts it to chat as you.'
+  }
 }
 
 export type BuddyBehaviourId = 'greetings' | 'answers' | 'banter'
@@ -104,31 +118,30 @@ export function buddyPostingConsentTitle(name: string | null | undefined): strin
   return `Let ${buddyDisplayName(name)} post as you?`
 }
 
-/** The posting consent dialog (plan 164 S-D6), word for word. */
+/**
+ * The posting consent dialog (plan 164 S-D6, plan 211 D5), word for word:
+ * Suggest is the one way Buddy's words reach chat, and only by a click.
+ */
 export function buddyPostingConsentSentence(name: string | null | undefined): string {
-  return `${buddyDisplayName(name)} posts to your chats as you, on the platforms you stream to, only in the modes you turn on. You can read every message later in Buddy → Reports.`
+  return `${buddyDisplayName(name)} posts to your chats as you, on the platforms you stream to, only when you click its card. You can read every message later in Buddy → Reports.`
 }
-
-export const BUDDY_AUTO_CONFIRM_SENTENCE = 'Automatic messages are sent without asking you first.'
 
 /** Where the window remembers the one-time consent (like the nudge). */
 export const BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY = 'videorc.buddyAutoChatConsent'
 
 /**
- * What a mode change needs first: the consent dialog the first time the
- * mode leaves Off, then, for Auto, its own explicit confirm (every time).
- * Auto is never reachable without the second click.
+ * What a talk change needs first (plan 211 D5): Off and Bubble apply at
+ * once, because Buddy posts nothing as you in either. Suggest asks for the
+ * posting consent the first time, because one click there posts as you.
  */
 export function buddyModeChangeStep({
   next,
   consented
 }: {
-  next: CohostAutoChatMode
+  next: CohostTalkMode
   consented: boolean
-}): 'apply' | 'consent' | 'confirm-auto' {
-  if (next === 'off') return 'apply'
-  if (!consented) return 'consent'
-  return next === 'auto' ? 'confirm-auto' : 'apply'
+}): 'apply' | 'consent' {
+  return next === 'suggest' && !consented ? 'consent' : 'apply'
 }
 
 /** Every kind Buddy greets: the Activity kinds (`templates[]`) and the two
@@ -463,24 +476,34 @@ export function greetingTemplatePlatforms(
  * The editor's inline warnings (plan 164 S-D5): the text over a cap on a
  * platform it reaches (X takes 140), and braces nothing fills. Never a
  * silent cut: the backend clips with an ellipsis and says so in the log.
+ * The caps are chat's, so `chatCaps: false` (Bubble, plan 211 S-C4, where
+ * nothing goes to chat) leaves them out; the braces still warn.
  */
-export function greetingTemplateWarnings(template: BuddyGreetingLineDraft): string[] {
+export function greetingTemplateWarnings(
+  template: BuddyGreetingLineDraft,
+  { chatCaps = true }: { chatCaps?: boolean } = {}
+): string[] {
   const warnings: string[] = []
   const { text, unknown } = resolveGreetingPreview(
     template.text,
     BUDDY_SAMPLE_FIELDS[template.kind]
   )
-  for (const platform of greetingTemplatePlatforms(template)) {
-    const cap = CHAT_SEND_PLATFORM_MAX_CHARS[platform as StreamPlatform]
-    if (text.length > cap) {
-      warnings.push(
-        `${BUDDY_GREETING_PLATFORM_LABELS[platform]} takes ${cap} characters; this one is ${text.length}.`
-      )
+  if (chatCaps) {
+    for (const platform of greetingTemplatePlatforms(template)) {
+      const cap = CHAT_SEND_PLATFORM_MAX_CHARS[platform as StreamPlatform]
+      if (text.length > cap) {
+        warnings.push(
+          `${BUDDY_GREETING_PLATFORM_LABELS[platform]} takes ${cap} characters; this one is ${text.length}.`
+        )
+      }
     }
   }
   if (unknown.length > 0) {
+    const fields = unknown.map((field) => `{${field}}`).join(', ')
     warnings.push(
-      `${unknown.map((field) => `{${field}}`).join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not a field and will be posted as written.`
+      unknown.length === 1
+        ? `${fields} isn't a field and stays as written.`
+        : `${fields} aren't fields and stay as written.`
     )
   }
   return warnings

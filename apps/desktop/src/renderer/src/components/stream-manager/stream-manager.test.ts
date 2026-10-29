@@ -310,8 +310,9 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
   })
 })
 
-describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () => {
+describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, plan 211 D1)', () => {
   const autoChat = {
+    talk: 'suggest' as const,
     mode: 'suggest' as const,
     greetings: { enabled: true, templates: [] },
     answers: { enabled: false, cooldownSeconds: 20 },
@@ -351,20 +352,58 @@ describe('StreamManager Buddy Live and chat posting (plan 174 S3.14a, D7)', () =
     )
   })
 
-  it('shows the posting mode and the read-only behaviour chips under the header', () => {
+  it('shows how Buddy talks and the read-only behaviour chips under the header', () => {
     const markup = renderWith({ onCohostOpenChatSettings: () => undefined })
     const controls = between(
       markup,
       'data-slot="buddy-chat-controls"',
-      'data-slot="buddy-mode-hint"'
+      'data-slot="buddy-talk-hint"'
     )
-    expect(controls).toContain('Chat posting')
-    expect(controls).toMatch(/data-buddy-mode="suggest"[^>]*aria-checked="true"/)
+    expect(controls).toContain('Buddy talks')
+    expect(controls).toMatch(/data-buddy-talk="suggest"[^>]*aria-checked="true"/)
+    expect(controls).not.toContain('data-buddy-talk="auto"')
     expect(controls).not.toContain('role="switch"')
     expect(controls).toContain('Greetings on')
     expect(controls).toContain('Answers off')
     expect(controls).toContain('Banter off')
-    expect(markup).toContain('Each message is a card here; one click sends it.')
+    expect(markup).toContain('Each message is a card here; one click posts it to chat as you.')
+  })
+
+  it('says Bubble says nothing while the Buddy is on no output, Buddy Live on or off (plan 211 D9)', () => {
+    const onAir = {
+      ...emptyLiveDashboardState('now'),
+      sessionId: 's1',
+      session: { state: 'live' as const, startedAt: '2026-10-02T10:00:00Z' }
+    }
+    const offStream = {
+      persona: {
+        id: 'p-1',
+        name: 'Golmar',
+        images: {},
+        bubbleStyle: 'speech' as const,
+        source: 'default' as const
+      },
+      state: 'idle' as const,
+      bubble: null,
+      showOnStream: false,
+      showInRecording: false
+    }
+    const notice = (patch: Partial<StreamManagerProps>): string | undefined =>
+      renderWith({
+        dashboard: onAir,
+        cohostBuddy: offStream,
+        onBuddyShowOnStream: () => undefined,
+        ...patch
+      }).match(/data-testid="buddy-off-outputs"[\s\S]*?Show on stream/)?.[0]
+    const bubble = { ...autoChat, talk: 'bubble' as const }
+    for (const cohostEnabled of [false, true]) {
+      const shown = notice({ cohostAutoChat: bubble, cohostEnabled })
+      expect(shown).toContain('Golmar isn&#x27;t on stream.')
+      expect(shown).toContain('Viewers can&#x27;t see its bubble, so Bubble says nothing.')
+    }
+    // Suggest is unchanged: only with Buddy Live on.
+    expect(notice({})).toBeUndefined()
+    expect(notice({ cohostEnabled: true })).toContain('its bubbles or its reactions')
   })
 
   it('says the greetings are written with AI only with Premium and cloud AI (plan 192 D7)', () => {

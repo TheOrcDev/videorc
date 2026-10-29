@@ -184,19 +184,14 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
     expect(onSay).toHaveBeenCalledTimes(3)
   })
 
-  it('says when a Say also posts to chat, and counts against the chat cap (plan 174 F-6)', async () => {
-    await render(buddy(), { onSay: vi.fn(), sayPostsToChat: true, sayChatCap: 5 })
-    expect(sayInput().getAttribute('placeholder')).toBe('Say something on stream and in chat')
-    const note = container.querySelector('[data-slot="buddy-say-posts"]')
-    expect(note?.textContent).toBe('Also posts to chat as you · 0/5')
-    expect(sayInput().getAttribute('aria-describedby')).toBe('buddy-say-posts')
-    await type(sayInput(), 'too long')
-    expect(
-      container.querySelector('[data-slot="buddy-say-posts"]')?.getAttribute('data-over-cap')
-    ).toBe('true')
+  it('speaks in the bubble only, in every mode: never a word about chat (plan 211 D2)', async () => {
     await render(buddy(), { onSay: vi.fn() })
     expect(sayInput().getAttribute('placeholder')).toBe('Say something on stream')
+    expect(sayInput().hasAttribute('aria-describedby')).toBe(false)
     expect(container.querySelector('[data-slot="buddy-say-posts"]')).toBeNull()
+    const footer = container.querySelector('[data-slot="buddy-footer"]')?.textContent ?? ''
+    expect(footer).not.toMatch(/chat/i)
+    expect(footer).not.toContain('posts')
   })
 
   it('relays the switch and disables it without a handler', async () => {
