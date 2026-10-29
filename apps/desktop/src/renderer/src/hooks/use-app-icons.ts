@@ -33,14 +33,15 @@ export function useAppIcons(bundleIds: readonly string[]): ReadonlyMap<string, s
   const key = [...new Set(bundleIds.filter(Boolean))].sort().join('\n')
   useEffect(() => {
     const getAppIcons = window.videorc?.getAppIcons
-    const missing = key
-      .split('\n')
-      .filter((id) => id && !icons.has(id) && !asking.has(id))
-      .slice(0, APP_ICONS_MAX_IDS)
+    const missing = key.split('\n').filter((id) => id && !icons.has(id) && !asking.has(id))
     if (!getAppIcons || missing.length === 0) return
     for (const id of missing) asking.add(id)
-    void getAppIcons(missing)
-      .then((found) => {
+    const batches = Array.from({ length: Math.ceil(missing.length / APP_ICONS_MAX_IDS) }, (_, i) =>
+      missing.slice(i * APP_ICONS_MAX_IDS, (i + 1) * APP_ICONS_MAX_IDS)
+    )
+    void Promise.all(batches.map((ids) => getAppIcons(ids)))
+      .then((results) => {
+        const found = Object.fromEntries(results.flatMap((result) => Object.entries(result)))
         for (const id of missing) icons.set(id, iconUrl(found[id]))
       })
       .catch((error: unknown) => {

@@ -9,7 +9,7 @@ export interface AppIconsApi {
 }
 
 /** At most this many ids per call: one picker's worth of apps. */
-export const APP_ICONS_MAX_IDS = 256
+export const APP_ICONS_MAX_IDS = 64
 
 // Kept out of the backend/RPC-owned declaration file, like the front app.
 declare module './backend' {

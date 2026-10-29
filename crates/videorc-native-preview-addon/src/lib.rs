@@ -1,4 +1,7 @@
 #[cfg(target_os = "macos")]
+mod app_icons;
+
+#[cfg(target_os = "macos")]
 mod front_app;
 
 #[cfg(target_os = "macos")]

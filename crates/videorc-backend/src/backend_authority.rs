@@ -296,9 +296,11 @@ mod tests {
     fn app_window_resolution_is_local_studio_authority() {
         for role in [BackendRole::Renderer, BackendRole::Admin] {
             assert!(authorize_backend_method(role, "sources.resolve_app_window", false).is_ok());
+            assert!(authorize_backend_method(role, "sources.app_previews", false).is_ok());
         }
         for role in [BackendRole::Remote, BackendRole::Agent] {
             assert!(authorize_backend_method(role, "sources.resolve_app_window", false).is_err());
+            assert!(authorize_backend_method(role, "sources.app_previews", false).is_err());
         }
     }
 

@@ -1,3 +1,4 @@
+import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
@@ -2275,10 +2276,22 @@ secureIpcHandle('app:self-bundle-ids', (event) => {
     ? (frontAppMonitor?.selfBundleIds() ?? [])
     : []
 })
-// Plan 210 S5: New scene… and the scene list ask for app icons by bundle id.
-// S4 fills this in (the app's icon from its bundle, cached per id); until
-// then every app draws the generic glyph.
-secureIpcHandle('app:icons', (_event, _bundleIds: string[]): Record<string, string> => ({}))
+// Plan 210 S4: resolve native app icons once per session, for the main window.
+const getAppIcons = createAppIconHandler({
+  platform: process.platform,
+  pathForBundleId: (bundleId) => {
+    if (!nativePreviewInProcessModuleResolution.path) return null
+    const binding = requireNativePreviewRealSurfaceModule(
+      nativePreviewInProcessModuleResolution.path
+    ) as {
+      appPathForBundleId?: (id: string) => string | null
+    }
+    return binding.appPathForBundleId?.(bundleId) ?? null
+  },
+  pngForPath: async (path) =>
+    (await app.getFileIcon(path, { size: 'large' })).toDataURL({ scaleFactor: 2 })
+})
+secureIpcHandle('app:icons', (_event, bundleIds: unknown) => getAppIcons(bundleIds))
 
 function createWindow(): void {
   const chrome = glassWindowChrome('main')

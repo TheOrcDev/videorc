@@ -5903,6 +5903,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "ai.quota.get"
         | "devices.list"
         | "sources.resolve_app_window"
+        | "sources.app_previews"
         | "diagnostics.stats"
         | "capture.recovery.status"
         | "preview.surface.status"
@@ -10396,6 +10397,35 @@ async fn handle_text_message_with_role(
             Ok(quota) => ServerResponse::ok(command.id, quota),
             Err(error) => ServerResponse::error(command.id, "ai-quota-failed", error.to_string()),
         },
+        "sources.app_previews" => {
+            let params = if command.params.is_null() {
+                Ok(screen_capture::AppPreviewsParams::default())
+            } else {
+                serde_json::from_value(command.params)
+            };
+            match params {
+                Ok(params) => {
+                    match tokio::task::spawn_blocking(move || screen_capture::app_previews(params))
+                        .await
+                    {
+                        Ok(Ok(apps)) => {
+                            ServerResponse::ok(command.id, serde_json::json!({"apps": apps}))
+                        }
+                        Ok(Err(error)) => {
+                            ServerResponse::error(command.id, "app-previews-failed", error)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "app-previews-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "sources.resolve_app_window" => {
             match serde_json::from_value::<protocol::ResolveAppWindowParams>(command.params) {
                 Ok(params) if !params.bundle_id.trim().is_empty() => {

@@ -41,10 +41,135 @@ pub struct NativeCaptureSources {
     pub warnings: Vec<String>,
 }
 
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppPreviewsParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPreview {
+    bundle_id: String,
+    name: String,
+    pid: i32,
+    window_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    front_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    front_window_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    picture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
+}
+
+pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::app_previews(params)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = params;
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn preview_size(width: u32, height: u32, max_width: Option<u32>) -> (u32, u32) {
+    let max_width = max_width.unwrap_or(320).clamp(160, 640);
+    let target_width = width.max(1).min(max_width);
+    (
+        target_width,
+        ((height as f64 * target_width as f64 / width.max(1) as f64).round() as u32).max(1),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn preview_data_url(bytes: &[u8]) -> Option<String> {
+    use base64::Engine;
+    if bytes.len().div_ceil(3) * 4 + 23 > 2_000_000 {
+        return None;
+    }
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn build_app_previews(windows: &[AppWindow], host_pid: i32) -> Vec<AppPreview> {
+    // Filter before grouping/selection: development Electron apps can share a
+    // bundle id with our host, so filtering only the group seed is insufficient.
+    let windows: Vec<_> = windows
+        .iter()
+        .filter(|w| {
+            w.pid != host_pid
+                && w.pid != std::process::id() as i32
+                && w.bundle_id != "dev.theorcdev.videorc"
+        })
+        .cloned()
+        .collect();
+    let mut apps = Vec::new();
+    for w in &windows {
+        if w.bundle_id.is_empty()
+            || w.protected
+            || is_foreign_session_window_app(Some(&w.app_name))
+            || w.layer != 0
+            || w.width < 400
+            || w.height < 300
+            || apps.iter().any(|a: &AppPreview| a.bundle_id == w.bundle_id)
+        {
+            continue;
+        }
+        let params = ResolveAppWindowParams {
+            bundle_id: w.bundle_id.clone(),
+            prefer_window_id: None,
+            min_width: None,
+            min_height: None,
+        };
+        let (front_window_id, front_window_title) = match select_app_window(&params, true, &windows)
+        {
+            ResolveAppWindowResult::Found {
+                window_id, title, ..
+            } => (Some(window_id), Some(title)),
+            _ => (None, None),
+        };
+        let window_count = windows
+            .iter()
+            .filter(|other| {
+                other.bundle_id == w.bundle_id
+                    && !other.protected
+                    && other.layer == 0
+                    && other.width >= 400
+                    && other.height >= 300
+            })
+            .count();
+        apps.push(AppPreview {
+            bundle_id: w.bundle_id.clone(),
+            name: w.app_name.clone(),
+            pid: w.pid,
+            window_count,
+            front_window_id,
+            front_window_title,
+            picture: None,
+            width: None,
+            height: None,
+        });
+    }
+    apps.truncate(512);
+    apps
+}
+
 /// Plain metadata in front-to-back order; independent of ScreenCaptureKit.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone)]
 struct AppWindow {
+    pid: i32,
     id: u32,
     bundle_id: String,
     app_name: String,
@@ -488,7 +613,7 @@ fn utf16_z(value: &[u16]) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-mod macos {
+pub(crate) mod macos {
     use super::*;
     use block2::RcBlock;
     // Scoped here (not at the top of the file) so the Windows arm never sees
@@ -562,6 +687,20 @@ mod macos {
         unreachable!()
     }
 
+    /// Plan 210 S3: the discovery snapshot the listing or the resolver loaded
+    /// within the last second, for a capture swap that follows them; `None`
+    /// makes the caller load its own.
+    pub(crate) fn recent_shareable_content() -> Option<Retained<SCShareableContent>> {
+        let cache = CONTENT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        cache
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(1))
+            .map(|(_, content)| content.0.clone())
+    }
+
     pub fn resolve_app_window(
         params: &ResolveAppWindowParams,
     ) -> Result<ResolveAppWindowResult, String> {
@@ -569,6 +708,11 @@ mod macos {
         let running = unsafe { content.0.applications() }
             .iter()
             .any(|a| unsafe { a.bundleIdentifier() }.to_string() == params.bundle_id);
+        let windows = ordered_app_windows(&content)?;
+        Ok(select_app_window(params, running, &windows))
+    }
+
+    fn ordered_app_windows(content: &Content) -> Result<Vec<AppWindow>, String> {
         // CGWindowListCopyWindowInfo supplies documented front-to-back order;
         // SCShareableContent.windows does not promise a z-order.
         use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
@@ -592,6 +736,7 @@ mod macos {
                 let frame = unsafe { w.frame() };
                 let title = window_title(&w).unwrap_or_default();
                 Some(AppWindow {
+                    pid: app.pid,
                     id: unsafe { w.windowID() },
                     protected: is_protected_notes_window(&app, &title, unsafe { libc::getppid() }),
                     bundle_id: app.bundle_id,
@@ -605,7 +750,103 @@ mod macos {
             })
             .collect();
         windows.sort_by_key(|w| ids.iter().position(|id| *id == w.id).unwrap_or(usize::MAX));
-        Ok(select_app_window(params, running, &windows))
+        Ok(windows)
+    }
+
+    pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String> {
+        use objc2::{AnyThread, msg_send, runtime::AnyClass};
+        use objc2_screen_capture_kit::{SCContentFilter, SCStreamConfiguration};
+        let content = load_shareable_content()?;
+        let windows = ordered_app_windows(&content)?;
+        let mut apps = build_app_previews(&windows, unsafe { libc::getppid() });
+        // The class does not exist before macOS 14. Never send a newer selector there.
+        let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
+            return Ok(apps);
+        };
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        let mut pending = Vec::new();
+        for (index, app) in apps.iter().enumerate() {
+            let Some(id) = app
+                .front_window_id
+                .as_deref()
+                .and_then(parse_screencapturekit_window_id)
+            else {
+                continue;
+            };
+            let Some(window) = (unsafe { content.0.windows() })
+                .iter()
+                .find(|w| unsafe { w.windowID() } == id)
+            else {
+                continue;
+            };
+            let frame = unsafe { window.frame() };
+            let (width, height) = preview_size(
+                frame.size.width.max(1.0) as u32,
+                frame.size.height.max(1.0) as u32,
+                params.max_width,
+            );
+            let (tx, rx) = mpsc::channel();
+            let handler = RcBlock::new(
+                move |image: *mut objc2_core_graphics::CGImage, error: *mut NSError| {
+                    // Encode inside the completion: the borrowed CGImage lives only for this call.
+                    let result = if image.is_null() || !error.is_null() {
+                        None
+                    } else {
+                        unsafe { screenshot_jpeg(image) }.and_then(|bytes| preview_data_url(&bytes))
+                    };
+                    let _ = tx.send(result);
+                },
+            );
+            unsafe {
+                let filter = SCContentFilter::initWithDesktopIndependentWindow(
+                    SCContentFilter::alloc(),
+                    &window,
+                );
+                let config = SCStreamConfiguration::new();
+                config.setWidth(width as usize);
+                config.setHeight(height as usize);
+                config.setShowsCursor(false);
+                let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: &*config, completionHandler: &*handler];
+            }
+            pending.push((index, width, height, rx));
+        }
+        for (index, width, height, rx) in pending {
+            if let Ok(Some(picture)) =
+                rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                apps[index].picture = Some(picture);
+                apps[index].width = Some(width);
+                apps[index].height = Some(height);
+            }
+        }
+        Ok(apps)
+    }
+
+    unsafe fn screenshot_jpeg(image: *mut objc2_core_graphics::CGImage) -> Option<Vec<u8>> {
+        use objc2::{
+            msg_send,
+            runtime::{AnyClass, AnyObject},
+        };
+        use objc2_foundation::{NSDictionary, NSNumber};
+        unsafe {
+            let class = AnyClass::get(c"NSBitmapImageRep")?;
+            let allocated: objc2::rc::Allocated<AnyObject> = msg_send![class, alloc];
+            let bitmap: Option<Retained<AnyObject>> = msg_send![allocated, initWithCGImage: image];
+            let bitmap = bitmap?;
+            let properties = NSDictionary::from_slices(
+                &[&*NSString::from_str("NSImageCompressionFactor")],
+                &[&*NSNumber::new_f64(0.7)],
+            );
+            let data: Option<Retained<AnyObject>> =
+                msg_send![&*bitmap, representationUsingType: 3usize, properties: &*properties];
+            let data = data?;
+            let length: usize = msg_send![&*data, length];
+            if length == 0 || length > 1_500_000 {
+                return None;
+            }
+            let bytes: *const std::ffi::c_void = msg_send![&*data, bytes];
+            Some(std::slice::from_raw_parts(bytes.cast::<u8>(), length).to_vec())
+        }
     }
 
     fn window_application(window: &SCWindow) -> Option<crate::protocol::DeviceApp> {
@@ -930,9 +1171,70 @@ mod macos {
 mod tests {
     use super::*;
 
+    #[test]
+    fn app_previews_group_count_front_and_exclusions() {
+        let mut hidden = app_window(1);
+        hidden.on_screen = false;
+        let mut own = app_window(3);
+        own.pid = 42;
+        let mut notes = app_window(4);
+        notes.protected = true;
+        let mut palette = app_window(5);
+        palette.layer = 1;
+        let mut tiny = app_window(6);
+        tiny.width = 399;
+        let mut login = app_window(7);
+        login.app_name = "loginwindow".into();
+        login.bundle_id = "login.app".into();
+        let apps = build_app_previews(
+            &[
+                own,
+                hidden.clone(),
+                app_window(2),
+                notes,
+                palette,
+                tiny,
+                login,
+            ],
+            42,
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].window_count, 2);
+        assert_eq!(
+            apps[0].front_window_id.as_deref(),
+            Some("window:screencapturekit:2")
+        );
+        assert_eq!(apps[0].front_window_title.as_deref(), Some("Window 2"));
+        let minimized = build_app_previews(&[hidden], 42);
+        assert_eq!(
+            serde_json::to_value(&minimized[0]).unwrap(),
+            serde_json::json!({"bundleId":"test.app", "name":"App", "pid":12345,"windowCount":1})
+        );
+        assert_eq!(
+            serde_json::to_value(AppPreviewsParams::default()).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn app_previews_scale_and_data_url_budget() {
+        assert_eq!(preview_size(1920, 1080, None), (320, 180));
+        assert_eq!(preview_size(800, 600, Some(1)), (160, 120));
+        assert_eq!(preview_size(800, 600, Some(900)), (640, 480));
+        assert_eq!(preview_size(200, 400, None), (200, 400));
+        assert_eq!(preview_size(0, 0, None), (1, 1));
+        assert_eq!(
+            preview_data_url(&[0xff, 0xd8, 0xff]).unwrap(),
+            "data:image/jpeg;base64,/9j/"
+        );
+        assert!(preview_data_url(&vec![0; 1_500_000]).is_none());
+        assert!(preview_data_url(&vec![0; 1_499_980]).unwrap().len() <= 2_000_000);
+    }
+
     fn app_window(id: u32) -> AppWindow {
         AppWindow {
             id,
+            pid: 12345,
             bundle_id: "test.app".into(),
             app_name: "App".into(),
             title: format!("Window {id}"),
