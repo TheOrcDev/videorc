@@ -2291,7 +2291,9 @@ const getAppIcons = createAppIconHandler({
     return binding.appIconPngForBundleId?.(bundleId, pixels) ?? null
   }
 })
-secureIpcHandle('app:icons', (_event, bundleIds: unknown) => getAppIcons(bundleIds))
+secureIpcHandle('app:icons', (event, bundleIds: unknown) =>
+  frontAppSenderIsMain(event.sender.id, mainWindow?.webContents.id) ? getAppIcons(bundleIds) : {}
+)
 
 function createWindow(): void {
   const chrome = glassWindowChrome('main')
