@@ -13,8 +13,8 @@ import {
   outputLabel,
   outputVerdict,
   performanceCheckCeiling,
+  performanceCheckMayAutoRun,
   performanceCheckTooHeavyToast,
-  shouldAutoRunPerformanceCheck,
   shouldRunPerformanceCheck
 } from './performance-check'
 import {
@@ -609,62 +609,40 @@ describe('Go Live headroom on a CPU compositor (retest 153)', () => {
   })
 })
 
-describe('shouldAutoRunPerformanceCheck', () => {
-  const fresh = {
-    isPackaged: true,
-    state: { running: false, stale: false },
-    recordingState: 'idle',
-    recordingReplayOnly: false,
-    autoRuns: 0,
-    captureReadyAtLastRun: false,
-    captureReady: true
-  }
+describe('performanceCheckMayAutoRun', () => {
+  const nothingMeasured = { running: false, stale: false }
+  const idle = { state: 'idle' }
 
-  it('runs once on an idle packaged launch with nothing measured', () => {
-    expect(shouldAutoRunPerformanceCheck(fresh)).toBe(true)
-    expect(shouldAutoRunPerformanceCheck({ ...fresh, isPackaged: false })).toBe(false)
-    expect(shouldAutoRunPerformanceCheck({ ...fresh, state: undefined })).toBe(false)
-    expect(
-      shouldAutoRunPerformanceCheck({ ...fresh, state: { running: true, stale: false } })
-    ).toBe(false)
+  it('runs on an idle launch with nothing measured and capture ready', () => {
+    expect(performanceCheckMayAutoRun(nothingMeasured, idle, true)).toBe(true)
+    expect(performanceCheckMayAutoRun(undefined, idle, true)).toBe(false)
+    expect(performanceCheckMayAutoRun({ running: true, stale: false }, idle, true)).toBe(false)
   })
 
   it('counts the replay-only Clips ring as idle', () => {
-    for (const recordingState of ['starting', 'recording', 'stopping']) {
-      expect(
-        shouldAutoRunPerformanceCheck({ ...fresh, recordingState, recordingReplayOnly: true })
-      ).toBe(true)
+    for (const state of ['starting', 'recording', 'stopping']) {
+      expect(performanceCheckMayAutoRun(nothingMeasured, { state, replayOnly: true }, true)).toBe(
+        true
+      )
     }
   })
 
   it('never runs over a real recording or livestream', () => {
-    for (const recordingState of ['starting', 'recording', 'streaming', 'stopping']) {
-      expect(shouldAutoRunPerformanceCheck({ ...fresh, recordingState })).toBe(false)
+    for (const state of ['starting', 'recording', 'streaming', 'stopping']) {
+      expect(performanceCheckMayAutoRun(nothingMeasured, { state }, true)).toBe(false)
     }
   })
 
-  it('retries once after a no-verdict run made before capture was ready', () => {
-    const afterFirst = { ...fresh, autoRuns: 1, captureReadyAtLastRun: false }
-    expect(shouldAutoRunPerformanceCheck({ ...afterFirst, captureReady: false })).toBe(false)
-    expect(shouldAutoRunPerformanceCheck(afterFirst)).toBe(true)
-    // Ready the first time: a no-verdict run is the machine, not the timing.
-    expect(shouldAutoRunPerformanceCheck({ ...afterFirst, captureReadyAtLastRun: true })).toBe(
-      false
-    )
-    // The retry is the last one in this app run.
-    expect(shouldAutoRunPerformanceCheck({ ...afterFirst, autoRuns: 2 })).toBe(false)
+  it('waits for capture (a Linux portal screen not chosen yet measures nothing)', () => {
+    expect(performanceCheckMayAutoRun(nothingMeasured, idle, false)).toBe(false)
   })
 
-  it('does not retry once a verdict was recorded', () => {
+  it('does not run once a verdict was recorded', () => {
     const measured = {
-      ...fresh,
-      autoRuns: 1,
-      state: {
-        running: false,
-        stale: false,
-        result: result([['tutorial-1080p30', 'passed']], 'tutorial-1080p30')
-      }
+      running: false,
+      stale: false,
+      result: result([['tutorial-1080p30', 'passed']], 'tutorial-1080p30')
     }
-    expect(shouldAutoRunPerformanceCheck(measured)).toBe(false)
+    expect(performanceCheckMayAutoRun(measured, idle, true)).toBe(false)
   })
 })
