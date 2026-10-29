@@ -263,6 +263,11 @@ import {
   type ResourceSelection
 } from './resource-capabilities'
 import { PersistentDirectoryAuthority } from './persistent-directory-authority'
+import {
+  buildAllowsPackagedTestHooks,
+  ignoreInspectorSignal,
+  refusePackagedTestHooks
+} from './packaged-test-hooks'
 import { SmokeAppQuitGuard } from './smoke-app-quit-guard'
 import { PreviewLifecycleSmokeEvidence } from './preview-lifecycle-smoke-evidence'
 import {
@@ -1055,6 +1060,20 @@ if (app.isPackaged) {
   // the operator-only pilot bearer only until updater initialization copies it.
   scrubReleaseAuthorityEnvironment(process.env, { preservePilotToken: true })
 }
+// Release builds drop the CDP port and native module/helper overrides before
+// anything reads them (packaged-test-hooks.ts); a packaged test build keeps them.
+const refusedPackagedTestHooks = refusePackagedTestHooks(process.env, app.commandLine, {
+  isPackaged: app.isPackaged,
+  buildAllowsTestHooks: buildAllowsPackagedTestHooks()
+})
+if (refusedPackagedTestHooks.length > 0) {
+  safeConsole.warn(
+    `Release build ignored test-only hooks: ${refusedPackagedTestHooks.join(', ')}. Build with VIDEORC_PACKAGED_TEST_HOOKS=1 for a packaged test build.`
+  )
+}
+ignoreInspectorSignal(process, { isPackaged: app.isPackaged, platform: process.platform }, () =>
+  safeConsole.warn('Ignored SIGUSR1: packaged builds have no Node inspector.')
+)
 
 const appDataDirOverride = process.env.VIDEORC_APP_DATA_DIR?.trim()
 if (appDataDirOverride) {
@@ -1076,6 +1095,7 @@ startLocalCrashReporter(app.getPath('userData'), {
 })
 // Perf harnesses attach CDP profilers to the renderer through this switch
 // (0 = pick a free port; Chromium prints "DevTools listening on ws://...").
+// Development and packaged test builds only (refusePackagedTestHooks above).
 const remoteDebugPortOverride = process.env.VIDEORC_REMOTE_DEBUG_PORT?.trim()
 if (remoteDebugPortOverride) {
   app.commandLine.appendSwitch('remote-debugging-port', remoteDebugPortOverride)

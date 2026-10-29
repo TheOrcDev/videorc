@@ -75,6 +75,19 @@ Run both packaged release smokes:
 pnpm smoke:packaged:release
 ```
 
+### Packaged hardening (fuses and test hooks)
+
+Every packaged build flips four Electron fuses before signing (`electronFuses` in `apps/desktop/electron-builder.yml`): `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect` and the `SIGUSR1` inspector are off, and app code loads only from `app.asar`. A release build also ignores `VIDEORC_REMOTE_DEBUG_PORT`, `--remote-debugging-port`/`--remote-debugging-pipe` and the native preview module/helper path overrides (`VIDEORC_NATIVE_PREVIEW_HOST_MODULE`, `VIDEORC_NATIVE_PREVIEW_IN_PROCESS_MODULE`, `VIDEORC_NATIVE_PREVIEW_HOST_HELPER`) and logs one `Release build ignored test-only hooks` line. Each of those lets another same-user process run code as Videorc, inheriting its Screen Recording, Camera and Microphone grants on macOS.
+
+Check an artifact:
+
+```sh
+pnpm check:packaged-app                      # default release/ path for this OS
+pnpm check:packaged-app --app /path/to/Videorc.app
+```
+
+A harness that needs CDP in a packaged app (the live lab, `smoke:windows-main-window-recovery`, perf probes against a packaged build) needs a **packaged test build**: set `VIDEORC_PACKAGED_TEST_HOOKS=1` when `electron-vite build` runs (`pnpm --filter @videorc/desktop package:linux:test-hooks`, `VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop`, or `$env:VIDEORC_PACKAGED_TEST_HOOKS='1'` before `pnpm package:desktop:windows`). The fuses stay flipped. `pnpm check:packaged-app` refuses such a build unless you pass `--allow-test-hooks`; it must never ship. The packaged smoke command server (`VIDEORC_PACKAGED_SMOKE_TEST`, used by `smoke:packaged*` against the exact release payload) is unchanged.
+
 For development acceptance, run the same backend recording smoke through `pnpm dev`:
 
 ```sh
