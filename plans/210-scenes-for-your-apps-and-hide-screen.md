@@ -1235,3 +1235,84 @@ first (the vertical leg keeps Alpha's frame until its own commit, then cuts),
 then Beta -> Alpha with the vertical commit first (the program keeps Beta's
 frame, no evidence, until its own commit). Red before the fix: the vertical
 leg's frame changed on the program commit.
+
+### App-scene switch follow-up (2026-10-29)
+
+**What S11 found.** `smoke:smart-scenes` (`d021ef13`) put app-scene switches
+at p95 145 / 152 / 181 ms (p50 ~97) on a host at load 4 to 9, with the gap
+click -> backend start at 76 to 239 ms (S3's fixed-window preflight: 18 to
+35 ms); one wrong-layout frame in 1 of 20 in-place switches (run 9) and seven
+on a `swap-fallback` switch under load 20 (run 2); and one valid app-scene
+apply refused mid-run (run 5, retry succeeded).
+
+**Cause 1, the round trip.** Every app scene resolved its window over
+`sources.resolve_app_window` before the swap: a fresh `SCShareableContent`
+walk whose one-second cache alternating switches never hit. The resolver's
+own rule prefers the scene's remembered window (or the follower's front
+window) whenever it is on screen, and the held `devices.list` names only
+on-screen windows, so a listed, available window under the scene's app with
+a normal size IS the resolver's answer. `heldAppWindow`
+(`lib/scene-window-resolution.ts`, `464b471d`) answers from the held list;
+a window gone, an app relaunched or no remembered window still ask the
+backend. Click -> backend start is now 16 to 51 ms (p50 ~25) in both runs.
+
+**Cause 2, the wrong-layout frames.** The commit can land a tick or more
+before the compositor adopts the next capture: `try_preview_screen_frame_source`
+is a `try_lock` on the preview slot (contended by the swap's install, the
+metrics poll, a status read), and the stop-then-start path installs the
+capture later still. For those ticks `leg_screen_frame` drew the frame the
+leg held under the NEW layout. A scene that names a screen capture now cuts
+in together with that capture's first frame: until a current frame of the
+capture the scene names is on hand, the leg keeps the scene it drew last
+tick with the frame it drew (`leg_scene_for_tick`, `compositor.rs`,
+`12adf3c4`), bounded to one second so a capture that never delivers cannot
+pin the layout. Evidence stays judged by the scene as committed (the
+previous device's frame proves nothing for the next). Test:
+`a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit` (red
+before: Alpha's frame inside Beta's shrunk layout for one tick) and
+`a_leg_scene_hold_is_bounded`.
+
+**Cause 3, the refusal.** Not SCK listing lag: run 5's backend log shows the
+Alpha apply (generation 25, swap in flight) superseded by a newer start
+lease (`reason=stale-swap`) while the Clips ring stopped and restarted on
+the relaunched window (its session start re-asserts the preview sources),
+then `Session start refused: the screen preview source(s) produced no
+frames`. The renderer got `applied=false` with no toast. A refused saved
+scene switch now gets one more try, resolved over the backend, while the
+streamer's pick is still the latest (no newer scene apply, no newer layout
+intent than the one it minted; `savedSceneApplyRetryAllowed`); a source
+turned off on purpose is not retried. The ring restarting on a scene switch
+is the D3/Clips agent's area.
+
+**Numbers** (`smoke:smart-scenes`, 20 switches, Alpha full-bleed <-> Beta
+shrunk freeform, this Mac, other agents compiling Rust; `--out
+/tmp/smart-scenes-d5-run{1,2}`):
+
+| run | host load | click -> new picture p50 / p95 / max | click -> backend start | SCK update / first frame (from the swap) | black | wrong layout | in place |
+| --- | --------- | ------------------------------------ | ---------------------- | ---------------------------------------- | ----- | ------------ | -------- |
+| S11 run 8 to 10 | 4 to 9 | 97 / 145 / 153; 125 / 152 / 153; 164 / 181 / 186 ms | 76 to 239 ms | 30 to 70 ms | 0 | 1 (run 9) | 20/20 |
+| run 1 | 27.5 -> 19.2 | 89 / 231 / 236 ms | 16 to 51 ms | 48 to 99 / 103 to 248 ms | 0 | 0 | 20/20 |
+| run 2 | 23.6 -> 24.2 | 132 / 189 / 206 ms | 19 to 37 ms (one 99) | 54 to 165 / 98 to 226 ms | 0 | 0 | 20/20 |
+
+Zero black and zero wrong-layout in both runs, and the renderer's share is
+gone; what remains over the budget is ScreenCaptureKit's `updateContentFilter`
++ `updateConfiguration` and the next target's first frame, which S3 measured
+at 42 to 50 / 90 to 115 ms on a host at load 4 to 5 and which stretched to
+99 / 248 ms here at load 20 to 35 (run 1's three slow switches, #4 to #6,
+sat on a load spike). The budget line needs a quiet host to be read: the S3
+numbers for the same SCK path put the budget within reach at load < 10, and
+this host did not get there during the runs. Run 1 also showed the `follow`
+step at 731 ms (budget 650, S10's cadence, not this path) and the
+password-manager step failing because System Settings took the front
+mid-run; run 2 passed both.
+
+**Fixed-window scenes** (`probe:scene-window-switch --switches 20`, load
+18.5 -> 9.6): recording 96 / 175 / 210 ms, layout change 95 / 150 / 198 ms,
+black 0, wrong layout 0, preflight p50 24 ms, 20/20 cuts; S3's shape at
+load 4 to 5 was 82 to 100 / 116 to 118. The idle variant's coarse status
+edge is the 2 s snapshot cadence as in S3.
+
+**Not done.** `studio-provider.integration.test.ts` has one failing case on
+this branch independent of these commits (`freeform transform cannot
+overwrite a newer saved-scene choice`, times out identically with the
+committed `use-studio.tsx`; D3's area).
