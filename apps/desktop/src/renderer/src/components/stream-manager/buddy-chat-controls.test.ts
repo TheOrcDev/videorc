@@ -206,9 +206,9 @@ describe('How Buddy talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5)', ()
   it("says what the chosen value means as a visible line, in the Buddy's name (plan 174 F-12)", async () => {
     await render(autoChat({ talk: 'bubble' }), { name: 'Golmar' })
     expect(hint()).toBe('Golmar talks on stream in its bubble. Nothing goes to chat.')
-    expect(talkButton('bubble').closest('[role="radiogroup"]')?.getAttribute('aria-describedby')).toBe(
-      'buddy-talk-hint'
-    )
+    expect(
+      talkButton('bubble').closest('[role="radiogroup"]')?.getAttribute('aria-describedby')
+    ).toBe('buddy-talk-hint')
     expect(document.querySelector('[data-buddy-talk][title]')).toBeNull()
     await render(autoChat({ talk: 'off' }), { name: 'Golmar' })
     expect(hint()).toBe('Golmar says nothing on its own.')

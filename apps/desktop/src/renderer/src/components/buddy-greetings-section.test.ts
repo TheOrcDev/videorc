@@ -179,11 +179,11 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     await act(async () => toggle('follow').click())
     // The brace still warns: it would show as written in the bubble too.
     expect(warnings()).toEqual(["{nam} isn't a field and stays as written."])
-    expect(
-      document.querySelector('[data-slot="buddy-greeting-alert"]')?.textContent
-    ).not.toContain('X takes 140')
+    expect(document.querySelector('[data-slot="buddy-greeting-alert"]')?.textContent).not.toContain(
+      'X takes 140'
+    )
+    // The same editor stays open across the save: now in Suggest.
     await render([line], { talk: 'suggest' })
-    await act(async () => toggle('follow').click())
     expect(warnings()).toEqual([
       `X takes 140 characters; this one is ${'Welcome {nam}! '.length + 150}.`,
       "{nam} isn't a field and stays as written."

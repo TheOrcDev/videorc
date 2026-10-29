@@ -159,9 +159,9 @@ describe('StreamManager: how Buddy talks reaches the relay (plan 211 S-C1, D3)',
     localStorage.setItem('videorc.buddyAutoChatConsent', '1')
     const onCohostAutoChatChange = vi.fn()
     await render([], { cohostAutoChat: autoChat, onCohostAutoChatChange })
-    expect(
-      container.querySelector('[data-buddy-talk="off"]')?.getAttribute('aria-checked')
-    ).toBe('true')
+    expect(container.querySelector('[data-buddy-talk="off"]')?.getAttribute('aria-checked')).toBe(
+      'true'
+    )
     await choose('bubble')
     await choose('suggest')
     await render([], { cohostAutoChat: { ...autoChat, talk: 'bubble' }, onCohostAutoChatChange })

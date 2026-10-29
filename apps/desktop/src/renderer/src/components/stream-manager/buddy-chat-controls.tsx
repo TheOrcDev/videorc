@@ -140,7 +140,11 @@ export function BuddyChatControls({
             ))}
           </div>
         </div>
-        <p className="text-xs text-muted-foreground" data-slot="buddy-talk-hint" id="buddy-talk-hint">
+        <p
+          className="text-xs text-muted-foreground"
+          data-slot="buddy-talk-hint"
+          id="buddy-talk-hint"
+        >
           {buddyTalkHint(autoChat.talk, name)}
         </p>
       </div>

@@ -483,9 +483,9 @@ describe('BuddyReportCard: what Buddy said on stream (plan 211 D11)', () => {
     expect(block?.textContent).toContain('Said on stream')
     expect(block?.textContent).toContain('· 3')
     const shown = rows('said')
-    expect(shown.map((row) => row.querySelector('[data-slot="list-row-title"]')?.textContent)).toEqual(
-      ['Greeting', 'Answer', 'Say']
-    )
+    expect(
+      shown.map((row) => row.querySelector('[data-slot="list-row-title"]')?.textContent)
+    ).toEqual(['Greeting', 'Answer', 'Say'])
     expect(shown[0]!.textContent).toContain('Welcome, Ada!')
     expect(shown[0]!.textContent).toContain('1:30')
     expect(shown[1]!.textContent).toContain('@Ada It’s Rust today!')

@@ -389,9 +389,12 @@ describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, pla
       showInRecording: false
     }
     const notice = (patch: Partial<StreamManagerProps>): string | undefined =>
-      renderWith({ dashboard: onAir, cohostBuddy: offStream, ...patch }).match(
-        /data-testid="buddy-off-outputs"[\s\S]*?Show on stream/
-      )?.[0]
+      renderWith({
+        dashboard: onAir,
+        cohostBuddy: offStream,
+        onBuddyShowOnStream: () => undefined,
+        ...patch
+      }).match(/data-testid="buddy-off-outputs"[\s\S]*?Show on stream/)?.[0]
     const bubble = { ...autoChat, talk: 'bubble' as const }
     for (const cohostEnabled of [false, true]) {
       const shown = notice({ cohostAutoChat: bubble, cohostEnabled })

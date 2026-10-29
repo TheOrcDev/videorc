@@ -626,7 +626,11 @@ describe('report view', () => {
     const older = buddyReportView({ payload: payload(), session: SESSION, buddyOn: true })
     if (older.kind !== 'report') throw new Error(older.kind)
     expect(older.said).toEqual([])
-    const off = buddyReportView({ payload: payload({ report: null }), session: SESSION, buddyOn: true })
+    const off = buddyReportView({
+      payload: payload({ report: null }),
+      session: SESSION,
+      buddyOn: true
+    })
     if (off.kind !== 'buddy-off') throw new Error(off.kind)
     expect(off.said).toEqual([])
   })
