@@ -64,6 +64,7 @@ import {
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
+import { runSavedScenePreflight } from '@/lib/scene-apply-preflight'
 import {
   withoutSceneApp,
   SCENE_WINDOW_APPS_KEY,
@@ -9964,7 +9965,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         let sceneRevisionBeforeRequest: number | undefined
         let sceneRequestDispatched = false
         try {
-          const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
           const requestedConfig = captureConfigRef.current
           const requestedSources =
             options?.sourcesOverride ??
@@ -9976,25 +9976,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             options && 'backgroundOverride' in options
               ? (options.backgroundOverride ?? undefined)
               : (workingBackgroundRef.current ?? undefined)
-          if (options?.strictSources) {
-            const freshDevices = await client.request<DeviceList>('devices.list')
-            const issues = sceneSourceProblems(
-              {
-                layout,
-                sources: { ...visualSources(requestedSources), app: undefined },
-                background: snapshotBackground(requestedBackground)
-              },
-              freshDevices.devices
-            )
-            if (issues.length) throw new Error(issues.join(' '))
-            if (
-              requestedBackground &&
-              !(await window.videorc?.backgroundAssetExists?.(requestedBackground.assetId))
-            )
-              throw new Error(
-                'Saved background unavailable. Resolve it or apply without background.'
-              )
-          }
+          // Plan 210 S3: the strict check judges the device list the Studio
+          // holds (one fresh list only for a source missing from it) and runs
+          // beside the other round trips a switch needs; a fresh enumeration
+          // per switch cost most of the click-to-picture budget.
+          const strictPreflight = options?.strictSources
+            ? runSavedScenePreflight({
+                visual: {
+                  layout,
+                  sources: { ...visualSources(requestedSources), app: undefined },
+                  background: snapshotBackground(requestedBackground)
+                },
+                sceneApp: options.sceneApp,
+                devices: deviceListRef.current.devices,
+                listDevices: () =>
+                  client.request<DeviceList>('devices.list').then((list) => list.devices),
+                backgroundExists: requestedBackground
+                  ? () =>
+                      Promise.resolve(
+                        window.videorc?.backgroundAssetExists?.(requestedBackground.assetId)
+                      ).then((exists) => exists === true)
+                  : null
+              })
+            : null
+          const [protectedOverlayWindowIds, baselineCompositorStatus, preflight] =
+            await Promise.all([
+              currentProtectedOverlayWindowIds(),
+              client.requestTyped('compositor.status').catch(() => null),
+              strictPreflight
+            ])
+          if (preflight?.issues.length) throw new Error(preflight.issues.join(' '))
           if (
             !options?.strictSources &&
             JSON.stringify(requestedSources) !== JSON.stringify(requestedConfig.sources)
@@ -10025,9 +10036,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : {})
           }
           requestedSceneEvidence = requestedLayoutTransactionScene(requestedTransaction)
-          const baselineCompositorStatus = await client
-            .requestTyped('compositor.status')
-            .catch(() => null)
           sceneRevisionBeforeRequest =
             typeof baselineCompositorStatus?.sceneRevision === 'number'
               ? baselineCompositorStatus.sceneRevision
