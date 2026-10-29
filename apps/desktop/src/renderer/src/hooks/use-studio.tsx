@@ -15,9 +15,8 @@ import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-l
 import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
-import { globalShortcutLayout } from '../../../shared/global-shortcuts'
+import { globalShortcutLayout, withoutSceneShortcut } from '../../../shared/global-shortcuts'
 import { screenHideAccelerator } from '@/lib/screen-privacy-view'
-import { withoutSceneShortcut } from '../../../shared/global-shortcut-bindings'
 import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
 import { acceleratorLabel } from '../../../shared/accelerator-format'
 import {
@@ -65,21 +64,16 @@ import {
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
-import { judgeSceneSources, runSavedScenePreflight } from '@/lib/scene-apply-preflight'
 import {
   withoutSceneApp,
   SCENE_WINDOW_APPS_KEY,
   rememberedSceneApps,
-  rememberSceneWindowApp,
   sceneAppState,
-  resolveSceneWindowForApply,
-  savedSceneApplyRetryAllowed,
-  sceneWindowRefusal,
   reconcileWorkingSceneSources,
-  type SceneAppState,
-  type SavedSceneApplyOptions,
-  type SavedSceneApplyResult
-} from '@/lib/scene-window-resolution'
+  type SceneAppState
+} from '@/lib/scene-window-state'
+import type { SavedSceneApplyOptions, SavedSceneApplyResult } from '@/lib/scene-window-resolution'
+import type * as SavedSceneApply from '@/lib/saved-scene-apply'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
 import { backgroundLibrarySyncDecision, firstRunLookWritesHeld } from '@/lib/first-run'
 import type { FirstRunLook } from '@/lib/first-run-look'
@@ -104,6 +98,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type Dispatch,
   type ReactElement,
   type ReactNode,
@@ -149,7 +144,7 @@ import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
 import { useScreenPrivacy } from './use-screen-privacy'
-import { useFollowFrontApp, type FollowSceneApply } from './use-follow-front-app'
+import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
   GoLiveConfirmOutcome,
@@ -709,6 +704,22 @@ function loadCaptionOverlay() {
 // The Buddy's bubble rasterizer: lazy, never in the eager shell.
 function loadBuddyOverlay() {
   return import('@/lib/buddy-overlay')
+}
+
+// Plan 210 S10: the follower and the password-manager list it reads load on
+// macOS once the backend is up, never in the eager shell.
+function loadFollowFrontApp() {
+  return import('./use-follow-front-app')
+}
+
+// Plan 210 D5: a saved scene's app-window resolution and strict preflight live
+// in a chunk warmed at connect. Once in it is read synchronously, so no switch
+// pays the import.
+let savedSceneApplyChunk: typeof SavedSceneApply | null = null
+
+async function loadSavedSceneApply(): Promise<typeof SavedSceneApply> {
+  savedSceneApplyChunk ??= await import('@/lib/saved-scene-apply')
+  return savedSceneApplyChunk
 }
 
 // Steady-state telemetry (surface counters, diagnostics stats) commits to
@@ -7471,6 +7482,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     let remoteSurfaceConnected = false
     let remoteSurfacePublisher: RemoteSurfacePublisher | null = null
+    void loadSavedSceneApply().catch((error: unknown) =>
+      console.warn('[scenes] scene switch chunk failed to load', error)
+    )
     void import('@/lib/remote-surface')
       .then(({ RemoteSurfacePublisher }) => {
         if (disposed) return
@@ -10001,7 +10015,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // beside the other round trips a switch needs; a fresh enumeration
           // per switch cost most of the click-to-picture budget.
           const strictPreflight = options?.strictSources
-            ? runSavedScenePreflight({
+            ? (savedSceneApplyChunk ?? (await loadSavedSceneApply())).runSavedScenePreflight({
                 visual: {
                   layout,
                   sources: { ...visualSources(requestedSources), app: undefined },
@@ -10605,6 +10619,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         for (const listener of manualSceneApplyListenersRef.current) listener(id)
       const generation = ++savedSceneResolveGenerationRef.current
       let layoutIntentBefore = layoutIntentIdRef.current
+      let sceneApply: typeof SavedSceneApply
+      try {
+        sceneApply = savedSceneApplyChunk ?? (await loadSavedSceneApply())
+      } catch (error) {
+        reportError(error, { action: 'switch', object: 'the scene' })
+        return { ok: false }
+      }
       let visual = normalizeSceneVisual(repaired ?? saved.visual)
       let current = captureConfigRef.current
       let microphone: ReturnType<typeof sceneMicrophone> | null = null
@@ -10619,7 +10640,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       for (let attempt = 0; attempt < 2; attempt += 1) {
         visual = normalizeSceneVisual(repaired ?? saved.visual)
         try {
-          const resolved = await resolveSceneWindowForApply(
+          const resolved = await sceneApply.resolveSceneWindowForApply(
             visual,
             deviceListRef.current.devices,
             (params) => {
@@ -10640,7 +10661,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ...current,
               [id]: resolved.reason.slice(4) as SceneAppState
             }))
-            const refusal = sceneWindowRefusal(visual, resolved.reason)
+            const refusal = sceneApply.sceneWindowRefusal(visual, resolved.reason)
             if (!refusal.ok) toast.warning(refusal.message, { id: 'scene-app-unavailable' })
             return refusal
           }
@@ -10696,7 +10717,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         applied = await transaction
         if (applied) break
         if (
-          !savedSceneApplyRetryAllowed({
+          !sceneApply.savedSceneApplyRetryAllowed({
             attempt,
             generation,
             latestGeneration: savedSceneResolveGenerationRef.current,
@@ -10704,14 +10725,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             latestIntent: layoutIntentIdRef.current
           }) ||
           // A source turned off on purpose refuses the same way twice.
-          judgeSceneSources(visual, deviceListRef.current.devices, visual.sources.app).kind ===
-            'refused'
+          sceneApply.judgeSceneSources(visual, deviceListRef.current.devices, visual.sources.app)
+            .kind === 'refused'
         )
           break
         layoutIntentBefore = intent
       }
       if (applied) {
-        rememberedAppsRef.current = rememberSceneWindowApp(
+        rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
           rememberedAppsRef.current,
           id,
           visual.sources,
@@ -10797,8 +10818,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySavedSceneResult(sceneId, undefined, { preferWindowId, origin: 'follow' }),
     [applySavedSceneResult]
   )
-  useFollowFrontApp({
-    enabled: runtimeInfo?.platform === 'darwin',
+  const followFrontAppEnabled = runtimeInfo?.platform === 'darwin'
+  const followFrontAppWanted = followFrontAppEnabled && wsStatus === 'connected'
+  const [FollowFrontApp, setFollowFrontApp] = useState<ComponentType<FollowFrontAppHost> | null>(
+    null
+  )
+  useEffect(() => {
+    if (!followFrontAppWanted || FollowFrontApp) return
+    void loadFollowFrontApp()
+      .then(({ FollowFrontAppController }) => setFollowFrontApp(() => FollowFrontAppController))
+      .catch((error: unknown) => console.warn('[follow-front-app] load failed', error))
+  }, [followFrontAppWanted, FollowFrontApp])
+  const followFrontAppHost: FollowFrontAppHost = {
+    enabled: followFrontAppEnabled,
     scenes: sceneLibrary.scenes,
     activeSceneId: activeSavedSceneId,
     sources: captureConfig.sources,
@@ -10809,7 +10841,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     showScreen: privacy.showScreen,
     applyScene: followSceneApply,
     subscribeManualApply: subscribeManualSceneApply
-  })
+  }
 
   const applyCameraPreset = useCallback(
     (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => {
@@ -18622,6 +18654,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           replay={replayBufferControls}
         >
           {children}
+          {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
         </StudioContextProviders>
       </StudioBannersContext.Provider>
     </StudioShellContext.Provider>

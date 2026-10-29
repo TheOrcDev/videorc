@@ -1,8 +1,8 @@
 import type { Device, LayoutPreset, LayoutSettings } from './backend'
 import { layoutPresetNeedsScreen, layoutPresetOrientation } from './capture'
 import { layoutPresetLabel } from './layout-labels'
+import { appWindowFailureCopy } from './scene-apps'
 import {
-  appWindowFailureCopy,
   sceneSourceProblems,
   normalizeSceneAudio,
   normalizeSceneVisual,

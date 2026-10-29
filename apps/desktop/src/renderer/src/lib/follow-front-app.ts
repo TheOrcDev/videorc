@@ -1,4 +1,5 @@
-import { sceneForFrontApp, type SavedScene, type SceneOrientation } from './scene-presets'
+import { sceneForFrontApp } from './scene-apps'
+import type { SavedScene, SceneOrientation } from './scene-presets'
 
 /** Desktop application ids, including store/legacy variants. Keep exact ids;
  * Browser extension processes do not activate as foreground applications;
@@ -8,32 +9,60 @@ import { sceneForFrontApp, type SavedScene, type SceneOrientation } from './scen
  * help.enpass.io/business/latest/google-workspace/deploying-enpass-on-macos;
  * Homebrew/homebrew-cask Casks/{b/bitwarden,k/keeper-password-manager,
  * l/lastpass,p/proton-pass}.rb; keepassxreboot/keepassxc src/CMakeLists.txt.
+ * Grouped by product, each once with every bundle id it ships under: the
+ * Scene page lists them by name (`privacy-settings.ts`).
  */
-export const DEFAULT_PASSWORD_MANAGER_BUNDLE_IDS: readonly string[] = [
-  'com.1password.1password',
-  'com.agilebits.onepassword7',
-  'com.agilebits.onepassword-osx',
-  'com.agilebits.onepassword4',
-  'com.bitwarden.desktop',
-  'com.dashlane.dashlanephonefinal', // Current Mac App Store (Apple lookup 517914548).
-  'com.dashlane.Dashlane',
-  'com.dashlane.DashlaneAgent',
-  'com.keepersecurity.passwordmanager',
-  'com.callpod.keeper',
-  'com.callpod.keepermac.lite',
-  'com.lastpass.lastpassmacdesktop',
-  'com.lastpass.LastPass',
-  'com.lastpass.lastpassforsafari',
-  'com.apple.Passwords',
-  'com.apple.keychainaccess',
-  'me.proton.pass.electron',
-  'me.proton.pass',
-  'me.proton.pass.catalyst',
-  'org.keepassxc.keepassxc',
-  'org.keepassx.keepassxc',
-  'in.sinew.Enpass-Desktop',
-  'in.sinew.Enpass-Desktop.App'
+export const BUILT_IN_PASSWORD_MANAGERS: readonly {
+  name: string
+  bundleIds: readonly string[]
+}[] = [
+  {
+    name: '1Password',
+    bundleIds: [
+      'com.1password.1password',
+      'com.agilebits.onepassword7',
+      'com.agilebits.onepassword-osx',
+      'com.agilebits.onepassword4'
+    ]
+  },
+  { name: 'Bitwarden', bundleIds: ['com.bitwarden.desktop'] },
+  {
+    name: 'Dashlane',
+    bundleIds: [
+      'com.dashlane.dashlanephonefinal', // Current Mac App Store (Apple lookup 517914548).
+      'com.dashlane.Dashlane',
+      'com.dashlane.DashlaneAgent'
+    ]
+  },
+  {
+    name: 'Keeper',
+    bundleIds: [
+      'com.keepersecurity.passwordmanager',
+      'com.callpod.keeper',
+      'com.callpod.keepermac.lite'
+    ]
+  },
+  {
+    name: 'LastPass',
+    bundleIds: [
+      'com.lastpass.lastpassmacdesktop',
+      'com.lastpass.LastPass',
+      'com.lastpass.lastpassforsafari'
+    ]
+  },
+  { name: 'Passwords', bundleIds: ['com.apple.Passwords'] },
+  { name: 'Keychain Access', bundleIds: ['com.apple.keychainaccess'] },
+  {
+    name: 'Proton Pass',
+    bundleIds: ['me.proton.pass.electron', 'me.proton.pass', 'me.proton.pass.catalyst']
+  },
+  { name: 'KeePassXC', bundleIds: ['org.keepassxc.keepassxc', 'org.keepassx.keepassxc'] },
+  { name: 'Enpass', bundleIds: ['in.sinew.Enpass-Desktop', 'in.sinew.Enpass-Desktop.App'] }
 ]
+
+/** Every built-in bundle id: the reducer's default list. */
+export const DEFAULT_PASSWORD_MANAGER_BUNDLE_IDS: readonly string[] =
+  BUILT_IN_PASSWORD_MANAGERS.flatMap((app) => app.bundleIds)
 
 export type FrontApp = { bundleId: string; name: string; pid: number; frontWindowId?: string }
 export type ScreenHideReason = 'you' | 'password-manager'

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Device, ResolveAppWindowResult } from './backend'
 import { defaultCaptureConfig, mergeSourceKind } from './capture'
-import { hydrateWorkingScene, scenesForApps, type SceneVisual } from './scene-presets'
+import { scenesForApps } from './scene-apps'
+import { hydrateWorkingScene, type SceneVisual } from './scene-presets'
 import {
   heldAppWindow,
   rememberedSceneApps,

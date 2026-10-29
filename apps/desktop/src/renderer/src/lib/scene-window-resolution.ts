@@ -1,28 +1,32 @@
-import type {
-  Device,
-  ResolveAppWindowParams,
-  ResolveAppWindowResult,
-  SourceSelection
-} from './backend'
-import { reconcileSourceSelection } from './capture'
+import type { Device, ResolveAppWindowResult } from './backend'
 import {
   appWindowFailureCopy,
-  normalizeSceneApp,
   resolveSceneWindow,
   type AppWindowFailure,
   type AppWindowResolution,
-  type SavedScene,
-  type SceneVisual,
-  type SceneWindowResolution,
-  type VisualSources
-} from './scene-presets'
+  type SceneWindowResolution
+} from './scene-apps'
+import type { SavedScene, SceneVisual, VisualSources } from './scene-presets'
+import {
+  rememberedSceneApps,
+  type RememberedSceneApps,
+  type ResolveAppWindow
+} from './scene-window-state'
 
-export const SCENE_WINDOW_APPS_KEY = 'videorc.scene-window-apps.v1'
-export type SceneAppState = 'ready' | 'not-running' | 'no-window' | 'minimized'
+export {
+  reconcileWorkingSceneSources,
+  rememberedSceneApps,
+  SCENE_WINDOW_APPS_KEY,
+  sceneAppState,
+  withoutSceneApp,
+  type RememberedSceneApps,
+  type ResolveAppWindow,
+  type SceneAppState
+} from './scene-window-state'
+
 export type SavedSceneApplyResult =
   | { ok: true }
   | { ok: false; reason?: AppWindowFailure; message?: string }
-export type ResolveAppWindow = (params: ResolveAppWindowParams) => Promise<ResolveAppWindowResult>
 /** How a scene apply was asked for (plan 210 S10). */
 export type SavedSceneApplyOptions = {
   /** The window to prefer over the scene's own, as the follower's swap in place (D1, D10). */
@@ -30,21 +34,7 @@ export type SavedSceneApplyOptions = {
   /** `follow`: the follower's own apply, which never counts as the streamer's pick. */
   origin?: 'follow'
 }
-export type RememberedSceneApps = Record<string, string>
 
-/** Separate, bounded device memory. Never migrate or rewrite a scene snapshot. */
-export function rememberedSceneApps(
-  raw: unknown,
-  scenes: readonly Pick<SavedScene, 'id'>[]
-): RememberedSceneApps {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
-  const ids = new Set(scenes.map((s) => s.id))
-  return Object.fromEntries(
-    Object.entries(raw)
-      .filter(([id, bundleId]) => ids.has(id) && normalizeSceneApp({ bundleId }))
-      .slice(-200)
-  )
-}
 export function rememberSceneWindowApp(
   memory: RememberedSceneApps,
   sceneId: string,
@@ -61,24 +51,6 @@ export function rememberSceneWindowApp(
     Object.defineProperty(next, sceneId, { value: bundleId, enumerable: true, configurable: true })
   }
   return rememberedSceneApps(next, scenes)
-}
-
-/** Discovery can prove a window exists; only the resolver can distinguish a missing app from minimized windows. */
-export function sceneAppState(
-  visual: SceneVisual,
-  devices: readonly Device[],
-  last?: SceneAppState
-): SceneAppState | undefined {
-  const app = visual.sources.app
-  if (!app) return undefined
-  if (last && last !== 'ready') return last
-  if (
-    devices.some(
-      (d) => d.kind === 'window' && d.status === 'available' && d.app?.bundleId === app.bundleId
-    )
-  )
-    return 'ready'
-  return last && last !== 'ready' ? last : 'not-running'
 }
 
 /** The backend resolver's own floor for a normal window (D1). */
@@ -170,47 +142,4 @@ export function sceneWindowRefusal(
       reason
     )
   }
-}
-
-/** Used on first discovery at launch and every idle discovery refresh. */
-export async function reconcileWorkingSceneSources(
-  sources: SourceSelection & VisualSources,
-  devices: Device[],
-  resolve: ResolveAppWindow
-): Promise<SourceSelection & VisualSources> {
-  if (!sources.app || devices.length === 0) return reconcileSourceSelection(sources, devices)
-  const result = await resolve({ bundleId: sources.app.bundleId, preferWindowId: sources.windowId })
-  // Refusal keeps today's display fallback, without exact-title rebinding to another window.
-  const next = result.ok
-    ? {
-        ...sources,
-        windowId: result.windowId,
-        windowName: result.title,
-        screenId: undefined,
-        screenName: undefined,
-        captureOff: false,
-        testPattern: false
-      }
-    : { ...sources, windowId: undefined, windowName: undefined }
-  const reconciled = reconcileSourceSelection(next, devices)
-  // A successful resolver may be newer than devices.list. Preserve its authoritative window.
-  return result.ok
-    ? {
-        ...reconciled,
-        ...next,
-        cameraId: reconciled.cameraId,
-        cameraName: reconciled.cameraName,
-        cameraOff: reconciled.cameraOff,
-        microphoneId: reconciled.microphoneId,
-        microphoneName: reconciled.microphoneName,
-        microphoneOff: reconciled.microphoneOff
-      }
-    : reconciled
-}
-
-/** App identity belongs to renderer scene memory, never to protocol SourceSelection. */
-export function withoutSceneApp<T extends SourceSelection>(sources: T): Omit<T, 'app'> {
-  const next = { ...sources }
-  delete (next as T & { app?: unknown }).app
-  return next
 }

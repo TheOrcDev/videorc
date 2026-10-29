@@ -7,13 +7,8 @@ import {
   layoutPresetOrientation
 } from './capture'
 import { plural } from './format'
-import {
-  normalizeSceneVisual,
-  scenesForApps,
-  type SavedScene,
-  type ScenesForAppsOptions,
-  type SceneVisual
-} from './scene-presets'
+import { scenesForApps, type ScenesForAppsOptions } from './scene-apps'
+import { normalizeSceneVisual, type SavedScene, type SceneVisual } from './scene-presets'
 import { uniqueSceneName } from './scene-list'
 
 // Plan 210 D2: New scene… lists the open apps, each with a picture of its

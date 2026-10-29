@@ -2,14 +2,16 @@ import { describe, expect, it } from 'vitest'
 import { defaultCaptureConfig } from './capture'
 import {
   appWindowFailureCopy,
+  resolveSceneWindow,
+  sceneForFrontApp,
+  scenesForApps
+} from './scene-apps'
+import {
   hydrateSceneLibrary,
   hydrateWorkingScene,
   normalizeSceneVisual,
-  resolveSceneWindow,
-  sceneForFrontApp,
   sceneNameError,
   sceneSourceGaps,
-  scenesForApps,
   type SceneVisual
 } from './scene-presets'
 

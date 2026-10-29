@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { nextEligibleScene } from './scene-shortcut-walk'
-import { withGlobalShortcut, withoutSceneShortcut } from '../../../shared/global-shortcut-bindings'
-import { globalShortcutEntries, isGlobalShortcutAction } from '../../../shared/global-shortcuts'
+import { withGlobalShortcut } from '../../../shared/global-shortcut-bindings'
+import {
+  globalShortcutEntries,
+  isGlobalShortcutAction,
+  withoutSceneShortcut
+} from '../../../shared/global-shortcuts'
 import type { SavedScene } from './scene-presets'
 
 const scenes = [

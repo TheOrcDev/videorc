@@ -47,6 +47,19 @@ export function globalShortcutEntries(
     ])
   ]
 }
+/**
+ * Deletion releases the OS chord; renaming never changes an id's binding.
+ * Here, not in `global-shortcut-bindings.ts`, so the Studio's scene delete
+ * keeps that Settings-only module out of the eager chunk.
+ */
+export function withoutSceneShortcut(
+  config: GlobalShortcutsConfig | undefined,
+  id: string
+): GlobalShortcutsConfig {
+  const scenes = { ...config?.scenes }
+  delete scenes[id]
+  return { ...config, scenes }
+}
 export function globalShortcutLayout(action: GlobalShortcutAction): LayoutPreset | null {
   return action.startsWith('layout:') ? (action.slice(7) as LayoutPreset) : null
 }

@@ -44,13 +44,3 @@ export function withGlobalShortcut(
     [ACTION_CONFIG_KEYS[action as keyof typeof ACTION_CONFIG_KEYS]]: accelerator
   }
 }
-
-/** Deletion releases the OS chord; renaming never changes an id's binding. */
-export function withoutSceneShortcut(
-  config: GlobalShortcutsConfig | undefined,
-  id: string
-): GlobalShortcutsConfig {
-  const scenes = { ...config?.scenes }
-  delete scenes[id]
-  return { ...config, scenes }
-}

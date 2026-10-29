@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-import type { FollowFrontAppContext } from './follow-front-app'
+import { BUILT_IN_PASSWORD_MANAGERS, type FollowFrontAppContext } from './follow-front-app'
 
 // Plan 210 D11: Hide screen for password managers, per device. On by
 // default, with a built-in list the streamer can add apps to and take apps
@@ -31,56 +31,9 @@ export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
 
 /**
  * The built-in list by name: each product once, with every bundle id it
- * ships under (store, legacy and helper variants, `follow-front-app.ts`).
- * The test holds it equal to the reducer's defaults.
+ * ships under. One copy, the follower's (`follow-front-app.ts`).
  */
-export const BUILT_IN_PASSWORD_MANAGERS: readonly {
-  name: string
-  bundleIds: readonly string[]
-}[] = [
-  {
-    name: '1Password',
-    bundleIds: [
-      'com.1password.1password',
-      'com.agilebits.onepassword7',
-      'com.agilebits.onepassword-osx',
-      'com.agilebits.onepassword4'
-    ]
-  },
-  { name: 'Bitwarden', bundleIds: ['com.bitwarden.desktop'] },
-  {
-    name: 'Dashlane',
-    bundleIds: [
-      'com.dashlane.dashlanephonefinal',
-      'com.dashlane.Dashlane',
-      'com.dashlane.DashlaneAgent'
-    ]
-  },
-  {
-    name: 'Keeper',
-    bundleIds: [
-      'com.keepersecurity.passwordmanager',
-      'com.callpod.keeper',
-      'com.callpod.keepermac.lite'
-    ]
-  },
-  {
-    name: 'LastPass',
-    bundleIds: [
-      'com.lastpass.lastpassmacdesktop',
-      'com.lastpass.LastPass',
-      'com.lastpass.lastpassforsafari'
-    ]
-  },
-  { name: 'Passwords', bundleIds: ['com.apple.Passwords'] },
-  { name: 'Keychain Access', bundleIds: ['com.apple.keychainaccess'] },
-  {
-    name: 'Proton Pass',
-    bundleIds: ['me.proton.pass.electron', 'me.proton.pass', 'me.proton.pass.catalyst']
-  },
-  { name: 'KeePassXC', bundleIds: ['org.keepassxc.keepassxc', 'org.keepassx.keepassxc'] },
-  { name: 'Enpass', bundleIds: ['in.sinew.Enpass-Desktop', 'in.sinew.Enpass-Desktop.App'] }
-]
+export { BUILT_IN_PASSWORD_MANAGERS }
 
 /** One row of the list: a built-in app (all its variants) or an added one. */
 export type PasswordManagerEntry = {

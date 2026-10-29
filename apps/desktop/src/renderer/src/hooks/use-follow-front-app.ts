@@ -214,3 +214,13 @@ export function useFollowFrontApp(host: FollowFrontAppHost): void {
     }
   }, [enabled, api, watch])
 }
+
+/**
+ * The follower as the Studio mounts it: loaded on macOS once the backend is
+ * up, with the password-manager list it reads, so neither rides in the
+ * Studio's first paint. It renders nothing.
+ */
+export function FollowFrontAppController(host: FollowFrontAppHost): null {
+  useFollowFrontApp(host)
+  return null
+}

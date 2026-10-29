@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defaultCaptureConfig } from './capture'
-import { scenesForApps } from './scene-presets'
+import { scenesForApps } from './scene-apps'
 import {
   DEFAULT_PASSWORD_MANAGER_BUNDLE_IDS,
   initialFollowFrontAppState,
