@@ -170,6 +170,11 @@ linux:
   category: Video
   executableName: videorc
   maintainer: TheOrcDev
+  # The bundled videorc.desktop names the videorc:// handler too (AppImage
+  # integration tools copy it). The app writes its own user entry on launch;
+  # see src/main/linux-desktop-entry.ts.
+  mimeTypes:
+    - x-scheme-handler/videorc
   extraResources:
     - from: ../../target/release/videorc-backend
       to: videorc-backend
