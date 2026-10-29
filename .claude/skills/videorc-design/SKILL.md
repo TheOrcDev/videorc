@@ -84,17 +84,9 @@ for the owner, not a design choice.
   - **Light is the crisp invert** (D3): the dark chrome's pixels turned
     around, white liquid with black reflections and black-chrome controls.
     No separate light look.
-  - **The ground drifts, clear but calm** (D5, revised 2026-10-28). The
-    owner asked for "a little bit" of movement without costing memory or
-    CPU, and then for "clear but calm". Under the coats 10 and then 40 px
-    could not be seen, so it was tuned live with the owner watching.
-    - The same still sways up to 120 px across and 84 px down along two slow
-      sines (25 s and 33 s), 20 steps a second.
-    - It moves whenever the window is on screen, even beside a focused app.
-    - It holds still while the window is minimised or hidden, while a
-      recording or livestream runs (a Clips-only ring is not a take), and
-      under Reduce Motion.
-    - No second image, no shader, no zoom.
+  - **Nothing moves outside the Welcome screen** (D5; the owner tried a
+    drifting ground on 2026-10-28 and took it back on 2026-10-29): the ground
+    is a still, so it costs nothing while you record or stream.
   - **Stream Manager's highlights and members are chrome** (2026-10-28,
     plan 0011). The owner asked for the highlights and every member's entry
     to look much stronger, in the Welcome screen's Liquid Chrome.
@@ -116,7 +108,7 @@ for the owner, not a design choice.
     live.
 - **First-run setup paints Liquid Chrome** (2026-10-27, plans 203, 207 and 208).
   The Welcome screen is the only place outside a scene where a live
-  background runs: Liquid Chrome,
+  background runs, and the only place the chrome moves: Liquid Chrome,
   Polished, Normal motion, edge to edge. Under dark the shader dims it.
   Under light it is inverted (white liquid, black reflections) with no dim,
   and a CSS brightness of 0.85 after the invert only under Increase
@@ -883,9 +875,8 @@ moved onto the utility.
 
 Fast and subtle: 100–150 ms ease-out. Floating surfaces fade and scale from
 0.98. Rows highlight instantly. Nothing bounces, and chips never move. The
-chrome ground only drifts, slowly, while no take runs (owner call,
-2026-10-28); only the Welcome screen's backdrop plays Liquid Chrome itself.
-`prefers-reduced-motion` collapses motion.
+chrome ground is a still: only the Welcome screen's backdrop moves (owner
+call). `prefers-reduced-motion` collapses motion.
 
 ## Toast discipline
 
