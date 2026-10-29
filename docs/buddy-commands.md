@@ -1,7 +1,7 @@
 # Buddy voice commands
 
 Ask Buddy to put a comment on stream, take it down, or remove it from chat
-(plan 140). Buddy posts only in the modes you turn on, and it removes a
+(plan 140). Buddy never posts in your chat on its own, and it removes a
 comment only when you tell it to.
 
 Voice commands are part of Videorc Premium. **Remove from chat** in a
