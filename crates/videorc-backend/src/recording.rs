@@ -20240,7 +20240,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        tee_session_loglevel(stream_targets).to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -21029,6 +21029,20 @@ fn append_bridge_audio_input_args(
     }
 }
 
+/// The log level of a session whose RTMP legs ride the tee (retest 154 B2).
+/// A leg that reconnects logs `Recovery successful` at INFO; at `warning`
+/// it never reached `StreamLegMonitor`, so the UI kept the leg
+/// "reconnecting" while it streamed again. `level+info` tags every line, and
+/// `relay_ffmpeg_stderr` keeps INFO out of the warning paths, as on the
+/// bridge copy path (plan 161). A session without a stream is unchanged.
+fn tee_session_loglevel(stream_targets: &[StreamTarget]) -> &'static str {
+    if stream_targets.is_empty() {
+        "warning"
+    } else {
+        BRIDGE_FFMPEG_LOGLEVEL
+    }
+}
+
 /// One tee slave spec for an RTMP(S) leg. `onfail=ignore` keeps a dying
 /// platform from killing the recording or the other streams; `rw_timeout`
 /// (microseconds) bounds every socket operation so a stalled ingest ERRORS OUT
@@ -21146,7 +21160,7 @@ fn ffmpeg_args_with_encoder_and_replay(
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        tee_session_loglevel(stream_targets).to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -37791,6 +37805,55 @@ mod tests {
                  recover_any_error=1:restart_with_keyframe=1:recovery_wait_time=2",
             ]
         );
+    }
+
+    #[test]
+    fn a_raw_session_with_stream_legs_logs_their_recovery() {
+        // Retest 154 B2: `Recovery successful` is INFO; at `warning` the UI
+        // never left "reconnecting" although the legs streamed again.
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let fifo_path = Path::new("/tmp/videorc-raw-input.yuv");
+        let encoder = ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::LinuxSoftware);
+        let mut params = base_params(true, true);
+        let streaming = streaming_for(&[
+            (StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw"),
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "yt",
+            ),
+        ]);
+        params.streaming = Some(streaming.clone());
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        let streamed = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+            &capture,
+            &params,
+            Some(Path::new("/tmp/videorc-raw-record-stream.mkv")),
+            &targets,
+            fifo_path,
+            EncoderBridgeVideoOutput::RawYuv420p,
+            &encoder,
+            None,
+        )
+        .unwrap();
+        assert_eq!(arg_value(&streamed, "-loglevel"), Some("level+info"));
+
+        let recorded = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+            &capture,
+            &base_params(true, false),
+            Some(Path::new("/tmp/videorc-raw-record.mkv")),
+            &[],
+            fifo_path,
+            EncoderBridgeVideoOutput::RawYuv420p,
+            &encoder,
+            None,
+        )
+        .unwrap();
+        assert_eq!(arg_value(&recorded, "-loglevel"), Some("warning"));
     }
 
     #[test]
