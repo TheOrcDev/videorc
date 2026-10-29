@@ -5549,6 +5549,10 @@ pub struct CohostReportGreetingsSkipped {
     /// YouTube calls were paused by the quota breaker (plan 094).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub youtube_paused: u64,
+    /// Plan 211 D9: Bubble mode, and Buddy was on no output, so nobody would
+    /// have seen the line.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub no_bubble: u64,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -5571,6 +5575,7 @@ impl CohostReportGreetingsSkipped {
                 .destination_failed
                 .saturating_add(later.destination_failed),
             youtube_paused: self.youtube_paused.saturating_add(later.youtube_paused),
+            no_bubble: self.no_bubble.saturating_add(later.no_bubble),
         }
     }
 }
@@ -7883,6 +7888,7 @@ mod tests {
                 no_line: 1,
                 held: 4,
                 youtube_paused: 2,
+                no_bubble: 3,
                 ..CohostReportGreetingsSkipped::default()
             })
         );

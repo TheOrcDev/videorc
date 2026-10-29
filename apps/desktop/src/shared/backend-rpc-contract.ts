@@ -4161,7 +4161,9 @@ const cohostReportGreetingsSchema = objectSchema(
           deduped: optionalSchema(nonNegativeInteger),
           held: optionalSchema(nonNegativeInteger),
           destinationFailed: optionalSchema(nonNegativeInteger),
-          youtubePaused: optionalSchema(nonNegativeInteger)
+          youtubePaused: optionalSchema(nonNegativeInteger),
+          // Plan 211 D9: Bubble mode with Buddy on no output.
+          noBubble: optionalSchema(nonNegativeInteger)
         },
         { allowUnknown: false }
       )

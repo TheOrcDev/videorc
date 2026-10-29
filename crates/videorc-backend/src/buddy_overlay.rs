@@ -456,6 +456,16 @@ pub fn overlay_enabled(app: &AppState) -> bool {
     buddy.show_on_stream || buddy.show_in_recording
 }
 
+/// Whether anyone can see Buddy right now (plan 211 D9): today, whether it
+/// is on an output ([`overlay_enabled`]). In Bubble mode the lane greets,
+/// answers and asks for banter only while this holds, so no AI call is spent
+/// on a line nobody sees. Plan 202 Phase A adds the takeover rule here
+/// ("hidden by a takeover"); keep that rule in this one place. Reads the
+/// overlay layout from the database: call it before taking the engine lock.
+pub fn buddy_visible(app: &AppState) -> bool {
+    overlay_enabled(app)
+}
+
 /// Whether an utterance's words belong in the bubble: a line that reached
 /// chat (`sent`), one that was never meant for chat (`bubble-only`), or the
 /// streamer's own line from the Say box, which bubbles the moment it is

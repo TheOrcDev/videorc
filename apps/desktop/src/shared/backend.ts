@@ -6959,6 +6959,8 @@ export interface CohostReportGreetingSkips {
   destinationFailed?: number
   /** YouTube chat was paused (the quota breaker). */
   youtubePaused?: number
+  /** Plan 211 D9: Bubble mode, and Buddy wasn't on stream, so nobody would have seen it. */
+  noBubble?: number
 }
 
 /** Greeting totals over every chatter of the session. */

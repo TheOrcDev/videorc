@@ -1016,7 +1016,7 @@
           "byChat": 0,
           "onStream": 0,
           "manual": 0,
-          "skipped": { "noLine": 1, "held": 4, "youtubePaused": 2 }
+          "skipped": { "noLine": 1, "held": 4, "youtubePaused": 2, "noBubble": 3 }
         },
         "recap": { "offered": 0, "drafted": 0, "dismissed": 0 },
         "posts": [
