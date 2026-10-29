@@ -207,8 +207,24 @@ pub(crate) struct AnswerCandidate {
     pub(crate) question_id: String,
     pub(crate) message_id: Option<String>,
     pub(crate) destination_id: Option<String>,
+    /// The first asker's display name (plan 211 D8): a Bubble answer starts
+    /// with it, since the bubble has no chat thread to say who is answered.
+    pub(crate) author_name: Option<String>,
     pub(crate) text: String,
     pub(crate) state: CohostUtteranceState,
+}
+
+/// Plan 211 D8: in the bubble an answer says who it answers, "@{name} …",
+/// unless the reply already contains the name (case-insensitively). Suggest's
+/// chat text is unchanged: the chat thread names the asker.
+fn bubble_answer_text(text: &str, author_name: Option<&str>) -> String {
+    let Some(name) = author_name.map(str::trim).filter(|name| !name.is_empty()) else {
+        return text.to_string();
+    };
+    if text.to_lowercase().contains(&name.to_lowercase()) {
+        return text.to_string();
+    }
+    format!("@{name} {text}")
 }
 
 /// What the lane decided to say, before it becomes an utterance.
@@ -818,10 +834,15 @@ impl AutoChatLane {
                 vec![destination_id]
             }
         };
-        let text = candidate.text.trim().to_string();
+        let text = candidate.text.trim();
         if text.is_empty() {
             return pass;
         }
+        // Plan 211 D8: the bubble names the asker; a card does not.
+        let text = match talk {
+            CohostTalkMode::Bubble => bubble_answer_text(text, candidate.author_name.as_deref()),
+            CohostTalkMode::Off | CohostTalkMode::Suggest => text.to_string(),
+        };
         self.last_answer_at = Some(now);
         let trigger = CohostUtteranceTrigger {
             kind: CohostUtteranceTriggerKind::Answer,
@@ -1181,9 +1202,65 @@ mod tests {
             question_id: "q_1".to_string(),
             message_id: Some("m-1".to_string()),
             destination_id: Some("twitch:main".to_string()),
+            author_name: None,
             text: "It is a Keychron.".to_string(),
             state: CohostUtteranceState::Talk,
         }
+    }
+
+    /// Plan 211 S-B3 (D8): in the bubble an answer starts with "@{name} ",
+    /// unless the reply already names the asker; a Suggest card does not.
+    #[test]
+    fn a_bubble_answer_names_the_asker_unless_the_reply_already_does() {
+        let start = Instant::now();
+        let bubble = settings(CohostTalkMode::Bubble);
+        let named = |text: &str, name: Option<&str>| AnswerCandidate {
+            author_name: name.map(str::to_string),
+            text: text.to_string(),
+            ..answer()
+        };
+        let mut lane = AutoChatLane::default();
+        let pass = lane.route_answer(
+            &bubble,
+            named("It is a Keychron.", Some("Ada")),
+            start,
+            &now_iso(),
+        );
+        assert_eq!(pass.bubble[0].text, "@Ada It is a Keychron.");
+        // The reply already says who: no double name, case-insensitively.
+        let mut lane = AutoChatLane::default();
+        let pass = lane.route_answer(
+            &bubble,
+            named("Good one, ada: it is a Keychron.", Some("Ada")),
+            start,
+            &now_iso(),
+        );
+        assert_eq!(pass.bubble[0].text, "Good one, ada: it is a Keychron.");
+        // No name known, or a blank one: the reply as it came.
+        for name in [None, Some(""), Some("   ")] {
+            let mut lane = AutoChatLane::default();
+            let pass = lane.route_answer(
+                &bubble,
+                named("It is a Keychron.", name),
+                start,
+                &now_iso(),
+            );
+            assert_eq!(pass.bubble[0].text, "It is a Keychron.", "{name:?}");
+        }
+        // Suggest: the card's chat text is unchanged.
+        let mut lane = AutoChatLane::default();
+        let pass = lane.route_answer(
+            &settings(CohostTalkMode::Suggest),
+            named("It is a Keychron.", Some("Ada")),
+            start,
+            &now_iso(),
+        );
+        assert_eq!(pass.propose[0].text, "It is a Keychron.");
+        assert_eq!(
+            bubble_answer_text("  spaced  ", Some(" Bo ")),
+            "@Bo   spaced  ",
+            "the helper only prefixes; the bubble collapses whitespace later"
+        );
     }
 
     fn ai() -> GreetAiContext {

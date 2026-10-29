@@ -3928,14 +3928,18 @@ impl CohostSession {
                 && self.offered_answers.insert(incoming.id.clone())
             {
                 let message_id = message_ids.first().cloned();
-                let destination_id = message_id
-                    .as_deref()
-                    .and_then(|id| self.known.get(id))
-                    .map(|known| known.destination_id.clone());
+                let first_row = message_id.as_deref().and_then(|id| self.known.get(id));
+                let destination_id = first_row.map(|known| known.destination_id.clone());
+                // Plan 211 D8: the first asker's name, for the bubble.
+                let author_name = first_row
+                    .map(|known| known.author_name.trim())
+                    .filter(|name| !name.is_empty())
+                    .map(|name| truncate_utf16(name, QUESTION_ASKER_MAX_UNITS));
                 self.answer_candidates.push(AnswerCandidate {
                     question_id: incoming.id.clone(),
                     message_id,
                     destination_id,
+                    author_name,
                     text: truncate_utf16(&incoming.suggested_reply, QUESTION_TEXT_MAX_UNITS),
                     state: utterance_state_for_mood(incoming.mood),
                 });
@@ -21568,7 +21572,8 @@ mod tests {
         assert_eq!(bubbled.bubble.len(), 1, "{bubbled:?}");
         assert!(bubbled.propose.is_empty());
         let answer = &bubbled.bubble[0];
-        assert_eq!(answer.text, "Keychron Q1!");
+        // Plan 211 D8: the bubble names the first asker (the row's author).
+        assert_eq!(answer.text, "@Viewer 0 Keychron Q1!");
         assert_eq!(
             answer.state,
             CohostUtteranceState::Laugh,
@@ -21579,13 +21584,18 @@ mod tests {
             answer.trigger.message_id.as_deref(),
             Some(rows[0].id.as_str())
         );
-        assert_eq!(answer.destination_ids, vec!["twitch".to_string()]);
+        assert!(
+            answer.destination_ids.is_empty(),
+            "a Bubble answer goes to no chat destination (plan 211 D7)"
+        );
         assert_eq!(engine.snapshot().utterances.len(), 1);
 
         let (_, suggest) = run(CohostTalkMode::Suggest, true);
         assert!(suggest.bubble.is_empty());
         assert_eq!(suggest.propose.len(), 1);
         assert_eq!(suggest.propose[0].status, CohostUtteranceStatus::Proposed);
+        assert_eq!(suggest.propose[0].text, "Keychron Q1!", "a card is unchanged");
+        assert_eq!(suggest.propose[0].destination_ids, ["twitch"]);
 
         let (engine, off) = run(CohostTalkMode::Off, true);
         assert_eq!(off, AutoChatPass::default());
@@ -22399,7 +22409,11 @@ mod tests {
         // stay suggestions.
         let pass = tick(&mut engine, 3, "2026-08-22T10:01:02Z", open());
         assert_eq!(pass.bubble.len(), 1, "{pass:?}");
-        assert_eq!(pass.bubble[0].text, "Keychron Q1!");
+        assert_eq!(
+            pass.bubble[0].text,
+            "@Viewer 0 Keychron Q1!",
+            "the bubble names the asker (plan 211 D8)"
+        );
         assert_eq!(
             pass.bubble[0].trigger.kind,
             CohostUtteranceTriggerKind::Answer
@@ -22408,7 +22422,10 @@ mod tests {
             pass.bubble[0].trigger.message_id.as_deref(),
             Some(rows[0].id.as_str())
         );
-        assert_eq!(pass.bubble[0].destination_ids, ["twitch"]);
+        assert!(
+            pass.bubble[0].destination_ids.is_empty(),
+            "a Bubble answer goes to no chat destination (plan 211 D7)"
+        );
         // T+90 s: never twice.
         let pass = tick(&mut engine, 4, "2026-08-22T10:01:32Z", open());
         assert_eq!(pass, AutoChatPass::default());
