@@ -35,6 +35,7 @@ use crate::cohost_greetings::{
 use crate::cohost_throttle::{AutoChatThrottle, GreetingOffer};
 use crate::live_chat::LiveChatMessage;
 use crate::protocol::{CohostReportGreetingsSkipped, CohostReportPostSource};
+use crate::streaming::stream_platform_id;
 use crate::videorc_api::{
     COHOST_GREET_ITEMS_MAX, CohostApiError, CohostApiErrorKind, CohostGreetItem,
     CohostGreetRequest, CohostGreetResponse, CohostTickPersona,
@@ -51,6 +52,25 @@ pub(crate) const BANTER_QUIET_AFTER_SEND: Duration = Duration::from_secs(60);
 pub(crate) const ACTIVITY_FRESH_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// A viewer name as the greet route takes it.
 const GREET_NAME_MAX_UNITS: usize = 120;
+/// Plan 211 D7: in Bubble mode the throttle sees one destination, the bubble
+/// on stream, shared by every platform. Six lines a minute, 5 s apart, the
+/// kind cooldowns and the collapse then pace what viewers read, not what
+/// each chat would take.
+pub(crate) const BUBBLE_DESTINATION: &str = "bubble";
+
+/// The facts as the throttle keys them in Bubble mode (plan 211 S-B1): the
+/// destination is the bubble, and the dedupe key carries the platform, since
+/// the destination no longer names it. The same viewer on two platforms is
+/// greeted once per platform, as before.
+fn bubble_facts(mut facts: ActivityFacts) -> ActivityFacts {
+    facts.viewer_key = format!(
+        "{}:{}",
+        stream_platform_id(facts.platform),
+        facts.viewer_key
+    );
+    facts.destination_id = BUBBLE_DESTINATION.to_string();
+    facts
+}
 
 /// What one lane pass decided. The caller shows `bubble`, publishes
 /// `propose` (and every change), arms the pump for `schedule`, runs `greet`
@@ -431,7 +451,8 @@ impl AutoChatLane {
         now_iso: &str,
     ) -> AutoChatPass {
         let mut pass = AutoChatPass::default();
-        let on = settings.talk().speaks() && settings.greetings.enabled;
+        let talk = settings.talk();
+        let on = talk.speaks() && settings.greetings.enabled;
         for message in messages {
             let Some(facts) = activity_facts(message).or_else(|| welcome_facts(message)) else {
                 continue;
@@ -455,6 +476,11 @@ impl AutoChatLane {
                 self.skip(&mut pass, kind, GreetingSkipReason::NoLine, &name);
                 continue;
             }
+            // Plan 211 D7: the bubble is one destination for every platform.
+            let facts = match talk {
+                CohostTalkMode::Bubble => bubble_facts(facts),
+                CohostTalkMode::Off | CohostTalkMode::Suggest => facts,
+            };
             match self.throttle.offer_greeting(facts, now) {
                 GreetingOffer::SendNow(batch) => {
                     self.greet(settings, ai, &batch, now, now_iso, &mut pass);
@@ -537,11 +563,18 @@ impl AutoChatLane {
             event_id: Some(first.message_id.clone()),
             message_id: None,
         };
+        // A Bubble line goes to no chat destination (plan 211 D7: the facts
+        // name the bubble, not a chat), so it carries none. A Suggest card
+        // keeps the destination the event came from (D8).
+        let destination_ids = match settings.talk() {
+            CohostTalkMode::Bubble => Vec::new(),
+            CohostTalkMode::Off | CohostTalkMode::Suggest => vec![first.destination_id.clone()],
+        };
         let spoken = Spoken {
             text,
             state: line.state,
             trigger,
-            destination_ids: vec![first.destination_id.clone()],
+            destination_ids,
         };
         // Plan 192 S2.2: with the AI available for this session, the line
         // waits for its AI version; the record is made when the result lands,
@@ -735,10 +768,12 @@ impl AutoChatLane {
     }
 
     /// A tick reply the viewer asked the Buddy for by name (S-D3), or one
-    /// the notes answer (plan 192 D5): under the answers switch, the answers
-    /// cooldown and the destination's limiter. Nothing here counts as a
-    /// send (plan 211 D10): a Suggest card counts when it lands, a Bubble
-    /// line never.
+    /// the notes answer (plan 192 D5): under the answers switch and the
+    /// answers cooldown. In Suggest the card also needs the question's chat
+    /// row and its destination's limiter; in Bubble (plan 211 D7) the line
+    /// goes to the bubble, so it needs neither and the bubble queue paces
+    /// it. Nothing here counts as a send (D10): a Suggest card counts when
+    /// it lands, a Bubble line never.
     pub(crate) fn route_answer(
         &mut self,
         settings: &CohostAutoChat,
@@ -747,7 +782,8 @@ impl AutoChatLane {
         now_iso: &str,
     ) -> AutoChatPass {
         let mut pass = AutoChatPass::default();
-        if !settings.talk().speaks() || !settings.answers.enabled {
+        let talk = settings.talk();
+        if !talk.speaks() || !settings.answers.enabled {
             return pass;
         }
         let cooldown = Duration::from_secs(u64::from(settings.answers.cooldown_seconds));
@@ -761,21 +797,27 @@ impl AutoChatLane {
             ));
             return pass;
         }
-        let Some(destination_id) = candidate.destination_id else {
-            pass.log.push(format!(
-                "Buddy skipped an answer to {}: the question's chat row is unknown.",
-                candidate.question_id
-            ));
-            return pass;
+        let destination_ids = match talk {
+            CohostTalkMode::Bubble => Vec::new(),
+            CohostTalkMode::Off | CohostTalkMode::Suggest => {
+                let Some(destination_id) = candidate.destination_id else {
+                    pass.log.push(format!(
+                        "Buddy skipped an answer to {}: the question's chat row is unknown.",
+                        candidate.question_id
+                    ));
+                    return pass;
+                };
+                if let Err(at) = self.throttle.admit(&destination_id, now) {
+                    pass.log.push(format!(
+                        "Buddy skipped an answer to {}: {destination_id} is rate-limited for {} s.",
+                        candidate.question_id,
+                        at.saturating_duration_since(now).as_secs()
+                    ));
+                    return pass;
+                }
+                vec![destination_id]
+            }
         };
-        if let Err(at) = self.throttle.admit(&destination_id, now) {
-            pass.log.push(format!(
-                "Buddy skipped an answer to {}: {destination_id} is rate-limited for {} s.",
-                candidate.question_id,
-                at.saturating_duration_since(now).as_secs()
-            ));
-            return pass;
-        }
         let text = candidate.text.trim().to_string();
         if text.is_empty() {
             return pass;
@@ -792,7 +834,7 @@ impl AutoChatLane {
                 text,
                 state: candidate.state,
                 trigger,
-                destination_ids: vec![destination_id],
+                destination_ids,
             },
             None,
             now,
@@ -1548,7 +1590,10 @@ mod tests {
         assert_eq!(first.bubble.len(), 1);
         assert_eq!(first.bubble[0].text, "Hi Ana, welcome to the stream!");
         assert_eq!(first.bubble[0].state, CohostUtteranceState::Talk);
-        assert_eq!(first.bubble[0].destination_ids, ["main"]);
+        assert!(
+            first.bubble[0].destination_ids.is_empty(),
+            "a Bubble line goes to no chat destination (plan 211 D7)"
+        );
         assert_eq!(
             first.bubble[0].trigger.kind,
             CohostUtteranceTriggerKind::Greeting
@@ -2146,7 +2191,10 @@ mod tests {
             CohostUtteranceTriggerKind::Answer
         );
         assert_eq!(first.bubble[0].trigger.message_id.as_deref(), Some("m-1"));
-        assert_eq!(first.bubble[0].destination_ids, ["twitch:main"]);
+        assert!(
+            first.bubble[0].destination_ids.is_empty(),
+            "a Bubble answer goes to no chat destination (plan 211 D7)"
+        );
         assert_eq!(lane.utterance_source(&first.bubble[0].id), None);
         let cooled = lane.route_answer(
             &bubble,
@@ -2163,21 +2211,26 @@ mod tests {
             &now_iso(),
         );
         assert_eq!(later.bubble.len(), 1);
+        // Plan 211 S-B1: in Bubble the answer needs no chat row and no
+        // limiter; it goes out anyway.
         let mut unknown = answer();
         unknown.destination_id = None;
-        let dropped = lane.route_answer(
+        let anyway = lane.route_answer(
             &bubble,
-            unknown,
+            unknown.clone(),
             start + Duration::from_secs(60),
             &now_iso(),
         );
-        assert!(dropped.bubble.is_empty() && dropped.log.len() == 1);
+        assert_eq!(anyway.bubble.len(), 1, "{anyway:?}");
+        assert!(anyway.log.is_empty());
         let mut off = bubble.clone();
         off.answers.enabled = false;
         assert_eq!(
             lane.route_answer(&off, answer(), start + Duration::from_secs(90), &now_iso()),
             AutoChatPass::default()
         );
+        // Suggest is unchanged: a card on the question's destination, no
+        // card without one, and the destination's limiter holds.
         let suggest = settings(CohostTalkMode::Suggest);
         let card = lane.route_answer(
             &suggest,
@@ -2187,6 +2240,114 @@ mod tests {
         );
         assert_eq!(card.propose.len(), 1);
         assert!(card.bubble.is_empty());
+        assert_eq!(card.propose[0].destination_ids, ["twitch:main"]);
+        let dropped = lane.route_answer(
+            &suggest,
+            unknown,
+            start + Duration::from_secs(150),
+            &now_iso(),
+        );
+        assert!(dropped.propose.is_empty() && dropped.log.len() == 1, "{dropped:?}");
+        assert!(dropped.log[0].contains("chat row is unknown"));
+        lane.throttle
+            .note_sent("twitch:main", start + Duration::from_secs(179));
+        let limited = lane.route_answer(
+            &suggest,
+            answer(),
+            start + Duration::from_secs(180),
+            &now_iso(),
+        );
+        assert!(limited.propose.is_empty() && limited.log.len() == 1, "{limited:?}");
+        assert!(limited.log[0].contains("rate-limited"));
+    }
+
+    /// A chat row on another platform: the same shape, another destination.
+    fn chat_row_on(platform: StreamPlatform, target: &str, name: &str) -> LiveChatMessage {
+        let mut row = chat_row(name, true, true);
+        row.platform = platform;
+        row.target_id = Some(target.to_string());
+        row.id = format!(
+            "session-1:{}:{target}:chat-{}",
+            stream_platform_id(platform),
+            name.to_lowercase()
+        );
+        row
+    }
+
+    /// Plan 211 S-B1 (D7): in Bubble the throttle sees one destination, the
+    /// bubble, so a burst of first-timers across two platforms is one line
+    /// now and one collapsed follow-up, while the same viewer on two
+    /// platforms is still greeted once per platform. Suggest keeps a card
+    /// per destination.
+    #[test]
+    fn a_burst_on_two_platforms_is_one_bubble_and_a_viewer_is_greeted_once_per_platform() {
+        let start = Instant::now();
+        let bubble = bare_settings(CohostTalkMode::Bubble);
+        let rows = vec![
+            chat_row_on(StreamPlatform::Twitch, "main", "Ana"),
+            chat_row_on(StreamPlatform::Youtube, "yt", "Bo"),
+            chat_row_on(StreamPlatform::Twitch, "main", "Cy"),
+            chat_row_on(StreamPlatform::Youtube, "yt", "Di"),
+            chat_row_on(StreamPlatform::Twitch, "main", "Ed"),
+        ];
+        let mut lane = AutoChatLane::default();
+        let first = lane.note_activity(&bubble, None, &rows, start, &now_iso());
+        assert_eq!(first.bubble.len(), 1, "{first:?}");
+        assert_eq!(first.bubble[0].text, "Hi Ana, welcome to the stream!");
+        assert!(first.bubble[0].destination_ids.is_empty());
+        assert_eq!(first.skipped.held, 4);
+        assert_eq!(first.skipped.deduped, 0);
+        assert_eq!(first.schedule, Some(start + Duration::from_secs(5)));
+        let later = lane.drain(&bubble, None, start + Duration::from_secs(5), &now_iso());
+        assert_eq!(later.bubble.len(), 1, "one collapsed follow-up: {later:?}");
+        assert_eq!(
+            later.bubble[0].text,
+            "Hi Bo, Cy, Di and 1 other, welcome to the stream!"
+        );
+        assert_eq!(lane.next_due(), None, "nothing left waiting");
+
+        // The same viewer id on two platforms: two greetings, one each.
+        let mut lane = AutoChatLane::default();
+        let twitch_ana = chat_row_on(StreamPlatform::Twitch, "main", "Ana");
+        let youtube_ana = chat_row_on(StreamPlatform::Youtube, "yt", "Ana");
+        assert_eq!(twitch_ana.author_id, youtube_ana.author_id);
+        let one = lane.note_activity(&bubble, None, &[twitch_ana.clone()], start, &now_iso());
+        assert_eq!(one.bubble.len(), 1);
+        let two = lane.note_activity(
+            &bubble,
+            None,
+            &[youtube_ana],
+            start + Duration::from_secs(1),
+            &now_iso(),
+        );
+        assert_eq!(two.skipped.deduped, 0, "{two:?}");
+        assert_eq!(two.skipped.held, 1, "held for the first-time cooldown");
+        let released = lane.drain(&bubble, None, start + Duration::from_secs(5), &now_iso());
+        assert_eq!(released.bubble.len(), 1);
+        assert_eq!(released.bubble[0].text, "Hi Ana, welcome to the stream!");
+        let replay = lane.note_activity(
+            &bubble,
+            None,
+            &[twitch_ana],
+            start + Duration::from_secs(6),
+            &now_iso(),
+        );
+        assert_eq!(replay.skipped.deduped, 1, "the same platform dedupes");
+        assert!(silent(&replay));
+
+        // Suggest: the destinations stay apart, so Ana and Bo get a card
+        // each at once, on their own destination.
+        let mut lane = AutoChatLane::default();
+        let cards = lane.note_activity(
+            &bare_settings(CohostTalkMode::Suggest),
+            None,
+            &rows[..2],
+            start,
+            &now_iso(),
+        );
+        assert_eq!(cards.propose.len(), 2, "{cards:?}");
+        assert_eq!(cards.propose[0].destination_ids, ["main"]);
+        assert_eq!(cards.propose[1].destination_ids, ["yt"]);
     }
 
     /// S-D4, plan 211 S-A2: the quiet minute runs from an approved card
