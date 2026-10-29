@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useEffectEvent, type ReactElement } from 'react'
 
+import { PANE_STABLE_GUTTER } from '@/components/pane'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { QuickSettings } from '@/components/studio/quick-settings'
@@ -190,7 +191,9 @@ export function StudioTab(): ReactElement {
   // The Go Live confirmation is the shell's (GoLiveDialogGate), so it opens
   // over every page, not only this one (plan 174 S0.6, B-5).
   return (
-    <div className={STUDIO_CONTAINER}>
+    // The page keeps its width when the inspector grows past the pane (Chat
+    // showing up on air): the pane keeps the scrollbar's gutter (plan 0009).
+    <div className={STUDIO_CONTAINER} {...PANE_STABLE_GUTTER}>
       {/* The Studio bench: the preview pane leads, and the inspector (the
           transport, session facts, microphone, sources, takeover) sits beside
           it, split by a hairline, from 720 px of content (a container query,
