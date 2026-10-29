@@ -5,6 +5,7 @@
 
 import type {
   InterruptionRecovery,
+  SessionLogEntry,
   RecordingFinalizationEvent,
   RecordingFinalizationState
 } from './backend'
@@ -38,6 +39,52 @@ export function interruptedTakeBadge(
     detail:
       'Videorc stopped during this recording. Everything up to that moment was saved as MP4; the original MKV is kept.'
   }
+}
+
+/** The log the backend writes when Record was refused and the row it had
+ * just created was marked failed (`SessionStartRowGuard`, F-017). */
+export const SESSION_START_FAILED_LOG_CODE = 'session-start-failed'
+
+const START_FAILED_REASON_PREFIXES = ['the session was marked failed:', 'reason=']
+
+type StartFailedRow = FinalizationRow & {
+  fileSizeBytes?: number
+  sessionLogCount?: number
+}
+
+/** A failed row with no file and some logs: its logs say whether Record was
+ * refused before anything was written. */
+export function mayBeStartFailed(session: StartFailedRow): boolean {
+  return (
+    session.status === 'failed' &&
+    !session.mp4Path &&
+    session.fileSizeBytes == null &&
+    (session.sessionLogCount ?? 0) > 0
+  )
+}
+
+/** Badge copy for a Record press the backend refused: the row exists, its
+ * file never did. `null` on every other row, and while its logs are unknown. */
+export function startFailedBadge(
+  session: StartFailedRow,
+  sessionLogs: readonly SessionLogEntry[] | undefined
+): { label: string; detail: string } | null {
+  if (!mayBeStartFailed(session) || !sessionLogs) return null
+  const logs = sessionLogs.filter((entry) => entry.code === SESSION_START_FAILED_LOG_CODE)
+  if (logs.length === 0) return null
+  const reason = logs.map((entry) => startFailedReason(entry.message)).find(Boolean)
+  const detail = 'This recording stopped before it started, so there is no file.'
+  return { label: "Didn't start", detail: reason ? `${detail} ${reason}` : detail }
+}
+
+function startFailedReason(message: string): string | null {
+  for (const prefix of START_FAILED_REASON_PREFIXES) {
+    const at = message.indexOf(prefix)
+    if (at < 0) continue
+    const reason = message.slice(at + prefix.length).trim()
+    return reason ? reason : null
+  }
+  return null
 }
 
 /** Badge copy for a row whose MP4 is still being produced. */
