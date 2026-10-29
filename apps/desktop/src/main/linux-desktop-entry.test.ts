@@ -57,8 +57,11 @@ describe('linuxDesktopEntryPaths', () => {
 })
 
 describe('quoteDesktopExecArgument', () => {
-  it('quotes a plain path and keeps spaces inside the quotes', () => {
-    expect(quoteDesktopExecArgument('/opt/Videorc.AppImage')).toBe('"/opt/Videorc.AppImage"')
+  it('leaves a plain path bare and quotes one with spaces', () => {
+    // Bare: the xdg-open generic launcher does not strip quotes.
+    expect(quoteDesktopExecArgument('/opt/Videorc-0.15.1.AppImage')).toBe(
+      '/opt/Videorc-0.15.1.AppImage'
+    )
     expect(quoteDesktopExecArgument('/home/ana/My Apps/Videorc.AppImage')).toBe(
       '"/home/ana/My Apps/Videorc.AppImage"'
     )
@@ -70,7 +73,8 @@ describe('quoteDesktopExecArgument', () => {
     expect(quoteDesktopExecArgument('/a`b')).toBe('"/a\\\\`b"')
     // A literal backslash: quoting doubles it, string escaping doubles it again.
     expect(quoteDesktopExecArgument('/a\\b')).toBe('"/a\\\\\\\\b"')
-    expect(quoteDesktopExecArgument('/100%/Videorc')).toBe('"/100%%/Videorc"')
+    expect(quoteDesktopExecArgument('/100%/Videorc')).toBe('/100%%/Videorc')
+    expect(quoteDesktopExecArgument("/ana's/V")).toBe('"/ana\'s/V"')
   })
 
   it('refuses a path the format cannot carry', () => {
@@ -87,8 +91,8 @@ describe('buildVideorcDesktopEntry', () => {
         '[Desktop Entry]',
         'Name=Videorc',
         'Comment=Videorc desktop app.',
-        `Exec="${APPIMAGE}" --no-sandbox %U`,
-        `TryExec="${APPIMAGE}"`,
+        `Exec=${APPIMAGE} --no-sandbox %U`,
+        `TryExec=${APPIMAGE}`,
         'Terminal=false',
         'Type=Application',
         'Icon=videorc',
@@ -105,6 +109,11 @@ describe('buildVideorcDesktopEntry', () => {
     expect(desktopEntryValue(entryFor('/home/ana/My Apps/V.AppImage'), 'Exec')).toBe(
       '"/home/ana/My Apps/V.AppImage" --no-sandbox %U'
     )
+    // TryExec is a plain string: never quoted, only backslashes escaped.
+    expect(desktopEntryValue(entryFor('/home/ana/My Apps/V.AppImage'), 'TryExec')).toBe(
+      '/home/ana/My Apps/V.AppImage'
+    )
+    expect(desktopEntryValue(entryFor('/a\\b'), 'TryExec')).toBe('/a\\\\b')
     expect(buildVideorcDesktopEntry('/a\nb')).toBeNull()
   })
 })

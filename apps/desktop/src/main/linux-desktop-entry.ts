@@ -60,17 +60,30 @@ export function linuxDesktopEntryPaths(
   }
 }
 
-// One Exec argument, quoted per the Desktop Entry spec ("The Exec key"):
-// inside double quotes, `"`, `` ` ``, `$` and `\` take a backslash, `%` is
+// One Exec argument per the Desktop Entry spec ("The Exec key"). An argument
+// with a reserved character is double-quoted, with `"`, `` ` ``, `$` and `\`
+// backslash-escaped inside; a plain path stays bare, because the xdg-open
+// generic launcher (xdg-utils 1.2, used on Hyprland, Sway and other bare
+// window managers) splits Exec on spaces and does not strip quotes. `%` is
 // written `%%`, and then the whole value gets the string-value escaping, which
 // doubles every backslash again. Null for a path the format cannot carry.
 export function quoteDesktopExecArgument(value: string): string | null {
-  // eslint-disable-next-line no-control-regex
-  if (value.length === 0 || /[\u0000-\u001f\u007f]/.test(value)) {
+  if (!isRepresentablePath(value)) {
     return null
   }
-  const quoted = `"${value.replace(/["`$\\]/g, '\\$&').replace(/%/g, '%%')}"`
-  return quoted.replace(/\\/g, '\\\\')
+  const needsQuotes = /[\s"'\\><~|&;$*?#()`]/.test(value)
+  const argument = needsQuotes ? `"${value.replace(/["`$\\]/g, '\\$&')}"` : value
+  return escapeDesktopString(argument.replace(/%/g, '%%'))
+}
+
+// A plain string value (TryExec): only the backslash is escaped.
+export function escapeDesktopString(value: string): string {
+  return value.replace(/\\/g, '\\\\')
+}
+
+function isRepresentablePath(value: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return value.length > 0 && !/[\u0000-\u001f\u007f]/.test(value)
 }
 
 // The same launch flags as the entry electron-builder bundles in the AppImage
@@ -85,7 +98,7 @@ export function buildVideorcDesktopEntry(appImagePath: string): string | null {
     'Name=Videorc',
     'Comment=Videorc desktop app.',
     `Exec=${exec} --no-sandbox %U`,
-    `TryExec=${exec}`,
+    `TryExec=${escapeDesktopString(appImagePath)}`,
     'Terminal=false',
     'Type=Application',
     `Icon=${VIDEORC_DESKTOP_ICON_NAME}`,
