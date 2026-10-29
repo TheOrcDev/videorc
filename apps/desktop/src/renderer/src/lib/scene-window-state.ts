@@ -20,6 +20,18 @@ import {
 
 export const SCENE_WINDOW_APPS_KEY = 'videorc.scene-window-apps.v1'
 export type SceneAppState = 'ready' | 'not-running' | 'no-window' | 'minimized'
+export type AppWindowFailure = 'app-not-running' | 'app-no-window' | 'app-minimized'
+/** S2's refusals, in words: "Figma isn't open". Eager: the start reason says it too. */
+export function appWindowFailureCopy(name: string, reason: AppWindowFailure): string {
+  switch (reason) {
+    case 'app-not-running':
+      return `${name} isn't open`
+    case 'app-no-window':
+      return `${name} has no window open`
+    case 'app-minimized':
+      return `${name}'s window is minimized`
+  }
+}
 export type RememberedSceneApps = Record<string, string>
 export type ResolveAppWindow = (params: ResolveAppWindowParams) => Promise<ResolveAppWindowResult>
 
@@ -55,15 +67,23 @@ export function sceneAppState(
   return last && last !== 'ready' ? last : 'not-running'
 }
 
-/** Used on first discovery at launch and every idle discovery refresh. */
+/**
+ * Used on first discovery at launch and every idle discovery refresh. For a
+ * scene made for an app, `appState` is the resolver's answer: `ready` with
+ * its window, or why there is none. Plan 210 D1: quitting and relaunching
+ * the app never breaks the scene, so a refusal holds the screen at None
+ * (never a whole display under the app's name) with the scene still on, and
+ * the next refresh that finds the app's window applies it.
+ */
 export async function reconcileWorkingSceneSources(
   sources: SourceSelection & VisualSources,
   devices: Device[],
   resolve: ResolveAppWindow
-): Promise<SourceSelection & VisualSources> {
-  if (!sources.app || devices.length === 0) return reconcileSourceSelection(sources, devices)
+): Promise<{ sources: SourceSelection & VisualSources; appState?: SceneAppState }> {
+  if (!sources.app || devices.length === 0)
+    return { sources: reconcileSourceSelection(sources, devices) }
   const result = await resolve({ bundleId: sources.app.bundleId, preferWindowId: sources.windowId })
-  // Refusal keeps today's display fallback, without exact-title rebinding to another window.
+  // Refusal waits with Screen None, without exact-title rebinding to another window.
   const next = result.ok
     ? {
         ...sources,
@@ -74,21 +94,31 @@ export async function reconcileWorkingSceneSources(
         captureOff: false,
         testPattern: false
       }
-    : { ...sources, windowId: undefined, windowName: undefined }
+    : {
+        ...sources,
+        windowId: undefined,
+        windowName: undefined,
+        screenId: undefined,
+        screenName: undefined,
+        captureOff: true
+      }
   const reconciled = reconcileSourceSelection(next, devices)
   // A successful resolver may be newer than devices.list. Preserve its authoritative window.
   return result.ok
     ? {
-        ...reconciled,
-        ...next,
-        cameraId: reconciled.cameraId,
-        cameraName: reconciled.cameraName,
-        cameraOff: reconciled.cameraOff,
-        microphoneId: reconciled.microphoneId,
-        microphoneName: reconciled.microphoneName,
-        microphoneOff: reconciled.microphoneOff
+        sources: {
+          ...reconciled,
+          ...next,
+          cameraId: reconciled.cameraId,
+          cameraName: reconciled.cameraName,
+          cameraOff: reconciled.cameraOff,
+          microphoneId: reconciled.microphoneId,
+          microphoneName: reconciled.microphoneName,
+          microphoneOff: reconciled.microphoneOff
+        },
+        appState: 'ready'
       }
-    : reconciled
+    : { sources: reconciled, appState: result.reason }
 }
 
 /** App identity belongs to renderer scene memory, never to protocol SourceSelection. */

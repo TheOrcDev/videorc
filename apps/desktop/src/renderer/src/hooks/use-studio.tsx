@@ -67,6 +67,7 @@ import {
 import {
   withoutSceneApp,
   SCENE_WINDOW_APPS_KEY,
+  appWindowFailureCopy,
   rememberedSceneApps,
   sceneAppState,
   reconcileWorkingSceneSources,
@@ -7089,7 +7090,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return clientRef.current.requestTyped('sources.resolve_app_window', params)
       }
     )
-      .then((nextSources) => {
+      .then(({ sources: nextSources, appState }) => {
         if (
           disposed ||
           isActiveRecordingState(recordingRef.current.state) ||
@@ -7098,6 +7099,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           layoutIntentAwaitingProofRef.current !== null
         )
           return
+        // Plan 210 D1: the scene list and the start reason say what the
+        // resolver found ("Figma's window is minimized"), not the device
+        // list's guess.
+        const activeId = activeSavedSceneIdRef.current
+        if (appState && activeId && workingAppRef.current === appBefore)
+          setResolvedAppStates((states) =>
+            states[activeId] === appState ? states : { ...states, [activeId]: appState }
+          )
         setCaptureConfig((current) => {
           if (
             current.sources !== before ||
@@ -13894,12 +13903,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return START_BLOCKED_COPY.noOutput
       }
       const config = captureConfigForIntent(captureConfig, intent)
-      const sourceOff = sceneSourceOffBlockedReason(
-        sceneSourcesTurnedOff(
-          { layout: config.layout, sources: visualSources(config.sources), background: null },
-          deviceList.devices
-        )
+      const turnedOff = sceneSourcesTurnedOff(
+        { layout: config.layout, sources: visualSources(config.sources), background: null },
+        deviceList.devices
       )
+      // Plan 210 D1: a scene made for an app whose window isn't there holds
+      // Screen None until it is. The start says why in S2's words, never
+      // "Screen is set to None".
+      const activeApp = activeSavedSceneId
+        ? sceneLibrary.scenes.find((scene) => scene.id === activeSavedSceneId)?.visual.sources.app
+        : undefined
+      if (turnedOff.screen && activeApp) {
+        const state = savedSceneAppStates[activeSavedSceneId!]
+        return appWindowFailureCopy(
+          activeApp.name,
+          `app-${state && state !== 'ready' ? state : 'not-running'}`
+        )
+      }
+      const sourceOff = sceneSourceOffBlockedReason(turnedOff)
       if (sourceOff) {
         return sourceOff
       }
@@ -13958,6 +13979,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     },
     [
+      activeSavedSceneId,
       captureConfig,
       currentStreamOutputTopologyRequestKey,
       deviceList.devices,
@@ -13965,6 +13987,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       health,
       transportSessionActive,
       livestreamingEntitlementReason,
+      savedSceneAppStates,
+      sceneLibrary.scenes,
       streamOutputTopologyPreflight,
       wsStatus
     ]

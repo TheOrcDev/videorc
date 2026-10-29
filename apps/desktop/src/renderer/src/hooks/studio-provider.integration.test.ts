@@ -721,13 +721,15 @@ class StudioBackend {
         return this.deviceList
       case 'sources.resolve_app_window': {
         // Plan 210: the app's front window is the listed window the scene
-        // prefers, when the device list has it; otherwise the app is not open.
-        const preferred = this.deviceList.devices.find(
-          (device) =>
-            device.kind === 'window' &&
-            device.status === 'available' &&
-            device.id === params.preferWindowId
+        // prefers, when the device list has it, else the first listed window
+        // under the app's bundle id (a relaunched app's new window);
+        // otherwise the app is not open.
+        const listed = this.deviceList.devices.filter(
+          (device) => device.kind === 'window' && device.status === 'available'
         )
+        const preferred =
+          listed.find((device) => device.id === params.preferWindowId) ??
+          listed.find((device) => device.app?.bundleId === params.bundleId)
         return preferred
           ? { ok: true, windowId: preferred.id, title: preferred.name, width: 1280, height: 720 }
           : { ok: false, reason: 'not-running' }
@@ -6034,6 +6036,87 @@ describe('real StudioProvider lifecycle', () => {
       () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
     )
     expect(latest().savedScenes[0].visual.layout.sourceTransformOverrides).toEqual(placement)
+  })
+
+  // Plan 210 D1: quitting and relaunching the app never breaks its scene. At
+  // launch with the app gone, the scene stays on with no screen (never a whole
+  // display under the app's name), Record says why in S2's words, and the
+  // refresh that lists the app's next window applies it.
+  it('holds an app scene at Screen None while its app is gone, and takes its next window', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const app = { bundleId: 'com.example.presentation', name: 'Presentation' }
+    const [appScene] = scenesForApps(
+      [{ ...app, frontWindowId: 'window:2', frontWindowName: 'Presentation' }],
+      {
+        layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
+        sources: {},
+        background: null
+      },
+      [],
+      { id: () => 'app-scene-presentation', now: () => '2026-10-29T10:00:00.000Z' }
+    )
+    localStorage.setItem(SCENE_LIBRARY_KEY, JSON.stringify({ version: 1, scenes: [appScene] }))
+    localStorage.setItem(
+      WORKING_SCENE_KEY,
+      JSON.stringify({ version: 1, origin: 'saved', sceneId: appScene.id, visual: appScene.visual })
+    )
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        sources: { windowId: 'window:2', windowName: 'Presentation' }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.core.canSaveScene === true &&
+        observations.at(-1)?.core.captureConfig.sources.captureOff === true
+    )
+    expect(latest().activeSavedSceneId).toBe(appScene.id)
+    expect(latest().captureConfig.sources.screenId).toBeUndefined()
+    expect(latest().captureConfig.sources.windowId).toBeUndefined()
+    expect(latest().savedSceneAppStates[appScene.id]).toBe('not-running')
+    expect(latest().recordBlockedReason).toBe("Presentation isn't open")
+    expect(latest().canStart).toBe(false)
+
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: 'window:2',
+          name: 'Presentation',
+          kind: 'window',
+          status: 'available',
+          width: 1280,
+          height: 720,
+          app: { ...app, pid: 7 }
+        }
+      ]
+    }
+    await act(async () => latest().refreshDevices())
+    await waitForObservation(() => latest().captureConfig.sources.windowId === 'window:2')
+    expect(latest().activeSavedSceneId).toBe(appScene.id)
+    expect(latest().captureConfig.sources.captureOff).toBe(false)
+    expect(latest().captureConfig.sources.screenId).toBeUndefined()
+    expect(latest().savedSceneAppStates[appScene.id]).toBe('ready')
+    expect(latest().recordBlockedReason).not.toBe("Presentation isn't open")
   })
 
   // Owner, 2026-10-27: a saved scene keeps its screen, microphone and System

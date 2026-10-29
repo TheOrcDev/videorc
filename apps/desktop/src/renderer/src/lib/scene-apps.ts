@@ -12,7 +12,8 @@ import {
 // Scene page (New scene…, the list), a saved scene's switch and the follower
 // read these, all lazy, so they stay out of the Studio's first paint.
 
-export type AppWindowFailure = 'app-not-running' | 'app-no-window' | 'app-minimized'
+export { appWindowFailureCopy, type AppWindowFailure } from './scene-window-state'
+import type { AppWindowFailure } from './scene-window-state'
 export type AppWindowResolution =
   | { windowId: string; title: string }
   | { reason: 'not-running' | 'no-window' | 'minimized' }
@@ -21,17 +22,6 @@ export type SceneWindowResolution =
   | { kind: 'resolve-app'; bundleId: string }
   | { kind: 'blocked'; reason: AppWindowFailure }
   | { kind: 'resolve-sources' }
-
-export function appWindowFailureCopy(name: string, reason: AppWindowFailure): string {
-  switch (reason) {
-    case 'app-not-running':
-      return `${name} isn't open`
-    case 'app-no-window':
-      return `${name} has no window open`
-    case 'app-minimized':
-      return `${name}'s window is minimized`
-  }
-}
 
 /** Resolve before strict preflight; the returned projection never rewrites a snapshot.
  * An old fixed-window scene can pass remembered device ownership as fallbackBundleId.

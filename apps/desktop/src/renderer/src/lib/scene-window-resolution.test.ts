@@ -123,24 +123,59 @@ describe('scene window wiring', () => {
     const working = hydrateWorkingScene(
       JSON.parse(JSON.stringify({ version: 1, sceneId: 's', visual: visual() }))
     )!
-    const next = await reconcileWorkingSceneSources(
+    const { sources: next, appState } = await reconcileWorkingSceneSources(
       working.visual.sources,
       [screen],
       vi.fn(async () => success)
     )
     expect(next.windowId).toBe(device.id)
+    expect(next.captureOff).toBe(false)
     expect(next.app).toEqual(app)
+    expect(appState).toBe('ready')
     expect(withoutSceneApp(next)).not.toHaveProperty('app')
   })
-  it('falls back to a display on working app refusal, keeping app memory for its return', async () => {
-    const next = await reconcileWorkingSceneSources(
+  // Plan 210 D1: the app quit overnight. The scene stays on, waiting for the
+  // app's next window with no screen: never a whole display under its name.
+  it.each(['not-running', 'no-window', 'minimized'] as const)(
+    'holds Screen None on a working app refusal (%s), keeping app memory for its return',
+    async (reason) => {
+      const { sources: next, appState } = await reconcileWorkingSceneSources(
+        visual().sources,
+        [screen, device],
+        vi.fn(async (): Promise<ResolveAppWindowResult> => ({ ok: false, reason }))
+      )
+      expect(next.screenId).toBeUndefined()
+      expect(next.windowId).toBeUndefined()
+      expect(next.captureOff).toBe(true)
+      expect(next.app).toEqual(app)
+      expect(appState).toBe(reason)
+    }
+  )
+  it('takes the window on the refresh that finds the app again', async () => {
+    const gone = await reconcileWorkingSceneSources(
       visual().sources,
-      [screen, device],
+      [screen],
       vi.fn(async (): Promise<ResolveAppWindowResult> => ({ ok: false, reason: 'not-running' }))
     )
-    expect(next.screenId).toBe(screen.id)
-    expect(next.windowId).toBeUndefined()
-    expect(next.app).toEqual(app)
+    const back = await reconcileWorkingSceneSources(
+      gone.sources,
+      [screen, device],
+      vi.fn(async () => success)
+    )
+    expect(back.sources.windowId).toBe(device.id)
+    expect(back.sources.captureOff).toBe(false)
+    expect(back.appState).toBe('ready')
+  })
+  it('answers no app state for a scene without an app, or before the first device list', async () => {
+    const plain = await reconcileWorkingSceneSources(
+      { ...visual().sources, app: undefined },
+      [screen],
+      vi.fn()
+    )
+    expect(plain.appState).toBeUndefined()
+    const early = await reconcileWorkingSceneSources(visual().sources, [], vi.fn())
+    expect(early.appState).toBeUndefined()
+    expect(early.sources.windowId).toBe('window:screencapturekit:old')
   })
   it('exposes lazy app state and clears app identity on a manual capture pick', () => {
     expect(sceneAppState(visual(), [device])).toBe('ready')
