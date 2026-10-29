@@ -787,7 +787,9 @@ fn pending_session_deletion_from_records(
     let mut blocked_paths = Vec::new();
     for record in records {
         match deletion_path_state(&record)? {
-            DeletionPathState::Missing => {}
+            DeletionPathState::Missing => {
+                remove_empty_session_deletion_quarantine_directory(&record)
+            }
             DeletionPathState::Ready(path) => paths.push(path),
             DeletionPathState::Blocked(path) => blocked_paths.push(path),
         }
@@ -1427,10 +1429,21 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
         None => {}
     }
 
+    match std::fs::symlink_metadata(original_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DeletionPathState::Missing);
+        }
+        _ => {}
+    }
+    if !ensure_session_deletion_quarantine_directory(original_path, quarantine_path)? {
+        return Ok(DeletionPathState::Blocked(record.original_path.clone()));
+    }
+
     // Move first, verify second. Checking the original path and then renaming
     // it lets a replacement race into the checked name and be sent to Trash.
     match crate::session_ops::rename_session_file_no_replace(original_path, quarantine_path) {
         Ok(()) => {
+            crate::session_ops::sync_session_file_parent(original_path)?;
             crate::session_ops::sync_session_file_parent(quarantine_path)?;
             match capture_session_file_bound_identity(quarantine_path)? {
                 Some(actual)
@@ -1500,12 +1513,76 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
     }
 }
 
+const SESSION_DELETION_QUARANTINE_PREFIX: &str = ".videorc-trash-";
+
+/// The quarantine keeps the recording's own file name inside a private hidden
+/// folder beside it, so the system Trash (and Restore/Put Back) shows the real
+/// `videorc-session-….mp4` instead of a nameless hidden file.
 fn session_deletion_quarantine_path(
     original_path: &Path,
     operation_id: &str,
     index: usize,
 ) -> PathBuf {
-    original_path.with_file_name(format!(".videorc-trash-{operation_id}-{index}"))
+    let directory = original_path.with_file_name(format!(
+        "{SESSION_DELETION_QUARANTINE_PREFIX}{operation_id}-{index}"
+    ));
+    match original_path.file_name() {
+        Some(name) => directory.join(name),
+        None => directory,
+    }
+}
+
+/// The private quarantine folder of a current-format record, `None` for a
+/// legacy tombstone whose quarantine is a hidden file beside the original.
+fn session_deletion_quarantine_directory<'a>(
+    original_path: &Path,
+    quarantine_path: &'a Path,
+) -> Option<&'a Path> {
+    let directory = quarantine_path.parent()?;
+    let is_private = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(SESSION_DELETION_QUARANTINE_PREFIX));
+    (is_private && directory.parent() == original_path.parent()).then_some(directory)
+}
+
+/// Creates the private quarantine folder before the move. `false` means the
+/// name is taken by something that is not a real folder, so the file stays
+/// where it is instead of following a link out of the recordings folder.
+fn ensure_session_deletion_quarantine_directory(
+    original_path: &Path,
+    quarantine_path: &Path,
+) -> Result<bool> {
+    let Some(directory) = session_deletion_quarantine_directory(original_path, quarantine_path)
+    else {
+        return Ok(true);
+    };
+    match std::fs::create_dir(directory) {
+        Ok(()) => crate::session_ops::sync_session_file_parent(directory)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Could not create deletion quarantine {}",
+                    directory.display()
+                )
+            });
+        }
+    }
+    Ok(std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_dir()))
+}
+
+/// Best effort: once its file is gone (trashed or renamed back), the empty
+/// private quarantine folder goes too. A non-empty folder is left alone.
+fn remove_empty_session_deletion_quarantine_directory(record: &SessionDeletionPathRecord) {
+    let Some(quarantine_path) = record.quarantine_path.as_deref().map(Path::new) else {
+        return;
+    };
+    if let Some(directory) =
+        session_deletion_quarantine_directory(Path::new(&record.original_path), quarantine_path)
+    {
+        let _ = std::fs::remove_dir(directory);
+    }
 }
 
 fn distinct_nonempty_paths<const N: usize>(paths: [Option<String>; N]) -> Vec<String> {
@@ -6054,7 +6131,9 @@ impl Database {
             // when Trash reported an error, a now-missing path is complete;
             // any present or uninspectable path remains retryable.
             match inspect_path(&record)? {
-                DeletionPathState::Missing => {}
+                DeletionPathState::Missing => {
+                    remove_empty_session_deletion_quarantine_directory(&record)
+                }
                 DeletionPathState::Ready(path) | DeletionPathState::Blocked(path) => {
                     pending_paths.push(path);
                     pending_records.push(record);
@@ -15748,7 +15827,7 @@ mod tests {
             .paths
             .iter()
             .map(PathBuf::from)
-            .find(|path| path.parent() == backup.parent())
+            .find(|path| path.parent().and_then(Path::parent) == backup.parent())
             .expect("the backup's quarantine sits in the backup folder");
         assert_eq!(
             std::fs::read(&quarantined_backup).unwrap(),
@@ -16131,10 +16210,233 @@ mod tests {
             .unwrap();
         assert!(completion.deleted);
         assert!(!quarantine.exists());
+        assert!(!quarantine.parent().unwrap().exists());
         assert_eq!(
             std::fs::read(&media_path).unwrap(),
             b"unrelated quarantine replacement"
         );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_path_keeps_the_recording_file_name() {
+        let original = Path::new("/recordings/videorc-session-2026-10-29.mp4");
+        let quarantine = session_deletion_quarantine_path(original, "op-id", 1);
+
+        assert_eq!(
+            quarantine,
+            Path::new("/recordings/.videorc-trash-op-id-1/videorc-session-2026-10-29.mp4")
+        );
+        assert_eq!(quarantine.file_name(), original.file_name());
+        assert_eq!(quarantine.extension().unwrap(), "mp4");
+        assert_eq!(
+            session_deletion_quarantine_directory(original, &quarantine),
+            Some(Path::new("/recordings/.videorc-trash-op-id-1"))
+        );
+        // A legacy tombstone's hidden file beside the recording has no
+        // private folder, so cleanup never touches the recordings folder.
+        assert_eq!(
+            session_deletion_quarantine_directory(
+                original,
+                Path::new("/recordings/.videorc-trash-op-id-1")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn delete_quarantine_moves_files_under_their_names_and_completion_removes_the_folders() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let mp4 = directory.join("videorc-session-named.mp4");
+        let mkv = directory.join("videorc-session-named.mkv");
+        std::fs::write(&mp4, b"exported recording").unwrap();
+        std::fs::write(&mkv, b"capture recording").unwrap();
+        let mut session = sample_session("named-delete");
+        session.output_path = Some(mkv.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session(
+                "named-delete",
+                "completed",
+                None,
+                Some(mp4.display().to_string()),
+                None,
+            )
+            .unwrap();
+
+        let operation = database
+            .prepare_session_deletions(&["named-delete".to_string()])
+            .unwrap()
+            .remove(0);
+        assert!(!mp4.exists() && !mkv.exists());
+        let resolved = database.pending_session_deletions().unwrap().remove(0);
+        assert_eq!(resolved.paths, operation.paths);
+        assert!(resolved.blocked_paths.is_empty());
+        let mut names = Vec::new();
+        for path in resolved.paths.iter().map(PathBuf::from) {
+            let folder = path.parent().unwrap();
+            assert_eq!(folder.parent().unwrap(), directory);
+            assert!(
+                folder
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(".videorc-trash-")
+            );
+            names.push(path.file_name().unwrap().to_str().unwrap().to_string());
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            ["videorc-session-named.mkv", "videorc-session-named.mp4"]
+        );
+        assert_eq!(
+            std::fs::read(
+                resolved
+                    .paths
+                    .iter()
+                    .find(|path| path.ends_with(".mp4"))
+                    .unwrap()
+            )
+            .unwrap(),
+            b"exported recording"
+        );
+
+        // Electron moves both to the Trash.
+        for path in &resolved.paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        let completion = database
+            .complete_session_deletion(&operation.operation_id, &[])
+            .unwrap();
+        assert!(completion.deleted);
+        for path in resolved.paths.iter().map(PathBuf::from) {
+            assert!(!path.parent().unwrap().exists(), "{}", path.display());
+        }
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_restores_a_replacement_to_its_name() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-delete-folder-replacement-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let original = directory.join("videorc-session-replaced.mp4");
+        let quarantine = session_deletion_quarantine_path(&original, "op", 0);
+        std::fs::write(&original, b"owned recording").unwrap();
+        let record = SessionDeletionPathRecord {
+            original_path: original.display().to_string(),
+            quarantine_path: Some(quarantine.display().to_string()),
+            identity: capture_session_file_identity(&original).unwrap(),
+            object_identity: capture_session_file_object_identity(&original).unwrap(),
+        };
+        std::fs::remove_file(&original).unwrap();
+        std::fs::write(&original, b"replacement before quarantine").unwrap();
+
+        // The replacement is moved first, fails verification, and goes back.
+        assert_eq!(
+            deletion_path_state(&record).unwrap(),
+            DeletionPathState::Missing
+        );
+        assert!(!quarantine.exists());
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"replacement before quarantine"
+        );
+        remove_empty_session_deletion_quarantine_directory(&record);
+        assert!(!quarantine.parent().unwrap().exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_that_is_not_a_directory_never_moves_the_file() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-delete-folder-taken-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let original = directory.join("videorc-session-taken.mp4");
+        let quarantine = session_deletion_quarantine_path(&original, "op", 0);
+        std::fs::write(&original, b"owned recording").unwrap();
+        let record = SessionDeletionPathRecord {
+            original_path: original.display().to_string(),
+            quarantine_path: Some(quarantine.display().to_string()),
+            identity: capture_session_file_identity(&original).unwrap(),
+            object_identity: capture_session_file_object_identity(&original).unwrap(),
+        };
+
+        // A file at the folder name fails closed and stays retryable.
+        std::fs::write(quarantine.parent().unwrap(), b"not a folder").unwrap();
+        assert!(deletion_path_state(&record).is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"owned recording");
+        remove_empty_session_deletion_quarantine_directory(&record);
+        assert_eq!(
+            std::fs::read(quarantine.parent().unwrap()).unwrap(),
+            b"not a folder"
+        );
+        std::fs::remove_file(quarantine.parent().unwrap()).unwrap();
+
+        // A link at the folder name never carries the file out of the folder.
+        #[cfg(unix)]
+        {
+            let elsewhere = directory.join("elsewhere");
+            std::fs::create_dir(&elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, quarantine.parent().unwrap()).unwrap();
+            assert_eq!(
+                deletion_path_state(&record).unwrap(),
+                DeletionPathState::Blocked(original.display().to_string())
+            );
+            assert_eq!(std::fs::read(&original).unwrap(), b"owned recording");
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_survives_a_restart_before_and_after_the_move() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap().to_path_buf();
+        let media_path = directory.join("videorc-session-restart.mp4");
+        std::fs::write(&media_path, b"owned recording").unwrap();
+        let mut session = sample_session("restart-delete");
+        session.output_path = Some(media_path.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session("restart-delete", "completed", None, None, None)
+            .unwrap();
+        let operation = database
+            .prepare_session_deletions(&["restart-delete".to_string()])
+            .unwrap()
+            .remove(0);
+        let quarantine = PathBuf::from(&operation.paths[0]);
+        assert_eq!(quarantine.file_name(), media_path.file_name());
+
+        // A crash after the tombstone but before the move: the file is still
+        // at its name and the private folder does not exist yet.
+        crate::session_ops::rename_session_file_no_replace(&quarantine, &media_path).unwrap();
+        std::fs::remove_dir(quarantine.parent().unwrap()).unwrap();
+        drop(database);
+        let database = Database::open_file_for_tests(&database_path);
+        let recovered = database.reconcile_session_deletions().unwrap();
+        assert_eq!(recovered.pending, 1);
+        assert!(!media_path.exists());
+        assert_eq!(std::fs::read(&quarantine).unwrap(), b"owned recording");
+
+        // A crash after the move: the next launch resolves the inner path.
+        drop(database);
+        let database = Database::open_file_for_tests(&database_path);
+        let resolved = database.pending_session_deletions().unwrap().remove(0);
+        assert_eq!(resolved.paths, vec![quarantine.display().to_string()]);
+        assert!(resolved.blocked_paths.is_empty());
+        std::fs::remove_file(&quarantine).unwrap();
+        let recovered = database.reconcile_session_deletions().unwrap();
+        assert_eq!(recovered.completed, 1);
+        assert!(!quarantine.parent().unwrap().exists());
+        assert!(database.pending_session_deletions().unwrap().is_empty());
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }
