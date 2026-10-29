@@ -76,6 +76,7 @@ import {
   sceneWindowRefusal,
   reconcileWorkingSceneSources,
   type SceneAppState,
+  type SavedSceneApplyOptions,
   type SavedSceneApplyResult
 } from '@/lib/scene-window-resolution'
 import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
@@ -147,6 +148,7 @@ import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
 import { useScreenPrivacy } from './use-screen-privacy'
+import { useFollowFrontApp, type FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
   GoLiveConfirmOutcome,
@@ -1456,7 +1458,11 @@ export type StudioContextValue = {
   savedSceneAppStates: Readonly<Record<string, SceneAppState | undefined>>
   /** Plan 210 S5: New scene…, the scene list's order and its ⋯ edits. */
   sceneLibraryActions: SceneLibraryActions
-  applySavedSceneResult: (id: string, repaired?: SceneVisual) => Promise<SavedSceneApplyResult>
+  applySavedSceneResult: (
+    id: string,
+    repaired?: SceneVisual,
+    options?: SavedSceneApplyOptions
+  ) => Promise<SavedSceneApplyResult>
   applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
   applyBackgroundSlot: (slotId: string | null) => void
   applyWorkingBackgroundStyle: (patch: Partial<Scene['background']>) => void
@@ -10576,10 +10582,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }))
   }, [])
   const savedSceneResolveGenerationRef = useRef(0)
+  // Plan 210 S10: the follower hears every apply that is not its own, so a
+  // scene the streamer picks (click, key, remote, agent) holds until the next
+  // app change.
+  const manualSceneApplyListenersRef = useRef(new Set<(sceneId: string) => void>())
+  const subscribeManualSceneApply = useCallback((listener: (sceneId: string) => void) => {
+    manualSceneApplyListenersRef.current.add(listener)
+    return () => {
+      manualSceneApplyListenersRef.current.delete(listener)
+    }
+  }, [])
   const applySavedSceneResult = useCallback(
-    async (id: string, repaired?: SceneVisual): Promise<SavedSceneApplyResult> => {
+    async (
+      id: string,
+      repaired?: SceneVisual,
+      options?: SavedSceneApplyOptions
+    ): Promise<SavedSceneApplyResult> => {
       const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
       if (!saved) return { ok: false }
+      if (options?.origin !== 'follow')
+        for (const listener of manualSceneApplyListenersRef.current) listener(id)
       let visual = normalizeSceneVisual(repaired ?? saved.visual)
       const generation = ++savedSceneResolveGenerationRef.current
       const layoutIntentBefore = layoutIntentIdRef.current
@@ -10591,7 +10613,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             if (!clientRef.current) throw offlineError()
             return clientRef.current.requestTyped('sources.resolve_app_window', params)
           },
-          rememberedAppsRef.current[id]
+          rememberedAppsRef.current[id],
+          options?.preferWindowId
         )
         if (
           generation !== savedSceneResolveGenerationRef.current ||
@@ -10733,6 +10756,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       (await applySavedSceneResult(id, repaired)).ok,
     [applySavedSceneResult]
   )
+
+  // Plan 210 S10 (D10, D11): the stream follows the app in front, macOS only.
+  const followSceneApply = useCallback<FollowSceneApply>(
+    (sceneId, preferWindowId) =>
+      applySavedSceneResult(sceneId, undefined, { preferWindowId, origin: 'follow' }),
+    [applySavedSceneResult]
+  )
+  useFollowFrontApp({
+    enabled: runtimeInfo?.platform === 'darwin',
+    scenes: sceneLibrary.scenes,
+    activeSceneId: activeSavedSceneId,
+    sources: captureConfig.sources,
+    sessionState: recording.state,
+    orientation: layoutPresetOrientation(captureConfig.layout.layoutPreset),
+    screenPrivacy: privacy.screenPrivacy,
+    hideScreen: privacy.hideScreen,
+    showScreen: privacy.showScreen,
+    applyScene: followSceneApply,
+    subscribeManualApply: subscribeManualSceneApply
+  })
 
   const applyCameraPreset = useCallback(
     (patch: Partial<LayoutSettings>, options?: { keepScene?: boolean }) => {

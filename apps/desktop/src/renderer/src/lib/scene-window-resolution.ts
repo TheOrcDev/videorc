@@ -22,6 +22,13 @@ export type SavedSceneApplyResult =
   | { ok: true }
   | { ok: false; reason?: AppWindowFailure; message?: string }
 export type ResolveAppWindow = (params: ResolveAppWindowParams) => Promise<ResolveAppWindowResult>
+/** How a scene apply was asked for (plan 210 S10). */
+export type SavedSceneApplyOptions = {
+  /** The window to prefer over the scene's own, as the follower's swap in place (D1, D10). */
+  preferWindowId?: string
+  /** `follow`: the follower's own apply, which never counts as the streamer's pick. */
+  origin?: 'follow'
+}
 export type RememberedSceneApps = Record<string, string>
 
 /** Separate, bounded device memory. Never migrate or rewrite a scene snapshot. */
@@ -77,13 +84,14 @@ export async function resolveSceneWindowForApply(
   visual: SceneVisual,
   devices: readonly Device[],
   resolve: ResolveAppWindow,
-  fallbackBundleId?: string
+  fallbackBundleId?: string,
+  preferWindowId?: string
 ): Promise<SceneWindowResolution> {
   const initial = resolveSceneWindow(visual, devices, fallbackBundleId)
   if (initial.kind !== 'resolve-app') return initial
   const result = await resolve({
     bundleId: initial.bundleId,
-    preferWindowId: visual.sources.windowId
+    preferWindowId: preferWindowId ?? visual.sources.windowId
   })
   const resolved = resolveSceneWindow(visual, devices, fallbackBundleId, result)
   return !visual.sources.app && resolved.kind === 'blocked' ? { kind: 'resolve-sources' } : resolved
