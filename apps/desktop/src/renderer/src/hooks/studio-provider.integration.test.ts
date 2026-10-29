@@ -159,6 +159,8 @@ type DeferredBackendResponse = {
 }
 
 const now = '2026-07-12T00:00:00.000Z'
+/** A deferred response that the test backend computes when it is released. */
+const BACKEND_RESPONSE = Symbol('backend response')
 const signedInAccount = {
   status: 'signed-in' as const,
   username: 'provider-test',
@@ -1687,7 +1689,10 @@ class TestWebSocket {
           data: JSON.stringify({
             id: command.id,
             ok: true,
-            payload: deferredResponse ? payloadOverride : this.backend.response(command)
+            payload:
+              deferredResponse && payloadOverride !== BACKEND_RESPONSE
+                ? payloadOverride
+                : this.backend.response(command)
           })
         })
       } catch (error) {
@@ -2854,10 +2859,12 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.some((command) => command.method === 'scene.source.transform.update')
     )
 
-    // Hold the newer choice at source preflight. Its source/layout identities
-    // and authoritative revision have not changed, so only intent ownership
-    // can reject the older transform acknowledgement at this point.
-    const releaseSelection = backend.deferResponse('devices.list', backend.deviceList)
+    // Hold the newer choice at its layout apply (plan 210 S3: the source
+    // preflight reads the held device list, with no round trip to hold). Its
+    // source/layout identities and authoritative revision have not changed,
+    // so only intent ownership can reject the older transform acknowledgement
+    // at this point.
+    const releaseSelection = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
     let selection!: Promise<boolean>
     act(() => {
       selection = latest().core.applySavedScene(first.id)
@@ -7005,7 +7012,9 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().saveScene('B')).toBe(true)
     })
     const second = latest().savedScenes[1]
-    const release = backend.deferResponse('devices.list', backend.deviceList)
+    // Hold the stale pick at its layout apply (plan 210 S3: the source
+    // preflight reads the held device list, with no round trip to hold).
+    const release = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
     let stale: Promise<boolean> | undefined
     await act(async () => {
       stale = latest().applySavedScene(first.id)
