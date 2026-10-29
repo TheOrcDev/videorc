@@ -1223,7 +1223,12 @@ struct CompositorLiveSources {
     camera: Option<PreviewCameraFrameSource>,
     screen: Option<PreviewScreenFrameSource>,
     last_camera_frame: Option<(FrameHandle<PreviewCameraPixelFormat>, LayoutSettings)>,
+    /// Plan 210 S3: the screen frame on air. It survives a source change
+    /// (a window swap, a restart, a window gone) until the adopted
+    /// generation delivers, so viewers see the last picture, never black.
     last_screen_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    /// The capture generation `last_screen_frame` came from.
+    last_screen_frame_generation: Option<u64>,
     camera_fetch: LiveSourceFetchState,
     screen_fetch: LiveSourceFetchState,
     adopted_scene_revisions: Option<(Option<u64>, Option<u64>)>,
@@ -1438,7 +1443,7 @@ impl CompositorLiveSources {
             self.camera_fetch = LiveSourceFetchState::default();
         }
         if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
-            self.last_screen_frame = None;
+            // The held frame stays (plan 210 S3); only the accounting restarts.
             self.screen_fetch = LiveSourceFetchState::default();
         }
         self.camera = camera;
@@ -1523,7 +1528,7 @@ impl CompositorLiveSources {
             self.screen_binding_verified = true;
             if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
                 let previous_screen_present = self.screen.is_some();
-                self.last_screen_frame = None;
+                // The held frame stays (plan 210 S3); only the accounting restarts.
                 self.screen_fetch = LiveSourceFetchState::default();
                 screen_change = screen
                     .as_ref()
@@ -1555,6 +1560,14 @@ impl CompositorLiveSources {
             cache.snapshot.as_ref().map(|s| s.revision),
             cache.simulcast_snapshot.as_ref().map(|s| s.revision),
         );
+        // A held screen frame belongs to the scene just left (plan 210 S3);
+        // once no leg shows a screen source there is nothing to hold it for.
+        if !scene_shows_screen_source(cache.snapshot.as_ref())
+            && !scene_shows_screen_source(cache.simulcast_snapshot.as_ref())
+        {
+            self.last_screen_frame = None;
+            self.last_screen_frame_generation = None;
+        }
         let missing_binding = [&cache.snapshot, &cache.simulcast_snapshot]
             .into_iter()
             .flatten()
@@ -1661,13 +1674,30 @@ impl CompositorLiveSources {
         self.last_camera_frame.clone()
     }
 
-    fn latest_screen_frame(&mut self) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
+    /// The screen frame to draw this tick (plan 210 S3): the newest frame
+    /// of the adopted capture generation, else the frame held from before a
+    /// switch until that generation delivers. The source gates the store by
+    /// generation, so a frame of the next window never replaces the hold
+    /// while the scene still names the previous one. Delivery accounting
+    /// counts only frames of the adopted generation.
+    fn latest_screen_frame(
+        &mut self,
+        scene_names_adopted_source: bool,
+    ) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
         let Some(source) = self.screen.clone() else {
             return self.last_screen_frame.clone();
         };
+        if !scene_names_adopted_source {
+            // The adopted capture is not what any leg's scene names yet (a
+            // switch in flight, adopted by the periodic refresh before the
+            // commit): its frames must not replace the frame on air.
+            return self.last_screen_frame.clone();
+        }
+        let generation = source.generation();
         if self.last_screen_frame.is_none() {
             if let Ok(Some(frame)) = source.try_latest_frame_result() {
                 self.last_screen_frame = Some(frame);
+                self.last_screen_frame_generation = Some(generation);
             }
             return self.last_screen_frame.clone();
         }
@@ -1677,6 +1707,7 @@ impl CompositorLiveSources {
                 self.screen_fetch.record_fresh_lock();
                 if let Some(frame) = frame {
                     self.last_screen_frame = Some(frame);
+                    self.last_screen_frame_generation = Some(generation);
                 }
             }
             Err(()) => {
@@ -1687,18 +1718,35 @@ impl CompositorLiveSources {
                 ) {
                     if let Some(frame) = source.latest_frame_blocking() {
                         self.last_screen_frame = Some(frame);
+                        self.last_screen_frame_generation = Some(generation);
                     }
                     self.screen_fetch.record_blocking_refresh();
                 }
             }
         }
-        if let Some(frame) = self.last_screen_frame.as_ref() {
+        if self.screen_frame_is_current()
+            && let Some(frame) = self.last_screen_frame.as_ref()
+        {
             self.screen_fetch.record_serve(
                 frame.as_ptr().cast::<()>(),
                 frame.captured_at.elapsed().as_millis() as u64,
             );
         }
         self.last_screen_frame.clone()
+    }
+
+    /// Whether the frame on air came from the adopted capture generation
+    /// (plan 210 S3). A held frame draws, but it is no evidence that the
+    /// adopted source delivers, and never a fingerprint for it.
+    fn screen_frame_is_current(&self) -> bool {
+        self.screen_binding_verified
+            && self.last_screen_frame.is_some()
+            && self.last_screen_frame_generation.is_some()
+            && self
+                .screen
+                .as_ref()
+                .map(PreviewScreenFrameSource::generation)
+                == self.last_screen_frame_generation
     }
 }
 
@@ -1755,6 +1803,39 @@ fn scene_needs_live_screen_frame(
 
 fn active_image_source_is_cached(active_image_source: Option<&CompositorImageSource>) -> bool {
     active_image_source.is_some_and(|source| source.rgba.is_some() || source.bgra.is_some())
+}
+
+/// Whether the scene shows a screen or window source at all, whichever
+/// device it names.
+fn scene_shows_screen_source(snapshot: Option<&CompositorSceneSnapshot>) -> bool {
+    scene_needs_live_screen_frame(snapshot, None)
+}
+
+/// Plan 210 S3: the screen frame a leg draws. The compositor holds the last
+/// screen frame across a switch, so a leg whose scene shows a screen source
+/// draws it even while the adopted capture is not yet the one the scene
+/// names (the switch is in flight) or no longer is (its window went away):
+/// never black while a picture exists. Evidence stays strict: see
+/// `evidence_screen_frame`.
+fn leg_screen_frame<'a>(
+    frame: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    snapshot: Option<&CompositorSceneSnapshot>,
+    screen_key: Option<&SourceKey>,
+) -> Option<&'a FrameHandle<PreviewScreenPixelFormat>> {
+    frame.filter(|_| {
+        scene_accepts_source(snapshot, screen_key) || scene_shows_screen_source(snapshot)
+    })
+}
+
+/// The screen frame that proves the scene's named source delivers: a frame
+/// of the adopted generation, from the device the scene names.
+fn evidence_screen_frame<'a>(
+    frame: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    current: bool,
+    snapshot: Option<&CompositorSceneSnapshot>,
+    screen_key: Option<&SourceKey>,
+) -> Option<&'a FrameHandle<PreviewScreenPixelFormat>> {
+    frame.filter(|_| current && scene_accepts_source(snapshot, screen_key))
 }
 
 fn same_camera_source(
@@ -3277,6 +3358,7 @@ async fn start_synthetic_compositor_with_lifecycle(
             compositor.status.scene_sources.clone(),
             compositor.image_sources.status(),
             compositor.worker_activity.clone(),
+            compositor.status.screen_switch.clone(),
         )
     };
     let run_id = Uuid::new_v4().to_string();
@@ -3313,6 +3395,7 @@ async fn start_synthetic_compositor_with_lifecycle(
         },
         editor_draft: None,
         live_background: None,
+        screen_switch: previous_scene_status.7,
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Synthetic compositor running.".to_string()),
     };
@@ -3515,6 +3598,7 @@ pub async fn stop_compositor(state: &AppState) -> CompositorStatus {
         let mut compositor = state.compositor.lock().await;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
+        status.screen_switch = compositor.status.screen_switch.take();
         compositor.status = status.clone();
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
@@ -3644,6 +3728,7 @@ async fn stop_compositor_if_run_id_with_lifecycle(
         compositor.banner_session_shape = None;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
+        status.screen_switch = compositor.status.screen_switch.take();
         compositor.status = status.clone();
         status
     };
@@ -4219,6 +4304,21 @@ fn source_authority_health_sample(mut sample: CaptureHealthSample) -> CaptureHea
 
 pub async fn compositor_status(state: &AppState) -> CompositorStatus {
     state.compositor.lock().await.status.clone()
+}
+
+/// Plan 210 S3: record how the last screen or window switch changed the
+/// capture (in place, or a restart and why), for `compositor.status`.
+pub(crate) async fn note_screen_switch(
+    state: &AppState,
+    switch: crate::protocol::ScreenSwitchStatus,
+) {
+    let status = {
+        let mut compositor = state.compositor.lock().await;
+        compositor.status.screen_switch = Some(switch);
+        compositor.status.updated_at = Utc::now().to_rfc3339();
+        compositor.status.clone()
+    };
+    state.emit_event("compositor.status", status);
 }
 
 pub async fn compositor_frame_store(state: &AppState) -> CompositorFrameStore {
@@ -6461,7 +6561,7 @@ async fn run_synthetic_compositor_loop(
                                     camera_producer,
                                     screen_present: screen_delivery_health_source_present(
                                         screen_is_consumed,
-                                        live_sources.last_screen_frame.is_some(),
+                                        live_sources.screen_frame_is_current(),
                                         screen_target_fps.is_some(),
                                         screen_producer.is_some(),
                                     ),
@@ -9074,6 +9174,18 @@ async fn publish_compositor_frame(
         } else {
             (None, 0.0)
         };
+    // Plan 210 S3: a frame of the adopted capture replaces the frame on air
+    // only once a leg's scene names that capture; until then (and while the
+    // authority is contended) the frame on air holds.
+    let scene_names_adopted_screen = {
+        let key = live_sources
+            .screen
+            .as_ref()
+            .and_then(PreviewScreenFrameSource::source_key);
+        scene_accepts_source(snapshot.as_ref(), key)
+            || scene_accepts_source(simulcast_snapshot.as_ref(), key)
+            || scene_accepts_source(iso_screen_snapshot.as_ref(), key)
+    };
     let (screen_frame, screen_frame_fetch_ms) =
         if scene_needs_live_screen_frame(snapshot.as_ref(), active_image_source.as_ref())
             || scene_needs_live_screen_frame(simulcast_snapshot.as_ref(), None)
@@ -9081,10 +9193,11 @@ async fn publish_compositor_frame(
         {
             let screen_fetch_started_at = Instant::now();
             (
-                live_sources
-                    .screen_binding_verified
-                    .then(|| live_sources.latest_screen_frame())
-                    .flatten(),
+                if live_sources.screen_binding_verified {
+                    live_sources.latest_screen_frame(scene_names_adopted_screen)
+                } else {
+                    live_sources.last_screen_frame.clone()
+                },
                 screen_fetch_started_at.elapsed().as_secs_f64() * 1000.0,
             )
         } else {
@@ -9112,12 +9225,18 @@ async fn publish_compositor_frame(
         .as_ref()
         .filter(|_| scene_accepts_source(snapshot.as_ref(), camera_key))
         .map(|(frame, _)| frame);
-    let primary_screen_frame = screen_frame
-        .as_ref()
-        .filter(|_| scene_accepts_source(snapshot.as_ref(), screen_key));
+    let screen_frame_current = live_sources.screen_frame_is_current();
+    let primary_screen_frame =
+        leg_screen_frame(screen_frame.as_ref(), snapshot.as_ref(), screen_key);
     let fingerprint = evidence_fingerprint(
         primary_camera_frame.map(|frame| (frame.sequence, frame.captured_at)),
-        primary_screen_frame.map(|frame| (frame.sequence, frame.captured_at)),
+        evidence_screen_frame(
+            screen_frame.as_ref(),
+            screen_frame_current,
+            snapshot.as_ref(),
+            screen_key,
+        )
+        .map(|frame| (frame.sequence, frame.captured_at)),
     );
     let published_at = Instant::now();
     // Plan 190: every leg of this tick reads the live background at
@@ -9455,9 +9574,7 @@ async fn publish_compositor_frame(
                 .as_ref()
                 .filter(|_| scene_accepts_source(aux_snapshot, camera_key))
                 .map(|(frame, _)| frame),
-            screen_frame: screen_frame
-                .as_ref()
-                .filter(|_| scene_accepts_source(aux_snapshot, screen_key)),
+            screen_frame: leg_screen_frame(screen_frame.as_ref(), aux_snapshot, screen_key),
             // The auxiliary leg carries the bar per the leg plan. On the
             // vertical simulcast leg the renderer rasterizes the Auxiliary
             // bar for that portrait canvas (plan 077).
@@ -9571,9 +9688,8 @@ async fn publish_compositor_frame(
                 .as_ref()
                 .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
                 .map(|(frame, _)| frame);
-            let leg_screen_frame = screen_frame
-                .as_ref()
-                .filter(|_| scene_accepts_source(leg_snapshot, screen_key));
+            let leg_screen_frame =
+                leg_screen_frame(screen_frame.as_ref(), leg_snapshot, screen_key);
             // A contended capture authority cannot prove current source pixels.
             // Keep the last published ISO frame instead of encoding a black
             // frame; the supervisor owns committed removal/terminal failure.
@@ -9834,7 +9950,8 @@ async fn publish_compositor_frame(
                                 !source_frame_is_too_stale(frame.captured_at)
                             })
                             && scene_accepts_source(aux, camera_key),
-                        screen_frame.is_some()
+                        screen_frame_current
+                            && screen_frame.is_some()
                             && active_image_source.is_none()
                             && scene_accepts_source(aux, screen_key),
                     )
@@ -12204,6 +12321,7 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
         frame_pipeline: CompositorFramePipelineStatus::default(),
         editor_draft: None,
         live_background: None,
+        screen_switch: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
     }
@@ -15930,7 +16048,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_key_screen_generation_resets_held_frame_and_fetch_accounting() {
+    async fn same_key_screen_generation_holds_the_frame_and_resets_fetch_accounting() {
         let state = test_state();
         let video = tiny_video();
         let screen_id = "screen:screencapturekit:generation-test";
@@ -15945,7 +16063,7 @@ mod tests {
             .as_ref()
             .expect("installed screen source")
             .generation();
-        assert!(sources.latest_screen_frame().is_some());
+        assert!(sources.latest_screen_frame(true).is_some());
         sources.screen_fetch.try_lock_misses = 7;
         sources.screen_fetch.blocking_refreshes = 3;
         sources.screen_fetch.fresh_serves = 11;
@@ -15972,7 +16090,10 @@ mod tests {
                 .map(PreviewScreenFrameSource::generation),
             Some(next_generation)
         );
-        assert!(sources.last_screen_frame.is_none());
+        // Plan 210 S3: the frame on air holds across the restart (never
+        // black); it is no longer current, so it is no delivery evidence.
+        assert!(sources.last_screen_frame.is_some());
+        assert!(!sources.screen_frame_is_current());
         let stats = sources.fetch_stats();
         assert_eq!(stats.screen_try_lock_misses, 0);
         assert_eq!(stats.screen_blocking_refreshes, 0);

@@ -10,6 +10,7 @@ import type {
   CompositorStatus,
   DiagnosticStats,
   SceneEditorDraftAck,
+  ScreenSwitchStatus,
   SceneEditorDraftParams,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -1113,6 +1114,54 @@ describe('backend RPC contract', () => {
         })
       ).toThrow()
     }
+  })
+
+  it('reports how the last screen switch changed the capture (plan 210 S3)', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      updatedAt: '2026-10-29T00:00:00Z'
+    } satisfies CompositorStatus
+    const inPlace = {
+      mode: 'in-place',
+      sourceId: 'window:screencapturekit:42',
+      generation: 7,
+      firstFrameMs: 61,
+      updatedAt: '2026-10-29T00:00:01Z'
+    } satisfies ScreenSwitchStatus
+    const restart = {
+      mode: 'restart',
+      reason: 'the canvas changed',
+      sourceId: 'screen:screencapturekit:1',
+      generation: 8,
+      updatedAt: '2026-10-29T00:00:02Z'
+    } satisfies ScreenSwitchStatus
+    expect(validateBackendRpcResult('compositor.status', status)).toEqual(status)
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, screenSwitch: inPlace })
+    ).toEqual({ ...status, screenSwitch: inPlace })
+    expect(
+      validateBackendEventPayload('compositor.status', { ...status, screenSwitch: restart })
+    ).toEqual({ ...status, screenSwitch: restart })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        screenSwitch: { ...inPlace, mode: 'warm' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        screenSwitch: { ...inPlace, pixels: 'no' }
+      })
+    ).toThrow('pixels must be a known field')
   })
 
   it('reports the effective editor draft on compositor status and never a forged one', () => {

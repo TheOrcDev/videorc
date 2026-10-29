@@ -2474,8 +2474,25 @@ export interface CompositorStatus {
   editorDraft?: SceneEditorDraftStatus | null
   /** Plan 190: the applied live background and how it is drawn. */
   liveBackground?: LiveBackgroundStatus
+  /** Plan 210 S3: how the last screen or window switch changed the capture. */
+  screenSwitch?: ScreenSwitchStatus
   updatedAt: string
   message?: string
+}
+
+/**
+ * Plan 210 S3: how the last screen or window switch changed the capture:
+ * the running stream changed its target in place, or it was stopped and
+ * another started, with the reason the in-place change was not used.
+ */
+export interface ScreenSwitchStatus {
+  mode: 'in-place' | 'restart'
+  reason?: string
+  sourceId: string
+  generation: number
+  /** Switch request to the new source's first frame, when it arrived. */
+  firstFrameMs?: number
+  updatedAt: string
 }
 
 /** Capacity-one/latest-wins notification used by native preview presentation. */

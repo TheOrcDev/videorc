@@ -88,6 +88,7 @@ import type {
   SceneEditorDraftAck,
   SceneEditorDraftParams,
   SceneEditorDraftStatus,
+  ScreenSwitchStatus,
   DeviceList,
   ResolveAppWindowParams,
   ResolveAppWindowResult,
@@ -1783,6 +1784,18 @@ const liveBackgroundStatusSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const screenSwitchStatusSchema = objectSchema(
+  {
+    mode: enumSchema(['in-place', 'restart']),
+    reason: optionalText,
+    sourceId: boundedString,
+    generation: nonNegativeInteger,
+    firstFrameMs: optionalSchema(nonNegativeInteger),
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ScreenSwitchStatus>
+
 const compositorStatusSchema = objectSchema(
   {
     state: enumSchema(['stopped', 'starting', 'live', 'failed']),
@@ -1810,6 +1823,7 @@ const compositorStatusSchema = objectSchema(
     framePipeline: optionalSchema(boundedBackendPayloadSchema),
     editorDraft: optionalSchema(nullableSchema(sceneEditorDraftStatusSchema)),
     liveBackground: optionalSchema(liveBackgroundStatusSchema),
+    screenSwitch: optionalSchema(screenSwitchStatusSchema),
     updatedAt: timestamp,
     message: optionalText
   },

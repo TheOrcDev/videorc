@@ -3926,9 +3926,38 @@ pub struct CompositorStatus {
     /// while the scene has no live background.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_background: Option<LiveBackgroundStatus>,
+    /// Plan 210 S3: how the last screen or window switch changed the
+    /// capture, and why the in-place change was not used when it wasn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_switch: Option<ScreenSwitchStatus>,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Plan 210 S3: how the last screen or window switch changed the capture.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenSwitchStatus {
+    pub mode: ScreenSwitchMode,
+    /// Why the running stream was not changed in place (`restart` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub source_id: String,
+    pub generation: u64,
+    /// Switch request to the new source's first frame, when it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_frame_ms: Option<u64>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenSwitchMode {
+    /// The running ScreenCaptureKit stream changed its target.
+    InPlace,
+    /// The stream was stopped and another started.
+    Restart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

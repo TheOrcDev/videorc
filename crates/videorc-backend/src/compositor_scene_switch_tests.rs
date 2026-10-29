@@ -339,7 +339,7 @@ async fn latest_bytes(state: &AppState) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn source_switch_retries_contention_and_never_exposes_previous_device() {
+async fn source_switch_holds_the_last_frame_and_never_proves_the_previous_device() {
     let state = state();
     let mut scene = snapshot(SceneSourceKind::Screen);
     state.compositor.lock().await.scene = Some(scene.clone());
@@ -360,6 +360,8 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
     scene.scene.as_mut().unwrap().sources[0].device_id = Some("screen:next".into());
     state.compositor.lock().await.scene = Some(scene.clone());
     let held = state.preview_screen.lock().await;
+    // Plan 210 S3: the frame on air holds while the next device is not
+    // delivering, under contention too. It is no evidence for `screen:next`.
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
             .await
@@ -367,10 +369,11 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
             .screen,
         None
     );
-    assert_black(&latest_bytes(&state).await, 64, 36);
+    assert_eq!(latest_bytes(&state).await, green);
     drop(held);
     // The old device is still installed. Its perfectly valid frame must not
-    // masquerade as the selected device after the registry becomes accessible.
+    // masquerade as the selected device after the registry becomes accessible;
+    // it still draws, as the last picture on air.
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
             .await
@@ -378,7 +381,7 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
             .screen,
         None
     );
-    assert_black(&latest_bytes(&state).await, 64, 36);
+    assert_eq!(latest_bytes(&state).await, green);
     install_screen(&state, "screen:next", 2, 22, [255, 0, 0, 255]).await;
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
@@ -390,7 +393,8 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
     let blue = latest_bytes(&state).await;
     assert_ne!(blue, green);
 
-    // Rapid A→B→A: a late B producer cannot paint the now-selected A scene.
+    // Rapid A→B→A: a late B producer cannot prove the now-selected A scene;
+    // its last frame holds on air until A delivers again.
     scene.revision = 3;
     scene.scene.as_mut().unwrap().sources[0].device_id = Some("screen:fixture".into());
     state.compositor.lock().await.scene = Some(scene);
@@ -401,6 +405,7 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
             .screen,
         None
     );
+    assert_eq!(latest_bytes(&state).await, blue);
     install_screen(&state, "screen:fixture", 3, 33, [0, 255, 0, 255]).await;
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
@@ -410,6 +415,192 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
         Some(33)
     );
     assert_eq!(latest_bytes(&state).await, green);
+}
+
+/// Plan 210 S3: a window switch changes the running capture in place. The
+/// store is the same; frames of the next window carry the next generation.
+/// The compositor keeps the previous window's last frame until the scene
+/// commit names the next window and a frame of its generation is there,
+/// then cuts: never the next window under the previous layout, never black.
+#[tokio::test]
+async fn a_window_swap_holds_the_last_frame_until_the_commit_then_cuts() {
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    assert_eq!(
+        publish(&state, &mut sources, &mut cache)
+            .await
+            .fingerprint
+            .screen,
+        Some(11)
+    );
+    let alpha = latest_bytes(&state).await;
+    assert!(sources.screen_frame_is_current());
+
+    // The stream changes target: generation 2 from here, same store.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    // Beta's first frame lands while the scene still names Alpha. The
+    // periodic refresh may adopt the new identity before the commit does.
+    crate::preview_screen::test_publish_screen_pixels(&state, 22, [255, 0, 0, 255], Instant::now())
+        .await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert!(matches!(
+        change,
+        Some(CompositorScreenSourceChange::Adopted { generation: 2, .. })
+    ));
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(
+        result.fingerprint.screen, None,
+        "Beta is no evidence for Alpha's scene"
+    );
+    assert_eq!(
+        latest_bytes(&state).await,
+        alpha,
+        "Alpha's last frame holds, never Beta, never black"
+    );
+    assert!(!sources.screen_frame_is_current());
+
+    // The commit names Beta: the first publish after it cuts.
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, Some(22));
+    let beta = latest_bytes(&state).await;
+    assert_ne!(beta, alpha);
+    assert!(sources.screen_frame_is_current());
+    // And the cut holds: the next tick draws Beta again, as live.
+    publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(latest_bytes(&state).await, beta);
+}
+
+/// Plan 210 S3: the stop-then-start fallback retires the old capture before
+/// the new one exists. The frame on air holds through the gap instead of
+/// going black, and the new capture's first frame cuts in at its commit.
+#[tokio::test]
+async fn a_capture_retired_mid_switch_keeps_the_last_frame_on_air() {
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    publish(&state, &mut sources, &mut cache).await;
+    let alpha = latest_bytes(&state).await;
+
+    crate::preview_screen::test_detach_live_screen(&state).await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert_eq!(change, Some(CompositorScreenSourceChange::Removed));
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, None);
+    assert_eq!(
+        latest_bytes(&state).await,
+        alpha,
+        "no capture, but the last frame holds"
+    );
+
+    install_screen(&state, "window:beta", 2, 22, [255, 0, 0, 255]).await;
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, Some(22));
+    assert_ne!(latest_bytes(&state).await, alpha);
+}
+
+/// Plan 210 S3 under S7: a swap while the screen is hidden is a fresh
+/// capture for the gate. The next window's first frame publishes frosted,
+/// stamped with the new generation (so the switch completes), and its live
+/// pixels are held for the show.
+#[tokio::test]
+async fn a_swap_while_hidden_cuts_to_a_frosted_still_never_the_live_window() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 36;
+    let stripes = || {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let value = if (index % WIDTH as usize) / 2 % 2 == 0 {
+                255
+            } else {
+                0
+            };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    };
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    publish(&state, &mut sources, &mut cache).await;
+    let alpha = latest_bytes(&state).await;
+
+    state
+        .screen_privacy
+        .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+    assert!(crate::preview_screen::hold_screen_now(&state).await);
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    assert!(
+        crate::preview_screen::test_publish_screen_bgra(&state, 22, stripes(), Instant::now())
+            .await
+    );
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(
+        result.fingerprint.screen,
+        Some(22),
+        "the frosted still completes the switch"
+    );
+    let on_air = latest_bytes(&state).await;
+    assert_ne!(on_air, alpha);
+    // Luma along one row: the live stripes alternate every two pixels; the
+    // frost is smooth.
+    let row: Vec<u8> = (8..WIDTH - 8)
+        .map(|x| on_air[(18 * WIDTH + x) as usize])
+        .collect();
+    let max_step = row
+        .windows(2)
+        .map(|pair| pair[0].abs_diff(pair[1]))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_step < 40,
+        "the next window's live stripes reached the program: max step {max_step}"
+    );
+    assert_eq!(
+        crate::preview_screen::test_privacy_held_frames(&state).await,
+        1
+    );
+
+    state.screen_privacy.show();
+    assert!(crate::preview_screen::release_screen_now(&state).await);
+    publish(&state, &mut sources, &mut cache).await;
+    let shown = latest_bytes(&state).await;
+    let row: Vec<u8> = (8..WIDTH - 8)
+        .map(|x| shown[(18 * WIDTH + x) as usize])
+        .collect();
+    let max_step = row
+        .windows(2)
+        .map(|pair| pair[0].abs_diff(pair[1]))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_step > 100,
+        "the show publishes the held live frame: max step {max_step}"
+    );
 }
 
 #[tokio::test]
