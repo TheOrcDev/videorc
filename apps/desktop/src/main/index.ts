@@ -88,7 +88,12 @@ import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import {
+  execFile,
+  execFileSync,
+  spawn,
+  type ChildProcessWithoutNullStreams
+} from 'node:child_process'
 
 import {
   OwnedProcessRegistry,
@@ -363,6 +368,14 @@ import {
 import type { BuddyDeepLinkNavigation } from '../shared/electron-ipc-contract'
 import { parseBuddyDeepLink, runBuddyDeepLink, type BuddyDeepLink } from './buddy-deep-link'
 import { cohostAutoChatRelayPatch } from './cohost-auto-chat-relay'
+import {
+  buildVideorcDesktopEntry,
+  decideVideorcDesktopEntry,
+  linuxAppImageToRegister,
+  linuxDesktopEntryPaths,
+  VIDEORC_DESKTOP_FILE_NAME,
+  VIDEORC_URL_MIME_TYPE
+} from './linux-desktop-entry'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -8883,6 +8896,15 @@ function enforceWindowsVersionFloor(): boolean {
 }
 
 function registerOAuthCallbackProtocol(): void {
+  // An AppImage has no installed desktop entry, so Electron's xdg-settings
+  // path fails ("invalid application name"); it registers itself instead.
+  const appImage = linuxAppImageToRegister(process.platform, app.isPackaged, process.env.APPIMAGE)
+  if (appImage) {
+    void registerLinuxAppImageUrlHandler(appImage).catch((error: unknown) =>
+      logBackend('warn', `Couldn't register Videorc for videorc:// links: ${errorMessage(error)}`)
+    )
+    return
+  }
   if (process.defaultApp) {
     const appPath = process.argv[1]
     if (appPath) {
@@ -8892,6 +8914,61 @@ function registerOAuthCallbackProtocol(): void {
   }
 
   app.setAsDefaultProtocolClient(OAUTH_CALLBACK_PROTOCOL)
+}
+
+// Best-effort: no shell, a bounded wait, and a failure is only logged.
+function runDesktopTool(command: string, args: string[]): Promise<void> {
+  return new Promise((resolveRun) => {
+    execFile(command, args, { timeout: 10_000 }, (error, _stdout, stderr) => {
+      if (error) {
+        const detail = stderr.trim() || errorMessage(error)
+        logBackend('warn', `${command} ${args.join(' ')} failed: ${detail}`)
+      }
+      resolveRun()
+    })
+  })
+}
+
+async function registerLinuxAppImageUrlHandler(appImage: string): Promise<void> {
+  const desired = buildVideorcDesktopEntry(appImage)
+  if (!desired) {
+    logBackend('warn', 'The AppImage path cannot go in a desktop entry; videorc:// links stay off.')
+    return
+  }
+  // The AppImage's own 512 px icon, else the 256 px logo in resources.
+  const icons = [
+    {
+      source: join(
+        dirname(process.resourcesPath),
+        'usr/share/icons/hicolor/512x512/apps/videorc.png'
+      ),
+      size: 512
+    },
+    { source: join(process.resourcesPath, 'videorc-logo.png'), size: 256 }
+  ]
+  const icon = icons.find((candidate) => existsSync(candidate.source))
+  const paths = linuxDesktopEntryPaths(homedir(), process.env.XDG_DATA_HOME, icon?.size ?? 512)
+
+  const existing = await fsPromises.readFile(paths.desktopFile, 'utf8').catch(() => null)
+  const decision = decideVideorcDesktopEntry(existing, desired)
+  if (decision.action === 'keep' && decision.reason === 'unmanaged') {
+    logBackend('info', `Leaving ${paths.desktopFile} alone: Videorc did not write it.`)
+    return
+  }
+  if (decision.action === 'write') {
+    await fsPromises.mkdir(paths.applicationsDir, { recursive: true })
+    await fsPromises.writeFile(paths.desktopFile, desired, { mode: 0o644 })
+    logBackend('info', `Wrote ${paths.desktopFile} (${decision.reason}) for videorc:// links.`)
+  }
+  if (icon && !existsSync(paths.iconFile)) {
+    await fsPromises.mkdir(paths.iconDir, { recursive: true })
+    await fsPromises.copyFile(icon.source, paths.iconFile)
+  }
+  // Re-asserted every launch, so a handler another app took is reclaimed.
+  await runDesktopTool('xdg-mime', ['default', VIDEORC_DESKTOP_FILE_NAME, VIDEORC_URL_MIME_TYPE])
+  if (decision.action === 'write') {
+    await runDesktopTool('update-desktop-database', [paths.applicationsDir])
+  }
 }
 
 function oauthCallbackRedirectUri(platform?: string): string | null {
