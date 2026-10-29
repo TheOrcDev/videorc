@@ -61,9 +61,12 @@ const WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE: Duration = Duration::from_millis(2500);
 /// Kept free by the `-framerate` attempt for the final negotiated-default
-/// attempt, so a stalled exact rate cannot leave it no time.
+/// attempt, so a stalled exact rate cannot leave it no time. The reserve must
+/// cover the stalled attempt's own teardown (kill, wait, killer join) and
+/// still leave the ~1.0-1.3 s the HP HD Camera's default format needs for
+/// its first frame.
 #[cfg(any(target_os = "windows", test))]
-const WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE: Duration = Duration::from_millis(1250);
+const WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE: Duration = Duration::from_millis(1500);
 /// An attempt that still has a fallback after it is skipped below this: it
 /// cannot realistically go live, and the fallback gets the time instead.
 #[cfg(any(target_os = "windows", test))]
@@ -5182,16 +5185,14 @@ mod windows {
         let stderr = collect_stderr(child.stderr.take());
         let child = Arc::new(StdMutex::new(child));
         let done = Arc::new(AtomicBool::new(false));
-        let live = Arc::new(AtomicBool::new(false));
-        let timed_out = Arc::new(AtomicBool::new(false));
+        let race = Arc::new(FirstFrameRace::default());
         let killer = spawn_stop_flag_killer(
             Arc::clone(&child),
             Arc::clone(&done),
             Arc::clone(stop_flag),
             FirstFrameDeadline {
                 at: first_frame_deadline,
-                live: Arc::clone(&live),
-                timed_out: Arc::clone(&timed_out),
+                race: Arc::clone(&race),
             },
         );
 
@@ -5206,6 +5207,13 @@ mod windows {
         loop {
             match stdout.read_exact(&mut buffer) {
                 Ok(()) => {
+                    if !startup_sent && !race.claim_live() {
+                        // The deadline passed while this frame was still in
+                        // the pipe: the killer owns the attempt and has ended
+                        // FFmpeg. Reporting Live now would hand the ladder a
+                        // preview that is already dead and never retried.
+                        break;
+                    }
                     buffer = publish_bgra_frame(shared, width, height, buffer);
                     if !startup_sent {
                         let _ = startup_tx.send(NativeCameraStartup::Live {
@@ -5235,7 +5243,6 @@ mod windows {
                             }),
                         });
                         startup_sent = true;
-                        live.store(true, Ordering::Release);
                         outcome = Some(CameraPreviewAttempt::ProducedFrames);
                         tracing::info!(
                             camera = %config.unique_id,
@@ -5267,7 +5274,8 @@ mod windows {
             .wait();
         let _ = killer.join();
         outcome.unwrap_or_else(|| {
-            let cause = if timed_out.load(Ordering::Acquire) {
+            let timed_out = race.timed_out();
+            let cause = if timed_out {
                 format!("no frame within {} ms", first_frame_timeout.as_millis())
             } else {
                 read_error.map_or_else(
@@ -5275,14 +5283,64 @@ mod windows {
                     |error| format!("ended before the first frame ({error})"),
                 )
             };
-            CameraPreviewAttempt::FailedBeforeFirstFrame(format!("{cause}{}", stderr_tail(&stderr)))
+            // A killed attempt has nothing more to say; waiting for its
+            // stderr would spend the time the next attempt was reserved.
+            let stderr_wait = if timed_out {
+                Duration::ZERO
+            } else {
+                STDERR_TAIL_WAIT
+            };
+            CameraPreviewAttempt::FailedBeforeFirstFrame(format!(
+                "{cause}{}",
+                stderr_tail(&stderr, stderr_wait)
+            ))
         })
     }
 
     struct FirstFrameDeadline {
         at: Instant,
-        live: Arc<AtomicBool>,
-        timed_out: Arc<AtomicBool>,
+        race: Arc<FirstFrameRace>,
+    }
+
+    const FIRST_FRAME_IDLE: u8 = 0;
+    const FIRST_FRAME_LIVE: u8 = 1;
+    const FIRST_FRAME_TIMED_OUT: u8 = 2;
+
+    /// The attempt's first-frame race, settled exactly once. The reader claims
+    /// Live the moment `read_exact` hands it a frame; the killer claims
+    /// TimedOut when the deadline passes with no claim; only the winner acts.
+    /// Two separate flags let a deadline landing between the frame's arrival
+    /// and the Live flag kill a preview that had just gone live, which the
+    /// ladder then treated as "ran live, do not retry".
+    #[derive(Debug, Default)]
+    pub(super) struct FirstFrameRace(std::sync::atomic::AtomicU8);
+
+    impl FirstFrameRace {
+        pub(super) fn claim_live(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_LIVE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn claim_timed_out(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_TIMED_OUT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn timed_out(&self) -> bool {
+            self.0.load(Ordering::Acquire) == FIRST_FRAME_TIMED_OUT
+        }
     }
 
     fn bgra_frame_len(width: u32, height: u32) -> Option<usize> {
@@ -5317,12 +5375,11 @@ mod windows {
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while !done.load(Ordering::Acquire) {
+                // Past the deadline the killer may act only if it wins the
+                // race; a reader that already claimed Live keeps its child.
                 let stalled =
-                    !first_frame.live.load(Ordering::Acquire) && Instant::now() >= first_frame.at;
+                    Instant::now() >= first_frame.at && first_frame.race.claim_timed_out();
                 if stop_flag.load(Ordering::Acquire) || stalled {
-                    if stalled {
-                        first_frame.timed_out.store(true, Ordering::Release);
-                    }
                     let _ = child
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5377,10 +5434,13 @@ mod windows {
         next_buffer
     }
 
+    /// How long a failed attempt waits for FFmpeg's last stderr lines.
+    const STDERR_TAIL_WAIT: Duration = Duration::from_millis(300);
+
     /// The last FFmpeg lines of a reaped attempt. The reader thread publishes
     /// only at EOF, which can trail the child's exit by a few milliseconds.
-    fn stderr_tail(stderr: &Arc<StdMutex<Vec<u8>>>) -> String {
-        let deadline = Instant::now() + Duration::from_millis(300);
+    fn stderr_tail(stderr: &Arc<StdMutex<Vec<u8>>>, wait: Duration) -> String {
+        let deadline = Instant::now() + wait;
         loop {
             let message = {
                 let bytes = stderr
@@ -9558,12 +9618,12 @@ Error opening input file video=HP HD Camera."#;
         // ...but after a 2 s probe it leaves the negotiated default its share.
         assert_eq!(
             windows_camera_attempt_first_frame_timeout(secs(4.0), ExactRate),
-            Some(secs(2.75))
+            Some(secs(2.5))
         );
         // What MJPEG left behind still fits both fallbacks.
         assert_eq!(
             windows_camera_attempt_first_frame_timeout(secs(2.5), ExactRate),
-            Some(secs(1.25))
+            Some(secs(1.0))
         );
         assert_eq!(
             windows_camera_attempt_first_frame_timeout(secs(2.0), ExactRate),
@@ -9587,6 +9647,24 @@ Error opening input file video=HP HD Camera."#;
             windows_camera_attempt_first_frame_timeout(Duration::ZERO, NegotiatedDefault),
             None
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_camera_first_frame_race_has_exactly_one_winner() {
+        use super::windows::FirstFrameRace;
+        // The reader's frame arrives first: the killer may not kill.
+        let reader_first = FirstFrameRace::default();
+        assert!(reader_first.claim_live());
+        assert!(!reader_first.claim_timed_out());
+        assert!(!reader_first.timed_out());
+        // The deadline passes first: the frame in the pipe is not Live.
+        let killer_first = FirstFrameRace::default();
+        assert!(killer_first.claim_timed_out());
+        assert!(!killer_first.claim_live());
+        assert!(killer_first.timed_out());
+        // A second claim by the same side changes nothing.
+        assert!(!killer_first.claim_timed_out());
     }
 
     #[test]
