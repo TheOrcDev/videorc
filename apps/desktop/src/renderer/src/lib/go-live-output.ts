@@ -252,7 +252,9 @@ export function streamQualityUntouched(streaming: StreamingSettings): boolean {
  * Go Live on a CPU compositor (Linux, Windows' CPU fallback). The stream
  * steps down to 720p30 (or the smaller output that held steady) unless the
  * check proved headroom for it; a quality the user picked is only warned
- * about. Encoder-agnostic: the compositor is the bottleneck here.
+ * about. Encoder-agnostic: the compositor is the bottleneck here. A check
+ * where not even the floor held still steps down, to the floor: every
+ * larger rung measured worse, so 1080p is the worst choice left.
  */
 export function cpuCompositorStreamAdvice({
   streamVideo,
@@ -267,7 +269,6 @@ export function cpuCompositorStreamAdvice({
   if (
     !result ||
     state.stale ||
-    result.belowFloor ||
     isUntrustedPerformanceCheckResult(result) ||
     streamVideo.width < streamVideo.height ||
     !result.rungs.some(
