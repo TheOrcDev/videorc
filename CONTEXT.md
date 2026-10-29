@@ -324,10 +324,13 @@ _Avoid_: the Buddy, co-host, Orcle, pet, sidekick
 The switch that lets Buddy join a livestream.
 _Avoid_: Joins my streams, chat mode (for the on switch)
 
-**Chat posting**:
-What Buddy may post to your chats as you: Off, Suggest or Auto. It never
-turns Buddy on or off; Buddy Live does.
-_Avoid_: chat mode, auto chat
+**{name} talks**:
+How Buddy talks on its own, named after the streamer's Buddy ("Golmar
+talks", else "Buddy talks"): Off, Bubble (in its bubble on stream, never in
+chat) or Suggest (a card; one click posts it to chat as you). Buddy never
+posts in your chat on its own. It never turns Buddy on or off; Buddy Live
+does. Plan 211.
+_Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211)
 
 **Profile**:
 The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,

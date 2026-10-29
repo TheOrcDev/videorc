@@ -476,24 +476,34 @@ export function greetingTemplatePlatforms(
  * The editor's inline warnings (plan 164 S-D5): the text over a cap on a
  * platform it reaches (X takes 140), and braces nothing fills. Never a
  * silent cut: the backend clips with an ellipsis and says so in the log.
+ * The caps are chat's, so `chatCaps: false` (Bubble, plan 211 S-C4, where
+ * nothing goes to chat) leaves them out; the braces still warn.
  */
-export function greetingTemplateWarnings(template: BuddyGreetingLineDraft): string[] {
+export function greetingTemplateWarnings(
+  template: BuddyGreetingLineDraft,
+  { chatCaps = true }: { chatCaps?: boolean } = {}
+): string[] {
   const warnings: string[] = []
   const { text, unknown } = resolveGreetingPreview(
     template.text,
     BUDDY_SAMPLE_FIELDS[template.kind]
   )
-  for (const platform of greetingTemplatePlatforms(template)) {
-    const cap = CHAT_SEND_PLATFORM_MAX_CHARS[platform as StreamPlatform]
-    if (text.length > cap) {
-      warnings.push(
-        `${BUDDY_GREETING_PLATFORM_LABELS[platform]} takes ${cap} characters; this one is ${text.length}.`
-      )
+  if (chatCaps) {
+    for (const platform of greetingTemplatePlatforms(template)) {
+      const cap = CHAT_SEND_PLATFORM_MAX_CHARS[platform as StreamPlatform]
+      if (text.length > cap) {
+        warnings.push(
+          `${BUDDY_GREETING_PLATFORM_LABELS[platform]} takes ${cap} characters; this one is ${text.length}.`
+        )
+      }
     }
   }
   if (unknown.length > 0) {
+    const fields = unknown.map((field) => `{${field}}`).join(', ')
     warnings.push(
-      `${unknown.map((field) => `{${field}}`).join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not a field and will be posted as written.`
+      unknown.length === 1
+        ? `${fields} isn't a field and stays as written.`
+        : `${fields} aren't fields and stay as written.`
     )
   }
   return warnings

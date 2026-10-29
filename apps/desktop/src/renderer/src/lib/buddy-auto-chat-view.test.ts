@@ -191,7 +191,10 @@ describe('greeting preview (plan 164 S-D5)', () => {
 
   it('warns on an unknown field, never silently', () => {
     expect(greetingTemplateWarnings({ kind: 'follow', text: 'Welcome {nam}' })).toEqual([
-      '{nam} is not a field and will be posted as written.'
+      "{nam} isn't a field and stays as written."
+    ])
+    expect(greetingTemplateWarnings({ kind: 'follow', text: '{nam} and {nmae}' })).toEqual([
+      "{nam}, {nmae} aren't fields and stay as written."
     ])
     expect(greetingTemplateWarnings({ kind: 'follow', text: 'Welcome {name}' })).toEqual([])
   })
@@ -208,6 +211,19 @@ describe('greeting preview (plan 164 S-D5)', () => {
     expect(greetingTemplateWarnings({ kind: 'raid', text: longer })).toEqual([
       `Twitch takes 200 characters; this one is ${'raider42 '.length + 200}.`
     ])
+  })
+
+  it("leaves chat's caps out in Bubble, where nothing goes to chat (plan 211 S-C4)", () => {
+    const long = `Welcome {name}! ${'x'.repeat(250)}`
+    expect(greetingTemplateWarnings({ kind: 'follow', text: long }, { chatCaps: false })).toEqual(
+      []
+    )
+    // A brace nothing fills still warns: it shows as written in the bubble too.
+    expect(
+      greetingTemplateWarnings({ kind: 'follow', text: `${long} {nam}` }, { chatCaps: false })
+    ).toEqual(["{nam} isn't a field and stays as written."])
+    // Suggest (the default) still warns about every cap the line reaches.
+    expect(greetingTemplateWarnings({ kind: 'follow', text: long })).toHaveLength(2)
   })
 })
 

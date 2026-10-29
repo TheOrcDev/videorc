@@ -622,7 +622,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
     expect(text).toContain('“Buddy, highlight the comment from coders X”')
     expect(text).toContain('“This one is toxic. Remove it from our chat.”')
     expect(text).toContain(
-      'Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+      'Buddy never posts in your chat on its own. It removes a comment only when you tell it to.'
     )
     expect(text).toContain('20 seconds')
     expect(text).toContain('At most 10 removals a minute.')
