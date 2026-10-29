@@ -144,6 +144,7 @@ import type {
 import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
+import { useScreenPrivacy } from './use-screen-privacy'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
   GoLiveConfirmOutcome,
@@ -1605,6 +1606,10 @@ export type StudioContextValue = {
    * start that cannot run says why and resolves false; one that only opened
    * the dialog resolves false too.
    */
+  screenPrivacy: import('@/lib/backend').ScreenPrivacy
+  hideScreen: ReturnType<typeof useScreenPrivacy>['hideScreen']
+  showScreen: ReturnType<typeof useScreenPrivacy>['showScreen']
+  toggleScreenHidden: ReturnType<typeof useScreenPrivacy>['toggleScreenHidden']
   startRecording: () => Promise<boolean>
   startLivestream: () => Promise<boolean>
   stopSession: () => Promise<boolean>
@@ -2528,7 +2533,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     deviceListRef.current = deviceList
   }, [deviceList])
+  const runPrivacyRelay = useEffectEvent((mode: 'hide' | 'show', caller: 'you') =>
+    privacy.runScreenPrivacy(mode, caller)
+  )
   const [recording, setRecording] = useState<RecordingStatus>({ state: 'idle', message: 'Ready.' })
+  const privacy = useScreenPrivacy(client, recording.state, wsStatus)
   // Plan 181: the backend's replay ring, and the switch (the user's intent).
   const [replayState, setReplayState] = useState<ReplayStateEvent>(REPLAY_STATE_OFF)
   const replayStateRef = useRef<ReplayStateEvent>(REPLAY_STATE_OFF)
@@ -3245,6 +3254,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (async () => {
         if (!client) throw offlineError()
         switch (command.action) {
+          case 'screenHide':
+          case 'screenShow': {
+            const outcome = await runPrivacyRelay(
+              command.action === 'screenHide' ? 'hide' : 'show',
+              'you'
+            )
+            if (!outcome.ok) throw new Error(outcome.message)
+            return { hidden: command.action === 'screenHide' }
+          }
           case 'create':
             return client.requestTyped('session.marker.create', command.params)
           case 'get':
@@ -17359,6 +17377,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the one context a deck key and (S6) an agent's tool call run against.
   const studioActionSource = (): StudioActionSource | null =>
     client && {
+      runScreenPrivacy: privacy.runScreenPrivacy,
       client,
       recordingRef,
       replayStateRef,
@@ -17515,7 +17534,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     systemAudioShown,
     bannerList ?? NO_BANNERS,
     sceneLibrary.scenes,
-    activeSavedSceneId
+    activeSavedSceneId,
+    privacy.screenPrivacy.hidden
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on
@@ -17664,6 +17684,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // first-run setup is open.
     if (firstRunSetupOpen) return
     const context: GlobalShortcutContext = {
+      toggleScreenHidden: privacy.toggleScreenHidden,
       switchLayout: (layoutAction) => {
         const current = captureConfigRef.current
         const direct = globalShortcutLayout(layoutAction)
@@ -17997,6 +18018,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const value = useMemo<StudioCoreContextValue>(
     () => ({
+      ...privacy,
       connection,
       wsStatus,
       health,
@@ -18242,6 +18264,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       canSampleAudio
     }),
     [
+      privacy,
       connection,
       wsStatus,
       health,

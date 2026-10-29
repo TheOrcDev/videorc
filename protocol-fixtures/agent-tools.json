@@ -3284,6 +3284,37 @@
       "onAir": false,
       "rateFamily": "action",
       "notice": null
+    },
+    {
+      "name": "hide_screen",
+      "title": "Hide screen",
+      "description": "Hide the screen behind a frosted still while the camera and microphone stay on. Only the streamer can show the screen again.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "hidden": {
+            "type": "boolean"
+          }
+        },
+        "required": ["hidden"],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "runsIn": "studio",
+      "buddy": true,
+      "onAir": true,
+      "rateFamily": "action",
+      "notice": "{agent} hid your screen."
     }
   ]
 }

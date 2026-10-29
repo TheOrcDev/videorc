@@ -86,7 +86,7 @@ describe('global layout shortcuts', () => {
     expect(active.startLivestream).toHaveBeenCalledOnce()
   })
   it('keeps stable IDs, unassigned defaults and validates unknown actions', () => {
-    expect(globalShortcutEntries({})).toHaveLength(18)
+    expect(globalShortcutEntries({})).toHaveLength(19)
     // Plan 068 D6 / plan 181 R4: Save a clip ships unbound.
     expect(globalShortcutEntries({}).find(([id]) => id === 'clip-mark')?.[1]).toBeUndefined()
     expect(withGlobalShortcut({}, 'clip-mark', 'Cmd+Shift+K').clipMark).toBe('Cmd+Shift+K')

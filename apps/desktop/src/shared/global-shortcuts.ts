@@ -1,6 +1,9 @@
 import { LAYOUT_PRESET_VALUES, type GlobalShortcutsConfig, type LayoutPreset } from './backend'
 
+export const DEFAULT_SCREEN_HIDE_SHORTCUT = 'Control+Alt+H'
+
 export const GLOBAL_SHORTCUT_ACTIONS = [
+  'screen-hide-toggle',
   'record-toggle',
   'stream-toggle',
   'mic-toggle',
@@ -29,6 +32,7 @@ export function globalShortcutEntries(
       `scene:${id}`,
       key
     ]),
+    ['screen-hide-toggle', config.screenHideToggle ?? DEFAULT_SCREEN_HIDE_SHORTCUT],
     ['record-toggle', config.recordToggle],
     ['stream-toggle', config.streamToggle],
     ['mic-toggle', config.micToggle],

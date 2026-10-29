@@ -21,6 +21,7 @@ import { shortcutsByGroup } from '@/lib/shortcuts'
 import { systemAudioDevice } from '@/lib/system-audio'
 
 const GLOBAL_ACTION_ROWS = [
+  'screen-hide-toggle',
   'record-toggle',
   'stream-toggle',
   'mic-toggle',

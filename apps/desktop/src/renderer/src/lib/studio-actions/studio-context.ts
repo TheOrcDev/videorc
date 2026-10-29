@@ -67,6 +67,10 @@ export interface StudioActionSource extends Omit<
   HeadlessGoLiveStudio,
   'connected' | 'wsStatus' | 'recording' | 'config'
 > {
+  runScreenPrivacy?: (
+    mode: 'hide' | 'show' | 'toggle',
+    caller: import('./privacy').PrivacyCaller
+  ) => Promise<import('./context').StudioActionOutcome>
   client: BackendClient
   recordingRef: Ref<RecordingStatus>
   replayStateRef: Ref<ReplayStateEvent>
@@ -186,6 +190,7 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
   const captionsGate = cloudAiUploadGate(studio.entitlements)
   return {
     client,
+    runScreenPrivacy: studio.runScreenPrivacy,
     sessionActive: sessionOwnsTransport(studio.recordingRef.current),
     replayOn: studio.replayStateRef.current.state === 'on',
     recordBlockedReason: studio.recordBlockedReason,

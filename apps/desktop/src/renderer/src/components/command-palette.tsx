@@ -1,3 +1,4 @@
+import { DEFAULT_SCREEN_HIDE_SHORTCUT } from '../../../shared/global-shortcuts'
 import {
   CaptionsIcon,
   ChatIcon,
@@ -124,6 +125,8 @@ export function CommandPalette({
 }): ReactElement {
   const { active, setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
   const {
+    screenPrivacy,
+    toggleScreenHidden,
     runtimeInfo,
     savedScenes,
     applySavedSceneResult,
@@ -240,6 +243,13 @@ export function CommandPalette({
               </CommandItem>
             </>
           )}
+          <CommandItem
+            value={screenPrivacy.hidden ? 'Show screen' : 'Hide screen'}
+            onSelect={() => run(() => void toggleScreenHidden())}
+          >
+            {screenPrivacy.hidden ? 'Show screen' : 'Hide screen'}
+            {shortcut(settings.globalShortcuts?.screenHideToggle ?? DEFAULT_SCREEN_HIDE_SHORTCUT)}
+          </CommandItem>
           <CommandItem
             value={muteLabel}
             keywords={['mic', 'microphone', 'audio', 'mute', 'silence']}

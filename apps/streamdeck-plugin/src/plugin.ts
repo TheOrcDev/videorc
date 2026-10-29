@@ -4,6 +4,7 @@
 // optimistic intent. When Videorc is closed or Remote Control is disabled in
 // Settings, every key shows an alert glyph on press and the title says so.
 
+import { privacyKeyTitle, privacyKeyIntent } from './privacy-key.js'
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck'
 import type {
   DidReceiveSettingsEvent,
@@ -227,6 +228,17 @@ class SceneApply extends VideorcAction<SceneSettings> {
   }
 }
 
+@action({ UUID: 'com.videorc.streamdeck.screen-hide-toggle' })
+class ScreenHideToggle extends VideorcAction<JsonObject> {
+  protected renderTitle: TitleRenderer = (state) => privacyKeyTitle(Boolean(state?.screenHidden))
+  protected override renderPressed(state: RemoteState | null): boolean {
+    return Boolean(state?.screenHidden)
+  }
+  protected intentFor(): Record<string, unknown> {
+    return privacyKeyIntent()
+  }
+}
+
 type TakeoverSettings = { assetId?: string }
 
 @action({ UUID: 'com.videorc.streamdeck.takeover-toggle' })
@@ -321,6 +333,7 @@ streamDeck.actions.registerAction(new MicToggle())
 streamDeck.actions.registerAction(new SystemAudioToggle())
 streamDeck.actions.registerAction(new SceneApply())
 streamDeck.actions.registerAction(new SavedSceneApply())
+streamDeck.actions.registerAction(new ScreenHideToggle())
 streamDeck.actions.registerAction(new TakeoverToggle())
 streamDeck.actions.registerAction(new BannerToggle())
 streamDeck.actions.registerAction(new SoundPlay())

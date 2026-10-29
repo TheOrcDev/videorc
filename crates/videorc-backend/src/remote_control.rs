@@ -82,6 +82,9 @@ pub enum RemoteIntent {
         asset_id: String,
     },
     TakeoverHide,
+    ScreenHide,
+    ScreenShow,
+    ScreenHideToggle,
     /// Banners (plan 186). Show and hide are explicit and idempotent; the
     /// toggle is for a single deck key. `bannerHide` without a `bannerId`
     /// hides every banner.
@@ -150,6 +153,7 @@ impl RemoteIntent {
     /// a bouncing key cannot interleave `micMute` + `micToggle`.
     pub fn debounce_kind(&self) -> &'static str {
         match self {
+            Self::ScreenHide | Self::ScreenShow | Self::ScreenHideToggle => "privacy",
             Self::RecordStart | Self::RecordStop | Self::RecordToggle => "record",
             Self::StreamStart | Self::StreamStop => "stream",
             Self::MicMute | Self::MicUnmute | Self::MicToggle => "mic",
@@ -957,5 +961,24 @@ mod tests {
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(discovery_path(Path::new(":memory:")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    #[test]
+    fn privacy_intents_validate_and_share_only_the_privacy_bucket() {
+        for kind in ["screenHide", "screenShow", "screenHideToggle"] {
+            let intent: RemoteIntent =
+                serde_json::from_value(serde_json::json!({"kind": kind})).unwrap();
+            assert!(intent.validate().is_ok());
+            assert_eq!(intent.debounce_kind(), "privacy");
+            assert_eq!(
+                serde_json::to_value(intent).unwrap(),
+                serde_json::json!({"kind": kind})
+            );
+        }
+        assert_ne!(RemoteIntent::TakeoverHide.debounce_kind(), "privacy");
     }
 }

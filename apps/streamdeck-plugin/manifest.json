@@ -147,6 +147,21 @@
         }
       ],
       "PropertyInspectorPath": "ui/property-inspector.html"
+    },
+    {
+      "UUID": "com.videorc.streamdeck.screen-hide-toggle",
+      "Name": "Hide screen",
+      "Icon": "imgs/takeover",
+      "Tooltip": "Hide or show your screen",
+      "States": [
+        {
+          "Image": "imgs/takeover"
+        },
+        {
+          "Image": "imgs/takeover"
+        }
+      ],
+      "PropertyInspectorPath": "ui/property-inspector.html"
     }
   ]
 }

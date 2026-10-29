@@ -50,6 +50,9 @@ describe('the remote intent entry point', () => {
   it('has one executor for every kind on the wire (docs/remote-control.md)', () => {
     expect(Object.keys(REMOTE_INTENT_EXECUTORS).sort()).toEqual(
       [
+        'screenHide',
+        'screenShow',
+        'screenHideToggle',
         'recordStart',
         'recordStop',
         'recordToggle',

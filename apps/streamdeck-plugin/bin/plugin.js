@@ -37,6 +37,7 @@ var __runInitializers = (this && this.__runInitializers) || function (thisArg, i
     }
     return useValue ? value : void 0;
 };
+import { privacyKeyTitle, privacyKeyIntent } from './privacy-key.js';
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck';
 import { VideorcClient, sceneKeyIntent, sceneKeyTitle, bannerKeyIntent, bannerKeyTitle, soundKeyIntent, soundKeyTitle } from './videorc-client.js';
 const client = new VideorcClient();
@@ -285,6 +286,31 @@ let SceneApply = (() => {
     };
     return SceneApply = _classThis;
 })();
+let ScreenHideToggle = (() => {
+    let _classDecorators = [action({ UUID: 'com.videorc.streamdeck.screen-hide-toggle' })];
+    let _classDescriptor;
+    let _classExtraInitializers = [];
+    let _classThis;
+    let _classSuper = VideorcAction;
+    var ScreenHideToggle = class extends _classSuper {
+        static { _classThis = this; }
+        static {
+            const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
+            __esDecorate(null, _classDescriptor = { value: _classThis }, _classDecorators, { kind: "class", name: _classThis.name, metadata: _metadata }, null, _classExtraInitializers);
+            ScreenHideToggle = _classThis = _classDescriptor.value;
+            if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
+            __runInitializers(_classThis, _classExtraInitializers);
+        }
+        renderTitle = (state) => privacyKeyTitle(Boolean(state?.screenHidden));
+        renderPressed(state) {
+            return Boolean(state?.screenHidden);
+        }
+        intentFor() {
+            return privacyKeyIntent();
+        }
+    };
+    return ScreenHideToggle = _classThis;
+})();
 let TakeoverToggle = (() => {
     let _classDecorators = [action({ UUID: 'com.videorc.streamdeck.takeover-toggle' })];
     let _classDescriptor;
@@ -420,6 +446,7 @@ streamDeck.actions.registerAction(new MicToggle());
 streamDeck.actions.registerAction(new SystemAudioToggle());
 streamDeck.actions.registerAction(new SceneApply());
 streamDeck.actions.registerAction(new SavedSceneApply());
+streamDeck.actions.registerAction(new ScreenHideToggle());
 streamDeck.actions.registerAction(new TakeoverToggle());
 streamDeck.actions.registerAction(new BannerToggle());
 streamDeck.actions.registerAction(new SoundPlay());

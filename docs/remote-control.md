@@ -429,3 +429,18 @@ chose, so paired phones can now read those scene labels. A paired device can
 apply a saved scene through `sceneApply { sceneId }` (non-empty, at most 128
 characters), with the same orientation and app-availability refusals as Studio.
 No new route, method or event is added; `LAN_EVENTS` and the router are unchanged.
+
+## Hide screen (plan 210 S8a)
+
+| Intent             | Fields | Effect             |
+| ------------------ | ------ | ------------------ |
+| `screenHide`       | none   | Hide screen        |
+| `screenShow`       | none   | Show screen        |
+| `screenHideToggle` | none   | Toggle Hide screen |
+
+These share the `privacy` debounce bucket and a renderer lane independent
+of scene switches. `remote.state.screenHidden` is a boolean, confirmed by
+the Studio's privacy state. Only that boolean crosses the LAN: no reason,
+timestamp or screen contents. The phone is the streamer's own paired
+device. Hiding is the safe direction; showing is a deliberate key press.
+No route, credential or LAN event is added.

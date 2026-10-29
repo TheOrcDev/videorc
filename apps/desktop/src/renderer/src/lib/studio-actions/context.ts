@@ -58,6 +58,10 @@ export type StudioActionExecutor = (
 ) => Promise<StudioActionOutcome>
 
 export interface StudioActionContext {
+  runScreenPrivacy?: (
+    mode: 'hide' | 'show' | 'toggle',
+    caller: import('./privacy').PrivacyCaller
+  ) => Promise<import('./context').StudioActionOutcome>
   client: StudioActionClient
   sessionActive: boolean
   /**

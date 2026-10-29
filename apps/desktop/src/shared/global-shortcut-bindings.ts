@@ -6,6 +6,7 @@ import { globalShortcutLayout, type GlobalShortcutAction } from './global-shortc
 // so only Settings and the IPC contract carry it.
 
 const ACTION_CONFIG_KEYS = {
+  'screen-hide-toggle': 'screenHideToggle',
   'record-toggle': 'recordToggle',
   'stream-toggle': 'streamToggle',
   'mic-toggle': 'micToggle',

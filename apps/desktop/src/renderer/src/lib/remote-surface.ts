@@ -6,6 +6,7 @@ import { bannerSummaries, type BannerSummary } from '../../../shared/banner-comm
 /** The state projection deck keys render. Minimal by design and the ONLY
  * payload remote sockets receive — never widen it with tokens/paths/URLs. */
 export interface RemoteSurfaceState {
+  screenHidden: boolean
   sessionState: string
   sessionActive: boolean
   recordEnabled: boolean
@@ -103,7 +104,8 @@ export type RemoteSurfaceValues = readonly [
   systemAudioShown: boolean,
   banners: readonly BannerSummary[],
   savedScenes?: readonly { id: string; name: string }[],
-  activeSavedSceneId?: string | null
+  activeSavedSceneId?: string | null,
+  screenHidden?: boolean
 ]
 
 function snapshotFromValues(
@@ -112,6 +114,7 @@ function snapshotFromValues(
 ): RemoteSurfaceSnapshot {
   return {
     state: {
+      screenHidden: values[17] ?? false,
       savedScenes: (values[15] ?? []).map(({ id, name }) => ({ id, name })),
       activeSavedSceneId: values[16] ?? null,
       sessionState: values[0],

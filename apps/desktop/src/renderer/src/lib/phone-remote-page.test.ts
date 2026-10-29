@@ -3,6 +3,7 @@ import { Window, type HTMLButtonElement, type Node } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type State = {
+  screenHidden?: boolean
   sessionState: string
   sessionActive: boolean
   streamEnabled: boolean
@@ -613,4 +614,15 @@ it('shows saved scenes above layouts and sends their ids, marking confirmed stat
   expect(keys[1].getAttribute('aria-pressed')).toBe('false')
   keys[0].click()
   expect(client().intent).toHaveBeenCalledWith({ kind: 'sceneApply', sceneId: 'figma' })
+})
+
+it('the phone privacy key toggles and follows confirmed hidden state', () => {
+  const button = () => page.document.querySelector<HTMLButtonElement>('#deck-takeovers button')!
+  expect(button().textContent).toContain('Hide screen')
+  button().click()
+  expect(client().intent).toHaveBeenLastCalledWith({ kind: 'screenHideToggle' })
+  remote.state.screenHidden = true
+  client().emit('state', remote.state)
+  expect(button().textContent).toContain('Screen hidden')
+  expect(button().getAttribute('aria-pressed')).toBe('true')
 })

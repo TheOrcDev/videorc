@@ -577,8 +577,14 @@ function renderDeck() {
   )
 
   const takeovers = describe.takeovers ?? []
-  $('takeovers-label').hidden = takeovers.length === 0
+  $('takeovers-label').hidden = false
   $('deck-takeovers').replaceChildren(
+    key({
+      name: state.screenHidden ? 'Screen hidden' : 'Hide screen',
+      on: Boolean(state.screenHidden),
+      toggle: true,
+      onTap: () => send({ kind: 'screenHideToggle' })
+    }),
     ...takeovers.map((takeover) => {
       const on = state.activeTakeoverId === takeover.id
       return key({

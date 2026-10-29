@@ -817,6 +817,19 @@ mod tests {
     }
 
     #[test]
+    fn hide_screen_is_a_parameterless_hide_only_buddy_tool() {
+        let tool = catalog().tool("hide_screen").unwrap();
+        assert!(tool.buddy && tool.on_air);
+        assert_eq!(tool.runs_in, AgentToolRunsIn::Studio);
+        assert!(tool.validate_arguments(&serde_json::json!({})).is_ok());
+        assert!(
+            tool.validate_arguments(&serde_json::json!({"show": true}))
+                .is_err()
+        );
+        assert!(catalog().tool("show_screen").is_none());
+    }
+
+    #[test]
     fn notices_fill_the_agent_the_arguments_and_the_result() {
         let catalog = catalog();
         let notify = catalog.tool("notify").unwrap();
@@ -870,6 +883,7 @@ mod tests {
             "switch_scene",
             "set_audio",
             "set_takeover",
+            "hide_screen",
             "play_sound",
             "stop_sounds",
             "set_highlight",
@@ -901,7 +915,7 @@ mod tests {
             .copied()
             .filter(|name| catalog.tool(name).unwrap().on_air)
             .collect();
-        assert_eq!(on_air, ["stop", "notify"]);
+        assert_eq!(on_air, ["stop", "hide_screen", "notify"]);
         // Every read is a read, honestly hinted.
         for tool in &catalog.tools {
             assert_eq!(

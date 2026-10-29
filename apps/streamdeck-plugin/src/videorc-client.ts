@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import WebSocket from 'ws'
 
 export interface RemoteState {
+  screenHidden?: boolean
   sessionState?: string
   sessionActive?: boolean
   recordEnabled?: boolean

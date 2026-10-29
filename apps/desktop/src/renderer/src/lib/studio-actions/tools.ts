@@ -9,6 +9,7 @@
 // the Studio's, from the `notice` the backend puts on the `agents.activity`
 // event.
 
+import { screenPrivacyAction } from './privacy'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { soundboard } from '@/lib/soundboard-store'
 import type { LayoutPreset } from '@/lib/backend'
@@ -176,6 +177,12 @@ const notify: AgentToolExecutor = async (_context, args) => {
 
 /** Every `runsIn: studio` tool, by catalog name. */
 export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
+  hide_screen: async (context, _args, intent) => {
+    const caller = intent.agentId === 'buddy' ? 'buddy' : 'agent'
+    const outcome = await (context.runScreenPrivacy?.('hide', caller) ??
+      screenPrivacyAction(context.client, 'hide', caller))
+    return outcome.ok ? { ok: true, message: 'Screen hidden.', result: { hidden: true } } : outcome
+  },
   start_recording: startRecording,
   stop,
   switch_scene: switchScene,

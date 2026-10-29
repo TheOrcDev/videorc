@@ -4957,6 +4957,7 @@ export interface GlobalShortcutsConfig {
   scenes?: Record<string, string>
   recordToggle?: string
   streamToggle?: string
+  screenHideToggle?: string
   micToggle?: string
   /** Turn system audio on/off (plan 069 S6). Unbound by default. */
   systemAudioToggle?: string

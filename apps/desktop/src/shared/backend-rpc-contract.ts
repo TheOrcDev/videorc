@@ -672,6 +672,7 @@ export interface BackendEventMap {
   // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
   'sounds.changed': SoundboardState
   // --- Hide screen (plan 210 S7): the state, on every hide and show ---
+  'remote.state': { screenHidden: boolean; [key: string]: unknown }
   'screen.privacy.changed': ScreenPrivacy
   'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
@@ -5443,6 +5444,10 @@ const runtimeEventSchemas = {
   'banners.changed': bannerListSchema,
   'sounds.changed': soundboardStateSchema,
   'screen.privacy.changed': screenPrivacySchema,
+  'remote.state': runtimeSchema<BackendEventMap['remote.state']>('remote state', (value, path) => {
+    objectSchema({ screenHidden: booleanSchema }, { allowUnknown: true }).parse(value, path)
+    return value as BackendEventMap['remote.state']
+  }),
   'sounds.playback': soundsPlaybackSchema,
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,

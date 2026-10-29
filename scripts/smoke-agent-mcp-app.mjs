@@ -764,7 +764,15 @@ try {
     },
     AGENT_POLL
   )
-  log('step 4: switch_scene, set_banner, set_takeover and set_audio round trips confirmed')
+  const hidden = await callOk(bridge, 'hide_screen')
+  if (hidden.structuredContent?.hidden !== true) fail('hide_screen did not confirm hidden')
+  if (!(await request(renderer, timeoutMs, 'screen.privacy.get')).hidden)
+    fail('hide_screen did not hide')
+  if (catalogNames.includes('show_screen')) fail('Agents must not have a show_screen tool')
+  await request(renderer, timeoutMs, 'screen.show')
+  log(
+    'step 4: switch_scene, set_banner, set_takeover, set_audio and hide_screen round trips confirmed'
+  )
 
   // 5. Record, mark, stop; the artifact and the Library.
   const started = await callOk(bridge, 'start_recording', {}, { timeoutMs })
