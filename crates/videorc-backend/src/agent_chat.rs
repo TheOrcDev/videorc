@@ -846,8 +846,21 @@ mod tests {
         let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
         layout.buddy.show_on_stream = true;
         crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
-        state.cohost.lock().await.settings.auto_chat.talk =
-            Some(crate::cohost::CohostTalkMode::Off);
+        let mut auto_chat = crate::cohost::get_cohost_settings(&state).await.auto_chat;
+        auto_chat.talk = Some(crate::cohost::CohostTalkMode::Off);
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                auto_chat: Some(auto_chat),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.cohost.lock().await.settings().auto_chat.talk(),
+            crate::cohost::CohostTalkMode::Off
+        );
         let outcome = buddy_say(
             &state,
             &agent,
