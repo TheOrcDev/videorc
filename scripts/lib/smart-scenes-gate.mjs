@@ -27,8 +27,19 @@ export const SMART_SCENES_BUDGET = Object.freeze({
    * the follow budget, and said so in the summary.
    */
   followObservationSlackMs: 100,
-  /** D11: a password manager in front hides within the settle plus this. */
-  passwordManagerHideMs: 400 + 600,
+  /**
+   * D11: a password manager in front hides within this, with no settle: the
+   * follower hides on the front change itself, so the manager's window never
+   * goes on air for the settle. What remains is the observer's poll, the
+   * renderer's dispatch and the backend's hide.
+   */
+  passwordManagerHideMs: 600,
+  /**
+   * D11: the screen shows again once another app has held the front for the
+   * settle (so a ⌘-Tab pass back to the manager never shows between), plus
+   * the same dispatch and show.
+   */
+  passwordManagerShowMs: 400 + 600,
   /**
    * How long after a hide (or show) press each output may still carry the
    * previous picture: one capture frame, the compositor tick, the encoder

@@ -107,9 +107,14 @@ export function initialFollowFrontAppState(): FollowFrontAppState {
 }
 
 /** Caller supplies monotonic milliseconds and feeds confirmed privacy changes
- * back through hide-changed. All automatic actions use the 400 ms settle
- * gate. Privacy works with Follow off and during a manual scene hold.
- * Orientation stays within the Studio's current orientation even while idle.
+ * back through hide-changed. The 400 ms settle gate is D10's: a scene switch,
+ * a window swap and the auto-show wait for the app in front to stay there.
+ * The password-manager hide (D11) never waits: the manager's window must not
+ * go on air for the settle, so it hides on the front change itself, and the
+ * screen comes back only once another app has held the front for the settle
+ * (a ⌘-Tab pass back to the manager never shows between). Privacy works
+ * with Follow off and during a manual scene hold. Orientation stays within
+ * the Studio's current orientation even while idle.
  */
 export function reduceFollowFrontApp(
   previous: FollowFrontAppState,
@@ -145,7 +150,7 @@ export function reduceFollowFrontApp(
     return { state, actions }
   }
   const front = state.front
-  if (!front || now - state.since < 400) return { state, actions }
+  if (!front) return { state, actions }
   const bundleId = front.bundleId.toLowerCase()
   const passwordManagers = new Set(
     [...DEFAULT_PASSWORD_MANAGER_BUNDLE_IDS, ...(context.passwordManagerBundleIds ?? [])].map(
@@ -162,7 +167,9 @@ export function reduceFollowFrontApp(
     actions.push({ type: 'hide', reason: 'password-manager' })
     state.hidden = true
     state.hideReason = 'password-manager'
-  } else if (!shouldHide && state.hidden && state.hideReason === 'password-manager') {
+  }
+  if (now - state.since < 400) return { state, actions }
+  if (!shouldHide && state.hidden && state.hideReason === 'password-manager') {
     actions.push({ type: 'show' })
     state.hidden = false
     state.hideReason = null

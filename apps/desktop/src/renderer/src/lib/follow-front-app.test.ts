@@ -141,28 +141,57 @@ describe('follow the app in front', () => {
 })
 
 describe('password-manager hide', () => {
-  it('waits 400 ms and ignores password-manager command-tab passes', () => {
+  // D11: the manager's window must never go on air for the settle, so the
+  // hide rides the front change itself. The show waits for D10's settle, so a
+  // ⌘-Tab pass through another app and back never shows the screen between.
+  it('hides on the front change itself, before any settle', () => {
     const h = harness({ followEnabled: false })
-    expect(h.activate('com.apple.Passwords')).toEqual([])
-    expect(h.tick(399)).toEqual([])
     h.activate('other')
-    expect(h.tick(800)).toEqual([])
+    h.tick(500)
+    h.context.now = 600
+    expect(h.activate('com.apple.Passwords')).toEqual([
+      { type: 'hide', reason: 'password-manager' }
+    ])
+    expect(h.tick(601)).toEqual([])
+    expect(h.tick(1000)).toEqual([])
+  })
+  it('shows again only once another app has held the front for 400 ms', () => {
+    const h = harness({ followEnabled: false })
     h.activate('com.apple.Passwords')
-    expect(h.tick(1200)).toEqual([{ type: 'hide', reason: 'password-manager' }])
+    h.context.now = 100
+    expect(h.activate('other')).toEqual([])
+    expect(h.tick(499)).toEqual([])
+    expect(h.tick(500)).toEqual([{ type: 'show' }])
+    expect(h.tick(900)).toEqual([])
+  })
+  it('never shows for a ⌘-Tab pass that lands back on the manager', () => {
+    const h = harness({ followEnabled: false })
+    expect(h.activate('com.apple.Passwords')).toHaveLength(1)
+    h.context.now = 100
+    expect(h.activate('other')).toEqual([])
+    expect(h.tick(300)).toEqual([])
+    h.context.now = 350
+    expect(h.activate('com.apple.Passwords')).toEqual([])
+    expect(h.tick(500)).toEqual([])
+    expect(h.tick(800)).toEqual([])
+    h.context.now = 900
+    h.activate('other')
+    expect(h.tick(1299)).toEqual([])
+    expect(h.tick(1300)).toEqual([{ type: 'show' }])
   })
   it.each(DEFAULT_PASSWORD_MANAGER_BUNDLE_IDS)(
-    'hides after settling for %s on a display, even with Follow off',
+    'hides at once for %s on a display, even with Follow off, and shows after the settle',
     (bundleId) => {
       const h = harness({ followEnabled: false })
-      expect(h.settle(bundleId)).toEqual([{ type: 'hide', reason: 'password-manager' }])
-      expect(h.tick(500)).toEqual([])
+      expect(h.activate(bundleId)).toEqual([{ type: 'hide', reason: 'password-manager' }])
+      expect(h.tick(400)).toEqual([])
       expect(h.settle('com.unknown')).toEqual([{ type: 'show' }])
       expect(h.tick(1000)).toEqual([])
     }
   )
   it.each(['window', 'app', 'none'] as const)('never hides a %s source', (screenSource) => {
     const h = harness({ screenSource })
-    expect(h.settle('com.apple.Passwords')).toEqual([])
+    expect(h.activate('com.apple.Passwords')).toEqual([])
     expect(h.tick(500)).toEqual([])
   })
   it('respects its own switch and settings changes independently of Follow', () => {
@@ -182,12 +211,22 @@ describe('password-manager hide', () => {
     })
     expect(h.settle('com.apple.Passwords')).toEqual([])
     h.context.passwordManagerBundleIds = ['custom.manager']
-    expect(h.settle('custom.manager')).toEqual([{ type: 'hide', reason: 'password-manager' }])
+    expect(h.activate('custom.manager')).toEqual([{ type: 'hide', reason: 'password-manager' }])
   })
   it('does not show between two password managers', () => {
     const h = harness()
     h.settle('com.apple.Passwords')
-    expect(h.settle('com.bitwarden.desktop')).toEqual([])
+    expect(h.activate('com.bitwarden.desktop')).toEqual([])
+    expect(h.tick(900)).toEqual([])
+  })
+  it('keeps Follow behind the settle while the hide is immediate', () => {
+    const h = harness()
+    h.activate('com.apple.Passwords')
+    h.send({ type: 'hide-changed', hidden: true, reason: 'password-manager' })
+    h.context.now = 100
+    expect(h.activate()).toEqual([])
+    expect(h.tick(499)).toEqual([])
+    expect(h.tick(500)).toEqual([{ type: 'show' }, { type: 'switch-scene', sceneId: 'figma' }])
   })
   it('never replaces or auto-shows a manual hide', () => {
     const h = harness()

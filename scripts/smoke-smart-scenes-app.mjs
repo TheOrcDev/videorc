@@ -897,7 +897,7 @@ try {
       'screen.privacy.get',
       (privacy) => privacy.hidden === false,
       'shown again when the app left the front',
-      SMART_SCENES_BUDGET.passwordManagerHideMs + 2000
+      SMART_SCENES_BUDGET.passwordManagerShowMs + 2000
     ).catch(() => ({ hidden: true }))
     await sleep(600)
 
@@ -915,7 +915,8 @@ try {
     const afterFront = await request(ws, timeoutMs, 'screen.privacy.get')
     await activateApp('/System/Library/CoreServices/Finder.app')
     await waitForFrontApp((entry) => entry.bundleId === 'com.apple.finder')
-    await sleep(SMART_SCENES_BUDGET.passwordManagerHideMs + 400)
+    // A wrong auto-show would land after the settle: wait past it.
+    await sleep(SMART_SCENES_BUDGET.passwordManagerShowMs + 400)
     const afterLeave = await request(ws, timeoutMs, 'screen.privacy.get')
     await renderer.togglePrivacy()
     const afterShow = await waitForBackendState(

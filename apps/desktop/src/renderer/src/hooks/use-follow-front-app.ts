@@ -18,7 +18,11 @@ import {
 import type { SavedScene, SceneOrientation } from '@/lib/scene-presets'
 import type { FrontAppApi } from '../../../shared/front-app'
 
-/** D10's settle gate: an app must stay in front this long before anything happens. */
+/**
+ * D10's settle gate: an app must stay in front this long before the stream
+ * follows it or a hidden screen shows again. The password-manager hide (D11)
+ * never waits for it.
+ */
 export const FOLLOW_SETTLE_MS = 400
 
 export type FollowSceneApply = (

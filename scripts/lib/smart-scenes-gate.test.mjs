@@ -303,7 +303,7 @@ describe('passwordManagerGate', () => {
     })
     assert.deepEqual(verdict.failures, [
       'hidden for "you", not the password-manager list',
-      'hid after 1200 ms (> 1000 ms)',
+      'hid after 1200 ms (> 600 ms)',
       'a manual hide was auto-shown when the app left the front'
     ])
   })

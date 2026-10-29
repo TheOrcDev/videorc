@@ -270,6 +270,33 @@ describe('Hide screen for a password manager (plan 210 S10, D11)', () => {
     expect(fake.showScreen).toHaveBeenCalledTimes(1)
   })
 
+  it('hides before the settle, and shows again only after another app has held the front for it', async () => {
+    const host = onDisplay()
+    await render(host)
+    // D11: the manager's window never goes on air for the settle.
+    await emit(front(ONE_PASSWORD, 'window:screencapturekit:70'))
+    expect(fake.hideScreen).toHaveBeenCalledExactlyOnceWith('password-manager')
+    await render({ ...host, screenPrivacy: { hidden: true, reason: 'password-manager' } })
+    // A ⌘-Tab pass through Safari and back never shows the screen between.
+    await emit(front('com.apple.Safari', 'window:screencapturekit:50'))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100)
+    })
+    expect(fake.showScreen).not.toHaveBeenCalled()
+    await emit(front(ONE_PASSWORD, 'window:screencapturekit:70'))
+    await settle()
+    expect(fake.showScreen).not.toHaveBeenCalled()
+    expect(fake.hideScreen).toHaveBeenCalledTimes(1)
+    // Safari holding the front for the settle shows it.
+    await emit(front('com.apple.Safari', 'window:screencapturekit:50'))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FOLLOW_SETTLE_MS - 50)
+    })
+    expect(fake.showScreen).not.toHaveBeenCalled()
+    await settle()
+    expect(fake.showScreen).toHaveBeenCalledTimes(1)
+  })
+
   it('never hides for a window or app scene', async () => {
     await render(fake.host)
     await switchTo(ONE_PASSWORD, 'window:screencapturekit:70')
