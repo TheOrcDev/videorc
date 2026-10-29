@@ -174,6 +174,9 @@ The corresponding test executes both actual YAML shell blocks against success,
 ordinary failure, killed retry success and killed retry failure.
 
 Main subsequently advanced to `c2d1eaffbaca2f09b553ca8300db6cf5b937fac0`,
-merging #915, #920, #922–#928. Incorporate those upstream fixes before freezing
-the candidate and rerun affected gates. They address the earlier overlaps;
+merging #915, #920, #922–#928. Those upstream fixes are now merged into the
+implementation branch. Rerun affected gates before freezing the candidate.
+They address the earlier overlaps;
 their merge does not supply the new candidate's physical acceptance.
+
+Draft source PR: https://github.com/TheOrcDev/videorc/pull/930.
