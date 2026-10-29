@@ -16457,9 +16457,10 @@ async fn prepare_native_audio_source(
 /// back-pressure the shared encoder and stall the other platforms (or the local
 /// recording) — the classic cause of "one platform makes them all lag." On sustained
 /// overflow the lagging slave drops packets instead of blocking everyone; the queue
-/// is large enough that the disk-backed recording leg never drops in practice. We do
-/// not enable fifo auto-recovery, so a leg that fails to open still surfaces the
-/// `Slave muxer #N failed` line that drives the per-target failure status (M5).
+/// is large enough that the disk-backed recording leg never drops in practice. These
+/// tee-wide options carry no auto-recovery, so the recording leg that fails still
+/// surfaces the `Slave muxer #N failed` line (M5); RTMP legs override them with their
+/// own recovering `fifo_options` (`rtmp_tee_leg`).
 fn tee_output_args(spec: String) -> Vec<String> {
     vec![
         "-f".to_string(),
@@ -20933,21 +20934,25 @@ fn append_bridge_copy_flv_output(
         "fifo".to_string(),
         "-fifo_format".to_string(),
         "flv".to_string(),
-        "-queue_size".to_string(),
-        "512".to_string(),
-        "-drop_pkts_on_overflow".to_string(),
-        "1".to_string(),
-        "-attempt_recovery".to_string(),
-        "1".to_string(),
-        "-recover_any_error".to_string(),
-        "1".to_string(),
-        "-restart_with_keyframe".to_string(),
-        "1".to_string(),
-        "-recovery_wait_time".to_string(),
-        "2".to_string(),
-        target.url.clone(),
     ]);
+    for (key, value) in RTMP_LEG_FIFO_RECOVERY_OPTIONS {
+        args.extend([format!("-{key}"), value.to_string()]);
+    }
+    args.push(target.url.clone());
 }
+
+/// The fifo-muxer options every RTMP leg runs with, whether it is its own
+/// output (bridge copy) or a tee slave (`rtmp_tee_leg`): drop on overflow,
+/// and reconnect after ANY error on a keyframe, every two seconds, without a
+/// retry limit (plan 161).
+const RTMP_LEG_FIFO_RECOVERY_OPTIONS: [(&str, &str); 6] = [
+    ("queue_size", "512"),
+    ("drop_pkts_on_overflow", "1"),
+    ("attempt_recovery", "1"),
+    ("recover_any_error", "1"),
+    ("restart_with_keyframe", "1"),
+    ("recovery_wait_time", "2"),
+];
 
 /// `fps` is the encoder rate of the FIFO that `input_layout` maps.
 fn append_bridge_copy_output_args(
@@ -21031,9 +21036,22 @@ fn append_bridge_audio_input_args(
 /// Twitch endpoint used to wedge the whole stop path until Force stop
 /// (owner report, 2026-08-19). Steady-state overflow is already handled by
 /// the fifo wrapper's drop_pkts_on_overflow; this bounds the CLOSE.
+///
+/// The leg's own `fifo_options` replace the tee-wide ones with the plan 161
+/// recovery set: an ingest that drops (Broken pipe) or restarts used to
+/// close the slave for the rest of the session; now the fifo reconnects it
+/// and logs `[fifo @ …] Error opening <url>` / `Recovery successful`, which
+/// `StreamLegMonitor` attributes by URL (retest 154 B2). The option string
+/// is unescaped twice (tee slave split, then slave option parse) before the
+/// fifo parses it, so each `:` separator is written `\\\:`.
 fn rtmp_tee_leg(url: &str) -> String {
+    let fifo_options = RTMP_LEG_FIFO_RECOVERY_OPTIONS
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\\\\\\:");
     format!(
-        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}]{}",
+        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}:fifo_options={fifo_options}]{}",
         escape_tee_target(url)
     )
 }
@@ -34344,8 +34362,12 @@ mod tests {
 
         assert!(args.contains(&"tee".to_string()));
         let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
-        assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-test.mkv"));
+        assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-test.mkv|"));
         assert!(tee.contains("onfail=ignore"));
+        // Every RTMP leg reconnects on its own; the recording leg keeps the
+        // tee-wide options (no recovery, onfail=abort).
+        assert_eq!(tee.matches(":fifo_options=").count(), 3, "{tee}");
+        assert_eq!(tee.matches("attempt_recovery=1").count(), 3, "{tee}");
         assert_eq!(
             tee.matches("[f=flv").count(),
             3,
@@ -36775,8 +36797,12 @@ mod tests {
         {
             assert!(args.contains(&"tee".to_string()));
             let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
-            assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-bridge-record-stream.mkv"));
+            assert!(
+                tee.contains("[f=matroska:onfail=abort]/tmp/videorc-bridge-record-stream.mkv|")
+            );
             assert_eq!(tee.matches("[f=flv").count(), 2);
+            // Retest 154 B2: each Linux RTMP leg reconnects on its own.
+            assert_eq!(tee.matches("attempt_recovery=1").count(), 2, "{tee}");
         }
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
@@ -37712,8 +37738,106 @@ mod tests {
         // forever and the stop path hangs until Force stop.
         let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
         assert!(leg.starts_with("[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout="));
-        assert!(leg.contains(":rw_timeout=8000000]"));
+        assert!(leg.contains(":rw_timeout=8000000:"));
         assert!(leg.ends_with("rtmp://live.twitch.tv/app/streamkey"));
+    }
+
+    /// One `av_get_token` pass: split on unescaped `delim`, dropping one
+    /// level of backslash escaping (what tee and its slave-option parser do).
+    fn av_tokens(input: &str, delim: char) -> Vec<String> {
+        let mut tokens = vec![String::new()];
+        let mut chars = input.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => tokens.last_mut().unwrap().extend(chars.next()),
+                c if c == delim => tokens.push(String::new()),
+                c => tokens.last_mut().unwrap().push(c),
+            }
+        }
+        tokens
+    }
+
+    #[test]
+    fn rtmp_tee_legs_reconnect_through_their_own_fifo() {
+        // Retest 154 B2: with only the tee-wide fifo options a dropped ingest
+        // closed the slave for good ("Streaming to X stopped · Broken pipe").
+        let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
+        assert_eq!(
+            leg,
+            "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout=8000000:\
+             fifo_options=queue_size=512\\\\\\:drop_pkts_on_overflow=1\\\\\\:attempt_recovery=1\\\\\\:\
+             recover_any_error=1\\\\\\:restart_with_keyframe=1\\\\\\:recovery_wait_time=2]\
+             rtmp://live.twitch.tv/app/streamkey"
+        );
+        // Tee splits slaves (one unescape), then parses the slave options
+        // (a second one): the fifo must receive the plan 161 recovery set
+        // intact, and the flv options must stay the leg's own.
+        let slave = av_tokens(&leg, '|');
+        assert_eq!(slave.len(), 1);
+        let (options, url) = slave[0]
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once(']'))
+            .unwrap();
+        assert_eq!(url, "rtmp://live.twitch.tv/app/streamkey");
+        let options = av_tokens(options, ':');
+        assert_eq!(
+            options,
+            [
+                "f=flv",
+                "onfail=ignore",
+                "flvflags=no_duration_filesize",
+                "rw_timeout=8000000",
+                "fifo_options=queue_size=512:drop_pkts_on_overflow=1:attempt_recovery=1:\
+                 recover_any_error=1:restart_with_keyframe=1:recovery_wait_time=2",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dropped_tee_leg_reconnects_and_resumes_on_its_own_target() {
+        // The bundled n8.1 FFmpeg's own lines for a record+stream tee whose
+        // ingest restarted (retest 154 B2): the tee's fifo legs name their URL
+        // on `Error opening`, so plan 161 attribution works unchanged.
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe(&format!(
+                "Output #0, tee, to '[f=matroska:onfail=abort]/tmp/a.mkv|[f=flv]{YOUTUBE_URL}|[f=flv]{TWITCH_URL}':"
+            )),
+            None
+        );
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0x7f4fe03c8680] Error opening {TWITCH_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 1,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0x7f4fe03b72c0] Error opening {YOUTUBE_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03b72c0] Recovery failed: Connection refused"),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03b72c0] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 0 })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03c8680] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 1 })
+        );
     }
 
     #[test]
