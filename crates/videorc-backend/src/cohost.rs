@@ -7705,12 +7705,14 @@ async fn publish_auto_chat_pass(
                 ),
             );
         }
-        let snapshot = {
-            let mut engine = state.cohost.lock().await;
-            if !pass.bubble.is_empty() {
-                engine.note_buddy_spoke(Instant::now());
-            }
-            engine.snapshot()
+        let (snapshot, sources) = {
+            let engine = state.cohost.lock().await;
+            let sources: Vec<Option<crate::protocol::CohostReportPostSource>> = pass
+                .bubble
+                .iter()
+                .map(|utterance| engine.utterance_source(&utterance.id))
+                .collect();
+            (engine.snapshot(), sources)
         };
         match lifecycle_delivery {
             Some(guard) => emit_state(state, &snapshot, guard),
@@ -7719,12 +7721,13 @@ async fn publish_auto_chat_pass(
                 emit_state(state, &snapshot, &guard);
             }
         }
-    }
-    // plan 211 S-B2: the bubble queue goes in front of this call, so a line
-    // waits for the current bubble instead of replacing it, and the report
-    // records the line when it shows (S-B5).
-    for utterance in &pass.bubble {
-        crate::buddy_overlay::show_for_utterance(state, utterance).await;
+        // Plan 211 D7: Buddy's lines go through the bubble queue, so a line
+        // waits for the bubble that is up instead of replacing it. The line
+        // counts as spoken (Banter's quiet minute) and lands on the report
+        // when it actually shows (`note_bubble_shown`), not here.
+        for (utterance, source) in pass.bubble.iter().zip(sources) {
+            crate::buddy_overlay::queue_for_utterance(state, utterance, source).await;
+        }
     }
 }
 
@@ -7735,6 +7738,37 @@ fn utterance_trigger_label(kind: CohostUtteranceTriggerKind) -> &'static str {
         CohostUtteranceTriggerKind::Banter => "banter",
         CohostUtteranceTriggerKind::Manual => "say",
     }
+}
+
+/// One of Buddy's lines actually showed in its bubble (plan 211 D7): the
+/// bubble queue calls this when the line goes up, now or after its wait.
+/// Banter's quiet minute runs from here for Buddy's own lines (never from
+/// the streamer's Say line), as it ran from a send.
+pub(crate) async fn note_bubble_shown(
+    state: &AppState,
+    utterance: &CohostUtterance,
+    _source: Option<crate::protocol::CohostReportPostSource>,
+) {
+    if utterance.trigger.kind != CohostUtteranceTriggerKind::Manual {
+        state.cohost.lock().await.note_buddy_spoke(Instant::now());
+    }
+}
+
+/// A waiting line was dropped by the bubble queue (plan 211 D7: the queue
+/// was full, or it waited too long). A greeting counts as `stale` on the
+/// report, like a replayed row; nothing is counted for other lines.
+pub(crate) async fn note_bubble_dropped(state: &AppState, utterance: &CohostUtterance) {
+    if utterance.trigger.kind != CohostUtteranceTriggerKind::Greeting {
+        return;
+    }
+    persist_greeting_skips(
+        state,
+        CohostReportGreetingsSkipped {
+            stale: 1,
+            ..CohostReportGreetingsSkipped::default()
+        },
+    )
+    .await;
 }
 
 /// Plan 192 D7: fold skip counts into the live-chat session's report as
@@ -8144,9 +8178,10 @@ async fn send_approved(state: &AppState, utterance: CohostUtterance) {
     if status == CohostUtteranceStatus::Failed {
         note_greeting_not_sent(state, &utterance, GreetingSkipReason::DestinationFailed).await;
     }
-    // D7: the words that reached chat reach the bubble as they land. A manual
-    // line bubbled when it was typed (`say_utterance`), so it is not shown
-    // twice; an answer that went nowhere stops thinking.
+    // D7: the words that reached chat reach the bubble as they land, through
+    // the bubble queue like any Buddy line (plan 211 D7). A manual line
+    // bubbled when it was typed (`say_utterance`), so it is not shown twice;
+    // an answer that went nowhere stops thinking.
     if status == CohostUtteranceStatus::Sent {
         if !manual {
             let landed = CohostUtterance {
@@ -8154,7 +8189,7 @@ async fn send_approved(state: &AppState, utterance: CohostUtterance) {
                 text: text.clone(),
                 ..utterance.clone()
             };
-            crate::buddy_overlay::show_for_utterance(state, &landed).await;
+            crate::buddy_overlay::queue_for_utterance(state, &landed, source).await;
         }
     } else if trigger == CohostUtteranceTriggerKind::Answer {
         crate::buddy_overlay::settle(state).await;
@@ -10481,6 +10516,9 @@ where
     let stopped = report.is_some();
     let mut snapshot = engine.snapshot();
     drop(engine);
+    // Plan 211 D7: the lines waiting for the bubble were for this chat
+    // session; the next one starts with an empty queue.
+    crate::buddy_overlay::clear_queue(state).await;
     save_session_report(state, report);
     if stopped {
         // The off state names why the backend ended the session (a Premium
