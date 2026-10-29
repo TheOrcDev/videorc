@@ -1467,7 +1467,8 @@ mod tests {
             bubble: [pass.bubble, follow.bubble].concat(),
             ..pass
         };
-        assert!(pass.bubble.iter().all(|u| u.destination_ids == ["main"]));
+        // Plan 211 D7: a Bubble line goes to no chat destination.
+        assert!(pass.bubble.iter().all(|u| u.destination_ids.is_empty()));
         assert!(
             pass.bubble
                 .iter()
@@ -1649,7 +1650,7 @@ mod tests {
         assert_eq!(pass.bubble.len(), 1);
         assert_eq!(pass.bubble[0].text, "Welcome, Fan0! Thanks for the follow.");
         assert_eq!(pass.bubble[0].state, CohostUtteranceState::Talk);
-        assert_eq!(pass.bubble[0].destination_ids, ["main"]);
+        assert!(pass.bubble[0].destination_ids.is_empty(), "plan 211 D7");
         assert_eq!(
             lane.utterance_source(&pass.bubble[0].id),
             Some(CohostReportPostSource::Line)
@@ -2094,7 +2095,7 @@ mod tests {
         assert_eq!(routed.bubble.len(), 1);
         assert_eq!(routed.bubble[0].text, "Fresh blood! Fan0 joins the horde.");
         assert_eq!(routed.bubble[0].state, CohostUtteranceState::Laugh);
-        assert_eq!(routed.bubble[0].destination_ids, ["main"]);
+        assert!(routed.bubble[0].destination_ids.is_empty(), "plan 211 D7");
         assert_eq!(
             lane.utterance_source(&routed.bubble[0].id),
             Some(CohostReportPostSource::Ai)
@@ -2415,12 +2416,14 @@ mod tests {
     }
 
     /// S2.2: one request carries up to six batches; a seventh goes out as
-    /// its line.
+    /// its line. Driven in Suggest, where the limiter is still per
+    /// destination; in Bubble (plan 211 D7) the bubble is one destination,
+    /// so the same seven follows are one request item now and six held.
     #[test]
     fn a_greet_request_carries_at_most_six_batches() {
         let start = Instant::now();
         let mut lane = AutoChatLane::default();
-        let bubble = bare_settings(CohostTalkMode::Bubble);
+        let suggest = bare_settings(CohostTalkMode::Suggest);
         // Seven follows on seven destinations: the limiter is per
         // destination, so every one is ready at once.
         let rows: Vec<LiveChatMessage> = (0..7)
@@ -2433,12 +2436,15 @@ mod tests {
                 row
             })
             .collect();
-        let pass = lane.note_activity(&bubble, Some(&ai()), true, &rows, start, &now_iso());
+        let pass = lane.note_activity(&suggest, Some(&ai()), true, &rows, start, &now_iso());
         let pending = pass.greet.as_ref().unwrap();
         assert_eq!(pending.request.items.len(), COHOST_GREET_ITEMS_MAX);
-        assert_eq!(pass.bubble.len(), 1, "the seventh goes out as its line");
-        assert_eq!(pass.bubble[0].text, "Welcome, Fan6! Thanks for the follow.");
-        assert_eq!(pass.bubble[0].destination_ids, ["dest-6"]);
+        assert_eq!(pass.propose.len(), 1, "the seventh goes out as its line");
+        assert_eq!(
+            pass.propose[0].text,
+            "Welcome, Fan6! Thanks for the follow."
+        );
+        assert_eq!(pass.propose[0].destination_ids, ["dest-6"]);
         let ids: HashSet<&str> = pending
             .request
             .items
@@ -2449,20 +2455,29 @@ mod tests {
         assert!(ids.iter().all(|id| id.len() <= 80));
         // The six route back to their own destinations.
         let routed = lane.apply_greet_result(
-            &bubble,
+            &suggest,
             pass.greet.unwrap(),
             Ok(CohostGreetResponse::default()),
             start + Duration::from_secs(1),
             &now_iso(),
         );
-        assert_eq!(routed.bubble.len(), 6);
+        assert_eq!(routed.propose.len(), 6);
         let destinations: HashSet<String> = routed
-            .bubble
+            .propose
             .iter()
             .map(|u| u.destination_ids[0].clone())
             .collect();
         assert_eq!(destinations.len(), 6);
         assert!(!destinations.contains("dest-6"));
+        // Bubble: one destination for every platform, so one item asks the
+        // AI now and the other six wait for the follow cooldown, collapsed.
+        let mut lane = AutoChatLane::default();
+        let bubble = bare_settings(CohostTalkMode::Bubble);
+        let pass = lane.note_activity(&bubble, Some(&ai()), true, &rows, start, &now_iso());
+        assert_eq!(pass.greet.as_ref().unwrap().request.items.len(), 1);
+        assert!(pass.bubble.is_empty() && pass.propose.is_empty());
+        assert_eq!(pass.skipped.held, 6);
+        assert_eq!(pass.schedule, Some(start + Duration::from_secs(10)));
     }
 
     /// D7: a send-path skip is counted once per greeting and logged once per
@@ -2823,8 +2838,10 @@ mod tests {
                 passes.push(lane.drain(&settings, None, true, now, &now_iso()));
             }
             assert_eq!(lane.next_due(), None);
-            // An AI greet result, on its own destination.
-            now += Duration::from_secs(1);
+            // An AI greet result, on its own destination. In Bubble the
+            // bubble is one destination for everything above (plan 211
+            // D7), so its limiter gets a minute first.
+            now += Duration::from_secs(60);
             let mut cheer = event("cheer");
             cheer.target_id = Some("chat-3".to_string());
             let pass = lane.note_activity(&settings, Some(&ai()), true, &[cheer], now, &now_iso());
