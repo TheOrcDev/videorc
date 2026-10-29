@@ -290,6 +290,8 @@ export interface StreamManagerProps {
   onMarkClip?: (seconds: ClipLength) => void
   /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */
   onClip?: (seconds: ClipLength) => Promise<string>
+  /** Plan 210 S8b: Hide screen (true) or Show screen (false), relayed to Studio. */
+  onScreenPrivacy?: (hidden: boolean) => unknown
   /**
    * Banners (plan 186 S7): the list Studio pushed (null until it loads) and
    * one show or hide, relayed to Studio. The status bar's Banners menu and
@@ -417,6 +419,7 @@ export function StreamManager({
   onClear,
   onMarkClip,
   onClip,
+  onScreenPrivacy,
   banners,
   onBanner,
   sounds,
@@ -1146,7 +1149,12 @@ export function StreamManager({
         </div>
       ) : null}
 
-      <StatsBar items={stats} layout={statsLayout} onLayoutChange={changeStatsLayout} />
+      <StatsBar
+        items={stats}
+        layout={statsLayout}
+        screenHidden={markerContext?.screen?.hidden === true}
+        onLayoutChange={changeStatsLayout}
+      />
 
       <div className={PANES_GRID} data-slot="stream-manager-panes">
         {/* Below Wide: one segmented control picks the pane. */}
@@ -1306,6 +1314,8 @@ export function StreamManager({
         onHighlightAnchorChange={inHistory ? undefined : onHighlightAnchorChange}
         clip={markerContext?.clip}
         onMarkClip={clipAvailable ? onMarkClip : undefined}
+        screen={markerContext?.screen}
+        onScreenPrivacy={onScreenPrivacy}
         banners={banners}
         onBanner={onBanner}
         sounds={sounds}

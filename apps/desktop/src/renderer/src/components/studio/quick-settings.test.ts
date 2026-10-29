@@ -41,7 +41,9 @@ describe('Studio Sources rows (plan 080 S4)', () => {
       captionsCommandPending: false,
       wsStatus: 'connected',
       systemAudioConfirmed: null,
-      systemAudioIssue: null
+      systemAudioIssue: null,
+      settings: {},
+      screenPrivacy: { hidden: false }
     }
     return renderToStaticMarkup(createElement(QuickSettings))
   }

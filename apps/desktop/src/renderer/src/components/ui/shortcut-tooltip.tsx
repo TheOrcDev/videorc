@@ -2,6 +2,7 @@ import type { ReactElement } from 'react'
 
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 
 /**
  * A control's tooltip with its shortcut, when one is bound (keyboard-first,
@@ -13,18 +14,21 @@ export function ShortcutTooltip({
   label,
   accelerator,
   platform,
+  className,
   children
 }: {
   label: string
   /** The bound shortcut as an Electron accelerator; empty or absent when none is bound. */
   accelerator?: string
   platform?: string
+  /** Layout for the wrapper (`flex flex-col` around a whole row), never styling. */
+  className?: string
   children: ReactElement
 }): ReactElement {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex">{children}</span>
+        <span className={cn('inline-flex', className)}>{children}</span>
       </TooltipTrigger>
       <TooltipContent>
         {label}

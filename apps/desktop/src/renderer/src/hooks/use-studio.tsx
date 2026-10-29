@@ -16,6 +16,7 @@ import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import { streamOutputCheckFailureMessage } from '@/lib/stream-output-check-message'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout } from '../../../shared/global-shortcuts'
+import { screenHideAccelerator } from '@/lib/screen-privacy-view'
 import { withoutSceneShortcut } from '../../../shared/global-shortcut-bindings'
 import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
 import { acceleratorLabel } from '../../../shared/accelerator-format'
@@ -4380,6 +4381,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   lastErrorRef.current = lastError
   // The Stream Manager's marker and clip facts (plan 068, plan 181 R4): sits
   // after the settings and runtime state it reads.
+  const screenHidden = privacy.screenPrivacy.hidden
+  const screenHideRefusal = privacy.screenPrivacy.unavailable
+  const screenHideKey = screenHideAccelerator(settings.globalShortcuts?.screenHideToggle)
   useEffect(() => {
     // A buffer-only session (plan 181) has no Library row to hold a marker,
     // so the voice marker waits for a recording or a livestream.
@@ -4424,6 +4428,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? { longShortcutLabel: acceleratorLabel(longClipShortcut, runtimeInfo?.platform) }
           : {}),
         ...(clipOff ? { off: clipOff } : {})
+      },
+      // Plan 210 S8b: the Stream Manager's Hide screen action and stats chip.
+      screen: {
+        hidden: screenHidden,
+        ...(screenHideRefusal ? { unavailable: screenHideRefusal } : {}),
+        ...(screenHideKey ? { accelerator: screenHideKey } : {})
       }
     })
     return () => {
@@ -4441,7 +4451,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     settings.globalShortcuts?.clipMark,
     settings.globalShortcuts?.clipMarkLong,
     markerVoice,
-    lastVoiceMarker
+    lastVoiceMarker,
+    screenHidden,
+    screenHideRefusal,
+    screenHideKey
   ])
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)

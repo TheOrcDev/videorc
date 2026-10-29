@@ -1505,6 +1505,27 @@ describe('Stream Manager clip IPC (plan 199)', () => {
     }
   })
 
+  it('pushes Hide screen’s state, refusal and key for the Stream Manager (plan 210 S8b)', () => {
+    for (const screen of [
+      { hidden: false, accelerator: 'Control+Alt+H' },
+      { hidden: true },
+      { hidden: false, unavailable: "Hide screen isn't available on this recording." }
+    ]) {
+      const payload = { ...context, screen }
+      expect(validateElectronEventPayload('comments-window:marker-context', payload)).toEqual(
+        payload
+      )
+      expect(validateElectronInvokeResult('comments-window:marker-context-get', payload)).toEqual(
+        payload
+      )
+    }
+    for (const screen of [{}, { hidden: 'yes' }, { hidden: true, reason: 'you' }]) {
+      expect(() =>
+        validateElectronEventPayload('comments-window:marker-context', { ...context, screen })
+      ).toThrow()
+    }
+  })
+
   it('carries a clip length on the relay command, and none for the 30-second clip', () => {
     for (const command of [
       { requestId: 'r-30' },

@@ -28,6 +28,7 @@ import {
   withOverlayRect,
   type StageItemDraft
 } from '@/components/scene/overlay-stage'
+import { HideScreenSection } from '@/components/scene/hide-screen-section'
 import { SceneList } from '@/components/scene/scene-list'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
 import { presetCameraCornerRect } from '@/components/scene/stage-corner'
@@ -849,6 +850,10 @@ export function LayoutTab(): ReactElement {
               it duplicated the stage: the stage's rects and legend chips ARE
               the source list, clicking one selects it (and enables editing),
               and visibility now lives in the Inspector. */}
+
+          {/* Hide screen's setup (plan 210 D9, D11), under the canvas that
+              shows its frosted picture; the action is on Studio's Screen row. */}
+          <HideScreenSection />
         </div>
 
         {/* The inspector: one section named after the selection, then the

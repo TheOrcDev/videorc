@@ -77,6 +77,15 @@ export interface MarkerContext {
   }
   /** The Clip action (plan 181 R4), for the window's button and `/clip`. */
   clip?: ClipContext
+  /** Hide screen (plan 210 S8b), for the window's action and its stats chip. */
+  screen?: ScreenPrivacyContext
+}
+/** What the Stream Manager shows of Hide screen: the state, why a hide is
+ * refused, and its key as an Electron accelerator when one is bound. */
+export interface ScreenPrivacyContext {
+  hidden: boolean
+  unavailable?: string
+  accelerator?: string
 }
 export interface ClipContext {
   /** The ring holds frames or a recording runs: a press keeps something. */
@@ -215,6 +224,16 @@ export const markerContextSchema = nullableSchema(
             shortcutLabel: optionalSchema(stringSchema({ maxLength: 160 })),
             longShortcutLabel: optionalSchema(stringSchema({ maxLength: 160 })),
             off: optionalSchema(enumSchema(['switch', 'blocked', 'starting', 'idle']))
+          },
+          strict
+        )
+      ),
+      screen: optionalSchema(
+        objectSchema(
+          {
+            hidden: booleanSchema,
+            unavailable: optionalSchema(stringSchema({ maxLength: 1000 })),
+            accelerator: optionalSchema(stringSchema({ maxLength: 160 }))
           },
           strict
         )
