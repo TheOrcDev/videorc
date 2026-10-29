@@ -3077,6 +3077,30 @@ pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
     recording.as_ref().map(ActiveRecording::accepts_banners)
 }
 
+/// Plan 210 S7.5: whether this session's screen reaches its output through
+/// FFmpeg's own display grab (the legacy graph: avfoundation, gdigrab or
+/// x11grab) instead of the gated frame store. Every compositor path (the
+/// encoder bridge on Metal, CPU and Linux, the direct D3D11 recording, the
+/// Windows D3D11 media session) reads the store Hide screen covers; the
+/// legacy graph never does, so Hide screen cannot cover it.
+fn session_reads_display_directly(active: &ActiveRecording) -> bool {
+    let bridge = active.encoder_bridge.is_some() || active.encoder_bridge_stream.is_some();
+    #[cfg(target_os = "windows")]
+    let bridge = bridge || active.windows_d3d11_media.is_some();
+    !bridge
+}
+
+/// `Some(session_id)` while a session that reads the display directly runs:
+/// `screen.hide` refuses with [`crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY`]
+/// and `screen.privacy.get` says why.
+pub async fn active_session_reads_display_directly(state: &AppState) -> Option<String> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| session_reads_display_directly(active))
+        .map(|active| active.session_id.clone())
+}
+
 /// Plan 186 S4: recompose the legacy FFmpeg overlay frame when the banner
 /// set changes mid-session (Show, Hide, a rect or opacity change, a reorder).
 /// The compositor paths read the set on their next tick; only the legacy
@@ -4255,6 +4279,15 @@ async fn start_session_with_timeline(
     let shown_banners_at_start = crate::banners::shown_banners_for_compositor(&state.database)?;
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
+    // Plan 210 S7.5: the legacy graph grabs the display through FFmpeg itself,
+    // outside the gated frame store. Starting it while the screen is hidden
+    // would record the live screen under a "Screen hidden" chip: refuse.
+    if !use_encoder_bridge && state.screen_privacy.view().hidden {
+        anyhow::bail!(
+            "{} This profile records through the legacy FFmpeg capture path, which cannot hide the screen; show the screen first, or choose a profile the encoder bridge supports.",
+            crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY
+        );
+    }
     if matches!(capture.video, VideoInput::TestPattern)
         && !linux_bridge_composes_native_sources(use_encoder_bridge, &params)
     {
@@ -27524,6 +27557,26 @@ mod tests {
         );
         assert!(frame(&active).iter().all(|byte| *byte == 0));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Plan 210 S7.5: only the legacy FFmpeg graph reads the display outside
+    /// the gated frame store.
+    #[tokio::test]
+    async fn hide_screen_refuses_only_the_legacy_ffmpeg_session() {
+        let state = test_state();
+        assert_eq!(active_session_reads_display_directly(&state).await, None);
+        let legacy = test_active_recording_stub("legacy-session");
+        assert!(legacy.encoder_bridge.is_none() && legacy.encoder_bridge_stream.is_none());
+        assert!(session_reads_display_directly(&legacy));
+        *state.recording.lock().await = Some(legacy);
+        assert_eq!(
+            active_session_reads_display_directly(&state)
+                .await
+                .as_deref(),
+            Some("legacy-session")
+        );
+        *state.recording.lock().await = None;
+        assert_eq!(active_session_reads_display_directly(&state).await, None);
     }
 
     /// Plan 186 S4: which sessions take a banner shown after their start.

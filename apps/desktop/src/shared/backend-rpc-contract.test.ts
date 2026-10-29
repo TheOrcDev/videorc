@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import { LIVE_BACKGROUND_DEFAULT_LOOKS, LIVE_BACKGROUND_IDS } from './live-background-ids'
@@ -3418,5 +3420,62 @@ describe('app window source contracts (plan 210 S1)', () => {
     ]) {
       expect(() => validateBackendRpcResult('sources.app_previews', { apps: [bad] })).toThrow()
     }
+  })
+})
+
+describe('Hide screen wire contract (plan 210 S7)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/screen-privacy.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    visible: unknown
+    hiddenByYou: unknown
+    hiddenByPasswordManager: unknown
+    unavailableOnLegacySession: unknown
+    hideParams: unknown
+    rejected: unknown[]
+  }
+
+  it('accepts every fixture state on the RPC results and the event, field for field', () => {
+    for (const state of [
+      fixture.visible,
+      fixture.hiddenByYou,
+      fixture.hiddenByPasswordManager,
+      fixture.unavailableOnLegacySession
+    ]) {
+      expect(validateBackendRpcResult('screen.privacy.get', state)).toEqual(state)
+      expect(validateBackendRpcResult('screen.hide', state)).toEqual(state)
+      expect(validateBackendRpcResult('screen.show', state)).toEqual(state)
+      expect(validateBackendEventPayload('screen.privacy.changed', state)).toEqual(state)
+    }
+    expect(validateBackendRpcParams('screen.hide', fixture.hideParams)).toEqual(fixture.hideParams)
+    expect(validateBackendRpcParams('screen.hide', { reason: 'you' })).toEqual({ reason: 'you' })
+  })
+
+  it('rejects a null field, an unknown reason, a forged field and a missing flag', () => {
+    for (const bad of fixture.rejected) {
+      expect(() => validateBackendRpcResult('screen.privacy.get', bad)).toThrow()
+      expect(() => validateBackendEventPayload('screen.privacy.changed', bad)).toThrow()
+    }
+    expect(() =>
+      validateBackendRpcResult('screen.privacy.get', { hidden: true, reason: 'you', extra: 1 })
+    ).toThrow()
+    for (const bad of [{}, { reason: 'agent' }, { reason: null }, { reason: 'you', extra: true }]) {
+      expect(() => validateBackendRpcParams('screen.hide', bad)).toThrow()
+    }
+  })
+
+  it('types the three methods and the event', () => {
+    expectTypeOf<BackendRpcParams<'screen.hide'>>().toEqualTypeOf<{
+      reason: 'you' | 'password-manager'
+    }>()
+    expectTypeOf<BackendRpcResult<'screen.show'>>().toEqualTypeOf<
+      BackendEventMap['screen.privacy.changed']
+    >()
+    expect(runtimeValidatedBackendRpcMethods).toEqual(
+      expect.arrayContaining(['screen.hide', 'screen.show', 'screen.privacy.get'])
+    )
   })
 })

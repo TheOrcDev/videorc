@@ -4198,6 +4198,29 @@ export interface ScreenIdParams {
   screenId: string
 }
 
+// --- Hide screen (plan 210 S7) ---
+/** Who hid the screen: the streamer, or the password-manager list on their behalf. */
+export type ScreenPrivacyReason = 'you' | 'password-manager'
+
+/**
+ * Hide screen state, in memory only and cleared at launch. `screen.privacy.get`
+ * returns it; `screen.privacy.changed` carries it on every hide and show.
+ * Absent fields are omitted by the backend, never `null`.
+ */
+export interface ScreenPrivacy {
+  hidden: boolean
+  /** RFC 3339, the moment of the hide; present only while hidden. */
+  since?: string
+  reason?: ScreenPrivacyReason
+  /** Why `screen.hide` would be refused right now (a legacy FFmpeg session). */
+  unavailable?: string
+}
+
+export interface ScreenHideParams {
+  reason: ScreenPrivacyReason
+}
+// --- end Hide screen (plan 210 S7) ---
+
 export interface RenameScreenParams {
   screenId: string
   name: string

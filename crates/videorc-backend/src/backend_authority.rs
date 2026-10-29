@@ -508,6 +508,25 @@ mod remote_role_tests {
         }
     }
 
+    /// Plan 210 S7: Hide screen is the Studio window's and main's. The remote
+    /// (Stream Deck, phone) and agent roles never reach it; agents get a
+    /// hide-only tool through the renderer in S8.
+    #[test]
+    fn hide_screen_methods_admit_renderer_and_admin_only() {
+        for method in ["screen.hide", "screen.show", "screen.privacy.get"] {
+            assert!(authorize_backend_method(BackendRole::Renderer, method, false).is_ok());
+            assert!(authorize_backend_method(BackendRole::Admin, method, false).is_ok());
+            assert!(
+                authorize_backend_method(BackendRole::Remote, method, false).is_err(),
+                "remote role must not reach {method}"
+            );
+            assert!(
+                authorize_backend_method(BackendRole::Agent, method, true).is_err(),
+                "agent role must not reach {method}"
+            );
+        }
+    }
+
     /// Plan 209 D19: the remote allowlist is byte-identical to `dc1309cb`.
     /// The Agent role is a new door, never a wider old one.
     #[test]
