@@ -4064,27 +4064,16 @@ async fn start_session_with_timeline(
         None,
     );
 
-    if params.output.record_enabled && !replay_only {
-        // Advisory only: `df` and the health-event write stay off the start path.
-        let disk_state = state.clone();
-        let disk_session_id = session_id.clone();
-        let disk_output_dir = output_dir.clone();
-        // Plan 200 C5: the notice counts minutes, from the bitrate of every
-        // file this take writes.
-        let disk_video_kbps = params.output.video.bitrate_kbps;
-        let disk_separate_files = crate::source_iso::armed_plan(&params.output)
-            .map_or(0, |plan| plan.iso_roles().count());
-        tokio::spawn(async move {
-            let _ = emit_disk_space_health_event(
-                &disk_state,
-                &disk_session_id,
-                &disk_output_dir,
-                disk_video_kbps,
-                disk_separate_files,
-            )
-            .await;
-        });
-    }
+    // Plan 200 C5: the notice counts minutes, from the bitrate of every file
+    // this take writes. Sent once the Starting status is out (below).
+    let disk_space_check = (params.output.record_enabled && !replay_only).then(|| {
+        (
+            output_dir.clone(),
+            params.output.video.bitrate_kbps,
+            crate::source_iso::armed_plan(&params.output)
+                .map_or(0, |plan| plan.iso_roles().count()),
+        )
+    });
 
     let recording_preview_generation = stop_idle_live_preview_for_recording(state.clone()).await;
     timeline.mark(RecordingStartPhase::PreviewStop);
@@ -5785,6 +5774,23 @@ async fn start_session_with_timeline(
     );
 
     timeline.mark(RecordingStartPhase::StartingPublished);
+    if let Some((disk_output_dir, disk_video_kbps, disk_separate_files)) = disk_space_check {
+        // Advisory only: `df` and the health-event write stay off the start
+        // path. Retest 154 A5: sent before the Starting status, the event
+        // named a session the renderer did not know yet and never toasted.
+        let disk_state = state.clone();
+        let disk_session_id = session_id.clone();
+        tokio::spawn(async move {
+            let _ = emit_disk_space_health_event(
+                &disk_state,
+                &disk_session_id,
+                &disk_output_dir,
+                disk_video_kbps,
+                disk_separate_files,
+            )
+            .await;
+        });
+    }
     let mut command = ffmpeg_command(&ffmpeg_path);
     command
         .args(&args)
@@ -10886,6 +10892,7 @@ async fn monitor_session(
                 native_audio_stats,
                 records_file: active.output_path.is_some(),
                 replay_only: active.replay_only,
+                ffmpeg_evidence: active.ffmpeg_progress.evidence.clone(),
             }
         });
     let retired_active = monitored_recording
@@ -11184,7 +11191,7 @@ async fn monitor_session(
         .await;
     state.soundboard.session_ended(&state, &session_id);
 
-    if let Some(native_audio_stats) = monitored_recording.native_audio_stats {
+    if let Some(native_audio_stats) = monitored_recording.native_audio_stats.as_ref() {
         let diagnostic_stats = {
             let mut diagnostics = state.diagnostics.lock().await;
             let next = apply_audio_stats(
@@ -11771,13 +11778,20 @@ async fn monitor_session(
             // Only the RECORDING bridge condemns the session here — a stream
             // failure was already reported above and, with a clean exit,
             // finalizes in the arm before this one.
-            let (failed_stage, health_code, mut message) = classify_failed_ffmpeg_exit(
-                monitored_recording.stop_intent_preceded_exit,
-                monitored_recording.stop_escalated,
-                recording_bridge_terminal_failure.as_deref(),
+            let (failed_stage, health_code, mut message) = ffmpeg_disk_full_failure(
+                monitored_recording.ffmpeg_fatal_category(),
                 &exit_status.to_string(),
                 monitored_recording.records_file,
-            );
+            )
+            .unwrap_or_else(|| {
+                classify_failed_ffmpeg_exit(
+                    monitored_recording.stop_intent_preceded_exit,
+                    monitored_recording.stop_escalated,
+                    recording_bridge_terminal_failure.as_deref(),
+                    &exit_status.to_string(),
+                    monitored_recording.records_file,
+                )
+            });
             monitored_recording
                 .pipeline
                 .mark_failed(failed_stage, &message);
@@ -13696,6 +13710,19 @@ struct MonitoredRecording {
     records_file: bool,
     /// Plan 181: a buffer-only session; its terminal status keeps the mark.
     replay_only: bool,
+    /// FFmpeg's stderr evidence, read at terminal time for the first fatal
+    /// category (retest 154 A5: a full disk said only "exit status: 228").
+    ffmpeg_evidence: Arc<StdMutex<FfmpegEvidenceSnapshot>>,
+}
+
+impl MonitoredRecording {
+    fn ffmpeg_fatal_category(&self) -> Option<&'static str> {
+        self.ffmpeg_evidence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tail
+            .first_fatal_category
+    }
 }
 
 fn should_finalize_recording_session(
@@ -13780,6 +13807,27 @@ fn classify_failed_ffmpeg_exit(
         "ffmpeg-exit",
         format!("FFmpeg exited with {exit_status}"),
     )
+}
+
+/// Retest 154 A5: a full recordings folder ends FFmpeg with "No space left on
+/// device" (Windows: "There is not enough space on the disk"). That cause
+/// outranks a forced stop or a broken bridge pipe, which are its consequences.
+/// The raw stderr stays in the persisted `ffmpeg-stderr-tail` log.
+fn ffmpeg_disk_full_failure(
+    fatal_category: Option<&str>,
+    exit_status: &str,
+    records_file: bool,
+) -> Option<(RecordingPipelineStage, &'static str, String)> {
+    if !records_file || fatal_category != Some(FFMPEG_DISK_FULL_CATEGORY) {
+        return None;
+    }
+    Some((
+        RecordingPipelineStage::Muxer,
+        "recording-disk-full",
+        format!(
+            "The recordings folder ran out of space, so recording stopped. The recording up to that point is kept. Free some space before you record again. (FFmpeg exit: {exit_status})"
+        ),
+    ))
 }
 
 fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
@@ -22365,6 +22413,8 @@ fn parse_ffmpeg_progress_media_seconds(line: &str) -> Option<f64> {
         .then(|| seconds.clamp(0.0, MAX_CAPTURE_MEDIA_CLOCK_SECONDS))
 }
 
+const FFMPEG_DISK_FULL_CATEGORY: &str = "disk-full";
+
 fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
     let line = line.to_ascii_lowercase();
     if line.contains("could not find audio only device")
@@ -22384,8 +22434,12 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
         || line.contains("could not open encoder")
     {
         Some("encoder-open-failed")
-    } else if line.contains("no space left on device") {
-        Some("disk-full")
+    } else if line.contains("no space left on device")
+        // Windows ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL.
+        || line.contains("not enough space on the disk")
+        || line.contains("disk is full")
+    {
+        Some(FFMPEG_DISK_FULL_CATEGORY)
     } else if line.contains("could not write header") {
         Some("output-open-failed")
     } else if line.contains("conversion failed") {
@@ -47126,5 +47180,69 @@ mod low_end_windows_recording_tests {
                 .iter()
                 .all(|line| line.chars().count() <= FFMPEG_STDERR_TAIL_LINE_CHARS)
         );
+    }
+
+    // Retest 154 A5: a full recordings folder ended the take with only
+    // "FFmpeg exited with exit status: 228".
+    #[test]
+    fn a_full_disk_is_recognised_on_every_platform() {
+        for line in [
+            "[matroska @ 0x55] Error writing trailer: No space left on device",
+            "av_interleaved_write_frame(): No space left on device",
+            "[out#0/matroska @ 01] Error muxing a packet: There is not enough space on the disk.",
+        ] {
+            assert_eq!(
+                classify_ffmpeg_fatal_line(line),
+                Some("disk-full"),
+                "{line}"
+            );
+        }
+
+        let mut tail = FfmpegStderrTail::default();
+        tail.observe("frame=  900 fps= 30 q=-1.0 size=   12000KiB");
+        tail.observe("av_interleaved_write_frame(): No space left on device");
+        tail.observe("Error writing trailer: No space left on device");
+        tail.observe("Conversion failed!");
+        assert_eq!(tail.first_fatal_category, Some("disk-full"));
+        let summary = tail.summary().unwrap();
+        assert!(summary.starts_with("category=disk-full "), "{summary}");
+        assert!(
+            summary.contains("No space left on device"),
+            "raw text stays in logs"
+        );
+    }
+
+    #[test]
+    fn a_full_disk_says_plainly_that_the_folder_ran_out_of_space() {
+        let (stage, code, message) =
+            ffmpeg_disk_full_failure(Some("disk-full"), "exit status: 228", true).unwrap();
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-disk-full");
+        assert!(
+            message.contains("recordings folder ran out of space"),
+            "{message}"
+        );
+        assert!(message.contains("up to that point is kept"), "{message}");
+        assert!(message.contains("Free some space"), "{message}");
+        assert!(!message.contains("No space left on device"), "{message}");
+
+        // Other fatal causes, and a stream-only session, keep their own copy.
+        assert!(
+            ffmpeg_disk_full_failure(Some("encoder-open-failed"), "exit status: 1", true).is_none()
+        );
+        assert!(ffmpeg_disk_full_failure(None, "exit status: 228", true).is_none());
+        assert!(ffmpeg_disk_full_failure(Some("disk-full"), "exit status: 228", false).is_none());
+    }
+
+    #[test]
+    fn the_terminal_failure_reads_the_first_fatal_category_from_ffmpeg_evidence() {
+        let progress = FfmpegProgressBeacon::default();
+        progress
+            .evidence
+            .lock()
+            .unwrap()
+            .observe("Error writing trailer: No space left on device");
+        let category = progress.evidence.lock().unwrap().tail.first_fatal_category;
+        assert_eq!(category, Some(FFMPEG_DISK_FULL_CATEGORY));
     }
 }
