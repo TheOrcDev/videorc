@@ -16,6 +16,7 @@ import { platformCopy } from '@/lib/platform-copy'
 import { isMediaAccessSnapshotReady } from '@/lib/system-access'
 import {
   FIRST_RUN_ROWS_FALLBACK_MS,
+  LINUX_CAPTURE_ACCESS,
   firstRunPrimary,
   firstRunSetupDescription,
   systemAccessRowsReady
@@ -65,21 +66,21 @@ export function PermissionsStep(): ReactElement {
     devicesListed: wsStatus === 'connected' && deviceList.devices.length > 0,
     waitedLong
   })
-  const nothingToGrant = osName === 'Linux'
-  const primary = firstRunPrimary(rows)
+  const portalGuidance = osName === 'Linux'
+  const primaryLabel = portalGuidance ? 'Continue' : firstRunPrimary(rows).label
   const bodyRef = useRef<HTMLDivElement>(null)
 
   // Focus lands on the first row that has something to press, else on the
   // primary, once the rows are real (never on a Skeleton).
   useEffect(() => {
-    if (!ready && !nothingToGrant) return
+    if (!ready && !portalGuidance) return
     const card = bodyRef.current?.closest<HTMLElement>('[data-slot="first-run-card"]')
     if (!card || card.contains(document.activeElement)) return
     const target =
       card.querySelector<HTMLElement>('[data-slot="system-access-row"] button') ??
       card.querySelector<HTMLElement>('[data-first-run-primary]')
     target?.focus()
-  }, [nothingToGrant, ready])
+  }, [portalGuidance, ready])
 
   return (
     <FirstRunStepLayout
@@ -97,25 +98,20 @@ export function PermissionsStep(): ReactElement {
         <Button
           data-first-run-primary=""
           disabled={frame.leaving}
-          variant={primary.label === 'Continue' ? 'default' : 'outline'}
+          variant={primaryLabel === 'Continue' ? 'default' : 'outline'}
           onClick={frame.next}
         >
-          {primary.label}
-          {primary.label === 'Continue' ? <ArrowRightIcon data-icon="inline-end" /> : null}
+          {primaryLabel}
+          {primaryLabel === 'Continue' ? <ArrowRightIcon data-icon="inline-end" /> : null}
         </Button>
       }
     >
       <div ref={bodyRef}>
-        {nothingToGrant ? (
-          // Linux (plan 174 I-8): no standing grants; the desktop portal asks
-          // per capture. The same words as Settings → Permissions.
-          <Empty className="p-4" data-testid="system-access-none">
+        {portalGuidance ? (
+          <Empty className="p-4" data-first-run-linux-access="" data-testid="system-access-none">
             <EmptyHeader>
-              <EmptyTitle>Nothing to grant here</EmptyTitle>
-              <EmptyDescription>
-                Linux keeps no capture permissions for apps. Your desktop may ask when Videorc
-                starts capturing the screen.
-              </EmptyDescription>
+              <EmptyTitle>{LINUX_CAPTURE_ACCESS.title}</EmptyTitle>
+              <EmptyDescription>{LINUX_CAPTURE_ACCESS.description}</EmptyDescription>
             </EmptyHeader>
           </Empty>
         ) : ready ? (

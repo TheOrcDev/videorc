@@ -81,7 +81,7 @@ export function firstRunSnapshotDecision({
   suppressed: boolean
   platform: string | undefined
 }): FirstRunDecision {
-  if (suppressed || !platform || platform === 'linux') return 'hide'
+  if (suppressed || !platform) return 'hide'
   return snapshot === 'fresh' || snapshot === 'resume' ? 'show' : 'hide'
 }
 
@@ -102,12 +102,8 @@ export interface FirstRunStepContext {
   mode: FirstRunSetupMode
 }
 
-export function firstRunStepsFor({ goal, platform }: FirstRunStepContext): FirstRunStep[] {
-  return FIRST_RUN_STEPS.filter(
-    (step) =>
-      (step !== 'permissions' || platform !== 'linux') &&
-      (step !== 'destinations' || goal !== 'record')
-  )
+export function firstRunStepsFor({ goal }: FirstRunStepContext): FirstRunStep[] {
+  return FIRST_RUN_STEPS.filter((step) => step !== 'destinations' || goal !== 'record')
 }
 
 export function nextFirstRunStep(
@@ -138,7 +134,7 @@ export function firstRunStepPosition(
   context: FirstRunStepContext
 ): { index: number; count: number } {
   const steps = firstRunStepsFor(context)
-  // A saved Permissions step on Linux starts at the first applicable step.
+  // A saved step excluded by the goal counts as the last applicable step.
   const index = steps.filter(
     (candidate) => FIRST_RUN_STEPS.indexOf(candidate) < FIRST_RUN_STEPS.indexOf(step)
   ).length

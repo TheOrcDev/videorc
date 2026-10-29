@@ -3,17 +3,17 @@ import { basename, join, resolve } from 'node:path'
 
 import {
   assertIsolatedLinuxObjectKey,
-  assertLinuxAlphaReleaseManifest,
-  LINUX_ALPHA_UPDATE_FEED_NAME,
+  assertLinuxReleaseManifest,
+  parseLinuxReleaseId,
+  LINUX_UPDATE_FEED_NAME,
   sha256File,
   sha512File,
   updateFeedArtifactNameFromYml,
   updateFeedFileMetadataFromYml,
   updateFeedSha512FromYml,
   updateFeedVersionFromYml
-} from './linux-alpha-release.mjs'
+} from './linux-release.mjs'
 
-const CANDIDATE_ROOT = 'candidates/linux-alpha'
 const MAX_DOWNLOAD_BYTES = Object.freeze({
   appimage: 2 * 1024 * 1024 * 1024,
   'ffmpeg-license': 2 * 1024 * 1024,
@@ -41,10 +41,12 @@ export class LinuxReleaseCandidateError extends Error {
 }
 
 export function assertLinuxCandidateCoordinates({ releaseId, sourceCommit, appImageSha256 }) {
-  if (!/^\d+\.\d+\.\d+-alpha\.\d+$/.test(releaseId ?? '')) {
+  try {
+    parseLinuxReleaseId(releaseId)
+  } catch {
     throw new LinuxReleaseCandidateError(
       'invalid-release-id',
-      'Candidate releaseId must be a three-part numeric version followed by -alpha.N.'
+      'Candidate releaseId must be a three-part numeric version followed by -alpha.N or -beta.N.'
     )
   }
   if (!/^[a-f0-9]{40}$/.test(sourceCommit ?? '')) {
@@ -64,7 +66,7 @@ export function assertLinuxCandidateCoordinates({ releaseId, sourceCommit, appIm
 
 export function linuxCandidatePrefix({ releaseId, sourceCommit }) {
   assertLinuxCandidateCoordinates({ releaseId, sourceCommit })
-  return `${CANDIDATE_ROOT}/${releaseId}/${sourceCommit}`
+  return `candidates/linux-${parseLinuxReleaseId(releaseId).channel}/${releaseId}/${sourceCommit}`
 }
 
 export function linuxCandidateIdentity({ releaseId, sourceCommit, appImageSha256 }) {
@@ -108,7 +110,7 @@ export function assertPendingLinuxCandidateManifest(
   manifest,
   { releaseId, sourceCommit, appImageSha256 } = {}
 ) {
-  assertLinuxAlphaReleaseManifest(manifest)
+  assertLinuxReleaseManifest(manifest)
   assertLinuxCandidateCoordinates({
     releaseId: releaseId ?? manifest.releaseId,
     sourceCommit: sourceCommit ?? manifest.sourceCommit,
@@ -139,11 +141,7 @@ export function linuxCandidateObjectDescriptors(manifest) {
   const descriptors = [
     descriptor('appimage', manifest.filename, `${prefix}/${manifest.filename}`),
     descriptor('sha256', `${manifest.filename}.sha256`, `${prefix}/${manifest.filename}.sha256`),
-    descriptor(
-      'update-feed',
-      LINUX_ALPHA_UPDATE_FEED_NAME,
-      `${prefix}/${LINUX_ALPHA_UPDATE_FEED_NAME}`
-    ),
+    descriptor('update-feed', LINUX_UPDATE_FEED_NAME, `${prefix}/${LINUX_UPDATE_FEED_NAME}`),
     descriptor('manifest', 'release.json', `${prefix}/release.json`),
     descriptor('ffmpeg-license', 'FFMPEG-LICENSE.txt', `${prefix}/FFMPEG-LICENSE.txt`),
     descriptor('ffmpeg-source', 'FFMPEG-SOURCE.txt', `${prefix}/FFMPEG-SOURCE.txt`)
@@ -169,15 +167,15 @@ export async function buildLinuxCandidateStoragePlan({
 }) {
   assertPendingLinuxCandidateManifest(manifest)
   const feedYml = await requiredText(
-    join(releaseDir, LINUX_ALPHA_UPDATE_FEED_NAME),
-    LINUX_ALPHA_UPDATE_FEED_NAME
+    join(releaseDir, LINUX_UPDATE_FEED_NAME),
+    LINUX_UPDATE_FEED_NAME
   )
   assertFeedMatchesManifest({ feedYml, manifest })
 
   const paths = new Map([
     ['appimage', join(releaseDir, manifest.filename)],
     ['sha256', join(releaseDir, `${manifest.filename}.sha256`)],
-    ['update-feed', join(releaseDir, LINUX_ALPHA_UPDATE_FEED_NAME)],
+    ['update-feed', join(releaseDir, LINUX_UPDATE_FEED_NAME)],
     ['manifest', manifestPath],
     ['ffmpeg-license', ffmpegLicensePath],
     ['ffmpeg-source', ffmpegSourcePath]

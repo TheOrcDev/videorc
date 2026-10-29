@@ -1,5 +1,11 @@
 # Implementation Plans
 
+- 2026-10-29: [Plan 212](212-linux-beta-readiness.md), Linux Beta on Ubuntu
+  24.04 GNOME/Wayland and Omarchy/Hyprland, x64 AppImage. **IN PROGRESS**:
+  trustworthy gates, exact-artifact validation, channel identity and complete
+  acceptance ledger. Runtime gaps, protected promotion/web integration, both
+  physical acceptance passes, seven-day pilot and production receipts remain open.
+
 - 2026-10-28: [Plan 211](211-buddy-talks-only-in-its-bubble.md), Buddy
   talks only in its bubble, and Auto is gone. Owner request, after Auto
   posted an AI welcome in chat as them on the 2026-10-28 stream and Off then

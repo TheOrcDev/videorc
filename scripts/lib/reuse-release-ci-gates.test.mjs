@@ -17,6 +17,29 @@ import { main as reuseCli } from '../reuse-release-ci-gates.mjs'
 const sha = 'a'.repeat(40)
 const otherSha = 'b'.repeat(40)
 
+const linuxSteps = [
+  'Test Linux FFmpeg policy',
+  'Fetch and verify pinned Linux FFmpeg',
+  'Clippy',
+  'Test'
+].map((name) => ({ name, status: 'completed', conclusion: 'success' }))
+
+async function linuxReuse(steps) {
+  return findFirstReusableReleaseCiGate({
+    lookup: 'linux-rust',
+    repository: 'TheOrcDev/videorc',
+    sha,
+    api: apiFrom({
+      [`/repos/TheOrcDev/videorc/actions/workflows/linux.yml/runs?head_sha=${sha}&per_page=20`]: {
+        workflow_runs: [jsSuccessRun({ path: '.github/workflows/linux.yml' })]
+      },
+      '/repos/TheOrcDev/videorc/actions/runs/11/jobs?per_page=100': {
+        jobs: [jsSuccessJob({ name: 'Linux gates (FFmpeg policy + Rust compile/test)', steps })]
+      }
+    })
+  })
+}
+
 function jsSuccessRun(overrides = {}) {
   return {
     id: 11,
@@ -74,6 +97,30 @@ function apiFrom(routes) {
 }
 
 describe('reuse-release-ci-gates', () => {
+  it('requires executed Linux policy, provisioning, clippy and test steps', async () => {
+    assert.equal((await linuxReuse(linuxSteps)).reused, true)
+    assert.equal((await linuxReuse(undefined)).reused, false)
+    assert.equal((await linuxReuse([])).reused, false)
+    assert.equal(
+      (
+        await linuxReuse([
+          {
+            name: 'Skip Linux Rust compile/test for an allow-listed docs or version-only change',
+            status: 'completed',
+            conclusion: 'success'
+          }
+        ])
+      ).reused,
+      false
+    )
+    for (const required of linuxSteps) {
+      assert.equal((await linuxReuse(linuxSteps.filter((step) => step !== required))).reused, false)
+      for (const conclusion of ['skipped', 'failure', 'cancelled', null]) {
+        const steps = linuxSteps.map((step) => (step === required ? { ...step, conclusion } : step))
+        assert.equal((await linuxReuse(steps)).reused, false, `${required.name}: ${conclusion}`)
+      }
+    }
+  })
   it('rejects a non-canonical source SHA or repository', () => {
     assert.throws(
       () => parseReleaseSourceSha('abc'),
@@ -281,6 +328,7 @@ describe('reuse-release-ci-gates CLI', () => {
                   {
                     id: 3300,
                     name: 'Linux gates (FFmpeg policy + Rust compile/test)',
+                    steps: linuxSteps,
                     status: 'completed',
                     conclusion: 'success',
                     html_url: 'https://example.test/job/3300'

@@ -1,0 +1,179 @@
+# Linux Beta readiness
+
+Status: implementation in progress; **no accepted or published Beta**.
+Authorized scope: x64 AppImage on Ubuntu 24.04 GNOME/Wayland and
+Omarchy/Hyprland/Wayland. Work starts at main
+`8e601aeb3f804ccf120b4c7986182e2b44448b86` (0.16.0). Existing Alpha
+candidates, owner waivers, CI results and older artifacts are not Beta evidence.
+Do not modify `/home/orcdev/retest-fix-153/src` or its unrelated user changes.
+
+## Delivery order
+
+1. **Trustworthy evidence (in progress).** Fix swallowed Rust workflow exits,
+   reject reused docs-only Linux jobs, enforce artifact analyzer verdicts and
+   98% take coverage, inspect actual AppImage bytes, define the complete
+   acceptance ledger and maintained Linux development gates.
+2. **Runtime and channel integration (open).** Resolve the feature rows below;
+   derive the Linux badge from immutable build identity; retain Alpha defaults;
+   finish private Beta candidates, protected exact-byte pilot/public promotion,
+   finalizer, storage and web/update consumers. Do not enable the release
+   controller as a side effect. The current controller lacks Linux support.
+3. **Freeze and build (open).** Reconcile newer main, overlapping PRs and live
+   numeric versions. Choose a strictly higher patch only when preparing the
+   actual candidate. Merge reviewed preparation, freeze protected-main source,
+   build unsigned production AppImage with bundled OAuth and pinned LGPL
+   FFmpeg, validate payload, retain exact checksums and workflow provenance.
+4. **Physical acceptance (blocked on candidate and Ubuntu operator).** Complete
+   every row below on both separate physical desktops with that same AppImage.
+   Test hooks/dev binaries can diagnose failures but cannot replace acceptance.
+5. **Pilot (open).** Seven actual days; at least three testers per desktop,
+   three sessions per tester, at least 20 aggregate session hours. Record bugs
+   and rerun affected gates on a new candidate after any source/payload change.
+6. **Public release (blocked on acceptance).** Commit a reviewed, hash-bound
+   PASS record; promote those bytes through protected automation; verify signed-in
+   download, production updater and configured mirrors; finish support/rollback
+   records. No real provider broadcast or announcement without its authorization.
+
+## Complete acceptance ledger
+
+All rows are **OPEN** until named operators provide current candidate evidence.
+For every row record source SHA, AppImage SHA-256/size, environment versions,
+operator, start/end timestamps, commands/actions, expected and observed result,
+and hashes of private reports. Never commit tokens, user profiles or recordings.
+For failures preserve evidence and fixes; a skip, waiver, screenshot alone,
+file size or successful build is not a pass.
+
+| Contract category         | Required cases and evidence                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| provenance-and-gates      | Actual executed JS/Rust gates; typecheck, lint, format, dependency audits, script/desktop tests and build; Linux compile plus relevant shared macOS/Windows regression checks; workflow source equals frozen main; pinned dependencies/FFmpeg; clean build; no credential or test-hook override in production; exact AppImage, feed, sidecar and receipt hashes.                                    |
+| install-and-payload       | Clean download, hash check, executable bit, FUSE and supported extraction path, launch without development tools/host FFmpeg; inspect AppImage itself for backend, FFmpeg/ffprobe, license/source/build configuration, app.asar, Electron fuses, production flags, icons and desktop entry; paths with spaces, no executable in Downloads assumptions; clean removal without deleting recordings.   |
+| first-run-and-accounts    | Linux first-use flow, permission explanations, setup completion/restart; sign in/out and browser videorc:// callback from packaged app; cancel/expired/duplicate callback; keyring locked/unavailable and session restart; secure persistence without plaintext fallback; migration from current Alpha; settings and scenes preserved.                                                              |
+| portal-capture            | Monitor/window picker grant/cancel/deny/revoke; restore token and stale token; portal restart and app restart; multi-monitor, fractional scaling, HiDPI, portrait, source resize/minimize/close; screen lock/suspend/resume; correct source pixels, no silent substitute; no stuck picker or leaked stream.                                                                                         |
+| camera-and-microphone     | Integrated and USB camera/mic enumeration and selection; preview dimensions/cadence; real moving camera target and audible controlled signal; no device/permissions/in-use cases; unplug/replug, default-device changes, live source replacement, recovery and diagnostics.                                                                                                                         |
+| scenes-and-preview        | Every exposed scene/layout, crop/fit/mirror, portrait/landscape, overlays/backgrounds/captions/chat/banners; exported pixels and presented pixels agree; CPU/BMP presenter states its real transport; source liveness and stalls; 20 detach/close/reopen/focus cycles; resize/scaling/placement; Notes capture visibility explicitly disclosed and tested.                                          |
+| recording-and-storage     | Every exposed 1080p/1440p/4K 30/60 profile, vertical twins and 640x360 floor; forced OpenH264 and approved VAAPI; hard-content pressure; H.264 level, BT.709/video-range, GOP, fps, frame count and complete take; cold/warm start/stop/finalization; repeated sessions; unwritable/deleted/full output disk; failed-start Library state, crash/finalization recovery and no corrupt-success state. |
+| audio-and-sync            | Mic-only, mute/gain/noise cleanup, real bus soundboard exactly once, no-sound PCM preservation; silence and missing-device behavior; system audio and combined mix; direct-Pulse fallback warning if mixing unavailable; gap/clipping and A/V flash-click analysis, 60-minute drift and stop tail.                                                                                                  |
+| replay-library-and-export | Clips/replay arm/save/disarm during Record/Stream, performance check with ring active, bounded disk and rollover; Library identity/duration/thumbnails, file move/delete/Trash collisions; replay/trim/export/cancel, original preservation, unsupported imports and damaged files.                                                                                                                 |
+| streaming-and-recovery    | Local RTMP receiver artifacts and decoded output for every supported provider workflow, reconnect/offline/auth failures, multiple destinations, record+stream, differing profiles and dual orientations; output continuity while provider API/chat is down; explicit refusals for unsupported combinations; real-provider acceptance separately authorized.                                         |
+| companion-and-remotes     | Chat/activity/highlights and fake-provider quota outage; Buddy, captions contract/live fake Gateway, kill switch and captions audio source; remote control, Phone LAN, Agents and Buddy tools, pairing/revoke/allowlists/leak tests; keyboard/global shortcuts on GNOME and Hyprland; supported/excluded features match visible controls and docs.                                                  |
+| performance-and-endurance | Three fresh passes of critical workflows; 50 Record/Stop cycles per encoder; 60 minutes simultaneous real capture recording+local stream per encoder; >=4 hours on minimum-spec hardware per desktop; CPU/RAM/VRAM/disk/thermal trends, preview and output liveness; process crash and recovery; only owned children killed/reaped, no process/portal/encoder leaks.                                |
+| security-and-licenses     | Bundled credential handling and secret-service guarantees, protocol/origin/token checks, redacted support bundles and logs; dependency advisory gates; LGPL/source/license notices and exact FFmpeg configuration; published SHA-256 and deliberate unsigned authenticity policy; no release secrets inherited by candidate processes.                                                              |
+| updates-and-rollback      | Real AppImage Alpha→Beta→higher-patch hotfix through staged feeds on both desktops; preserve data/keyring/settings; reject wrong hash/stale/feed mismatch, offline/download interrupted, read-only path, restart; rollback web/feed pointers without overwriting immutable bytes; installed-client recovery rolls forward; never move macOS/Windows pointers.                                       |
+| support-and-production    | Rehearse authenticated download/feed/mirror routes in pilot; support/acceptance/release/rollback owners; troubleshooting for both desktops, prerequisites, safe-GPU policy, diagnostics and redaction; explicit supported profiles/features and limitations. Public production verification is a separate post-promotion receipt (below), not fabricated in prepublication acceptance.              |
+
+## Fixed quality budgets
+
+- FPS and frame-count error <=2%; moving-content freeze <=100 ms, repeated
+  frames <=2; audio gap <=20 ms; A/V target <=100 ms, hard limit <=150 ms.
+- GOP <=2.5 seconds; A/V stop tail <=100 ms; take coverage >=98%.
+- Cold Record <=1000 ms; warm Record p95 <=350 ms; Stop-to-idle p95 <=300 ms;
+  short-take finalization p95 <=5000 ms. Long-file finalization gets its own
+  measured storage profile; never silently apply a relaxed short-take budget.
+- Capture target must move and the microphone must have non-silent controlled
+  input for quality evidence. A static image cannot prove temporal fidelity.
+- No threshold reduction, waiver or omitted required environment for green.
+
+## Runtime scope decisions still to resolve
+
+| Feature                            | Current finding                                                           | Required completion                                                                                         |
+| ---------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| System audio                       | Linux unsupported                                                         | Implement and prove before broad streaming Beta, or obtain an explicit narrower scope decision.             |
+| Live camera/mic/screen replacement | Recording path refuses Linux replacement                                  | Implement/prove replacement and recovery; do not disguise refusal as support.                               |
+| Captions                           | Renderer hard-disabled although normal microphone now uses shared PCM bus | Trace backend path and implement/prove with fake Gateway, or obtain explicit exclusion.                     |
+| Separate source recordings         | macOS-only                                                                | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
+| Preview                            | CPU/BMP proof presenter                                                   | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
+| Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix   | Prove shared-bus mix and fallback warning.                                                                  |
+| First run                          | Linux setup enabled with sharing guidance; focused tests pass             | Real-app smoke and packaged physical proof still required.                                                  |
+| Notes protection                   | Capture exclusion unsupported                                             | Tell users Notes may be captured; prove behavior.                                                           |
+| Split profiles / dual orientation  | Restricted encoded paths                                                  | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
+
+## Maintained evidence tooling
+
+- `pnpm smoke:local-gates:linux --list` lists explicit source and Linux runtime
+  gates. `--phase=source` or `--phase=runtime` runs that phase; no argument runs
+  both. Runtime requires an explicitly approved VAAPI node, physical tester
+  metadata from `docs/linux-dev-loop.md`, moving camera target, non-silent mic,
+  and operator screen-sharing grants. Logs/profiles live in a private temp dir.
+- This runner labels evidence **development-only**, tracks source SHA and dirty
+  state, rejects missing runtime proof/skips/report-only, and never calls its
+  result a physical Beta PASS. The remaining feature and packaged gates above
+  are still required. Darwin/ScreenCaptureKit/Metal aggregate skips do not count.
+- `pnpm release:validate:linux-beta-acceptance --template <release.json>` emits a
+  pending JSON template. Save it separately from frozen candidate source. Fill
+  it from real observations; no template values authorize publication.
+- `pnpm release:validate:linux-beta-acceptance <release.json> <record.json>
+<private-evidence-root>` checks identity, both desktops, all categories,
+  metrics/endurance/pilot and actual private evidence-file SHA-256s. This checks
+  the evidence contract, not the truth of observations: named operators and
+  protected reviewers must inspect raw reports and attest the rows.
+- Acceptance belongs at `docs/acceptance/linux-beta/<releaseId>.json`, referenced
+  by a commit-pinned GitHub URL naming that exact release. No Beta owner-waiver
+  route. A future promotion workflow must call this validator against retrieved
+  private evidence, not merely trust the manifest URL. **Promotion wiring is
+  still open; this first slice does not create a public release path.**
+
+### Private measurement receipts
+
+Each category's `evidence` reference points to a private JSON receipt under
+1 MiB, with `schemaVersion: 1`, `status: pass`, the complete `candidate` identity,
+`environmentId`, `operator`, `startedAt`, `finishedAt`, `categoryIds`, and a
+nonempty `artifacts` list of `{path, sha256}` references to actual measurements.
+Times must fit the environment's acceptance window. A pilot receipt instead
+names `pilotSessionId`, the tester as `operator`, and that session's exact times.
+The validator checks receipt bytes, their identity/coverage, and all measured
+artifact bytes. Relative paths must stay inside the private evidence root,
+including through symlinks. Large recordings are streamed for hashing. The
+reviewer still verifies that the observations actually satisfy the ledger.
+
+## Post-promotion receipt and completion
+
+After protected exact-byte promotion, record resolved production download and
+feed paths, final object hashes/sizes, current version, authenticated account
+visibility, short-lived redirect behavior, configured primary/mirror outcomes,
+Alpha-client upgrade and hotfix/rollback rehearsal references. Keep any pending
+mirror sync explicit. Only then expose Beta web state and declare Linux live.
+No Discord/email/provider broadcast is implied by this implementation request.
+
+## Current coordination and blockers
+
+- Ogre: physical Omarchy 4.0.4 x64; Intel `/dev/dri/renderD128` is allowed.
+  `/dev/dri/renderD129` is quarantined: **never probe it**. Use isolated profiles
+  and sequential encoders. Do not change desktop/system configuration to pass.
+- Ubuntu: separate physical Ubuntu 24.04 GNOME/Wayland host/operator requested;
+  answer pending. Camera/mic/picker grants are operator actions.
+- Named owners, exact production candidate, physical runs, real elapsed pilot,
+  update/rollback evidence and production receipts remain outstanding.
+- Review existing work before implementing overlaps: #928 disk-full, #927
+  aspect ratio, #926 Trash, #925 output permissions, #924 Secret Service, #923
+  assets, #922 protocol registration, #920 failed-start Library, #915 Clips
+  performance check, #843 clippy allowances. #921 Alpha owner waiver is not Beta
+  acceptance. Do not overwrite these branches or bypass protected review.
+- The original planned baselines and old candidate run 40888591935 do not prove
+  this changed source. No version bump, candidate dispatch or publication yet.
+
+### Engineering checkpoint, 2026-10-29
+
+The draft source PR prepares Alpha/Beta identity, exact AppImage inspection,
+strict CI reuse and recording verdicts, the acceptance contract, Linux gate
+runner and first-run setup. These are engineering changes, not passed physical
+acceptance rows. The initial source gates passed typecheck, lint, format, build,
+JS/Rust advisory audits and 2,763 Node tests with no skips; onboarding added
+155 passing focused desktop tests and 121 script tests. The bounded full
+desktop rerun and cold backend build are still running. Caption enablement is
+being investigated separately and is not certified by these results.
+
+GitHub rejected the push because the current OAuth credential lacks the
+`workflow` scope. The release-workflow exit fix and its executable Bash
+regression tests are retained in the local
+`local/linux-beta-including-workflow` branch and pending worktree changes;
+the draft source PR excludes those two files so its remaining work is
+reviewable now. **The workflow fix must land before a Beta candidate build.**
+Its exact shell change captures `status=$?` inside `else`, before leaving the
+failed `if` command. Ordinary failures must fail; only 137/143 get one retry.
+The corresponding test executes both actual YAML shell blocks against success,
+ordinary failure, killed retry success and killed retry failure.
+
+Main subsequently advanced to `c2d1eaffbaca2f09b553ca8300db6cf5b937fac0`,
+merging #915, #920, #922–#928. Incorporate those upstream fixes before freezing
+the candidate and rerun affected gates. They address the earlier overlaps;
+their merge does not supply the new candidate's physical acceptance.

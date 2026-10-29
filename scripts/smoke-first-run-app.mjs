@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Plans 203 S7 and 207 S8. Real macOS dev app, isolated profile, CDP observations only.
+// Plans 203 S7, 207 S8 and 212. Real macOS/Linux dev app, isolated profile.
 // No permission buttons are pressed. Cold TCC prompts need the owner's S0 pass.
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -14,11 +14,12 @@ import {
   evaluateFirstRunSmokeStep,
   FIRST_RUN_SMOKE_LIMITS,
   FIRST_RUN_SOURCE_START_PATTERNS,
+  firstRunPermissionsReady,
   firstRunSourceStartLines
 } from './lib/first-run-smoke-gate.mjs'
 
-if (process.platform !== 'darwin')
-  throw new Error('First-run app smoke requires macOS; Windows acceptance is owner-owed.')
+if (!['darwin', 'linux'].includes(process.platform))
+  throw new Error('First-run app smoke requires macOS or Linux; Windows acceptance is owner-owed.')
 if (!existsSync(join(repoRoot, 'target/debug/videorc-backend'))) {
   throw new Error('Build target/debug/videorc-backend before running this smoke.')
 }
@@ -29,7 +30,7 @@ delete process.env.ELECTRON_RUN_AS_NODE
 const outputRoot = resolve(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir())
 mkdirSync(outputRoot, { recursive: true })
 const output = mkdtempSync(join(outputRoot, 'videorc-first-run-'))
-const report = { limits: FIRST_RUN_SMOKE_LIMITS, output, steps: [] }
+const report = { platform: process.platform, limits: FIRST_RUN_SMOKE_LIMITS, output, steps: [] }
 const save = () =>
   writeFileSync(join(output, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
 let cdp
@@ -213,6 +214,9 @@ const stateExpression = `(() => {
     registryRaw, registry: registryRaw ? JSON.parse(registryRaw) : null,
     toasts: e?.toasts ?? [], closedAt: e?.closedAt,
     rows: Array.from(document.querySelectorAll('[data-slot="system-access-row"]')).map(row => row.dataset.state),
+    linuxAccess: !!document.querySelector('[data-first-run-linux-access]'),
+    linuxAccessTitle: document.querySelector('[data-first-run-linux-access] [data-slot="empty-title"]')?.textContent,
+    linuxAccessDescription: document.querySelector('[data-first-run-linux-access] [data-slot="empty-description"]')?.textContent,
     loading: !!document.querySelector('[data-first-run-rows="loading"]'),
     primaryCount: document.querySelectorAll('[data-first-run-primary]').length,
     primary: document.querySelector('[data-first-run-primary]')?.textContent.trim() ?? null,
@@ -237,7 +241,7 @@ const stateExpression = `(() => {
     retainedContextsLost: !!e?.contexts.length && e.contexts.every(gl => gl.isContextLost())
   };
 })()`
-const state = () => evaluate(stateExpression)
+const state = async () => ({ ...(await evaluate(stateExpression)), platform: process.platform })
 
 async function waitFor(label, predicate, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs
@@ -510,7 +514,7 @@ async function startApp(name) {
   await evaluate(instrument)
   await check(
     'fresh',
-    await waitFor('initial fresh setup', (s) => s.setup === 'open' && s.rows.length === 4)
+    await waitFor('initial fresh setup', (s) => s.setup === 'open' && firstRunPermissionsReady(s))
   )
   await beginGuard(startMs, false)
   report.hostGrants = await evaluate('window.videorc.getMediaAccessStatus()')
@@ -621,6 +625,9 @@ async function soundCheck() {
   }
   await check('sound', {
     ...(await state()),
+    systemAudioDeviceStatus: (await request(backend, 5000, 'devices.list')).devices.find(
+      (device) => device.kind === 'system-audio'
+    )?.status,
     microphoneGrant,
     gainBefore: s.config.audio.microphoneGainDb,
     gainKeyPressed
@@ -670,7 +677,10 @@ async function replay() {
     `(() => { const button = Array.from(document.querySelectorAll('button')).find(el => el.textContent.trim() === 'Run setup again…'); if (!button || button.disabled) throw new Error('Run setup again… unavailable'); button.click(); })()`
   )
   await check('replay-open', {
-    ...(await waitFor('replay permissions', (s) => s.mode === 'replay' && s.rows.length === 4)),
+    ...(await waitFor(
+      'replay permissions',
+      (s) => s.mode === 'replay' && firstRunPermissionsReady(s)
+    )),
     beforeRecordRaw: before.recordRaw
   })
   const visitedSteps = ['permissions']
@@ -705,7 +715,7 @@ try {
   // CDP attaches after the untouched first mount; reload to measure mount to
   // first frame on a shared renderer clock, as plan 203 did.
   await reloadWith({ 'videorc.theme': 'dark' })
-  await check('fresh', await waitFor('fresh rows', (s) => s.rows.length === 4))
+  await check('fresh', await waitFor('fresh rows', (s) => firstRunPermissionsReady(s)))
   await check(
     'moving',
     await waitFor('moving backdrop', (s) => ['moving', 'still'].includes(s.backdrop), 5000)
@@ -823,7 +833,7 @@ try {
   })
   await beginGuard()
   await reloadWith({ 'videorc.firstRun': resumeRecord })
-  await check('resume', await waitFor('legacy resumed rows', (s) => s.rows.length === 4))
+  await check('resume', await waitFor('legacy resumed rows', (s) => firstRunPermissionsReady(s)))
   await waitFor('legacy resumed motion', (s) => s.backdrop === 'moving')
   await leave('[data-first-run-skip]')
   await check('finish', { ...(await state()), pressedPrimary: 'Skip setup' })
@@ -831,7 +841,7 @@ try {
   // record to test startup ordering instead of hiding setup by migration.
   await beginGuard()
   await reloadWith({ 'videorc.firstRun': resumeRecord, 'videorc.whatsNewLastSeenVersion': '0.0.1' })
-  await waitFor('old-version setup', (s) => s.rows.length === 4)
+  await waitFor('old-version setup', (s) => firstRunPermissionsReady(s))
   const whatsNewStart = Date.now()
   await delay(FIRST_RUN_SMOKE_LIMITS.whatsNewWatchMs + 100)
   await check('whats-new', {
@@ -844,7 +854,7 @@ try {
 
   await startApp('livestreams')
   await reloadWith({ 'videorc.theme': 'light' })
-  await waitFor('light permissions', (s) => s.rows.length === 4 && s.theme === 'light')
+  await waitFor('light permissions', (s) => firstRunPermissionsReady(s) && s.theme === 'light')
   // Plan 208 S5: opened in light, the first frame is already turned, never dark first.
   await check(
     'moving',

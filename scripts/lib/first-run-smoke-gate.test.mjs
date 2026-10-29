@@ -12,6 +12,7 @@ const raw =
   '{"version":1,"status":"skipped","step":"permissions","updatedAt":"2026-10-27T12:00:00.000Z"}'
 const record = (status) => ({ ...JSON.parse(raw), status })
 const setup = {
+  platform: 'darwin',
   setup: 'open',
   mode: 'first-run',
   cardStep: 'permissions',
@@ -522,5 +523,65 @@ test('replay can retain an existing source, but never admits a new source', () =
       matches: ['[capture-generation] source=camera generation=1 reason=normal-start config=1234']
     }).pass,
     false
+  )
+})
+
+test('Linux fresh, resume and replay require real sharing guidance and no synthetic grant rows', () => {
+  const linux = {
+    ...setup,
+    platform: 'linux',
+    rows: [],
+    primary: 'Continue',
+    linuxAccess: true,
+    linuxAccessTitle: 'Screen sharing on Linux',
+    linuxAccessDescription:
+      'When you add a screen or window, your desktop asks what to share. Camera and microphone access depends on your desktop and device permissions.'
+  }
+  for (const step of ['fresh', 'resume', 'replay-open']) {
+    const o = {
+      ...linux,
+      ...(step === 'replay-open' ? { mode: 'replay', recordRaw: raw, beforeRecordRaw: raw } : {})
+    }
+    assert.equal(evaluateFirstRunSmokeStep(step, o).pass, true)
+    for (const mutation of [
+      { linuxAccess: false },
+      { linuxAccessTitle: '' },
+      { linuxAccessDescription: '' },
+      { rows: ['granted', 'granted', 'granted', 'granted'] },
+      { loading: true },
+      { primary: 'Skip for now' },
+      { platform: 'unknown' }
+    ])
+      assert.equal(
+        evaluateFirstRunSmokeStep(step, { ...o, ...mutation }).pass,
+        false,
+        JSON.stringify(mutation)
+      )
+  }
+})
+
+test('Linux sound check must match observed system audio availability and still exercise the microphone controls', () => {
+  const linux = {
+    ...observations.sound,
+    platform: 'linux',
+    systemAudioDeviceStatus: 'unavailable',
+    soundSystemAudioRow: false
+  }
+  assert.equal(evaluateFirstRunSmokeStep('sound', linux).pass, true)
+  for (const mutation of [
+    { systemAudioDeviceStatus: undefined },
+    { systemAudioDeviceStatus: 'available' },
+    { soundSystemAudioRow: true },
+    { gainKeyPressed: false }
+  ]) {
+    assert.equal(evaluateFirstRunSmokeStep('sound', { ...linux, ...mutation }).pass, false)
+  }
+  assert.equal(
+    evaluateFirstRunSmokeStep('sound', {
+      ...linux,
+      systemAudioDeviceStatus: 'available',
+      soundSystemAudioRow: true
+    }).pass,
+    true
   )
 })

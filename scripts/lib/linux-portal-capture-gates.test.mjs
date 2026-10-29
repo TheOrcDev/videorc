@@ -133,7 +133,7 @@ test('Phase D proof requires live compositor, portal layer, and non-synthetic pi
 test('a portal recording must carry video at the requested size over most of the take', () => {
   const expected = { width: 1920, height: 1080, recordingMs: 6000 }
   const good = {
-    metrics: { hasVideo: true, width: 1920, height: 1080, durationSeconds: 5.8 },
+    metrics: { hasVideo: true, width: 1920, height: 1080, durationSeconds: 5.9 },
     sizeBytes: 2_000_000
   }
   assert.deepEqual(assessPortalRecording(good, expected), { ok: true, failures: [] })
@@ -155,7 +155,14 @@ test('a portal recording must carry video at the requested size over most of the
     { ...good, metrics: { ...good.metrics, durationSeconds: 1.2 } },
     expected
   )
-  assert.match(short.failures.join(';'), /duration 1.2s < 3.6s/)
+  assert.match(short.failures.join(';'), /duration 1.2s < 5.9s/)
+
+  assert.equal(
+    assessPortalRecording({ ...good, metrics: { ...good.metrics, durationSeconds: 3.6 } }, expected)
+      .ok,
+    false,
+    'a take missing 40% of its requested duration is not acceptance evidence'
+  )
 
   const empty = assessPortalRecording({ ...good, sizeBytes: 900 }, expected)
   assert.match(empty.failures.join(';'), /file size 900 bytes/)
