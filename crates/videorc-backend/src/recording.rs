@@ -3371,6 +3371,45 @@ pub fn resolve_output_directory(configured: Option<&str>) -> Result<PathBuf> {
     Ok(expanded)
 }
 
+/// Prove the recordings folder takes a new file: create a uniquely named
+/// hidden probe in it and remove it again. Permissions, read-only mounts and
+/// ACLs all show up here on every platform; nothing else is touched. The OS
+/// error goes to the log, the user gets the Output page's plain copy.
+async fn ensure_output_directory_writable(output_dir: &Path) -> Result<()> {
+    let probe = output_dir.join(format!(".videorc-write-check-{}", Uuid::new_v4()));
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .await;
+    match created {
+        Ok(file) => {
+            drop(file);
+            if let Err(error) = fs::remove_file(&probe).await {
+                tracing::warn!(
+                    path = %probe.display(),
+                    "Could not remove the recordings folder write check: {error}"
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(
+                folder = %output_dir.display(),
+                "Recordings folder is not writable: {error}"
+            );
+            bail!(output_directory_not_writable_message(output_dir))
+        }
+    }
+}
+
+fn output_directory_not_writable_message(output_dir: &Path) -> String {
+    format!(
+        "Videorc can't save to {}. Choose another recordings folder in Output.",
+        output_dir.display()
+    )
+}
+
 pub fn default_recordings_dir() -> PathBuf {
     // Harness isolation (F-016): smokes must never write into the user's real
     // media library — Electron main forces this env for isolated backend
@@ -3857,6 +3896,10 @@ async fn start_session_with_timeline(
         fs::create_dir_all(&output_dir)
             .await
             .with_context(|| format!("Could not create {}", output_dir.display()))?;
+        // Retest 154 A4: a read-only folder used to start the session, then
+        // FFmpeg failed to open its output and the Library kept a failed row.
+        // Refuse here, before the session row and any FFmpeg process exist.
+        ensure_output_directory_writable(&output_dir).await?;
     }
 
     let started_at = Utc::now();
@@ -40449,6 +40492,71 @@ mod tests {
             resolve_output_directory(Some(absolute_fixture)).unwrap(),
             PathBuf::from(absolute_fixture)
         );
+    }
+
+    // Retest 154 A4: Record with a read-only recordings folder started the
+    // session, FFmpeg failed with Permission denied and a failed row stayed
+    // in the Library. The start must be refused before the row exists.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn record_refuses_an_unwritable_recordings_folder_before_the_session_row() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let folder = std::env::temp_dir().join(format!("videorc-ro-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root writes through mode 555, so there is nothing to refuse.
+        let blocked = std::fs::File::create(folder.join("root-check")).is_err();
+        let _ = std::fs::remove_file(folder.join("root-check"));
+        if !blocked {
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&folder);
+            eprintln!("skipped: running as root, mode 555 does not block writes");
+            return;
+        }
+
+        let probe_error = format!(
+            "{:#}",
+            ensure_output_directory_writable(&folder).await.unwrap_err()
+        );
+        assert_eq!(probe_error, output_directory_not_writable_message(&folder));
+
+        let state = test_state();
+        let mut params = base_params(true, false);
+        params.output.output_directory = Some(folder.display().to_string());
+        let error = format!(
+            "{:#}",
+            start_session(state.clone(), params).await.unwrap_err()
+        );
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let leftovers = std::fs::read_dir(&folder).unwrap().count();
+        let _ = std::fs::remove_dir_all(&folder);
+
+        assert!(
+            error.contains(&format!(
+                "Videorc can't save to {}. Choose another recordings folder in Output.",
+                folder.display()
+            )),
+            "{error}"
+        );
+        assert!(!error.contains("Permission denied"), "{error}");
+        assert!(state.recording.lock().await.is_none());
+        let page = state.database.list_session_items_page(None, 20).unwrap();
+        assert!(
+            page.items.is_empty(),
+            "a refused start leaves no Library row"
+        );
+        assert_eq!(leftovers, 0, "no probe or recording file is left behind");
+    }
+
+    #[tokio::test]
+    async fn a_writable_recordings_folder_passes_and_keeps_no_probe_file() {
+        let folder = std::env::temp_dir().join(format!("videorc-rw-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        ensure_output_directory_writable(&folder).await.unwrap();
+        let leftovers = std::fs::read_dir(&folder).unwrap().count();
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(leftovers, 0);
     }
 
     #[test]
