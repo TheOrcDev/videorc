@@ -2277,19 +2277,19 @@ secureIpcHandle('app:self-bundle-ids', (event) => {
     : []
 })
 // Plan 210 S4: resolve native app icons once per session, for the main window.
+// The addon draws the icon on the main thread; `app.getFileIcon` kills main on
+// macOS 26 (AppKit traps on its thread-pool worker), so it is never called.
 const getAppIcons = createAppIconHandler({
   platform: process.platform,
-  pathForBundleId: (bundleId) => {
+  pngForBundleId: (bundleId, pixels) => {
     if (!nativePreviewInProcessModuleResolution.path) return null
     const binding = requireNativePreviewRealSurfaceModule(
       nativePreviewInProcessModuleResolution.path
     ) as {
-      appPathForBundleId?: (id: string) => string | null
+      appIconPngForBundleId?: (id: string, pixels: number) => Uint8Array | null
     }
-    return binding.appPathForBundleId?.(bundleId) ?? null
-  },
-  pngForPath: async (path) =>
-    (await app.getFileIcon(path, { size: 'large' })).toDataURL({ scaleFactor: 2 })
+    return binding.appIconPngForBundleId?.(bundleId, pixels) ?? null
+  }
 })
 secureIpcHandle('app:icons', (_event, bundleIds: unknown) => getAppIcons(bundleIds))
 
