@@ -12,9 +12,61 @@ import {
   readBudgetOverrides,
   recordLatencyRendererReady,
   recordLatencySceneReady,
+  recordLatencyTakeDurationMs,
   summarizeRecordCycles,
   timelinePhaseDeltas
 } from './record-latency-gate.mjs'
+import { evaluateRecordingWallDuration } from './recording-duration-gate.mjs'
+
+describe('record latency take coverage', () => {
+  it('rejects a truncated take hidden by a delayed Record acknowledgement', () => {
+    const expectedDurationMs = recordLatencyTakeDurationMs({
+      recordingAtMs: 1000,
+      stopClickAtMs: 6000,
+      recordingMs: 4000
+    })
+    assert.equal(expectedDurationMs, 5000)
+    assert.equal(
+      evaluateRecordingWallDuration({
+        expectedDurationMs,
+        actualDurationSeconds: 4.1,
+        minRatio: 0.98
+      }).length,
+      1
+    )
+    assert.deepEqual(
+      evaluateRecordingWallDuration({
+        expectedDurationMs,
+        actualDurationSeconds: 4.9,
+        minRatio: 0.98
+      }),
+      []
+    )
+  })
+
+  it('keeps the configured hold as a floor even if the observed interval is shorter', () => {
+    assert.equal(
+      recordLatencyTakeDurationMs({ recordingAtMs: 0, stopClickAtMs: 3000, recordingMs: 4000 }),
+      4000
+    )
+  })
+
+  it('refuses missing, non-finite or reversed timing evidence', () => {
+    const valid = { recordingAtMs: 1000, stopClickAtMs: 5000, recordingMs: 4000 }
+    for (const patch of [
+      { recordingAtMs: undefined },
+      { recordingAtMs: NaN },
+      { recordingAtMs: -1 },
+      { stopClickAtMs: Infinity },
+      { stopClickAtMs: 1000 },
+      { stopClickAtMs: 999 },
+      { recordingMs: 0 },
+      { recordingMs: NaN }
+    ]) {
+      assert.throws(() => recordLatencyTakeDurationMs({ ...valid, ...patch }), /coverage needs/)
+    }
+  })
+})
 
 describe('record latency scene fixture', () => {
   const pattern = { kind: 'test-pattern', visible: true }

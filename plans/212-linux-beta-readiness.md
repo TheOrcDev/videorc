@@ -1002,3 +1002,33 @@ focused tests, Clippy, a final normal-profile backend/bridge build and the
 app smokes sequentially. Wait receipt:
 `/tmp/videorc-beta-state-capability-wait.json`. Fresh Windows stability and
 full-suite results remain pending.
+
+### Recording interval coverage, 2026-10-30
+
+The latency smoke now checks 98% coverage of the measured interval from the
+observed Running event to the Stop request, with the configured hold as a
+minimum. Previously it checked only the configured hold, although recording
+continues while the renderer acknowledges Record. A delayed acknowledgement
+could therefore conceal a shortened artifact. Missing or reversed monotonic
+timestamps fail instead of reducing the coverage requirement. Per-cycle
+timing receipts are written before artifact analysis and retain a pending,
+passed or failed artifact status, so a quality failure no longer discards
+the start/stop phase evidence.
+
+All 40 focused latency-event, budget and duration tests pass, with zero
+skips; lint and formatting pass. The full Node suite passes all 2,920 tests
+with zero skips (`/tmp/videorc-beta-latency-coverage-full-node.log`).
+A retrospective calculation from the rounded
+timings in `/tmp/videorc-beta-replay-regression-Wc4WGx/latency-vaapi` finds
+no additional duration failures in those five old takes. It is only a lower
+bound from saved timings, not a fresh run or current-candidate acceptance.
+The actual latency failures remain: the saved warm-start timelines spend
+282–326 ms before admission completes and 165–171 ms at microphone warm-up;
+FFmpeg exit accounts for 408–535 ms of Stop. These phase observations locate
+work to investigate; they do not establish a fix or justify changing budgets.
+
+The prior owned build completed and refused stale-source runtime launches.
+Fresh Rust verification for `713a2a6d` is running under
+`/tmp/videorc-beta-state-capability-verification-OhMWpx/report.json`.
+The measured-interval smoke will run only after that queue releases the app
+and its final normal-profile backend/bridge hashes have been verified.

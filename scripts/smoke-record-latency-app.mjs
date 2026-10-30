@@ -47,6 +47,7 @@ import {
   readBudgetOverrides,
   recordLatencyRendererReady,
   recordLatencySceneReady,
+  recordLatencyTakeDurationMs,
   summarizeRecordCycles,
   timelinePhaseDeltas
 } from './lib/record-latency-gate.mjs'
@@ -274,7 +275,7 @@ async function waitForScreenOnlyRenderer(smoke) {
   fail(`screen-only layout did not commit: ${JSON.stringify(last)}`)
 }
 
-async function verifyArtifact({ mp4Path, cycleIndex }) {
+async function verifyArtifact({ mp4Path, cycleIndex, expectedDurationMs }) {
   if (!mp4Path || !existsSync(mp4Path)) fail(`artifact missing for cycle ${cycleIndex}: ${mp4Path}`)
   const [startupReport, qualityReport] = await Promise.all([
     analyzeStartupResolution(mp4Path, {
@@ -313,7 +314,7 @@ async function verifyArtifact({ mp4Path, cycleIndex }) {
     )
   }
   const durationFailures = evaluateRecordingWallDuration({
-    expectedDurationMs: recordingMs,
+    expectedDurationMs,
     actualDurationSeconds: durationSeconds,
     minRatio: 0.98
   })
@@ -370,8 +371,12 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
   // Diagnostics publish is asynchronous; give the last stop snapshot a moment.
   await sleep(300)
   const stopTimeline = timelineSnapshotFor(recorder, 'recordingStopTimeline', sessionId)
-  const artifact = await verifyArtifact({ mp4Path: finalization.mp4Path, cycleIndex })
   const compositor = compositorPathForSession(recorder, sessionId)
+  const expectedDurationMs = recordLatencyTakeDurationMs({
+    recordingAtMs: recordingRecord.at,
+    stopClickAtMs: stopClickAt,
+    recordingMs
+  })
 
   const cycle = {
     index: cycleIndex,
@@ -388,7 +393,9 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
     mp4Path: finalization.mp4Path,
     compositorPath: compositor.path,
     compositorPathDetail: compositor.detail,
-    artifact,
+    expectedDurationMs,
+    artifact: null,
+    artifactStatus: 'pending',
     backend: {
       startTimeline,
       stopTimeline,
@@ -396,6 +403,27 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
       stopPhases: stopTimeline ? timelinePhaseDeltas(stopTimeline.marks) : null
     }
   }
+  // Preserve the measured phases even when the analyzer refuses this take.
+  // Only a completed analyzer run may mark the artifact passed.
+  const cyclePath = join(outputDirectory, `cycle-${cycleIndex}-timing.json`)
+  const saveCycle = () =>
+    writeFileSync(cyclePath, `${JSON.stringify(cycle, null, 2)}\n`, { mode: 0o600 })
+  saveCycle()
+  try {
+    cycle.artifact = await verifyArtifact({
+      mp4Path: finalization.mp4Path,
+      cycleIndex,
+      expectedDurationMs
+    })
+    cycle.artifactStatus = 'passed'
+  } catch (error) {
+    cycle.artifactStatus = 'failed'
+    cycle.artifactError = error instanceof Error ? error.message : String(error)
+    throw error
+  } finally {
+    saveCycle()
+  }
+  const artifact = cycle.artifact
   log(
     `cycle ${cycleIndex + 1}/${cycles} (${cold ? 'cold' : 'warm'}) ` +
       `start click→starting ${formatMs(cycle.clickToStartingMs)} click→recording ${formatMs(cycle.clickToRecordingMs)} · ` +

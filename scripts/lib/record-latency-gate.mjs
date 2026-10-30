@@ -46,6 +46,26 @@ export const RECORD_LATENCY_BUDGETS = Object.freeze({
 // and stop share the `record` family.
 export const REMOTE_RECORD_INTENT_DEBOUNCE_MS = 150
 
+/**
+ * Recording is already running while the renderer acknowledges Record. Count
+ * that interval too: a slow acknowledgement must not hide a truncated take.
+ * Both timestamps come from the smoke's monotonic clock; the configured hold
+ * remains a floor if an early stop or invalid fixture shortens the interval.
+ */
+export function recordLatencyTakeDurationMs({ recordingAtMs, stopClickAtMs, recordingMs }) {
+  if (
+    !Number.isFinite(recordingAtMs) ||
+    recordingAtMs < 0 ||
+    !Number.isFinite(stopClickAtMs) ||
+    stopClickAtMs <= recordingAtMs ||
+    !Number.isFinite(recordingMs) ||
+    recordingMs <= 0
+  ) {
+    throw new Error('Recording coverage needs ordered monotonic timestamps and a positive hold.')
+  }
+  return Math.max(recordingMs, stopClickAtMs - recordingAtMs)
+}
+
 export const RECORD_LATENCY_METRICS = Object.freeze([
   'clickToStartingMs',
   'clickToRecordingMs',
