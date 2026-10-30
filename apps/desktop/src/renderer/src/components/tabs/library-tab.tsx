@@ -80,7 +80,9 @@ import {
   finalizationFailed,
   finalizingBadgeLabel,
   interruptedTakeBadge,
-  isFinalizingSession
+  isFinalizingSession,
+  mayBeStartFailed,
+  startFailedBadge
 } from '@/lib/session-finalization'
 import {
   recordingRoleLabel,
@@ -871,7 +873,19 @@ function LibraryRow({
   onDelete: () => void
 }): ReactElement {
   const { recording } = useStudioRecordingState()
-  const filePath = session.mp4Path ?? session.outputPath ?? null
+  const { sessionDetails, loadSessionDetails } = useStudioCore()
+  // A Record press the backend refused leaves a failed row whose file never
+  // existed; its logs say so. They load once, only for rows of that shape.
+  const startFailedCandidate = mayBeStartFailed(session)
+  const sessionLogs = sessionDetails[session.id]?.sessionLogs
+  const startFailedLogsRequested = useRef(false)
+  useEffect(() => {
+    if (!startFailedCandidate || sessionLogs || startFailedLogsRequested.current) return
+    startFailedLogsRequested.current = true
+    void loadSessionDetails(session.id)
+  }, [startFailedCandidate, sessionLogs, loadSessionDetails, session.id])
+  const startFailed = startFailedBadge(session, sessionLogs)
+  const filePath = startFailed ? null : (session.mp4Path ?? session.outputPath ?? null)
   const format = sessionFormatLabel(session)
   const title = libraryTitle(session)
   // A live row shows the capture's ticking elapsed time; the session row only
@@ -1056,6 +1070,13 @@ function LibraryRow({
             // Why the export failed, on hover and on focus (plan 174 S1.10, E-23).
             <InfoTooltip content={session.finalizationError} tabIndex={active ? 0 : -1}>
               <Badge variant="destructive">MP4 failed</Badge>
+            </InfoTooltip>
+          ) : startFailed ? (
+            // Record was refused before anything was written: no MKV to tag.
+            <InfoTooltip content={startFailed.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-session-start-failed="" variant="destructive">
+                {startFailed.label}
+              </Badge>
             </InfoTooltip>
           ) : recovered ? (
             <InfoTooltip content={recovered.detail} tabIndex={active ? 0 : -1}>

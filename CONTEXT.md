@@ -297,11 +297,10 @@ _Avoid_: Teleprompter, Preview window (as a title)
 **Chrome ground**:
 The still of Liquid Chrome under every Videorc window (plan 208): black
 metal with soft silver streaks in dark, and the same turned around,
-porcelain with graphite streaks, in light. It drifts slowly while the
-window is on screen and holds still during a recording or livestream, and
-the desktop never shows through it. The Preview has none, because it frames video.
+porcelain with graphite streaks, in light. It never moves, and the desktop
+never shows through it. The Preview has none, because it frames video.
 _Avoid_: wallpaper, background (a scene has one), live background (it never
-plays a look), glass
+moves), glass
 
 **Chrome controls**:
 The polished controls you touch: the chrome primary button (Go Live…,
@@ -353,10 +352,13 @@ _Avoid_: the Buddy, co-host, Orcle, pet, sidekick
 The switch that lets Buddy join a livestream.
 _Avoid_: Joins my streams, chat mode (for the on switch)
 
-**Chat posting**:
-What Buddy may post to your chats as you: Off, Suggest or Auto. It never
-turns Buddy on or off; Buddy Live does.
-_Avoid_: chat mode, auto chat
+**{name} talks**:
+How Buddy talks on its own, named after the streamer's Buddy ("Golmar
+talks", else "Buddy talks"): Off, Bubble (in its bubble on stream, never in
+chat) or Suggest (a card; one click posts it to chat as you). Buddy never
+posts in your chat on its own. It never turns Buddy on or off; Buddy Live
+does. Plan 211.
+_Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211)
 
 **Profile**:
 The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,

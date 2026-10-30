@@ -23,6 +23,7 @@ import {
   formatMoneyShort,
   statItems,
   supportersUnit,
+  withLiveFollows,
   type StatId,
   type StatItemModel
 } from './stream-manager-stats'
@@ -657,5 +658,100 @@ describe('stats bar items (plan 057)', () => {
       unit: 'peak',
       description: 'Peak 30 viewers, average 20'
     })
+  })
+})
+
+describe('live followers between audience reads', () => {
+  // Twitch read 100 followers at 10 s; X is shown but not counted live.
+  function polled(total: number, readAt: number): LiveDashboardState {
+    return reduceDashboardAudience(
+      live(),
+      {
+        sessionId: 's',
+        updatedAt: at(readAt),
+        platforms: [
+          {
+            platform: 'twitch',
+            metric: 'followers',
+            capability: 'available',
+            total,
+            baseline: 100,
+            delta: total - 100,
+            at: at(readAt)
+          }
+        ]
+      },
+      at(readAt)
+    )
+  }
+  const follow = (id: string, seconds: number, platform: StreamPlatform = 'twitch') =>
+    message({
+      id,
+      platform,
+      receivedAt: at(seconds),
+      eventType: 'follow',
+      messageText: '',
+      details: { kind: 'follow' }
+    })
+  const followers = (dashboard: LiveDashboardState, messages: LiveChatMessage[]) =>
+    find(
+      statItems({
+        dashboard,
+        viewerSample: null,
+        messages,
+        providers: [provider('twitch')],
+        nowMs: T0 + 60_000
+      }),
+      'followers'
+    )
+
+  it('counts a follow the moment it reaches Activity, before the next read', () => {
+    expect(followers(polled(100, 10), [])).toMatchObject({ value: '100' })
+    expect(followers(polled(100, 10), [follow('f1', 20)])).toMatchObject({
+      value: '101',
+      delta: '+1',
+      description: '101 followers, +1 this stream'
+    })
+    expect(followers(polled(100, 10), [follow('f1', 20), follow('f2', 25)])?.value).toBe('102')
+  })
+
+  it('counts one follow once, however often its message arrives', () => {
+    const repeated = [follow('f1', 20), follow('f1', 20), follow('f1', 21)]
+    expect(followers(polled(100, 10), repeated)).toMatchObject({ value: '101', delta: '+1' })
+  })
+
+  it('lets the next read win: a follow it already includes is not added again', () => {
+    const messages = [follow('f1', 20), follow('f2', 40)]
+    // The read at 30 s includes f1; f2 arrived after it.
+    expect(followers(polled(101, 30), messages)).toMatchObject({ value: '102', delta: '+2' })
+    // The read at 50 s includes both and is the count.
+    expect(followers(polled(102, 50), messages)).toMatchObject({ value: '102', delta: '+2' })
+    // A read that disagrees still wins over the events it postdates.
+    expect(followers(polled(100, 50), messages)).toMatchObject({ value: '100' })
+  })
+
+  it('leaves the count alone without a total to add to', () => {
+    const kick = reduceDashboardAudience(
+      live(),
+      {
+        sessionId: 's',
+        updatedAt: at(10),
+        platforms: [
+          { platform: 'kick', metric: 'followers', capability: 'delta-only', delta: 1, at: at(10) },
+          { platform: 'x', metric: 'followers', capability: 'pending' }
+        ]
+      },
+      at(10)
+    )
+    const messages = [follow('k1', 20, 'kick'), follow('x1', 20, 'x')]
+    expect(withLiveFollows(kick.audience, messages)).toBe(kick.audience)
+    // A deleted follow and a chat message are not follows.
+    const twitch = polled(100, 10)
+    expect(
+      withLiveFollows(twitch.audience, [
+        { ...follow('f1', 20), isDeleted: true },
+        message({ receivedAt: at(20) })
+      ])
+    ).toBe(twitch.audience)
   })
 })

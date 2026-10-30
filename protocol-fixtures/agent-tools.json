@@ -1630,7 +1630,7 @@
     {
       "name": "buddy_say",
       "title": "Buddy says a line",
-      "description": "Buddy says a line in its speech bubble on the picture, like the Stream Manager's Say box, and posts it in chat too when its chat mode is Auto. Viewers see it. Refused when Buddy is off the picture and its chat mode doesn't post, since nobody would see it.",
+      "description": "Buddy says a line in its speech bubble on the picture, like the Stream Manager's Say box, and never in chat. Viewers see it on stream. Refused while Buddy is off the picture, since nobody would see it.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1654,16 +1654,9 @@
         "properties": {
           "bubble": {
             "type": "boolean"
-          },
-          "chat": {
-            "type": "boolean"
-          },
-          "chatMode": {
-            "type": "string",
-            "enum": ["off", "suggest", "auto"]
           }
         },
-        "required": ["bubble", "chat", "chatMode"],
+        "required": ["bubble"],
         "additionalProperties": false
       },
       "annotations": {
@@ -1681,7 +1674,7 @@
     {
       "name": "set_buddy",
       "title": "Set up Buddy",
-      "description": "Turn Buddy Live on or off, choose how Buddy posts in chat (off: never, suggest: a card the streamer approves, auto: by itself), and put Buddy on the stream or take it off, like the Stream Manager's Buddy controls. Turning Buddy on needs Premium and the streamer's Cloud AI consent.",
+      "description": "Turn Buddy Live on or off, choose how Buddy talks (off: never on its own, bubble: in its speech bubble on the picture, never in chat, suggest: a card the streamer clicks to post in chat), and put Buddy on the stream or take it off, like the Stream Manager's Buddy controls. Turning Buddy Live on needs Premium and the streamer's Cloud AI consent; talk needs neither.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1689,10 +1682,14 @@
             "type": "boolean",
             "description": "Buddy Live on or off."
           },
+          "talk": {
+            "type": "string",
+            "description": "How Buddy talks on its own: off, bubble (the default) or suggest. Buddy never posts in chat on its own.",
+            "enum": ["off", "bubble", "suggest"]
+          },
           "chatMode": {
             "type": "string",
-            "description": "How Buddy posts in chat.",
-            "enum": ["off", "suggest", "auto"]
+            "description": "The old name of talk. Always refused: Buddy never posts in chat on its own. Use talk."
           },
           "onStream": {
             "type": "boolean",
@@ -1707,15 +1704,15 @@
           "on": {
             "type": "boolean"
           },
-          "chatMode": {
+          "talk": {
             "type": "string",
-            "enum": ["off", "suggest", "auto"]
+            "enum": ["off", "bubble", "suggest"]
           },
           "onStream": {
             "type": "boolean"
           }
         },
-        "required": ["on", "chatMode", "onStream"],
+        "required": ["on", "talk", "onStream"],
         "additionalProperties": false
       },
       "annotations": {

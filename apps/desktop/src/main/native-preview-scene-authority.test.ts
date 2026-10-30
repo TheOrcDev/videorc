@@ -97,6 +97,37 @@ describe('native preview compositor scene authority', () => {
     ).toBe(true)
   })
 
+  it('never treats Buddy appearing, moving or leaving at the same revision as a conflicting scene (plan 205)', () => {
+    const committed = scene(9, 'screen-camera')
+    const buddyLayer = {
+      id: 'overlay:buddy',
+      name: 'Buddy',
+      kind: 'buddy' as const,
+      transform: transform(),
+      visible: true,
+      frameUrl: 'http://127.0.0.1:1/preview/buddy/latest.bmp?canvasWidth=3840&canvasHeight=2160',
+      fit: 'fill' as const,
+      mirror: false
+    }
+    const withBuddy = { ...committed, sources: [...committed.sources, buddyLayer] }
+    const moved = {
+      ...committed,
+      sources: [...committed.sources, { ...buddyLayer, transform: { ...transform(), x: 0.7 } }]
+    }
+    const authority = { committedRunId: 'run-a', candidateRunId: 'run-a' }
+
+    expect(compositorSceneConflictsWithCommitted(committed, withBuddy, authority)).toBe(false)
+    expect(compositorSceneConflictsWithCommitted(withBuddy, moved, authority)).toBe(false)
+    expect(compositorSceneConflictsWithCommitted(withBuddy, committed, authority)).toBe(false)
+    expect(
+      compositorSceneConflictsWithCommitted(
+        withBuddy,
+        { ...scene(9, 'side-by-side'), sources: [buddyLayer] },
+        authority
+      )
+    ).toBe(true)
+  })
+
   it('requires an attached in-process present at or beyond the committed revision', () => {
     const status = {
       state: 'live',

@@ -3414,6 +3414,45 @@ pub fn resolve_output_directory(configured: Option<&str>) -> Result<PathBuf> {
     Ok(expanded)
 }
 
+/// Prove the recordings folder takes a new file: create a uniquely named
+/// hidden probe in it and remove it again. Permissions, read-only mounts and
+/// ACLs all show up here on every platform; nothing else is touched. The OS
+/// error goes to the log, the user gets the Output page's plain copy.
+async fn ensure_output_directory_writable(output_dir: &Path) -> Result<()> {
+    let probe = output_dir.join(format!(".videorc-write-check-{}", Uuid::new_v4()));
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .await;
+    match created {
+        Ok(file) => {
+            drop(file);
+            if let Err(error) = fs::remove_file(&probe).await {
+                tracing::warn!(
+                    path = %probe.display(),
+                    "Could not remove the recordings folder write check: {error}"
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(
+                folder = %output_dir.display(),
+                "Recordings folder is not writable: {error}"
+            );
+            bail!(output_directory_not_writable_message(output_dir))
+        }
+    }
+}
+
+fn output_directory_not_writable_message(output_dir: &Path) -> String {
+    format!(
+        "Videorc can't save to {}. Choose another recordings folder in Output.",
+        output_dir.display()
+    )
+}
+
 pub fn default_recordings_dir() -> PathBuf {
     // Harness isolation (F-016): smokes must never write into the user's real
     // media library — Electron main forces this env for isolated backend
@@ -3900,6 +3939,10 @@ async fn start_session_with_timeline(
         fs::create_dir_all(&output_dir)
             .await
             .with_context(|| format!("Could not create {}", output_dir.display()))?;
+        // Retest 154 A4: a read-only folder used to start the session, then
+        // FFmpeg failed to open its output and the Library kept a failed row.
+        // Refuse here, before the session row and any FFmpeg process exist.
+        ensure_output_directory_writable(&output_dir).await?;
     }
 
     let started_at = Utc::now();
@@ -4064,27 +4107,16 @@ async fn start_session_with_timeline(
         None,
     );
 
-    if params.output.record_enabled && !replay_only {
-        // Advisory only: `df` and the health-event write stay off the start path.
-        let disk_state = state.clone();
-        let disk_session_id = session_id.clone();
-        let disk_output_dir = output_dir.clone();
-        // Plan 200 C5: the notice counts minutes, from the bitrate of every
-        // file this take writes.
-        let disk_video_kbps = params.output.video.bitrate_kbps;
-        let disk_separate_files = crate::source_iso::armed_plan(&params.output)
-            .map_or(0, |plan| plan.iso_roles().count());
-        tokio::spawn(async move {
-            let _ = emit_disk_space_health_event(
-                &disk_state,
-                &disk_session_id,
-                &disk_output_dir,
-                disk_video_kbps,
-                disk_separate_files,
-            )
-            .await;
-        });
-    }
+    // Plan 200 C5: the notice counts minutes, from the bitrate of every file
+    // this take writes. Sent once the Starting status is out (below).
+    let disk_space_check = (params.output.record_enabled && !replay_only).then(|| {
+        (
+            output_dir.clone(),
+            params.output.video.bitrate_kbps,
+            crate::source_iso::armed_plan(&params.output)
+                .map_or(0, |plan| plan.iso_roles().count()),
+        )
+    });
 
     let recording_preview_generation = stop_idle_live_preview_for_recording(state.clone()).await;
     timeline.mark(RecordingStartPhase::PreviewStop);
@@ -5789,6 +5821,23 @@ async fn start_session_with_timeline(
     );
 
     timeline.mark(RecordingStartPhase::StartingPublished);
+    if let Some((disk_output_dir, disk_video_kbps, disk_separate_files)) = disk_space_check {
+        // Advisory only: `df` and the health-event write stay off the start
+        // path. Retest 154 A5: sent before the Starting status, the event
+        // named a session the renderer did not know yet and never toasted.
+        let disk_state = state.clone();
+        let disk_session_id = session_id.clone();
+        tokio::spawn(async move {
+            let _ = emit_disk_space_health_event(
+                &disk_state,
+                &disk_session_id,
+                &disk_output_dir,
+                disk_video_kbps,
+                disk_separate_files,
+            )
+            .await;
+        });
+    }
     let mut command = ffmpeg_command(&ffmpeg_path);
     command
         .args(&args)
@@ -8002,8 +8051,9 @@ impl Mp4ExportProbe {
             .is_none_or(|codec| codec == "h264")
     }
 
-    /// Plan 200 C2: AAC already (record+stream takes) is copied, never
-    /// encoded a second time.
+    /// Plan 200 C2: AAC already (record+stream takes, and record-only takes
+    /// that don't keep the lossless MKV) is copied, never encoded a second
+    /// time.
     fn audio_is_aac(&self) -> bool {
         self.audio_codec.as_deref() == Some("aac")
     }
@@ -8650,17 +8700,19 @@ fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> V
     args.extend(["-c:v".to_string(), "copy".to_string()]);
     if options.copy_audio {
         // Plan 200 C2: record+stream takes already hold AAC; a second encode
-        // only loses quality.
+        // only loses quality. Record-only takes hold AAC too unless they keep
+        // the lossless MKV, so finalize is a copy, not a whole-track encode.
         args.extend(["-c:a".to_string(), "copy".to_string()]);
     } else {
         // 256k stereo AAC: transparent for voice+music mixes; the capture
         // MKV's PCM is the lossless source when the keep-original setting is
-        // on (recording-quality plan Q4).
+        // on (recording-quality plan Q4). Its bitrate is the record-only
+        // take's (`RECORD_AAC_BITRATE`).
         args.extend([
             "-c:a".to_string(),
             "aac".to_string(),
             "-b:a".to_string(),
-            "256k".to_string(),
+            RECORD_AAC_BITRATE.to_string(),
         ]);
     }
     args.extend(["-movflags".to_string(), "+faststart".to_string()]);
@@ -10887,6 +10939,7 @@ async fn monitor_session(
                 native_audio_stats,
                 records_file: active.output_path.is_some(),
                 replay_only: active.replay_only,
+                ffmpeg_evidence: active.ffmpeg_progress.evidence.clone(),
             }
         });
     let retired_active = monitored_recording
@@ -11185,7 +11238,7 @@ async fn monitor_session(
         .await;
     state.soundboard.session_ended(&state, &session_id);
 
-    if let Some(native_audio_stats) = monitored_recording.native_audio_stats {
+    if let Some(native_audio_stats) = monitored_recording.native_audio_stats.as_ref() {
         let diagnostic_stats = {
             let mut diagnostics = state.diagnostics.lock().await;
             let next = apply_audio_stats(
@@ -11772,13 +11825,20 @@ async fn monitor_session(
             // Only the RECORDING bridge condemns the session here — a stream
             // failure was already reported above and, with a clean exit,
             // finalizes in the arm before this one.
-            let (failed_stage, health_code, mut message) = classify_failed_ffmpeg_exit(
-                monitored_recording.stop_intent_preceded_exit,
-                monitored_recording.stop_escalated,
-                recording_bridge_terminal_failure.as_deref(),
+            let (failed_stage, health_code, mut message) = ffmpeg_disk_full_failure(
+                monitored_recording.ffmpeg_fatal_category(),
                 &exit_status.to_string(),
                 monitored_recording.records_file,
-            );
+            )
+            .unwrap_or_else(|| {
+                classify_failed_ffmpeg_exit(
+                    monitored_recording.stop_intent_preceded_exit,
+                    monitored_recording.stop_escalated,
+                    recording_bridge_terminal_failure.as_deref(),
+                    &exit_status.to_string(),
+                    monitored_recording.records_file,
+                )
+            });
             monitored_recording
                 .pipeline
                 .mark_failed(failed_stage, &message);
@@ -13697,6 +13757,19 @@ struct MonitoredRecording {
     records_file: bool,
     /// Plan 181: a buffer-only session; its terminal status keeps the mark.
     replay_only: bool,
+    /// FFmpeg's stderr evidence, read at terminal time for the first fatal
+    /// category (retest 154 A5: a full disk said only "exit status: 228").
+    ffmpeg_evidence: Arc<StdMutex<FfmpegEvidenceSnapshot>>,
+}
+
+impl MonitoredRecording {
+    fn ffmpeg_fatal_category(&self) -> Option<&'static str> {
+        self.ffmpeg_evidence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tail
+            .first_fatal_category
+    }
 }
 
 fn should_finalize_recording_session(
@@ -13781,6 +13854,27 @@ fn classify_failed_ffmpeg_exit(
         "ffmpeg-exit",
         format!("FFmpeg exited with {exit_status}"),
     )
+}
+
+/// Retest 154 A5: a full recordings folder ends FFmpeg with "No space left on
+/// device" (Windows: "There is not enough space on the disk"). That cause
+/// outranks a forced stop or a broken bridge pipe, which are its consequences.
+/// The raw stderr stays in the persisted `ffmpeg-stderr-tail` log.
+fn ffmpeg_disk_full_failure(
+    fatal_category: Option<&str>,
+    exit_status: &str,
+    records_file: bool,
+) -> Option<(RecordingPipelineStage, &'static str, String)> {
+    if !records_file || fatal_category != Some(FFMPEG_DISK_FULL_CATEGORY) {
+        return None;
+    }
+    Some((
+        RecordingPipelineStage::Muxer,
+        "recording-disk-full",
+        format!(
+            "The recordings folder ran out of space, so recording stopped. The recording up to that point is kept. Free some space before you record again. (FFmpeg exit: {exit_status})"
+        ),
+    ))
 }
 
 fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
@@ -16501,9 +16595,10 @@ async fn prepare_native_audio_source(
 /// back-pressure the shared encoder and stall the other platforms (or the local
 /// recording) — the classic cause of "one platform makes them all lag." On sustained
 /// overflow the lagging slave drops packets instead of blocking everyone; the queue
-/// is large enough that the disk-backed recording leg never drops in practice. We do
-/// not enable fifo auto-recovery, so a leg that fails to open still surfaces the
-/// `Slave muxer #N failed` line that drives the per-target failure status (M5).
+/// is large enough that the disk-backed recording leg never drops in practice. These
+/// tee-wide options carry no auto-recovery, so the recording leg that fails still
+/// surfaces the `Slave muxer #N failed` line (M5); RTMP legs override them with their
+/// own recovering `fifo_options` (`rtmp_tee_leg`).
 fn tee_output_args(spec: String) -> Vec<String> {
     vec![
         "-f".to_string(),
@@ -20368,7 +20463,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
             &mut args,
             &input_layout,
             &params.audio,
-            !stream_targets.is_empty(),
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
             true,
         );
     }
@@ -20385,7 +20480,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &mut args,
                 &input_layout,
                 &params.audio,
-                true,
+                OutputAudioCodec::StreamAac,
                 video_output,
                 params.output.video.fps,
                 path,
@@ -20597,7 +20692,13 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
         ) {
             append_media_foundation_h264_copy_metadata_args(&mut args, params.output.video.fps);
         }
-        append_audio_encoding_with_video_clock(&mut args, &input_layout, &params.audio, true, true);
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            OutputAudioCodec::StreamAac,
+            true,
+        );
         args.push(ffmpeg_file_path(output_path));
     }
     // Plan 181: the ring copies the recording leg's encode (the clean
@@ -20913,19 +21014,12 @@ fn append_bridge_copy_file_output(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming_audio: bool,
+    audio_codec: OutputAudioCodec,
     video_output: EncoderBridgeVideoOutput,
     fps: u32,
     path: &Path,
 ) {
-    append_bridge_copy_output_args(
-        args,
-        input_layout,
-        audio,
-        streaming_audio,
-        video_output,
-        fps,
-    );
+    append_bridge_copy_output_args(args, input_layout, audio, audio_codec, video_output, fps);
     args.push(ffmpeg_file_path(path));
 }
 
@@ -20945,7 +21039,14 @@ fn append_bridge_copy_flv_output(
     } else {
         audio
     };
-    append_bridge_copy_output_args(args, input_layout, audio, true, video_output, fps);
+    append_bridge_copy_output_args(
+        args,
+        input_layout,
+        audio,
+        OutputAudioCodec::StreamAac,
+        video_output,
+        fps,
+    );
     // FLV's H264 codec tag, explicitly: the mpegts input carries tag [27]
     // (stream_type) through -c:v copy, wrapper muxers clone it verbatim into
     // the inner flv muxer, and "-tag:v 0" is a no-op for copy (0 = keep).
@@ -20971,28 +21072,32 @@ fn append_bridge_copy_flv_output(
         "fifo".to_string(),
         "-fifo_format".to_string(),
         "flv".to_string(),
-        "-queue_size".to_string(),
-        "512".to_string(),
-        "-drop_pkts_on_overflow".to_string(),
-        "1".to_string(),
-        "-attempt_recovery".to_string(),
-        "1".to_string(),
-        "-recover_any_error".to_string(),
-        "1".to_string(),
-        "-restart_with_keyframe".to_string(),
-        "1".to_string(),
-        "-recovery_wait_time".to_string(),
-        "2".to_string(),
-        target.url.clone(),
     ]);
+    for (key, value) in RTMP_LEG_FIFO_RECOVERY_OPTIONS {
+        args.extend([format!("-{key}"), value.to_string()]);
+    }
+    args.push(target.url.clone());
 }
+
+/// The fifo-muxer options every RTMP leg runs with, whether it is its own
+/// output (bridge copy) or a tee slave (`rtmp_tee_leg`): drop on overflow,
+/// and reconnect after ANY error on a keyframe, every two seconds, without a
+/// retry limit (plan 161).
+const RTMP_LEG_FIFO_RECOVERY_OPTIONS: [(&str, &str); 6] = [
+    ("queue_size", "512"),
+    ("drop_pkts_on_overflow", "1"),
+    ("attempt_recovery", "1"),
+    ("recover_any_error", "1"),
+    ("restart_with_keyframe", "1"),
+    ("recovery_wait_time", "2"),
+];
 
 /// `fps` is the encoder rate of the FIFO that `input_layout` maps.
 fn append_bridge_copy_output_args(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming_audio: bool,
+    audio_codec: OutputAudioCodec,
     video_output: EncoderBridgeVideoOutput,
     fps: u32,
 ) {
@@ -21008,7 +21113,7 @@ fn append_bridge_copy_output_args(
     ) {
         append_media_foundation_h264_copy_metadata_args(args, fps);
     }
-    append_audio_encoding_with_video_clock(args, input_layout, audio, streaming_audio, true);
+    append_audio_encoding_with_video_clock(args, input_layout, audio, audio_codec, true);
 }
 
 /// Output metadata for a stream copy of the Media Foundation MPEG-TS FIFO.
@@ -21069,9 +21174,22 @@ fn append_bridge_audio_input_args(
 /// Twitch endpoint used to wedge the whole stop path until Force stop
 /// (owner report, 2026-08-19). Steady-state overflow is already handled by
 /// the fifo wrapper's drop_pkts_on_overflow; this bounds the CLOSE.
+///
+/// The leg's own `fifo_options` replace the tee-wide ones with the plan 161
+/// recovery set: an ingest that drops (Broken pipe) or restarts used to
+/// close the slave for the rest of the session; now the fifo reconnects it
+/// and logs `[fifo @ …] Error opening <url>` / `Recovery successful`, which
+/// `StreamLegMonitor` attributes by URL (retest 154 B2). The option string
+/// is unescaped twice (tee slave split, then slave option parse) before the
+/// fifo parses it, so each `:` separator is written `\\\:`.
 fn rtmp_tee_leg(url: &str) -> String {
+    let fifo_options = RTMP_LEG_FIFO_RECOVERY_OPTIONS
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\\\\\\:");
     format!(
-        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}]{}",
+        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}:fifo_options={fifo_options}]{}",
         escape_tee_target(url)
     )
 }
@@ -21207,7 +21325,7 @@ fn ffmpeg_args_with_encoder_and_replay(
             &mut args,
             &input_layout,
             &params.audio,
-            !stream_targets.is_empty(),
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
             false,
         );
     }
@@ -21702,11 +21820,59 @@ fn append_audio_output_args(args: &mut Vec<String>, input_layout: &InputLayout) 
     }
 }
 
+/// The audio codec of a session's primary output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputAudioCodec {
+    /// A stream, and the MKV a record+stream take tees from it: AAC 160k.
+    StreamAac,
+    /// A record-only take: AAC at the bitrate the MP4 export used to encode,
+    /// so the export copies it. Encoding the whole PCM track at Stop took
+    /// 11 min 53 s for a 75-minute take on a slow laptop (retest 152).
+    RecordAac,
+    /// A record-only take that keeps its capture MKV ("Keep original
+    /// recording": lossless audio, as promised) or arms separate source
+    /// recordings (their PCM legs align with the Combined file's PCM).
+    /// Encoded to AAC at export.
+    RecordPcm,
+}
+
+/// Record-only AAC bitrate: what the MP4 export encodes PCM at.
+const RECORD_AAC_BITRATE: &str = "256k";
+
+impl OutputAudioCodec {
+    fn for_session(params: &StartSessionParams, streaming: bool) -> Self {
+        let separate_sources = params
+            .output
+            .separate_source_recordings
+            .as_ref()
+            .is_some_and(|iso| iso.enabled);
+        if streaming {
+            Self::StreamAac
+        } else if params.output.keep_original_mkv || separate_sources {
+            Self::RecordPcm
+        } else {
+            Self::RecordAac
+        }
+    }
+
+    fn is_streaming(self) -> bool {
+        self == Self::StreamAac
+    }
+
+    fn encoder_args(self) -> &'static [&'static str] {
+        match self {
+            Self::StreamAac => &["-c:a", "aac", "-b:a", "160k"],
+            Self::RecordAac => &["-c:a", "aac", "-b:a", RECORD_AAC_BITRATE],
+            Self::RecordPcm => &["-c:a", "pcm_s16le"],
+        }
+    }
+}
+
 fn append_audio_encoding_args(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming: bool,
+    codec: OutputAudioCodec,
 ) {
     if input_layout.audio_inputs.is_empty() {
         return;
@@ -21720,13 +21886,8 @@ fn append_audio_encoding_args(
         "48000".to_string(),
         "-ac".to_string(),
         audio_output_channels(input_layout).to_string(),
-        "-c:a".to_string(),
-        if streaming { "aac" } else { "pcm_s16le" }.to_string(),
     ]);
-
-    if streaming {
-        args.extend(["-b:a".to_string(), "160k".to_string()]);
-    }
+    args.extend(codec.encoder_args().iter().map(|arg| arg.to_string()));
 }
 
 /// Applies audio encoding and its duration contract as one inseparable output
@@ -21740,17 +21901,17 @@ fn append_audio_encoding_with_video_clock(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming: bool,
+    codec: OutputAudioCodec,
     preserve_bridge_shortest: bool,
 ) {
-    append_audio_encoding_args(args, input_layout, audio, streaming);
+    append_audio_encoding_args(args, input_layout, audio, codec);
     let microphone_is_padded = input_layout
         .audio_inputs
         .iter()
         .any(|input| input.track.source == AudioTrackSource::Microphone);
     if preserve_bridge_shortest || microphone_is_padded {
         args.push("-shortest".to_string());
-        if !streaming
+        if !codec.is_streaming()
             && (input_layout.microphone_is_linux_pulse
                 || (microphone_is_padded && !preserve_bridge_shortest))
         {
@@ -21760,7 +21921,8 @@ fn append_audio_encoding_with_video_clock(
             // window can retain an entire short recording. Bound these dense
             // live A/V queues to 250 ms so the overflow heartbeat advances the
             // lagging stream, retaining PCM, apad and video-owned EOF. Encoded
-            // bridges and AAC outputs keep their existing synchronization.
+            // bridges and stream outputs keep their existing synchronization;
+            // a record-only take keeps the bound whether it writes PCM or AAC.
             args.extend(["-shortest_buf_duration".to_string(), "0.25".to_string()]);
         }
     }
@@ -22298,6 +22460,8 @@ fn parse_ffmpeg_progress_media_seconds(line: &str) -> Option<f64> {
         .then(|| seconds.clamp(0.0, MAX_CAPTURE_MEDIA_CLOCK_SECONDS))
 }
 
+const FFMPEG_DISK_FULL_CATEGORY: &str = "disk-full";
+
 fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
     let line = line.to_ascii_lowercase();
     if line.contains("could not find audio only device")
@@ -22317,8 +22481,12 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
         || line.contains("could not open encoder")
     {
         Some("encoder-open-failed")
-    } else if line.contains("no space left on device") {
-        Some("disk-full")
+    } else if line.contains("no space left on device")
+        // Windows ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL.
+        || line.contains("not enough space on the disk")
+        || line.contains("disk is full")
+    {
+        Some(FFMPEG_DISK_FULL_CATEGORY)
     } else if line.contains("could not write header") {
         Some("output-open-failed")
     } else if line.contains("conversion failed") {
@@ -34511,8 +34679,12 @@ mod tests {
 
         assert!(args.contains(&"tee".to_string()));
         let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
-        assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-test.mkv"));
+        assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-test.mkv|"));
         assert!(tee.contains("onfail=ignore"));
+        // Every RTMP leg reconnects on its own; the recording leg keeps the
+        // tee-wide options (no recovery, onfail=abort).
+        assert_eq!(tee.matches(":fifo_options=").count(), 3, "{tee}");
+        assert_eq!(tee.matches("attempt_recovery=1").count(), 3, "{tee}");
         assert_eq!(
             tee.matches("[f=flv").count(),
             3,
@@ -34950,7 +35122,7 @@ mod tests {
                     &mut args,
                     &layout,
                     &params.audio,
-                    streaming,
+                    OutputAudioCodec::for_session(&params, streaming),
                     true,
                 );
 
@@ -34961,7 +35133,7 @@ mod tests {
                         .parse()
                         .unwrap();
                     assert!(seconds > 0.0 && seconds < FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_secs_f64());
-                    assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+                    assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
                     assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
                     let bound_index = args
                         .iter()
@@ -34981,26 +35153,116 @@ mod tests {
     }
 
     #[test]
+    fn record_only_takes_encode_aac_unless_the_lossless_mkv_is_kept() {
+        let record = base_params(true, false);
+        assert_eq!(
+            OutputAudioCodec::for_session(&record, false),
+            OutputAudioCodec::RecordAac
+        );
+        let mut keep = base_params(true, false);
+        keep.output.keep_original_mkv = true;
+        assert_eq!(
+            OutputAudioCodec::for_session(&keep, false),
+            OutputAudioCodec::RecordPcm
+        );
+        let mut iso = base_params(true, false);
+        iso.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            });
+        assert_eq!(
+            OutputAudioCodec::for_session(&iso, false),
+            OutputAudioCodec::RecordPcm
+        );
+        iso.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: false,
+                keep_combined: true,
+            });
+        assert_eq!(
+            OutputAudioCodec::for_session(&iso, false),
+            OutputAudioCodec::RecordAac
+        );
+        for params in [&record, &keep] {
+            assert_eq!(
+                OutputAudioCodec::for_session(params, true),
+                OutputAudioCodec::StreamAac
+            );
+        }
+    }
+
+    #[test]
+    fn record_only_aac_is_what_the_mp4_export_copies() {
+        let layout = microphone_input_layout(false);
+        let mut args = Vec::new();
+        append_audio_encoding_args(
+            &mut args,
+            &layout,
+            &AudioSettings::default(),
+            OutputAudioCodec::RecordAac,
+        );
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        // The bitrate the export used to encode the PCM track at.
+        assert_eq!(arg_value(&args, "-b:a"), Some(RECORD_AAC_BITRATE));
+        assert_eq!(arg_value(&args, "-ar"), Some("48000"));
+        // ...so the export is a copy, and its chapters/faststart are unchanged.
+        let probe = Mp4ExportProbe {
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            ..Mp4ExportProbe::default()
+        };
+        let export = mp4_export_args(
+            Path::new("/tmp/take.mkv"),
+            Path::new("/tmp/take.mp4"),
+            &Mp4ExportOptions::plan(&probe, None),
+        );
+        assert_eq!(arg_value(&export, "-c:a"), Some("copy"));
+        assert_eq!(export.iter().filter(|arg| *arg == "-c:a").count(), 1);
+        assert_eq!(arg_value(&export, "-b:a"), None);
+        assert_eq!(arg_value(&export, "-movflags"), Some("+faststart"));
+
+        let mut pcm = Vec::new();
+        append_audio_encoding_args(
+            &mut pcm,
+            &layout,
+            &AudioSettings::default(),
+            OutputAudioCodec::RecordPcm,
+        );
+        assert_eq!(arg_value(&pcm, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&pcm, "-b:a"), None);
+    }
+
+    #[test]
     fn legacy_pcm_sync_bound_preserves_aac_and_bridge_policies() {
         let layout = microphone_input_layout(false);
-        for streaming in [false, true] {
+        for codec in [
+            OutputAudioCodec::RecordPcm,
+            OutputAudioCodec::RecordAac,
+            OutputAudioCodec::StreamAac,
+        ] {
+            let streaming = codec.is_streaming();
             for bridge in [false, true] {
                 let mut args = Vec::new();
                 append_audio_encoding_with_video_clock(
                     &mut args,
                     &layout,
                     &AudioSettings::default(),
-                    streaming,
+                    codec,
                     bridge,
                 );
                 assert_eq!(
                     arg_value(&args, "-shortest_buf_duration"),
                     (!streaming && !bridge).then_some("0.25"),
-                    "streaming={streaming}, bridge={bridge}: {args:?}"
+                    "codec={codec:?}, bridge={bridge}: {args:?}"
                 );
                 assert_eq!(
                     arg_value(&args, "-c:a"),
-                    Some(if streaming { "aac" } else { "pcm_s16le" })
+                    Some(if codec == OutputAudioCodec::RecordPcm {
+                        "pcm_s16le"
+                    } else {
+                        "aac"
+                    })
                 );
                 assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
                 assert!(args.iter().any(|arg| arg == "-shortest"));
@@ -35527,7 +35789,7 @@ mod tests {
         }
 
         #[test]
-        fn record_only_bridge_keeps_pcm_and_adds_the_ring() {
+        fn record_only_bridge_keeps_its_audio_and_adds_the_ring() {
             let mut params = base_params(true, false);
             params.replay = Some(ReplayParams {
                 seconds: 30,
@@ -35543,9 +35805,9 @@ mod tests {
                 Some(&ring()),
             )
             .unwrap();
-            // The file output is untouched: PCM audio, then the MKV path.
+            // The file output is untouched: its own AAC, then the MKV path.
             assert_eq!(all_values(&args, "-c:v"), vec!["copy", "copy"]);
-            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
             let mkv = position(&args, "/tmp/videorc-replay-record.mkv");
             assert!(
                 position(&args, "segment") > mkv,
@@ -35625,7 +35887,7 @@ mod tests {
                 "{maps:?}"
             );
             assert_eq!(all_values(&args, "-c:v").len(), 2, "two encodes: {args:?}");
-            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
             assert_ring_output(&args);
         }
 
@@ -35736,7 +35998,7 @@ mod tests {
             .unwrap();
             let filter = arg_value(&args, "-filter_complex").unwrap();
             assert!(filter.contains("split=2[v_main][v_replay]"), "{filter}");
-            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
             assert_ring_output(&args);
         }
 
@@ -36003,7 +36265,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "[preview]"));
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_current_h264_encoder_args(&args, false);
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
 
         let filter = arg_value(&args, "-filter_complex").unwrap();
@@ -36114,7 +36376,7 @@ mod tests {
             "-video_size"
         ));
         assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
@@ -36185,7 +36447,7 @@ mod tests {
             "-pix_fmt"
         ));
         assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
@@ -36852,8 +37114,12 @@ mod tests {
         {
             assert!(args.contains(&"tee".to_string()));
             let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
-            assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-bridge-record-stream.mkv"));
+            assert!(
+                tee.contains("[f=matroska:onfail=abort]/tmp/videorc-bridge-record-stream.mkv|")
+            );
             assert_eq!(tee.matches("[f=flv").count(), 2);
+            // Retest 154 B2: each Linux RTMP leg reconnects on its own.
+            assert_eq!(tee.matches("attempt_recovery=1").count(), 2, "{tee}");
         }
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
@@ -37789,8 +38055,106 @@ mod tests {
         // forever and the stop path hangs until Force stop.
         let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
         assert!(leg.starts_with("[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout="));
-        assert!(leg.contains(":rw_timeout=8000000]"));
+        assert!(leg.contains(":rw_timeout=8000000:"));
         assert!(leg.ends_with("rtmp://live.twitch.tv/app/streamkey"));
+    }
+
+    /// One `av_get_token` pass: split on unescaped `delim`, dropping one
+    /// level of backslash escaping (what tee and its slave-option parser do).
+    fn av_tokens(input: &str, delim: char) -> Vec<String> {
+        let mut tokens = vec![String::new()];
+        let mut chars = input.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => tokens.last_mut().unwrap().extend(chars.next()),
+                c if c == delim => tokens.push(String::new()),
+                c => tokens.last_mut().unwrap().push(c),
+            }
+        }
+        tokens
+    }
+
+    #[test]
+    fn rtmp_tee_legs_reconnect_through_their_own_fifo() {
+        // Retest 154 B2: with only the tee-wide fifo options a dropped ingest
+        // closed the slave for good ("Streaming to X stopped · Broken pipe").
+        let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
+        assert_eq!(
+            leg,
+            "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout=8000000:\
+             fifo_options=queue_size=512\\\\\\:drop_pkts_on_overflow=1\\\\\\:attempt_recovery=1\\\\\\:\
+             recover_any_error=1\\\\\\:restart_with_keyframe=1\\\\\\:recovery_wait_time=2]\
+             rtmp://live.twitch.tv/app/streamkey"
+        );
+        // Tee splits slaves (one unescape), then parses the slave options
+        // (a second one): the fifo must receive the plan 161 recovery set
+        // intact, and the flv options must stay the leg's own.
+        let slave = av_tokens(&leg, '|');
+        assert_eq!(slave.len(), 1);
+        let (options, url) = slave[0]
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once(']'))
+            .unwrap();
+        assert_eq!(url, "rtmp://live.twitch.tv/app/streamkey");
+        let options = av_tokens(options, ':');
+        assert_eq!(
+            options,
+            [
+                "f=flv",
+                "onfail=ignore",
+                "flvflags=no_duration_filesize",
+                "rw_timeout=8000000",
+                "fifo_options=queue_size=512:drop_pkts_on_overflow=1:attempt_recovery=1:\
+                 recover_any_error=1:restart_with_keyframe=1:recovery_wait_time=2",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dropped_tee_leg_reconnects_and_resumes_on_its_own_target() {
+        // The bundled n8.1 FFmpeg's own lines for a record+stream tee whose
+        // ingest restarted (retest 154 B2): the tee's fifo legs name their URL
+        // on `Error opening`, so plan 161 attribution works unchanged.
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe(&format!(
+                "Output #0, tee, to '[f=matroska:onfail=abort]/tmp/a.mkv|[f=flv]{YOUTUBE_URL}|[f=flv]{TWITCH_URL}':"
+            )),
+            None
+        );
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0x7f4fe03c8680] Error opening {TWITCH_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 1,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0x7f4fe03b72c0] Error opening {YOUTUBE_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03b72c0] Recovery failed: Connection refused"),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03b72c0] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 0 })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03c8680] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 1 })
+        );
     }
 
     #[test]
@@ -40404,6 +40768,71 @@ mod tests {
         );
     }
 
+    // Retest 154 A4: Record with a read-only recordings folder started the
+    // session, FFmpeg failed with Permission denied and a failed row stayed
+    // in the Library. The start must be refused before the row exists.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn record_refuses_an_unwritable_recordings_folder_before_the_session_row() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let folder = std::env::temp_dir().join(format!("videorc-ro-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root writes through mode 555, so there is nothing to refuse.
+        let blocked = std::fs::File::create(folder.join("root-check")).is_err();
+        let _ = std::fs::remove_file(folder.join("root-check"));
+        if !blocked {
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&folder);
+            eprintln!("skipped: running as root, mode 555 does not block writes");
+            return;
+        }
+
+        let probe_error = format!(
+            "{:#}",
+            ensure_output_directory_writable(&folder).await.unwrap_err()
+        );
+        assert_eq!(probe_error, output_directory_not_writable_message(&folder));
+
+        let state = test_state();
+        let mut params = base_params(true, false);
+        params.output.output_directory = Some(folder.display().to_string());
+        let error = format!(
+            "{:#}",
+            start_session(state.clone(), params).await.unwrap_err()
+        );
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let leftovers = std::fs::read_dir(&folder).unwrap().count();
+        let _ = std::fs::remove_dir_all(&folder);
+
+        assert!(
+            error.contains(&format!(
+                "Videorc can't save to {}. Choose another recordings folder in Output.",
+                folder.display()
+            )),
+            "{error}"
+        );
+        assert!(!error.contains("Permission denied"), "{error}");
+        assert!(state.recording.lock().await.is_none());
+        let page = state.database.list_session_items_page(None, 20).unwrap();
+        assert!(
+            page.items.is_empty(),
+            "a refused start leaves no Library row"
+        );
+        assert_eq!(leftovers, 0, "no probe or recording file is left behind");
+    }
+
+    #[tokio::test]
+    async fn a_writable_recordings_folder_passes_and_keeps_no_probe_file() {
+        let folder = std::env::temp_dir().join(format!("videorc-rw-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        ensure_output_directory_writable(&folder).await.unwrap();
+        let leftovers = std::fs::read_dir(&folder).unwrap().count();
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(leftovers, 0);
+    }
+
     #[test]
     fn live_preview_initial_status_is_unavailable() {
         let state = initial_live_preview_state();
@@ -41359,8 +41788,8 @@ mod tests {
         );
         assert_eq!(arg_value(&args, "-ar"), Some("48000"));
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
-        assert_eq!(arg_value(&args, "-b:a"), None);
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        assert_eq!(arg_value(&args, "-b:a"), Some(RECORD_AAC_BITRATE));
     }
 
     #[test]
@@ -41408,7 +41837,7 @@ mod tests {
             Some("aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
     }
 
     #[test]
@@ -41675,7 +42104,7 @@ mod tests {
             &mut args,
             &input_layout,
             &AudioSettings::default(),
-            true,
+            OutputAudioCodec::StreamAac,
             true,
         );
 
@@ -42735,7 +43164,13 @@ mod tests {
         ];
         append_audio_output_args(&mut args, &input_layout);
         args.extend(["-c:v".to_string(), "mpeg4".to_string()]);
-        append_audio_encoding_with_video_clock(&mut args, &input_layout, &audio, true, false);
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &audio,
+            OutputAudioCodec::StreamAac,
+            false,
+        );
         args.push(output.display().to_string());
 
         let status = std::process::Command::new("ffmpeg")
@@ -43040,7 +43475,7 @@ mod tests {
             Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&with_mic, "-ac"), Some("2"));
-        assert_eq!(arg_value(&with_mic, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&with_mic, "-c:a"), Some("aac"));
         assert_eq!(
             ffmpeg_inputs(&without_mic),
             vec![
@@ -43054,7 +43489,7 @@ mod tests {
             Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
         );
         assert_eq!(arg_value(&without_mic, "-ac"), Some("2"));
-        assert_eq!(arg_value(&without_mic, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&without_mic, "-c:a"), Some("aac"));
     }
 
     #[test]
@@ -46965,5 +47400,69 @@ mod low_end_windows_recording_tests {
                 .iter()
                 .all(|line| line.chars().count() <= FFMPEG_STDERR_TAIL_LINE_CHARS)
         );
+    }
+
+    // Retest 154 A5: a full recordings folder ended the take with only
+    // "FFmpeg exited with exit status: 228".
+    #[test]
+    fn a_full_disk_is_recognised_on_every_platform() {
+        for line in [
+            "[matroska @ 0x55] Error writing trailer: No space left on device",
+            "av_interleaved_write_frame(): No space left on device",
+            "[out#0/matroska @ 01] Error muxing a packet: There is not enough space on the disk.",
+        ] {
+            assert_eq!(
+                classify_ffmpeg_fatal_line(line),
+                Some("disk-full"),
+                "{line}"
+            );
+        }
+
+        let mut tail = FfmpegStderrTail::default();
+        tail.observe("frame=  900 fps= 30 q=-1.0 size=   12000KiB");
+        tail.observe("av_interleaved_write_frame(): No space left on device");
+        tail.observe("Error writing trailer: No space left on device");
+        tail.observe("Conversion failed!");
+        assert_eq!(tail.first_fatal_category, Some("disk-full"));
+        let summary = tail.summary().unwrap();
+        assert!(summary.starts_with("category=disk-full "), "{summary}");
+        assert!(
+            summary.contains("No space left on device"),
+            "raw text stays in logs"
+        );
+    }
+
+    #[test]
+    fn a_full_disk_says_plainly_that_the_folder_ran_out_of_space() {
+        let (stage, code, message) =
+            ffmpeg_disk_full_failure(Some("disk-full"), "exit status: 228", true).unwrap();
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-disk-full");
+        assert!(
+            message.contains("recordings folder ran out of space"),
+            "{message}"
+        );
+        assert!(message.contains("up to that point is kept"), "{message}");
+        assert!(message.contains("Free some space"), "{message}");
+        assert!(!message.contains("No space left on device"), "{message}");
+
+        // Other fatal causes, and a stream-only session, keep their own copy.
+        assert!(
+            ffmpeg_disk_full_failure(Some("encoder-open-failed"), "exit status: 1", true).is_none()
+        );
+        assert!(ffmpeg_disk_full_failure(None, "exit status: 228", true).is_none());
+        assert!(ffmpeg_disk_full_failure(Some("disk-full"), "exit status: 228", false).is_none());
+    }
+
+    #[test]
+    fn the_terminal_failure_reads_the_first_fatal_category_from_ffmpeg_evidence() {
+        let progress = FfmpegProgressBeacon::default();
+        progress
+            .evidence
+            .lock()
+            .unwrap()
+            .observe("Error writing trailer: No space left on device");
+        let category = progress.evidence.lock().unwrap().tail.first_fatal_category;
+        assert_eq!(category, Some(FFMPEG_DISK_FULL_CATEGORY));
     }
 }

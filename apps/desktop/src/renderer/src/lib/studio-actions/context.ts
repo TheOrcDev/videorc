@@ -216,7 +216,9 @@ export interface SceneArrangeContext {
 /** Buddy as the Stream Manager's switch, mode control and header see it. */
 export interface StudioBuddyAccess {
   /** `cohost.settings` as loaded; null until the backend answered. */
-  settings: Pick<CohostSettings, 'enabled' | 'autoChat'> | null
+  settings:
+    | (Pick<CohostSettings, 'enabled' | 'autoChat'> & Partial<Pick<CohostSettings, 'persona'>>)
+    | null
   /** The Premium gate (`liveCohostGate`): Buddy Live needs it. */
   entitled: boolean
   entitlementReason: string | null

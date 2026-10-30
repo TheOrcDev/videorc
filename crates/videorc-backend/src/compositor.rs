@@ -11960,6 +11960,8 @@ fn linear_source_tap(
     })
 }
 
+// Per-pixel: see `read_source_rgba`.
+#[inline(always)]
 fn read_source_rgba_linear(
     source: &RgbaSource<'_>,
     column: LinearTap,
@@ -12393,6 +12395,12 @@ fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
     source.width as usize * source.height as usize * 4
 }
 
+/// One source pixel, called once per destination pixel by every CPU blit.
+/// Forced inline: LLVM's own choice flips with the size of this module, and
+/// when it chose a call (0.14.0, after unrelated code landed here) the camera
+/// blits paid a call per pixel and the backend went from ~170 % to ~250 % CPU
+/// recording 720p30 on a slow laptop (retest 153).
+#[inline(always)]
 fn read_source_rgba(source: &RgbaSource<'_>, x: u32, y: u32) -> (u8, u8, u8, u8) {
     let index = (y as usize * source.width as usize + x as usize) * 4;
     match source.format {
@@ -24478,6 +24486,32 @@ mod live_background_metal_tests {
         // A release shares nothing either.
         renderer.release();
         assert!(renderer.frame_at(still_at).is_none());
+    }
+}
+
+/// Retest 153: the per-pixel source reads stay inlined into the CPU blits.
+/// A release build once turned `read_source_rgba` into a call per pixel and
+/// recording a camera at 720p30 cost the backend ~80 % more CPU, with no code
+/// change in the blits themselves. Only the attribute pins it.
+#[cfg(test)]
+mod per_pixel_inline_tests {
+    #[test]
+    fn per_pixel_source_reads_are_forced_inline() {
+        let source = include_str!("compositor.rs");
+        for function in ["fn read_source_rgba(", "fn read_source_rgba_linear("] {
+            let (before, _) = source
+                .split_once(&format!("\n{function}"))
+                .unwrap_or_else(|| panic!("{function} is defined"));
+            let attributes: Vec<&str> = before
+                .lines()
+                .rev()
+                .take_while(|line| line.starts_with("#[") || line.starts_with("//"))
+                .collect();
+            assert!(
+                attributes.contains(&"#[inline(always)]"),
+                "{function} must stay #[inline(always)]: it runs once per pixel"
+            );
+        }
     }
 }
 

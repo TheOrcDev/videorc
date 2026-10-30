@@ -66,6 +66,11 @@ const htmlPath = resolve(
 // mount. Executors, the surface publisher, the headless Go Live, the Agents
 // settings and the Connect dialog are lazy. Measured 405,989. Raise gzip to
 // 410,000 (~1.2%); keep re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-29 (retest 154 B1): main measured 2,028,805 raw. The
+// performance check now steps the default Clips ring aside and waits for a
+// ready capture before its launch run (the hold, the step-aside, the gate,
+// ~1.4 KB raw in the Studio provider; no new UI). Measured 2,030,166 raw /
+// 409,985 gzip. Raise raw to 2,031,000 (~0.05%); gzip unchanged.
 // Recalibrated 2026-10-29 (plan 210, smarter scenes): its base measured
 // 2,028,805 raw / 409,745 gzip (255 bytes of headroom) and the branch added
 // 49,353 raw / 11,841 gzip. Re-splitting took back 24,874 raw / 5,968 gzip:

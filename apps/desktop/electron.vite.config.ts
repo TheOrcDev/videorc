@@ -6,6 +6,10 @@ import react from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 
 import {
+  BUILD_FLAGS_FILE_NAME,
+  packagedTestHooksBuildEnabled
+} from './src/main/packaged-test-hooks'
+import {
   RENDERER_DOCUMENT_CSP,
   rendererDocumentCspWithScriptHash
 } from './src/shared/renderer-security-policy'
@@ -30,9 +34,29 @@ const developmentRendererCspPlugin = {
   }
 }
 
+// A packaged test build (VIDEORC_PACKAGED_TEST_HOOKS=1) keeps the CDP port and
+// native module overrides; release builds refuse them (packaged-test-hooks.ts).
+// The flags file lets `pnpm check:packaged-app` prove which one an artifact is.
+const packagedTestHooks = packagedTestHooksBuildEnabled(process.env)
+const buildFlagsPlugin = {
+  name: 'videorc-build-flags',
+  generateBundle(this: {
+    emitFile(file: { type: 'asset'; fileName: string; source: string }): string
+  }): void {
+    this.emitFile({
+      type: 'asset',
+      fileName: BUILD_FLAGS_FILE_NAME,
+      source: `${JSON.stringify({ packagedTestHooks })}\n`
+    })
+  }
+}
+
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()]
+    define: {
+      __VIDEORC_PACKAGED_TEST_HOOKS__: JSON.stringify(packagedTestHooks)
+    },
+    plugins: [externalizeDepsPlugin(), buildFlagsPlugin]
   },
   preload: {
     plugins: [externalizeDepsPlugin()]

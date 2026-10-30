@@ -1085,6 +1085,51 @@ mod tests {
         }
     }
 
+    /// Plan 211 D12: Buddy's tools follow the talk mode. `set_buddy` takes
+    /// and answers `talk` (off, bubble, suggest); the old `chatMode` stays
+    /// in the input schema only so an agent holding the old schema reaches
+    /// the Studio's sentence ("Auto is gone…") instead of a schema error.
+    /// `buddy_say` answers `{ bubble }` alone: it never posts.
+    #[test]
+    fn buddy_tools_follow_the_talk_mode_d12() {
+        let catalog = catalog();
+        let set_buddy = catalog.tool("set_buddy").unwrap();
+        let talk = serde_json::json!(["off", "bubble", "suggest"]);
+        assert_eq!(set_buddy.input_schema["properties"]["talk"]["enum"], talk);
+        assert_eq!(set_buddy.output_schema["properties"]["talk"]["enum"], talk);
+        assert_eq!(
+            set_buddy.output_schema["required"],
+            serde_json::json!(["on", "talk", "onStream"])
+        );
+        assert_eq!(
+            set_buddy.input_schema["properties"]["chatMode"]["enum"],
+            serde_json::Value::Null,
+            "chatMode takes any value, so the Studio can refuse it in words"
+        );
+        assert_eq!(
+            set_buddy.validate_arguments(&serde_json::json!({ "talk": "auto" })),
+            Err("arguments.talk must be one of \"off\", \"bubble\", \"suggest\".".to_string())
+        );
+        assert_eq!(
+            set_buddy.validate_arguments(&serde_json::json!({ "chatMode": "auto" })),
+            Ok(())
+        );
+        assert!(!set_buddy.description.contains("auto"));
+
+        let buddy_say = catalog.tool("buddy_say").unwrap();
+        let outputs: Vec<&String> = buddy_say.output_schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(outputs, ["bubble"]);
+        assert_eq!(
+            buddy_say.output_schema["required"],
+            serde_json::json!(["bubble"])
+        );
+        assert!(!buddy_say.description.contains("chat mode"));
+    }
+
     #[test]
     fn update_settings_takes_the_curated_list_and_refuses_everything_else() {
         let tool = catalog().tool("update_settings").unwrap();

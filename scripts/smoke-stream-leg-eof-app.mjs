@@ -344,7 +344,7 @@ function sessionParams(outputDirectoryCapability) {
       recordEnabled: true,
       streamEnabled: true,
       outputDirectoryCapability,
-      video: { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 },
+      video: recordingVideo(),
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
     streaming: {
@@ -368,6 +368,17 @@ function sessionParams(outputDirectoryCapability) {
       enabledTargetIds: targets.map((target) => target.id)
     }
   }
+}
+
+// Linux runs one encode for the recording and the stream, and refuses a
+// recording below the stream's profile (it would send the stream at the
+// recording's quality): record at the stream default there, as the
+// multistream smoke does.
+function recordingVideo() {
+  if (process.platform === 'linux') {
+    return { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+  }
+  return { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
 }
 
 function spawnListener(target, recvPath) {

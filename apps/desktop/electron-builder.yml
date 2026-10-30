@@ -25,6 +25,22 @@ files:
   - out/**/*
   - package.json
 
+# Plan 0002 (retest 152). Flipped by electron-builder right before signing, on
+# every platform and in test builds too. No harness needs Node in the packaged
+# binary: the backend is a Rust process and smokes drive the app through the
+# smoke command server or (test builds only) CDP. `pnpm check:packaged-app`
+# reads these back from the artifact.
+# Left at Electron's defaults until each is proven on macOS and Windows:
+# enableEmbeddedAsarIntegrityValidation (Windows needs the resource edit the
+# base config skips), enableCookieEncryption (one-way cookie-store migration;
+# sign-in must survive the update) and grantFileProtocolExtraPrivileges (the
+# renderer still loads from file://).
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+
 # Shared across platforms. Platform-specific resources live under mac:/win:
 # because electron-builder CONCATENATES global + platform extraResources
 # (it does not override) — a global entry with a mac-only path breaks the
@@ -170,6 +186,11 @@ linux:
   category: Video
   executableName: videorc
   maintainer: TheOrcDev
+  # The bundled videorc.desktop names the videorc:// handler too (AppImage
+  # integration tools copy it). The app writes its own user entry on launch;
+  # see src/main/linux-desktop-entry.ts.
+  mimeTypes:
+    - x-scheme-handler/videorc
   extraResources:
     - from: ../../target/release/videorc-backend
       to: videorc-backend

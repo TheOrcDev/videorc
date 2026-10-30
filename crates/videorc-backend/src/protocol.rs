@@ -5660,6 +5660,10 @@ pub struct CohostReportGreetingsSkipped {
     /// YouTube calls were paused by the quota breaker (plan 094).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub youtube_paused: u64,
+    /// Plan 211 D9: Bubble mode, and Buddy was on no output, so nobody would
+    /// have seen the line.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub no_bubble: u64,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -5682,6 +5686,7 @@ impl CohostReportGreetingsSkipped {
                 .destination_failed
                 .saturating_add(later.destination_failed),
             youtube_paused: self.youtube_paused.saturating_add(later.youtube_paused),
+            no_bubble: self.no_bubble.saturating_add(later.no_bubble),
         }
     }
 }
@@ -5725,6 +5730,28 @@ pub enum CohostReportPostSource {
 
 /// Posts kept per report, newest kept.
 pub const COHOST_REPORT_POSTS_CAP: usize = 200;
+
+/// Plan 211 D11: one line Buddy said in its bubble on stream, written when
+/// it actually showed (a queued line that was dropped is not "said"). The
+/// streamer's own Say line is recorded too, with trigger `manual`. `posts`
+/// stays chat-only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportSaid {
+    /// The utterance id.
+    pub id: String,
+    /// When it showed.
+    pub at: String,
+    pub trigger: crate::cohost::CohostUtteranceTriggerKind,
+    /// The text as shown (clipped to the bubble's cap).
+    pub text: String,
+    /// Who wrote a greeting, the AI or the line. Omitted on other lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CohostReportPostSource>,
+}
+
+/// Lines said on stream kept per report, newest kept.
+pub const COHOST_REPORT_SAID_CAP: usize = 200;
 
 /// at once and whether it was ever corroborated (two viewers within 60 s).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -5839,6 +5866,11 @@ pub struct CohostSessionReport {
     /// most 200. Omitted while empty, so older reports read unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub posts: Vec<CohostReportPost>,
+    /// Plan 211 D11: what Buddy said in its bubble on stream (the streamer's
+    /// Say lines too), oldest first, at most 200. Omitted while empty, so
+    /// older reports read unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub said: Vec<CohostReportSaid>,
 }
 
 impl CohostSessionReport {
@@ -5990,6 +6022,15 @@ impl CohostSessionReport {
         while self.posts.len() > COHOST_REPORT_POSTS_CAP {
             self.posts.remove(0);
         }
+        for said in later.said {
+            if self.said.iter().any(|existing| existing.id == said.id) {
+                continue;
+            }
+            self.said.push(said);
+        }
+        while self.said.len() > COHOST_REPORT_SAID_CAP {
+            self.said.remove(0);
+        }
         self
     }
 
@@ -6000,6 +6041,16 @@ impl CohostSessionReport {
         Self {
             posts: vec![post.clone()],
             ..Self::empty(session_id, &post.at)
+        }
+    }
+
+    /// Plan 211 D11: a report that carries nothing but one `said` line,
+    /// folded into the session's report as the line shows (like
+    /// `post_only`).
+    pub fn said_only(session_id: &str, said: CohostReportSaid) -> Self {
+        Self {
+            said: vec![said.clone()],
+            ..Self::empty(session_id, &said.at)
         }
     }
 
@@ -6040,6 +6091,7 @@ impl CohostSessionReport {
             recap: CohostReportRecap::default(),
             commands: None,
             posts: Vec::new(),
+            said: Vec::new(),
         }
     }
 }
@@ -7994,6 +8046,7 @@ mod tests {
                 no_line: 1,
                 held: 4,
                 youtube_paused: 2,
+                no_bubble: 3,
                 ..CohostReportGreetingsSkipped::default()
             })
         );
@@ -8001,7 +8054,50 @@ mod tests {
         assert_eq!(report.posts[0].source, Some(CohostReportPostSource::Ai));
         assert_eq!(report.posts[1].source, Some(CohostReportPostSource::Line));
         assert_eq!(report.posts[2].source, None);
+        // Plan 211 D11: what Buddy said in its bubble rides beside the posts,
+        // with a greeting's source and none on a manual line.
+        assert_eq!(report.said.len(), 2);
+        assert_eq!(
+            report.said[0],
+            CohostReportSaid {
+                id: "utt-4-fixture".to_string(),
+                at: "2026-08-22T10:08:00Z".to_string(),
+                trigger: crate::cohost::CohostUtteranceTriggerKind::Greeting,
+                text: "Welcome, Ada!".to_string(),
+                source: Some(CohostReportPostSource::Line),
+            }
+        );
+        assert_eq!(
+            report.said[1].trigger,
+            crate::cohost::CohostUtteranceTriggerKind::Manual
+        );
+        assert_eq!(report.said[1].source, None);
         assert_eq!(serde_json::to_value(&report).unwrap(), report_wire);
+        // A said line folds in like a post; the same id is kept once.
+        let folded = report.clone().merged_with(CohostSessionReport::said_only(
+            "session-fixture",
+            CohostReportSaid {
+                id: "utt-6-fixture".to_string(),
+                at: "2026-08-22T10:10:00Z".to_string(),
+                trigger: crate::cohost::CohostUtteranceTriggerKind::Answer,
+                text: "@Ada It's Rust today.".to_string(),
+                source: None,
+            },
+        ));
+        assert_eq!(folded.said.len(), 3);
+        assert_eq!(folded.said[2].id, "utt-6-fixture");
+        assert_eq!(
+            report.clone().merged_with(report.clone()).said.len(),
+            2,
+            "the same lines twice are kept once"
+        );
+        let only = CohostSessionReport::said_only("s", report.said[1].clone());
+        assert_eq!(only.segments, 0);
+        assert!(only.posts.is_empty());
+        assert_eq!(
+            serde_json::to_value(&only).unwrap()["said"][0]["trigger"],
+            "manual"
+        );
 
         let at = "2026-08-22T10:00:00Z";
         let empty = CohostSessionReport::greeting_skips_only(
@@ -8404,6 +8500,11 @@ mod tests {
             payload_wire["report"].get("commands").is_none(),
             "omitted, never null"
         );
+        // Plan 211 D11: a report from before `said` reads unchanged and
+        // writes no `said` key; the payload's report carries two lines.
+        assert!(report.said.is_empty());
+        assert!(report_wire.get("said").is_none());
+        assert_eq!(minimal.said.len(), 2);
     }
 
     #[test]

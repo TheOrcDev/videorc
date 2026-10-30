@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, statSync } from 'node:fs'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 // Library rewrite L6: session ops round-trip over the REAL backend WS —
 // import → list → rename → duplicate → storage totals → delete. Runs the
@@ -142,6 +142,11 @@ try {
     ),
     'prepare should return two existing operation-owned quarantine paths'
   )
+  assert.deepEqual(
+    quarantinePaths.map((path) => basename(path)).sort(),
+    ['Session Ops Smoke (copy).mp4', 'Session Ops Smoke.mp4'],
+    'quarantine should keep each recording file name so the Trash shows it'
+  )
   assert.ok(
     resolvedOperations.every((operation) => (operation.blockedPaths ?? []).length === 0),
     'identity-matched files should not be blocked from Trash'
@@ -162,6 +167,11 @@ try {
     assert.equal(completed.deleted, true)
   }
   assert.deepEqual(await rpc('sessions.delete.pending'), [])
+  assert.deepEqual(
+    readdirSync(outputDir).filter((name) => name.startsWith('.videorc-trash-')),
+    [],
+    'completion should remove the empty private quarantine folders'
+  )
 
   console.log(
     'Session ops smoke OK — import/rename/duplicate/storage/two-phase-delete round-trip over the real WS.'

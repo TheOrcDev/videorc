@@ -26,6 +26,23 @@
   [acceptance record](../docs/acceptance/2026-10-29-smarter-scenes-acceptance.md)
   (owner by-eye checks owed).
 
+- 2026-10-28: [Plan 211](211-buddy-talks-only-in-its-bubble.md), Buddy
+  talks only in its bubble, and Auto is gone. Owner request, after Auto
+  posted an AI welcome in chat as them on the 2026-10-28 stream and Off then
+  skipped 46 greetings: Buddy greets on stream, never in chat. The control
+  becomes "{name} talks: Off · Bubble · Suggest". Bubble speaks greetings,
+  answers ("@name …") and banter in the bubble only. It is paced and queued
+  so no line cuts another short, skipped while Buddy is off stream, and
+  listed under "Said on stream" in Reports. Nothing automatic can reach
+  chat: the lane's send output is deleted, and the Say box and `buddy_say`
+  are bubble-only. A new `autoChat.talk` field keeps older apps safe (Bubble
+  is saved as `mode: off`). New installs and saved Auto start in Bubble;
+  saved Off stays Off. Agents' `set_buddy` takes `talk`. One desktop PR in
+  five phases, plus an eval-fixture tidy on the web. Supersedes plan 202
+  Phases B to D. **BUILT** 2026-10-29 as one desktop PR (all five phases)
+  and a web eval-fixture PR; owner answers recorded 2026-10-28. Owed: the
+  owner's by-eye pass in both themes, a live take, and `smoke:agent-mcp`
+  B1 (local RTMP go-live), red on this Mac before Buddy's step.
 - 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
   agents and Buddy run the studio. Owner request: a complete MCP so people
   control everything from their agents, with Buddy using it too. Agents on
@@ -151,6 +168,8 @@
   in Layout → Buddy hides the pet and bubble while a takeover shows; it
   starts off for everyone, so the release notes must say so. Four desktop
   phases, no web change. **PLANNED**; owner answers recorded 2026-10-26.
+  **2026-10-28**: Phases B to D (Bubble mode) are superseded by plan 211.
+  Only Phase A, "Show on takeovers", remains, and it runs after plan 211.
 - 2026-10-26: [Plan 201](201-studio-audio-balance.md), Balance the Microphone
   and System audio from the Studio. One Audio section puts both levels on
   one audiocn Mixer scale, each with the same Gain fader Sources uses, in

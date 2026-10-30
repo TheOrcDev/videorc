@@ -5794,6 +5794,7 @@ mod linux {
             }
             PortalStart::Denied(state) => {
                 let message = state.message();
+                tracing::warn!(%message, "portal screen capture: not shared");
                 let _ = startup_tx.send(match state.lifecycle_status() {
                     SourceLifecycleStatus::PermissionNeeded => {
                         NativeScreenStartup::PermissionNeeded(message)

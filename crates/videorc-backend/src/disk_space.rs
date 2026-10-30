@@ -15,8 +15,9 @@ const EXPORT_HEADROOM_BYTES: u64 = 512 * MIB;
 pub const RECORD_NOTICE_FLOOR_BYTES: u64 = 1024 * MIB;
 /// The notice shows when the volume holds less than this many minutes.
 pub const RECORD_NOTICE_MINUTES: u64 = 20;
-/// The MKV's audio is 48 kHz stereo `pcm_s16le` on a record-only take
-/// (AAC 160k when streaming): estimate with the larger.
+/// The MKV's audio is 48 kHz stereo `pcm_s16le` on a record-only take that
+/// keeps the original MKV or records separate sources (AAC 256k on other
+/// record-only takes, 160k when streaming): estimate with the largest.
 const RECORDING_AUDIO_KBPS: u64 = 1_536;
 
 /// Free bytes on the volume holding `path`, or `None` where it can't be read.

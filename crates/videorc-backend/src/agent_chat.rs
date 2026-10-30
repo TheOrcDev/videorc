@@ -8,8 +8,9 @@
 //!   at once like the row menu's "Remove from chat", except on YouTube, where
 //!   it waits on the existing removal card for the streamer's click (YouTube
 //!   API policy). The answer says so and never waits for it.
-//! - Buddy's line is the Stream Manager Say box's own function: it bubbles,
-//!   and posts per Buddy's chat mode.
+//! - Buddy's line is the Stream Manager Say box's own function: it bubbles on
+//!   the picture and never posts in chat (plan 211 D12). It is refused while
+//!   Buddy is on no output, since nobody would see it.
 //!
 //! Viewer-written strings (D18) leave here only as `viewerName`. Provider
 //! error text has anything address-shaped scrubbed, as `list_destinations`
@@ -31,7 +32,9 @@ use crate::streaming::{stream_platform_id, stream_platform_label};
 
 pub const CHAT_NOT_RUNNING: &str = "Chat isn't running: posting needs a livestream.";
 pub const WAITING_FOR_YOU: &str = "Waiting for you to confirm in Videorc.";
-pub const BUDDY_UNSEEN: &str = "Buddy isn't on the picture and its chat mode doesn't post, so nobody would see that. Put Buddy on stream with set_buddy first.";
+/// `buddy_say` while Buddy is on no output (plan 211 D12). Only this tool
+/// says it: the line would bubble on a picture nobody sees.
+pub const BUDDY_UNSEEN: &str = "Buddy isn't on the picture, so nobody would see it.";
 
 fn text_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
@@ -376,8 +379,13 @@ pub async fn remove_chat_message(
 // buddy_say (S13)
 // ---------------------------------------------------------------------------
 
+/// Plan 211 D1 and D12: the Say box is bubble-only in every mode, so this
+/// tool never posts and never reads the talk mode. It is refused with
+/// [`BUDDY_UNSEEN`] while Buddy is on no output; otherwise the line goes
+/// through `say_utterance` (it pre-empts the bubble queue, as the Say box
+/// does) and the answer is `{ bubble: true }`.
 pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) -> ToolOutcome {
-    use crate::cohost::{CohostAutoChatMode, CohostUtteranceState};
+    use crate::cohost::CohostUtteranceState;
     let Some(text) = text_of(&args, "text") else {
         return ToolOutcome::refused("Say what Buddy should say: text.");
     };
@@ -388,19 +396,15 @@ pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) ->
         },
         None => CohostUtteranceState::default(),
     };
+    if !crate::buddy_overlay::overlay_enabled(state) {
+        return ToolOutcome::refused(BUDDY_UNSEEN);
+    }
     let session_id = state
         .live_chat
         .lock()
         .await
         .session_id()
         .map(str::to_string);
-    let mode = state.cohost.lock().await.auto_chat_mode();
-    let bubble = crate::buddy_overlay::overlay_enabled(state);
-    // The Say box posts only in Auto, and only into a running chat.
-    let posts = mode == CohostAutoChatMode::Auto && session_id.is_some();
-    if !bubble && !posts {
-        return ToolOutcome::refused(BUDDY_UNSEEN);
-    }
     let params = crate::protocol::CohostSayParams {
         session_id: session_id.unwrap_or_default(),
         text: text.to_string(),
@@ -409,23 +413,9 @@ pub async fn buddy_say(state: &AppState, _agent: &AgentIdentity, args: Value) ->
     if let Err(error) = crate::cohost::say_utterance(state, params).await {
         return ToolOutcome::refused(error.to_string());
     }
-    let chat_mode = match mode {
-        CohostAutoChatMode::Off => "off",
-        CohostAutoChatMode::Suggest => "suggest",
-        CohostAutoChatMode::Auto => "auto",
-    };
-    let text = match (bubble, posts) {
-        (true, true) => "Buddy said it in its bubble, and posts it in chat (chat mode Auto).",
-        (true, false) => {
-            "Buddy said it in its bubble. Its chat mode doesn't post, so chat didn't get it."
-        }
-        _ => {
-            "Buddy posts it in chat (chat mode Auto). Buddy isn't on the picture, so there's no bubble."
-        }
-    };
     ToolOutcome::ok(
-        text,
-        Some(json!({ "bubble": bubble, "chat": posts, "chatMode": chat_mode })),
+        "Buddy said it in its bubble.",
+        Some(json!({ "bubble": true })),
     )
 }
 
@@ -830,23 +820,69 @@ mod tests {
         crate::live_chat::stop_live_chat(&state).await;
     }
 
+    /// Plan 211 D12 (S-D2): `buddy_say` is bubble-only. Off the picture it
+    /// is refused in the one sentence; on the picture the line bubbles and
+    /// the answer is `{ bubble: true }`, whatever the talk mode says (Off
+    /// here, the quietest), and nothing is ever sent.
     #[tokio::test]
-    async fn buddy_say_refuses_when_nobody_would_see_it() {
+    async fn buddy_say_is_refused_off_the_picture_and_bubbles_on_it() {
         let state = test_state();
         let (agent, _) = connect_agent(&state, "Claude Code");
-        // A fresh profile: Buddy is off the picture and its chat mode is Off.
+        // A fresh profile: both of Buddy's output switches are off (opt-in).
+        assert!(!crate::buddy_overlay::overlay_enabled(&state));
         let outcome = buddy_say(&state, &agent, json!({ "text": "hello" })).await;
-        if crate::buddy_overlay::overlay_enabled(&state) {
-            assert_eq!(outcome.outcome, crate::storage::AgentActivityOutcome::Ok);
-            assert_eq!(outcome.structured.unwrap()["bubble"], true);
-        } else {
-            assert_eq!(outcome, ToolOutcome::refused(BUDDY_UNSEEN));
-        }
+        assert_eq!(outcome, ToolOutcome::refused(BUDDY_UNSEEN));
+        assert_eq!(
+            BUDDY_UNSEEN,
+            "Buddy isn't on the picture, so nobody would see it."
+        );
         let outcome = buddy_say(&state, &agent, json!({ "text": "hi", "mood": "shout" })).await;
         assert_eq!(
             outcome,
             ToolOutcome::refused("mood must be talk, laugh or think.")
         );
+
+        // Buddy on stream, talk Off: the line still bubbles and never posts.
+        let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        let mut auto_chat = crate::cohost::get_cohost_settings(&state).await.auto_chat;
+        auto_chat.talk = Some(crate::cohost::CohostTalkMode::Off);
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                auto_chat: Some(auto_chat),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.cohost.lock().await.settings().auto_chat.talk(),
+            crate::cohost::CohostTalkMode::Off
+        );
+        let outcome = buddy_say(
+            &state,
+            &agent,
+            json!({ "text": "  hello horde ", "mood": "laugh" }),
+        )
+        .await;
+        assert_eq!(outcome.outcome, crate::storage::AgentActivityOutcome::Ok);
+        assert_eq!(outcome.text, "Buddy said it in its bubble.");
+        assert_eq!(outcome.structured, Some(json!({ "bubble": true })));
+        let shown = crate::buddy_overlay::status(&state).await;
+        assert_eq!(
+            shown.bubble.map(|bubble| bubble.text).as_deref(),
+            Some("hello horde")
+        );
+        assert_eq!(shown.state, crate::cohost::CohostAvatarState::Laugh);
+        let snapshot = state.cohost.lock().await.snapshot();
+        assert_eq!(snapshot.utterances.len(), 1);
+        assert_eq!(
+            snapshot.utterances[0].status,
+            crate::cohost::CohostUtteranceStatus::BubbleOnly
+        );
+        assert_eq!(snapshot.auto_chat_sends, 0);
     }
 
     #[test]

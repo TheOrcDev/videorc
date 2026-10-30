@@ -224,3 +224,46 @@ describe('the chrome ground keeps the text tiers readable (plan 208, S2)', () =>
     }
   })
 })
+
+/** A neutral `oklch(L 0 0 / A%)` token as gamma grey and alpha. */
+function neutralWithAlpha(value: string): { gamma: number; alpha: number } {
+  const match = /^oklch\(([\d.]+) 0 0 \/ ([\d.]+)%\)$/.exec(value)
+  if (!match) throw new Error(`not a translucent neutral oklch: ${value}`)
+  return {
+    gamma: linearToGamma(oklchGreyToLinear(Number(match[1]))),
+    alpha: Number(match[2]) / 100
+  }
+}
+
+// Plan 0011: the Stream Manager's chrome rows lay a translucent plate, and on
+// hover a lift, over the theme's solid (the utilities' bottom layer, so the
+// ground never shows through). Plate and lift composited over the solid must
+// keep every text tier readable, in both themes and at Increase Contrast.
+describe('the chrome rows keep the text tiers readable (plan 0011)', () => {
+  const over = (gamma: number, layer: string): number => {
+    const { gamma: top, alpha } = neutralWithAlpha(layer)
+    return alpha * top + (1 - alpha) * gamma
+  }
+
+  it.each(THEMES)('$name: on-stream and member plates, at rest and on hover', (current) => {
+    const text = block(current.name === 'dark' ? '.dark' : ':root')
+    const solid = linearToGamma(oklchGreyToLinear(greyLightness(token(text, 'glass-solid'))))
+    expect(greyLightness(token(text, 'glass-solid'))).toBe(current.base)
+    for (const plate of ['chrome-row-live-top', 'chrome-row-member-top']) {
+      const rest = over(solid, token(text, plate))
+      const hover = over(rest, token(text, 'chrome-row-lift'))
+      for (const [state, gamma] of [
+        ['rest', rest],
+        ['hover', hover]
+      ] as const) {
+        const ratios = ratiosOver(current.tiers, gammaToLinear(gamma))
+        for (const tier of Object.keys(THRESHOLDS) as (keyof Tiers)[]) {
+          expect(
+            ratios[tier],
+            `${plate} (${state}): ${tier} ${ratios[tier].toFixed(2)}:1`
+          ).toBeGreaterThanOrEqual(THRESHOLDS[tier])
+        }
+      }
+    }
+  })
+})

@@ -62,6 +62,30 @@ function buddy(overrides: Partial<StudioBuddyAccess> = {}): StudioBuddyAccess {
 }
 
 describe('set_buddy (plan 209 S13)', () => {
+  it.each(['off', 'bubble', 'suggest'])('saves talk %s without Premium', async (talk) => {
+    const access = buddy({ entitled: false })
+    const outcome = await executeAgentIntent(
+      call('set_buddy', { talk }),
+      context({ buddy: access })
+    )
+    expect(outcome.ok).toBe(true)
+    expect(outcome.result).toEqual({ on: false, talk, onStream: false })
+  })
+
+  it.each(['auto', 'off'])('refuses legacy chatMode %s', async (chatMode) => {
+    const outcome = await executeAgentIntent(
+      call('set_buddy', { chatMode }),
+      context({ buddy: buddy() })
+    )
+    expect(outcome).toEqual({
+      ok: false,
+      message:
+        chatMode === 'auto'
+          ? 'Auto is gone: Buddy never posts in chat on its own. Use talk: bubble.'
+          : 'chatMode is now talk: off, bubble or suggest.'
+    })
+  })
+
   it('turns Buddy Live on with the Stream Manager command save, never the microphone', async () => {
     const access = buddy()
     const outcome = await executeAgentIntent(
@@ -72,7 +96,7 @@ describe('set_buddy (plan 209 S13)', () => {
     expect(outcome).toEqual({
       ok: true,
       message: 'Buddy Live is on.',
-      result: { on: true, chatMode: 'off', onStream: false }
+      result: { on: true, talk: 'bubble', onStream: false }
     })
   })
 
@@ -87,16 +111,18 @@ describe('set_buddy (plan 209 S13)', () => {
         }
       }
     })
+    // Plan 211 D12: `talk` merges into the stored block, so the templates
+    // and cooldowns stay and Buddy Live isn't touched.
     const outcome = await executeAgentIntent(
-      call('set_buddy', { chatMode: 'auto' }),
+      call('set_buddy', { talk: 'suggest' }),
       context({ buddy: access })
     )
     const patch = vi.mocked(access.saveSettings).mock.calls[0][0]
     expect(patch).not.toHaveProperty('enabled')
     expect(patch).not.toHaveProperty('listen')
-    expect(patch.autoChat?.mode).toBe('auto')
+    expect(patch.autoChat?.talk).toBe('suggest')
     expect(patch.autoChat?.greetings.templates).toEqual(templates)
-    expect(outcome.message).toBe('Chat posting: Auto.')
+    expect(outcome.message).toBe('Buddy talks: Suggest.')
   })
 
   it('refuses Buddy Live without Premium or consent, but always turns it off', async () => {

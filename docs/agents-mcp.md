@@ -132,8 +132,8 @@ Chat and Buddy, the next stream, settings and the Library:
 | --------------------- | ---------------------------------------------------------------------------------- |
 | `send_chat_message`   | Post in chat as you, on every chat that takes posts or the ones named              |
 | `remove_chat_message` | Remove a viewer's message; on YouTube it waits for your click on the card          |
-| `buddy_say`           | Buddy says a line in its bubble, and in chat when its chat mode is Auto            |
-| `set_buddy`           | Buddy Live on or off, its chat posting mode, and whether it is on stream           |
+| `buddy_say`           | Buddy says a line in its bubble on the picture, never in chat; refused off the picture |
+| `set_buddy`           | Buddy Live on or off, how Buddy talks (off, bubble or suggest), and whether it is on stream |
 | `update_stream_info`  | The next stream's title, description, privacy and category, shared or per platform |
 | `set_destinations`    | Turn destinations on or off for the next stream                                    |
 | `schedule_stream`     | Schedule an upcoming livestream on YouTube or X                                    |

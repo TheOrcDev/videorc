@@ -90,7 +90,12 @@ import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import {
+  execFile,
+  execFileSync,
+  spawn,
+  type ChildProcessWithoutNullStreams
+} from 'node:child_process'
 
 import {
   OwnedProcessRegistry,
@@ -215,7 +220,11 @@ import {
   previewSurfaceCanvasFromOutputs,
   type PreviewSurfaceCanvas
 } from './preview-surface-banners'
-import { previewSurfaceBuddyLayer, withPreviewSurfaceOverlays } from './preview-surface-buddy'
+import {
+  previewSurfaceBuddyLayer,
+  previewSurfaceDrawsBuddyLayer,
+  withPreviewSurfaceOverlays
+} from './preview-surface-buddy'
 import {
   PREVIEW_SURFACE_LIVE_BACKGROUND_RUNTIME_SCRIPT,
   previewSurfaceBackgroundLayer,
@@ -261,6 +270,11 @@ import {
   type ResourceSelection
 } from './resource-capabilities'
 import { PersistentDirectoryAuthority } from './persistent-directory-authority'
+import {
+  buildAllowsPackagedTestHooks,
+  ignoreInspectorSignal,
+  refusePackagedTestHooks
+} from './packaged-test-hooks'
 import { SmokeAppQuitGuard } from './smoke-app-quit-guard'
 import { PreviewLifecycleSmokeEvidence } from './preview-lifecycle-smoke-evidence'
 import {
@@ -337,6 +351,7 @@ import {
   DISABLE_FEATURES_SWITCH,
   mergeDisabledFeatures
 } from './chromium-disabled-features'
+import { linuxPasswordStoreSwitch, PASSWORD_STORE_SWITCH } from './linux-password-store'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
 import {
   flushPermissionRestart,
@@ -355,6 +370,15 @@ import {
 } from '../shared/buddy-assets'
 import type { BuddyDeepLinkNavigation } from '../shared/electron-ipc-contract'
 import { parseBuddyDeepLink, runBuddyDeepLink, type BuddyDeepLink } from './buddy-deep-link'
+import { cohostAutoChatRelayPatch } from './cohost-auto-chat-relay'
+import {
+  buildVideorcDesktopEntry,
+  decideVideorcDesktopEntry,
+  linuxAppImageToRegister,
+  linuxDesktopEntryPaths,
+  VIDEORC_DESKTOP_FILE_NAME,
+  VIDEORC_URL_MIME_TYPE
+} from './linux-desktop-entry'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -471,6 +495,7 @@ import {
   type WatchdogRunToken
 } from './native-preview-first-frame'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
+import { PREVIEW_SURFACE_STAGE_RUNTIME_SCRIPT } from './preview-surface-stage'
 import {
   NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT,
   resetNativePreviewProofMeasurementStatus
@@ -526,7 +551,6 @@ import {
   captureStateAfterStatusPayload,
   captureStateAfterTransportLoss,
   captureStateBlocksInterruption,
-  takeRunning,
   type MainCaptureState
 } from '../shared/capture-state'
 import {
@@ -573,7 +597,6 @@ import type {
   CohostActionCommand,
   CohostBuddyActionCommand,
   CohostSessionActionCommand,
-  CohostAutoChatRelayPatch,
   CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostState,
@@ -908,9 +931,6 @@ let backendManagedAssetRoots: ManagedAssetRoots | null = null
 let backendAuthorityReady: Promise<void> = Promise.resolve()
 const mainResourceCapabilities = new MainResourceCapabilityRegistry()
 let mainCaptureState: MainCaptureState = 'unknown'
-// The chrome ground holds still while a take runs (2026-10-28): what every
-// window last heard on `session:take-running`. Windows start from false.
-let publishedTakeRunning = false
 let mainPreviewProgramShape: ReturnType<typeof previewProgramShape> = null
 // Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
 // the renderer's End livestream question (exit-guard.ts).
@@ -1053,6 +1073,20 @@ if (app.isPackaged) {
   // the operator-only pilot bearer only until updater initialization copies it.
   scrubReleaseAuthorityEnvironment(process.env, { preservePilotToken: true })
 }
+// Release builds drop the CDP port and native module/helper overrides before
+// anything reads them (packaged-test-hooks.ts); a packaged test build keeps them.
+const refusedPackagedTestHooks = refusePackagedTestHooks(process.env, app.commandLine, {
+  isPackaged: app.isPackaged,
+  buildAllowsTestHooks: buildAllowsPackagedTestHooks()
+})
+if (refusedPackagedTestHooks.length > 0) {
+  safeConsole.warn(
+    `Release build ignored test-only hooks: ${refusedPackagedTestHooks.join(', ')}. Build with VIDEORC_PACKAGED_TEST_HOOKS=1 for a packaged test build.`
+  )
+}
+ignoreInspectorSignal(process, { isPackaged: app.isPackaged, platform: process.platform }, () =>
+  safeConsole.warn('Ignored SIGUSR1: packaged builds have no Node inspector.')
+)
 
 const appDataDirOverride = process.env.VIDEORC_APP_DATA_DIR?.trim()
 if (appDataDirOverride) {
@@ -1074,6 +1108,7 @@ startLocalCrashReporter(app.getPath('userData'), {
 })
 // Perf harnesses attach CDP profilers to the renderer through this switch
 // (0 = pick a free port; Chromium prints "DevTools listening on ws://...").
+// Development and packaged test builds only (refusePackagedTestHooks above).
 const remoteDebugPortOverride = process.env.VIDEORC_REMOTE_DEBUG_PORT?.trim()
 if (remoteDebugPortOverride) {
   app.commandLine.appendSwitch('remote-debugging-port', remoteDebugPortOverride)
@@ -1263,6 +1298,20 @@ const disabledChromiumFeatures = mergeDisabledFeatures(
 )
 if (disabledChromiumFeatures) {
   app.commandLine.appendSwitch(DISABLE_FEATURES_SWITCH, disabledChromiumFeatures)
+}
+// Linux: Chromium gives safeStorage a real password store only on desktops it
+// recognizes (KDE, GNOME, XFCE, …). On Hyprland, Sway, i3 and other window
+// managers it falls back to basic_text, and protected persistence (folder
+// grants, sign-in, provider OAuth) refuses. Ask for the Secret Service there;
+// Chromium still falls back to basic_text when none answers. A user's own
+// --password-store always wins. See linux-password-store.ts.
+const passwordStore = linuxPasswordStoreSwitch(
+  process.platform,
+  process.env,
+  app.commandLine.hasSwitch(PASSWORD_STORE_SWITCH)
+)
+if (passwordStore) {
+  app.commandLine.appendSwitch(PASSWORD_STORE_SWITCH, passwordStore)
 }
 const packagedSmokeHarnessCapability =
   app.isPackaged && process.env.VIDEORC_PACKAGED_SMOKE_TEST === '1'
@@ -3428,28 +3477,6 @@ function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId
   }
 }
 
-/**
- * The Stream Manager's `autoChat` relay block (plan 164 S-D6): a partial of
- * the mode and the three switches. `undefined` when absent, `false` when
- * malformed, else the validated block.
- */
-function cohostAutoChatRelayPatch(value: unknown): CohostAutoChatRelayPatch | undefined | false {
-  if (value === undefined) return undefined
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const block = value as Record<string, unknown>
-  const patch: CohostAutoChatRelayPatch = {}
-  if (block.mode !== undefined) {
-    if (block.mode !== 'off' && block.mode !== 'suggest' && block.mode !== 'auto') return false
-    patch.mode = block.mode
-  }
-  for (const key of ['greetings', 'answers', 'banter'] as const) {
-    if (block[key] === undefined) continue
-    if (typeof block[key] !== 'boolean') return false
-    patch[key] = block[key]
-  }
-  return patch
-}
-
 function commentsCommandRequestId(value: unknown): string {
   if (!value || typeof value !== 'object' || !('requestId' in value)) {
     throw new Error('Chat command requires a request id.')
@@ -4202,24 +4229,6 @@ function restoreCaptionsWindowOnLaunch(): void {
 
 app.on('browser-window-focus', () => {
   void setNativePreviewSurfacesVisible(true)
-})
-
-function publishTakeRunning(): void {
-  const running = takeRunning(mainCaptureState)
-  if (running === publishedTakeRunning) {
-    return
-  }
-  publishedTakeRunning = running
-  sendToWindows('session:take-running', running)
-}
-
-// A window that loads (or reloads) during a take starts from false: tell it.
-app.on('browser-window-created', (_event, window) => {
-  window.webContents.on('did-finish-load', () => {
-    if (publishedTakeRunning && !window.isDestroyed() && window !== nativePreviewSurfaceWindow) {
-      sendElectronEvent(window.webContents, 'session:take-running', true)
-    }
-  })
 })
 
 function previewWindowIsOpenForSurface(): boolean {
@@ -5053,6 +5062,7 @@ function backendPreviewFrameUrl(
 // frame server stands in for the source routes only, never for this one.
 function previewBuddyFrameUrl(canvas: PreviewSurfaceCanvas): string | undefined {
   if (
+    !previewSurfaceDrawsBuddyLayer(process.platform) ||
     !nativePreviewFramePollingEnabled ||
     nativePreviewSurfaceFramePollingSuppressed ||
     !backendConnection ||
@@ -5499,6 +5509,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         background: transparent;
       }
 
+      /* The stage: the whole window, or, when the window is not the
+         canvas's shape (a tiling window manager ignores the aspect lock), the
+         canvas fitted and centred in it by layoutSceneStage. Outside it the
+         body shows through, as it does around a surface with no frames. */
       #scene-root {
         position: fixed;
         inset: 0;
@@ -5680,6 +5694,36 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             Math.max(0, Number(scene?.layout?.cameraCornerRadiusPct ?? 0))
           );
           return String(Math.min(width, height) * radiusPct / 100) + 'px';
+        }
+
+        ${PREVIEW_SURFACE_STAGE_RUNTIME_SCRIPT}
+
+        // Fit #scene-root to the scene's canvas so layer percentages scale
+        // uniformly; the full window (no inline rect) when the shapes match.
+        function layoutSceneStage() {
+          const canvas = scene?.bannerCanvas;
+          const rect = previewSurfaceStageRect(
+            window.innerWidth,
+            window.innerHeight,
+            Number(canvas?.width),
+            Number(canvas?.height)
+          );
+          const next = rect
+            ? {
+                right: 'auto',
+                bottom: 'auto',
+                left: String(rect.left) + 'px',
+                top: String(rect.top) + 'px',
+                width: String(rect.width) + 'px',
+                height: String(rect.height) + 'px'
+              }
+            : { right: '', bottom: '', left: '', top: '', width: '', height: '' };
+          for (const [property, value] of Object.entries(next)) {
+            if (root.style[property] !== value) {
+              root.style[property] = value;
+            }
+          }
+          root.dataset.stageFit = rect ? 'contain' : 'window';
         }
 
         function refreshLayerMasks() {
@@ -6190,6 +6234,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           scene = nextScene;
           window.__videorcNativePreviewSceneRevision = scene?.revision ?? null;
           document.body.dataset.sceneRevision = String(scene?.revision ?? '');
+          layoutSceneStage();
           const nextLayers = Array.isArray(scene?.sources) ? scene.sources.filter((layer) => layer.visible !== false) : [];
           const activeIds = new Set(nextLayers.map((layer) => String(layer.id)));
           stopMissingPollers(activeIds);
@@ -6212,7 +6257,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         window.__videorcSetPreviewScene = applyScene;
         window.__videorcSetFramePollingSuppressed = setFramePollingSuppressed;
         window.__videorcSetFramePollingProfile = setFramePollingProfile;
-        window.addEventListener('resize', refreshLayerMasks);
+        window.addEventListener('resize', () => {
+          layoutSceneStage();
+          refreshLayerMasks();
+        });
 
         function applyCompositorStatus(nextStatus) {
           pendingCompositorStatus = nextStatus;
@@ -6417,7 +6465,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               liveBackground: liveBackgroundMetrics(),
               blankFrames: measurement.blankFrames,
               width: window.innerWidth,
-              height: window.innerHeight
+              height: window.innerHeight,
+              stageFit: root.dataset.stageFit ?? 'window',
+              stageWidth: root.clientWidth,
+              stageHeight: root.clientHeight
             };
           };
           scheduleTick();
@@ -8962,6 +9013,15 @@ function enforceWindowsVersionFloor(): boolean {
 }
 
 function registerOAuthCallbackProtocol(): void {
+  // An AppImage has no installed desktop entry, so Electron's xdg-settings
+  // path fails ("invalid application name"); it registers itself instead.
+  const appImage = linuxAppImageToRegister(process.platform, app.isPackaged, process.env.APPIMAGE)
+  if (appImage) {
+    void registerLinuxAppImageUrlHandler(appImage).catch((error: unknown) =>
+      logBackend('warn', `Couldn't register Videorc for videorc:// links: ${errorMessage(error)}`)
+    )
+    return
+  }
   if (process.defaultApp) {
     const appPath = process.argv[1]
     if (appPath) {
@@ -8971,6 +9031,61 @@ function registerOAuthCallbackProtocol(): void {
   }
 
   app.setAsDefaultProtocolClient(OAUTH_CALLBACK_PROTOCOL)
+}
+
+// Best-effort: no shell, a bounded wait, and a failure is only logged.
+function runDesktopTool(command: string, args: string[]): Promise<void> {
+  return new Promise((resolveRun) => {
+    execFile(command, args, { timeout: 10_000 }, (error, _stdout, stderr) => {
+      if (error) {
+        const detail = stderr.trim() || errorMessage(error)
+        logBackend('warn', `${command} ${args.join(' ')} failed: ${detail}`)
+      }
+      resolveRun()
+    })
+  })
+}
+
+async function registerLinuxAppImageUrlHandler(appImage: string): Promise<void> {
+  const desired = buildVideorcDesktopEntry(appImage)
+  if (!desired) {
+    logBackend('warn', 'The AppImage path cannot go in a desktop entry; videorc:// links stay off.')
+    return
+  }
+  // The AppImage's own 512 px icon, else the 256 px logo in resources.
+  const icons = [
+    {
+      source: join(
+        dirname(process.resourcesPath),
+        'usr/share/icons/hicolor/512x512/apps/videorc.png'
+      ),
+      size: 512
+    },
+    { source: join(process.resourcesPath, 'videorc-logo.png'), size: 256 }
+  ]
+  const icon = icons.find((candidate) => existsSync(candidate.source))
+  const paths = linuxDesktopEntryPaths(homedir(), process.env.XDG_DATA_HOME, icon?.size ?? 512)
+
+  const existing = await fsPromises.readFile(paths.desktopFile, 'utf8').catch(() => null)
+  const decision = decideVideorcDesktopEntry(existing, desired)
+  if (decision.action === 'keep' && decision.reason === 'unmanaged') {
+    logBackend('info', `Leaving ${paths.desktopFile} alone: Videorc did not write it.`)
+    return
+  }
+  if (decision.action === 'write') {
+    await fsPromises.mkdir(paths.applicationsDir, { recursive: true })
+    await fsPromises.writeFile(paths.desktopFile, desired, { mode: 0o644 })
+    logBackend('info', `Wrote ${paths.desktopFile} (${decision.reason}) for videorc:// links.`)
+  }
+  if (icon && !existsSync(paths.iconFile)) {
+    await fsPromises.mkdir(paths.iconDir, { recursive: true })
+    await fsPromises.copyFile(icon.source, paths.iconFile)
+  }
+  // Re-asserted every launch, so a handler another app took is reclaimed.
+  await runDesktopTool('xdg-mime', ['default', VIDEORC_DESKTOP_FILE_NAME, VIDEORC_URL_MIME_TYPE])
+  if (decision.action === 'write') {
+    await runDesktopTool('update-desktop-database', [paths.applicationsDir])
+  }
 }
 
 function oauthCallbackRedirectUri(platform?: string): string | null {
@@ -9957,7 +10072,6 @@ function disconnectBackendEventSocket(): void {
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
-  publishTakeRunning()
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -9993,7 +10107,6 @@ function retireBackendEventSocket(
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
-  publishTakeRunning()
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -14218,7 +14331,6 @@ function updateMainCaptureState(payload: RecordingStatus): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
-  publishTakeRunning()
   const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {

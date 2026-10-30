@@ -26,6 +26,17 @@ export const PREVIEW_SURFACE_BUDDY_LAYER_KIND = 'buddy'
 /** One Buddy; the id matches the Scene editor's stage id for it. */
 export const PREVIEW_SURFACE_BUDDY_LAYER_ID = 'overlay:buddy'
 
+/**
+ * Whether the proof surface draws the Buddy's layer on this platform. On
+ * macOS the Preview is the native CAMetalLayer, where the compositor's
+ * program leg draws the Buddy, and the proof surface is only its fallback;
+ * polling the route there would build a third pet atlas that shrinks the
+ * stream's and the recording's under their shared memory budget.
+ */
+export function previewSurfaceDrawsBuddyLayer(platform: NodeJS.Platform): boolean {
+  return platform !== 'darwin'
+}
+
 /** The Buddy's rect for a canvas: the vertical rect on a portrait canvas
  * (`OverlayOrientation::for_canvas`), the horizontal one otherwise. */
 export function previewSurfaceBuddyRect(

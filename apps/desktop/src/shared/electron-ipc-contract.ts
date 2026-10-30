@@ -339,7 +339,6 @@ export interface ElectronIpcEventMap {
   'buddy:deep-link': BuddyDeepLinkNavigation
   'shortcut:modifier': boolean
   'window:visible': boolean
-  'session:take-running': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
   'shortcut-recorder:key': ShortcutRecorderKeyEvent
   'shortcut-recorder:disarmed': undefined
@@ -393,7 +392,6 @@ export const electronEventChannels = [
   'shortcut:modifier',
   'window:visible',
   'app:front-changed',
-  'session:take-running',
   'global-shortcuts:triggered',
   'shortcut-recorder:key',
   'shortcut-recorder:disarmed',
@@ -2017,9 +2015,6 @@ const specificRuntimeEventSchemas = {
     },
     { allowUnknown: false }
   ),
-  // A recording or livestream is running (never a Clips-only ring). Every
-  // window hears it; the chrome ground holds still while it is true.
-  'session:take-running': booleanSchema,
   'global-shortcuts:triggered': runtimeSchema<GlobalShortcutAction>(
     'shortcut action',
     (value, path) => {

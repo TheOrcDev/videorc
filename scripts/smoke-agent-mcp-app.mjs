@@ -41,7 +41,9 @@
 //       pixels there; the camera's corner; set_scene_item on Buddy.
 //   B6. Chat on the fake providers: a post is seen (echoSends), a Twitch
 //       removal runs, a YouTube removal waits for the streamer's card.
-//   B7. buddy_say reaches the bubble; set_buddy round trips or refuses.
+//   B7. buddy_say reaches the bubble and is refused off the picture; set_buddy
+//       on/off round trips or refuses, onStream and talk round trip, and the
+//       old chatMode is refused in words (plan 211 D12).
 //   B8. Prepare: update_stream_info, set_destinations, schedule_stream,
 //       get_settings and update_settings.
 //   B9. Library: rename, get_recording with includeTranscript, export,
@@ -1476,11 +1478,49 @@ try {
   if ((await request(renderer, timeoutMs, 'overlays.layout.get'))?.buddy?.showOnStream !== false) {
     fail('set_buddy onStream false left Buddy on the stream')
   }
+  // Plan 211 D12: off the picture, buddy_say is refused in the one sentence
+  // (it never posts instead).
+  const unseen = await call(bridge, 'buddy_say', { text: BUDDY_LINE })
+  if (
+    !unseen.isError ||
+    resultText(unseen) !== "Buddy isn't on the picture, so nobody would see it."
+  ) {
+    fail(`buddy_say off the picture: ${JSON.stringify(unseen)}`)
+  }
   await callOk(bridge, 'set_buddy', { onStream: true })
   if ((await request(renderer, timeoutMs, 'overlays.layout.get'))?.buddy?.showOnStream !== true) {
     fail('set_buddy onStream true did not put Buddy back')
   }
-  log(`step B7: buddy_say reached Buddy's bubble; ${buddyNote}; set_buddy onStream off and on`)
+  // Plan 211 D12: `talk` round-trips without Premium (the Stream Manager
+  // control's own gate), and the old `chatMode` is refused in words.
+  const buddyTalk = await waitUntil(
+    'set_buddy talk to answer',
+    async () => {
+      const result = await call(bridge, 'set_buddy', { talk: 'suggest' })
+      return { done: resultText(result) !== copy.buddy.loading, value: result }
+    },
+    AGENT_ACTION_POLL
+  )
+  if (buddyTalk.isError || buddyTalk.structuredContent?.talk !== 'suggest') {
+    fail(`set_buddy talk suggest: ${JSON.stringify(buddyTalk)}`)
+  }
+  if ((await request(renderer, timeoutMs, 'cohost.settings.get'))?.autoChat?.talk !== 'suggest') {
+    fail('set_buddy talk suggest did not save autoChat.talk')
+  }
+  const buddyBubble = await callOk(bridge, 'set_buddy', { talk: 'bubble' })
+  if (buddyBubble.structuredContent?.talk !== 'bubble') {
+    fail(`set_buddy talk bubble: ${JSON.stringify(buddyBubble)}`)
+  }
+  if ((await request(renderer, timeoutMs, 'cohost.settings.get'))?.autoChat?.talk !== 'bubble') {
+    fail('set_buddy talk bubble did not save autoChat.talk')
+  }
+  const legacyAuto = await call(bridge, 'set_buddy', { chatMode: 'auto' })
+  if (!legacyAuto.isError || resultText(legacyAuto) !== copy.buddy.autoGone) {
+    fail(`set_buddy chatMode auto: ${JSON.stringify(legacyAuto)}`)
+  }
+  log(
+    `step B7: buddy_say reached Buddy's bubble and was refused off the picture; ${buddyNote}; set_buddy onStream off and on, talk suggest and bubble round-tripped, chatMode auto refused ("${copy.buddy.autoGone}")`
+  )
 
   // B8. Prepare the next stream.
   const info = await callOk(bridge, 'update_stream_info', {

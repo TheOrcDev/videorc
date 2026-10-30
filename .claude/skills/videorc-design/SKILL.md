@@ -56,7 +56,8 @@ drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
    LED: red for record, live, and destructive; green for healthy; amber for
    attention.
    Never tint panels, rows, or text decoratively, and never colour a status
-   word: the tone rides on an icon, a dot, a chip or an Alert.
+   word: the tone rides on an icon, a dot, a chip or an Alert. The one row
+   exception is the member hue as a member row's chrome edge (plan 0011).
 5. **Keyboard-first, quietly.** Primary actions show their shortcut as a key
    chip. Global hints live in the status bar, not on every surface.
 6. **One primitive per job.** Confirmations, locks, disabled reasons,
@@ -83,17 +84,23 @@ for the owner, not a design choice.
   - **Light is the crisp invert** (D3): the dark chrome's pixels turned
     around, white liquid with black reflections and black-chrome controls.
     No separate light look.
-  - **The ground drifts, clear but calm** (D5, revised 2026-10-28). The
-    owner asked for "a little bit" of movement without costing memory or
-    CPU, and then for "clear but calm". Under the coats 10 and then 40 px
-    could not be seen, so it was tuned live with the owner watching.
-    - The same still sways up to 120 px across and 84 px down along two slow
-      sines (25 s and 33 s), 20 steps a second.
-    - It moves whenever the window is on screen, even beside a focused app.
-    - It holds still while the window is minimised or hidden, while a
-      recording or livestream runs (a Clips-only ring is not a take), and
-      under Reduce Motion.
-    - No second image, no shader, no zoom.
+  - **Nothing moves outside the Welcome screen** (D5; the owner tried a
+    drifting ground on 2026-10-28 and took it back on 2026-10-29): the ground
+    is a still, so it costs nothing while you record or stream.
+  - **Stream Manager's highlights and members are chrome** (2026-10-28,
+    plan 0011). The owner asked for the highlights and every member's entry
+    to look much stronger, in the Welcome screen's Liquid Chrome.
+    - The row on stream (chat, Studio chat and Activity) is a
+      `chrome-row-live` plate with a polished 2px edge, and its On stream
+      chip is the `chrome` Badge (chrome-fill, the green status dot kept).
+    - A member's chat row and a sub or membership in Activity is a
+      `chrome-row-member` plate at half strength, with the member hue only
+      as its 2px edge. Its Member chip is the `plate` Badge.
+    - One background per row: on stream, then paid, then the Buddy
+      pull-up, then member. A member's Super Chat still reads as paid.
+    - Static plates on the theme's solid, never on the bare ground: no
+      motion, no blur. Screens take the class from
+      `components/ui/chrome-row.ts`.
   - **Record and Stop are a red LED** (D8): the `record` Button, unlit at
     idle and lit while a recording or livestream runs. Go Live… is the
     chrome primary. Delete, Remove and every other destructive action keep
@@ -101,7 +108,7 @@ for the owner, not a design choice.
     live.
 - **First-run setup paints Liquid Chrome** (2026-10-27, plans 203, 207 and 208).
   The Welcome screen is the only place outside a scene where a live
-  background runs: Liquid Chrome,
+  background runs, and the only place the chrome moves: Liquid Chrome,
   Polished, Normal motion, edge to edge. Under dark the shader dims it.
   Under light it is inverted (white liquid, black reflections) with no dim,
   and a CSS brightness of 0.85 after the invert only under Increase
@@ -637,9 +644,10 @@ made it chat first: one thin stats bar and fewer words.
   row widen every row past the pane. Never reintroduce it per call site.
 - **The Buddy pane** has one header: Buddy's identity (the living preview at
   32 px, the name, the bubble while one is up), the Alpha tag, listening,
-  the status and the **Buddy Live** switch. Under it, "Chat posting" is a
-  `SegmentedControl` (Off · Suggest · Auto) with the chosen mode's meaning
-  as a line; it never turns Buddy on. Greetings, Answers and Banter are
+  the status and the **Buddy Live** switch. Under it, "{name} talks" is a
+  `SegmentedControl` (Off · Bubble · Suggest, plan 211) with the chosen
+  value's meaning as a line; it never turns Buddy on, and nothing Buddy
+  does on its own reaches chat. Greetings, Answers and Banter are
   read-only summary chips that link to their one home, Buddy → Chat. The
   footer holds the Say box, the reaction chips and the "{name} on stream"
   switch. Every card that waits on the streamer is a `BuddyCard`.
@@ -878,9 +886,8 @@ moved onto the utility.
 
 Fast and subtle: 100–150 ms ease-out. Floating surfaces fade and scale from
 0.98. Rows highlight instantly. Nothing bounces, and chips never move. The
-chrome ground only drifts, slowly, while no take runs (owner call,
-2026-10-28); only the Welcome screen's backdrop plays Liquid Chrome itself.
-`prefers-reduced-motion` collapses motion.
+chrome ground is a still: only the Welcome screen's backdrop moves (owner
+call). `prefers-reduced-motion` collapses motion.
 
 ## Toast discipline
 
