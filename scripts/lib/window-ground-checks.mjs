@@ -1,9 +1,11 @@
-// Plan 208 S3: pure checks over controlled, text-free capture patches.
+// Plan 208 S3: pure checks over controlled, text-free capture patches. Since
+// the owner took the chrome ground out (2026-10-29), every window is the solid
+// palette: no ground image is mounted and the pixels never move.
 import { clampRect, contrastRatio, relativeLuminance } from './image-stats.mjs'
 import { parseCssColor } from './glass-parity.mjs'
 
-// Same WCAG ratios and gamma-sRGB -> linear luminance math as S2's
-// chrome-ground-contrast.test.ts; capture pixels already contain the coats.
+// Same WCAG ratios and gamma-sRGB -> linear luminance math as
+// window-contrast.test.ts; capture pixels already contain the coats.
 export const GROUND_CONTRAST = Object.freeze({ foreground: 7, 'muted-foreground': 4.5, subtle: 3 })
 
 // Select the A/B from the request, never from applied state: a product
@@ -66,24 +68,8 @@ export function pixelStability(images, rect) {
 export function groundDomChecks({ theme, pageDark, ground }) {
   const checks = {}
   checks.followsTheme = pageDark === (theme === 'dark')
-  checks.groundMounted = ground?.ground === 'chrome' && ground.mounted === true
-  // D12 intentionally hides the still under Reduce Transparency. Its
-  // asset must still be decoded; opacity and contrast remain gated.
-  checks.groundVisible =
-    ground?.firstRun === false && (ground?.reducedTransparency || ground?.visible === true)
-  const images = ground?.images ?? []
-  checks.themeAsset =
-    images.length === 2 &&
-    images.filter((i) => i.visible).length === 1 &&
-    images.some(
-      (i) =>
-        i.theme === theme &&
-        i.visible &&
-        i.loaded &&
-        i.width === 1280 &&
-        i.height === 720 &&
-        i.src.includes(`chrome-ground-${theme}`)
-    )
+  checks.solidRoot = ground?.ground === 'solid'
+  checks.noGround = ground?.mounted === false && (ground?.images ?? []).length === 0
   return checks
 }
 
@@ -91,9 +77,7 @@ export function evaluateGround({ theme, role, glassState, pageDark, ground, samp
   const preview = role === 'preview'
   const mode = glassState?.applied?.mode
   const checks = {
-    mode: preview
-      ? mode?.kind === 'solid' && mode.reason === 'dark-always'
-      : mode?.kind === 'ground',
+    mode: mode?.kind === 'solid',
     noVibrancy: Array.isArray(glassState?.effectViews) && glassState.effectViews.length === 0,
     opaquePixels: stability?.pass === true
   }

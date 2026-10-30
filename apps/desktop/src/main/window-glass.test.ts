@@ -26,22 +26,22 @@ const win = (windowsBuild?: number, glass?: string) => ({
   windowsBuild,
   glass
 })
-const GROUND: GlassMode = { kind: 'ground' }
+const SOLID: GlassMode = { kind: 'solid', reason: 'default' }
 
-describe('resolveGlassMode (plan 208, D1)', () => {
-  it('gives every platform the chrome ground by default', () => {
-    expect(resolveGlassMode(mac)).toEqual(GROUND)
-    expect(resolveGlassMode(win(26100))).toEqual(GROUND)
-    expect(resolveGlassMode(win(19045))).toEqual(GROUND)
-    expect(resolveGlassMode(win(undefined))).toEqual(GROUND)
-    expect(resolveGlassMode({ platform: 'linux' })).toEqual(GROUND)
+describe('resolveGlassMode', () => {
+  it('gives every platform the solid palette by default (the chrome ground is gone, 2026-10-29)', () => {
+    expect(resolveGlassMode(mac)).toEqual(SOLID)
+    expect(resolveGlassMode(win(26100))).toEqual(SOLID)
+    expect(resolveGlassMode(win(19045))).toEqual(SOLID)
+    expect(resolveGlassMode(win(undefined))).toEqual(SOLID)
+    expect(resolveGlassMode({ platform: 'linux' })).toEqual(SOLID)
   })
 
-  it('keeps the ground under software rendering and after a blank Mica launch: it needs neither', () => {
-    expect(resolveGlassMode({ ...win(22631), softwareRendering: true })).toEqual(GROUND)
-    expect(resolveGlassMode({ ...win(22631), micaFoundBlank: true })).toEqual(GROUND)
+  it('keeps the solid palette under software rendering and after a blank Mica launch: it needs neither', () => {
+    expect(resolveGlassMode({ ...win(22631), softwareRendering: true })).toEqual(SOLID)
+    expect(resolveGlassMode({ ...win(22631), micaFoundBlank: true })).toEqual(SOLID)
     expect(resolveGlassMode({ ...mac, softwareRendering: true, micaFoundBlank: true })).toEqual(
-      GROUND
+      SOLID
     )
   })
 
@@ -58,10 +58,10 @@ describe('resolveGlassMode (plan 208, D1)', () => {
     })
   })
 
-  it('anything that is not an escape hatch keeps the ground', () => {
+  it('anything that is not an escape hatch keeps the solid palette', () => {
     for (const value of ['1', 'glass', 'ground', 'chrome', '', ' ']) {
-      expect(resolveGlassMode({ ...mac, glass: value })).toEqual(GROUND)
-      expect(resolveGlassMode({ ...mac, legacyVibrancy: value })).toEqual(GROUND)
+      expect(resolveGlassMode({ ...mac, glass: value })).toEqual(SOLID)
+      expect(resolveGlassMode({ ...mac, legacyVibrancy: value })).toEqual(SOLID)
     }
   })
 })
@@ -127,32 +127,32 @@ describe('resolveGlassStyle (plan 091)', () => {
 })
 
 describe('windowGlassOptions', () => {
-  it('gives every ground window an opaque backing on the theme solid base: no vibrancy, no material', () => {
+  it('gives every solid window an opaque backing on the theme solid base: no vibrancy, no material', () => {
     for (const role of THEME_ROLES) {
-      const dark = windowGlassOptions(role, { ...mac, mode: GROUND, dark: true })
+      const dark = windowGlassOptions(role, { ...mac, mode: SOLID, dark: true })
       expect(dark.backgroundColor).toBe(DARK_WINDOW_PALETTE.base)
       expect(dark.vibrancy).toBeUndefined()
       expect(dark.visualEffectState).toBeUndefined()
       expect(dark.backgroundMaterial).toBeUndefined()
       expect(dark.transparent).toBeUndefined()
-      expect(windowGlassOptions(role, { ...mac, mode: GROUND, dark: false }).backgroundColor).toBe(
+      expect(windowGlassOptions(role, { ...mac, mode: SOLID, dark: false }).backgroundColor).toBe(
         LIGHT_WINDOW_PALETTE.base
       )
     }
   })
 
-  it('keeps the macOS title bar recipe under the ground', () => {
-    const options = windowGlassOptions('main', { ...mac, mode: GROUND, dark: true })
+  it('keeps the macOS title bar recipe on the solid palette', () => {
+    const options = windowGlassOptions('main', { ...mac, mode: SOLID, dark: true })
     expect(options.titleBarStyle).toBe('hiddenInset')
     expect(options.trafficLightPosition).toEqual(trafficLightPosition('main'))
   })
 
   it('carries no macOS chrome off macOS: the native frame owns the title bar', () => {
     for (const platform of ['win32', 'linux'] as const) {
-      expect(windowGlassOptions('main', { platform, mode: GROUND, dark: true })).toEqual({
+      expect(windowGlassOptions('main', { platform, mode: SOLID, dark: true })).toEqual({
         backgroundColor: DARK_WINDOW_PALETTE.base
       })
-      expect(windowGlassOptions('chat', { platform, mode: GROUND, dark: false })).toEqual({
+      expect(windowGlassOptions('chat', { platform, mode: SOLID, dark: false })).toEqual({
         backgroundColor: LIGHT_WINDOW_PALETTE.base
       })
     }
@@ -194,22 +194,17 @@ describe('windowGlassOptions', () => {
 })
 
 describe('glassModeForRole', () => {
-  it('keeps the ground for every theme-following role, with or without the appearance pin', () => {
+  it('keeps the solid palette for every theme-following role, with or without the appearance pin', () => {
     for (const role of THEME_ROLES) {
-      expect(glassModeForRole(role, GROUND, true)).toEqual(GROUND)
-      expect(glassModeForRole(role, GROUND, false)).toEqual(GROUND)
+      expect(glassModeForRole(role, SOLID, true)).toEqual(SOLID)
+      expect(glassModeForRole(role, SOLID, false)).toEqual(SOLID)
     }
   })
 
-  it('keeps the Preview solid dark under the ground: it frames video (plan 208, D7)', () => {
-    expect(glassModeForRole('preview', GROUND, true)).toEqual({
-      kind: 'solid',
-      reason: 'dark-always'
-    })
-    expect(glassModeForRole('preview', GROUND, false)).toEqual({
-      kind: 'solid',
-      reason: 'dark-always'
-    })
+  it('keeps the Preview solid and dark by default: it frames video (plan 208, D7)', () => {
+    expect(glassModeForRole('preview', SOLID, true)).toEqual(SOLID)
+    expect(glassModeForRole('preview', SOLID, false)).toEqual(SOLID)
+    expect(solidWindowBase('preview', false)).toBe(DARK_WINDOW_PALETTE.base)
   })
 
   it('under the clear glass, keeps the material for every role when the appearance pin is available', () => {
@@ -230,20 +225,19 @@ describe('glassModeForRole', () => {
     })
   })
 
-  it('never turns a solid mode back into a material or a ground', () => {
+  it('never turns a solid mode back into a material', () => {
     const solid = resolveGlassMode({ ...mac, glass: '0' })
     expect(glassModeForRole('chat', solid, true)).toEqual(solid)
     expect(glassModeForRole('preview', solid, true)).toEqual(solid)
   })
 })
 
-describe('windowGroundForMode: what the renderer paints under its coats (plan 208, S2)', () => {
-  it('maps the ground to chrome, the OS materials to glass, and the solid palette to solid', () => {
-    expect(windowGroundForMode(GROUND)).toBe('chrome')
+describe('windowGroundForMode: what the window sits on (plan 208, S2)', () => {
+  it('maps the OS materials to glass and the solid palette to solid', () => {
+    expect(windowGroundForMode(SOLID)).toBe('solid')
     expect(windowGroundForMode({ kind: 'material', material: 'under-window' })).toBe('glass')
     expect(windowGroundForMode({ kind: 'mica' })).toBe('glass')
     expect(windowGroundForMode({ kind: 'solid', reason: 'disabled' })).toBe('solid')
-    expect(windowGroundForMode({ kind: 'solid', reason: 'dark-always' })).toBe('solid')
     expect(windowGroundForMode({ kind: 'solid', reason: 'platform' })).toBe('solid')
   })
 })

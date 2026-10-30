@@ -5,7 +5,7 @@ import {
   evaluateGround,
   isClearGlassRun,
   pixelStability
-} from './chrome-ground-checks.mjs'
+} from './window-ground-checks.mjs'
 
 const image = () => ({ width: 3, height: 3, data: new Uint8Array(36).fill(255) })
 const rect = { x: 0, y: 0, width: 3, height: 3 }
@@ -15,20 +15,13 @@ function fixture() {
     theme: 'dark',
     role: 'main',
     pageDark: true,
-    glassState: { applied: { mode: { kind: 'ground' } }, effectViews: [] },
+    glassState: { applied: { mode: { kind: 'solid', reason: 'default' } }, effectViews: [] },
     ground: {
-      ground: 'chrome',
-      mounted: true,
-      visible: true,
+      ground: 'solid',
+      mounted: false,
+      visible: false,
       firstRun: false,
-      images: ['dark', 'light'].map((theme) => ({
-        theme,
-        visible: theme === 'dark',
-        loaded: true,
-        width: 1280,
-        height: 720,
-        src: `/chrome-ground-${theme}.webp`
-      })),
+      images: [],
       tiers: {
         foreground: 'oklch(0.97 0 0)',
         'muted-foreground': 'oklch(0.71 0 0)',
@@ -58,7 +51,7 @@ test('background extremes keep a single bright crest instead of averaging it', (
   ])
 })
 
-test('ground checks fail closed on mode, vibrancy, desktop leak, asset and all text tiers', () => {
+test('solid window checks fail closed on mode, vibrancy, desktop leak, a ground and all text tiers', () => {
   assert.equal(evaluateGround(fixture()).pass, true)
   for (const mutate of [
     (f) => {
@@ -71,22 +64,19 @@ test('ground checks fail closed on mode, vibrancy, desktop leak, asset and all t
       f.stability.pass = false
     },
     (f) => {
-      f.ground.mounted = false
+      f.glassState.applied.mode = { kind: 'ground' }
     },
     (f) => {
-      f.ground.images[0].width = 0
+      f.ground.mounted = true
     },
     (f) => {
-      f.ground.images[0].visible = false
+      f.ground.images = [{ theme: 'dark', src: '/chrome-ground-dark.webp' }]
     },
     (f) => {
-      f.ground.images[0].src = '/wrong.webp'
+      f.ground.ground = 'chrome'
     },
     (f) => {
       f.pageDark = false
-    },
-    (f) => {
-      f.ground.firstRun = true
     },
     ...['foreground', 'muted-foreground', 'subtle'].map((tier) => (f) => {
       f.ground.tiers[tier] = 'rgb(10, 10, 10)'
@@ -101,22 +91,13 @@ test('ground checks fail closed on mode, vibrancy, desktop leak, asset and all t
   assert.equal(evaluateGround(f).checks.foregroundContrast, false)
 })
 
-test('reduced transparency permits the hidden ground while retaining the other contracts', () => {
-  const f = fixture()
-  f.ground.visible = false
-  f.ground.reducedTransparency = true
-  assert.equal(evaluateGround(f).pass, true)
-  f.ground.reducedTransparency = false
-  assert.equal(evaluateGround(f).pass, false)
-})
-
 test('Preview must be solid dark in both themes and needs no renderer ground', () => {
   for (const theme of ['dark', 'light']) {
     const f = fixture()
     f.role = 'preview'
     f.theme = theme
     f.ground = null
-    f.glassState.applied.mode = { kind: 'solid', reason: 'dark-always' }
+    f.glassState.applied.mode = { kind: 'solid', reason: 'default' }
     assert.equal(evaluateGround(f).pass, true)
     f.samples[0].extremes = [{ r: 255, g: 255, b: 255 }]
     assert.equal(evaluateGround(f).checks.pinnedDark, false)

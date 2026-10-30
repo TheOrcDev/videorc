@@ -5,7 +5,7 @@
 // stayed empty for ever and nothing was logged. This smoke launches the
 // packaged app and proves, against the real window:
 //
-//   1. a normal launch mounts the UI on the opaque chrome ground (plan 208);
+//   1. a normal launch mounts the UI on the opaque solid palette;
 //   2. a crashed renderer is reloaded and the UI comes back, with log lines;
 //   3. under VIDEORC_GLASS=clear (the plan 091 A/B, one release) the Mica
 //      paint check reports painted, software rendering starts on the solid

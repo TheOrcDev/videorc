@@ -146,17 +146,18 @@ for the Mac numbers and the Windows measurement still owed.
 
 ### Chrome grounds (plan 208)
 
-The opaque window grounds are a still of Liquid Chrome's Polished look at
+The desktop windows no longer use these stills: the owner removed the
+chrome ground from under every window on 2026-10-29, and the windows paint
+the plain solid. Only the phone remote still serves them.
+
+The grounds are a still of Liquid Chrome's Polished look at
 its catalogue poster phase (1.2), rendered by the existing WebGL2 poster
 runner at 1280 × 720 with Dim 0. The Rust `chrome-grounds` example applies
 `image::imageops::blur` with Gaussian σ 24 to sRGB bytes. For light, it
 inverts each channel (`255 - v`) **before** blurring.
 
-Every window's `ChromeGround` (`components/chrome-ground.tsx`, plan 208 S2)
-paints them under its coats, and the phone remote's LAN router serves the
-same files at `/chrome-ground-{dark,light}.webp` (`include_bytes!`, never a
-copy; S6). `chrome-ground-contrast.test.ts` reads the stats file, so a
-regenerated ground re-proves the windows' text contrast.
+The phone remote's LAN router serves them at
+`/chrome-ground-{dark,light}.webp` (`include_bytes!`, never a copy; S6).
 
 Regenerate from the repository root (requires Rust, desktop Electron and
 libwebp's `cwebp` on PATH):
