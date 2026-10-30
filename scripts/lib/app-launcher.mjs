@@ -26,6 +26,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
+import './smoke-env.mjs'
 import { acquireHostSmokeLock, waitForHostMemory, withBuildSlot } from './host-lock.mjs'
 
 import { assertSmokeCommandConnection } from './smoke-command-client.mjs'
