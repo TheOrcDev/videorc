@@ -7,10 +7,9 @@ import { WINDOW_TITLE_CLASS } from '@/components/pane'
 import { currentPlatform, isMacPlatform } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
-// The frame every window shares. The window's opaque base, the chrome ground
-// (`ChromeGround`) and the body's window coat sit under it; this adds the
-// content coat for single-pane windows and the traffic-light gutter for
-// header rows.
+// The frame every window shares. The window's opaque base and the body's
+// window coat sit under it; this adds the content coat for single-pane
+// windows and the traffic-light gutter for header rows.
 
 /**
  * Header rows share their line with the macOS traffic lights (hiddenInset).
