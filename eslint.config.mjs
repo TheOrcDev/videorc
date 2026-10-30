@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import js from '@eslint/js'
 import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
@@ -8,13 +10,15 @@ const PHOSPHOR_RESTRICTION = {
     'Import icons from @/components/icons instead. Add a new semantic slot there only if no existing slot already means the same thing.'
 }
 
-// Base UI is audiocn's primitive layer (plan 092). Videorc's own UI is Radix
-// (components.json: radix-rhea), so only files installed from the @audiocn
-// registry may import it. docs/audiocn.md lists them.
+// Base UI is the primitive layer of the registries Videorc installs from:
+// audiocn (plan 092) and @videorc (videorc-ui). Until a family moves to
+// @videorc, Videorc's own UI is Radix (components.json: radix-rhea), so only
+// registry files may import it: the audiocn files docs/audiocn.md lists, and
+// the items in apps/desktop/ui-registry.json (pnpm ui:sync).
 const BASE_UI_RESTRICTION = {
   group: ['@base-ui/react', '@base-ui/react/*'],
   message:
-    "Base UI is audiocn's primitive layer; Videorc UI uses Radix. Only files installed from @audiocn may import it (docs/audiocn.md)."
+    "Base UI is the registries' primitive layer; Videorc UI not yet synced from @videorc uses Radix. Only files installed from @audiocn (docs/audiocn.md) or listed in apps/desktop/ui-registry.json may import it."
 }
 
 const AUDIOCN_BASE_UI_FILES = [
@@ -25,6 +29,15 @@ const AUDIOCN_BASE_UI_FILES = [
   'lcd-display',
   'parameter-slider'
 ].map((name) => `apps/desktop/src/renderer/src/components/ui/${name}.tsx`)
+
+// A @videorc item's file is named after it (a videorc-ui registry rule), in
+// components/ui/ or components/.
+const VIDEORC_UI_BASE_UI_FILES = JSON.parse(
+  readFileSync(new URL('./apps/desktop/ui-registry.json', import.meta.url), 'utf8')
+).items.flatMap((name) => [
+  `apps/desktop/src/renderer/src/components/ui/${name}.{ts,tsx}`,
+  `apps/desktop/src/renderer/src/components/${name}.tsx`
+])
 
 export default tseslint.config(
   {
@@ -84,9 +97,10 @@ export default tseslint.config(
     }
   },
   {
-    // audiocn files may build on Base UI (plan 092). Flat config does not merge
-    // rule options, so this block re-declares the rule with the icon ban only.
-    files: AUDIOCN_BASE_UI_FILES,
+    // Registry files may build on Base UI (plan 092; videorc-ui). Flat config
+    // does not merge rule options, so this block re-declares the rule with the
+    // icon ban only.
+    files: [...AUDIOCN_BASE_UI_FILES, ...VIDEORC_UI_BASE_UI_FILES],
     rules: {
       'no-restricted-imports': ['error', { paths: [PHOSPHOR_RESTRICTION] }]
     }
