@@ -25,8 +25,8 @@ those faders from outside with `LCD_FADER` inside the Audio screen.
 | `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Every level (`MicLevelMeter`'s segmented bar), and under `lcd-meter`                                                |
 | `bar-visualizer`                                                                                | `components/ui/`            | Session mic sliver                                                                                                  |
 | `mixer`                                                                                         | `components/ui/`            | Sources Audio column and Studio Audio section: one meter range, Cmd/Ctrl+Up/Down between rows (plans 093, 173, 201) |
-| `fader`                                                                                         | `components/ui/`            | Sources and Studio: shared Microphone and System audio Gain faders; Sources Sounds Level and Assets → Sounds        |
-| `parameter-slider`                                                                              | `components/ui/`            | Sources: Microphone Sync                                                                                            |
+| `fader` (from `@videorc`, below)                                                                | `components/ui/`            | Sources and Studio: shared Microphone and System audio Gain faders; Sources Sounds Level and Assets → Sounds        |
+| `parameter-slider` (from `@videorc`, below)                                                     | `components/ui/`            | Sources: Microphone Sync                                                                                            |
 | `channel-toggle`                                                                                | `components/ui/`            | Sources: Microphone Mute (`MuteToggle`)                                                                             |
 | `sound-pad`                                                                                     | `components/ui/`            | Studio → Soundboard and the Stream Manager's Sounds popover (plan 189)                                              |
 
@@ -62,17 +62,21 @@ Installed from:
   `history-playback.ts`; Videorc kept its copies and dropped the new files,
   which the LCD never imports.
 
+- `fader` and `parameter-slider` (2026-10-30): `@videorc/fader` and
+  `@videorc/parameter-slider`, videorc-ui's forks of audiocn's (plan 004
+  there): Videorc's copies byte for byte under an attribution header, with
+  the chrome range and bead and the radius tiers. They are in
+  `apps/desktop/ui-registry.json`, so `pnpm ui:sync` installs them and
+  `pnpm ui:check` guards them. The sync takes `@audiocn/core`,
+  `@audiocn/db-scale` and `@audiocn/use-audio-config` as they are upstream:
+  `frame-loop.ts`'s update and paint phases, `types.ts`'s optional history
+  fields, and `lib/audio/history.ts`, `history-playback.ts`, `click.ts` and
+  `hooks/use-audio-context.tsx`, which nothing in Videorc imports yet.
+
 PR #2 merged as audiocn `d3736de` (2026-10-02). Checked against audiocn.dev
 at that commit, after Prettier: every plan 093 file and every shared file is
-byte-identical. Upstream is ahead of Videorc's shared copies, not adopted
-yet:
-
-- `lib/audio/types.ts` and `lib/audio/decibels.ts` each gained one leading
-  doc comment; `types.ts` also gained three optional history fields.
-- `lib/audio/frame-loop.ts` runs listeners in an update phase, then a paint
-  phase.
-
-Adopting them is an ordinary update (see Updating). Plan 196 adopted
+byte-identical. The forks' sync (above) adopted upstream's later core.
+Plan 196 adopted
 audiocn #4 (`level-meter`'s `[overflow-anchor:none]` and room for a
 horizontal scale) with the LCD.
 
@@ -80,18 +84,18 @@ horizontal scale) with the LCD.
 
 - **Never use audiocn's Web Audio hooks or blocks** (`useMicrophone`, `useAudioAnalyser`, `useAudioDevices`, `useSystemAudio`, `useWebAudioMixer`, `useSound`, the blocks, the soundboard block among them). The backend is the capture authority. The renderer's only microphone stream is the visual one owned by `StudioMicVisualProvider`, which opens only after an exact `granted` status.
 - **Base UI stays inside registry files.** `@base-ui/react` may only be imported by the files in `AUDIOCN_BASE_UI_FILES` and the `@videorc` items synced from videorc-ui (`apps/desktop/ui-registry.json`, `pnpm ui:sync`; both in `eslint.config.mjs`). Videorc's UI not yet synced from `@videorc` uses Radix.
-- **Do not edit vendored files.** Fix the problem in audiocn, then re-install. Local patches: none, except `hooks/use-reduced-motion.ts`, which carries Videorc's `smoothScrollBehavior()` (plan 174 S1.8): restore it after any `--overwrite`.
+- **Do not edit vendored files.** Fix the problem in audiocn (or, for `fader` and `parameter-slider`, in videorc-ui), then re-install. Local patches: none. `hooks/use-reduced-motion.ts` is `@videorc/use-reduced-motion`, a superset of audiocn's that adds `smoothScrollBehavior()` (plan 174 S1.8): when an `@audiocn` item overwrites it, take it back with `pnpm ui:sync use-reduced-motion`.
 - **The LCD draws in Videorc's ink.** `LcdDisplay` keeps `variant="primary"` (`--primary`) and `appearance="auto"`; no hardware ink. Its bezel and glass are the instrument's own materials, so `lcd-display.tsx` is on the style guard's colour-literal allowlist; `audiocn-adoption.test.ts` keeps `LcdDisplay` inside `MicLevelMeter` and the Studio screen kit (`components/lcd-panel.tsx`, plan 197), with no `variant` or `appearance`. The kit sets the screen's variables to the app's glass (`LCD_ON_GLASS`); a dropdown's list keeps the screen's own opaque glass inside `glass-float`.
 - **Tokens are Videorc tokens.** The `audiocn` block in `styles.css` points the three meter tokens (and their foregrounds) at `--foreground`, `--warning` and `--destructive`, and the channel tokens at `--warning` (mute, the muted-speaker amber), `--foreground` (solo) and `--info` (monitor); solo and monitor have no Videorc use. Never keep the CSS the CLI writes (raw colours, and self-referencing lines in `@theme inline`); `audiocn-adoption.test.ts` fails if it comes back.
 
 - **Videorc's skin comes from outside.** Vendored files stay pristine; Videorc styles the parts it renders through `className`:
 
-  | audiocn default                                                     | Videorc override                                                                                                              |
-  | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-  | Fader and ParameterSlider thumbs `bg-background ring-foreground/15` | `bg-knob ring-knob-ring`, like every Videorc slider (`FaderThumb className`, and a `data-slot` selector on `ParameterSlider`) |
-  | `ChannelToggle` `rounded-lg`                                        | `rounded-chip` (controls are 6 px)                                                                                            |
-  | `MixerChannels` scrolls                                             | `scrollable={false}`: only `PaneBody` scrolls                                                                                 |
-  | `SoundPad` `rounded-xl`                                             | `rounded-row` (pads are cards, 8 px); the file is in `OFF_TIER_RADIUS_ALLOWLIST`                                              |
+  | audiocn default                                                     | Videorc override                                                                                                          |
+  | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+  | Fader and ParameterSlider thumbs `bg-background ring-foreground/15` | In the `@videorc` forks: `chrome-bead ring-knob-ring`. The older `bg-knob ring-knob-ring` call-site classes are redundant |
+  | `ChannelToggle` `rounded-lg`                                        | `rounded-chip` (controls are 6 px)                                                                                        |
+  | `MixerChannels` scrolls                                             | `scrollable={false}`: only `PaneBody` scrolls                                                                             |
+  | `SoundPad` `rounded-xl`                                             | `rounded-row` (pads are cards, 8 px); the file is in `OFF_TIER_RADIUS_ALLOWLIST`                                          |
 
 - **No control without a backend path.** Videorc has no pan, solo, monitoring or player, so `pan-control`, `SoloToggle`, `MonitorToggle` and `volume-control` stay out until the backend has something for them to drive (plan 093, D1 and D2).
 - **Values are whole numbers.** The renderer rounds stored audio settings (`clampNumber` in `lib/capture.ts`), so faders step 1 dB with no Alt sub-steps.
@@ -110,7 +114,7 @@ adapters that live outside the eager bundle:
 
 ## Updating
 
-1. From `apps/desktop`, look first: `pnpm dlx shadcn@4.21.1 add @audiocn/lcd-meter @audiocn/level-meter @audiocn/bar-visualizer @audiocn/mixer @audiocn/fader @audiocn/parameter-slider @audiocn/channel-toggle @audiocn/sound-pad --dry-run --diff`.
+1. From `apps/desktop`, look first: `pnpm dlx shadcn@4.21.1 add @audiocn/lcd-meter @audiocn/level-meter @audiocn/bar-visualizer @audiocn/mixer @audiocn/channel-toggle @audiocn/sound-pad --dry-run --diff`. `fader` and `parameter-slider` are `@videorc`'s: `pnpm ui:sync fader parameter-slider` from the repo root.
 2. Then install. The CLI asks per colliding file and ignores piped answers, so install with `--overwrite` (`bar-visualizer.tsx` is audiocn's own; `use-reduced-motion.ts` is too, apart from Videorc's `smoothScrollBehavior`, which must survive) and restore what Videorc owns: `badge.tsx` (if an item pulls it in, the CLI's shadcn badge would replace the glass-chip badge), `kbd.tsx` (`sound-pad` pulls in shadcn's, which would replace the glass keycap) and `styles.css` (next step). Any file outside the installed list: stop and look with `--dry-run --diff`.
 3. Back at the repo root (the remaining steps run there): undo the CLI's CSS (`git checkout -- apps/desktop/src/renderer/src/styles.css`), remove any `cn` package it adds to `apps/desktop/package.json`, then `pnpm install`.
 4. Run `pnpm exec prettier --write` on the changed files and review the diff.
