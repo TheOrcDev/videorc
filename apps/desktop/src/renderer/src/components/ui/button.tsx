@@ -23,9 +23,9 @@ const buttonVariants = cva(
         xs: "h-6 gap-1 px-2.5 text-xs has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2 [&_svg:not([class*='size-'])]:size-3"
       },
       variant: {
-        // The fill's chrome under an oil-slick spectrum that slides across on
-        // hover. Colour where the theme keeps chrome neutral: one per screen.
-        chromatic: 'chrome-chromatic border-0',
+        // A face of the theme's solid in a ring of liquid chrome that flows
+        // around it and surges on hover. It always moves: one per screen.
+        chromatic: 'chrome-chromatic',
         // Polished chrome: no border, so its light and shade reach the edge;
         // the focus ring still draws.
         default: 'chrome-fill border-0',
