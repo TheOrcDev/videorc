@@ -23,16 +23,26 @@ export const WORKING_SCENE_STORAGE_KEY = 'videorc.working-scene.v1'
 
 /**
  * Renderer JS (inside an `eval-js` seed, after it wrote the capture config):
- * forgets the working scene, keeps the seeded capture config through the
- * reload, and reloads.
+ * keeps the seeded capture config through the reload, and reloads after
+ * `delayMs`. By default it also forgets the working scene; a seed that keeps
+ * the remembered sources and layout (a real-source run, a seed that only
+ * adds destinations) passes `forgetWorkingScene: false`.
  */
-export const RELOAD_KEEPING_SEED_JS = `{
+export function reloadKeepingSeedJs({ forgetWorkingScene = true, delayMs = 50 } = {}) {
+  if (!Number.isInteger(delayMs) || delayMs < 0) throw new Error(`Not a reload delay: ${delayMs}`)
+  const forget = forgetWorkingScene
+    ? `\n    localStorage.removeItem(${JSON.stringify(WORKING_SCENE_STORAGE_KEY)});`
+    : ''
+  return `{
   const seededCaptureConfig = localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)});
   const writeSeed = () => {
-    if (seededCaptureConfig !== null) localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)}, seededCaptureConfig);
-    localStorage.removeItem(${JSON.stringify(WORKING_SCENE_STORAGE_KEY)});
+    if (seededCaptureConfig !== null) localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)}, seededCaptureConfig);${forget}
   };
   writeSeed();
   window.addEventListener('pagehide', writeSeed);
-  setTimeout(() => location.reload(), 50);
+  setTimeout(() => location.reload(), ${delayMs});
 }`
+}
+
+/** The default seed reload: forget the working scene, reload after 50 ms. */
+export const RELOAD_KEEPING_SEED_JS = reloadKeepingSeedJs()
