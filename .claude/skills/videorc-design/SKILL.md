@@ -968,7 +968,8 @@ Asking, locking and explaining
   `SessionLockAlert locks?` says "Locked while you're recording or live.
   Changes apply the next time you record or go live."; `OfflineAlert` says
   Videorc is reconnecting. The wording is `SESSION_LOCK_REASON`,
-  `sessionLockReason(locks)` and `OFFLINE_LOCK_REASON` from the same file.
+  `sessionLockReason(locks)` and `OFFLINE_LOCK_REASON` in `lib/lock-reason.ts`
+  (strings only, so code that isn't UI imports them without a component).
 
 Rows, forms and choices
 

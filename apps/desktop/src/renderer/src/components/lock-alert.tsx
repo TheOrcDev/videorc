@@ -2,6 +2,7 @@ import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Button, buttonVariants } from '@/components/ui/button'
+import { OFFLINE_LOCK_REASON, sessionLockReason } from '@/lib/lock-reason'
 
 /**
  * What unlocks a locked feature: its one action. Your app resolves it (is
@@ -21,25 +22,6 @@ type LockAlertAction =
     }
 
 type LockAlertProps = Omit<ComponentProps<typeof Alert>, 'variant' | 'icon' | 'children'>
-
-/** The one wording for controls a running recording or livestream locks. */
-const SESSION_LOCK_REASON =
-  "Locked while you're recording or live. Changes apply the next time you record or go live."
-
-/** The one wording for controls that wait for the app to reconnect. */
-const OFFLINE_LOCK_REASON = 'Videorc is reconnecting. These controls come back in a moment.'
-
-/**
- * The session lock that names what it locks: "Destinations and stream
- * details are locked while you're recording or live. …". Without `locks` it
- * is the plain SESSION_LOCK_REASON.
- */
-function sessionLockReason(locks?: string): string {
-  if (!locks) {
-    return SESSION_LOCK_REASON
-  }
-  return `${locks} are locked while you're recording or live. Changes apply the next time you record or go live.`
-}
 
 /** The action's words: "Sign in" or "View Premium", unless it brings its own. */
 function unlockActionLabel(action: LockAlertAction): string {
@@ -135,13 +117,5 @@ function OfflineAlert({
   return <LockAlert reason={reason} {...props} />
 }
 
-export {
-  LockAlert,
-  OFFLINE_LOCK_REASON,
-  OfflineAlert,
-  SESSION_LOCK_REASON,
-  SessionLockAlert,
-  sessionLockReason,
-  unlockActionLabel
-}
+export { LockAlert, OfflineAlert, SessionLockAlert, unlockActionLabel }
 export type { LockAlertAction, LockAlertProps }
