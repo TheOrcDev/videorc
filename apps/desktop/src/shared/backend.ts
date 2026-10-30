@@ -1719,7 +1719,9 @@ export interface ReplayParams {
   /**
    * A buffer-only start nobody asked for (the ring runs by default whenever
    * Videorc is open; owner redesign R2). The backend refuses it on a
-   * software encoder path with `replay-software-encoder`; a start the user
+   * software encoder path with `replay-software-encoder`, and while the
+   * scene's camera has no frame yet with `replay-sources-not-ready` (the
+   * renderer starts it again once the camera goes live); a start the user
    * chose omits it and runs anywhere.
    */
   auto?: boolean

@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   nextPortalShareGrant,
+  REPLAY_WAITS_FOR_CAMERA_PREVIEW,
   REPLAY_WAITS_FOR_PORTAL_SHARE,
   REPLAY_WAITS_FOR_SCREEN,
+  REPLAY_WAITS_FOR_SCREEN_PREVIEW,
   REPLAY_WAITS_FOR_SHARE_DIALOG,
   replayStartWaitsForGrant,
+  replayStartWaitsForPreview,
   replayStartWaitsForScreen,
   SCREEN_SHARE_GRANTED_MESSAGE
 } from './replay-buffer-grants'
@@ -326,6 +329,104 @@ describe('Linux portal share (retest 153)', () => {
       replayStartWaitsForScreen({
         sources: { ...portal, screenId: 'screen:screencapturekit:1' },
         layout: preset
+      })
+    ).toBeNull()
+  })
+})
+
+describe('replayStartWaitsForPreview (launch race on the Windows Intel box)', () => {
+  const chosen = {
+    screenId: 'screen:dxgi:1',
+    windowId: undefined,
+    captureOff: undefined,
+    testPattern: undefined,
+    cameraId: 'camera:windows-dshow:1',
+    cameraOff: undefined
+  }
+  const idleCamera = { state: 'device-missing', framesCaptured: 0 }
+  const idleScreen = { state: 'source-missing', framesCaptured: 0 }
+  const liveCamera = { state: 'live', cameraId: chosen.cameraId, framesCaptured: 12 }
+  const liveScreen = { state: 'live', sourceId: chosen.screenId, framesCaptured: 9 }
+  const wait = (
+    previewCamera: typeof idleCamera & { cameraId?: string },
+    previewScreen: typeof idleScreen & { sourceId?: string }
+  ) =>
+    replayStartWaitsForPreview({
+      autoPreview: true,
+      sources: chosen,
+      layoutPreset: 'screen-camera',
+      previewCamera,
+      previewScreen
+    })
+
+  it('waits while a needed preview has not reported for its source, screen first', () => {
+    // The idle statuses carry no id: nothing has been asked for yet.
+    expect(wait(idleCamera, idleScreen)).toBe(REPLAY_WAITS_FOR_SCREEN_PREVIEW)
+    expect(wait(idleCamera, liveScreen)).toBe(REPLAY_WAITS_FOR_CAMERA_PREVIEW)
+    // A status for another source is not this source's report.
+    expect(wait(liveCamera, { state: 'live', sourceId: 'screen:dxgi:2', framesCaptured: 30 })).toBe(
+      REPLAY_WAITS_FOR_SCREEN_PREVIEW
+    )
+  })
+
+  it('waits while a preview is starting without a frame, then clears on the first frame', () => {
+    const starting = { state: 'starting', sourceId: chosen.screenId, framesCaptured: 0 }
+    expect(wait(liveCamera, starting)).toBe(REPLAY_WAITS_FOR_SCREEN_PREVIEW)
+    expect(wait(liveCamera, { ...starting, framesCaptured: 1 })).toBeNull()
+    expect(wait(liveCamera, liveScreen)).toBeNull()
+  })
+
+  it('never waits for a reported device that is missing, denied or failed', () => {
+    for (const state of ['device-missing', 'permission-needed', 'failed']) {
+      expect(wait({ state, cameraId: chosen.cameraId, framesCaptured: 0 }, liveScreen)).toBeNull()
+    }
+    for (const state of ['source-missing', 'permission-needed', 'failed']) {
+      expect(wait(liveCamera, { state, sourceId: chosen.screenId, framesCaptured: 0 })).toBeNull()
+    }
+  })
+
+  it('waits only for the previews the Studio opens', () => {
+    expect(
+      replayStartWaitsForPreview({
+        autoPreview: true,
+        sources: chosen,
+        layoutPreset: 'camera-only',
+        previewCamera: liveCamera,
+        previewScreen: idleScreen
+      })
+    ).toBeNull()
+    expect(
+      replayStartWaitsForPreview({
+        autoPreview: true,
+        sources: chosen,
+        layoutPreset: 'screen-only',
+        previewCamera: idleCamera,
+        previewScreen: liveScreen
+      })
+    ).toBeNull()
+    for (const sources of [
+      { ...chosen, captureOff: true, cameraOff: true },
+      { ...chosen, screenId: undefined, cameraId: undefined },
+      { ...chosen, testPattern: true, cameraOff: true }
+    ]) {
+      expect(
+        replayStartWaitsForPreview({
+          autoPreview: true,
+          sources,
+          layoutPreset: 'screen-camera',
+          previewCamera: idleCamera,
+          previewScreen: idleScreen
+        })
+      ).toBeNull()
+    }
+    // A smoke that disables the auto preview opens nothing to wait for.
+    expect(
+      replayStartWaitsForPreview({
+        autoPreview: false,
+        sources: chosen,
+        layoutPreset: 'screen-camera',
+        previewCamera: idleCamera,
+        previewScreen: idleScreen
       })
     ).toBeNull()
   })

@@ -30,6 +30,12 @@ export type ReplayReconcileInput = {
   /** The renderer's own buffer-only start has not answered yet. */
   replayStartInFlight: boolean
   failedStarts: number
+  /**
+   * The backend refused the last start as `replay-sources-not-ready`: the
+   * scene's camera has no frame yet. The ring waits for the camera to go
+   * live instead of retrying (each try would only be refused again).
+   */
+  waitingForCamera?: boolean
 }
 
 export type ReplayReconcileAction = 'start' | 'stop' | 'give-up' | null
@@ -46,7 +52,8 @@ export function replayBufferReconcileAction(input: ReplayReconcileInput): Replay
       (input.recordingState === 'idle' || input.recordingState === 'failed') &&
       !input.startPending &&
       !input.stopPending &&
-      !input.replayStartInFlight
+      !input.replayStartInFlight &&
+      !input.waitingForCamera
     ) {
       return input.failedStarts >= REPLAY_START_RETRY_LIMIT ? 'give-up' : 'start'
     }
