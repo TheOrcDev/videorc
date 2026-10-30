@@ -9094,19 +9094,23 @@ describe('real StudioProvider lifecycle', () => {
   describe('events no core consumer reads keep the core value (plan 191)', () => {
     async function mountQuietProvider(setup?: (backend: StudioBackend) => void): Promise<{
       api: VideorcApi
+      backend: StudioBackend
       latest: () => StudioObservation
       shell: () => ReturnType<typeof useStudioShell> | undefined
       emit: (event: string, payload: unknown) => Promise<void>
+      emitMain: (event: string, payload: unknown) => Promise<void>
     }> {
       const backend = new StudioBackend()
       setup?.(backend)
       TestWebSocket.backend = backend
       vi.stubGlobal('WebSocket', TestWebSocket)
+      let emitMain!: (event: string, payload: unknown) => void
       const api = createVideorcApi({
         acknowledge: async () => true,
         pending: async () => [],
         acknowledgeProvider: async () => true,
-        pendingProvider: async () => []
+        pendingProvider: async () => [],
+        registerEmitter: (emit) => (emitMain = emit)
       })
       const testDom = installProviderTestEnvironment(api)
       restoreEnvironment = testDom.restore
@@ -9152,8 +9156,91 @@ describe('real StudioProvider lifecycle', () => {
           await Promise.resolve()
         })
       }
-      return { api, latest, shell: () => shell, emit }
+      return {
+        api,
+        backend,
+        latest,
+        shell: () => shell,
+        emit,
+        emitMain: async (event, payload) => {
+          await act(async () => emitMain(event, payload))
+        }
+      }
     }
+
+    it('ignores identical preview window IPC snapshots while publishing real lifecycle changes', async () => {
+      const { latest, emitMain } = await mountQuietProvider()
+      const core = latest().core
+      await emitMain('preview-window:state', structuredClone(core.previewWindow))
+      expect(latest().core).toBe(core)
+      const changed: PreviewWindowState = {
+        ...core.previewWindow,
+        supervisor: {
+          ...core.previewWindow.supervisor,
+          lifecycleState: 'failed',
+          lastError: 'The preview window could not open.',
+          updatedAt: '2026-10-30T12:00:01.000Z'
+        }
+      }
+      await emitMain('preview-window:state', changed)
+      expect(latest().core.previewWindow).toEqual(changed)
+      expect(latest().core).not.toBe(core)
+      const failedCore = latest().core
+      await emitMain('preview-window:state', structuredClone(changed))
+      expect(latest().core).toBe(failedCore)
+    })
+
+    it('keeps preview telemetry out of core while exporting the latest support diagnostics', async () => {
+      const { api, backend, latest, shell, emit } = await mountQuietProvider()
+      const core = latest().core
+      const shellValue = shell()
+      const status: PreviewSurfaceStatus = {
+        ...latest().diagnostics.previewSurfaceStatus,
+        state: 'stopped',
+        transport: 'unavailable',
+        framesRendered: 42,
+        updatedAt: '2026-10-30T12:00:01.000Z'
+      }
+      await emit('preview.surface.status', status)
+      await waitForObservation(
+        () => latest().diagnostics.previewSurfaceStatus.updatedAt === status.updatedAt
+      )
+      expect(latest().diagnostics.previewSurfaceStatus).toEqual(status)
+      expect(latest().core).toBe(core)
+      expect(shell()).toBe(shellValue)
+
+      // The export waits for main's fresh runtime snapshot. Telemetry received
+      // during that wait must still make it into the bundle, even when invoked
+      // through the stable action captured before the preview update.
+      const runtimeInfo = await api.getRuntimeInfo()
+      let releaseRuntime!: (value: typeof runtimeInfo) => void
+      api.getRuntimeInfo = vi.fn(
+        () => new Promise<typeof runtimeInfo>((resolve) => (releaseRuntime = resolve))
+      )
+      let exportTask!: Promise<void>
+      await act(async () => {
+        exportTask = core.exportSupportBundle()
+      })
+      expect(latest().core.supportBundleExportPending).toBe(true)
+      const failed: PreviewSurfaceStatus = {
+        ...status,
+        state: 'failed',
+        framesRendered: 43,
+        message: 'The preview stopped presenting.',
+        updatedAt: '2026-10-30T12:00:02.000Z'
+      }
+      await emit('preview.surface.status', failed)
+      expect(latest().diagnostics.previewSurfaceStatus).toEqual(failed)
+      await act(async () => {
+        releaseRuntime(runtimeInfo)
+        await exportTask
+      })
+      expect(
+        backend.commands.find((command) => command.method === 'diagnostics.supportBundle.export')
+          ?.params
+      ).toMatchObject({ rendererDiagnostics: { nativePreviewSurfaceStatus: failed } })
+      expect(latest().core.supportBundleExportPending).toBe(false)
+    })
 
     it('streams caption partials to captions readers without a new core or shell value', async () => {
       const { api, latest, shell, emit } = await mountQuietProvider()

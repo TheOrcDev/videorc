@@ -1195,7 +1195,85 @@ Agents smoke use unchanged Rust source and the normal opt-level 2 profile:
 The prior reproduction places roughly 13 seconds of the Stop tool's delay
 before the backend receives Stop. Event receipt, renderer RPC and timer-gap
 traces are being collected to distinguish delivery delay from backend stop
-work. No timeout or artifact budget has changed; completion remains pending.
+work. No timeout or artifact budget has changed.
+
+The resumed normal-profile build completed successfully at 16:13:36 UTC.
+Its Rust/Cargo digest is
+`aed1366346ef41285954ea16b33235e89a2d3097e83e3b319582d7a272c75d45`,
+backend SHA-256 is
+`e1beae68307e97cfb3c9ad9137b49db8d91b11e96d22d1f9d2794fcd641c16fc`,
+and MCP bridge SHA-256 is
+`2299810e3546f51e092dec7b114339371bf887de46482ccd5ff0400125247ac2`.
+Rust source is unchanged between `294717d0` and `c77db353`.
+The trace run completes Record → marker → Stop and a 19.70-second artifact
+passes analysis. Recording Stop takes 14.1 seconds; the later local-stream
+Stop times out. Renderer timer gaps reach 6,253 ms, and the renderer waits
+11.25 seconds between receiving the streaming Stop intent and sending its RPC.
+These results locate substantial delay before backend stop work, rather than
+establishing an encoder deadlock.
+
+Two subsequent profiles on those verified binaries reproduce Stop timeouts:
+`/tmp/videorc-beta-agent-cpu-profile-LqTMLh/report.json` and
+`/tmp/videorc-beta-agent-cpu-profile-UZeuCm/report.json`.
+React rendering dominates the idle profile; sampled Core context changes
+repeatedly name `exportSupportBundle`, plus periodic `previewWindow` updates.
+The export callback captures preview telemetry even though its consumers only
+need that telemetry when exporting. The correction reads the existing latest
+status ref at export time, after refreshing runtime diagnostics, and removes
+the telemetry dependency from the Core action. No development checks or
+diagnostic updates are disabled. An actual-provider regression must retain
+Core/Shell identity across telemetry while proving that an export includes
+status received during the asynchronous runtime refresh. That regression fails
+on the old callback and passes with the correction.
+
+The first rerun removes the callback churn but still times out on Stop:
+`/tmp/videorc-beta-core-telemetry-fixed-Ts7n6k/report.json`.
+Its metadata-only context trace identifies the remaining idle invalidations
+as `previewWindow.supervisor.updatedAt` alone. The supervisor now timestamps
+actual state transitions; repeated frame observations retain the existing
+timestamp. The renderer also retains an identical window snapshot received
+through IPC. Periodic reconciliation still explicitly re-drives an open window
+whose surface was never created. Cross-platform supervisor tests cover repeated
+observations, failure and explicit recovery; the real-provider test covers
+duplicate IPC and a real failure transition. All five focused regressions pass;
+each regression first failed on its corresponding old implementation.
+
+On both fixes, `/tmp/videorc-beta-preview-lifecycle-fixed-vaui4n/report.json`
+shows no repeated idle Core changes after the pending privacy transition.
+Recording Stop completes in 7,541 ms within the unchanged Agents deadline,
+and its 1920×1080, 9.87-second artifact passes analysis. This is not a recording
+latency-budget pass. The full Agents smoke remains failed: the combined local
+stream/recording session exceeds the OpenH264 raw-frame FIFO delivery budget,
+ends before Stop, and the tool correctly refuses an already-ended session.
+Its original errors and artifact evidence remain retained. No timeout, frame
+delivery limit or artifact threshold has been relaxed.
+The failed combined take's persisted diagnostics identify 1920×1080 at 30 fps
+for both roles, two active FFmpeg processes, 18.89 compositor fps, 177 pre-encode
+skips, 224 output-queue drops and a 1,997 ms queue-age high-water mark. This
+is not merely a high-resolution profile failure. The same-profile role
+isolation path and its throughput proof need investigation; increasing the
+FIFO deadline would not establish cadence or artifact acceptance.
+
+Full desktop verification passes 603 files and 6,653 tests, with the existing
+Windows-only OBS test skipped on Linux:
+`/tmp/videorc-beta-core-telemetry-checks-ls9Rxn/desktop/run.log`.
+After correcting two test-only type annotations, all five focused regressions,
+typecheck, lint, repository formatting and the production frontend build pass:
+`/tmp/videorc-beta-preview-source-typed-dtc8wr/report.json`.
+Production source is unchanged from the complete desktop run. The sequential
+Linux preview/remote follow-on is
+`/tmp/videorc-beta-preview-quiet-regressions-DfErO3/report.json`.
+Both runtime gates pass. The Linux proof-preview probe completes all 100 cycles
+with clean owned-process teardown and zero budget failures. Its successful
+scratch cleanup removes the wrapper's nested log; the separate generated
+performance report is preserved alongside the queue as
+`preview-lifecycle-performance.json`, SHA-256
+`210e772ab0004261c7ef7c3fc6b8255625fc66f11ba5f4aac00f82d633d8a053`.
+Remote control passes discovery, authorization, microphone, debounce, scenes,
+explicit Clips enable, successful/refused clip tickets, system-audio refusal
+and client revocation. Backend and MCP bridge hashes remain unchanged.
+These are development regression results; AppImage, physical and full
+recording/performance acceptance remain open.
 
 ### Public-pointer storage adapter, 2026-10-30
 

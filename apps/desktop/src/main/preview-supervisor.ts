@@ -267,6 +267,17 @@ export class PreviewSupervisorModel {
   private transition(
     patch: Omit<Partial<PreviewSupervisorState>, 'updatedAt'>
   ): PreviewSupervisorState {
+    // Surface observations arrive continuously. Only a lifecycle change owns
+    // a new timestamp; frame freshness belongs to PreviewSurfaceStatus. A
+    // timestamp-only change otherwise invalidates Studio's whole Core context
+    // on every window-state reconciliation.
+    if (
+      (Object.keys(patch) as Array<keyof typeof patch>).every((key) =>
+        Object.is(this.state[key], patch[key])
+      )
+    ) {
+      return this.snapshot()
+    }
     this.state = {
       ...this.state,
       ...patch,

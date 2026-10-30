@@ -11581,7 +11581,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const timer = window.setInterval(() => {
       void reconcile()
     }, 4000)
-    const unsubscribe = window.videorc?.onPreviewWindowState?.((state) => setPreviewWindow(state))
+    const unsubscribe = window.videorc?.onPreviewWindowState?.((state) =>
+      setPreviewWindow((current) =>
+        JSON.stringify(current) === JSON.stringify(state) ? current : state
+      )
+    )
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -12209,7 +12213,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         appVersion: freshRuntimeInfo?.version,
         rendererDiagnostics: {
           automaticSourceFallbacks: automaticSourceFallbacks.current,
-          nativePreviewSurfaceStatus: previewSurfaceStatus,
+          // Read at export time, including telemetry received while main was
+          // refreshing runtime info. Capturing the state here also made this
+          // core action invalidate every Assets control on each preview tick.
+          nativePreviewSurfaceStatus: previewSurfaceStatusRef.current,
           runtimeInfo: freshRuntimeInfo ?? undefined
         }
       }
@@ -12242,7 +12249,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  }, [client, reportError, runtimeInfo, supportBundleExportPending])
   // Plan 174 A-20: a toast whose raw details were withheld offers this export
   // (latest-value hand-off, like the ref mirrors above; idempotent per render).
   registerSupportBundleExport(() => void exportSupportBundle())
