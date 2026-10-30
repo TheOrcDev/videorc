@@ -16713,7 +16713,10 @@ function createVideorcApi(options: {
       getBundledBackgroundAssets: async () => [],
       getPendingAccountCallbacks: options.pending,
       acknowledgeAccountCallback: options.acknowledge,
-      ...(options.refreshAccount ? { refreshAccount: options.refreshAccount } : {}),
+      // Keep this capability absent when the fixture uses the backend fallback.
+      // The Proxy's generic no-op otherwise returns undefined for a method
+      // whose real contract always returns an account refresh outcome.
+      refreshAccount: options.refreshAccount,
       ...(options.signOutAccount ? { signOutAccount: options.signOutAccount } : {}),
       getPendingOAuthCallbacks: options.pendingProvider,
       acknowledgeOAuthCallback: options.acknowledgeProvider,

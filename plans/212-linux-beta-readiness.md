@@ -854,4 +854,21 @@ Hide/Show across start/stop and source recovery. Legacy paths must refuse the
 unsupported combination rather than expose live screen pixels. App-following
 features remain subject to their platform capability guards. The maintained
 smart-scenes smoke requires macOS fixture apps and cannot certify Linux;
-its Linux skip is not acceptance. Merged-source checks remain pending.
+its Linux skip is not acceptance. Main's follow-up `ab82c61a` is also merged;
+it accepts the new screen-command receiver type in the Linux PipeWire loop.
+
+Merged-source verification passes 85 focused desktop tests, 61 focused Node
+tests and 11 StudioProvider integration cases. One fixture incorrectly made
+an absent account-refresh capability into a callable no-op with an invalid
+return value; keeping that optional capability absent restores the existing
+backend fallback without removing the error assertion. Typecheck, lint and
+all 2,917 Node tests pass (zero Node skips). Formatting and the frontend
+production build also pass. Full desktop tests are running on the merged
+source. Rust formatting passes. An additional `cargo clippy --all-targets`
+probe failed on 95 test-target lints; its log is retained and no pass is
+claimed. The repository's standard production-target Clippy command, with
+its existing four Linux allowances, is queued behind the new backend build.
+Neither Rust check nor the new backend build is reported as complete.
+Logs use the `/tmp/videorc-beta-main-merge-` prefix. The old runtime binary is
+not used for this merged source; fresh backend provenance is recorded in
+`/tmp/videorc-beta-main-merge-backend-provenance.json`.
