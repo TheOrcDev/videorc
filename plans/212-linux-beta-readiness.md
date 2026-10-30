@@ -167,8 +167,14 @@ does not close their acceptance rows.
   ETag or create-only conditions, publishes mirrors before the primary, and
   requires durable intent/readback/completion records. Ambiguous writes retain
   their generation; recovery inspection only compares prior/intended bytes.
-  This core has no CLI, network transport or publication credentials. Its
-  protected coordinator, actual storage/journal adapters, pilot enrollment and
+  The journal state machine now persists a generation through a required private
+  compare-and-swap store. Completion retains the lock until the protected caller
+  acknowledges the exact successful finalizer result; a lost completion response
+  therefore cannot admit a new publisher. Missing journals require explicit
+  provisioning/recovery, and initialization cannot overwrite an existing journal.
+  It revalidates stored receipt/intent identity and origin order after reload.
+  These modules have no CLI, network transport or publication credentials. Their
+  protected coordinator, actual storage transport, pilot enrollment and
   updater/rollback proof remain open. The planner does not alter the
   release-controller setting.
 
@@ -510,3 +516,38 @@ macOS Rust job were still running at this observation. Windows startup incident
 diagnostics failed again; that runbook-excluded job still cannot count as a
 PASS. Required source and physical/runtime acceptance remain separate. The
 existing watched head is left running while the next tested slice is prepared.
+
+### Publication journal and runtime queue, 2026-10-30
+
+The journal now implements the transaction core's claim, intent, receipt,
+completion, unknown and pre-write abandonment protocol against an injected
+private conditional store. Its tests model independent coordinators, process
+restart, lost responses, malformed stored state, changed receipts and missing
+journals. An unknown generation remains locked. Completion is deliberately
+separate from acknowledgement: only a protected caller that received the exact
+successful finalizer result may acknowledge it. A lost acknowledgement response
+is inspected through durable completed history, never retried automatically.
+Initialization is a separate provisioning operation, permitted only after the
+protected operator establishes that no prior Beta publication exists.
+
+This is tested state/transaction logic, including the actual promotion planner's
+output. A production private store adapter, conditional-write capability proof,
+protected workflow and explicit unknown-generation recovery remain required.
+No production journal was provisioned and no public pointer was written.
+The full worktree Node suite passed all 2,849 tests with zero failures/skips;
+the latest 61 focused release tests passed, including canonical receipt hashes
+across store serialization and lost acknowledgement inspection. Focused ESLint,
+Prettier and diff checks passed. These are artificial transaction/store tests,
+not proof of any production storage provider or physical candidate.
+
+Clippy completed successfully with the four existing Linux CI platform
+allowances. The earlier backend build also completed, but predates the latest
+RPC execution-policy correction. A single queue now rebuilds all backend bins,
+checks a digest of every Rust/Cargo input before/after compilation, then runs
+the fake caption contract, Linux Pulse microphone replacement/loss modes,
+caption pixels through local RTMP, development first-run smoke and full Rust
+tests. It uses isolated data/evidence and explicitly pins approved renderD128.
+The prior queued test command was intentionally stopped before it spawned
+children so these app smokes run first; its exit 143 is not a test failure.
+Current runtime results are still pending. No release readiness is inferred
+from the successful compilation or Clippy result.

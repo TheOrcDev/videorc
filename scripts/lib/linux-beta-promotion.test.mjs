@@ -12,6 +12,10 @@ import {
 } from './linux-beta-promotion.mjs'
 import { finalizeVerifiedLinuxBetaPlan } from './linux-beta-publication.mjs'
 import {
+  createLinuxBetaPublicationJournal,
+  LINUX_BETA_PUBLICATION_JOURNAL_KEY
+} from './linux-beta-publication-journal.mjs'
+import {
   buildLinuxReleaseManifest,
   buildLinuxUpdateFeedYml,
   formatSha256File
@@ -214,7 +218,23 @@ test('the verified planner output can cross the publication core with exact stag
       : await readFile(join(f.root, basename(artifact.sourceObjectKey)))
     objects.set(artifact.objectKey, { body, etag: '"staged"' })
   }
-  const journalEntries = []
+  let journalObject = null
+  let revision = 0
+  const journal = createLinuxBetaPublicationJournal({
+    store: {
+      async read(key) {
+        assert.equal(key, LINUX_BETA_PUBLICATION_JOURNAL_KEY)
+        return structuredClone(journalObject)
+      },
+      async write(key, value, etag) {
+        assert.equal(key, LINUX_BETA_PUBLICATION_JOURNAL_KEY)
+        assert.equal(etag, journalObject?.etag ?? null)
+        journalObject = { value: structuredClone(value), etag: `"journal-${++revision}"` }
+        return structuredClone(journalObject)
+      }
+    }
+  })
+  await journal.initialize()
   const result = await finalizeVerifiedLinuxBetaPlan({
     plan,
     origins: ['fixture'],
@@ -233,17 +253,12 @@ test('the verified planner output can cross the publication core with exact stag
         objects.set(key, { body, etag: '"published-fixture"' })
       }
     },
-    journal: {
-      claim: async (identity) => ({ identity, generation: 1 }),
-      intent: async (entry) => journalEntries.push(['intent', entry]),
-      verified: async (entry) => journalEntries.push(['verified', entry]),
-      complete: async (entry) => journalEntries.push(['complete', entry]),
-      unknown: async () => assert.fail('fixture publication must not become ambiguous'),
-      abandon: async () => assert.fail('fixture publication must not abandon')
-    }
+    journal
   })
   assert.equal(result.receipts.length, 2)
-  assert.equal(journalEntries.at(-1)[0], 'complete')
+  assert.equal((await journal.inspect()).active.status, 'complete-awaiting-ack')
+  await journal.acknowledge(result)
+  assert.deepEqual(await journal.publishedReleaseIds(), [plan.manifest.releaseId])
   assert.deepEqual(
     JSON.parse(objects.get('releases/linux-beta/latest/release.json').body.toString()),
     plan.manifest
