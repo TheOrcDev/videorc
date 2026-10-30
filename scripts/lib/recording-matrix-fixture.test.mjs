@@ -103,6 +103,37 @@ describe('recording matrix synthetic source ownership', () => {
     await assert.rejects(prepareRecordingMatrixFixture(run.options), /source transition refused/)
     assert.equal(run.sceneReads, 0)
   })
+
+  it('does not start a layout mutation after source selection exhausted the deadline', async () => {
+    const run = harness()
+    const command = run.options.command
+    run.options.command = async (...args) => {
+      const result = await command(...args)
+      await run.options.sleep(500)
+      return result
+    }
+    await assert.rejects(prepareRecordingMatrixFixture(run.options), /apply screen-only layout/)
+    assert.equal(run.calls.length, 1)
+    assert.equal(run.sceneReads, 0)
+  })
+
+  it('retains the last pending renderer state when the next read times out', async () => {
+    const run = harness([{ ...ready, visualTransactionPending: true }])
+    const command = run.options.command
+    const timeout = new Error('eval-js smoke command timed out after 1ms')
+    run.options.command = async (...args) => {
+      if (run.stateReads === 1) throw timeout
+      return command(...args)
+    }
+    await assert.rejects(prepareRecordingMatrixFixture(run.options), (error) => {
+      assert.match(error.message, /confirm renderer and backend scene/)
+      assert.match(error.message, /"visualTransactionPending":true/)
+      assert.equal(error.cause, timeout)
+      return true
+    })
+    assert.equal(run.calls.filter((call) => call.name === 'enable-synthetic-source').length, 1)
+    assert.equal(run.sceneReads, 0)
+  })
 })
 
 describe('recording matrix moving-content gates', () => {

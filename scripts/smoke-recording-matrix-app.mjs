@@ -407,7 +407,8 @@ async function runPass({
       command: (name, params, waitMs) =>
         requestSmokeCommand(smoke, name, params, { timeoutMs: waitMs }),
       request: (method, waitMs) => request(ws, waitMs, method),
-      timeoutMs
+      timeoutMs,
+      onProgress: (step) => console.log(`[matrix:fixture] ${JSON.stringify(step)}`)
     })
     console.log(`Recording matrix synthetic fixture committed: ${JSON.stringify(fixture)}`)
 

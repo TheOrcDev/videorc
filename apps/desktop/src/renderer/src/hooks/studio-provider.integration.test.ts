@@ -7509,6 +7509,142 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.captureConfig.sources.cameraOff).toBeUndefined()
   }, 15_000)
 
+  it('reconciles Clips with the committed layout after a delayed folder authorization', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    let releaseAuthorization!: (selection: ResourceSelection) => void
+    const folder: ResourceSelection = {
+      capabilityId: 'test-folder',
+      kind: 'output-directory',
+      displayName: 'Recordings'
+    }
+    const authorize = vi
+      .fn()
+      .mockResolvedValue(folder)
+      .mockImplementationOnce(
+        () =>
+          new Promise<ResourceSelection>((resolve) => {
+            releaseAuthorization = resolve
+          })
+      )
+    api.authorizeOutputDirectory = authorize
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({ outputDirectoryHandle: 'folder-handle' })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() => authorize.mock.calls.length === 1)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(0)
+
+    await act(async () => {
+      latest()!.core.applyLayoutPatch({ layoutPreset: 'screen-only' })
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' &&
+        latest()?.core.layoutSwitchPending == null
+    )
+    await act(async () => {
+      releaseAuthorization(folder)
+    })
+    await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+    const starts = backend.sentCommands.filter((command) => command.method === 'session.start')
+    expect(starts).toHaveLength(1)
+    expect(starts[0].params).toMatchObject({
+      layout: { layoutPreset: 'screen-only' },
+      output: {
+        recordEnabled: false,
+        streamEnabled: false,
+        outputDirectoryCapability: 'test-folder'
+      }
+    })
+    expect(authorize).toHaveBeenCalledTimes(2)
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
+  it('does not dispatch a delayed Clips start after a recording has taken over', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    let releaseAuthorization!: (selection: ResourceSelection) => void
+    const folder: ResourceSelection = {
+      capabilityId: 'test-folder',
+      kind: 'output-directory',
+      displayName: 'Recordings'
+    }
+    const authorize = vi
+      .fn()
+      .mockResolvedValue(folder)
+      .mockImplementationOnce(
+        () =>
+          new Promise<ResourceSelection>((resolve) => {
+            releaseAuthorization = resolve
+          })
+      )
+    api.authorizeOutputDirectory = authorize
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({ outputDirectoryHandle: 'folder-handle' })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() => authorize.mock.calls.length === 1)
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.state === 'recording' &&
+        !latest()?.recording.recording.replayOnly
+    )
+    await act(async () => {
+      releaseAuthorization(folder)
+    })
+    // Let the cancelled automatic start reconcile against the active session.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+    const starts = backend.sentCommands.filter((command) => command.method === 'session.start')
+    expect(starts).toHaveLength(1)
+    expect(starts[0].params).toMatchObject({ output: { recordEnabled: true } })
+    expect(latest()?.recording.recording.replayOnly).not.toBe(true)
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
   it('keeps source pickers enabled on a buffer-only session and re-arms with the new microphone', async () => {
     const backend = new StudioBackend()
     backend.sourceCapabilities = [

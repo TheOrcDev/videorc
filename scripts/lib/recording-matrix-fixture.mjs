@@ -39,12 +39,36 @@ export async function prepareRecordingMatrixFixture({
   request,
   timeoutMs,
   now = Date.now,
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  onProgress = () => {}
 }) {
-  const deadline = now() + timeoutMs
-  const remaining = () => Math.max(1, deadline - now())
-  await command('enable-synthetic-source', { settleMs: 0 }, remaining())
-  await command(
+  const startedAt = now()
+  const deadline = startedAt + timeoutMs
+  let phase = 'select synthetic source'
+  let last = null
+  let visibleSourceKinds = null
+  const failure = (cause) =>
+    new Error(
+      `Recording matrix synthetic scene did not commit during ${phase} after ${now() - startedAt}ms: ` +
+        JSON.stringify({ renderer: last, visibleSourceKinds }) +
+        (cause ? ` (${cause.message ?? cause})` : ''),
+      cause ? { cause } : undefined
+    )
+  const remaining = () => {
+    if (now() >= deadline) throw failure()
+    return deadline - now()
+  }
+  const action = async (name, params, label) => {
+    phase = label
+    onProgress({ phase, elapsedMs: now() - startedAt })
+    try {
+      return await command(name, params, remaining())
+    } catch (error) {
+      throw failure(error)
+    }
+  }
+  await action('enable-synthetic-source', { settleMs: 0 }, phase)
+  await action(
     'eval-js',
     {
       code: `
@@ -54,14 +78,17 @@ export async function prepareRecordingMatrixFixture({
         return true;
       `
     },
-    remaining()
+    'apply screen-only layout'
   )
-  let last = null
+  phase = 'confirm renderer and backend scene'
+  onProgress({ phase, elapsedMs: now() - startedAt })
   while (now() < deadline) {
-    const response = await command(
-      'eval-js',
-      {
-        code: `
+    let response
+    try {
+      response = await command(
+        'eval-js',
+        {
+          code: `
           const hook = window.__videorcSmokeScenePresets;
           const state = hook?.state();
           const config = hook?.streamingState().captureConfig;
@@ -76,18 +103,30 @@ export async function prepareRecordingMatrixFixture({
             layoutSwitchPending: state?.pendingLayout
           };
         `
-      },
-      remaining()
-    )
+        },
+        remaining()
+      )
+    } catch (error) {
+      // Preserve the last meaningful renderer state instead of replacing it
+      // with a final clamped HTTP timeout. This is a read, never a replay of
+      // either source/layout mutation.
+      throw failure(error)
+    }
     last = response?.result
     if (rendererReady(last)) {
-      const scene = await request('scene.get', remaining())
+      let scene
+      try {
+        scene = await request('scene.get', remaining())
+      } catch (error) {
+        throw failure(error)
+      }
       const visible = scene?.sources?.filter((source) => source?.visible === true)
+      visibleSourceKinds = visible?.map((source) => source.kind) ?? null
       if (visible?.length === 1 && visible[0].kind === 'test-pattern') {
         return { layoutPreset: 'screen-only', visibleSourceKinds: ['test-pattern'] }
       }
     }
-    await sleep(Math.min(100, remaining()))
+    await sleep(Math.min(100, Math.max(0, deadline - now())))
   }
-  throw new Error(`Recording matrix synthetic scene did not commit: ${JSON.stringify(last)}`)
+  throw failure()
 }

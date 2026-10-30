@@ -16200,24 +16200,90 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       portalShareGrantedSourceId,
       previewScreen: previewScreenStatus
     })
+  const replayStartContextRef = useRef({
+    captureConfig,
+    sceneWithBackground,
+    sceneEditMode,
+    recordBlockedReason,
+    replayGrantWait,
+    sourceDeviceSwitchPending
+  })
+  replayStartContextRef.current = {
+    captureConfig,
+    sceneWithBackground,
+    sceneEditMode,
+    recordBlockedReason,
+    replayGrantWait,
+    sourceDeviceSwitchPending
+  }
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
-    if (recordBlockedReason || replayGrantWait) {
+    const currentContext = replayStartContextRef.current
+    if (currentContext.recordBlockedReason || currentContext.replayGrantWait) {
       // Not yet: a source or a permission is missing. The switch stays on
       // and the ring starts once the reason clears (the effect below), so a
       // launch before Sources settle never turns clips off.
       return
     }
+    const selectionReady = (): boolean => {
+      const current = replayStartContextRef.current
+      return (
+        replayArmedRef.current &&
+        (recordingRef.current.state === 'idle' || recordingRef.current.state === 'failed') &&
+        (replayStateRef.current.state === 'off' || replayStateRef.current.state === 'error') &&
+        !replayReconcileHoldRef.current &&
+        !performanceCheckHoldRef.current &&
+        layoutIntentAwaitingProofRef.current === null &&
+        current.sourceDeviceSwitchPending === null &&
+        !current.recordBlockedReason &&
+        !current.replayGrantWait &&
+        current.captureConfig === captureConfigRef.current &&
+        sessionStartInFlightRef.current === null &&
+        !sessionStartLifecycleActiveRef.current &&
+        stopSessionInFlightPromiseRef.current === null
+      )
+    }
+    if (!selectionReady()) {
+      scheduleReplayReconcile()
+      return
+    }
     replayStartInFlightRef.current = true
+    let superseded = false
     try {
       const replay = await import('@/lib/replay-buffer')
+      if (!selectionReady()) {
+        superseded = true
+        return
+      }
+      // Read after the lazy import: a scheduled callback may belong to an
+      // older render. Keep one coherent scene/config until dispatch, then
+      // cancel if authorization lets a newer intent overtake it.
+      const context = replayStartContextRef.current
+      const config = captureConfigRef.current
+      const settings = settingsRef.current
+      const layoutIntent = layoutIntentIdRef.current
       const status = await replay.startBufferOnlySession({
         client,
-        captureConfig: captureConfigRef.current,
-        scene: sceneWithBackground,
-        sceneEditMode,
-        settings: settingsRef.current
+        captureConfig: config,
+        scene: context.sceneWithBackground,
+        sceneEditMode: context.sceneEditMode,
+        settings,
+        isCurrent: () => {
+          const current = replayStartContextRef.current
+          return (
+            selectionReady() &&
+            layoutIntentIdRef.current === layoutIntent &&
+            captureConfigRef.current === config &&
+            settingsRef.current === settings &&
+            current.sceneWithBackground === context.sceneWithBackground &&
+            current.sceneEditMode === context.sceneEditMode
+          )
+        }
       })
+      if (status === null) {
+        superseded = true
+        return
+      }
       replayFailedStartsRef.current = 0
       replayBlockedReasonRef.current = null
       setReplayBlockedReasonState(null)
@@ -16252,16 +16318,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     } finally {
       replayStartInFlightRef.current = false
+      if (superseded) scheduleReplayReconcile()
     }
-  }, [
-    applyRecordingStatus,
-    client,
-    recordBlockedReason,
-    replayGrantWait,
-    sceneEditMode,
-    sceneWithBackground,
-    scheduleReplayReconcile
-  ])
+  }, [applyRecordingStatus, client, scheduleReplayReconcile])
 
   const stopReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || !sessionIsReplayOnly(recordingRef.current)) return

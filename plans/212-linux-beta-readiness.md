@@ -774,3 +774,65 @@ separate. Twenty-eight focused matrix fixture/profile tests pass with zero
 skips, and changed-script lint passes. Full corrected runtime results and
 the broader Node suite remain pending. No AppImage or physical acceptance
 claim follows from these debug-backend observations.
+
+
+### Corrected matrix results and automatic Clips-start race, 2026-10-30
+
+The corrected OpenH264 full matrix ran every case without the unexpected
+portal picker. Seven ordinary profiles passed: 540p30, 720p30, 1080p30,
+vertical-1080p30, floor-360p24, vertical-720p30 and vertical-540p30. The
+existing hard 4K30 survival-only case also passed, for 8/18 total; that
+survival contract does not establish moving-content acceptance.
+Higher profiles still fail real artifact motion. Examples include 1080p60
+at 733 ms frozen/42 identical frames, 1440p30 at 633 ms/15 frames and 4K30
+at 1,467 ms/40 frames. The 1440p60 take saved 5.783 seconds against the
+5.88-second minimum. The legacy 4K60 path saved only 1.883 seconds of the
+six-second take and lacked keyframe evidence. Hard 1080p60 delivered about
+20.9 fps. Diagnostics show both CPU composition and downstream writer/encoder
+pressure. No output profile or acceptance budget was removed or relaxed.
+The receipts are under `/tmp/videorc-beta-matrix-fixture-runtime-OPjuIr`.
+
+VAAPI initially timed out before the first recording. Three fresh focused
+runs then failed/passed/failed: one renderer confirmed screen-only while the
+backend still exposed a camera; another reverted to screen-camera. The
+matrix now retains its last renderer state, visible backend source kinds,
+phase, elapsed time and causal error, and refuses another mutation after the
+existing deadline. It no longer reduces that evidence to a final 1 ms HTTP
+timeout. Thirty focused fixture/profile tests pass with no skips.
+
+Automatic Clips starts crossed lazy loading and output-folder authorization
+with a render-time scene snapshot. A delayed request could therefore carry
+an older layout or race a newer recording. Starts now read the current
+scene/config after lazy loading, wait for source/layout transitions, and
+cancel before dispatch if the captured intent, scene, settings or session
+state changes. Cancellation schedules fresh reconciliation without consuming
+the failed-start retry budget. Four unit cases and two real StudioProvider
+regressions cover supersession at authorization, the replacement layout,
+Record taking over, request shape and genuine authorization failure; the
+existing source-change re-arm integration also passes.
+
+After this guard, three fresh VAAPI 1080p30 app processes each committed the
+synthetic-only scene and passed strict artifact analysis. Reports are in
+`/tmp/videorc-beta-replay-guard-runtime-kmptyu/queue.json`. They retain backend
+SHA-256 `3aeea22340efa17610c351fc1f7b339c6d73414af63bdb63e83d8867ded6fc8d`
+and Rust/Cargo source digest
+`95e8a9a25b5447178b69218a13a28b01b36fef37304e074b9d895206705073df`.
+These are development observations, not exact-AppImage acceptance.
+
+The full VAAPI follow-up completed at 10/18: nine ordinary profiles and the
+existing hard 4K30 survival case passed. Failures include 1080p60 at 183 ms
+frozen/seven identical frames, 1440p30 at 167 ms/four frames, 1440p60 at
+367 ms/20 frames and 4K30 at 733 ms/eight frames. Legacy 4K60 saved only
+2.167 seconds of the six-second take. Hard 1080p60 froze for 600 ms and
+repeated 31 frames. No scene-selection failure occurred in this full run.
+The host was on mains power; its configuration was not changed.
+
+VAAPI Clips latency completed all five strict artifact checks but failed
+cold start (1,953 ms), warm start p95 (847 ms) and Stop p95 (967 ms).
+Finalization p95 passed at 641 ms. OpenH264 Clips latency failed the first
+artifact's startup-motion contract with four identical frames. The guard
+therefore improves scene consistency but does not establish cadence or
+latency readiness. Reports are under
+`/tmp/videorc-beta-replay-regression-Wc4WGx`.
+Typecheck, lint, formatting and all 2,886 Node tests pass (zero Node skips).
+Desktop tests and the frontend build remain in progress at this checkpoint.
