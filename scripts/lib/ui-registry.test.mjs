@@ -22,7 +22,9 @@ import {
   resolveAliasDir,
   resolveItemClosure,
   serializeUiManifest,
-  shadcnAddArgs
+  shadcnAddArgs,
+  syncedFileForms,
+  withoutLeadingComments
 } from './ui-registry.mjs'
 
 const PATHS = { '@/*': ['src/renderer/src/*'] }
@@ -305,13 +307,26 @@ test('dependency changes name every addition, removal and range change', () => {
   assert.deepEqual(dependencyChanges({}, {}), [])
 })
 
+test("the CLI drops the comments before a file's first statement, and either form is in sync", () => {
+  const header = '// Chrome rows.\n/* Plates. */\n\nconst A = 1 // kept\n// kept too\n'
+  assert.equal(withoutLeadingComments(header), 'const A = 1 // kept\n// kept too\n')
+  assert.deepEqual(syncedFileForms(header), ['const A = 1 // kept\n// kept too\n', header])
+  const directive = "'use client'\n\n// Kept: it leads the second statement.\nimport x from 'x'\n"
+  assert.deepEqual(syncedFileForms(directive), [directive])
+  assert.equal(
+    withoutLeadingComments('/**\n * Doc.\n */\nexport type A = 1\n'),
+    'export type A = 1\n'
+  )
+})
+
 test('drift is a missing file or the first place a local file parts from the registry', () => {
   const expected = [
-    { path: 'same.ts', content: 'a\nb\n', item: 'same' },
-    { path: 'gone.ts', content: 'a\n', item: 'gone' },
-    { path: 'edited.ts', content: 'a\nb\nc\nd\n', item: 'edited' }
+    { path: 'same.ts', forms: ['a\nb\n'], item: 'same' },
+    { path: 'header.ts', forms: ['b\n', '// a\nb\n'], item: 'header' },
+    { path: 'gone.ts', forms: ['a\n'], item: 'gone' },
+    { path: 'edited.ts', forms: ['a\nb\nc\nd\n'], item: 'edited' }
   ]
-  const local = { 'same.ts': 'a\nb\n', 'edited.ts': 'a\nB\nC\nd\n' }
+  const local = { 'same.ts': 'a\nb\n', 'header.ts': '// a\nb\n', 'edited.ts': 'a\nB\nC\nd\n' }
   const drift = findDrift(expected, (path) => local[path] ?? null)
   assert.deepEqual(
     drift.map(({ path, kind }) => [path, kind]),
