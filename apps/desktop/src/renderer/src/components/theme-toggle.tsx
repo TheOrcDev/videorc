@@ -43,13 +43,7 @@ function ThemeToggle(): ReactElement {
       accelerator="D"
       label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
     >
-      <Button
-        aria-label="Toggle color theme"
-        data-slot="theme-toggle"
-        onClick={toggleTheme}
-        size="icon"
-        variant="ghost"
-      >
+      <Button aria-label="Toggle color theme" onClick={toggleTheme} size="icon" variant="ghost">
         {isDark ? <DarkModeIcon weight="fill" /> : <LightModeIcon weight="fill" />}
       </Button>
     </ShortcutTooltip>
