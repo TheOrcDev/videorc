@@ -7,8 +7,8 @@ import { cn } from '@/lib/utils'
 /**
  * A control's tooltip with its shortcut, when one is bound (keyboard-first,
  * quietly; plan 174 S1.1, promoted from the Sources mixer). The trigger is a
- * wrapper: Radix's TooltipTrigger writes `data-state` onto its child, which
- * would replace a Switch's checked/unchecked, the hook its track styles use.
+ * wrapper, so the trigger's own attributes (`data-popup-open`, its handlers)
+ * never land on the control, a Switch whose track styles read its state.
  */
 export function ShortcutTooltip({
   label,
@@ -27,8 +27,8 @@ export function ShortcutTooltip({
 }): ReactElement {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <span className={cn('inline-flex', className)}>{children}</span>
+      <TooltipTrigger render={<span className={cn('inline-flex', className)} />}>
+        {children}
       </TooltipTrigger>
       <TooltipContent>
         {label}

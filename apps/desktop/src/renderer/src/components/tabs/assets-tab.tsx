@@ -547,12 +547,16 @@ function BackgroundStylePopover({
   return (
     <Popover>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <Button aria-label={`Adjust style for ${name}`} size="icon" variant="ghost">
-              <AdjustIcon />
-            </Button>
-          </PopoverTrigger>
+        <TooltipTrigger
+          render={
+            <PopoverTrigger
+              render={
+                <Button aria-label={`Adjust style for ${name}`} size="icon" variant="ghost" />
+              }
+            />
+          }
+        >
+          <AdjustIcon />
         </TooltipTrigger>
         <TooltipContent>Adjust style</TooltipContent>
       </Tooltip>

@@ -135,7 +135,9 @@ export function TwitchGifsFieldView({
       <Select
         disabled={!settings}
         value={mode}
-        onValueChange={(value) => onChange(value as TwitchGifMode)}
+        onValueChange={(value) => {
+          if (value !== null) onChange(value)
+        }}
       >
         <SelectTrigger className="w-32 shrink-0" id="twitch-gifs">
           <SelectValue>

@@ -232,7 +232,7 @@ describe('StatusBarAction', () => {
     expect(action?.getAttribute('aria-label')).toBe('Open Preview')
     // Named on hover by a tooltip, never a native title (plan 174 S1.10).
     expect(action?.hasAttribute('title')).toBe(false)
-    expect(action?.getAttribute('data-state')).toBe('closed')
+    expect(action?.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     expect(action?.getAttribute('type')).toBe('button')
     expect(action?.className).toContain(STATUS_BAR_ACTION_CLASS)
     act(() => action?.click())

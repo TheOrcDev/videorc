@@ -16,6 +16,11 @@ import { TooltipProvider } from './tooltip'
 
 const styles = readFileSync(new URL('../../styles.css', import.meta.url), 'utf8')
 const read = (name: string): string => readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')
+/** The class tokens of every string literal in a source that holds `token`, in any order. */
+const classLists = (source: string, token: string): Set<string>[] =>
+  [...source.matchAll(/'([^'\n]*)'|"([^"\n]*)"/g)]
+    .map((match) => new Set((match[1] ?? match[2] ?? '').split(/\s+/)))
+    .filter((classes) => classes.has(token))
 
 describe('desktop scale', () => {
   it('defines the radius tiers 12 / 8 / 6 and the size tokens', () => {
@@ -83,7 +88,7 @@ describe('desktop scale', () => {
   it('puts every floating surface on the float glass, never an inverted pill', () => {
     const tooltip = read('tooltip.tsx')
     expect(tooltip).not.toContain('bg-foreground')
-    expect(tooltip).toContain('delayDuration = 600')
+    expect(tooltip).toContain('delay = 600')
     // Plan 072: one surface for everything that floats. The old near-opaque
     // popover coat read as a black slab on the plan 050 window glass.
     for (const name of [
@@ -98,11 +103,18 @@ describe('desktop scale', () => {
       const source = read(name)
       // Plan 091 D6: the popup tier for everything that floats, the tooltip
       // tier for tooltips, the dialog tier for dialogs (and the palette).
-      expect(source, name).toMatch(
-        name === 'tooltip.tsx'
-          ? /rounded-row border glass-float-tooltip /
-          : /rounded-(lg|xl) border glass-float /
-      )
+      const tier = name === 'tooltip.tsx' ? 'glass-float-tooltip' : 'glass-float'
+      const surfaces = classLists(source, tier)
+      expect(surfaces.length, name).toBeGreaterThan(0)
+      for (const classes of surfaces) {
+        expect(classes.has('border'), name).toBe(true)
+        expect(
+          name === 'tooltip.tsx'
+            ? classes.has('rounded-row')
+            : classes.has('rounded-lg') || classes.has('rounded-xl'),
+          name
+        ).toBe(true)
+      }
       expect(source, name).not.toContain('bg-popover')
       expect(source, name).not.toMatch(/rounded-(2xl|3xl)/)
     }
@@ -115,7 +127,9 @@ describe('desktop scale', () => {
     for (const name of ['dropdown-menu.tsx', 'context-menu.tsx', 'select.tsx']) {
       const source = read(name)
       expect(source, name).not.toMatch(/\brounded-(?:sm|md)\b/)
-      expect(source.match(/min-h-7[^"']*rounded-chip/g)?.length ?? 0, name).toBeGreaterThan(0)
+      const items = classLists(source, 'min-h-7')
+      expect(items.length, name).toBeGreaterThan(0)
+      for (const classes of items) expect(classes.has('rounded-chip'), name).toBe(true)
       // One separator strength in every float: the hairline itself.
       expect(source, name).not.toContain('bg-border/50')
     }

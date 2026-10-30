@@ -169,9 +169,7 @@ async function openMenu(sessionId: string): Promise<HTMLElement[]> {
   const trigger = row(sessionId).querySelector(
     'button[aria-label="Session actions"]'
   ) as HTMLElement
-  await act(async () =>
-    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  )
+  await act(async () => trigger.click())
   return [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
 }
 

@@ -501,8 +501,11 @@ export function LibraryTab({
       {/* Filter bar: filter · sort · search. */}
       <PaneStrip className="flex flex-wrap items-center gap-2">
         <Select
+          items={LIBRARY_FILTERS}
           value={filter}
-          onValueChange={(value) => changeView({ filter: value as LibraryFilter })}
+          onValueChange={(value) => {
+            if (value !== null) changeView({ filter: value })
+          }}
         >
           <SelectTrigger aria-label="Filter" className="w-40">
             <SelectValue />
@@ -517,7 +520,13 @@ export function LibraryTab({
             </SelectGroup>
           </SelectContent>
         </Select>
-        <Select value={sort} onValueChange={(value) => setSort(value as LibrarySort)}>
+        <Select
+          items={LIBRARY_SORTS}
+          value={sort}
+          onValueChange={(value) => {
+            if (value !== null) setSort(value)
+          }}
+        >
           <SelectTrigger aria-label="Sort" className="w-36">
             <SelectValue />
           </SelectTrigger>
@@ -973,13 +982,11 @@ function LibraryRow({
               <p className="truncate text-sm font-medium">{title}</p>
               {cleanCutJob && cleanCutChip ? (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge data-library-clean-cut={cleanCutJob.state} variant="outline">
-                      {cleanCutChip.working ? (
-                        <Spinner aria-hidden data-icon="inline-start" />
-                      ) : null}
-                      {cleanCutChip.label}
-                    </Badge>
+                  <TooltipTrigger
+                    render={<Badge data-library-clean-cut={cleanCutJob.state} variant="outline" />}
+                  >
+                    {cleanCutChip.working ? <Spinner aria-hidden data-icon="inline-start" /> : null}
+                    {cleanCutChip.label}
                   </TooltipTrigger>
                   <TooltipContent>
                     Clean cut:{' '}
@@ -994,10 +1001,8 @@ function LibraryRow({
               ) : null}
               {quality ? (
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge data-library-quality="" variant="warning">
-                      {quality.label}
-                    </Badge>
+                  <TooltipTrigger render={<Badge data-library-quality="" variant="warning" />}>
+                    {quality.label}
                   </TooltipTrigger>
                   <TooltipContent>{quality.detail}</TooltipContent>
                 </Tooltip>
@@ -1143,16 +1148,18 @@ function RowActions({
         </DisabledReason>
       ) : (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label="Play recording"
-              size="icon"
-              tabIndex={tabIndex}
-              variant="ghost"
-              onClick={() => void actions.play()}
-            >
-              <PlayIcon weight="fill" />
-            </Button>
+          <TooltipTrigger
+            render={
+              <Button
+                aria-label="Play recording"
+                size="icon"
+                tabIndex={tabIndex}
+                variant="ghost"
+                onClick={() => void actions.play()}
+              />
+            }
+          >
+            <PlayIcon weight="fill" />
           </TooltipTrigger>
           <TooltipContent>Play in the default player</TooltipContent>
         </Tooltip>
@@ -1657,7 +1664,7 @@ export function NoiseCleanupDirectAction({
     return (
       <>
         <Tooltip>
-          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipTrigger render={button} />
           <TooltipContent>{help}</TooltipContent>
         </Tooltip>
         <span hidden id={descriptionId}>

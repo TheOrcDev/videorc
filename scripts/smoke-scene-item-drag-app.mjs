@@ -199,7 +199,7 @@ try {
     }
   )
   await cdp.eval(
-    `(async () => {const deadline=performance.now()+5000;while(document.querySelector('[data-slot="dialog-overlay"][data-state="open"]')){document.querySelectorAll('[data-slot="dialog-close"]').forEach(button=>button.click());document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(performance.now()>deadline)throw Error('Could not dismiss launch dialog');await new Promise(resolve=>setTimeout(resolve,100))}})()`
+    `(async () => {const deadline=performance.now()+5000;while(document.querySelector('[data-slot="dialog-overlay"][data-open]')){document.querySelectorAll('[data-slot="dialog-close"]').forEach(button=>button.click());document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(performance.now()>deadline)throw Error('Could not dismiss launch dialog');await new Promise(resolve=>setTimeout(resolve,100))}})()`
   )
   await command('select-layout-preset', {
     preset: cameraSelected ? 'screen-camera' : 'screen-only',

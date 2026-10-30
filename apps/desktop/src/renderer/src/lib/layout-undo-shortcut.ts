@@ -1,3 +1,4 @@
+import { MODAL_OPEN_SELECTOR } from '@/lib/modal-open'
 import { isCommandKey } from '@/lib/platform'
 
 // ⌘Z on the Scene page (plan 174 S3.9, D15): a single-level undo of the last
@@ -12,9 +13,7 @@ export const LAYOUT_UNDO_EDITABLE_SELECTOR =
 
 /** While one of these is open anywhere, the key belongs to it. */
 export const LAYOUT_UNDO_MODAL_SELECTOR = [
-  '[role="dialog"][data-state="open"]',
-  '[role="alertdialog"][data-state="open"]',
-  '[role="menu"][data-state="open"]',
+  MODAL_OPEN_SELECTOR,
   '[data-videorc-stage-phase="dragging"]',
   '[data-videorc-stage-phase="pending"]'
 ].join(', ')

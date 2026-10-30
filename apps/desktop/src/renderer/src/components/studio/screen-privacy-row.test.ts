@@ -79,9 +79,7 @@ function core(
 }
 
 async function render(view: () => ReactElement): Promise<void> {
-  await act(async () =>
-    root.render(createElement(TooltipProvider, { delayDuration: 0, children: view() }))
-  )
+  await act(async () => root.render(createElement(TooltipProvider, { delay: 0, children: view() })))
 }
 
 const line = (): HTMLElement =>

@@ -1,4 +1,4 @@
-import { cloneElement, useId, type ComponentProps, type ReactElement, type ReactNode } from 'react'
+import { useId, type ComponentProps, type ReactElement, type ReactNode } from 'react'
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -48,27 +48,28 @@ export function InfoTooltip({
   return (
     <>
       <Tooltip>
-        <TooltipTrigger asChild>
-          {focusable ? (
-            <span
-              aria-describedby={descriptionId}
-              className={cn(
-                'inline-flex rounded-chip outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
-                className
-              )}
-              data-slot="info-tooltip"
-              tabIndex={tabIndex}
-            >
-              {children}
-            </span>
-          ) : (
-            // The child's own prop wins over the trigger's, so the text stays
-            // its description while the tooltip is closed too.
-            cloneElement(children as ReactElement<{ 'aria-describedby'?: string }>, {
-              'aria-describedby': descriptionId
-            })
-          )}
-        </TooltipTrigger>
+        {focusable ? (
+          <TooltipTrigger
+            render={
+              <span
+                aria-describedby={descriptionId}
+                className={cn(
+                  'inline-flex rounded-chip outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
+                  className
+                )}
+                data-slot="info-tooltip"
+                tabIndex={tabIndex}
+              />
+            }
+          >
+            {children}
+          </TooltipTrigger>
+        ) : (
+          // Base UI merges the trigger's props into the child's, so the child
+          // is the trigger and the text stays its description while the
+          // tooltip is closed too. A describedby of the child's own wins.
+          <TooltipTrigger aria-describedby={descriptionId} render={children} />
+        )}
         <TooltipContent align={align} side={side}>
           {content}
         </TooltipContent>

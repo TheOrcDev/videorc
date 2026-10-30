@@ -268,8 +268,10 @@ export function ObsImportDialog({
                 <FieldLabel htmlFor={collectionId}>Scene collection</FieldLabel>
                 <Select
                   disabled={applying}
-                  value={collection}
+                  // Never undefined: that would make the select uncontrolled.
+                  value={collection ?? null}
                   onValueChange={(value) => {
+                    if (value === null) return
                     invalidateSetup()
                     setCollection(value)
                   }}
@@ -290,8 +292,10 @@ export function ObsImportDialog({
                 <FieldLabel htmlFor={profileId}>Profile</FieldLabel>
                 <Select
                   disabled={applying}
-                  value={profile}
+                  // Never undefined: that would make the select uncontrolled.
+                  value={profile ?? null}
                   onValueChange={(value) => {
+                    if (value === null) return
                     invalidateSetup()
                     setProfile(value)
                   }}

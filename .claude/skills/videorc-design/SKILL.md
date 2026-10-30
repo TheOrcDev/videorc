@@ -917,7 +917,8 @@ these are the props that matter. Paths are under
 Asking, locking and explaining
 
 - `AlertDialog` (`ui/alert-dialog.tsx`): shadcn's, on the dialog tier with no
-  close button; Radix focuses Cancel and Escape closes. Use it through
+  close button; it focuses Cancel and Escape closes, and its Action never
+  closes it (the owner does). Use it through
   `ConfirmDialog` unless the question is not a delete (End livestream has
   its own, `components/end-livestream-dialog.tsx`).
 - `ConfirmDialog` (`components/confirm-dialog.tsx`), the recipe in
@@ -928,7 +929,7 @@ Asking, locking and explaining
   `<DisabledReason reason id? label? focusable? tabIndex?>{control}</DisabledReason>`.
   A focusable wrapper with a Tooltip and `aria-describedby`, because a
   disabled control takes no hover. Pass `reason` only while the control is
-  disabled; `focusable={false}` only for Radix select or menu items.
+  disabled; `focusable={false}` only for select or menu items.
 - `LockAlert` (`components/lock-alert.tsx`): `reason action?`, where
   `action` is `{ kind: 'sign-in' }` or `{ kind: 'view-premium', url }`
   (`unlockActionForGate`, `unlockActionForReason` in `lib/lock-view.ts`).

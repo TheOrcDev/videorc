@@ -1,4 +1,4 @@
-import { cloneElement, useId, type ComponentProps, type ReactElement, type ReactNode } from 'react'
+import { useId, type ComponentProps, type ReactElement, type ReactNode } from 'react'
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -13,8 +13,8 @@ import { cn } from '@/lib/utils'
  * Pass the reason only while the control is disabled: with no reason the
  * control renders exactly as it is, with no extra tab stop.
  *
- * `focusable={false}` is for Radix items a menu or a select already moves
- * through (they skip disabled items): the item itself takes the hover and is
+ * `focusable={false}` is for items a menu or a select already moves through
+ * (they skip disabled items): the item itself takes the hover and is
  * described, with no wrapper in the list. Never use it on a native disabled
  * `<button>`: Chromium sends it no pointer events, so only the wrapper works.
  */
@@ -56,24 +56,33 @@ export function DisabledReason({
   return (
     <>
       <Tooltip>
-        <TooltipTrigger asChild>
-          {focusable ? (
-            <span
-              aria-describedby={descriptionId}
-              aria-label={label}
-              className={cn(
-                'inline-flex rounded-chip outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
-                className
-              )}
-              data-slot="disabled-reason"
-              tabIndex={tabIndex}
-            >
-              {children}
-            </span>
-          ) : (
-            withDescription(children, descriptionId)
-          )}
-        </TooltipTrigger>
+        {focusable ? (
+          <TooltipTrigger
+            render={
+              <span
+                aria-describedby={descriptionId}
+                aria-label={label}
+                className={cn(
+                  'inline-flex rounded-chip outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
+                  className
+                )}
+                data-slot="disabled-reason"
+                tabIndex={tabIndex}
+              />
+            }
+          >
+            {children}
+          </TooltipTrigger>
+        ) : (
+          // The item itself carries the description and takes the hover while
+          // disabled: Base UI merges these into the item's own props, its
+          // classes first, so the pointer-events override wins.
+          <TooltipTrigger
+            aria-describedby={descriptionId}
+            className="data-disabled:pointer-events-auto"
+            render={children}
+          />
+        )}
         <TooltipContent align={align} side={side}>
           {reason}
         </TooltipContent>
@@ -85,13 +94,4 @@ export function DisabledReason({
       </span>
     </>
   )
-}
-
-/** The item itself carries the description and takes the hover while disabled. */
-function withDescription(child: ReactElement, descriptionId: string): ReactElement {
-  const { className } = child.props as { className?: string }
-  return cloneElement(child as ReactElement<{ className?: string; 'aria-describedby'?: string }>, {
-    'aria-describedby': descriptionId,
-    className: cn(className, 'data-disabled:pointer-events-auto')
-  })
 }

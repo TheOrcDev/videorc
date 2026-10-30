@@ -345,8 +345,11 @@ export function CaptionsControls(): ReactElement {
           </FieldContent>
           <Select
             disabled={locked || isSessionActive}
+            items={LANGUAGES.map((language) => ({ value: language.id, label: language.label }))}
             value={captions.language}
-            onValueChange={(language) => patchCaptions({ language })}
+            onValueChange={(language) => {
+              if (language !== null) patchCaptions({ language })
+            }}
           >
             <SelectTrigger className="w-full" id="caption-language">
               <SelectValue />

@@ -67,7 +67,7 @@ export function NavigableRow({
     if (!hint) return button
     return (
       <Tooltip>
-        <TooltipTrigger asChild>{button}</TooltipTrigger>
+        <TooltipTrigger render={button} />
         <TooltipContent align="start">{hint}</TooltipContent>
       </Tooltip>
     )

@@ -256,7 +256,7 @@ async function main() {
     code: `
       for (let i = 0; i < 25; i++) {
         const scrim = document.querySelector(
-          '[data-slot="dialog-overlay"][data-state="open"], [data-slot="alert-dialog-overlay"][data-state="open"]'
+          '[data-slot="dialog-overlay"][data-open], [data-slot="alert-dialog-overlay"][data-open]'
         )
         if (!scrim) return { dismissed: true }
         document.querySelectorAll('[data-slot="dialog-close"]').forEach((button) => button.click())
@@ -396,8 +396,8 @@ async function main() {
   // surface because the watcher knew only the plain dialog's scrim. Each
   // stand-in carries the slot and state its ui primitive renders.
   for (const [kind, markup] of [
-    ['alert-dialog', '<div data-slot="alert-dialog-overlay" data-state="open"></div>'],
-    ['dialog', '<div data-slot="dialog-overlay" data-state="open"></div>']
+    ['alert-dialog', '<div data-slot="alert-dialog-overlay" data-open></div>'],
+    ['dialog', '<div data-slot="dialog-overlay" data-open></div>']
   ]) {
     await smokeCommand('eval-js', {
       code: `

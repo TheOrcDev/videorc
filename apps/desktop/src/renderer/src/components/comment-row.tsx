@@ -121,7 +121,7 @@ export function formatCommentTime(iso: string): string {
 function ChipHint({ hint, children }: { hint: string; children: ReactElement }): ReactElement {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipTrigger render={children} />
       <TooltipContent>{hint}</TooltipContent>
     </Tooltip>
   )
@@ -593,24 +593,26 @@ function EmoteText({
 function ChatLink({ link }: { link: ChatLinkPiece }): ReactElement {
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <span
-          className="underline decoration-muted-foreground/50 underline-offset-2"
-          data-slot="comment-link"
-          title={link.href}
-        >
-          {link.text}
-        </span>
+      <ContextMenuTrigger
+        render={
+          <span
+            className="underline decoration-muted-foreground/50 underline-offset-2"
+            data-slot="comment-link"
+            title={link.href}
+          />
+        }
+      >
+        {link.text}
       </ContextMenuTrigger>
       <ContextMenuContent className="w-56" data-testid="comment-link-menu">
         <ContextMenuLabel className="truncate font-normal text-subtle">
           {link.host}
         </ContextMenuLabel>
-        <ContextMenuItem onSelect={() => void openChatLink(link.href)}>
+        <ContextMenuItem onClick={() => void openChatLink(link.href)}>
           <ExternalLinkIcon aria-hidden />
           Open link
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => void copyChatLink(link.href)}>
+        <ContextMenuItem onClick={() => void copyChatLink(link.href)}>
           <CopyIcon aria-hidden />
           Copy link
         </ContextMenuItem>

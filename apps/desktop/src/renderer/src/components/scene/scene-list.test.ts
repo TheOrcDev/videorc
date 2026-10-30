@@ -130,10 +130,10 @@ const savedRows = () =>
     row.getAttribute('data-saved-scene')
   )
 async function menu(name: string, item: string): Promise<void> {
-  const trigger = container.querySelector(`button[aria-label="Actions for ${name}"]`)!
-  await act(async () =>
-    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  )
+  const trigger = container.querySelector<HTMLButtonElement>(
+    `button[aria-label="Actions for ${name}"]`
+  )!
+  await act(async () => trigger.click())
   const entry = [...document.querySelectorAll('[role="menuitem"]')].find(
     (candidate) => candidate.textContent === item
   ) as HTMLElement | undefined
@@ -265,10 +265,10 @@ describe('the Scene page scene list (plan 210 D6)', () => {
 describe('a saved scene’s ⋯ menu', () => {
   it('holds the plan’s actions, app ones only for app scenes', async () => {
     await render()
-    const trigger = container.querySelector('button[aria-label="Actions for Figma"]')!
-    await act(async () =>
-      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-    )
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Actions for Figma"]'
+    )!
+    await act(async () => trigger.click())
     expect(
       [...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)
     ).toEqual([

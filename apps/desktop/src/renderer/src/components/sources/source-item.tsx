@@ -199,17 +199,19 @@ export function SourceControlRow({
         <span className={cn(valueClass, 'inline-flex')} data-slot="source-control-value">
           {reset ? (
             <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  className="-mr-2 px-2 font-mono text-muted-foreground tabular-nums hover:text-foreground"
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                  onClick={reset.onReset}
-                >
-                  {value}
-                  <span className="sr-only">. {reset.label}</span>
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    className="-mr-2 px-2 font-mono text-muted-foreground tabular-nums hover:text-foreground"
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={reset.onReset}
+                  />
+                }
+              >
+                {value}
+                <span className="sr-only">. {reset.label}</span>
               </TooltipTrigger>
               <TooltipContent>{reset.label}</TooltipContent>
             </Tooltip>

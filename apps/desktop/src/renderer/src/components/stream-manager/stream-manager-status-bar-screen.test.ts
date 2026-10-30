@@ -41,7 +41,7 @@ async function renderBar(
   await act(async () =>
     root.render(
       createElement(TooltipProvider, {
-        delayDuration: 0,
+        delay: 0,
         children: createElement(StreamManagerStatusBar, {
           providers: [],
           audience: null,
@@ -64,7 +64,7 @@ async function openMore(): Promise<HTMLElement> {
     '[aria-label="More Stream Manager actions"]'
   )!
   await act(async () => {
-    more.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+    more.click()
   })
   return document.querySelector<HTMLElement>('[role=menu]')!
 }

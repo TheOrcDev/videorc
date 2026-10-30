@@ -1029,7 +1029,7 @@ async function dismissLaunchDialogs(smoke) {
   const result = await smokeCommand(smoke, 'eval-js', {
     code: `
       for (let i = 0; i < 25; i++) {
-        const scrim = document.querySelector('[data-slot="dialog-overlay"][data-state="open"]')
+        const scrim = document.querySelector('[data-slot="dialog-overlay"][data-open]')
         if (!scrim) return { dismissed: true }
         document.querySelectorAll('[data-slot="dialog-close"]').forEach((button) => button.click())
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))

@@ -181,17 +181,19 @@ export function PowerSlider({
           )}
           {canReset ? (
             <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label={`Reset ${label}`}
-                  className="text-muted-foreground"
-                  disabled={disabled}
-                  size="icon"
-                  variant="ghost"
-                  onClick={reset}
-                >
-                  <ResetIcon className="size-3.5" />
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    aria-label={`Reset ${label}`}
+                    className="text-muted-foreground"
+                    disabled={disabled}
+                    size="icon"
+                    variant="ghost"
+                    onClick={reset}
+                  />
+                }
+              >
+                <ResetIcon className="size-3.5" />
               </TooltipTrigger>
               <TooltipContent>Reset to default</TooltipContent>
             </Tooltip>

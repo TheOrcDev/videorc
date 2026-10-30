@@ -12393,7 +12393,8 @@ async function runSmokePreviewMotionCommand(
         if (${JSON.stringify(openMoreMenu)}) {
           const trigger = document.querySelector('button[aria-label="More Stream Manager actions"]');
           if (visible(trigger) && !openMenu()) {
-            trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
+            // A plain click opens the menu (Base UI opens on mousedown or click).
+            trigger.click();
             if (await settle(() => openMenu()?.querySelector('[role^="menuitem"]'))) {
               moreMenuItems = Array.from(openMenu().querySelectorAll('[role^="menuitem"]')).map(
                 (item) => (item.textContent ?? '').trim()

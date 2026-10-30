@@ -174,16 +174,16 @@ describe('overlay coverage', () => {
 
   it('an open alert dialog blocks the docked preview', () => {
     document.body.innerHTML =
-      '<div data-slot="alert-dialog-overlay" data-state="open"></div>' +
-      '<div data-slot="dialog-overlay" data-state="closed"></div>'
+      '<div data-slot="alert-dialog-overlay" data-open></div>' +
+      '<div data-slot="dialog-overlay" data-closed></div>'
     expect(document.querySelectorAll(DOCK_BLOCKING_SCRIM_SELECTOR)).toHaveLength(1)
   })
 
   it('menus, hover cards and shown toasts are floating blockers; tooltips are not', () => {
     document.body.innerHTML = [
-      '<div data-slot="context-menu-content" data-state="open"></div>',
-      '<div data-slot="hover-card-content" data-state="open"></div>',
-      '<div data-slot="tooltip-content" data-state="delayed-open"></div>',
+      '<div data-slot="context-menu-content" data-open></div>',
+      '<div data-slot="hover-card-content" data-open></div>',
+      '<div data-slot="tooltip-content" data-open></div>',
       '<li data-sonner-toast data-visible="true" data-removed="false"></li>',
       '<li data-sonner-toast data-visible="false" data-removed="false"></li>',
       '<li data-sonner-toast data-visible="true" data-removed="true"></li>'

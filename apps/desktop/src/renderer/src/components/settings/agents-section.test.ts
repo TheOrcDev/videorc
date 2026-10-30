@@ -270,7 +270,7 @@ describe('AgentsSection states (plan 209 S7)', () => {
         '[aria-label="More actions for Claude Desktop"]'
       )!
       await act(async () => {
-        trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+        trigger.click()
       })
       const item = [...document.querySelectorAll<HTMLElement>('[role=menuitem]')].find(
         (entry) => entry.textContent?.trim() === 'Remove…'

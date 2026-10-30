@@ -246,11 +246,9 @@ function PaneLabel({
       ) : null}
       {onStream ? (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="flex" data-slot="pane-on-stream">
-              <StatusDot tone="good" />
-              <span className="sr-only">On stream:</span>
-            </span>
+          <TooltipTrigger render={<span className="flex" data-slot="pane-on-stream" />}>
+            <StatusDot tone="good" />
+            <span className="sr-only">On stream:</span>
           </TooltipTrigger>
           <TooltipContent>On stream</TooltipContent>
         </Tooltip>

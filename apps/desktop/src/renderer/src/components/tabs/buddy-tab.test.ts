@@ -693,7 +693,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
       'Reconnect Twitch to let Buddy remove messages.'
     )
     expect(reconnect.hasAttribute('title')).toBe(false)
-    expect(reconnect.getAttribute('data-state')).toBe('closed')
+    expect(reconnect.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     const authorize = rows[2].querySelector('button')!
     expect(rows[2].textContent).toContain('Needs access')
     expect(authorize.textContent).toBe('Authorize X Live')
