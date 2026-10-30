@@ -188,8 +188,8 @@ function StatCell({
   )
   if (item.details.length === 0) return cell
   return (
-    <HoverCard closeDelay={80} openDelay={400}>
-      <HoverCardTrigger asChild>{cell}</HoverCardTrigger>
+    <HoverCard>
+      <HoverCardTrigger closeDelay={80} delay={400} render={cell} />
       <StatDetails item={item} />
     </HoverCard>
   )
@@ -319,7 +319,7 @@ export function StatsBar({
   if (!onLayoutChange) return bar
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>{bar}</ContextMenuTrigger>
+      <ContextMenuTrigger render={bar} />
       <ContextMenuContent className="w-52" data-testid="stats-bar-menu">
         <ContextMenuLabel>Stats</ContextMenuLabel>
         {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
@@ -327,7 +327,6 @@ export function StatsBar({
             key={id}
             checked={!layout.hidden.includes(id)}
             onCheckedChange={(checked) => change(setStatHidden(layout, id, checked !== true))}
-            onSelect={(event) => event.preventDefault()}
           >
             {STAT_NAMES[id]}
           </ContextMenuCheckboxItem>
@@ -335,16 +334,16 @@ export function StatsBar({
         {menuTarget ? (
           <>
             <ContextMenuSeparator />
-            <ContextMenuItem disabled={moveLeft === layout} onSelect={() => change(moveLeft)}>
+            <ContextMenuItem disabled={moveLeft === layout} onClick={() => change(moveLeft)}>
               Move {STAT_NAMES[menuTarget]} left
             </ContextMenuItem>
-            <ContextMenuItem disabled={moveRight === layout} onSelect={() => change(moveRight)}>
+            <ContextMenuItem disabled={moveRight === layout} onClick={() => change(moveRight)}>
               Move {STAT_NAMES[menuTarget]} right
             </ContextMenuItem>
           </>
         ) : null}
         <ContextMenuSeparator />
-        <ContextMenuItem disabled={isDefault} onSelect={() => change(DEFAULT_STATS_LAYOUT)}>
+        <ContextMenuItem disabled={isDefault} onClick={() => change(DEFAULT_STATS_LAYOUT)}>
           Reset stats
         </ContextMenuItem>
         <ContextMenuLabel className="text-subtle">Drag a stat to move it.</ContextMenuLabel>

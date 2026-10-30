@@ -405,7 +405,7 @@ function SentenceHint({
   if (!line) return children
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipTrigger render={children} />
       <TooltipContent>{line}</TooltipContent>
     </Tooltip>
   )
@@ -506,21 +506,23 @@ export function ActivityPane({
         </div>
         {/* Below 640 px the same filters live in one menu, like chat's. */}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Activity filters"
-              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              type="button"
-              variant="ghost"
-            >
-              Filters
-              {activeFilterCount > 0 ? (
-                <Badge className="px-1.5" variant="outline">
-                  {activeFilterCount}
-                </Badge>
-              ) : null}
-              <ChevronDownIcon data-icon="inline-end" />
-            </Button>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                aria-label="Activity filters"
+                className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            Filters
+            {activeFilterCount > 0 ? (
+              <Badge className="px-1.5" variant="outline">
+                {activeFilterCount}
+              </Badge>
+            ) : null}
+            <ChevronDownIcon data-icon="inline-end" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-52">
             <DropdownMenuLabel>Show</DropdownMenuLabel>
@@ -528,9 +530,11 @@ export function ActivityPane({
               value={filter}
               onValueChange={(value) => setFilter(value as ActivityFilter | 'all')}
             >
-              <DropdownMenuRadioItem value="all">Everything</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem closeOnClick value="all">
+                Everything
+              </DropdownMenuRadioItem>
               {shownFilters.map((option) => (
-                <DropdownMenuRadioItem key={option.id} value={option.id}>
+                <DropdownMenuRadioItem key={option.id} closeOnClick value={option.id}>
                   {option.label}
                   <span className="ml-auto text-muted-foreground tabular-nums">
                     {counts[option.id]}
@@ -556,17 +560,19 @@ export function ActivityPane({
             Manual picks always win; the switch only feeds an idle slot. */}
         {onAutoShowChange ? (
           <Tooltip>
-            <TooltipTrigger asChild>
-              <label className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none">
-                Auto-show
-                <Switch
-                  aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
-                  checked={autoShow}
-                  data-testid="activity-auto-show"
-                  size="sm"
-                  onCheckedChange={onAutoShowChange}
-                />
-              </label>
+            <TooltipTrigger
+              render={
+                <label className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none" />
+              }
+            >
+              Auto-show
+              <Switch
+                aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
+                checked={autoShow}
+                data-testid="activity-auto-show"
+                size="sm"
+                onCheckedChange={onAutoShowChange}
+              />
             </TooltipTrigger>
             <TooltipContent>
               Shows new follows, subs, gifts, tips, rewards, raids and streaks on stream for a few

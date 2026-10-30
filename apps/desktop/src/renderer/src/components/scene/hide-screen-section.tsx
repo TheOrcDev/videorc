@@ -184,10 +184,8 @@ function AddPasswordManagerButton({
         : null
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button data-testid="password-manager-add" variant="outline">
-          Add app…
-        </Button>
+      <PopoverTrigger render={<Button data-testid="password-manager-add" variant="outline" />}>
+        Add app…
       </PopoverTrigger>
       <PopoverContent
         align="start"

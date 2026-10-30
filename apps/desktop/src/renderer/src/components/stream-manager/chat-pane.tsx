@@ -428,21 +428,23 @@ export function ChatPane({
         </div>
         {/* Below 640 px the same filters live in one menu. */}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Chat filters"
-              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              type="button"
-              variant="ghost"
-            >
-              Filters
-              {activeFilterCount > 0 ? (
-                <Badge className="px-1.5" variant="outline">
-                  {activeFilterCount}
-                </Badge>
-              ) : null}
-              <ChevronDownIcon data-icon="inline-end" />
-            </Button>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                aria-label="Chat filters"
+                className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            Filters
+            {activeFilterCount > 0 ? (
+              <Badge className="px-1.5" variant="outline">
+                {activeFilterCount}
+              </Badge>
+            ) : null}
+            <ChevronDownIcon data-icon="inline-end" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-52">
             {platforms.length > 1 ? (
@@ -460,6 +462,7 @@ export function ChatPane({
               {questionMessageIds.size > 0 || filter.questions ? (
                 <DropdownMenuCheckboxItem
                   checked={filter.questions}
+                  closeOnClick
                   onCheckedChange={(checked) =>
                     setFilter((current) => ({ ...current, questions: checked === true }))
                   }
@@ -469,6 +472,7 @@ export function ChatPane({
               ) : null}
               <DropdownMenuCheckboxItem
                 checked={filter.mentions}
+                closeOnClick
                 onCheckedChange={(checked) =>
                   setFilter((current) => ({ ...current, mentions: checked === true }))
                 }
@@ -977,15 +981,17 @@ export function Composer({
           ) : writable.length > 1 ? (
             <InputGroupAddon>
               <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <InputGroupButton
-                    aria-label={`Send to: ${pickLabel}`}
-                    data-testid="chat-send-to"
-                    size="xs"
-                  >
-                    To: {pickLabel}
-                    <ChevronDownIcon data-icon="inline-end" />
-                  </InputGroupButton>
+                <DropdownMenuTrigger
+                  render={
+                    <InputGroupButton
+                      aria-label={`Send to: ${pickLabel}`}
+                      data-testid="chat-send-to"
+                      size="xs"
+                    />
+                  }
+                >
+                  To: {pickLabel}
+                  <ChevronDownIcon data-icon="inline-end" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56">
                   <DropdownMenuLabel>Send to</DropdownMenuLabel>
@@ -1004,7 +1010,6 @@ export function Composer({
                             return next.size === writable.length ? null : next
                           })
                         }
-                        onSelect={(event) => event.preventDefault()}
                       >
                         <ChatPlatformIcon decorative platform={provider.platform} />
                         {CHAT_PLATFORM_LABELS[provider.platform]}
@@ -1017,7 +1022,7 @@ export function Composer({
                     ))}
                   </DropdownMenuGroup>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={() => setPicked(null)}>
+                  <DropdownMenuItem onClick={() => setPicked(null)}>
                     Every writable destination
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -1222,9 +1227,7 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
   return (
     <div aria-label="Latest message delivery" className="mt-1.5 flex">
       <Tooltip>
-        <TooltipTrigger asChild>
-          <Badge className="max-w-full truncate">Sending…</Badge>
-        </TooltipTrigger>
+        <TooltipTrigger render={<Badge className="max-w-full truncate" />}>Sending…</TooltipTrigger>
         <TooltipContent>{operation.text}</TooltipContent>
       </Tooltip>
     </div>

@@ -62,7 +62,7 @@ export function StatusBarAction({
   if (!tip) return button
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipTrigger render={button} />
       <TooltipContent side="top">{tip}</TooltipContent>
     </Tooltip>
   )

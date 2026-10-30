@@ -15,7 +15,18 @@
     "alert",
     "avatar",
     "chrome-row",
-    "field-context"
+    "field-context",
+    "tooltip",
+    "popover",
+    "hover-card",
+    "dropdown-menu",
+    "context-menu",
+    "select",
+    "dialog",
+    "alert-dialog",
+    "command",
+    "sonner",
+    "modal-open"
   ],
   "keepLocal": ["src/renderer/src/styles.css", "src/renderer/src/components/icons.tsx"]
 }

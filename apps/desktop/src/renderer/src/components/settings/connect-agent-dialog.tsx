@@ -177,8 +177,11 @@ function ChooseStep({
             <FieldLabel htmlFor="connect-agent-app">App</FieldLabel>
             <Select
               disabled={pending}
+              items={AGENT_APPS.map((option) => ({ value: option.id, label: option.label }))}
               value={app}
-              onValueChange={(value) => setApp(value as AgentClientKind)}
+              onValueChange={(value) => {
+                if (value !== null) setApp(value)
+              }}
             >
               <SelectTrigger className="w-full" id="connect-agent-app">
                 <SelectValue />

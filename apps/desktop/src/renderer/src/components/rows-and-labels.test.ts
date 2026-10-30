@@ -117,7 +117,7 @@ describe('NavigableRow (B-25)', () => {
     expect(button.className).toContain('hover:bg-accent')
     // The hint is a Tooltip the keyboard reaches, never a native title (S1.10).
     expect(button.hasAttribute('title')).toBe(false)
-    expect(button.dataset.state).toBe('closed')
+    expect(button.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     await act(async () => button.click())
     expect(onNavigate).toHaveBeenCalledTimes(1)
   })

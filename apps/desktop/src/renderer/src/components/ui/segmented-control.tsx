@@ -202,10 +202,9 @@ function SegmentedControl<T extends string>({
           </button>
         )
         if (!tooltip) return button
-        // The button's own data-state ("on"/"off") wins over the trigger's.
         return (
           <Tooltip key={optionValue}>
-            <TooltipTrigger asChild>{button}</TooltipTrigger>
+            <TooltipTrigger render={button} />
             <TooltipContent>{tooltip}</TooltipContent>
           </Tooltip>
         )

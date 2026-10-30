@@ -59,7 +59,8 @@ describe('ConfirmDialog (plan 174 S0.3, J1-3)', () => {
     const cancel = byTestId('confirm-cancel')
     expect(cancel?.textContent).toBe('Cancel')
     expect(cancel?.getAttribute('data-variant')).toBe('ghost')
-    expect(document.activeElement).toBe(cancel)
+    // Base UI moves the first focus on the next animation frame.
+    await vi.waitFor(() => expect(document.activeElement).toBe(cancel))
     expect(byTestId('confirm-confirm')?.getAttribute('data-variant')).toBe('destructive')
   })
 

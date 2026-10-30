@@ -689,6 +689,7 @@ function MetadataOverride({
   const twitch = override.platform === 'twitch'
   const youtube = override.platform === 'youtube'
   const x = override.platform === 'x'
+  const languageOptions = streamLanguageOptions(override.twitchLanguage)
 
   // The switch gates custom TEXT only. Platform settings below it (made for
   // kids, category, language, announce) always apply, on or off.
@@ -810,14 +811,17 @@ function MetadataOverride({
             <FieldLabel htmlFor="twitch-language">Language</FieldLabel>
             <Select
               disabled={disabled}
+              items={languageOptions}
               value={override.twitchLanguage?.trim().toLowerCase() ?? ''}
-              onValueChange={(twitchLanguage) => onPatch({ twitchLanguage })}
+              onValueChange={(twitchLanguage) => {
+                if (twitchLanguage !== null) onPatch({ twitchLanguage })
+              }}
             >
               <SelectTrigger className="w-full" id="twitch-language">
                 <SelectValue placeholder="Choose a language" />
               </SelectTrigger>
               <SelectContent>
-                {streamLanguageOptions(override.twitchLanguage).map((option) => (
+                {languageOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>

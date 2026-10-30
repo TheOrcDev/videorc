@@ -16,8 +16,8 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
  * The right-click twin of a row's ⋯ menu (plan 174 S3.11, E-16): built from
  * the same `KebabMenuItem` list, so the two menus can never disagree. Groups,
  * keys, disabled reasons and the destructive item last, exactly as in
- * `KebabMenu`. The child is the row itself (the trigger, `asChild`).
- * Apart from kebab-menu.tsx so the ⋯ menu's other hosts don't load Radix's
+ * `KebabMenu`. The child is the row itself: the trigger renders as it.
+ * Apart from kebab-menu.tsx so the ⋯ menu's other hosts don't load the
  * context menu.
  */
 export function KebabContextMenu({
@@ -32,7 +32,7 @@ export function KebabContextMenu({
   const groups = kebabMenuGroups(items)
   return (
     <ContextMenu onOpenChange={onOpenChange}>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuTrigger render={children} />
       <ContextMenuContent>
         {groups.map((group, index) => (
           <KebabContextMenuGroup key={group[0]?.id ?? index} items={group} separated={index > 0} />
@@ -63,7 +63,7 @@ function KebabContextMenuGroup({
             <ContextMenuItem
               disabled={item.disabled}
               variant={item.destructive ? 'destructive' : 'default'}
-              onSelect={() => item.onSelect()}
+              onClick={() => item.onSelect()}
             >
               {item.icon ? <item.icon data-icon="inline-start" /> : null}
               {item.label}

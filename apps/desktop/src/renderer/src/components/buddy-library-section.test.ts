@@ -211,9 +211,7 @@ async function click(element: HTMLElement | null | undefined): Promise<void> {
 
 async function openMenu(id: string): Promise<HTMLElement[]> {
   const trigger = card(id).querySelector<HTMLElement>('[data-testid="buddy-library-more"]')!
-  await act(async () =>
-    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  )
+  await act(async () => trigger.click())
   await settle()
   return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
 }
@@ -399,7 +397,8 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
       { avatarId: PEBBLE, name: 'Rocky' },
       { avatarId: PEBBLE, name: 'Rocky' }
     ])
-    expect(byTestId('buddy-library-edit-dialog')).toBeNull()
+    // Base UI unmounts a closing dialog once its exit animation has run.
+    await vi.waitFor(() => expect(byTestId('buddy-library-edit-dialog')).toBeNull())
   })
 
   it('opens the onboarding when another surface asks for it (plan 174 G-4)', async () => {

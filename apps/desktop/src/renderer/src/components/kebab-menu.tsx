@@ -59,11 +59,11 @@ export function kebabMenuGroups(items: readonly KebabMenuItem[]): KebabMenuItem[
  * menu is open, while the trigger has keyboard focus, and while it is busy.
  */
 const REVEAL_ON_HOVER =
-  'opacity-0 group-hover/kebab-host:opacity-100 group-focus-within/kebab-host:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 aria-busy:opacity-100'
+  'opacity-0 group-hover/kebab-host:opacity-100 group-focus-within/kebab-host:opacity-100 focus-visible:opacity-100 data-popup-open:opacity-100 aria-busy:opacity-100'
 
 /**
  * ⋯ overflow menu for low-frequency per-item actions (videorc-design): a ghost
- * icon trigger and a Radix dropdown. One anatomy for every list and card
+ * icon trigger and a dropdown menu. One anatomy for every list and card
  * (plan 174 S1.6b, E-PAT/A-PAT): Library rows, Assets tiles, scenes,
  * scheduled streams, chat and Activity rows. Items group by `group` with a
  * hairline between groups, destructive items last; `shortcut` shows an
@@ -95,23 +95,25 @@ export function KebabMenu({
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-busy={busy || undefined}
-          aria-label={label}
-          className={cn(reveal === 'hover' && REVEAL_ON_HOVER, className)}
-          disabled={disabled}
-          size="icon"
-          tabIndex={tabIndex}
-          variant="ghost"
-          onClick={(event) => event.stopPropagation()}
-        >
-          {busy ? (
-            <SpinnerIcon aria-hidden className="animate-spin" />
-          ) : (
-            <MoreIcon aria-hidden weight="bold" />
-          )}
-        </Button>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            aria-busy={busy || undefined}
+            aria-label={label}
+            className={cn(reveal === 'hover' && REVEAL_ON_HOVER, className)}
+            disabled={disabled}
+            size="icon"
+            tabIndex={tabIndex}
+            variant="ghost"
+            onClick={(event) => event.stopPropagation()}
+          />
+        }
+      >
+        {busy ? (
+          <SpinnerIcon aria-hidden className="animate-spin" />
+        ) : (
+          <MoreIcon aria-hidden weight="bold" />
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>
         {groups.map((group, index) => (
@@ -143,7 +145,7 @@ function KebabMenuGroup({
             <DropdownMenuItem
               disabled={item.disabled}
               variant={item.destructive ? 'destructive' : 'default'}
-              onSelect={() => item.onSelect()}
+              onClick={() => item.onSelect()}
             >
               {item.icon ? <item.icon data-icon="inline-start" /> : null}
               {item.label}

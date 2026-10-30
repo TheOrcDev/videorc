@@ -218,8 +218,8 @@ describe('Sources System audio row (plans 069, 173)', () => {
   })
 
   it('keeps the On switch styled by its own state under the shortcut tooltip', () => {
-    // Radix TooltipTrigger asChild writes data-state onto its child; on the
-    // Switch that replaced checked/unchecked, the only hook its track styles use.
+    // The tooltip's trigger is a wrapper, so nothing it writes lands on the
+    // Switch, whose track styles read its own checked/unchecked.
     const onSwitch = /<button[^>]*aria-label="System audio"[^>]*>/
     expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-state="checked"')
     expect(render({}).match(onSwitch)?.[0]).toContain('data-state="unchecked"')

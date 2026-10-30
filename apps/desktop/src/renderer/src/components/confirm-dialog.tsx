@@ -1,4 +1,4 @@
-import type { MouseEvent, ReactElement, ReactNode } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 
 import {
   AlertDialog,
@@ -78,12 +78,9 @@ export function ConfirmDialog({
             data-testid={hook('confirm')}
             disabled={confirmDisabled}
             variant={confirmVariant}
-            onClick={(event: MouseEvent<HTMLButtonElement>) => {
-              // Radix would close on this click; the owner closes instead,
-              // so a pending action keeps the sheet (and its reason) up.
-              event.preventDefault()
-              onConfirm()
-            }}
+            // The answer never closes the sheet itself: the owner closes it,
+            // so a pending action keeps the sheet (and its reason) up.
+            onClick={onConfirm}
           >
             {confirmLabel}
           </AlertDialogAction>

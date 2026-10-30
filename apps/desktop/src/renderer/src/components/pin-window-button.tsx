@@ -16,8 +16,8 @@ export const PIN_WINDOW_LABEL = 'Keep on top'
  * look sits in a WindowHeader (Notes, the Captions reader); the status-bar
  * look is a StatusBarAction (Stream Manager, whose title row stays bare).
  *
- * It brings its own TooltipProvider: a Radix Tooltip without one throws, and
- * the detached windows have no provider of their own.
+ * It brings its own TooltipProvider, with the desktop delay: the detached
+ * windows have no provider of their own.
  */
 export function PinWindowButton({
   pinned,
@@ -48,23 +48,25 @@ export function PinWindowButton({
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            aria-label={PIN_WINDOW_LABEL}
-            aria-pressed={pinned}
-            className={cn(
-              '[-webkit-app-region:no-drag]',
-              pinned ? 'text-foreground' : 'text-muted-foreground',
-              className
-            )}
-            data-testid="pin-window-button"
-            size="icon"
-            type="button"
-            variant="ghost"
-            onClick={toggle}
-          >
-            {icon}
-          </Button>
+        <TooltipTrigger
+          render={
+            <Button
+              aria-label={PIN_WINDOW_LABEL}
+              aria-pressed={pinned}
+              className={cn(
+                '[-webkit-app-region:no-drag]',
+                pinned ? 'text-foreground' : 'text-muted-foreground',
+                className
+              )}
+              data-testid="pin-window-button"
+              size="icon"
+              type="button"
+              variant="ghost"
+              onClick={toggle}
+            />
+          }
+        >
+          {icon}
         </TooltipTrigger>
         <TooltipContent>{PIN_WINDOW_LABEL}</TooltipContent>
       </Tooltip>

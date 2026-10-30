@@ -282,13 +282,18 @@ describe('BannerInspector', () => {
 
     const choose = async (trigger: string, label: string): Promise<string[]> => {
       await act(async () => fold.querySelector<HTMLButtonElement>(trigger)!.click())
-      const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+      // The open list only: the last one may still be animating out.
+      const options = [
+        ...document.querySelectorAll<HTMLElement>(
+          '[data-slot="select-content"][data-open] [role="option"]'
+        )
+      ]
       const labels = options.map((option) => option.textContent ?? '')
       await act(async () => options.find((option) => option.textContent === label)!.click())
       return labels
     }
     const hideAfter = '[data-videorc-banner-hide-after]'
-    expect(fold.querySelector(hideAfter)?.textContent).toBe('Off')
+    expect(fold.querySelector(`${hideAfter} [data-slot="select-value"]`)?.textContent).toBe('Off')
     expect(await choose(hideAfter, '30 s')).toEqual(['Off', '10 s', '30 s', '1 min', '5 min'])
     expect(props.onPatch).toHaveBeenCalledTimes(1)
     expect(props.onPatch).toHaveBeenLastCalledWith({ hideAfterSec: 30 })
@@ -307,7 +312,7 @@ describe('BannerInspector', () => {
       banner: banner('sponsor', { hideAfterSec: 60, repeatEveryMin: 5 })
     })
     await renderInspector(timed)
-    expect(fold.querySelector(hideAfter)?.textContent).toBe('1 min')
+    expect(fold.querySelector(`${hideAfter} [data-slot="select-value"]`)?.textContent).toBe('1 min')
     await choose(hideAfter, 'Off')
     await choose('[data-videorc-banner-repeat]', 'Off')
     expect(timed.onPatch).toHaveBeenNthCalledWith(1, { hideAfterSec: 0 })

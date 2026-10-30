@@ -1096,9 +1096,7 @@ function KindChips({
         // sits in a span trigger: the toggle's own data-state must stay on/off.
         return (
           <Tooltip key={chip.group.id}>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">{item}</span>
-            </TooltipTrigger>
+            <TooltipTrigger render={<span className="inline-flex" />}>{item}</TooltipTrigger>
             <TooltipContent>
               {chip.state === 'on' ? `Keep all ${chip.total}` : `Cut all ${chip.total}`}
             </TooltipContent>
@@ -1134,18 +1132,20 @@ function Moments({
           const Glyph = MOMENT_ICONS[pin.kind] ?? PinIcon
           return (
             <Tooltip key={pin.key}>
-              <TooltipTrigger asChild>
-                <Button
-                  className="max-w-full"
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                  onClick={() => onSeek(pin.startMs)}
-                >
-                  <Glyph data-icon="inline-start" />
-                  <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
-                  <span className="truncate">{pin.label}</span>
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    className="max-w-full"
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={() => onSeek(pin.startMs)}
+                  />
+                }
+              >
+                <Glyph data-icon="inline-start" />
+                <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
+                <span className="truncate">{pin.label}</span>
               </TooltipTrigger>
               <TooltipContent>{pin.excerpt || pin.label}</TooltipContent>
             </Tooltip>

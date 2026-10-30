@@ -121,67 +121,69 @@ export function DevicePicker({
 
   const picker = (
     <Popover open={open} onOpenChange={setOpenState}>
-      <PopoverTrigger asChild>
-        <button
-          aria-controls={`${id}-popup`}
-          aria-expanded={open}
-          aria-haspopup={searchable ? 'dialog' : 'listbox'}
-          aria-label={label}
-          className={
-            lcd
-              ? cn(
-                  LCD_VALUE_BUTTON,
-                  'data-[state=open]:bg-(--lcd-display-ink-unlit)',
-                  view.placeholder && 'text-(--lcd-display-ink-dim)'
-                )
-              : cn(
-                  selectTriggerClassName,
-                  'w-full min-w-0',
-                  inline &&
-                    'justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent'
-                )
-          }
-          data-placeholder={view.placeholder ? '' : undefined}
-          data-size="default"
-          data-slot="device-picker-trigger"
-          disabled={disabled}
-          id={id}
-          role="combobox"
-          type="button"
-        >
-          <span
-            className={cn(
-              'flex min-w-0 items-center gap-1.5',
-              inline || lcd ? 'justify-end' : 'flex-1'
-            )}
-          >
-            {/* A long name truncates in a narrow row: the title on the cut
-                text itself reveals it (plan 174 S1.10, truncation only). */}
-            <span className="min-w-0 truncate" title={inline || lcd ? view.label : undefined}>
-              {view.label}
-            </span>
-            {statusInTrigger && view.status ? (
-              <span
-                className={
-                  lcd
-                    ? 'shrink-0 text-(--lcd-display-ink-dim)'
-                    : 'shrink-0 text-xs font-normal text-muted-foreground'
-                }
-              >
-                {view.status}
-              </span>
-            ) : null}
-          </span>
-          {lcd ? (
-            <LcdPixelChevron />
-          ) : (
-            <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
+      <PopoverTrigger
+        render={
+          <button
+            aria-controls={`${id}-popup`}
+            aria-expanded={open}
+            aria-haspopup={searchable ? 'dialog' : 'listbox'}
+            aria-label={label}
+            className={
+              lcd
+                ? cn(
+                    LCD_VALUE_BUTTON,
+                    'data-popup-open:bg-(--lcd-display-ink-unlit)',
+                    view.placeholder && 'text-(--lcd-display-ink-dim)'
+                  )
+                : cn(
+                    selectTriggerClassName,
+                    'w-full min-w-0',
+                    inline &&
+                      'justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-popup-open:bg-accent'
+                  )
+            }
+            data-placeholder={view.placeholder ? '' : undefined}
+            data-size="default"
+            data-slot="device-picker-trigger"
+            disabled={disabled}
+            id={id}
+            role="combobox"
+            type="button"
+          />
+        }
+      >
+        <span
+          className={cn(
+            'flex min-w-0 items-center gap-1.5',
+            inline || lcd ? 'justify-end' : 'flex-1'
           )}
-        </button>
+        >
+          {/* A long name truncates in a narrow row: the title on the cut
+                text itself reveals it (plan 174 S1.10, truncation only). */}
+          <span className="min-w-0 truncate" title={inline || lcd ? view.label : undefined}>
+            {view.label}
+          </span>
+          {statusInTrigger && view.status ? (
+            <span
+              className={
+                lcd
+                  ? 'shrink-0 text-(--lcd-display-ink-dim)'
+                  : 'shrink-0 text-xs font-normal text-muted-foreground'
+              }
+            >
+              {view.status}
+            </span>
+          ) : null}
+        </span>
+        {lcd ? (
+          <LcdPixelChevron />
+        ) : (
+          <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
+        )}
       </PopoverTrigger>
       <DevicePickerList
         align={inline || lcd ? 'end' : 'start'}
-        className={inline || lcd ? 'w-72' : 'w-(--radix-popover-trigger-width) min-w-56'}
+        className={inline || lcd ? 'w-72' : 'w-(--anchor-width) min-w-56'}
         groups={devicePickerGroups({ ...selection, noneLabel, groupByKind, query })}
         id={`${id}-popup`}
         label={label}
@@ -319,13 +321,9 @@ function DevicePickerList({
       align={align}
       className={cn('gap-0', lcd ? 'p-1' : 'p-0', className)}
       id={id}
-      onOpenAutoFocus={(event) => {
-        // Without a search field the list takes focus: its keys move the
-        // highlight and it names the highlighted row (aria-activedescendant).
-        if (searchPlaceholder !== null) return
-        event.preventDefault()
-        listRef.current?.focus()
-      }}
+      // Without a search field the list takes focus: its keys move the
+      // highlight and it names the highlighted row (aria-activedescendant).
+      initialFocus={searchPlaceholder === null ? listRef : true}
     >
       {lcd ? <LcdPopupScreen>{command}</LcdPopupScreen> : command}
     </PopoverContent>

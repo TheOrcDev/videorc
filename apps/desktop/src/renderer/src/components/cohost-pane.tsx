@@ -1170,7 +1170,7 @@ const HEADER_NARROW_HIDDEN = '@max-[400px]/buddy-header:hidden'
 function HoverHint({ hint, children }: { hint: string; children: ReactElement }): ReactElement {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipTrigger render={children} />
       <TooltipContent>{hint}</TooltipContent>
     </Tooltip>
   )

@@ -209,15 +209,12 @@ export function GoLiveConfirmationDialog({
   }
 
   // The first focus is the title, else the primary, never a button that
-  // changes a destination (B-14).
-  const focusFirst = (event: Event): void => {
-    event.preventDefault()
+  // changes a destination (B-14): with all three disabled, focus stays put.
+  const firstFocus = (): HTMLElement | false => {
     for (const element of [titleRef.current, primaryRef.current, cancelRef.current]) {
-      if (element && !element.disabled) {
-        element.focus()
-        return
-      }
+      if (element && !element.disabled) return element
     }
+    return false
   }
 
   const reconnect = (destination: GoLiveDestinationPreflight): void => {
@@ -238,7 +235,7 @@ export function GoLiveConfirmationDialog({
         data-testid="go-live-dialog"
         size="xl"
         onKeyDown={onKeyDown}
-        onOpenAutoFocus={focusFirst}
+        initialFocus={firstFocus}
       >
         <DialogHeader>
           <DialogTitle>{GO_LIVE_DIALOG_TITLE}</DialogTitle>

@@ -115,8 +115,13 @@ export function BuddyMotionSection({
               </FieldDescription>
             </div>
             <Select
+              items={buddySleepChoices(motion.sleepAfterSeconds).map((seconds) => ({
+                value: String(seconds),
+                label: buddySleepLabel(seconds)
+              }))}
               value={String(motion.sleepAfterSeconds)}
               onValueChange={(next) => {
+                if (next === null) return
                 const seconds = Number(next)
                 if (Number.isFinite(seconds) && seconds !== motion.sleepAfterSeconds) {
                   save({ ...motion, sleepAfterSeconds: seconds })
