@@ -408,3 +408,12 @@ says not to repair it as part of cutting a release. No thresholds or workflow
 requirements were changed here. The actual Windows source and installer gates,
 plus Linux exact-candidate quality acceptance, remain required. This diagnostic
 failure does not establish a regression from the file-URL authorization fix.
+
+The hosted macOS Rust job in run `40983512345` (job `123829603675`,
+`macos-15`) passed its advisory audit, format check and Clippy, then reached
+the 75-minute job limit during test compilation. No test execution/result
+appears in the log. The process/memory sentinel never ran, so its upload step
+subsequently found no report. This is incomplete macOS test/sentinel evidence,
+not a source-test failure or a PASS. The runbook already excludes this hosted
+job from release completion; relevant shared-platform regression evidence is
+still owed. No timeout, test, or acceptance threshold was changed.
