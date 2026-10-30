@@ -41,6 +41,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import './lib/smoke-env.mjs'
 import { measureAvSync } from './lib/av-sync.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { evaluateMixedYoutube4kTwitch1080pEvidence } from './lib/mixed-youtube-4k-twitch-1080p-gate.mjs'
