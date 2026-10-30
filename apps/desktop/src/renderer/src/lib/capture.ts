@@ -534,10 +534,25 @@ export function resolutionOptionsForOrientation(
 }
 
 /**
+ * The portrait twin of a landscape canvas: the size and frame rate the user
+ * (or the performance check) chose, turned on its side. 1080p30 maps to the
+ * named vertical profile; every other size keeps its own pixels and fps
+ * (720p → 720×1280, 1440p → 1440×2560, 4K → 2160×3840, the 360p floor →
+ * 360×640) as Custom, never silently upscaled to 1080×1920.
+ */
+export function verticalTwinVideo(video: VideoSettings): VideoSettings {
+  const named = videoPresets['vertical-1080x1920']
+  if (video.width === named.height && video.height === named.width && video.fps === named.fps) {
+    return named
+  }
+  return coerceVideoToOrientation(video, 'vertical')
+}
+
+/**
  * Off-air orientation coupling for the Studio modes: entering a vertical
- * scene flips the canvas to the portrait profile and remembers the landscape
- * settings; leaving restores exactly what was there. Returns null when no
- * video change is needed — same orientation class (scene switches WITHIN a
+ * scene flips the canvas to its portrait twin (verticalTwinVideo) and
+ * remembers the landscape settings; leaving restores exactly what was there.
+ * Returns null when no video change is needed — same orientation class (scene switches WITHIN a
  * mode never touch the canvas), a canvas the user already made portrait
  * (entering), or a canvas the user already made landscape while in vertical
  * mode (leaving — their explicit choice wins). Callers MUST NOT apply this
@@ -559,7 +574,7 @@ export function verticalOrientationVideoPatch(
     if (video.height > video.width) {
       return null
     }
-    return { video: videoPresets['vertical-1080x1920'], verticalRestoreVideo: video }
+    return { video: verticalTwinVideo(video), verticalRestoreVideo: video }
   }
   if (video.height <= video.width) {
     return { video, verticalRestoreVideo: null }
@@ -2741,8 +2756,10 @@ export function buildCaptureSources(
   captureId: string | undefined
 ): SourceSelection {
   const selected = captureDevices.find((device) => device.id === captureId)
+  const next = { ...current }
+  delete (next as SourceSelection & { app?: unknown }).app
   return {
-    ...current,
+    ...next,
     screenId: selected?.kind === 'screen' ? captureId : undefined,
     screenName: selected?.kind === 'screen' ? selected.name : undefined,
     windowId: selected?.kind === 'window' ? captureId : undefined,
@@ -2795,6 +2812,7 @@ export function mergeSourceKind(
   kind: keyof typeof SOURCE_KIND_FIELDS
 ): SourceSelection {
   const next: Record<string, unknown> = { ...current }
+  if (kind === 'capture') delete next.app
   for (const field of SOURCE_KIND_FIELDS[kind]) next[field] = picked[field]
   return next as SourceSelection
 }

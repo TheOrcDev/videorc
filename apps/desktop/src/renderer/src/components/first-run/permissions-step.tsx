@@ -5,14 +5,13 @@ import logoUrl from '@/assets/videorc-logo.png'
 import { GroupedList } from '@/components/list-row'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
 import { SystemAccessList } from '@/components/system-access-list'
+import { FirstRunStepLayout, useFirstRunStepFrame } from '@/components/first-run/setup-step-frame'
 import { Button } from '@/components/ui/button'
-import { DIALOG_SIZE_CLASS, DIALOG_SURFACE_CLASS, DialogBody } from '@/components/ui/dialog'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useStudioCore } from '@/hooks/use-studio'
 import { useMicrophoneMeter } from '@/hooks/use-studio-mic-sources'
 import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
-import type { FirstRunCompletion, FirstRunSetupMode } from '@/lib/first-run'
 import { platformCopy } from '@/lib/platform-copy'
 import { isMediaAccessSnapshotReady } from '@/lib/system-access'
 import {
@@ -21,10 +20,8 @@ import {
   firstRunSetupDescription,
   systemAccessRowsReady
 } from '@/lib/system-access-view'
-import { cn } from '@/lib/utils'
 
 const SKELETON_ROWS = 4
-export const FIRST_RUN_TITLE_ID = 'first-run-title'
 
 /** True once `ms` have passed since mount: setup's wait for a slow backend. */
 function useWaitedLong(ms: number): boolean {
@@ -50,25 +47,15 @@ function MicrophoneProof(): ReactElement {
 }
 
 /**
- * Step 1 of first-run setup, Permissions (plan 203 S5): the card on the dialog
- * tier at the `lg` dialog width, with the app icon, the title as the window's
- * `h1`, the OS's own description, the four system access rows in their setup
- * variant, the privacy line and one primary that reads Continue once every
- * needed grant is in and Skip for now before (D3). It is the window's `main`
- * landmark and not a dialog: no scrim, no focus trap, and Escape does nothing.
+ * Step 1 of first-run setup, Permissions (plan 203 S5, plan 207 S3): the app
+ * icon, the title as the window's `h1`, the OS's own description, the four
+ * system access rows in their setup variant, the privacy line and one primary
+ * that reads Continue once every needed grant is in and Skip for now before
+ * (D3). Both move on to the next step; "Skip setup" leaves setup.
  */
-export function PermissionsStep({
-  mode,
-  onLeave,
-  leaving = false
-}: {
-  mode: FirstRunSetupMode
-  /** Continue or Skip for now, with what the first-run record should say. */
-  onLeave: (completion: FirstRunCompletion) => void
-  /** The fade-out is running: the primary is spent. */
-  leaving?: boolean
-}): ReactElement {
+export function PermissionsStep(): ReactElement {
   const { wsStatus, deviceList, mediaAccess, runtimeInfo, handleSystemPermission } = useStudioCore()
+  const frame = useFirstRunStepFrame()
   const platform = runtimeInfo?.platform
   const { deviceNoun, osName } = platformCopy(platform)
   const rows = useSystemAccessRows()
@@ -80,13 +67,13 @@ export function PermissionsStep({
   })
   const nothingToGrant = osName === 'Linux'
   const primary = firstRunPrimary(rows)
-  const cardRef = useRef<HTMLElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
 
   // Focus lands on the first row that has something to press, else on the
   // primary, once the rows are real (never on a Skeleton).
   useEffect(() => {
     if (!ready && !nothingToGrant) return
-    const card = cardRef.current
+    const card = bodyRef.current?.closest<HTMLElement>('[data-slot="first-run-card"]')
     if (!card || card.contains(document.activeElement)) return
     const target =
       card.querySelector<HTMLElement>('[data-slot="system-access-row"] button') ??
@@ -95,30 +82,30 @@ export function PermissionsStep({
   }, [nothingToGrant, ready])
 
   return (
-    <main
-      ref={cardRef}
-      aria-labelledby={FIRST_RUN_TITLE_ID}
-      className={cn(
-        DIALOG_SURFACE_CLASS,
-        DIALOG_SIZE_CLASS.lg,
-        'flex max-h-full w-full flex-col gap-5'
-      )}
-      data-first-run-step="permissions"
-      data-first-run-mode={mode.kind}
-      data-slot="first-run-card"
-    >
-      <div className="flex shrink-0 items-center gap-4">
-        {/* Decorative: the title beside it names Videorc. */}
+    <FirstRunStepLayout
+      description={firstRunSetupDescription(platform)}
+      footnote={
+        <p className="text-meta text-muted-foreground">
+          Recordings stay on this {deviceNoun}. Cloud AI only runs after you opt in.
+        </p>
+      }
+      lead={
+        // Decorative: the title beside it names Videorc.
         <img alt="" className="size-16 shrink-0 object-contain" draggable={false} src={logoUrl} />
-        <div className="flex min-w-0 flex-col gap-1.5">
-          <h1 className="font-heading text-base leading-none font-medium" id={FIRST_RUN_TITLE_ID}>
-            Welcome to Videorc
-          </h1>
-          <p className="text-sm text-muted-foreground">{firstRunSetupDescription(platform)}</p>
-        </div>
-      </div>
-
-      <DialogBody>
+      }
+      primary={
+        <Button
+          data-first-run-primary=""
+          disabled={frame.leaving}
+          variant={primary.label === 'Continue' ? 'default' : 'outline'}
+          onClick={frame.next}
+        >
+          {primary.label}
+          {primary.label === 'Continue' ? <ArrowRightIcon data-icon="inline-end" /> : null}
+        </Button>
+      }
+    >
+      <div ref={bodyRef}>
         {nothingToGrant ? (
           // Linux (plan 174 I-8): no standing grants; the desktop portal asks
           // per capture. The same words as Settings → Permissions.
@@ -153,24 +140,7 @@ export function PermissionsStep({
             </span>
           </GroupedList>
         )}
-      </DialogBody>
-
-      <div className="flex shrink-0 flex-col gap-3">
-        <p className="text-meta text-muted-foreground">
-          Recordings stay on this {deviceNoun}. Cloud AI only runs after you opt in.
-        </p>
-        <div className="flex justify-end">
-          <Button
-            data-first-run-primary=""
-            disabled={leaving}
-            variant={primary.label === 'Continue' ? 'default' : 'outline'}
-            onClick={() => onLeave(primary.completion)}
-          >
-            {primary.label}
-            {primary.label === 'Continue' ? <ArrowRightIcon data-icon="inline-end" /> : null}
-          </Button>
-        </div>
       </div>
-    </main>
+    </FirstRunStepLayout>
   )
 }

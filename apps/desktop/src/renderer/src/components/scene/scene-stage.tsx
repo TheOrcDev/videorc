@@ -44,6 +44,7 @@ import {
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import {
+  STAGE_ITEM_BADGE_LABELS,
   overlayRectToStage,
   stageItemPictureRect,
   stageItemSnapPeers,
@@ -831,16 +832,31 @@ export function SceneStage({
             return (
               <ToggleGroupItem
                 key={entry.stageId}
-                aria-label={`Select ${entry.label}`}
+                aria-label={
+                  entry.badge ? `Select ${entry.label}, ${entry.badge}` : `Select ${entry.label}`
+                }
                 data-videorc-stage-banner-chip={entry.kind === 'banner' ? entry.id : undefined}
                 data-videorc-stage-overlay-chip={entry.kind === 'overlay' ? entry.item : undefined}
                 value={entry.stageId}
               >
                 <Icon data-icon="inline-start" />
-                {/* The stream-only or recording-only badge is on the stage itself. */}
                 <span className="max-w-44 truncate" title={entry.label}>
                   {entry.label}
                 </span>
+                {/* The state word after the name, quiet like a device's status
+                    (plan 205 S3): "Hidden", "Off", "Stream only" or "Recording
+                    only", nothing when both outputs show it. On the live canvas
+                    the stage's own badge is invisible under the picture, and
+                    the Preview draws nothing for a hidden or off item, so this
+                    chip is the one place the word shows. */}
+                {entry.badge ? (
+                  <span
+                    className="ml-0.5 shrink-0 text-xs font-normal text-muted-foreground"
+                    data-videorc-stage-chip-badge={entry.badge}
+                  >
+                    {STAGE_ITEM_BADGE_LABELS[entry.badge]}
+                  </span>
+                ) : null}
               </ToggleGroupItem>
             )
           })}
@@ -1053,7 +1069,8 @@ export function SceneStage({
                   switches turn off, or a selected banner that is hidden, is
                   drawn dimmed with an "off" or "hidden" chip (plan 174,
                   C-13). Hidden under the live surface like every painted
-                  element; the hit targets stay. */}
+                  element; the hit targets stay, and the toolbar chip keeps
+                  the word (plan 205 S3). */}
               {overlayItems.map((entry) => {
                 const rect = displayedOverlay(entry)
                 const selected = selectedItemId === entry.stageId

@@ -79,7 +79,10 @@ import type {
 import {
   finalizationFailed,
   finalizingBadgeLabel,
-  isFinalizingSession
+  interruptedTakeBadge,
+  isFinalizingSession,
+  mayBeStartFailed,
+  startFailedBadge
 } from '@/lib/session-finalization'
 import {
   recordingRoleLabel,
@@ -130,7 +133,9 @@ import {
   type LibraryFilter,
   type LibraryPickModifier,
   type LibrarySelection,
-  type LibrarySort
+  type LibrarySort,
+  CAPTURE_HOLD_REASON,
+  canExportMp4 as sessionCanExportMp4
 } from '@/lib/library-view'
 import {
   activeNoiseCleanupSourceIds,
@@ -153,9 +158,6 @@ const SessionMarkersDialog = lazy(async () => ({
 /** The table's columns: select, name, scene, duration, size, file, actions. */
 const LIBRARY_COLUMNS =
   'grid grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_8rem] items-center gap-2 px-gutter min-[1280px]:grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_13rem]'
-
-/** Why file actions wait while a recording or a livestream runs. */
-const CAPTURE_HOLD_REASON = 'Available when you stop recording or end the livestream.'
 
 /** A click that lands on one of the row's own controls is that control's, not the row's. */
 function fromRowControl(event: MouseEvent<HTMLElement>): boolean {
@@ -871,7 +873,19 @@ function LibraryRow({
   onDelete: () => void
 }): ReactElement {
   const { recording } = useStudioRecordingState()
-  const filePath = session.mp4Path ?? session.outputPath ?? null
+  const { sessionDetails, loadSessionDetails } = useStudioCore()
+  // A Record press the backend refused leaves a failed row whose file never
+  // existed; its logs say so. They load once, only for rows of that shape.
+  const startFailedCandidate = mayBeStartFailed(session)
+  const sessionLogs = sessionDetails[session.id]?.sessionLogs
+  const startFailedLogsRequested = useRef(false)
+  useEffect(() => {
+    if (!startFailedCandidate || sessionLogs || startFailedLogsRequested.current) return
+    startFailedLogsRequested.current = true
+    void loadSessionDetails(session.id)
+  }, [startFailedCandidate, sessionLogs, loadSessionDetails, session.id])
+  const startFailed = startFailedBadge(session, sessionLogs)
+  const filePath = startFailed ? null : (session.mp4Path ?? session.outputPath ?? null)
   const format = sessionFormatLabel(session)
   const title = libraryTitle(session)
   // A live row shows the capture's ticking elapsed time; the session row only
@@ -881,6 +895,8 @@ function LibraryRow({
   // still runs; the row says so instead of claiming an MKV.
   const finalizing = isFinalizingSession(session)
   const exportFailed = finalizationFailed(session)
+  // A take Videorc stopped in the middle of, recovered on the next start.
+  const recovered = interruptedTakeBadge(session)
   // Plan 198: a Screen or Camera file that stopped during the take.
   const fileStopped = separateFileStopped(session)
   // A Clean cut copy (plan 119 S14): `cleanCutOfSessionId` names its source.
@@ -1055,6 +1071,19 @@ function LibraryRow({
             <InfoTooltip content={session.finalizationError} tabIndex={active ? 0 : -1}>
               <Badge variant="destructive">MP4 failed</Badge>
             </InfoTooltip>
+          ) : startFailed ? (
+            // Record was refused before anything was written: no MKV to tag.
+            <InfoTooltip content={startFailed.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-session-start-failed="" variant="destructive">
+                {startFailed.label}
+              </Badge>
+            </InfoTooltip>
+          ) : recovered ? (
+            <InfoTooltip content={recovered.detail} tabIndex={active ? 0 : -1}>
+              <Badge data-interrupted-take-recovered="" variant="outline">
+                {recovered.label}
+              </Badge>
+            </InfoTooltip>
           ) : format ? (
             // The container is a fact, not a status: a tag (E-21).
             <Badge variant="outline">{format}</Badge>
@@ -1218,12 +1247,7 @@ function useSessionMenu({
   // Plan 198: a stopped Screen or Camera file exports what it recorded, and
   // nothing when it recorded nothing.
   const fileStopped = separateFileStopped(session)
-  const canExportMp4 =
-    Boolean(
-      session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
-    ) &&
-    !finalizing &&
-    fileStopped?.exportable !== false
+  const canExportMp4 = sessionCanExportMp4(session)
   const canOpenComments = session.commentCount > 0
   const cleanupJob = latestNoiseCleanupJobForSession(noiseCleanupJobs, session.id)
   const cleanupView = withNoiseCleanupConnectionState(

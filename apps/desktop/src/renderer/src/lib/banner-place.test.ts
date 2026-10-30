@@ -11,6 +11,7 @@ import {
   BANNER_PORTRAIT_TOP_MARGIN,
   BANNER_SNAPS,
   BANNER_SNAP_LABELS,
+  bannerDefaultPlaces,
   bannerFitRect,
   bannerSnapRect
 } from './banner-place'
@@ -128,5 +129,59 @@ describe('bannerSnapRect', () => {
     expect(
       bannerSnapRect(WIDE, { x: 0, y: 0, w: 1, h: 1 }, 'horizontal', 16 / 9, 'top-left')
     ).toStrictEqual({ x: 0, y: 0.04, w: 1, h: round6(16 / 9 / 6) })
+  })
+})
+
+// Plan 209 S11b: the TS twin of Rust `banner_default_places`, a banner's
+// "medium" size for an agent, pinned to the shared fixture and Rust's values.
+describe('where an imported banner lands (bannerDefaultPlaces)', () => {
+  it('matches the pinned fixture banner and every Rust shape case', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const fixture = JSON.parse(
+      await readFile(
+        new URL('../../../../../../protocol-fixtures/high-risk-contracts.json', import.meta.url),
+        'utf8'
+      )
+    ) as {
+      banner: { minimal: { width: number; height: number; horizontal: unknown; vertical: unknown } }
+    }
+    const minimal = fixture.banner.minimal
+    expect(bannerDefaultPlaces(minimal)).toEqual({
+      horizontal: minimal.horizontal,
+      vertical: minimal.vertical
+    })
+    // Full frame.
+    expect(bannerDefaultPlaces({ width: 3840, height: 2160 })).toEqual({
+      horizontal: { x: 0, y: 0, w: 1, h: 1 },
+      vertical: { x: 0, y: 0.341797, w: 1, h: 0.316406 }
+    })
+    // A small 16:9 image is a badge, not a full frame.
+    expect(bannerDefaultPlaces({ width: 1279, height: 720 }).horizontal.h).toBe(0.2)
+    // Tall: 70 % high on the right; 40 % high on the portrait leg.
+    const tall = bannerDefaultPlaces({ width: 400, height: 1200 })
+    expect(tall.horizontal).toMatchObject({
+      y: 0.15,
+      h: 0.7,
+      w: round6(0.7 * (400 / 1200) * (9 / 16))
+    })
+    expect(tall.vertical).toMatchObject({
+      y: 0.3,
+      h: 0.4,
+      w: round6(0.4 * (400 / 1200) * (16 / 9))
+    })
+    // Badge: 20 % high top right; 30 % wide below the portrait safe top.
+    const badge = bannerDefaultPlaces({ width: 512, height: 512 })
+    expect(badge.horizontal).toEqual({
+      x: round6(1 - BANNER_LANDSCAPE_SIDE_MARGIN - 0.1125),
+      y: BANNER_LANDSCAPE_EDGE_MARGIN,
+      w: 0.1125,
+      h: 0.2
+    })
+    expect(badge.vertical).toEqual({
+      x: round6(1 - BANNER_PORTRAIT_SIDE_MARGIN - 0.3),
+      y: BANNER_PORTRAIT_TOP_MARGIN,
+      w: 0.3,
+      h: round6((0.3 * 9) / 16)
+    })
   })
 })

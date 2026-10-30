@@ -124,8 +124,8 @@ function ClipsSection(): ReactElement {
                 ? 'Off. A clip can only be marked while you record.'
                 : running
                   ? 'The newest seconds are on disk, ready to save, and deleted as they age. Nothing is kept for longer.'
-                  : recordBlockedReason
-                    ? `Starts once a source is ready. ${recordBlockedReason}`
+                  : (recordBlockedReason ?? clips.waitReason)
+                    ? `Starts once a source is ready. ${recordBlockedReason ?? clips.waitReason}`
                     : 'Not running right now. It tries again after the next recording or source change.'
           }
           label={KEEP_LAST_SECONDS_LABEL}
@@ -476,7 +476,11 @@ function RecordingsFolderSection(): ReactElement {
   })
 
   const chooseFolder = async (): Promise<void> => {
-    const selection = await window.videorc?.pickDirectory?.()
+    // A refusal (no keyring for the folder grant) says so; never silent.
+    const selection = await window.videorc?.pickDirectory?.().catch((error: unknown) => {
+      toastUserError(error, { action: 'use', object: 'that folder' })
+      return null
+    })
     if (selection) {
       setSettings((current) => ({
         ...current,

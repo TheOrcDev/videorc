@@ -77,6 +77,7 @@ import { CommentsDeltaBatcher, scheduleCommentsDeltaFlush } from '@/lib/comments
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
 import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
+import { BUDDY_UNREACHABLE, type CohostActAnswer } from '../../shared/buddy-act'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -219,6 +220,33 @@ function CommentsWindowApp(): ReactElement {
       )
       return false
     }
+  }, [])
+  // Hide screen or Show screen (plan 210 S8b), relayed to Studio like `/hide`.
+  // Nothing says so when it works: the stats chip and the Preview do.
+  const runScreenPrivacy = useCallback(async (hidden: boolean): Promise<boolean> => {
+    try {
+      if (!window.videorc?.markerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.markerFromCommentsWindow({
+        requestId: crypto.randomUUID(),
+        action: hidden ? 'screenHide' : 'screenShow'
+      })
+      return true
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: hidden ? 'hide' : 'show', object: 'your screen' },
+        { id: 'screen-privacy' }
+      )
+      return false
+    }
+  }, [])
+  // `/buddy <words>` (plan 209 S20): relayed to Studio, which owns the
+  // backend socket and the Cloud AI consent. The answer is the composer's
+  // notice, so nothing toasts here.
+  const runBuddy = useCallback(async (sentence: string): Promise<CohostActAnswer> => {
+    if (!window.videorc?.buddyActFromCommentsWindow) throw new Error(BUDDY_UNREACHABLE)
+    return window.videorc.buddyActFromCommentsWindow({ requestId: crypto.randomUUID(), sentence })
   }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
@@ -736,7 +764,7 @@ function CommentsWindowApp(): ReactElement {
     live && cohost.enabled && cohost.entitled && cohost.consented && cohost.state.status === 'off'
 
   return (
-    // Real glass: the OS material under the body's window coat, and the
+    // The chrome ground under the body's window coat (plan 208), and the
     // frame's content coat on top (plan 050), like every other window.
     <WindowFrame>
       <ChatGifModeProvider mode={gifMode}>
@@ -847,10 +875,12 @@ function CommentsWindowApp(): ReactElement {
               )
           }}
           onClip={(seconds) => saveClip(seconds).then((copy) => copy.title)}
+          onScreenPrivacy={runScreenPrivacy}
           banners={banners}
           onBanner={runBanner}
           sounds={sounds}
           onSound={runSound}
+          onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onShowFollowNames={() => {
             void window.videorc

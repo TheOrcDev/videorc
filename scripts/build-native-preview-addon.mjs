@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { copyFileSync, mkdirSync, statSync } from 'node:fs'
+import { copyFileSync, mkdirSync, renameSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -39,7 +39,12 @@ if (universal) {
     ])
   }
   mkdirSync(dirname(plan.destination), { recursive: true })
-  run('lipo', ['-create', ...plan.targets.map((target) => target.source), '-output', plan.destination])
+  run('lipo', [
+    '-create',
+    ...plan.targets.map((target) => target.source),
+    '-output',
+    plan.destination
+  ])
   const bytes = statSync(plan.destination).size
   console.log(`Universal native preview addon ready: ${plan.destination} (${bytes} bytes).`)
   process.exit(0)
@@ -58,7 +63,12 @@ if (!artifact) {
 
 run('cargo', ['build', '-p', 'videorc-native-preview-addon', ...(release ? ['--release'] : [])])
 
-copyFileSync(artifact.source, artifact.destination)
+// A new inode, never a write into the old file: a running dev app still has
+// the previous .node mapped, and macOS kills every later dlopen of a signed
+// Mach-O whose pages changed under it (SIGKILL, Code Signature Invalid).
+const staging = `${artifact.destination}.${process.pid}.tmp`
+copyFileSync(artifact.source, staging)
+renameSync(staging, artifact.destination)
 const bytes = statSync(artifact.destination).size
 console.log(`Native preview addon ready: ${artifact.destination} (${bytes} bytes).`)
 

@@ -57,6 +57,7 @@ import { launchDevApp, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { launchAvSyncStimulus, stopAvSyncStimulus } from './lib/av-sync-stimulus.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import {
   focusScreenMotionStimulus,
   launchScreenMotionStimulus,
@@ -3698,7 +3699,7 @@ async function seedRendererSystemAudio() {
       try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
       const audio = { ...(current.audio ?? {}), systemAudioEnabled: true, systemAudioGainDb: -6 };
       localStorage.setItem(key, JSON.stringify({ ...current, audio }));
-      setTimeout(() => location.reload(), 50);
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
       return true;
     `
   })

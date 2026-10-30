@@ -100,8 +100,9 @@ describe('Buddy tab copy (plan 119 S2)', () => {
       "Creating a Buddy: your description and any picture you add go to Videorc's cloud AI, and the picture is used once and not kept. The Buddies you create (their pictures, name, personality and About you) are kept in your Videorc account so you can use them on any computer, until you delete them or your account.",
       // Plan 172 D10 (plan 174 G-6): a library Buddy's moves join the account.
       "Creating an Alive Buddy: your reference picture and its description go to Videorc's cloud AI. Its moves are kept on this computer and, for a Buddy you made that's in your library, in your Videorc account too, so it moves on any computer, until you remove them or delete the Buddy or your account.",
-      // Plan 192 D3: AI greetings are drafted by the cloud AI too.
-      "Buddy posts in chat as you: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
+      // Plan 192 D3: AI greetings are drafted by the cloud AI too; plan 211
+      // D2: they are said in the bubble, and posted only by a Suggest click.
+      "Buddy talks on stream: with Answers, Banter or AI greetings on, its messages are drafted by Videorc's cloud AI. It says them in its bubble, and posts one on your own account only when you click its card in Suggest.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
     expect(CLOUD_AI_KEEPS).toContain("Videorc servers don't keep your chat or your audio.")
@@ -334,10 +335,11 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     }
   })
 
-  it('keeps the promises plain: posts only in your modes, 20 seconds, 10 a minute, free removal', () => {
-    // Plan 164 D4 replaced "never acts on its own" with the per-mode promise.
+  it('keeps the promises plain: never posts on its own, 20 seconds, 10 a minute, free removal', () => {
+    // Plan 164 D4 replaced "never acts on its own" with the per-mode promise;
+    // plan 211 D6 makes it true by structure: nothing automatic reaches chat.
     expect(COHOST_ACTS_ON_ASK_COPY).toBe(
-      'Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+      'Buddy never posts in your chat on its own. It removes a comment only when you tell it to.'
     )
     expect(BUDDY_REMOVAL_LIMITS).toContain('20 seconds')
     expect(BUDDY_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')

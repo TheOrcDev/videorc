@@ -6,7 +6,10 @@ import {
   finalizationEventNeedsRefresh,
   finalizationFailed,
   finalizingBadgeLabel,
-  isFinalizingSession
+  interruptedTakeBadge,
+  isFinalizingSession,
+  mayBeStartFailed,
+  startFailedBadge
 } from './session-finalization'
 
 const row = (overrides: Record<string, unknown> = {}) => ({
@@ -73,6 +76,106 @@ describe('session finalization helpers', () => {
       updatedAt: 't'
     })
     expect(failed[0]).toMatchObject({ finalizationState: 'failed', finalizationError: 'disk full' })
+  })
+
+  it('badges only a recovered interrupted take', () => {
+    expect(interruptedTakeBadge(row())).toBeNull()
+    expect(interruptedTakeBadge(row({ interruptionRecovery: 'failed' }))).toBeNull()
+    const badge = interruptedTakeBadge(row({ interruptionRecovery: 'recovered' }))
+    expect(badge?.label).toBe('Recovered')
+    expect(badge?.detail).toContain('Videorc stopped during this recording')
+  })
+
+  describe('a Record start the backend refused', () => {
+    const reason =
+      'Cannot start: the camera preview source(s) produced no frames, so the recording would not match the preview. Re-select the source (or restart the app) and try again.'
+    const refused = (overrides: Record<string, unknown> = {}) =>
+      row({
+        status: 'failed',
+        outputPath: '/tmp/videorc-session-1.mkv',
+        sessionLogCount: 1,
+        ...overrides
+      })
+    const log = (code: string, message: string) => ({
+      id: 'l-1',
+      sessionId: 's-1',
+      level: 'error' as const,
+      code,
+      message,
+      createdAt: '2026-10-29T00:00:00Z'
+    })
+    const startFailedLog = (suffix: string) =>
+      log(
+        'session-start-failed',
+        `Session start did not reach a running pipeline; the session was marked failed${suffix}`
+      )
+
+    it('badges the row with the reason from its log', () => {
+      const badge = startFailedBadge(refused(), [startFailedLog(`: ${reason}`)])
+      expect(badge).toEqual({
+        label: "Didn't start",
+        detail: `This recording stopped before it started, so there is no file. ${reason}`
+      })
+    })
+
+    it('reads the reason from the published-terminal log as well', () => {
+      const badge = startFailedBadge(refused(), [
+        log('session-start-failed', `stage=Encoder reason=${reason}`)
+      ])
+      expect(badge?.detail).toBe(
+        `This recording stopped before it started, so there is no file. ${reason}`
+      )
+    })
+
+    it('says only the plain sentence when the log has no reason', () => {
+      expect(startFailedBadge(refused(), [startFailedLog('.')])?.detail).toBe(
+        'This recording stopped before it started, so there is no file.'
+      )
+      expect(startFailedBadge(refused(), [startFailedLog(':  ')])?.detail).toBe(
+        'This recording stopped before it started, so there is no file.'
+      )
+    })
+
+    it('leaves a failed row that has a file alone', () => {
+      const logs = [startFailedLog(`: ${reason}`)]
+      expect(startFailedBadge(refused({ fileSizeBytes: 4096 }), logs)).toBeNull()
+      expect(startFailedBadge(refused({ mp4Path: '/tmp/a.mp4' }), logs)).toBeNull()
+      expect(mayBeStartFailed(refused({ fileSizeBytes: 0 }))).toBe(false)
+    })
+
+    it('leaves completed rows and failed rows without the log alone', () => {
+      const logs = [startFailedLog(`: ${reason}`)]
+      expect(startFailedBadge(refused({ status: 'completed' }), logs)).toBeNull()
+      expect(
+        startFailedBadge(refused(), [log('encoder-stalled', 'The encoder stopped.')])
+      ).toBeNull()
+      expect(startFailedBadge(refused(), [])).toBeNull()
+    })
+
+    it('waits for the logs, and only asks for them on a row of that shape', () => {
+      expect(startFailedBadge(refused(), undefined)).toBeNull()
+      expect(mayBeStartFailed(refused())).toBe(true)
+      expect(mayBeStartFailed(refused({ sessionLogCount: 0 }))).toBe(false)
+      expect(mayBeStartFailed(row())).toBe(false)
+    })
+  })
+
+  it('carries the recovery outcome from the finalized event onto the row', () => {
+    const sessions = [row({ status: 'failed', finalizationState: 'finalizing' as const })]
+    const next = applyFinalizationEvent(sessions, {
+      sessionId: 's-1',
+      state: 'finalized',
+      mp4Path: '/tmp/a.mp4',
+      durationMs: 41_666,
+      interruptionRecovery: 'recovered',
+      updatedAt: '2026-10-27T00:00:00Z'
+    })
+    expect(next[0]).toMatchObject({
+      interruptionRecovery: 'recovered',
+      mp4Path: '/tmp/a.mp4',
+      durationMs: 41_666
+    })
+    expect(interruptedTakeBadge(next[0])?.label).toBe('Recovered')
   })
 
   it('asks for a refresh only when a finalized row is not loaded', () => {

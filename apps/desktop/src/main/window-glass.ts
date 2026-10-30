@@ -1,20 +1,24 @@
-// One window material for every Videorc window (plan 050, D1; plan 091).
+// One window material for every Videorc window (plan 050, D1; plan 091;
+// plan 208).
 //
-// Real macOS vibrancy: an NSVisualEffectView blurring what sits behind the
-// window. A 2026-09-23 region-capture probe showed it transmits on Electron 39
-// / macOS 26 in the real Videorc window; the June 2026 "materials paint
-// opaque" premise no longer reproduces. Since plan 091 the material is clear
-// glass: the native addon re-classes Electron's own vibrancy view and strips
-// AppKit's tint, wallpaper tinting and saturation boost, leaving a neutral
-// 60 pt blur (Ghostex's look), so the renderer's covers decide the whole
-// tone. `VIDEORC_GLASS_STYLE=material` keeps AppKit's own look as the A/B
-// control for one release. Every window's chrome (material, style, backing,
-// title bar, traffic lights) is decided here and nowhere else, so the windows
-// stay one family and a future material (e.g. macOS 26's NSGlassEffectView,
-// not exposed by Electron 39) is a one-file change.
+// Since plan 208 (D1) every window is opaque and sits on the chrome ground:
+// the window's backing is the theme's solid base and the renderer paints a
+// frosted still of Liquid Chrome under its coats (`ChromeGround`), the same
+// on macOS, Windows and Linux. Nothing of the desktop shows through.
+//
+// The plan 091 clear glass stays reachable for one release (D9) as
+// `VIDEORC_GLASS=clear`: real macOS vibrancy (an NSVisualEffectView blurring
+// what sits behind the window; a 2026-09-23 region-capture probe showed it
+// transmits on Electron 39 / macOS 26) that the native addon re-classes and
+// strips of AppKit's tint, wallpaper tinting and saturation boost, leaving a
+// neutral 60 pt blur (Ghostex's look); Windows 11 takes Mica there.
+// `VIDEORC_GLASS_STYLE=material` keeps AppKit's own look under it. Every
+// window's chrome (material, backing, title bar, traffic lights) is decided
+// here and nowhere else, so the windows stay one family.
 
 import type { BrowserWindow, BrowserWindowConstructorOptions } from 'electron'
 
+import type { WindowGround } from '../shared/window-ground'
 import { DARK_WINDOW_PALETTE, LIGHT_WINDOW_PALETTE } from './window-palette'
 
 export type GlassWindowRole = 'main' | 'chat' | 'captions' | 'notes' | 'preview'
@@ -23,6 +27,8 @@ export type GlassWindowRole = 'main' | 'chat' | 'captions' | 'notes' | 'preview'
 export type GlassMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 
 export type GlassMode =
+  /** The chrome ground (plan 208): an opaque window, the renderer paints the ground. */
+  | { kind: 'ground' }
   | { kind: 'material'; material: GlassMaterial }
   | { kind: 'mica' }
   | {
@@ -33,11 +39,16 @@ export type GlassMode =
         | 'appearance-unpinned'
         | 'software-rendering'
         | 'paint-check-blank'
+        /** The role frames video and takes no ground: the Preview (plan 208, D7). */
+        | 'dark-always'
     }
 
 export interface GlassEnvironment {
   platform: NodeJS.Platform
-  /** `VIDEORC_GLASS`: `0` paints the solid palette; a material name overrides the material. */
+  /**
+   * `VIDEORC_GLASS`: unset is the chrome ground; `0` paints the solid palette;
+   * `clear` (or a material name) is the plan 091 clear glass or Mica (D9).
+   */
   glass?: string
   /** Legacy `VIDEORC_GLASS_VIBRANCY`, honoured as an alias for one release. */
   legacyVibrancy?: string
@@ -102,9 +113,9 @@ function glassMaterialFrom(value: string | undefined): GlassMaterial | null {
 export type GlassStyle = 'clear' | 'material'
 
 /**
- * Clear glass is the default (plan 091, S1). `VIDEORC_GLASS_STYLE=material`
- * keeps the plan 050 look, AppKit's own tint and saturation, as the A/B
- * control for one release.
+ * Under `VIDEORC_GLASS=clear` the clear style is the default (plan 091, S1).
+ * `VIDEORC_GLASS_STYLE=material` keeps the plan 050 look, AppKit's own tint
+ * and saturation, as the A/B control for one release.
  */
 export const DEFAULT_GLASS_STYLE: GlassStyle = 'clear'
 
@@ -117,14 +128,28 @@ export function resolveGlassStyle(value: string | undefined): GlassStyle {
   return trimmed === 'clear' || trimmed === 'material' ? trimmed : DEFAULT_GLASS_STYLE
 }
 
+/**
+ * The window material for this launch. The chrome ground is the default on
+ * every platform (plan 208, D1): an opaque window needs no GPU compositor
+ * (software rendering keeps it) and no Mica paint check. `VIDEORC_GLASS=0`
+ * paints the solid palette; `VIDEORC_GLASS=clear`, or a material name, takes
+ * the plan 091 path with its own platform rules (D9, one release).
+ */
 export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
   const disabled = environment.glass?.trim() === '0' || environment.legacyVibrancy?.trim() === '0'
+  if (disabled) {
+    return { kind: 'solid', reason: 'disabled' }
+  }
+  const clearRequested =
+    environment.glass?.trim().toLowerCase() === 'clear' ||
+    glassMaterialFrom(environment.glass) !== null ||
+    glassMaterialFrom(environment.legacyVibrancy) !== null
+  if (!clearRequested) {
+    return { kind: 'ground' }
+  }
   if (environment.platform === 'win32') {
     // Mica (plan 050, D7): it tints from the wallpaper without a live blur, so
     // it stays cheap on the low-end iGPUs Windows testers use.
-    if (disabled) {
-      return { kind: 'solid', reason: 'disabled' }
-    }
     if ((environment.windowsBuild ?? 0) < WINDOWS_MICA_MIN_BUILD) {
       return { kind: 'solid', reason: 'platform' }
     }
@@ -138,9 +163,6 @@ export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
   }
   if (environment.platform !== 'darwin') {
     return { kind: 'solid', reason: 'platform' }
-  }
-  if (disabled) {
-    return { kind: 'solid', reason: 'disabled' }
   }
   const material =
     glassMaterialFrom(environment.glass) ??
@@ -180,20 +202,43 @@ export function trafficLightPosition(role: GlassWindowRole): { x: number; y: num
 export const DARK_ALWAYS_ROLES: ReadonlySet<GlassWindowRole> = new Set(['preview'])
 
 /**
- * A dark-always window whose appearance cannot be pinned paints the solid
- * palette: its material would otherwise follow a light app theme and put dark
- * text tokens on light glass. Windows has no per-window appearance pin, so
- * there the dark-always windows are always solid.
+ * A dark-always window takes no chrome ground: the Preview frames video, and
+ * a pattern around a picture competes with it, so it paints the solid dark
+ * base whatever the app theme (plan 208, D7). Under the clear glass (D9) a
+ * dark-always window whose appearance cannot be pinned paints the solid
+ * palette too: its material would otherwise follow a light app theme and put
+ * dark text tokens on light glass. Windows has no per-window appearance pin,
+ * so there the dark-always windows are always solid.
  */
 export function glassModeForRole(
   role: GlassWindowRole,
   mode: GlassMode,
   appearancePinAvailable: boolean
 ): GlassMode {
+  if (mode.kind === 'ground' && DARK_ALWAYS_ROLES.has(role)) {
+    return { kind: 'solid', reason: 'dark-always' }
+  }
   if (mode.kind !== 'solid' && DARK_ALWAYS_ROLES.has(role) && !appearancePinAvailable) {
     return { kind: 'solid', reason: 'appearance-unpinned' }
   }
   return mode
+}
+
+/**
+ * What the renderer paints under its coats for a window in this mode: the
+ * chrome ground, nothing over the OS glass, or nothing over the solid base.
+ * Passed to the renderer before its first paint (shared/window-ground.ts).
+ */
+export function windowGroundForMode(mode: GlassMode): WindowGround {
+  switch (mode.kind) {
+    case 'ground':
+      return 'chrome'
+    case 'material':
+    case 'mica':
+      return 'glass'
+    case 'solid':
+      return 'solid'
+  }
 }
 
 export function solidWindowBase(role: GlassWindowRole, dark: boolean): string {
@@ -220,6 +265,10 @@ export function windowGlassOptions(
     // is not focused (followWindow paints flat gray).
     return { ...chrome, vibrancy: context.mode.material, visualEffectState: 'active' }
   }
+  // The chrome ground (plan 208) and the solid palette are both opaque
+  // windows on the theme's solid base: no vibrancy, no backdrop material.
+  // Under the ground the renderer paints the Liquid Chrome still over this
+  // base, so first paint is already the theme's tone, never bright.
   return { ...chrome, backgroundColor: solidWindowBase(role, context.dark) }
 }
 

@@ -13,6 +13,7 @@ import { useContext, useEffect, useState, type ReactElement, type ReactNode } fr
 
 import { LCD_STATUS_DOT, LcdPanelNavRow, type StudioLook } from '@/components/lcd-panel'
 import { CohostPresenceDot } from '@/components/cohost-status'
+import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow, NavigableRowHintLines } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
@@ -121,12 +122,15 @@ export function SessionTransport({
         {active ? <SessionClock /> : null}
       </div>
       <div className="flex gap-2">
+        {/* D8 (plan 208): Record and the stop button are the red LED, lit
+            while the session runs; Go Live… is the chrome primary. */}
         {active ? (
           <Button
             className="flex-1"
+            data-lit
             disabled={!canStop}
             size="lg"
-            variant="destructive"
+            variant="record"
             onClick={onStop}
           >
             <StopIcon data-icon="inline-start" weight="fill" />
@@ -141,7 +145,7 @@ export function SessionTransport({
                 className="flex-1"
                 disabled={Boolean(recordBlockedReason) || startsBusy}
                 size="lg"
-                variant="destructive"
+                variant="record"
                 onClick={onRecord}
               >
                 <RecordIcon data-icon="inline-start" weight="fill" />
@@ -161,7 +165,7 @@ export function SessionTransport({
                 data-testid="go-live-button"
                 disabled={Boolean(liveStreamBlockedReason) || startsBusy}
                 size="lg"
-                variant="outline"
+                variant="default"
                 onClick={onLiveStream}
               >
                 <LivestreamIcon data-icon="inline-start" weight="fill" />
@@ -353,6 +357,8 @@ export function SessionPanel({ live = false, ...notices }: SessionPanelProps): R
             session fact, knowable without the Stream Manager; a recording
             has no chat for it to read. */}
         {live ? <CohostSessionRow /> : null}
+        {/* Plan 209 D12: which agents are connected, with Stop. */}
+        <AgentsSessionRow />
       </GroupedList>
       <SessionNotices {...notices} />
     </PanelSection>

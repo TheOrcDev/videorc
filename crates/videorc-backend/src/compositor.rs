@@ -31,7 +31,7 @@ use crate::color::{
 use crate::overlay_layout::{OverlayOrientation, OverlayRect, OverlaySessionShape};
 
 #[path = "compositor_preview_frame_lease.rs"]
-mod preview_frame_lease;
+pub(crate) mod preview_frame_lease;
 #[cfg(test)]
 #[path = "compositor_scene_switch_tests.rs"]
 mod scene_switch_tests;
@@ -110,13 +110,18 @@ const COMPOSITOR_WORKER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 pub type CompositorSlot = std::sync::Arc<tokio::sync::Mutex<CompositorRuntime>>;
 pub type CompositorFrameStore =
     Arc<StdMutex<FrameStore<CompositorPixelFormat, CompositorFrameExportHandle>>>;
+type CompositorFrameHandle = FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>;
+/// `get_picture` callers waiting for the metadata-only preview to compose
+/// one frame with pixels (see `latest_program_picture`).
+type ProgramPictureWaiters =
+    Arc<StdMutex<Vec<tokio::sync::oneshot::Sender<CompositorFrameHandle>>>>;
 
 #[derive(Clone, Default)]
 pub struct CompositorFrameExportHandle {
     // Output tick time, independent of how long the source pixels have been held.
     presentation_at: Option<Instant>,
     #[cfg(target_os = "macos")]
-    metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
+    pub(crate) metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
     d3d11_texture: Option<WindowsD3d11TextureLeaseTicket>,
 }
 
@@ -428,6 +433,18 @@ pub struct CompositorRuntime {
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
+    /// Plan 205 S6: the Preview's own picture, the program leg ("twin"),
+    /// published only on the ticks `preview_needs_program_leg` is true;
+    /// empty otherwise. `presented_frame_store` hands it to the Preview
+    /// lease and the pixel oracle while it is current, the primary store
+    /// else. Allocated per run beside `frame_store` (a handle store, no
+    /// pixels of its own until the twin composes).
+    program_frame_store: CompositorFrameStore,
+    /// Agents asking for the picture while the preview publishes metadata
+    /// frames only (no GPU: the Linux proof surface). The next such tick
+    /// composes CPU pixels once and hands them over. Lives for the runtime,
+    /// not per run, so a stale render cache still shares it.
+    program_picture_waiters: ProgramPictureWaiters,
     /// Plan 157: Screen/Camera ISO stores while a separate-source capture runs.
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     preview_frame_lease_capacity: Arc<tokio::sync::Semaphore>,
@@ -617,6 +634,12 @@ pub struct CompositorLoopConfig {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 205 S6: whether the program carries the item
+    /// (`program_shows` for the Preview's shape). When the program carries
+    /// an item the primary leg does not burn, the Preview composes its own
+    /// picture (`preview_needs_program_leg`).
+    pub highlight_overlay_on_program: bool,
+    pub buddy_overlay_on_program: bool,
 }
 
 /// Capture ownership of the preview compositor run.
@@ -650,16 +673,177 @@ pub struct CompositorArmParams {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 205 S6: the program's verdict for the Preview's shape (a
+    /// buffer-only lease is idle for the Preview: either switch).
+    pub highlight_overlay_on_program: bool,
+    pub buddy_overlay_on_program: bool,
 }
 
 /// The per-leg flags of the two layout-driven overlays (plan 164): the
 /// comment-highlight card and the Buddy. Captions keep their start-time plan.
+/// `*_on_program` (plan 205) is whether the program carries the item, which
+/// the Preview's own picture draws when the primary leg does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayLegFlags {
     pub highlight_on_primary: bool,
     pub highlight_on_aux: bool,
     pub buddy_on_primary: bool,
     pub buddy_on_aux: bool,
+    pub highlight_on_program: bool,
+    pub buddy_on_program: bool,
+}
+
+impl OverlayLegFlags {
+    /// The idle preview run's flags (plan 205 D1): the program while nothing
+    /// runs, every item with either switch on (`program_shows(None, …)`), on
+    /// the primary leg. The idle run has no auxiliary leg, and its primary
+    /// is the program.
+    pub fn idle(layout: &crate::overlay_layout::OverlayLayout) -> Self {
+        let shows = |item: &crate::overlay_layout::OverlayItemLayout| {
+            crate::overlay_layout::program_shows(None, item.show_on_stream, item.show_in_recording)
+        };
+        Self {
+            highlight_on_primary: shows(&layout.highlight),
+            highlight_on_aux: false,
+            buddy_on_primary: shows(&layout.buddy),
+            buddy_on_aux: false,
+            highlight_on_program: shows(&layout.highlight),
+            buddy_on_program: shows(&layout.buddy),
+        }
+    }
+
+    /// A session's flags (plan 205 S6): each leg by the session's plan
+    /// (`overlay_session_plans`, the D13 fallback applied), and the program
+    /// by the Preview's shape, which is idle (`None`) for a buffer-only
+    /// session, because the ring keeps the recording plan (D2) while the
+    /// Preview shows the program.
+    pub fn for_session(
+        shape: OverlaySessionShape,
+        replay_only: bool,
+        layout: &crate::overlay_layout::OverlayLayout,
+    ) -> Self {
+        let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+        let preview_shape = preview_program_shape(Some(shape), replay_only);
+        let shows = |item: &crate::overlay_layout::OverlayItemLayout| {
+            crate::overlay_layout::program_shows(
+                preview_shape,
+                item.show_on_stream,
+                item.show_in_recording,
+            )
+        };
+        Self {
+            highlight_on_primary: plans.highlight.primary,
+            highlight_on_aux: plans.highlight.aux,
+            buddy_on_primary: plans.buddy.primary,
+            buddy_on_aux: plans.buddy.aux,
+            highlight_on_program: shows(&layout.highlight),
+            buddy_on_program: shows(&layout.buddy),
+        }
+    }
+}
+
+/// The shape the Preview plans the program against (plan 205 D2): a
+/// buffer-only (Clips) session is `None`, idle, because the ring is a buffer
+/// and the Preview shows what either switch wants; every other session is
+/// itself; no session is `None`.
+pub(crate) fn preview_program_shape(
+    session_shape: Option<OverlaySessionShape>,
+    replay_only: bool,
+) -> Option<OverlaySessionShape> {
+    if replay_only { None } else { session_shape }
+}
+
+/// The overlay items the program leg trigger reads (plan 205 S6): for the
+/// highlight card and the Buddy, whether the primary leg burns the item and
+/// whether the program carries it; for captions, the per-leg plan (their
+/// program is "burned on any running leg", plan 090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ProgramLegOverlays {
+    pub highlight_on_primary: bool,
+    pub highlight_on_program: bool,
+    pub buddy_on_primary: bool,
+    pub buddy_on_program: bool,
+    pub caption_on_primary: bool,
+    pub caption_on_aux: bool,
+}
+
+/// Plan 205 S6: whether the Preview needs its own picture. True when some
+/// item is in the program (`program_shows` for the Preview's shape) but the
+/// primary leg does not burn it. On macOS that happens in two shapes only: a
+/// buffer-only (Clips) session at idle, whose primary burns by "Show in
+/// recording" while the program is either switch (D2), and a record + stream
+/// session with a split stream leg, whose primary is the recording. Every
+/// other row's primary is the program, so the Preview presents it as before
+/// and no extra GPU work runs. Pure.
+///
+/// `session_shape` is what the primary burns by (`None` on the idle run);
+/// `replay_only` says the session is a buffer-only lease; `banners` is the
+/// set the legs draw, a layer whose fade-out ended counts for nothing.
+pub(crate) fn preview_needs_program_leg(
+    session_shape: Option<OverlaySessionShape>,
+    replay_only: bool,
+    overlays: ProgramLegOverlays,
+    banners: &BannerSet,
+) -> bool {
+    let preview_shape = preview_program_shape(session_shape, replay_only);
+    let missing = |program: bool, primary: bool| program && !primary;
+    missing(overlays.highlight_on_program, overlays.highlight_on_primary)
+        || missing(overlays.buddy_on_program, overlays.buddy_on_primary)
+        || missing(
+            overlays.caption_on_primary || overlays.caption_on_aux,
+            overlays.caption_on_primary,
+        )
+        || banners
+            .layers
+            .iter()
+            .filter(|layer| !layer.fade.hides())
+            .any(|layer| {
+                missing(
+                    banner_leg_carries(preview_shape, BannerLeg::Program, &layer.banner),
+                    banner_leg_carries(session_shape, BannerLeg::Primary, &layer.banner),
+                )
+            })
+}
+
+/// `VIDEORC_PREVIEW_PROGRAM_LEG=0` keeps the Preview on the primary leg
+/// (the pre-plan-205 picture), said once in the log. A measurement and
+/// support switch, never a silent fallback.
+fn preview_program_leg_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        let disabled = matches!(
+            std::env::var("VIDEORC_PREVIEW_PROGRAM_LEG")
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("0" | "false" | "off" | "no")
+        );
+        if disabled {
+            tracing::warn!(
+                "VIDEORC_PREVIEW_PROGRAM_LEG is off: the Preview presents the primary leg even when the program differs from it"
+            );
+        }
+        disabled
+    })
+}
+
+/// The idle preview run's flags for the layout as it is stored right now
+/// (`OverlayLegFlags::idle`): what a preview run starts with, and what a
+/// lease release returns the run to.
+pub(crate) fn idle_overlay_flags(state: &AppState) -> OverlayLegFlags {
+    OverlayLegFlags::idle(&crate::overlay_layout::load_overlay_layout(&state.database))
+}
+
+/// Plan 205: when the program draws the Buddy on the idle run, start building
+/// the pet's atlas for the run's canvas now, so its first frame is not late
+/// (`leg_frame_at` asks too; this only shortens the wait).
+pub(crate) fn prepare_idle_buddy(state: &AppState, flags: OverlayLegFlags, canvas: (u32, u32)) {
+    if flags.buddy_on_primary {
+        state.buddy_sprite.prepare(&[(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (canvas.0.max(1), canvas.1.max(1)),
+        )]);
+    }
 }
 
 /// Plan 164 (S-B3.4, S-C1): swap the highlight and Buddy flags of the live
@@ -667,6 +851,23 @@ pub struct OverlayLegFlags {
 /// when no run is live; the next session reads the stored layout at start.
 pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
     let compositor = state.compositor.lock().await;
+    send_overlay_flags(&compositor, flags)
+}
+
+/// Plan 205 (S1): swap the idle preview run's flags in place when the layout
+/// is saved while nothing runs. A run a capture holds keeps the session's
+/// plan and answers false: the session is inserted into `state.recording`
+/// after its lease is armed, so this is the one check that tells the idle
+/// run from a session's, under the same lock the arm takes.
+pub async fn update_idle_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
+    let compositor = state.compositor.lock().await;
+    if compositor.capture_lease.is_some() {
+        return false;
+    }
+    send_overlay_flags(&compositor, flags)
+}
+
+fn send_overlay_flags(compositor: &CompositorRuntime, flags: OverlayLegFlags) -> bool {
     let Some(config_tx) = compositor.loop_config_tx.as_ref() else {
         return false;
     };
@@ -676,12 +877,27 @@ pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> b
         highlight_overlay_on_aux: flags.highlight_on_aux,
         buddy_overlay_on_primary: flags.buddy_on_primary,
         buddy_overlay_on_aux: flags.buddy_on_aux,
+        highlight_overlay_on_program: flags.highlight_on_program,
+        buddy_overlay_on_program: flags.buddy_on_program,
         ..current
     };
     if next == current {
         return true;
     }
     config_tx.send(next).is_ok()
+}
+
+/// The live run's loop configuration, for tests that read the overlay flags
+/// a start, a layout save or a lease release left on it.
+#[cfg(test)]
+pub(crate) async fn loop_config_for_test(state: &AppState) -> Option<CompositorLoopConfig> {
+    state
+        .compositor
+        .lock()
+        .await
+        .loop_config_tx
+        .as_ref()
+        .map(|config_tx| *config_tx.borrow())
 }
 
 // --- Banners (plan 186 S3) ---------------------------------------------------
@@ -1017,7 +1233,17 @@ struct CompositorLiveSources {
     camera: Option<PreviewCameraFrameSource>,
     screen: Option<PreviewScreenFrameSource>,
     last_camera_frame: Option<(FrameHandle<PreviewCameraPixelFormat>, LayoutSettings)>,
+    /// Plan 210 S3: the screen frame on air. It survives a source change
+    /// (a window swap, a restart, a window gone) until the adopted
+    /// generation delivers, so viewers see the last picture, never black.
     last_screen_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    /// The capture generation `last_screen_frame` came from.
+    last_screen_frame_generation: Option<u64>,
+    /// The screen frame each scene slot drew last tick (plan 210 S3): a leg
+    /// whose own scene has not yet named the adopted capture keeps drawing
+    /// it, so a commit that lands on one leg before the other never puts
+    /// the next window under the other leg's layout.
+    leg_screen_holds: LegScreenHolds,
     camera_fetch: LiveSourceFetchState,
     screen_fetch: LiveSourceFetchState,
     adopted_scene_revisions: Option<(Option<u64>, Option<u64>)>,
@@ -1096,6 +1322,9 @@ impl LiveSourceFetchState {
 struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
+    /// Plan 205 S6: the program leg's store (see `CompositorRuntime`).
+    program_frame_store: CompositorFrameStore,
+    program_picture_waiters: ProgramPictureWaiters,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
@@ -1178,6 +1407,8 @@ impl CompositorRenderCache {
         Self {
             frame_store: compositor.frame_store.clone(),
             stream_frame_store: compositor.stream_frame_store.clone(),
+            program_frame_store: compositor.program_frame_store.clone(),
+            program_picture_waiters: compositor.program_picture_waiters.clone(),
             source_iso_frame_stores: compositor.source_iso_frame_stores.clone(),
             snapshot: compositor.scene.clone(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
@@ -1229,7 +1460,7 @@ impl CompositorLiveSources {
             self.camera_fetch = LiveSourceFetchState::default();
         }
         if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
-            self.last_screen_frame = None;
+            // The held frame stays (plan 210 S3); only the accounting restarts.
             self.screen_fetch = LiveSourceFetchState::default();
         }
         self.camera = camera;
@@ -1314,7 +1545,7 @@ impl CompositorLiveSources {
             self.screen_binding_verified = true;
             if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
                 let previous_screen_present = self.screen.is_some();
-                self.last_screen_frame = None;
+                // The held frame stays (plan 210 S3); only the accounting restarts.
                 self.screen_fetch = LiveSourceFetchState::default();
                 screen_change = screen
                     .as_ref()
@@ -1346,6 +1577,15 @@ impl CompositorLiveSources {
             cache.snapshot.as_ref().map(|s| s.revision),
             cache.simulcast_snapshot.as_ref().map(|s| s.revision),
         );
+        // A held screen frame belongs to the scene just left (plan 210 S3);
+        // once no leg shows a screen source there is nothing to hold it for.
+        if !scene_shows_screen_source(cache.snapshot.as_ref())
+            && !scene_shows_screen_source(cache.simulcast_snapshot.as_ref())
+        {
+            self.last_screen_frame = None;
+            self.last_screen_frame_generation = None;
+            self.leg_screen_holds = LegScreenHolds::default();
+        }
         let missing_binding = [&cache.snapshot, &cache.simulcast_snapshot]
             .into_iter()
             .flatten()
@@ -1452,13 +1692,30 @@ impl CompositorLiveSources {
         self.last_camera_frame.clone()
     }
 
-    fn latest_screen_frame(&mut self) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
+    /// The screen frame to draw this tick (plan 210 S3): the newest frame
+    /// of the adopted capture generation, else the frame held from before a
+    /// switch until that generation delivers. The source gates the store by
+    /// generation, so a frame of the next window never replaces the hold
+    /// while the scene still names the previous one. Delivery accounting
+    /// counts only frames of the adopted generation.
+    fn latest_screen_frame(
+        &mut self,
+        scene_names_adopted_source: bool,
+    ) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
         let Some(source) = self.screen.clone() else {
             return self.last_screen_frame.clone();
         };
+        if !scene_names_adopted_source {
+            // The adopted capture is not what any leg's scene names yet (a
+            // switch in flight, adopted by the periodic refresh before the
+            // commit): its frames must not replace the frame on air.
+            return self.last_screen_frame.clone();
+        }
+        let generation = source.generation();
         if self.last_screen_frame.is_none() {
             if let Ok(Some(frame)) = source.try_latest_frame_result() {
                 self.last_screen_frame = Some(frame);
+                self.last_screen_frame_generation = Some(generation);
             }
             return self.last_screen_frame.clone();
         }
@@ -1468,6 +1725,7 @@ impl CompositorLiveSources {
                 self.screen_fetch.record_fresh_lock();
                 if let Some(frame) = frame {
                     self.last_screen_frame = Some(frame);
+                    self.last_screen_frame_generation = Some(generation);
                 }
             }
             Err(()) => {
@@ -1478,18 +1736,35 @@ impl CompositorLiveSources {
                 ) {
                     if let Some(frame) = source.latest_frame_blocking() {
                         self.last_screen_frame = Some(frame);
+                        self.last_screen_frame_generation = Some(generation);
                     }
                     self.screen_fetch.record_blocking_refresh();
                 }
             }
         }
-        if let Some(frame) = self.last_screen_frame.as_ref() {
+        if self.screen_frame_is_current()
+            && let Some(frame) = self.last_screen_frame.as_ref()
+        {
             self.screen_fetch.record_serve(
                 frame.as_ptr().cast::<()>(),
                 frame.captured_at.elapsed().as_millis() as u64,
             );
         }
         self.last_screen_frame.clone()
+    }
+
+    /// Whether the frame on air came from the adopted capture generation
+    /// (plan 210 S3). A held frame draws, but it is no evidence that the
+    /// adopted source delivers, and never a fingerprint for it.
+    fn screen_frame_is_current(&self) -> bool {
+        self.screen_binding_verified
+            && self.last_screen_frame.is_some()
+            && self.last_screen_frame_generation.is_some()
+            && self
+                .screen
+                .as_ref()
+                .map(PreviewScreenFrameSource::generation)
+                == self.last_screen_frame_generation
     }
 }
 
@@ -1546,6 +1821,112 @@ fn scene_needs_live_screen_frame(
 
 fn active_image_source_is_cached(active_image_source: Option<&CompositorImageSource>) -> bool {
     active_image_source.is_some_and(|source| source.rgba.is_some() || source.bgra.is_some())
+}
+
+/// Whether the scene shows a screen or window source at all, whichever
+/// device it names.
+fn scene_shows_screen_source(snapshot: Option<&CompositorSceneSnapshot>) -> bool {
+    scene_needs_live_screen_frame(snapshot, None)
+}
+
+/// Plan 210 S3: the screen frame each scene slot drew last tick. The
+/// program's hold also serves the legs that follow its scene (the classic
+/// aux, the Screen file); the vertical leg composes its own scene and holds
+/// its own frame.
+#[derive(Debug, Clone, Default)]
+struct LegScreenHolds {
+    primary: LegScreenHold,
+    simulcast: LegScreenHold,
+}
+
+/// What one scene slot drew last tick (plan 210 S3, D5).
+#[derive(Debug, Clone, Default)]
+struct LegScreenHold {
+    /// The screen frame the leg drew.
+    frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
+    /// The scene the leg drew.
+    scene: Option<CompositorSceneSnapshot>,
+    /// Since when the leg has been given a scene that names a capture
+    /// without a current frame on hand (see `leg_scene_for_tick`).
+    waiting_since: Option<Instant>,
+}
+
+/// Plan 210 D5: how long a leg keeps drawing the scene it drew last tick
+/// while the scene it was given names a capture that has not delivered.
+const LEG_SCENE_HOLD_MAX: Duration = Duration::from_secs(1);
+
+/// Plan 210 D5: the scene a leg draws this tick, and since when it has been
+/// waiting. A scene that names a screen capture cuts in together with that
+/// capture's first frame: until a current frame of the capture the scene
+/// names is on hand, the leg keeps the scene it drew last tick, with the
+/// frame it drew (`leg_screen_frame`), so the previous window is never
+/// drawn under the next layout and the next window never under the
+/// previous one. The commit lands a tick or more before the compositor
+/// adopts the next capture when the preview slot's lock is contended, and
+/// longer on the stop-then-start path; this rule holds for both. The wait
+/// is bounded, so a capture that never delivers cannot pin the layout.
+fn leg_scene_for_tick(
+    next: Option<CompositorSceneSnapshot>,
+    hold: &LegScreenHold,
+    screen_frame_current: bool,
+    screen_key: Option<&SourceKey>,
+    now: Instant,
+) -> (Option<CompositorSceneSnapshot>, Option<Instant>) {
+    let waits = match (next.as_ref(), hold.scene.as_ref()) {
+        (Some(next), Some(drawn)) => {
+            next.revision != drawn.revision
+                && hold.frame.is_some()
+                && scene_shows_screen_source(Some(next))
+                && !(screen_frame_current && scene_accepts_source(Some(next), screen_key))
+        }
+        _ => false,
+    };
+    if !waits {
+        return (next, None);
+    }
+    let since = hold.waiting_since.unwrap_or(now);
+    if now.duration_since(since) >= LEG_SCENE_HOLD_MAX {
+        return (next, None);
+    }
+    (hold.scene.clone(), Some(since))
+}
+
+/// Plan 210 S3: the screen frame a leg draws, judged by that leg's OWN
+/// scene. A leg whose scene names the adopted capture draws the frame on
+/// air (the adopted generation's newest frame, or the previous frame held
+/// until that generation delivers). A leg whose scene shows a screen source
+/// it does not name keeps the frame it drew last tick: its commit may land
+/// after the other leg's (the renderer sends the vertical scene after the
+/// program commit), and the next window is never drawn under this leg's
+/// previous layout. With nothing held yet it draws the frame on air only
+/// while that is itself a hold from before the switch, never a frame of a
+/// capture this leg has not adopted. Never black while a picture exists.
+/// Evidence stays strict: see `evidence_screen_frame`.
+fn leg_screen_frame<'a>(
+    on_air: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    on_air_current: bool,
+    held: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    snapshot: Option<&CompositorSceneSnapshot>,
+    screen_key: Option<&SourceKey>,
+) -> Option<&'a FrameHandle<PreviewScreenPixelFormat>> {
+    if scene_accepts_source(snapshot, screen_key) {
+        return on_air;
+    }
+    if !scene_shows_screen_source(snapshot) {
+        return None;
+    }
+    held.or(on_air.filter(|_| !on_air_current))
+}
+
+/// The screen frame that proves the scene's named source delivers: a frame
+/// of the adopted generation, from the device the scene names.
+fn evidence_screen_frame<'a>(
+    frame: Option<&'a FrameHandle<PreviewScreenPixelFormat>>,
+    current: bool,
+    snapshot: Option<&CompositorSceneSnapshot>,
+    screen_key: Option<&SourceKey>,
+) -> Option<&'a FrameHandle<PreviewScreenPixelFormat>> {
+    frame.filter(|_| current && scene_accepts_source(snapshot, screen_key))
 }
 
 fn same_camera_source(
@@ -2508,6 +2889,8 @@ mod editor_draft_tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         }
     }
@@ -3006,6 +3389,8 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         ),
         frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         stream_frame_store: None,
+        program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
+        program_picture_waiters: Arc::default(),
         source_iso_frame_stores: None,
         preview_frame_lease_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         frame_evidence: VecDeque::new(),
@@ -3065,6 +3450,7 @@ async fn start_synthetic_compositor_with_lifecycle(
             compositor.status.scene_sources.clone(),
             compositor.image_sources.status(),
             compositor.worker_activity.clone(),
+            compositor.status.screen_switch.clone(),
         )
     };
     let run_id = Uuid::new_v4().to_string();
@@ -3101,6 +3487,7 @@ async fn start_synthetic_compositor_with_lifecycle(
         },
         editor_draft: None,
         live_background: None,
+        screen_switch: previous_scene_status.7,
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Synthetic compositor running.".to_string()),
     };
@@ -3114,6 +3501,13 @@ async fn start_synthetic_compositor_with_lifecycle(
         highlight_overlay_on_aux: params.highlight_overlay_on_aux,
         buddy_overlay_on_primary: params.buddy_overlay_on_primary,
         buddy_overlay_on_aux: params.buddy_overlay_on_aux,
+        // Plan 205 S6: a fresh run's program is the union of its legs. The
+        // idle run has one leg, which is the program; a session run's legs
+        // are the running outputs. Only a buffer-only lease differs, and
+        // that arms the idle run in place (`CompositorArmParams`).
+        highlight_overlay_on_program: params.highlight_overlay_on_primary
+            || params.highlight_overlay_on_aux,
+        buddy_overlay_on_program: params.buddy_overlay_on_primary || params.buddy_overlay_on_aux,
     });
     let stream_frame_store = params
         .stream_output
@@ -3140,6 +3534,7 @@ async fn start_synthetic_compositor_with_lifecycle(
         let mut compositor = state.compositor.lock().await;
         compositor.frame_store = Arc::new(StdMutex::new(FrameStore::new(2)));
         compositor.stream_frame_store = stream_frame_store;
+        compositor.program_frame_store = Arc::new(StdMutex::new(FrameStore::new(2)));
         compositor.source_iso_frame_stores = source_iso_frame_stores;
         compositor.frame_evidence.clear();
         compositor.status = status.clone();
@@ -3295,6 +3690,7 @@ pub async fn stop_compositor(state: &AppState) -> CompositorStatus {
         let mut compositor = state.compositor.lock().await;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
+        status.screen_switch = compositor.status.screen_switch.take();
         compositor.status = status.clone();
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
@@ -3424,6 +3820,7 @@ async fn stop_compositor_if_run_id_with_lifecycle(
         compositor.banner_session_shape = None;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
+        status.screen_switch = compositor.status.screen_switch.take();
         compositor.status = status.clone();
         status
     };
@@ -3485,6 +3882,8 @@ pub async fn arm_compositor_for_capture(
             highlight_overlay_on_aux: params.highlight_overlay_on_aux,
             buddy_overlay_on_primary: params.buddy_overlay_on_primary,
             buddy_overlay_on_aux: params.buddy_overlay_on_aux,
+            highlight_overlay_on_program: params.highlight_overlay_on_program,
+            buddy_overlay_on_program: params.buddy_overlay_on_program,
         };
         let config_sent = compositor
             .loop_config_tx
@@ -3544,9 +3943,10 @@ enum CompositorLeaseRelease {
 
 /// Returns an armed run to preview ownership. With a live preview surface the
 /// loop is switched back to preview fps/consumer at the surface's current
-/// dimensions and the reconciler re-adopts the same run id; without one the
-/// run is stopped exactly like a retired preview run. A missing or foreign
-/// lease is a no-op.
+/// dimensions, with the overlay flags of the program for the layout stored
+/// now (plan 205), and the reconciler re-adopts the same run id; without one
+/// the run is stopped exactly like a retired preview run. A missing or
+/// foreign lease is a no-op.
 pub async fn release_compositor_capture_lease(
     state: &AppState,
     session_id: &str,
@@ -3554,6 +3954,10 @@ pub async fn release_compositor_capture_lease(
     // Read the surface before taking compositor ownership: the resize path
     // never awaits the surface under the compositor lock, and neither may we.
     let surface = crate::preview_surface::preview_surface_status(state).await;
+    // Plan 205: the idle run returns to the program of the layout as it is
+    // stored NOW, not the flags the run had when the capture armed. A layout
+    // saved during the session re-planned the session, never the idle run.
+    let idle_overlays = idle_overlay_flags(state);
     let release = {
         let _lifecycle = state.compositor_lifecycle.lock().await;
         let mut compositor = state.compositor.lock().await;
@@ -3582,6 +3986,12 @@ pub async fn release_compositor_capture_lease(
         } else {
             let restored = CompositorLoopConfig {
                 target_fps: surface.target_fps.clamp(30, 120),
+                highlight_overlay_on_primary: idle_overlays.highlight_on_primary,
+                highlight_overlay_on_aux: idle_overlays.highlight_on_aux,
+                buddy_overlay_on_primary: idle_overlays.buddy_on_primary,
+                buddy_overlay_on_aux: idle_overlays.buddy_on_aux,
+                highlight_overlay_on_program: idle_overlays.highlight_on_program,
+                buddy_overlay_on_program: idle_overlays.buddy_on_program,
                 ..lease.preview_config
             };
             let config_sent = compositor
@@ -3611,12 +4021,15 @@ pub async fn release_compositor_capture_lease(
     match release {
         CompositorLeaseRelease::Restored(status) => {
             let status = *status;
+            prepare_idle_buddy(state, idle_overlays, (status.width, status.height));
             tracing::info!(
-                "compositor {} released to preview after session {session_id}: {}x{} @ {} fps",
+                "compositor {} released to preview after session {session_id}: {}x{} @ {} fps, highlight {} buddy {}",
                 status.run_id.as_deref().unwrap_or("unknown-run"),
                 status.width,
                 status.height,
-                status.target_fps
+                status.target_fps,
+                idle_overlays.highlight_on_primary,
+                idle_overlays.buddy_on_primary
             );
             state.emit_event("compositor.status", status.clone());
             crate::preview_surface::reconcile_preview_after_capture_release(state).await;
@@ -3985,6 +4398,21 @@ pub async fn compositor_status(state: &AppState) -> CompositorStatus {
     state.compositor.lock().await.status.clone()
 }
 
+/// Plan 210 S3: record how the last screen or window switch changed the
+/// capture (in place, or a restart and why), for `compositor.status`.
+pub(crate) async fn note_screen_switch(
+    state: &AppState,
+    switch: crate::protocol::ScreenSwitchStatus,
+) {
+    let status = {
+        let mut compositor = state.compositor.lock().await;
+        compositor.status.screen_switch = Some(switch);
+        compositor.status.updated_at = Utc::now().to_rfc3339();
+        compositor.status.clone()
+    };
+    state.emit_event("compositor.status", status);
+}
+
 pub async fn compositor_frame_store(state: &AppState) -> CompositorFrameStore {
     state.compositor.lock().await.frame_store.clone()
 }
@@ -4022,6 +4450,154 @@ pub(crate) async fn test_install_source_iso_frame_stores(
 /// How many recent frame-evidence samples the compositor keeps for the
 /// startup barrier to seed from.
 pub const COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN: usize = 8;
+
+/// Plan 209 S6 (`get_picture`, D8): the program picture, the latest frame
+/// the compositor published, as top-down RGB. CPU frames carry planar
+/// YUV 4:2:0 (BT.709, video range); a Metal frame carries a BGRA target.
+/// `None` while nothing composes, and on a path whose frames carry no pixels
+/// the backend can read (the metadata-only preview, a D3D11 texture).
+pub(crate) struct ProgramPicture {
+    /// The program frame it came from (plan 209 review fix 11: `get_picture`
+    /// encodes one JPEG per frame).
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
+/// The newest program frame's sequence, without reading its pixels.
+pub(crate) async fn latest_program_sequence(state: &AppState) -> Option<u64> {
+    let compositor = state.compositor.lock().await;
+    let frame = compositor
+        .frame_store
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .latest()?;
+    Some(frame.sequence)
+}
+
+/// How long `get_picture` waits for the metadata-only preview to compose a
+/// frame with pixels (a few ticks at any shipping rate).
+const PROGRAM_PICTURE_COMPOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+pub(crate) async fn latest_program_picture(state: &AppState) -> Option<ProgramPicture> {
+    let (frame, waiters) = {
+        let compositor = state.compositor.lock().await;
+        let frame = compositor
+            .frame_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()?;
+        (frame, compositor.program_picture_waiters.clone())
+    };
+    // The no-GPU native preview (the Linux proof surface) publishes frames
+    // without pixels (#680): ask the next tick to compose this one picture.
+    let frame = if frame.bytes.is_empty()
+        && matches!(
+            frame.pixel_format,
+            CompositorPixelFormat::Yuv420p {
+                export: CompositorFrameExportKind::CpuYuv420p,
+            }
+        ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut waiters = waiters.lock().unwrap_or_else(|p| p.into_inner());
+            waiters.retain(|waiter| !waiter.is_closed());
+            waiters.push(tx);
+        }
+        tokio::time::timeout(PROGRAM_PICTURE_COMPOSE_TIMEOUT, rx)
+            .await
+            .ok()?
+            .ok()?
+    } else {
+        frame
+    };
+    tokio::task::spawn_blocking(move || program_picture_from_frame(&frame))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn program_picture_from_frame(
+    frame: &FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>,
+) -> Option<ProgramPicture> {
+    let (width, height) = (frame.width, frame.height);
+    match frame.pixel_format {
+        CompositorPixelFormat::Yuv420p {
+            export: CompositorFrameExportKind::CpuYuv420p,
+        } => yuv420p_to_rgb(width, height, &frame.bytes).map(|rgb| ProgramPicture {
+            sequence: frame.sequence,
+            width,
+            height,
+            rgb,
+        }),
+        CompositorPixelFormat::Yuv420p {
+            export: CompositorFrameExportKind::MetalIosurfaceTarget { .. },
+        } => {
+            #[cfg(target_os = "macos")]
+            {
+                let target = frame.metadata.metal_target.as_ref()?;
+                let (width, height) = (target.width() as u32, target.height() as u32);
+                let bgra = target.copy_bgra()?;
+                Some(ProgramPicture {
+                    sequence: frame.sequence,
+                    width,
+                    height,
+                    rgb: bgra_to_rgb(&bgra),
+                })
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        }
+        CompositorPixelFormat::D3d11Bgra8 { .. } | CompositorPixelFormat::D3d11Nv12 { .. } => None,
+    }
+}
+
+/// Planar I420 (BT.709, video range) to packed RGB. `None` when the bytes
+/// are shorter than the planes.
+pub(crate) fn yuv420p_to_rgb(width: u32, height: u32, bytes: &[u8]) -> Option<Vec<u8>> {
+    let (width, height) = (width as usize, height as usize);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let luma_len = width.checked_mul(height)?;
+    let chroma_len = chroma_width.checked_mul(chroma_height)?;
+    if bytes.len() < luma_len + 2 * chroma_len {
+        return None;
+    }
+    let (luma, chroma) = bytes.split_at(luma_len);
+    let (cb_plane, cr_plane) = chroma.split_at(chroma_len);
+    let mut rgb = vec![0_u8; luma_len * 3];
+    for y in 0..height {
+        for x in 0..width {
+            let luma_value = f32::from(luma[y * width + x]) - 16.0;
+            let chroma_index = (y / 2) * chroma_width + x / 2;
+            let cb = f32::from(cb_plane[chroma_index]) - 128.0;
+            let cr = f32::from(cr_plane[chroma_index]) - 128.0;
+            let scaled = 1.164_383_6 * luma_value;
+            let out = (y * width + x) * 3;
+            rgb[out] = (scaled + 1.792_741_1 * cr).round().clamp(0.0, 255.0) as u8;
+            rgb[out + 1] = (scaled - 0.213_248_6 * cb - 0.532_909_3 * cr)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+            rgb[out + 2] = (scaled + 2.112_401_8 * cb).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Some(rgb)
+}
+
+/// Packed BGRA to packed RGB (alpha dropped).
+pub(crate) fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);
+    for pixel in bgra.chunks_exact(4) {
+        rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
+    rgb
+}
 
 pub async fn compositor_latest_frame_evidence(state: &AppState) -> Option<CompositorFrameEvidence> {
     state.compositor.lock().await.frame_evidence.back().copied()
@@ -5510,6 +6086,8 @@ async fn run_synthetic_compositor_loop(
         mut highlight_overlay_on_aux,
         mut buddy_overlay_on_primary,
         mut buddy_overlay_on_aux,
+        mut highlight_overlay_on_program,
+        mut buddy_overlay_on_program,
     } = *config_rx.borrow_and_update();
     let mut pending_loop_config: Option<CompositorLoopConfig> = None;
     let mut loop_config_closed = false;
@@ -5534,6 +6112,11 @@ async fn run_synthetic_compositor_loop(
     // linear, plan 200 D3).
     let mut iso_screen_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
     let mut iso_camera_gpu_compositor = source_iso_output.and_then(|_| new_gpu_compositor(false));
+    // Plan 205 S6: the Preview's program leg compositor, `None` until the
+    // program differs from the primary leg (nothing is allocated before
+    // that, and it is dropped again the first tick they agree).
+    let mut program_gpu_compositor: Option<GpuCompositor> = None;
+    let mut program_leg_times_ms = Vec::with_capacity(128);
     // Plan 190: the primary leg's live background renderer, `None` until a
     // live background shows (nothing is allocated before that).
     let mut live_background_renderer: Option<Box<LiveBackgroundGpuRenderer>> = None;
@@ -5635,6 +6218,8 @@ async fn run_synthetic_compositor_loop(
             highlight_overlay_on_aux = next.highlight_overlay_on_aux;
             buddy_overlay_on_primary = next.buddy_overlay_on_primary;
             buddy_overlay_on_aux = next.buddy_overlay_on_aux;
+            highlight_overlay_on_program = next.highlight_overlay_on_program;
+            buddy_overlay_on_program = next.buddy_overlay_on_program;
             tracing::info!(
                 "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
                 target_fps,
@@ -5768,6 +6353,12 @@ async fn run_synthetic_compositor_loop(
                             #[cfg(test)]
                             at: None,
                         },
+                        ProgramLeg {
+                            gpu: &mut program_gpu_compositor,
+                            highlight_on_program: highlight_overlay_on_program,
+                            buddy_on_program: buddy_overlay_on_program,
+                            presenting: preview_surface_active,
+                        },
                     )
                         .await;
                 // Adoption at the publish boundary uses the same recovery/
@@ -5854,6 +6445,12 @@ async fn run_synthetic_compositor_loop(
                 gpu_command_wait_times_ms.push(published.timings.gpu_command_wait_ms);
                 gpu_total_times_ms.push(published.timings.gpu_total_ms);
                 frame_store_publish_times_ms.push(published.timings.frame_store_publish_ms);
+                // Plan 205 S6: what the Preview shows this tick, and what its
+                // own picture cost (0 while the primary leg is the program).
+                frame_pipeline.preview_program_leg = published.program_leg_published;
+                if published.program_leg_published {
+                    program_leg_times_ms.push(published.timings.program_leg_ms);
+                }
 
                 let surface_progress_started_at = Instant::now();
                 let surface_sequence = if published.primary_published { frames_rendered } else {
@@ -6083,7 +6680,7 @@ async fn run_synthetic_compositor_loop(
                                     camera_producer,
                                     screen_present: screen_delivery_health_source_present(
                                         screen_is_consumed,
-                                        live_sources.last_screen_frame.is_some(),
+                                        live_sources.screen_frame_is_current(),
                                         screen_target_fps.is_some(),
                                         screen_producer.is_some(),
                                     ),
@@ -6145,6 +6742,22 @@ async fn run_synthetic_compositor_loop(
                         }
                     }
                     let (p50, p95, p99) = frame_time_percentiles(&frame_times_ms);
+                    // Plan 205 S6: the program leg's cost per tick, in the
+                    // log only, beside the tick's whole render time; the
+                    // S5 bar reads these (2 ms p95 per tick).
+                    if !program_leg_times_ms.is_empty() {
+                        let (twin_p50, twin_p95, _) =
+                            frame_time_percentiles(&program_leg_times_ms);
+                        tracing::info!(
+                            ticks = program_leg_times_ms.len(),
+                            program_leg_p50_ms = format_args!("{twin_p50:.2}"),
+                            program_leg_p95_ms = format_args!("{twin_p95:.2}"),
+                            render_p50_ms = format_args!("{p50:.2}"),
+                            render_p95_ms = format_args!("{p95:.2}"),
+                            "Preview program leg cost"
+                        );
+                        program_leg_times_ms.clear();
+                    }
                     let (_, source_fetch_p95, _) = frame_time_percentiles(&source_fetch_times_ms);
                     let (_, scene_snapshot_p95, _) =
                         frame_time_percentiles(&scene_snapshot_times_ms);
@@ -6356,8 +6969,38 @@ struct CompositorPublishResult {
     fingerprint: SourceFrameFingerprint,
     compositor_backend: CompositorBackend,
     compositor_fallback_reason: Option<String>,
+    /// The surface the Preview presents this tick: the program leg's when it
+    /// published (plan 205 S6), else the primary's.
     metal_target_handoff: Option<CompositorMetalTargetHandoff>,
+    /// Plan 205 S6: the program leg composed and published this tick, so
+    /// the Preview shows the program rather than the primary leg.
+    program_leg_published: bool,
     timings: CompositorPublishTimings,
+}
+
+/// Plan 205 S6: the program leg's working set for one tick: its compositor
+/// (built on the first tick the leg is wanted, dropped on the first it is
+/// not), the program's verdict for the two layout-driven items, and whether
+/// a Preview surface is live to show the picture (no surface, no twin).
+struct ProgramLeg<'a> {
+    gpu: &'a mut Option<GpuCompositor>,
+    highlight_on_program: bool,
+    buddy_on_program: bool,
+    presenting: bool,
+}
+
+impl<'a> ProgramLeg<'a> {
+    /// A tick whose program is its primary leg (every test of the publish
+    /// path that is not about the program leg).
+    #[cfg(test)]
+    fn off(gpu: &'a mut Option<GpuCompositor>) -> Self {
+        Self {
+            gpu,
+            highlight_on_program: false,
+            buddy_on_program: false,
+            presenting: false,
+        }
+    }
 }
 
 /// Whether the composited frame for this tick repeats the previous one. A repeat means
@@ -6637,6 +7280,8 @@ struct CompositorPublishTimings {
     gpu_command_wait_ms: f64,
     gpu_total_ms: f64,
     frame_store_publish_ms: f64,
+    /// Plan 205 S6: the program leg's compose this tick (0 while off).
+    program_leg_ms: f64,
     gpu_readbacks: u64,
     bgra_bytes_copied: u64,
     yuv_frames_converted: u64,
@@ -7245,7 +7890,11 @@ impl GpuComposeFailure {
 /// camera mirror, and camera circle masks. Uploaded-image sources still fall back to the
 /// CPU compositor when uncached, so enabling the flag never produces a frame for a case
 /// the GPU path cannot match.
+/// `try_gpu_compose_with_chrome` with no chrome. Every leg now goes through
+/// `publish_auxiliary_compositor_frame` (plan 205 S6 hands the program leg
+/// its chrome), so this is the tests' shorthand.
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(test), allow(dead_code))]
 fn try_gpu_compose(
     gpu: Option<&mut GpuCompositor>,
     inputs: &CompositorRenderInputs<'_>,
@@ -8582,6 +9231,7 @@ async fn publish_compositor_frame(
     buddy_overlay_on_primary: bool,
     buddy_overlay_on_aux: bool,
     live: LiveBackgroundLeg<'_>,
+    program_leg: ProgramLeg<'_>,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
@@ -8643,6 +9293,18 @@ async fn publish_compositor_frame(
         } else {
             (None, 0.0)
         };
+    // Plan 210 S3: a frame of the adopted capture replaces the frame on air
+    // only once a leg's scene names that capture; until then (and while the
+    // authority is contended) the frame on air holds.
+    let scene_names_adopted_screen = {
+        let key = live_sources
+            .screen
+            .as_ref()
+            .and_then(PreviewScreenFrameSource::source_key);
+        scene_accepts_source(snapshot.as_ref(), key)
+            || scene_accepts_source(simulcast_snapshot.as_ref(), key)
+            || scene_accepts_source(iso_screen_snapshot.as_ref(), key)
+    };
     let (screen_frame, screen_frame_fetch_ms) =
         if scene_needs_live_screen_frame(snapshot.as_ref(), active_image_source.as_ref())
             || scene_needs_live_screen_frame(simulcast_snapshot.as_ref(), None)
@@ -8650,10 +9312,11 @@ async fn publish_compositor_frame(
         {
             let screen_fetch_started_at = Instant::now();
             (
-                live_sources
-                    .screen_binding_verified
-                    .then(|| live_sources.latest_screen_frame())
-                    .flatten(),
+                if live_sources.screen_binding_verified {
+                    live_sources.latest_screen_frame(scene_names_adopted_screen)
+                } else {
+                    live_sources.last_screen_frame.clone()
+                },
                 screen_fetch_started_at.elapsed().as_secs_f64() * 1000.0,
             )
         } else {
@@ -8681,12 +9344,69 @@ async fn publish_compositor_frame(
         .as_ref()
         .filter(|_| scene_accepts_source(snapshot.as_ref(), camera_key))
         .map(|(frame, _)| frame);
-    let primary_screen_frame = screen_frame
-        .as_ref()
-        .filter(|_| scene_accepts_source(snapshot.as_ref(), screen_key));
+    let screen_frame_current = live_sources.screen_frame_is_current();
+    // Evidence is judged by the scene as committed, never by the scene a leg
+    // keeps drawing while it waits (below): the previous device's frame is
+    // no proof for the scene that names the next.
+    let evidence_screen = evidence_screen_frame(
+        screen_frame.as_ref(),
+        screen_frame_current,
+        snapshot.as_ref(),
+        screen_key,
+    )
+    .map(|frame| (frame.sequence, frame.captured_at));
+    // Plan 210 D5: a scene that names a new capture cuts in together with
+    // that capture's first frame; until then each scene slot keeps the scene
+    // it drew last tick (`leg_scene_for_tick`). The ISO legs were derived
+    // above from the scene as committed: they draw one source full-frame,
+    // so no layout can be wrong there.
+    let hold_now = Instant::now();
+    let leg_screen_holds = live_sources.leg_screen_holds.clone();
+    let (snapshot, primary_waiting_since) = leg_scene_for_tick(
+        snapshot,
+        &leg_screen_holds.primary,
+        screen_frame_current,
+        screen_key,
+        hold_now,
+    );
+    let (simulcast_snapshot, simulcast_waiting_since) = leg_scene_for_tick(
+        simulcast_snapshot,
+        &leg_screen_holds.simulcast,
+        screen_frame_current,
+        screen_key,
+        hold_now,
+    );
+    // Plan 210 S3: each scene slot cuts to the adopted capture only when its
+    // own scene names it, and remembers what it drew for the next tick.
+    let primary_screen_frame = leg_screen_frame(
+        screen_frame.as_ref(),
+        screen_frame_current,
+        leg_screen_holds.primary.frame.as_ref(),
+        snapshot.as_ref(),
+        screen_key,
+    );
+    let simulcast_screen_frame = leg_screen_frame(
+        screen_frame.as_ref(),
+        screen_frame_current,
+        leg_screen_holds.simulcast.frame.as_ref(),
+        simulcast_snapshot.as_ref(),
+        screen_key,
+    );
+    live_sources.leg_screen_holds = LegScreenHolds {
+        primary: LegScreenHold {
+            frame: primary_screen_frame.cloned(),
+            scene: snapshot.clone(),
+            waiting_since: primary_waiting_since,
+        },
+        simulcast: LegScreenHold {
+            frame: simulcast_screen_frame.cloned(),
+            scene: simulcast_snapshot.clone(),
+            waiting_since: simulcast_waiting_since,
+        },
+    };
     let fingerprint = evidence_fingerprint(
         primary_camera_frame.map(|frame| (frame.sequence, frame.captured_at)),
-        primary_screen_frame.map(|frame| (frame.sequence, frame.captured_at)),
+        evidence_screen,
     );
     let published_at = Instant::now();
     // Plan 190: every leg of this tick reads the live background at
@@ -8730,23 +9450,44 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
-    // The Scene editor holding or dragging the Buddy on the idle preview: the
-    // pet draws on the primary leg where it will land, though no session
-    // carries it. A buffer-only run (the Clips ring, on by default) draws it
-    // too: like the other drafts and their chrome, it lands in the ring while
-    // the editor holds it (plan 181), and without it the default Buddy (on
-    // no output) would never show on the live canvas.
-    let buddy_edit = buddy_editor_place(editor_draft);
-    let buddy_on_primary = buddy_overlay_on_primary || buddy_edit.is_some();
+    // Plan 205 D4: the primary leg draws the Buddy only while its plan
+    // carries it (the idle run's plan is the program, so a Buddy on for an
+    // output shows on the live canvas). The Scene editor holding or dragging
+    // the Buddy moves that pet; it never draws one no output carries.
+    let primary_buddy_place = primary_buddy_place(buddy_overlay_on_primary, editor_draft);
+    let buddy_on_primary = primary_buddy_place.is_some();
+    // Plan 205 S6: whether the Preview composes its own picture this tick:
+    // some item is in the program and not on the primary leg, and a Preview
+    // surface is live to show it. Decided from the same cache the legs
+    // read, so a re-plan (a layout save, a banner change, the Clips arm, a
+    // lease release) takes effect on the next tick.
+    let program_leg_wanted = program_leg.presenting
+        && !preview_program_leg_disabled()
+        && preview_needs_program_leg(
+            render_cache.banner_session_shape,
+            render_cache.drafts_follow_capture,
+            ProgramLegOverlays {
+                highlight_on_primary: highlight_overlay_on_primary,
+                highlight_on_program: program_leg.highlight_on_program,
+                buddy_on_primary: buddy_overlay_on_primary,
+                buddy_on_program: program_leg.buddy_on_program,
+                caption_on_primary: caption_overlay_on_primary,
+                caption_on_aux: caption_overlay_on_aux,
+            },
+            &render_cache.banners,
+        );
     // Plan 168 S-B1: the pet on each leg that carries the Buddy, drawn from
-    // the sprite slot once per composed frame at `published_at` (both legs
-    // share the clock; the atlas is built off this thread).
-    let buddy_now = if buddy_on_primary || buddy_overlay_on_aux {
+    // the sprite slot once per composed frame at `published_at` (every leg
+    // shares the clock; the atlas is built off this thread).
+    let buddy_now = if buddy_on_primary
+        || buddy_overlay_on_aux
+        || (program_leg_wanted && program_leg.buddy_on_program)
+    {
         state.buddy_sprite.clock_seconds(published_at)
     } else {
         0.0
     };
-    let primary_buddy = buddy_on_primary.then(|| {
+    let primary_buddy = primary_buddy_place.map(|place| {
         buddy_leg_frame(
             state,
             crate::buddy_sprite::BuddySpriteLeg::Primary,
@@ -8760,7 +9501,7 @@ async fn publish_compositor_frame(
             highlight_overlay
                 .as_ref()
                 .filter(|_| highlight_overlay_on_primary),
-            buddy_edit.flatten(),
+            place,
         )
     });
     // Plan 186 S3: the banners each leg carries, fades at `published_at`
@@ -8781,6 +9522,8 @@ async fn publish_compositor_frame(
     // the proof surface draws the source layers itself, so that frame is the
     // tick's output even though it carries no pixels.
     let mut metadata_only_preview = false;
+    // Agents waiting for this metadata-only preview to compose pixels once.
+    let mut picture_waiters = Vec::new();
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -8856,13 +9599,21 @@ async fn publish_compositor_frame(
                     compositor_backend = CompositorBackend::Cpu;
                     compositor_fallback_reason = None;
                     metadata_only_preview = true;
+                    picture_waiters = std::mem::take(
+                        &mut *render_cache
+                            .program_picture_waiters
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner()),
+                    );
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason.to_string());
                 } else {
                     let _ = reason;
                 }
-                if !retain_previous_native_frame && frame_consumer.composes_cpu_pixels() {
+                if !retain_previous_native_frame
+                    && (frame_consumer.composes_cpu_pixels() || !picture_waiters.is_empty())
+                {
                     bytes = {
                         let mut store = frame_store
                             .lock()
@@ -8920,6 +9671,13 @@ async fn publish_compositor_frame(
                 captured_at,
                 bytes,
             );
+        }
+        if !picture_waiters.is_empty()
+            && let Some(frame) = store.latest().filter(|frame| frame.sequence == sequence)
+        {
+            for waiter in picture_waiters.drain(..) {
+                let _ = waiter.send(frame.clone());
+            }
         }
         timings.frame_store_publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
     }
@@ -9003,9 +9761,11 @@ async fn publish_compositor_frame(
                 .as_ref()
                 .filter(|_| scene_accepts_source(aux_snapshot, camera_key))
                 .map(|(frame, _)| frame),
-            screen_frame: screen_frame
-                .as_ref()
-                .filter(|_| scene_accepts_source(aux_snapshot, screen_key)),
+            screen_frame: if stream_output.composes_simulcast_scene {
+                simulcast_screen_frame
+            } else {
+                primary_screen_frame
+            },
             // The auxiliary leg carries the bar per the leg plan. On the
             // vertical simulcast leg the renderer rasterizes the Auxiliary
             // bar for that portrait canvas (plan 077).
@@ -9038,6 +9798,7 @@ async fn publish_compositor_frame(
             inputs,
             stream_gpu,
             stream_output.frame_consumer,
+            &[],
             #[cfg(test)]
             3,
         ) {
@@ -9118,9 +9879,15 @@ async fn publish_compositor_frame(
                 .as_ref()
                 .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
                 .map(|(frame, _)| frame);
-            let leg_screen_frame = screen_frame
-                .as_ref()
-                .filter(|_| scene_accepts_source(leg_snapshot, screen_key));
+            // The ISO legs derive from the program's scene, so they share
+            // its hold.
+            let leg_screen_frame = leg_screen_frame(
+                screen_frame.as_ref(),
+                screen_frame_current,
+                leg_screen_holds.primary.frame.as_ref(),
+                leg_snapshot,
+                screen_key,
+            );
             // A contended capture authority cannot prove current source pixels.
             // Keep the last published ISO frame instead of encoding a black
             // frame; the supervisor owns committed removal/terminal failure.
@@ -9169,6 +9936,7 @@ async fn publish_compositor_frame(
                 inputs,
                 gpu,
                 iso_output.frame_consumer,
+                &[],
                 #[cfg(test)]
                 trace_role,
             ) {
@@ -9187,6 +9955,146 @@ async fn publish_compositor_frame(
         });
         batch_store.publish(membership, sequence, frames);
     }
+    // Plan 205 S6: the Preview's own picture, the program leg ("twin"),
+    // composed last, after every encoded leg, from the same snapshot (the
+    // editor's draft and chrome included: the live canvas edits through the
+    // Preview), the same sources, the same tick and the primary's same-tick
+    // live background, with the program's items at the primary's canvas, so
+    // every prepared bitmap (the banners', the Buddy's Primary atlas) is the
+    // one the legs already hold. Its frame goes to its own store, which the
+    // Preview lease and the pixel oracle present while it is current. While
+    // the leg is not wanted nothing here touches the GPU: its compositor is
+    // dropped and its store emptied the first tick it is off, so the lease
+    // falls back to the primary's surface at once (the surface the lease
+    // already holds stays alive until main takes the next one).
+    #[cfg(target_os = "macos")]
+    let program_leg_handoff = if program_leg_wanted {
+        if program_leg.gpu.is_none() {
+            *program_leg.gpu = new_gpu_compositor(false);
+            tracing::info!(
+                sequence,
+                replay_only = render_cache.drafts_follow_capture,
+                shape = ?render_cache.banner_session_shape,
+                "Preview program leg on: the program differs from the primary leg"
+            );
+        }
+        let preview_shape = preview_program_shape(
+            render_cache.banner_session_shape,
+            render_cache.drafts_follow_capture,
+        );
+        // Captions' program is any running leg (plan 090): the Primary bar
+        // when the primary burns it, else the split stream leg's. The bubble
+        // follows the same rule. Both rasters are per target, so the
+        // Auxiliary one is sized for its own canvas and draws contained.
+        let twin_caption = (caption_overlay_on_primary || caption_overlay_on_aux)
+            .then(|| {
+                caption_overlays
+                    .primary
+                    .as_ref()
+                    .filter(|_| caption_overlay_on_primary)
+                    .or(caption_overlays.auxiliary.as_ref())
+            })
+            .flatten();
+        let twin_highlight = highlight_overlay
+            .as_ref()
+            .filter(|_| program_leg.highlight_on_program);
+        let twin_bubble = program_leg
+            .buddy_on_program
+            .then(|| {
+                buddy_overlays
+                    .primary
+                    .as_ref()
+                    .or(buddy_overlays.auxiliary.as_ref())
+            })
+            .flatten();
+        // The Buddy where the editor drags it, as on the primary (D4 still
+        // holds: the program carries it, or nothing draws).
+        let twin_buddy = program_leg.buddy_on_program.then(|| {
+            buddy_leg_frame(
+                state,
+                crate::buddy_sprite::BuddySpriteLeg::Primary,
+                (width, height),
+                buddy_now,
+                twin_caption,
+                twin_highlight,
+                buddy_editor_place(editor_draft).flatten(),
+            )
+        });
+        let twin_banners = banner_draws_for_leg(
+            &render_cache.banners,
+            preview_shape,
+            BannerLeg::Program,
+            (width, height),
+            published_at,
+            banner_draft_of(editor_draft),
+            &state.banner_prepare,
+        );
+        // Plan 193: the live frame the primary leg rendered at `live_at`,
+        // complete by now (its command buffer was waited for).
+        let shared_live_frame = live.renderer.as_ref().and_then(|r| r.frame_at(live_at));
+        let inputs = CompositorRenderInputs {
+            sequence,
+            width,
+            height,
+            snapshot: snapshot.as_ref(),
+            active_image_source: active_image_source.as_ref(),
+            background_image_source: background_image_source.as_ref(),
+            camera_frame: primary_camera_frame,
+            screen_frame: primary_screen_frame,
+            caption_overlay: twin_caption,
+            highlight_overlay: twin_highlight,
+            buddy_overlay: twin_bubble,
+            buddy_leg: twin_buddy.as_ref(),
+            banners: &twin_banners,
+            live_background: None,
+            shared_live_frame: shared_live_frame.as_ref(),
+            shared_live_output: None,
+        };
+        let program_store = render_cache.program_frame_store.clone();
+        let twin_started_at = Instant::now();
+        if let Some(twin_timings) = publish_auxiliary_compositor_frame(
+            sequence,
+            captured_at,
+            published_at,
+            program_store.clone(),
+            inputs,
+            program_leg.gpu.as_mut(),
+            CompositorFrameConsumer::NativePreview,
+            &editor_chrome,
+            #[cfg(test)]
+            4,
+        ) {
+            timings.merge_gpu(twin_timings);
+        }
+        timings.program_leg_ms = twin_started_at.elapsed().as_secs_f64() * 1000.0;
+        program_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()
+            .filter(|frame| frame.sequence == sequence)
+            .and_then(|frame| frame.metadata.metal_target_handoff())
+    } else {
+        if program_leg.gpu.take().is_some() {
+            *render_cache
+                .program_frame_store
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = FrameStore::new(2);
+            tracing::info!(
+                sequence,
+                "Preview program leg off: the primary leg is the program again"
+            );
+        }
+        None
+    };
+    #[cfg(not(target_os = "macos"))]
+    let program_leg_handoff: Option<CompositorMetalTargetHandoff> = {
+        // The Windows D3D11 session and the Electron proof surface draw the
+        // program themselves (plan 205 S8, S9); no compositor leg here.
+        let _ = (program_leg_wanted, program_leg, editor_chrome);
+        None
+    };
+    let program_leg_published = program_leg_handoff.is_some();
+    let metal_target_handoff = program_leg_handoff.or(metal_target_handoff);
     let evidence = CompositorFrameEvidence {
         sequence,
         scene_revision: snapshot.as_ref().map(|snapshot| snapshot.revision),
@@ -9240,7 +10148,8 @@ async fn publish_compositor_frame(
                                 !source_frame_is_too_stale(frame.captured_at)
                             })
                             && scene_accepts_source(aux, camera_key),
-                        screen_frame.is_some()
+                        screen_frame_current
+                            && screen_frame.is_some()
                             && active_image_source.is_none()
                             && scene_accepts_source(aux, screen_key),
                     )
@@ -9290,6 +10199,7 @@ async fn publish_compositor_frame(
         compositor_backend,
         compositor_fallback_reason,
         metal_target_handoff,
+        program_leg_published,
         timings,
     }
 }
@@ -9317,6 +10227,10 @@ fn compositor_frame_content_captured_at(
         .unwrap_or(fallback)
 }
 
+/// Compose and publish one auxiliary leg (the split stream leg, an ISO leg,
+/// or plan 205's program leg). `editor_chrome` is empty for every encoded
+/// leg: only the Preview's own picture draws the Scene editor's chrome.
+#[allow(clippy::too_many_arguments)]
 fn publish_auxiliary_compositor_frame(
     sequence: u64,
     captured_at: Instant,
@@ -9325,6 +10239,7 @@ fn publish_auxiliary_compositor_frame(
     inputs: CompositorRenderInputs<'_>,
     mut gpu: Option<&mut GpuCompositor>,
     frame_consumer: CompositorFrameConsumer,
+    editor_chrome: &[ChromeQuad],
     #[cfg(test)] trace_role: usize,
 ) -> Option<GpuCompositorTimings> {
     let width = inputs.width;
@@ -9333,10 +10248,12 @@ fn publish_auxiliary_compositor_frame(
     let mut export_handle = CompositorFrameExportHandle::default();
     #[cfg(test)]
     let compose_began = Instant::now();
-    let composed = try_gpu_compose(
+    let composed = try_gpu_compose_with_chrome(
         gpu.as_deref_mut(),
         &inputs,
         frame_consumer.publishes_cpu_yuv(),
+        editor_chrome,
+        &mut None,
     );
     #[cfg(test)]
     test_trace_source_iso_composition(trace_role, sequence, compose_began, &composed);
@@ -9682,7 +10599,7 @@ fn buddy_leg_frame(
 /// `overlayStageId('buddy')`).
 pub(crate) const BUDDY_DRAFT_ID: &str = "overlay:buddy";
 
-/// Where the idle preview draws the Buddy for the Scene editor, if it does:
+/// What the Scene editor says about the Buddy's place, if it holds it:
 /// `Some(None)` while a chrome-only draft holds the Buddy's selection (its
 /// saved place), `Some(Some(rect))` while a draft drags it or holds its
 /// dropped rect until the layout save lands. `None` for any other draft.
@@ -9691,6 +10608,18 @@ fn buddy_editor_place(draft: Option<&EditorDraft>) -> Option<Option<OverlayRect>
     Some(draft.transform.map(|transform| {
         OverlayRect::new(transform.x, transform.y, transform.width, transform.height)
     }))
+}
+
+/// Where the primary leg draws the Buddy this tick, if it does (plan 205
+/// D4): `None` unless the leg's plan carries it, whatever the editor holds;
+/// otherwise the editor's dragged rect (`Some(Some(rect))`) or the saved
+/// place (`Some(None)`). The editor moves a Buddy that is on; it never
+/// draws one that is off for every output.
+fn primary_buddy_place(
+    buddy_overlay_on_primary: bool,
+    draft: Option<&EditorDraft>,
+) -> Option<Option<OverlayRect>> {
+    buddy_overlay_on_primary.then(|| buddy_editor_place(draft).flatten())
 }
 
 /// `render_compositor_yuv420p_frame` plus the editor chrome quads blended
@@ -11088,6 +12017,8 @@ fn linear_source_tap(
     })
 }
 
+// Per-pixel: see `read_source_rgba`.
+#[inline(always)]
 fn read_source_rgba_linear(
     source: &RgbaSource<'_>,
     column: LinearTap,
@@ -11521,6 +12452,12 @@ fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
     source.width as usize * source.height as usize * 4
 }
 
+/// One source pixel, called once per destination pixel by every CPU blit.
+/// Forced inline: LLVM's own choice flips with the size of this module, and
+/// when it chose a call (0.14.0, after unrelated code landed here) the camera
+/// blits paid a call per pixel and the backend went from ~170 % to ~250 % CPU
+/// recording 720p30 on a slow laptop (retest 153).
+#[inline(always)]
 fn read_source_rgba(source: &RgbaSource<'_>, x: u32, y: u32) -> (u8, u8, u8, u8) {
     let index = (y as usize * source.width as usize + x as usize) * 4;
     match source.format {
@@ -11590,6 +12527,7 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
         frame_pipeline: CompositorFramePipelineStatus::default(),
         editor_draft: None,
         live_background: None,
+        screen_switch: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
     }
@@ -12184,6 +13122,8 @@ mod tests {
                 drafts_follow_capture: false,
                 frame_store: stores.screen.clone(),
                 stream_frame_store: None,
+                program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
+                program_picture_waiters: Arc::default(),
                 source_iso_frame_stores: Some(stores.clone()),
                 snapshot: Some(snapshot),
                 simulcast_snapshot: None,
@@ -13930,6 +14870,7 @@ mod tests {
                 false,
                 false,
                 LiveBackgroundLeg::unmeasured(&mut None),
+                ProgramLeg::off(&mut None),
             )
             .await;
             let frame = store.lock().unwrap().latest().expect("metadata frame");
@@ -13980,6 +14921,7 @@ mod tests {
                 false,
                 false,
                 LiveBackgroundLeg::unmeasured(&mut None),
+                ProgramLeg::off(&mut None),
             )
             .await;
             let frame = store.lock().unwrap().latest().expect("native frame");
@@ -14045,6 +14987,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
         assert_eq!(resumed.compositor_backend, CompositorBackend::Metal);
@@ -14094,6 +15037,7 @@ mod tests {
             inputs(8),
             Some(&mut gpu),
             CompositorFrameConsumer::VideoToolboxEncoder,
+            &[],
             1,
         );
         let mut held = Vec::new();
@@ -14106,6 +15050,7 @@ mod tests {
                 inputs(sequence),
                 Some(&mut gpu),
                 CompositorFrameConsumer::VideoToolboxEncoder,
+                &[],
                 1,
             );
             held.push(
@@ -14128,6 +15073,7 @@ mod tests {
             inputs(14),
             Some(&mut gpu),
             CompositorFrameConsumer::VideoToolboxEncoder,
+            &[],
             1,
         );
         assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 13);
@@ -14140,6 +15086,7 @@ mod tests {
             inputs(15),
             Some(&mut gpu),
             CompositorFrameConsumer::VideoToolboxEncoder,
+            &[],
             1,
         );
         assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 15);
@@ -14209,6 +15156,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -14305,6 +15253,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -14326,6 +15275,96 @@ mod tests {
         assert_eq!(result.timings.gpu_readbacks, 0);
         assert_eq!(result.timings.bgra_bytes_copied, 0);
         assert_eq!(result.timings.yuv_frames_converted, 0);
+    }
+
+    async fn publish_native_preview_tick_without_gpu(
+        state: &AppState,
+        sequence: u64,
+        live_sources: &mut CompositorLiveSources,
+        render_cache: &mut CompositorRenderCache,
+    ) {
+        publish_compositor_frame(
+            state,
+            "metadata-preview-picture-test",
+            sequence,
+            16,
+            8,
+            live_sources,
+            render_cache,
+            None,
+            CompositorFrameConsumer::NativePreview,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
+        )
+        .await;
+    }
+
+    fn latest_frame_bytes_len(store: &CompositorFrameStore) -> usize {
+        store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .latest()
+            .expect("native preview frame")
+            .bytes
+            .len()
+    }
+
+    // C5 (Linux idle): the no-GPU native preview publishes metadata frames
+    // only, so `get_picture` had nothing to read. Asking for the picture
+    // makes the next tick compose CPU pixels once.
+    #[tokio::test]
+    async fn metadata_only_preview_composes_one_picture_when_an_agent_asks() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_native_preview_tick_without_gpu(&state, 1, &mut live_sources, &mut render_cache)
+            .await;
+        let store = compositor_frame_store(&state).await;
+        assert_eq!(latest_frame_bytes_len(&store), 0);
+
+        let asking = tokio::spawn({
+            let state = state.clone();
+            async move { latest_program_picture(&state).await }
+        });
+        // The test runtime is single-threaded: let the request register.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        publish_native_preview_tick_without_gpu(&state, 2, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(latest_frame_bytes_len(&store), raw_yuv420p_len(16, 8));
+        let picture = asking.await.unwrap().expect("the composed preview picture");
+        assert_eq!(picture.sequence, 2);
+        assert_eq!((picture.width, picture.height), (16, 8));
+        assert_eq!(picture.rgb.len(), 16 * 8 * 3);
+
+        // Nobody asking: back to metadata frames (Linux plan 0014).
+        publish_native_preview_tick_without_gpu(&state, 3, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(latest_frame_bytes_len(&store), 0);
+    }
+
+    #[tokio::test]
+    async fn metadata_only_preview_picture_gives_up_without_a_tick() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_native_preview_tick_without_gpu(&state, 1, &mut live_sources, &mut render_cache)
+            .await;
+        tokio::time::pause();
+        assert!(latest_program_picture(&state).await.is_none());
     }
 
     #[tokio::test]
@@ -14356,6 +15395,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
         let store = compositor_frame_store(&state).await;
@@ -14390,6 +15430,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
         let jpeg_source = store
@@ -14481,6 +15522,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
 
@@ -14731,6 +15773,8 @@ mod tests {
             highlight_on_aux: false,
             buddy_on_primary: false,
             buddy_on_aux: true,
+            highlight_on_program: true,
+            buddy_on_program: true,
         };
         // No live run: nothing to swap; the next session reads the layout.
         assert!(!update_overlay_flags(&state, flags).await);
@@ -14743,6 +15787,8 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            highlight_overlay_on_program: false,
+            buddy_overlay_on_program: false,
         });
         state.compositor.lock().await.loop_config_tx = Some(loop_config_tx);
         assert!(update_overlay_flags(&state, flags).await);
@@ -14804,6 +15850,8 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            highlight_overlay_on_program: false,
+            buddy_overlay_on_program: false,
         });
         let supervisor_state = state.clone();
         let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
@@ -15297,7 +16345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_key_screen_generation_resets_held_frame_and_fetch_accounting() {
+    async fn same_key_screen_generation_holds_the_frame_and_resets_fetch_accounting() {
         let state = test_state();
         let video = tiny_video();
         let screen_id = "screen:screencapturekit:generation-test";
@@ -15312,7 +16360,7 @@ mod tests {
             .as_ref()
             .expect("installed screen source")
             .generation();
-        assert!(sources.latest_screen_frame().is_some());
+        assert!(sources.latest_screen_frame(true).is_some());
         sources.screen_fetch.try_lock_misses = 7;
         sources.screen_fetch.blocking_refreshes = 3;
         sources.screen_fetch.fresh_serves = 11;
@@ -15339,7 +16387,10 @@ mod tests {
                 .map(PreviewScreenFrameSource::generation),
             Some(next_generation)
         );
-        assert!(sources.last_screen_frame.is_none());
+        // Plan 210 S3: the frame on air holds across the restart (never
+        // black); it is no longer current, so it is no delivery evidence.
+        assert!(sources.last_screen_frame.is_some());
+        assert!(!sources.screen_frame_is_current());
         let stats = sources.fetch_stats();
         assert_eq!(stats.screen_try_lock_misses, 0);
         assert_eq!(stats.screen_blocking_refreshes, 0);
@@ -16014,6 +17065,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -16891,6 +17943,8 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            highlight_overlay_on_program: false,
+            buddy_overlay_on_program: false,
         }
     }
 
@@ -16986,6 +18040,164 @@ mod tests {
                 .is_none(),
             "a second release is a no-op"
         );
+    }
+
+    /// Plan 205 (S1, D1/D2): the idle run draws the program, so a stream-only
+    /// Buddy is on its primary; a buffer-only (Clips) lease keeps the
+    /// session's recording plan, which drops it, and a layout saved while
+    /// the lease holds the run re-plans by the session, never by the idle
+    /// rule.
+    #[tokio::test]
+    async fn the_idle_run_draws_the_programs_buddy_and_a_buffer_only_lease_keeps_the_record_plan() {
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        assert_eq!(
+            OverlayLegFlags::idle(&layout),
+            OverlayLegFlags {
+                highlight_on_primary: true,
+                highlight_on_aux: false,
+                buddy_on_primary: false,
+                buddy_on_aux: false,
+                highlight_on_program: true,
+                buddy_on_program: false,
+            },
+            "the shipped layout: highlight on both, Buddy off"
+        );
+        layout.buddy.show_on_stream = true;
+        let idle = OverlayLegFlags::idle(&layout);
+        assert!(
+            idle.buddy_on_primary,
+            "a stream-only Buddy is in the idle program"
+        );
+        assert!(!idle.buddy_on_aux);
+
+        let state = test_state();
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                highlight_overlay_on_primary: idle.highlight_on_primary,
+                buddy_overlay_on_primary: idle.buddy_on_primary,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        let started = loop_config_for_test(&state).await.expect("live run");
+        assert!(started.buddy_overlay_on_primary && started.highlight_overlay_on_primary);
+
+        // Clips arms the run with the recording plan (D2): the ring is a
+        // recording, so the stream-only Buddy leaves the primary.
+        let ring = crate::overlay_layout::overlay_session_plans(
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+            },
+            &layout,
+        );
+        assert!(!ring.buddy.primary);
+        arm_compositor_for_capture(
+            &state,
+            "clips",
+            CompositorArmParams {
+                replay_only: true,
+                highlight_overlay_on_primary: ring.highlight.primary,
+                buddy_overlay_on_primary: ring.buddy.primary,
+                ..arm_params(128, 72)
+            },
+        )
+        .await
+        .expect("preview run arms in place");
+        let leased = loop_config_for_test(&state).await.expect("leased run");
+        assert!(!leased.buddy_overlay_on_primary);
+        // The idle rule never reaches a leased run; the session's re-plan does.
+        assert!(!update_idle_overlay_flags(&state, idle).await);
+        assert!(
+            !loop_config_for_test(&state)
+                .await
+                .expect("leased run")
+                .buddy_overlay_on_primary
+        );
+        layout.buddy.show_in_recording = true;
+        let replanned = crate::overlay_layout::overlay_session_plans(
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+            },
+            &layout,
+        );
+        assert!(
+            update_overlay_flags(
+                &state,
+                OverlayLegFlags {
+                    highlight_on_primary: replanned.highlight.primary,
+                    highlight_on_aux: replanned.highlight.aux,
+                    buddy_on_primary: replanned.buddy.primary,
+                    buddy_on_aux: replanned.buddy.aux,
+                    highlight_on_program: true,
+                    buddy_on_program: true,
+                }
+            )
+            .await
+        );
+        assert!(
+            loop_config_for_test(&state)
+                .await
+                .expect("leased run")
+                .buddy_overlay_on_primary,
+            "a Buddy turned on for the recording joins the ring mid-session"
+        );
+        release_compositor_capture_lease(&state, "clips").await;
+        stop_compositor(&state).await;
+    }
+
+    /// Plan 205 (S1): `overlays.layout.set` while nothing runs swaps the idle
+    /// run's flags in place, both ways, and leaves fps and the consumer alone.
+    #[tokio::test]
+    async fn a_layout_saved_at_idle_swaps_the_idle_runs_flags() {
+        let state = test_state();
+        let idle = idle_overlay_flags(&state);
+        assert!(!idle.buddy_on_primary);
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                highlight_overlay_on_primary: idle.highlight_on_primary,
+                buddy_overlay_on_primary: idle.buddy_on_primary,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        let before = loop_config_for_test(&state).await.expect("live run");
+        assert!(!before.buddy_overlay_on_primary);
+
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let joined = loop_config_for_test(&state).await.expect("live run");
+        assert!(
+            joined.buddy_overlay_on_primary,
+            "the pet joins the idle run"
+        );
+        assert!(joined.highlight_overlay_on_primary);
+        assert_eq!(
+            (joined.target_fps, joined.frame_consumer),
+            (before.target_fps, before.frame_consumer)
+        );
+
+        layout.buddy.show_on_stream = false;
+        layout.highlight.show_on_stream = false;
+        layout.highlight.show_in_recording = false;
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let left = loop_config_for_test(&state).await.expect("live run");
+        assert!(
+            !left.buddy_overlay_on_primary,
+            "and leaves when both switches go off"
+        );
+        assert!(!left.highlight_overlay_on_primary);
+        stop_compositor(&state).await;
     }
 
     #[tokio::test]
@@ -19392,6 +20604,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
 
@@ -19504,6 +20717,7 @@ mod tests {
             false,
             false,
             LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg::off(&mut None),
         )
         .await;
         let compositor = state.compositor.lock().await;
@@ -19865,6 +21079,7 @@ mod tests {
                     false,
                     false,
                     LiveBackgroundLeg::unmeasured(&mut None),
+                    ProgramLeg::off(&mut None),
                 )
                 .await;
                 let store = compositor_frame_store(&state).await;
@@ -20518,13 +21733,21 @@ mod buddy_sprite_tests {
         }
     }
 
-    /// The Scene editor's Buddy on the idle preview: a chrome-only hold of
-    /// `overlay:buddy` draws the pet at its saved place, a draft with a rect
-    /// draws it at the dragged place (the picture follows the pointer, not
-    /// only the frame), and any other draft leaves the Buddy alone.
+    /// The Scene editor's Buddy on the idle preview, with the Buddy on for an
+    /// output (plan 205 D4: the primary's plan carries it): a chrome-only
+    /// hold of `overlay:buddy` draws the pet at its saved place, a draft with
+    /// a rect draws it at the dragged place (the picture follows the pointer,
+    /// not only the frame), and any other draft leaves the Buddy alone.
     #[test]
     fn a_buddy_draft_draws_the_pet_where_the_editor_drags_it() {
-        let layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        let mut layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        layout.show_on_stream = true;
+        let on = crate::overlay_layout::program_shows(
+            None,
+            layout.show_on_stream,
+            layout.show_in_recording,
+        );
+        assert!(on, "a stream-only Buddy is in the idle program");
         let saved = layout.horizontal;
         let dragged = OverlayRect::new(0.1, 0.1, saved.w, saved.h);
         let dragged_transform = CameraTransform {
@@ -20553,6 +21776,28 @@ mod buddy_sprite_tests {
             None
         );
         assert_eq!(buddy_editor_place(None), None);
+        // On, the primary draws the pet: at its saved place with no draft or
+        // a chrome-only hold, at the dragged place while a draft moves it,
+        // and at its saved place under any other draft.
+        assert_eq!(primary_buddy_place(on, None), Some(None));
+        assert_eq!(
+            primary_buddy_place(on, Some(&editor_draft(BUDDY_DRAFT_ID, None))),
+            Some(None)
+        );
+        assert_eq!(
+            primary_buddy_place(
+                on,
+                Some(&editor_draft(BUDDY_DRAFT_ID, Some(dragged_transform)))
+            ),
+            Some(Some(dragged))
+        );
+        assert_eq!(
+            primary_buddy_place(
+                on,
+                Some(&editor_draft("overlay:highlight", Some(dragged_transform)))
+            ),
+            Some(None)
+        );
 
         let slot = crate::buddy_sprite::BuddySpriteSlot::new(
             &crate::cohost::CohostPersona::default(),
@@ -20614,6 +21859,80 @@ mod buddy_sprite_tests {
                 assert_ne!(centre_luma(&metal, held.buddy_box), pet);
             }
         }
+    }
+
+    /// Plan 205 D4: a Buddy off for both outputs is in no program, so the
+    /// primary leg draws nothing for it even while the Scene editor holds or
+    /// drags it (the 2026-10-27 exception is gone). Deselecting changes
+    /// nothing either: the picture never had the pet.
+    #[test]
+    fn an_off_buddy_held_by_the_editor_draws_nothing() {
+        let layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        assert!(!layout.show_on_stream && !layout.show_in_recording);
+        let on = crate::overlay_layout::program_shows(
+            None,
+            layout.show_on_stream,
+            layout.show_in_recording,
+        );
+        assert!(!on);
+        let saved = layout.horizontal;
+        let dragged = OverlayRect::new(0.1, 0.1, saved.w, saved.h);
+        let dragged_transform = CameraTransform {
+            x: dragged.x,
+            y: dragged.y,
+            width: dragged.w,
+            height: dragged.h,
+        };
+        // The editor's draft still names the Buddy…
+        assert_eq!(
+            buddy_editor_place(Some(&editor_draft(BUDDY_DRAFT_ID, Some(dragged_transform)))),
+            Some(Some(dragged))
+        );
+        // …but the primary draws no pet for it: not held, not dragged, not
+        // without a draft.
+        assert_eq!(
+            primary_buddy_place(on, Some(&editor_draft(BUDDY_DRAFT_ID, None))),
+            None
+        );
+        assert_eq!(
+            primary_buddy_place(
+                on,
+                Some(&editor_draft(BUDDY_DRAFT_ID, Some(dragged_transform)))
+            ),
+            None
+        );
+        assert_eq!(primary_buddy_place(on, None), None);
+        // The frame composed with no Buddy leg has no pet at either place.
+        let slot = crate::buddy_sprite::BuddySpriteSlot::new(
+            &crate::cohost::CohostPersona::default(),
+            layout,
+            None,
+        );
+        slot.install_atlas_for_test(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::buddy_sprite::tests::parity_atlas(64),
+        );
+        let would_be = slot.leg_frame_at(
+            crate::buddy_sprite::BuddyLegRequest {
+                leg: crate::buddy_sprite::BuddySpriteLeg::Primary,
+                canvas: (WIDTH, HEIGHT),
+                now_seconds: 2.0,
+                highlight_rect: None,
+                caption_rect: None,
+            },
+            Some(dragged),
+        );
+        let centre_luma = |frame: &[u8], [x, y, w, h]: [f32; 4]| {
+            frame[(y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize]
+        };
+        let pet = rgb_to_yuv(230, 40, 40).0;
+        let cpu = cpu_frame(inputs(1, None, None, None, None));
+        assert_ne!(centre_luma(&cpu, would_be.buddy_box), pet);
+        assert_ne!(
+            centre_luma(&cpu, crate::buddy_sprite::buddy_box(saved, WIDTH, HEIGHT)),
+            pet
+        );
     }
 }
 
@@ -21607,6 +22926,674 @@ mod banner_tests {
     }
 }
 
+/// Plan 205 S6: the Preview's own picture, the program leg. The trigger
+/// across the session table, the session flags' program verdict, no GPU
+/// work while the trigger is false, and on Metal: a buffer-only lease and a
+/// split session each present a stream-only Buddy the primary leg lacks,
+/// and switching the leg on and off always leaves a presentable frame.
+#[cfg(test)]
+mod program_leg_tests {
+    use super::*;
+    use crate::banners::tests::sample_banner;
+    use crate::banners::{BannerFade, BannerLayer};
+    use crate::overlay_layout::{OverlayAuxLeg, OverlayLayout};
+    use crate::protocol::{SceneConfigParams, VideoPreset, VideoSettings};
+
+    fn shape(record: bool, stream: bool, aux_leg: OverlayAuxLeg) -> OverlaySessionShape {
+        OverlaySessionShape {
+            record_enabled: record,
+            stream_enabled: stream,
+            aux_leg,
+        }
+    }
+
+    /// The seven rows of "The rule": `(session shape, replay_only)`.
+    fn session_table() -> Vec<(&'static str, Option<OverlaySessionShape>, bool)> {
+        vec![
+            ("idle", None, false),
+            (
+                "buffer-only",
+                Some(shape(true, false, OverlayAuxLeg::None)),
+                true,
+            ),
+            (
+                "record",
+                Some(shape(true, false, OverlayAuxLeg::None)),
+                false,
+            ),
+            (
+                "stream",
+                Some(shape(false, true, OverlayAuxLeg::None)),
+                false,
+            ),
+            (
+                "shared",
+                Some(shape(true, true, OverlayAuxLeg::None)),
+                false,
+            ),
+            (
+                "split",
+                Some(shape(true, true, OverlayAuxLeg::Stream)),
+                false,
+            ),
+            (
+                "vertical",
+                Some(shape(true, true, OverlayAuxLeg::VerticalSimulcast)),
+                false,
+            ),
+        ]
+    }
+
+    fn flags_for(
+        session: Option<OverlaySessionShape>,
+        replay_only: bool,
+        layout: &OverlayLayout,
+    ) -> OverlayLegFlags {
+        match session {
+            None => OverlayLegFlags::idle(layout),
+            Some(shape) => OverlayLegFlags::for_session(shape, replay_only, layout),
+        }
+    }
+
+    fn overlays(flags: OverlayLegFlags, captions: (bool, bool)) -> ProgramLegOverlays {
+        ProgramLegOverlays {
+            highlight_on_primary: flags.highlight_on_primary,
+            highlight_on_program: flags.highlight_on_program,
+            buddy_on_primary: flags.buddy_on_primary,
+            buddy_on_program: flags.buddy_on_program,
+            caption_on_primary: captions.0,
+            caption_on_aux: captions.1,
+        }
+    }
+
+    fn banner_set(switches: &[(bool, bool)], hiding: bool) -> BannerSet {
+        let now = Instant::now();
+        BannerSet {
+            layers: switches
+                .iter()
+                .enumerate()
+                .map(|(index, (on_stream, in_recording))| {
+                    let mut banner = sample_banner(&format!("b{index}"), index as i64);
+                    banner.show_on_stream = *on_stream;
+                    banner.show_in_recording = *in_recording;
+                    BannerLayer {
+                        image_path: Arc::from(Path::new("/nonexistent/b.png")),
+                        banner,
+                        file_revision: None,
+                        fade: BannerFade {
+                            from: 1.0,
+                            to: if hiding { 0.0 } else { 1.0 },
+                            started_at: now,
+                        },
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn preview_needs_program_leg_across_the_session_table() {
+        let none = banner_set(&[], false);
+        let stream_only_banner = banner_set(&[(true, false)], false);
+        let recording_only_banner = banner_set(&[(false, true)], false);
+        let hiding_stream_only_banner = banner_set(&[(true, false)], true);
+        let mut stream_only_buddy = OverlayLayout::default();
+        stream_only_buddy.buddy.show_on_stream = true;
+        let mut recording_only_buddy = OverlayLayout::default();
+        recording_only_buddy.buddy.show_in_recording = true;
+        let mut both = OverlayLayout::default();
+        both.buddy.show_on_stream = true;
+        both.buddy.show_in_recording = true;
+        for (name, session, replay_only) in session_table() {
+            // The rows whose primary leg is not the program: a buffer-only
+            // ring at idle and a split stream leg.
+            let expected = matches!(name, "buffer-only" | "split");
+            let stream_only = flags_for(session, replay_only, &stream_only_buddy);
+            assert_eq!(
+                preview_needs_program_leg(
+                    session,
+                    replay_only,
+                    overlays(stream_only, (false, false)),
+                    &none
+                ),
+                expected,
+                "{name}: a stream-only Buddy"
+            );
+            assert_eq!(
+                preview_needs_program_leg(
+                    session,
+                    replay_only,
+                    overlays(OverlayLegFlags::default_for_test(), (false, false)),
+                    &stream_only_banner
+                ),
+                expected,
+                "{name}: a stream-only banner"
+            );
+            // Captions exist only in a session; their program is any leg,
+            // so an aux-only bar needs the twin and a primary bar never does.
+            assert_eq!(
+                preview_needs_program_leg(
+                    session,
+                    replay_only,
+                    overlays(OverlayLegFlags::default_for_test(), (false, true)),
+                    &none
+                ),
+                true,
+                "{name}: captions on the aux leg only"
+            );
+            assert!(!preview_needs_program_leg(
+                session,
+                replay_only,
+                overlays(OverlayLegFlags::default_for_test(), (true, true)),
+                &none
+            ));
+            // An item the primary burns, or no output wants, never asks.
+            for layout in [&recording_only_buddy, &both, &OverlayLayout::default()] {
+                assert!(
+                    !preview_needs_program_leg(
+                        session,
+                        replay_only,
+                        overlays(flags_for(session, replay_only, layout), (false, false)),
+                        &none
+                    ),
+                    "{name}: a Buddy the primary burns or nobody wants"
+                );
+            }
+            assert!(!preview_needs_program_leg(
+                session,
+                replay_only,
+                overlays(OverlayLegFlags::default_for_test(), (false, false)),
+                &recording_only_banner
+            ));
+            // A banner whose fade-out ended counts for nothing.
+            assert!(!preview_needs_program_leg(
+                session,
+                replay_only,
+                overlays(OverlayLegFlags::default_for_test(), (false, false)),
+                &hiding_stream_only_banner
+            ));
+        }
+    }
+
+    #[test]
+    fn session_flags_carry_the_programs_verdict() {
+        let mut layout = OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        for (name, session, replay_only) in session_table() {
+            let flags = flags_for(session, replay_only, &layout);
+            let Some(shape) = session else {
+                assert!(flags.buddy_on_primary && flags.buddy_on_program, "{name}");
+                continue;
+            };
+            let plans = crate::overlay_layout::overlay_session_plans(shape, &layout);
+            assert_eq!(flags.buddy_on_primary, plans.buddy.primary, "{name}");
+            assert_eq!(flags.buddy_on_aux, plans.buddy.aux, "{name}");
+            let program = crate::overlay_layout::program_shows(
+                preview_program_shape(session, replay_only),
+                true,
+                false,
+            );
+            assert_eq!(flags.buddy_on_program, program, "{name}");
+            assert_eq!(
+                flags.buddy_on_program,
+                !matches!(name, "record"),
+                "{name}: every row but record only carries a stream-only Buddy"
+            );
+        }
+    }
+
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 360;
+    const PET: [u8; 3] = [230, 40, 40];
+
+    fn state_with_scene() -> AppState {
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            tokio::sync::broadcast::channel(16).0,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: WIDTH,
+                height: HEIGHT,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let mut compositor = state.compositor.try_lock().expect("unlocked");
+        compositor.run_id = Some("test-run".to_string());
+        compositor.scene = Some(CompositorSceneSnapshot {
+            selected_sources: None,
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        });
+        drop(compositor);
+        state
+    }
+
+    /// The pet's box on `canvas`, as an oracle rect around its centre.
+    fn pet_rect() -> crate::preview_debug_sample::Rect {
+        let [x, y, w, h] = crate::buddy_sprite::buddy_box(
+            OverlayLayout::default().buddy.horizontal,
+            WIDTH,
+            HEIGHT,
+        );
+        crate::preview_debug_sample::Rect {
+            x: f64::from(x + w / 2.0) / f64::from(WIDTH) - 0.02,
+            y: f64::from(y + h / 2.0) / f64::from(HEIGHT) - 0.02,
+            w: 0.04,
+            h: 0.04,
+        }
+    }
+
+    fn sample(store: &CompositorFrameStore) -> [f64; 3] {
+        let value = crate::preview_debug_sample::sample_frame_store(store, &[pet_rect()])
+            .expect("the leg published a readable frame");
+        let s = &value["samples"][0];
+        [
+            s["r"].as_f64().unwrap(),
+            s["g"].as_f64().unwrap(),
+            s["b"].as_f64().unwrap(),
+        ]
+    }
+
+    fn is_pet(rgb: [f64; 3]) -> bool {
+        rgb.iter()
+            .zip(PET)
+            .all(|(value, target)| (value - f64::from(target)).abs() < 24.0)
+    }
+
+    struct Tick<'a> {
+        state: &'a AppState,
+        gpu: Option<&'a mut GpuCompositor>,
+        stream_gpu: Option<&'a mut GpuCompositor>,
+        program_gpu: &'a mut Option<GpuCompositor>,
+        consumer: CompositorFrameConsumer,
+        stream_output: Option<CompositorAuxiliaryOutput>,
+        buddy_on_primary: bool,
+        buddy_on_aux: bool,
+        buddy_on_program: bool,
+        presenting: bool,
+    }
+
+    async fn tick(sequence: u64, tick: Tick<'_>) -> CompositorPublishResult {
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(tick.state).await;
+        publish_compositor_frame(
+            tick.state,
+            "test-run",
+            sequence,
+            WIDTH,
+            HEIGHT,
+            &mut live_sources,
+            &mut render_cache,
+            tick.gpu,
+            tick.consumer,
+            tick.stream_output,
+            tick.stream_gpu,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            tick.buddy_on_primary,
+            tick.buddy_on_aux,
+            LiveBackgroundLeg::unmeasured(&mut None),
+            ProgramLeg {
+                gpu: tick.program_gpu,
+                highlight_on_program: false,
+                buddy_on_program: tick.buddy_on_program,
+                presenting: tick.presenting,
+            },
+        )
+        .await
+    }
+
+    fn program_store_is_empty(state: &AppState) -> bool {
+        state
+            .compositor
+            .try_lock()
+            .expect("unlocked")
+            .program_frame_store
+            .lock()
+            .unwrap()
+            .latest()
+            .is_none()
+    }
+
+    /// The STOP condition's guard: while the trigger is false, or no Preview
+    /// surface is live, the program leg builds nothing, composes nothing and
+    /// publishes nothing, whatever the primary does.
+    #[tokio::test]
+    async fn no_program_leg_work_while_the_trigger_is_false() {
+        let state = state_with_scene();
+        let mut program_gpu = None;
+        for (buddy_on_primary, buddy_on_program, presenting) in [
+            (false, false, true),
+            (true, true, true),
+            (true, false, true),
+            (false, true, false),
+        ] {
+            let result = tick(
+                1,
+                Tick {
+                    state: &state,
+                    gpu: None,
+                    stream_gpu: None,
+                    program_gpu: &mut program_gpu,
+                    consumer: CompositorFrameConsumer::RawYuvEncoder,
+                    stream_output: None,
+                    buddy_on_primary,
+                    buddy_on_aux: false,
+                    buddy_on_program,
+                    presenting,
+                },
+            )
+            .await;
+            assert!(result.primary_published);
+            assert!(
+                !result.program_leg_published,
+                "primary={buddy_on_primary} program={buddy_on_program} presenting={presenting}"
+            );
+            assert!(program_gpu.is_none(), "no compositor was built");
+            assert_eq!(result.timings.program_leg_ms, 0.0);
+            assert!(program_store_is_empty(&state));
+        }
+    }
+
+    /// A buffer-only lease (Clips at idle) with a stream-only Buddy: the
+    /// ring's primary frame has no pet (D2), the Preview's frame has it, and
+    /// the lease and the oracle present the Preview's.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_buffer_only_lease_with_a_stream_only_buddy_presents_the_pet_the_ring_lacks() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let state = state_with_scene();
+        state.buddy_sprite.install_atlas_for_test(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::buddy_sprite::tests::parity_atlas(64),
+        );
+        {
+            let mut compositor = state.compositor.try_lock().expect("unlocked");
+            compositor.capture_lease = Some(CompositorCaptureLease {
+                session_id: "clips".to_string(),
+                run_id: "test-run".to_string(),
+                replay_only: true,
+                render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(WIDTH, HEIGHT))),
+                preview_config: idle_config(),
+            });
+            compositor.banner_session_shape = Some(shape(true, false, OverlayAuxLeg::None));
+        }
+        let mut program_gpu = None;
+        let result = tick(
+            1,
+            Tick {
+                state: &state,
+                gpu: Some(&mut gpu),
+                stream_gpu: None,
+                program_gpu: &mut program_gpu,
+                consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                stream_output: None,
+                buddy_on_primary: false,
+                buddy_on_aux: false,
+                buddy_on_program: true,
+                presenting: true,
+            },
+        )
+        .await;
+        if result.compositor_backend != CompositorBackend::Metal {
+            eprintln!("skipping: Metal compositor did not render this frame");
+            return;
+        }
+        assert!(
+            result.program_leg_published,
+            "the Preview composed its own picture"
+        );
+        assert!(program_gpu.is_some());
+        assert!(result.timings.program_leg_ms > 0.0);
+        let (primary, program, presented) = {
+            let compositor = state.compositor.try_lock().expect("unlocked");
+            (
+                compositor.frame_store.clone(),
+                compositor.program_frame_store.clone(),
+                preview_frame_lease::presented_frame_store(&compositor),
+            )
+        };
+        assert!(
+            Arc::ptr_eq(&presented, &program),
+            "the lease presents the program"
+        );
+        let program_frame = program.lock().unwrap().latest().expect("published");
+        assert_eq!(program_frame.sequence, 1);
+        assert_eq!((program_frame.width, program_frame.height), (WIDTH, HEIGHT));
+        assert_eq!(
+            result.metal_target_handoff.map(|h| h.iosurface_id),
+            program_frame.metadata.metal_target_iosurface_id(),
+            "frameReady hands out the program's surface"
+        );
+        drop(program_frame);
+        assert!(is_pet(sample(&program)), "the Preview has the pet");
+        assert!(!is_pet(sample(&primary)), "the ring's frame does not");
+        let oracle = crate::preview_debug_sample::sample(
+            &state,
+            serde_json::json!({ "rects": [pet_rect()] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(oracle["frameId"], 1);
+        assert!(is_pet([
+            oracle["samples"][0]["r"].as_f64().unwrap(),
+            oracle["samples"][0]["g"].as_f64().unwrap(),
+            oracle["samples"][0]["b"].as_f64().unwrap(),
+        ]));
+    }
+
+    /// A split record + stream with a stream-only Buddy: the recording's
+    /// primary frame has no pet, the stream leg's and the Preview's do.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_split_session_with_a_stream_only_buddy_presents_the_pet_the_recording_lacks() {
+        let (Some(mut gpu), Some(mut stream_gpu)) =
+            (new_gpu_compositor(false), new_gpu_compositor(false))
+        else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let state = state_with_scene();
+        for leg in crate::buddy_sprite::BuddySpriteLeg::ALL {
+            state.buddy_sprite.install_atlas_for_test(
+                leg,
+                (WIDTH, HEIGHT),
+                crate::buddy_sprite::tests::parity_atlas(64),
+            );
+        }
+        let stream_output = CompositorAuxiliaryOutput {
+            width: WIDTH,
+            height: HEIGHT,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            composes_simulcast_scene: false,
+        };
+        let stream_store: CompositorFrameStore = Arc::new(StdMutex::new(FrameStore::new(2)));
+        {
+            let mut compositor = state.compositor.try_lock().expect("unlocked");
+            compositor.stream_frame_store = Some(stream_store.clone());
+            compositor.stream_output = Some(stream_output);
+            compositor.banner_session_shape = Some(shape(true, true, OverlayAuxLeg::Stream));
+        }
+        let mut program_gpu = None;
+        let result = tick(
+            1,
+            Tick {
+                state: &state,
+                gpu: Some(&mut gpu),
+                stream_gpu: Some(&mut stream_gpu),
+                program_gpu: &mut program_gpu,
+                consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                stream_output: Some(stream_output),
+                buddy_on_primary: false,
+                buddy_on_aux: true,
+                buddy_on_program: true,
+                presenting: true,
+            },
+        )
+        .await;
+        if result.compositor_backend != CompositorBackend::Metal {
+            eprintln!("skipping: Metal compositor did not render this frame");
+            return;
+        }
+        assert!(result.program_leg_published);
+        let (primary, program, presented) = {
+            let compositor = state.compositor.try_lock().expect("unlocked");
+            (
+                compositor.frame_store.clone(),
+                compositor.program_frame_store.clone(),
+                preview_frame_lease::presented_frame_store(&compositor),
+            )
+        };
+        assert!(Arc::ptr_eq(&presented, &program));
+        assert!(is_pet(sample(&program)), "the Preview has the pet");
+        assert!(is_pet(sample(&stream_store)), "the stream has the pet");
+        assert!(!is_pet(sample(&primary)), "the recording does not");
+    }
+
+    /// Switching the program leg on, off and on again: every tick leaves a
+    /// presentable frame with a Metal target that the lease can acquire,
+    /// the compositor is dropped the first tick the leg is off, and the
+    /// primary's surface is presented from that tick.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn switching_the_program_leg_on_and_off_keeps_a_presentable_frame() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let state = state_with_scene();
+        state.buddy_sprite.install_atlas_for_test(
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::buddy_sprite::tests::parity_atlas(64),
+        );
+        state
+            .compositor
+            .try_lock()
+            .expect("unlocked")
+            .banner_session_shape = Some(shape(true, true, OverlayAuxLeg::Stream));
+        let mut program_gpu = None;
+        let mut presented_surfaces = Vec::new();
+        for (sequence, on) in [(1, true), (2, true), (3, false), (4, false), (5, true)] {
+            let result = tick(
+                sequence,
+                Tick {
+                    state: &state,
+                    gpu: Some(&mut gpu),
+                    stream_gpu: None,
+                    program_gpu: &mut program_gpu,
+                    consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                    stream_output: None,
+                    buddy_on_primary: false,
+                    buddy_on_aux: false,
+                    buddy_on_program: on,
+                    presenting: true,
+                },
+            )
+            .await;
+            if result.compositor_backend != CompositorBackend::Metal {
+                eprintln!("skipping: Metal compositor did not render this frame");
+                return;
+            }
+            assert_eq!(result.program_leg_published, on, "tick {sequence}");
+            assert_eq!(
+                program_gpu.is_some(),
+                on,
+                "tick {sequence}: built or dropped"
+            );
+            let lease = preview_frame_lease::acquire_preview_frame(&state, "test-run", Some(1))
+                .await
+                .unwrap_or_else(|| panic!("tick {sequence}: a presentable frame"));
+            assert_eq!(lease.frame.frames_rendered, sequence);
+            let surface = lease
+                .frame
+                .metal_target_iosurface_id
+                .expect("a Metal target");
+            assert_eq!(
+                Some(surface),
+                result.metal_target_handoff.map(|h| h.iosurface_id),
+                "tick {sequence}: the lease and frameReady agree"
+            );
+            drop(lease);
+            let (presented, program) = {
+                let compositor = state.compositor.try_lock().expect("unlocked");
+                (
+                    preview_frame_lease::presented_frame_store(&compositor),
+                    compositor.program_frame_store.clone(),
+                )
+            };
+            assert_eq!(Arc::ptr_eq(&presented, &program), on, "tick {sequence}");
+            assert_eq!(is_pet(sample(&presented)), on, "tick {sequence}: the pet");
+            presented_surfaces.push(surface);
+        }
+        // Off empties the program store at once; on fills it again.
+        assert!(program_gpu.is_some() && !program_store_is_empty(&state));
+        assert_ne!(
+            presented_surfaces[1], presented_surfaces[2],
+            "the primary's own ring presents while the leg is off"
+        );
+    }
+
+    /// The idle run's configuration a Clips lease parks (a stream-only
+    /// Buddy is in the idle program).
+    fn idle_config() -> CompositorLoopConfig {
+        CompositorLoopConfig {
+            target_fps: 30,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+            buddy_overlay_on_primary: true,
+            buddy_overlay_on_aux: false,
+            highlight_overlay_on_program: false,
+            buddy_overlay_on_program: true,
+        }
+    }
+
+    impl OverlayLegFlags {
+        /// Every flag off.
+        fn default_for_test() -> Self {
+            Self {
+                highlight_on_primary: false,
+                highlight_on_aux: false,
+                buddy_on_primary: false,
+                buddy_on_aux: false,
+                highlight_on_program: false,
+                buddy_on_program: false,
+            }
+        }
+    }
+}
+
 /// Plan 190 S2: the Metal path with a live background. The live frame draws
 /// in place of the poster (which is never uploaded), moves between ticks
 /// while the stage stays put, a forced still falls back to the poster, and a
@@ -22165,6 +24152,7 @@ mod live_background_metal_tests {
                 false,
                 false,
                 LiveBackgroundLeg::pinned_at(&mut self.slot, at),
+                ProgramLeg::off(&mut None),
             )
             .await;
             assert_eq!(
@@ -22646,6 +24634,32 @@ mod live_background_metal_tests {
         // A release shares nothing either.
         renderer.release();
         assert!(renderer.frame_at(still_at).is_none());
+    }
+}
+
+/// Retest 153: the per-pixel source reads stay inlined into the CPU blits.
+/// A release build once turned `read_source_rgba` into a call per pixel and
+/// recording a camera at 720p30 cost the backend ~80 % more CPU, with no code
+/// change in the blits themselves. Only the attribute pins it.
+#[cfg(test)]
+mod per_pixel_inline_tests {
+    #[test]
+    fn per_pixel_source_reads_are_forced_inline() {
+        let source = include_str!("compositor.rs");
+        for function in ["fn read_source_rgba(", "fn read_source_rgba_linear("] {
+            let (before, _) = source
+                .split_once(&format!("\n{function}"))
+                .unwrap_or_else(|| panic!("{function} is defined"));
+            let attributes: Vec<&str> = before
+                .lines()
+                .rev()
+                .take_while(|line| line.starts_with("#[") || line.starts_with("//"))
+                .collect();
+            assert!(
+                attributes.contains(&"#[inline(always)]"),
+                "{function} must stay #[inline(always)]: it runs once per pixel"
+            );
+        }
     }
 }
 

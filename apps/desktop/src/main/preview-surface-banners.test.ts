@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
+import { previewProgramShape } from '../shared/preview-program'
+import type { RecordingStatus } from '../shared/backend'
+
 import type {
   Banner,
   LayoutSettings,
@@ -105,7 +108,11 @@ describe('proof surface banner layers (plan 186 S4)', () => {
       banner({ id: 'nowhere', sortOrder: 1, showOnStream: false, showInRecording: false }),
       banner({ id: 'b', sortOrder: 1, showOnStream: false })
     ]
-    expect(previewSurfaceVisibleBanners(banners).map((item) => item.id)).toEqual(['a', 'b', 'c'])
+    expect(previewSurfaceVisibleBanners(banners, null).map((item) => item.id)).toEqual([
+      'a',
+      'b',
+      'c'
+    ])
     expect(
       previewSurfaceBannerLayers(banners, { width: 1280, height: 720 }).map((item) => item.id)
     ).toEqual(['banner:a', 'banner:b', 'banner:c'])
@@ -176,5 +183,44 @@ describe('proof surface banner layers (plan 186 S4)', () => {
       width: 1280,
       height: 720
     })
+  })
+})
+
+describe('proof surface program banners (plan 205)', () => {
+  const banners = [
+    banner({ id: 'stream', showInRecording: false }),
+    banner({ id: 'record', showOnStream: false }),
+    banner({ id: 'both' }),
+    banner({ id: 'off', showOnStream: false, showInRecording: false }),
+    banner({ id: 'hidden', shown: false })
+  ]
+
+  it.each<{ name: string; status: RecordingStatus; expected: string[] }>([
+    { name: 'idle', status: { state: 'idle' }, expected: ['stream', 'record', 'both'] },
+    { name: 'record only', status: { state: 'recording' }, expected: ['record', 'both'] },
+    { name: 'stream only', status: { state: 'streaming' }, expected: ['stream', 'both'] },
+    {
+      name: 'record and stream',
+      status: { state: 'recording', streamUrl: 'rtmp://example.test/live' },
+      expected: ['stream', 'record', 'both']
+    },
+    {
+      name: 'buffer only is idle',
+      status: { state: 'recording', replayOnly: true },
+      expected: ['stream', 'record', 'both']
+    }
+  ])('$name', ({ status, expected }) => {
+    const shape = previewProgramShape(status)
+    expect(previewSurfaceVisibleBanners(banners, shape).map((item) => item.id)).toEqual(expected)
+    const scene: PreviewSurfaceSceneState = {
+      revision: 1,
+      layout: { layoutPreset: 'screen-camera' } as LayoutSettings,
+      sources: [],
+      bannerCanvas: { width: 1280, height: 720 },
+      updatedAt: 'now'
+    }
+    expect(withPreviewSurfaceBanners(scene, banners, shape).sources.map((item) => item.id)).toEqual(
+      expected.map((id) => `banner:${id}`)
+    )
   })
 })

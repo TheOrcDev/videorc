@@ -117,13 +117,13 @@ describe('SegmentedControl', () => {
     for (const candidate of radios()) expect(candidate.type).toBe('button')
   })
 
-  it('wears the Tabs track, with the checked segment as the glass chip', async () => {
+  it('wears the Tabs track, with the checked segment as the chrome plate', async () => {
     await render(
       h(Controlled, { 'aria-label': 'Theme', changes: [], initial: 'dark', options: THEMES })
     )
     expect(group().className).toContain('ring-border')
     expect(group().className).toContain('rounded-row')
-    expect(radio('Dark').className).toContain('aria-checked:glass-chip')
+    expect(radio('Dark').className).toContain('aria-checked:chrome-plate')
   })
 
   it('lets Tab reach the first enabled option when nothing is checked', async () => {

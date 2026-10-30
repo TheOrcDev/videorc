@@ -2,6 +2,8 @@ import type {
   AudienceSnapshot,
   AudioLevelsEvent,
   SessionSources,
+  ScreenHideParams,
+  ScreenPrivacy,
   SourceSwitchParams,
   BackendHealth,
   ScheduledStreamEvent,
@@ -86,7 +88,12 @@ import type {
   SceneEditorDraftAck,
   SceneEditorDraftParams,
   SceneEditorDraftStatus,
+  ScreenSwitchStatus,
   DeviceList,
+  ResolveAppWindowParams,
+  ResolveAppWindowResult,
+  AppPreviewsParams,
+  AppPreviewsResult,
   DiagnosticStats,
   EntitlementsSnapshot,
   FileAssessment,
@@ -135,6 +142,19 @@ import type {
   UsageStatsState,
   DiscordAnnounceSnapshot,
   DiscordAnnounceUpdateParams,
+  AgentAcknowledged,
+  AgentActivityEntry,
+  AgentCreated,
+  AgentIdParams,
+  AgentIntentAckParams,
+  AgentIntentEvent,
+  AgentIntentCancelEvent,
+  AgentsActivityListParams,
+  AgentsActivityPage,
+  AgentsCreateParams,
+  AgentsStatus,
+  AgentSummary,
+  AgentSurfacePublishParams,
   DiscordLinksPreview,
   DiscordTargetsParams,
   DiscordTestParams,
@@ -191,6 +211,7 @@ import {
   SOUNDBOARD_VOLUME_DB_MIN
 } from './backend'
 import { isBannerFileName } from './banner-assets'
+import type { CohostActAnswer, CohostActParams } from './buddy-act'
 import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from './live-background-ids'
 import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
@@ -359,6 +380,9 @@ export interface BackendRpcMethodMap {
   >
   'account.sign_out': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
+  'sources.resolve_app_window': BackendRpcDefinition<ResolveAppWindowParams, ResolveAppWindowResult>
+  // Plan 210 S4: New scene…'s picker, only while it is open.
+  'sources.app_previews': BackendRpcDefinition<AppPreviewsParams | undefined, AppPreviewsResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
   'stream.output.topology.probe': BackendRpcDefinition<
@@ -467,6 +491,9 @@ export interface BackendRpcMethodMap {
   'cohost.command.choose': BackendRpcDefinition<CohostCommandChooseParams, CohostState>
   'cohost.command.confirm': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
+  // Plan 209 S20: `/buddy <words>`; answers at once, the result follows as
+  // `cohost.act.result`.
+  'cohost.act': BackendRpcDefinition<CohostActParams, CohostActAnswer>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
   // --- Overlay layout (plan 164) ---
@@ -489,6 +516,11 @@ export interface BackendRpcMethodMap {
   'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
   // --- end banners (plan 186) ---
   // --- Soundboard (plan 189) ---
+  // --- Hide screen (plan 210 S7) ---
+  'screen.hide': BackendRpcDefinition<ScreenHideParams, ScreenPrivacy>
+  'screen.show': BackendRpcDefinition<undefined, ScreenPrivacy>
+  'screen.privacy.get': BackendRpcDefinition<undefined, ScreenPrivacy>
+  // --- end Hide screen (plan 210 S7) ---
   'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
   'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
   'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
@@ -549,6 +581,27 @@ export interface BackendRpcMethodMap {
   // --- end Buddy pets (plan 168, Phase B) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
+  // --- Agents (plan 209 S2, S3): renderer and admin ---
+  'agents.status': BackendRpcDefinition<undefined, AgentsStatus>
+  'agents.enable': BackendRpcDefinition<undefined, AgentsStatus>
+  'agents.disable': BackendRpcDefinition<undefined, AgentsStatus>
+  /** The token is in the answer once; show it, never store it. */
+  'agents.create': BackendRpcDefinition<AgentsCreateParams, AgentCreated>
+  'agents.remove': BackendRpcDefinition<AgentIdParams, AgentsStatus>
+  'agents.activity.list': BackendRpcDefinition<
+    AgentsActivityListParams | undefined,
+    AgentsActivityPage
+  >
+  /** Stop (D12): every agent is cut and Agents turns off. */
+  'agents.stop': BackendRpcDefinition<undefined, AgentsStatus>
+  /** Renderer-only, per socket: the Studio's socket runs agent intents, so
+   * it receives `agent.intent` and counts as "the Studio is open". */
+  'agent.intent.listen': BackendRpcDefinition<undefined, AgentAcknowledged>
+  /** Renderer-only: the Studio's answer to an `agent.intent` event. */
+  'agent.intent.ack': BackendRpcDefinition<AgentIntentAckParams, AgentAcknowledged>
+  /** Renderer-only: the Studio's projection for the Look tools. */
+  'agent.surface.publish': BackendRpcDefinition<AgentSurfacePublishParams, AgentAcknowledged>
+  // --- end Agents (plan 209) ---
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
   'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
   'liveChat.moderation.request': BackendRpcDefinition<ModerationRequestParams, ModerationOperation>
@@ -609,6 +662,8 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  // Plan 209 S20: the final answer to a `cohost.act`.
+  'cohost.act.result': CohostActAnswer
   'cohost.report.saved': CohostReportSavedEvent
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
@@ -617,6 +672,9 @@ export interface BackendEventMap {
   'banners.changed': Banner[]
   // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
   'sounds.changed': SoundboardState
+  // --- Hide screen (plan 210 S7): the state, on every hide and show ---
+  'remote.state': { screenHidden: boolean; [key: string]: unknown }
+  'screen.privacy.changed': ScreenPrivacy
   'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
@@ -652,6 +710,12 @@ export interface BackendEventMap {
   'liveChat.moderationOperation': ModerationOperation
   'youtube.quota': YouTubeQuotaStatus
   'discord.announce.changed': DiscordAnnounceSnapshot
+  // --- Agents (plan 209): renderer sockets only ---
+  'agents.status': AgentsStatus
+  'agents.activity': AgentActivityEntry
+  'agent.intent': AgentIntentEvent
+  'agent.intent.cancel': AgentIntentCancelEvent
+  // --- end Agents (plan 209) ---
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -785,8 +849,28 @@ const entitlementsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<EntitlementsSnapshot>
 
+// Plan 210 S4: a small JPEG of an app's front window. 2 MB of base64 is far
+// past a 320 px picture; anything else is not a picture the picker draws.
+const appPreviewPictureSchema = runtimeSchema<string>('a JPEG data URL', (value, path) => {
+  const url = stringSchema({ minLength: 1, maxLength: 2_000_000 }).parse(value, path)
+  if (!url.startsWith('data:image/jpeg;base64,'))
+    throw new RuntimeSchemaError(path, 'a JPEG data URL')
+  return url
+})
+
 const deviceSchema = objectSchema(
   {
+    app: optionalSchema(
+      objectSchema(
+        {
+          bundleId: boundedString,
+          name: boundedString,
+          pid: numberSchema({ integer: true, min: 0, max: 2_147_483_647 })
+        },
+        { allowUnknown: false }
+      )
+    ),
+    windowTitle: optionalText,
     id: boundedString,
     name: boundedString,
     kind: enumSchema(['screen', 'window', 'camera', 'microphone', 'system-audio']),
@@ -1151,6 +1235,128 @@ const discordAnnounceSnapshotSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordAnnounceSnapshot>
+// --- Agents (plan 209): strict shapes, no nulls, no tokens past agents.create ---
+const AGENT_NAME_MAX_CHARS = 40
+const AGENT_TOOL_NAME_MAX_CHARS = 40
+const AGENT_ACTIVITY_MAX_ROWS = 1000
+const agentClientKindSchema = enumSchema([
+  'claude-desktop',
+  'claude-code',
+  'cursor',
+  'codex',
+  'vs-code',
+  'other'
+])
+const agentActivityOutcomeSchema = enumSchema(['ok', 'refused', 'failed', 'timeout'])
+const agentIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const agentNameSchema = stringSchema({ minLength: 1, maxLength: AGENT_NAME_MAX_CHARS * 4 })
+const agentToolNameSchema = stringSchema({ minLength: 1, maxLength: AGENT_TOOL_NAME_MAX_CHARS })
+const agentLastActionSchema = objectSchema(
+  { tool: agentToolNameSchema, at: timestamp, outcome: agentActivityOutcomeSchema },
+  { allowUnknown: false }
+)
+const agentSummarySchema = objectSchema(
+  {
+    id: agentIdSchema,
+    name: agentNameSchema,
+    client: agentClientKindSchema,
+    createdAt: timestamp,
+    lastUsedAt: optionalSchema(timestamp),
+    lastAction: optionalSchema(agentLastActionSchema),
+    connected: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentSummary>
+const agentsStatusSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    port: optionalSchema(numberSchema({ integer: true, min: 1, max: 65_535 })),
+    bindError: optionalSchema(stringSchema({ maxLength: 1024 })),
+    bindErrorKind: optionalSchema(enumSchema(['ports-busy', 'other'])),
+    discoveryPath: optionalSchema(boundedPath),
+    agents: arraySchema(agentSummarySchema, { maxLength: 64 }),
+    connectedCount: nonNegativeInteger,
+    studioOpen: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsStatus>
+const agentsCreateParamsSchema = objectSchema(
+  { name: agentNameSchema, client: agentClientKindSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsCreateParams>
+const agentCreatedSchema = objectSchema(
+  { agent: agentSummarySchema, token: stringSchema({ minLength: 1, maxLength: 256 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentCreated>
+const agentIdParamsSchema = objectSchema(
+  { id: agentIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIdParams>
+const agentActivityEntrySchema = objectSchema(
+  {
+    id: agentIdSchema,
+    at: timestamp,
+    agentId: agentIdSchema,
+    agentName: agentNameSchema,
+    tool: agentToolNameSchema,
+    summary: stringSchema({ maxLength: 512 }),
+    outcome: agentActivityOutcomeSchema,
+    message: optionalSchema(stringSchema({ maxLength: 2048 })),
+    // Plan 209 S6 (D11): the filled notice of a successful onAir call, on
+    // the `agents.activity` event only; stored rows never carry it.
+    notice: optionalSchema(stringSchema({ minLength: 1, maxLength: 2048 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentActivityEntry>
+const agentsActivityListParamsSchema = objectSchema(
+  {
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: AGENT_ACTIVITY_MAX_ROWS })),
+    agentId: optionalSchema(agentIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsActivityListParams>
+const agentsActivityPageSchema = objectSchema(
+  { entries: arraySchema(agentActivityEntrySchema, { maxLength: AGENT_ACTIVITY_MAX_ROWS }) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentsActivityPage>
+const agentIntentEventSchema = objectSchema(
+  {
+    intentId: agentIdSchema,
+    agentId: agentIdSchema,
+    agentName: agentNameSchema,
+    tool: agentToolNameSchema,
+    args: boundedBackendParamValueSchema,
+    deadlineAt: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    generation: optionalSchema(numberSchema({ integer: true, min: 0 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentEvent>
+const agentIntentCancelEventSchema = objectSchema(
+  {
+    generation: numberSchema({ integer: true, min: 0 }),
+    agentId: optionalSchema(agentIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentCancelEvent>
+const agentIntentAckParamsSchema = objectSchema(
+  {
+    intentId: agentIdSchema,
+    ok: booleanSchema,
+    message: optionalSchema(stringSchema({ maxLength: 2048 })),
+    result: optionalSchema(boundedBackendParamValueSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentIntentAckParams>
+const agentSurfacePublishParamsSchema = objectSchema(
+  { surface: boundedBackendParamValueSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentSurfacePublishParams>
+const agentAcknowledgedSchema = objectSchema(
+  { ok: literalSchema(true) },
+  { allowUnknown: false }
+) as RuntimeSchema<AgentAcknowledged>
+// --- end Agents (plan 209) ---
+
 const discordAnnounceUpdateParamsSchema = objectSchema(
   {
     enabled: optionalSchema(booleanSchema),
@@ -1578,6 +1784,18 @@ const liveBackgroundStatusSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const screenSwitchStatusSchema = objectSchema(
+  {
+    mode: enumSchema(['in-place', 'restart']),
+    reason: optionalText,
+    sourceId: boundedString,
+    generation: nonNegativeInteger,
+    firstFrameMs: optionalSchema(nonNegativeInteger),
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ScreenSwitchStatus>
+
 const compositorStatusSchema = objectSchema(
   {
     state: enumSchema(['stopped', 'starting', 'live', 'failed']),
@@ -1605,6 +1823,7 @@ const compositorStatusSchema = objectSchema(
     framePipeline: optionalSchema(boundedBackendPayloadSchema),
     editorDraft: optionalSchema(nullableSchema(sceneEditorDraftStatusSchema)),
     liveBackground: optionalSchema(liveBackgroundStatusSchema),
+    screenSwitch: optionalSchema(screenSwitchStatusSchema),
     updatedAt: timestamp,
     message: optionalText
   },
@@ -2153,6 +2372,7 @@ const sceneCommitStatusSchema = boundedSemanticValue(
 )
 
 const recordingFinalizationStateSchema = enumSchema(['none', 'finalizing', 'finalized', 'failed'])
+const interruptionRecoverySchema = enumSchema(['recovered', 'failed'])
 
 const recordingFinalizationEventSchema = boundedSemanticValue(
   'a recording finalization event',
@@ -2166,6 +2386,7 @@ const recordingFinalizationEventSchema = boundedSemanticValue(
       durationMs: optionalSchema(nonNegativeInteger),
       fileSizeBytes: optionalSchema(nonNegativeInteger),
       error: optionalSchema(stringSchema({ maxLength: 16_384 })),
+      interruptionRecovery: optionalSchema(interruptionRecoverySchema),
       updatedAt: timestamp
     },
     { allowUnknown: false }
@@ -2224,7 +2445,9 @@ const sessionSummarySchema = boundedSemanticValue(
       finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 })),
       // Plan 157: separate-source take membership.
       takeId: optionalSchema(boundedString),
-      recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera']))
+      recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera'])),
+      // A take Videorc stopped mid-recording, recovered on the next start.
+      interruptionRecovery: optionalSchema(interruptionRecoverySchema)
     },
     { allowUnknown: false }
   )
@@ -2825,6 +3048,14 @@ const cohostWelcomeLineSchema = objectSchema(
 )
 const cohostAutoChatSchema = objectSchema(
   {
+    // Plan 211 D3: how Buddy talks, the one truth. Rust always sends it
+    // after normalization; optional here like `ai`, so a block from before
+    // the field still validates (the backend then reads `mode` for it).
+    // Absent, never null.
+    talk: optionalSchema(enumSchema(['off', 'bubble', 'suggest'])),
+    // Legacy (plan 211 D3): the projection older apps read. `auto` stays
+    // accepted on the way in (an old block) and is read as Bubble; the
+    // backend never writes it again.
     mode: enumSchema(['off', 'suggest', 'auto']),
     greetings: objectSchema(
       {
@@ -3273,6 +3504,23 @@ const soundSchema = objectSchema(
 const soundListSchema = arraySchema(soundSchema, {
   maxLength: SOUND_MAX_COUNT
 }) as RuntimeSchema<Sound[]>
+// --- Hide screen (plan 210 S7) ---
+const screenPrivacyReasonSchema = enumSchema(['you', 'password-manager'])
+const screenPrivacySchema = objectSchema(
+  {
+    hidden: booleanSchema,
+    since: optionalSchema(timestamp),
+    reason: optionalSchema(screenPrivacyReasonSchema),
+    unavailable: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ScreenPrivacy>
+const screenHideParamsSchema = objectSchema(
+  { reason: screenPrivacyReasonSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<ScreenHideParams>
+// --- end Hide screen (plan 210 S7) ---
+
 const soundboardStateSchema = objectSchema(
   {
     sounds: soundListSchema,
@@ -3635,7 +3883,8 @@ const cohostCommandSchema = objectSchema(
       'hide-banner',
       'hide-banners',
       'show-buddy',
-      'hide-buddy'
+      'hide-buddy',
+      'act'
     ]),
     status: enumSchema([
       'done',
@@ -3763,7 +4012,10 @@ const cohostFlagParamsSchema = objectSchema(
 // Chat moderation (plan 140 S4): closed shapes, kebab-case enums, optional
 // fields absent (never null) when the backend has nothing to say.
 // 'orcle-voice' is a saved wire value (plan 170 D22); never rename it.
-const moderationSourceSchema = enumSchema(['manual', 'orcle-voice'])
+// 'agent' (plan 209 S12) is the backend's own: an operation may carry it,
+// a renderer request never asks for it.
+const moderationSourceSchema = enumSchema(['manual', 'orcle-voice', 'agent'])
+const moderationRequestSourceSchema = enumSchema(['manual', 'orcle-voice'])
 const removeConfirmModeSchema = enumSchema(['confirm', 'countdown'])
 const moderationOperationSchema = objectSchema(
   {
@@ -3811,7 +4063,7 @@ const moderationRequestParamsSchema = objectSchema(
   {
     operationId: boundedString,
     messageId: boundedString,
-    source: moderationSourceSchema,
+    source: moderationRequestSourceSchema,
     reason: optionalSchema(stringSchema({ maxLength: 200 })),
     confirmMode: optionalSchema(removeConfirmModeSchema)
   },
@@ -3856,6 +4108,25 @@ const cohostCommandParamsSchema = objectSchema(
   { commandId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostCommandParams>
+// Plan 209 S20: `/buddy <words>` and Buddy's answer (`cohost.act`, then the
+// final one as `cohost.act.result`).
+const cohostActIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const cohostActParamsSchema = objectSchema(
+  {
+    actId: cohostActIdSchema,
+    sentence: stringSchema({ minLength: 1, maxLength: 2000 }),
+    consentToProcessChat: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostActParams>
+const cohostActAnswerSchema = objectSchema(
+  {
+    actId: cohostActIdSchema,
+    status: enumSchema(['working', 'done', 'refused', 'unavailable', 'not-found']),
+    message: stringSchema({ minLength: 1, maxLength: 2000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostActAnswer>
 
 // Plan 119 S1: the Buddy report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
@@ -3958,7 +4229,9 @@ const cohostReportGreetingsSchema = objectSchema(
           deduped: optionalSchema(nonNegativeInteger),
           held: optionalSchema(nonNegativeInteger),
           destinationFailed: optionalSchema(nonNegativeInteger),
-          youtubePaused: optionalSchema(nonNegativeInteger)
+          youtubePaused: optionalSchema(nonNegativeInteger),
+          // Plan 211 D9: Bubble mode with Buddy on no output.
+          noBubble: optionalSchema(nonNegativeInteger)
         },
         { allowUnknown: false }
       )
@@ -4007,6 +4280,17 @@ const cohostReportPostSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 211 D11: what Buddy said in its bubble on stream, written when it showed.
+const cohostReportSaidSchema = objectSchema(
+  {
+    id: boundedString,
+    at: timestamp,
+    trigger: enumSchema(['greeting', 'answer', 'banter', 'manual']),
+    text: stringSchema({ maxLength: 2000 }),
+    source: optionalSchema(enumSchema(['ai', 'line']))
+  },
+  { allowUnknown: false }
+)
 const cohostSessionReportSchema = objectSchema(
   {
     version: literalSchema(1),
@@ -4024,7 +4308,8 @@ const cohostSessionReportSchema = objectSchema(
     alerts: optionalSchema(arraySchema(cohostReportAlertSchema, { maxLength: 8 })),
     recap: cohostReportRecapSchema,
     commands: optionalSchema(cohostReportCommandsSchema),
-    posts: optionalSchema(arraySchema(cohostReportPostSchema, { maxLength: 200 }))
+    posts: optionalSchema(arraySchema(cohostReportPostSchema, { maxLength: 200 })),
+    said: optionalSchema(arraySchema(cohostReportSaidSchema, { maxLength: 200 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSessionReport>
@@ -4645,6 +4930,63 @@ const runtimeContracts = {
     params: oauthCompleteParamsSchema,
     result: oauthCallbackResultSchema
   },
+  'sources.resolve_app_window': {
+    params: objectSchema(
+      {
+        bundleId: stringSchema({ minLength: 1, maxLength: 16_384 }),
+        preferWindowId: optionalText,
+        minWidth: optionalSchema(numberSchema({ integer: true, min: 0, max: 65_536 })),
+        minHeight: optionalSchema(numberSchema({ integer: true, min: 0, max: 65_536 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: unionSchema([
+      objectSchema(
+        {
+          ok: literalSchema(true),
+          windowId: boundedString,
+          title: stringSchema({ maxLength: 16_384 }),
+          width: nonNegativeInteger,
+          height: nonNegativeInteger
+        },
+        { allowUnknown: false }
+      ),
+      objectSchema(
+        { ok: literalSchema(false), reason: enumSchema(['not-running', 'no-window', 'minimized']) },
+        { allowUnknown: false }
+      )
+    ])
+  },
+  'sources.app_previews': {
+    params: optionalSchema(
+      objectSchema(
+        { maxWidth: optionalSchema(numberSchema({ integer: true, min: 32, max: 1_920 })) },
+        { allowUnknown: false }
+      )
+    ),
+    result: objectSchema(
+      {
+        apps: arraySchema(
+          objectSchema(
+            {
+              bundleId: boundedString,
+              name: boundedString,
+              pid: numberSchema({ integer: true, min: 0, max: 2_147_483_647 }),
+              windowCount: nonNegativeInteger,
+              frontWindowId: optionalSchema(boundedString),
+              frontWindowTitle: optionalText,
+              picture: optionalSchema(appPreviewPictureSchema),
+              width: optionalSchema(nonNegativeInteger),
+              height: optionalSchema(nonNegativeInteger)
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 512 }
+        )
+      },
+      { allowUnknown: false }
+    )
+  },
   'devices.list': { params: undefinedOrFfmpegPathSchema, result: deviceListSchema },
   'recording.status': { params: undefinedSchema, result: recordingStatusSchema },
   'stream.output.topology.probe': {
@@ -4902,6 +5244,7 @@ const runtimeContracts = {
   'cohost.command.choose': { params: cohostCommandChooseParamsSchema, result: cohostStateSchema },
   'cohost.command.confirm': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
+  'cohost.act': { params: cohostActParamsSchema, result: cohostActAnswerSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
   // --- Overlay layout (plan 164) ---
@@ -4922,6 +5265,11 @@ const runtimeContracts = {
   'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
   // --- end banners (plan 186) ---
   // --- Soundboard (plan 189) ---
+  // --- Hide screen (plan 210 S7) ---
+  'screen.hide': { params: screenHideParamsSchema, result: screenPrivacySchema },
+  'screen.show': { params: undefinedSchema, result: screenPrivacySchema },
+  'screen.privacy.get': { params: undefinedSchema, result: screenPrivacySchema },
+  // --- end Hide screen (plan 210 S7) ---
   'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
   'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
   'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },
@@ -5060,7 +5408,25 @@ const runtimeContracts = {
   'cohost.report.latest': {
     params: undefinedSchema,
     result: nullableSchema(cohostReportPayloadSchema)
+  },
+  // --- Agents (plan 209 S2, S3) ---
+  'agents.status': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.enable': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.disable': { params: undefinedSchema, result: agentsStatusSchema },
+  'agents.create': { params: agentsCreateParamsSchema, result: agentCreatedSchema },
+  'agents.remove': { params: agentIdParamsSchema, result: agentsStatusSchema },
+  'agents.activity.list': {
+    params: optionalSchema(agentsActivityListParamsSchema),
+    result: agentsActivityPageSchema
+  },
+  'agents.stop': { params: undefinedSchema, result: agentsStatusSchema },
+  'agent.intent.listen': { params: undefinedSchema, result: agentAcknowledgedSchema },
+  'agent.intent.ack': { params: agentIntentAckParamsSchema, result: agentAcknowledgedSchema },
+  'agent.surface.publish': {
+    params: agentSurfacePublishParamsSchema,
+    result: agentAcknowledgedSchema
   }
+  // --- end Agents (plan 209) ---
 } satisfies Record<BackendRpcMethod, RuntimeBackendRpcContract>
 
 export function isTypedBackendRpcMethod(method: string): method is BackendRpcMethod {
@@ -5106,12 +5472,18 @@ const runtimeEventSchemas = {
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
+  'cohost.act.result': cohostActAnswerSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
   'banners.changed': bannerListSchema,
   'sounds.changed': soundboardStateSchema,
+  'screen.privacy.changed': screenPrivacySchema,
+  'remote.state': runtimeSchema<BackendEventMap['remote.state']>('remote state', (value, path) => {
+    objectSchema({ screenHidden: booleanSchema }, { allowUnknown: true }).parse(value, path)
+    return value as BackendEventMap['remote.state']
+  }),
   'sounds.playback': soundsPlaybackSchema,
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,
@@ -5150,7 +5522,13 @@ const runtimeEventSchemas = {
   'liveChat.moderationOperation': moderationOperationSchema,
   'youtube.quota': youtubeQuotaStatusSchema,
   'liveChat.totals': sessionChatTotalsSchema,
-  'discord.announce.changed': discordAnnounceSnapshotSchema
+  'discord.announce.changed': discordAnnounceSnapshotSchema,
+  // --- Agents (plan 209) ---
+  'agents.status': agentsStatusSchema,
+  'agents.activity': agentActivityEntrySchema,
+  'agent.intent': agentIntentEventSchema,
+  'agent.intent.cancel': agentIntentCancelEventSchema
+  // --- end Agents (plan 209) ---
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

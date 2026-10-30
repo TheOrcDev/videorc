@@ -2597,6 +2597,8 @@ mod runtime {
         ticket: WindowsD3d11TextureLeaseTicket,
         preview_generation: u64,
         source_live: bool,
+        /// Starts the presenter's handoff-to-present latency sample.
+        offered_at: Instant,
     }
 
     #[derive(Debug)]
@@ -3102,6 +3104,7 @@ mod runtime {
                     ticket,
                     preview_generation,
                     source_live,
+                    offered_at: Instant::now(),
                 })
             };
             let replaced_sequence = replaced
@@ -3783,6 +3786,7 @@ mod runtime {
                 sequence: metadata.sequence,
                 source_live: frame.source_live,
             },
+            frame.offered_at,
             metadata.width,
             metadata.height,
         )

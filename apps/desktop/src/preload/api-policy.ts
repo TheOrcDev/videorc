@@ -12,7 +12,9 @@ export const AUXILIARY_API_KEYS = {
     'setNotesWindowAlwaysOnTop',
     'saveNotesDocument',
     'onNotesFlushRequest',
-    'onNotesWindowState'
+    'onNotesWindowState',
+    // What the window sits on (plan 208): a value, read before first paint.
+    'windowGround'
   ],
   comments: [
     'cacheChatAvatar',
@@ -42,6 +44,8 @@ export const AUXILIARY_API_KEYS = {
     'getCommentsSounds',
     'onCommentsSounds',
     'soundFromCommentsWindow',
+    // `/buddy <words>` (plan 209 S20): ask, never answer or push.
+    'buddyActFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
     // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).
@@ -76,14 +80,18 @@ export const AUXILIARY_API_KEYS = {
     'sendCohostCommand',
     'sendCohostEnable',
     // The Buddy pane's living preview reads its pet pack (plan 168 Phase D).
-    'readBuddyPetFile'
+    'readBuddyPetFile',
+    // What the window sits on (plan 208): a value, read before first paint.
+    'windowGround'
   ],
   captions: [
     'getCaptionsWindowState',
     'setCaptionsWindowAlwaysOnTop',
     'onCaptionsWindowState',
     'getCaptionSnapshot',
-    'onCaptionSnapshot'
+    'onCaptionSnapshot',
+    // What the window sits on (plan 208): a value, read before first paint.
+    'windowGround'
   ]
 } as const satisfies Record<Exclude<RendererRole, 'main'>, readonly VideorcApiKey[]>
 

@@ -9,8 +9,9 @@ import { cn } from '@/lib/utils'
  * One scene card (plan 174 S3.3, B-20) for every scene the streamer switches
  * to: a built-in scene, a saved scene and a vertical-stream scene. It is
  * `MediaCard`'s look: the layout thumbnail, then the name on up to two lines
- * (V-4: never "Screen …" at 1,280 px), then one quiet meta line (a shortcut,
- * "Modified", "Resolve sources"). The scene in use has one marker on every
+ * (V-4: never "Screen …" at 1,280 px) after the app's icon for a scene made
+ * for an app (plan 210 D6), then one quiet meta line (a shortcut, "Resolve
+ * sources", why it can't go on). The scene in use has one marker on every
  * gallery: the card's selected look, a check, and `aria-pressed`.
  *
  * Why a card can't be chosen: a reason the cards share is the gallery's one
@@ -20,6 +21,7 @@ import { cn } from '@/lib/utils'
  */
 export function SceneCard({
   thumb,
+  icon,
   label,
   selected = false,
   pressed = selected,
@@ -33,6 +35,8 @@ export function SceneCard({
 }: {
   /** The layout diagram (`LayoutThumb`). */
   thumb: ReactNode
+  /** The app's icon before the name (a scene made for an app). */
+  icon?: ReactNode
   /** The scene's name, or "Switching…" while it applies. */
   label: string
   /** The scene in use: the card's selected look and the check. */
@@ -71,9 +75,10 @@ export function SceneCard({
         >
           {thumb}
           <span className="flex min-w-0 items-start justify-between gap-1.5">
+            {icon ? <span className="mt-px flex shrink-0">{icon}</span> : null}
             <span
               className={cn(
-                'line-clamp-2 min-w-0 font-medium break-words',
+                'line-clamp-2 min-w-0 flex-1 font-medium break-words',
                 size === 'sm' ? 'text-xs' : 'text-sm'
               )}
               data-slot="scene-card-label"

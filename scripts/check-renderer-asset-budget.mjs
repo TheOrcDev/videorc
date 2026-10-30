@@ -52,9 +52,42 @@ const htmlPath = resolve(
 // takes it to 400,072. The setup UI itself is lazy (its chunk is 308 KB raw,
 // ~43 KB gzip). Raise gzip to 405,000 (~1.2%); keep re-splitting the answer
 // for net-new UI.
+// Recalibrated 2026-10-27 (plan 207): main measured 1,996,019 raw (3,981
+// bytes of headroom). Setup's steps add 6,695 raw bytes of shell and Studio
+// state: the record's step and goal (~1.9 KB), the provider applying a look
+// as state or holding it behind a running session (~2.8 KB), Clips waiting
+// for a chosen screen (~0.6 KB) and the shell's step wiring (~0.8 KB). The
+// step UI and the look's helpers are lazy (setup's chunk is 357 KB raw).
+// Raise raw to 2,030,000 (~1.4%); keep re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-28 (plan 209, Videorc MCP): main measured 404,071 gzip
+// (929 bytes of headroom). The agents' Studio wiring needs ~1.9 KB of eager
+// gzip: the Go Live path the dialog and agents share, the agent intent lane
+// and its cancel handles, the agent surface input and the notices watcher's
+// mount. Executors, the surface publisher, the headless Go Live, the Agents
+// settings and the Connect dialog are lazy. Measured 405,989. Raise gzip to
+// 410,000 (~1.2%); keep re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-29 (retest 154 B1): main measured 2,028,805 raw. The
+// performance check now steps the default Clips ring aside and waits for a
+// ready capture before its launch run (the hold, the step-aside, the gate,
+// ~1.4 KB raw in the Studio provider; no new UI). Measured 2,030,166 raw /
+// 409,985 gzip. Raise raw to 2,031,000 (~0.05%); gzip unchanged.
+// Recalibrated 2026-10-29 (plan 210, smarter scenes): its base measured
+// 2,028,805 raw / 409,745 gzip (255 bytes of headroom) and the branch added
+// 49,353 raw / 11,841 gzip. Re-splitting took back 24,874 raw / 5,968 gzip:
+// the follower with its reducer and the one password-manager list (macOS,
+// once the backend is up), the window resolver and strict preflight (a chunk
+// warmed at connect), the app-scene helpers and the Settings-only shortcut
+// bindings are lazy. What stays is ~5.9 KB of eager gzip: the Studio's scene
+// switch with D5's resolve-and-retry (~1.8 KB), Hide screen's state read at
+// connect and its relays (~1.2 KB), each scene's app state and window memory
+// from launch (~1.0 KB), D3's autosave and the scene library's edits
+// (~1.0 KB) and the key walk through saved scenes (~0.7 KB). Measured
+// 2,053,284 raw / 415,618 gzip. Raise raw to 2,060,000 (~1.5%) and gzip to
+// 420,000 (~2.4%, two of the usual steps); keep re-splitting the answer for
+// net-new UI.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 405_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_060_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 420_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

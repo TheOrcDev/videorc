@@ -19,6 +19,7 @@ import { parseLivePosterAssetId } from '../../../shared/live-background-ids'
 
 export const SCENE_LIBRARY_KEY = 'videorc.scene-presets.v1'
 export const WORKING_SCENE_KEY = 'videorc.working-scene.v1'
+export type SceneApp = { bundleId: string; name: string; follows: boolean }
 export type VisualSources = Pick<
   SourceSelection,
   | 'cameraId'
@@ -30,7 +31,7 @@ export type VisualSources = Pick<
   | 'windowId'
   | 'windowName'
   | 'testPattern'
->
+> & { app?: SceneApp }
 export type SavedSceneBackground = Omit<EffectiveSceneBackground, 'managedAssetPath'> & {
   fileName?: string
 }
@@ -69,7 +70,24 @@ export type WorkingScene = {
   visual: SceneVisual
 }
 
+/** Invalid optional fields never discard a scene or opt it into following. */
+export function normalizeSceneApp(raw: unknown): SceneApp | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const data = raw as Record<string, unknown>
+  if (
+    typeof data.bundleId !== 'string' ||
+    !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(data.bundleId)
+  )
+    return undefined
+  return {
+    bundleId: data.bundleId,
+    name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : data.bundleId,
+    follows: data.follows === true
+  }
+}
+
 export function visualSources(sources: VisualSources): VisualSources {
+  const app = normalizeSceneApp(sources.app)
   return {
     cameraId: sources.cameraId,
     cameraName: sources.cameraName,
@@ -83,6 +101,7 @@ export function visualSources(sources: VisualSources): VisualSources {
     screenName: sources.screenName,
     windowId: sources.windowId,
     windowName: sources.windowName,
+    ...(app ? { app } : {}),
     testPattern: sources.testPattern === true
   }
 }
@@ -395,7 +414,8 @@ export function sceneSourceGaps(visual: SceneVisual, devices: readonly Device[])
       layoutPresetNeedsScreen(visual.layout.layoutPreset)) &&
     (!visual.sources.testPattern || baseId)
   ) {
-    check(baseId, visual.sources.windowId ? 'window' : 'screen', 'screen')
+    // App identities require resolution, not a stale-window-id refusal.
+    if (!visual.sources.app) check(baseId, visual.sources.windowId ? 'window' : 'screen', 'screen')
   }
   return gaps
 }
@@ -510,3 +530,5 @@ export function sourceVisibilityFromScene(
   }
   return visibility
 }
+
+export type SceneOrientation = 'horizontal' | 'vertical'

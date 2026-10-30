@@ -73,6 +73,12 @@ Hyprland) works the same way with `/etc/videorc-lab/policy.json`
 ("Linux lab machine" in that doc); it has no candidate workflow, so a PR
 build there is one built on the box (`live:install --build local:...`), and
 `live:remote` runs whatever is installed when `--build` is left out. The
+harness drives the app over CDP, which a release build refuses: lab
+candidates are packaged test builds (`VIDEORC_PACKAGED_TEST_HOOKS=1`, set
+by `lab-candidate-macos.yml`; on Linux build with
+`pnpm --filter @videorc/desktop package:linux:test-hooks`), and
+`--build release` cannot be driven (docs/distribution.md, "Packaged
+hardening"). The
 harness checks the policy, the run lock and the kill switches before every
 run and every step:
 

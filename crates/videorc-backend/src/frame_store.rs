@@ -602,6 +602,19 @@ impl<P, M> FrameStore<P, M> {
         self.latest.clone()
     }
 
+    /// Forget the latest frame so readers see no frame at all. Plan 210 S7
+    /// uses it as the last resort when a hidden screen's still cannot be
+    /// built in a store's format: no frame beats a live one.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn retire(&mut self) -> bool {
+        if self.latest.take().is_some() {
+            self.frames_replaced = self.frames_replaced.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Zero-filled checkout. Test-only since plan 191: its last production
     /// callers, the CPU compositor's frame checkouts, overwrite every byte and
     /// use `checkout_overwrite_buffer`.

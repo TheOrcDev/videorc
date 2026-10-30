@@ -73,7 +73,7 @@
     },
     {
       "UUID": "com.videorc.streamdeck.scene-apply",
-      "Name": "Scene",
+      "Name": "Layout",
       "Icon": "imgs/scene",
       "Tooltip": "Switch to a layout preset.",
       "States": [
@@ -82,6 +82,23 @@
         }
       ],
       "PropertyInspectorPath": "ui/property-inspector.html"
+    },
+    {
+      "UUID": "com.videorc.streamdeck.saved-scene",
+      "Name": "Scene",
+      "Icon": "imgs/scene",
+      "Tooltip": "Switch to a saved scene.",
+      "PropertyInspectorPath": "ui/property-inspector.html",
+      "States": [
+        {
+          "Image": "imgs/scene"
+        },
+        {
+          "Image": "imgs/scene",
+          "TitleColor": "#ffffff"
+        }
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.takeover-toggle",
@@ -127,6 +144,21 @@
       "States": [
         {
           "Image": "imgs/window"
+        }
+      ],
+      "PropertyInspectorPath": "ui/property-inspector.html"
+    },
+    {
+      "UUID": "com.videorc.streamdeck.screen-hide-toggle",
+      "Name": "Hide screen",
+      "Icon": "imgs/takeover",
+      "Tooltip": "Hide or show your screen",
+      "States": [
+        {
+          "Image": "imgs/takeover"
+        },
+        {
+          "Image": "imgs/takeover"
         }
       ],
       "PropertyInspectorPath": "ui/property-inspector.html"

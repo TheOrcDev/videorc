@@ -1001,6 +1001,9 @@ pub struct AppState {
     pub preview_metrics: Arc<tokio::sync::Mutex<PreviewMetricsState>>,
     pub preview_camera: PreviewCameraSlot,
     pub preview_screen: PreviewScreenSlot,
+    /// Hide screen (plan 210 S7): the gate every screen capture publishes
+    /// through. In memory only; a launch starts visible.
+    pub screen_privacy: Arc<crate::screen_privacy::ScreenPrivacyGate>,
     pub preview_surface: PreviewSurfaceSlot,
     /// Serializes preview-surface create/update/destroy transactions. The
     /// compositor lifecycle lock only protects worker ownership; it does not
@@ -1107,6 +1110,12 @@ pub struct AppState {
     /// listener's shutdown handle, and the client count that gates chat
     /// projection in `emit_event`.
     pub remote_lan: crate::remote_lan::RemoteLanSlot,
+    /// Plan 209: the agents a streamer connected (tokens hashed), the Agents
+    /// switch and the persisted port.
+    pub agent_registry: Arc<StdMutex<crate::agent_registry::AgentRegistry>>,
+    /// Plan 209: the Agents listener's bound port, rate limiter, pending
+    /// Studio intents, the Studio's projection and the renderer socket count.
+    pub agents: crate::agent_mcp::AgentMcpSlot,
     pub resource_authority: ResourceAuthority,
     pub oauth: Arc<OAuthSessions>,
     /// Pending 3-legged OAuth 1.0a authorizations for X Live (keyed by
@@ -1340,6 +1349,7 @@ impl AppState {
             preview_metrics: Arc::new(tokio::sync::Mutex::new(PreviewMetricsState::default())),
             preview_camera: Arc::new(tokio::sync::Mutex::new(initial_preview_camera_state())),
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
+            screen_privacy: Arc::new(crate::screen_privacy::ScreenPrivacyGate::default()),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
             preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),
@@ -1394,6 +1404,10 @@ impl AppState {
             remote_lan: crate::remote_lan::new_remote_lan_slot(
                 crate::remote_lan::LanRuntime::load_from_secrets(),
             ),
+            agent_registry: Arc::new(StdMutex::new(
+                crate::agent_registry::AgentRegistry::load_from_secrets(),
+            )),
+            agents: crate::agent_mcp::new_agent_mcp_slot(),
             resource_authority: ResourceAuthority::default(),
             oauth: Arc::new(OAuthSessions::new_with_secret_store(
                 oauth_store_path,

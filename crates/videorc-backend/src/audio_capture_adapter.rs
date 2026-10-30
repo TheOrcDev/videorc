@@ -782,6 +782,7 @@ fn capture_command(ffmpeg: &str, device: &str, protocol: CaptureProtocol) -> Com
         "0",
     ]);
     if protocol == CaptureProtocol::Pulse {
+        command.envs(crate::linux_pulse_audio::pulse_pinned_source_env());
         // 10 ms fragments (480 stereo s16 frames): one bounded PCM record per
         // fragment. `-wallclock` is FFmpeg's default and spelled out because
         // the capture clock depends on it.
@@ -914,9 +915,30 @@ fn resolve_target(ffmpeg: &str, id: &str) -> Result<(String, String)> {
         if source.starts_with('-') || source.contains(['\0', '\r', '\n']) {
             bail!("Invalid PulseAudio source identity");
         }
+        // Retest 154 (C4): an unplugged source is not opened at all, so the
+        // session records silence and says so instead of another mic.
+        #[cfg(target_os = "linux")]
+        let listing = crate::linux_pulse_audio::linux_pulse_sources_blocking(ffmpeg);
+        #[cfg(not(target_os = "linux"))]
+        let listing: Option<Vec<crate::linux_pulse_audio::PulseSource>> = None;
+        ensure_pulse_source_present(listing.as_deref(), &source)?;
         return Ok((source.clone(), source));
     }
     bail!("This microphone capture adapter does not recognize the device identity")
+}
+
+fn ensure_pulse_source_present(
+    listing: Option<&[crate::linux_pulse_audio::PulseSource]>,
+    source: &str,
+) -> Result<()> {
+    if crate::linux_pulse_audio::pulse_source_missing(listing, source) {
+        return Err(WorkerStartError::new(
+            WorkerStartFailureKind::DeviceNotInInventory,
+            crate::linux_pulse_audio::pulse_source_not_connected_message(source),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Limits for the worker's two probe children. A cold `ffmpeg-capture.exe`
@@ -2219,6 +2241,42 @@ mod tests {
         assert!(args.contains(&"-copyts".into()));
         assert!(!args.iter().any(|arg| arg.contains("videorc_audio")));
         assert_eq!(args.last().unwrap(), "pipe:1");
+        // Retest 154 (C4): pinned to the chosen source, never the default.
+        let pulse_prop = command
+            .get_envs()
+            .find(|(key, _)| *key == "PULSE_PROP")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(
+            pulse_prop.as_deref(),
+            Some("node.dont-fallback=true node.dont-move=true")
+        );
+    }
+
+    #[test]
+    fn non_pulse_capture_commands_carry_no_pulse_stream_properties() {
+        for protocol in [CaptureProtocol::AvFoundation, CaptureProtocol::DirectShow] {
+            let command = capture_command("ffmpeg", "6465736b", protocol);
+            assert!(!command.get_envs().any(|(key, _)| key == "PULSE_PROP"));
+        }
+    }
+
+    #[test]
+    fn an_unplugged_pulse_source_is_refused_as_not_in_inventory() {
+        // Retest 154 (C4): the session then records silence instead of the
+        // direct Pulse input, which would also open nothing else now.
+        let listed = crate::linux_pulse_audio::parse_pulse_sources(
+            "Auto-detected sources for pulse:\n* alsa_input.builtin [Internal Microphone] (none)\n  usb_mic [USB Mic] (none)\n",
+        );
+        assert!(ensure_pulse_source_present(Some(&listed), "usb_mic").is_ok());
+        let error = ensure_pulse_source_present(Some(&listed[..1]), "usb_mic").unwrap_err();
+        assert_eq!(
+            worker_start_failure_kind(&error),
+            Some(WorkerStartFailureKind::DeviceNotInInventory)
+        );
+        assert!(error.to_string().contains("\"usb_mic\" is not connected"));
+        // An unreadable listing says nothing about the device: it still opens.
+        assert!(ensure_pulse_source_present(None, "usb_mic").is_ok());
     }
 
     #[test]
@@ -2423,7 +2481,8 @@ mod tests {
     #[test]
     fn a_pulse_microphone_id_resolves_to_its_source_name_on_linux_only() {
         let id = crate::linux_pulse_audio::linux_pulse_microphone_id("videorc_test_tone");
-        let resolved = resolve_target("ffmpeg", &id);
+        // No FFmpeg to list sources with: an unknown listing still resolves.
+        let resolved = resolve_target("/nonexistent/videorc-ffmpeg", &id);
         if cfg!(target_os = "linux") {
             let (device, name) = resolved.unwrap();
             assert_eq!(device, "videorc_test_tone");
@@ -2433,7 +2492,7 @@ mod tests {
         }
         let hostile = crate::linux_pulse_audio::linux_pulse_microphone_id("-filter_complex");
         if cfg!(target_os = "linux") {
-            assert!(resolve_target("ffmpeg", &hostile).is_err());
+            assert!(resolve_target("/nonexistent/videorc-ffmpeg", &hostile).is_err());
         }
     }
 

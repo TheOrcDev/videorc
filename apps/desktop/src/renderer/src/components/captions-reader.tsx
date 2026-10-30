@@ -133,9 +133,9 @@ export function captionReaderAppearance(styleId: CaptionStyleId): {
   const hasPlate = definition.plate !== 'none'
   return {
     className: cn(
-      // The glass plate is its translucent colour alone: the window already
-      // sits on real glass, and CSS backdrop-filter on a vibrancy window
-      // wedged the compositor (plan 050, no backdrop-filter in the renderer).
+      // The glass plate is its translucent colour alone: CSS backdrop-filter
+      // on a vibrancy window wedged the compositor (plan 050), so the
+      // renderer has none.
       hasPlate && 'border border-white/10',
       definition.wide && 'w-full'
     ),

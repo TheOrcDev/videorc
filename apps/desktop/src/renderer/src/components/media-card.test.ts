@@ -16,10 +16,10 @@ describe('MediaCard', () => {
     expect(markup).not.toMatch(/shadow|rounded-panel|bg-muted|bg-card/)
   })
 
-  it('marks the one in use with the accent block, never a colour', () => {
+  it('marks the one in use with a brighter rim on the chrome plate, never a colour', () => {
     const markup = renderToStaticMarkup(createElement(MediaCard, { selected: true }, 'Scene'))
     expect(markup).toContain('data-selected="true"')
-    expect(markup).toContain('border-foreground/25 bg-accent')
+    expect(markup).toContain('border-foreground/25 chrome-plate')
     expect(markup).not.toMatch(/primary|success|warning/)
   })
 

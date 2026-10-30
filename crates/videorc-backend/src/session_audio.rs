@@ -3466,7 +3466,19 @@ struct SourceClock {
     /// position. The bus can only delay; the FFmpeg whole-track shift carries
     /// the common part of the offsets.
     delay_frames: u64,
+    /// The least a packet's capture time ran ahead of its mapped start in the
+    /// current lag window, and the device position that closes the window.
+    lag_min: f64,
+    lag_window_end: f64,
 }
+
+/// How long the mapping must stay behind its capture times before it steps.
+const LAG_WINDOW_FRAMES: f64 = 24_000.0;
+/// How far behind its capture times the mapping may stay for a whole
+/// [`LAG_WINDOW_FRAMES`] before it steps forward: beyond capture-time jitter
+/// (Pulse stamps carry 20 ms) and far inside the playout delay.
+const LAG_STEP_FRAMES: f64 = 1_920.0;
+
 impl SourceClock {
     fn new(frame: &AudioFrame, epoch: Instant) -> Self {
         let start = frame
@@ -3482,6 +3494,8 @@ impl SourceClock {
             observations: VecDeque::new(),
             last_observation: f64::NEG_INFINITY,
             delay_frames: 0,
+            lag_min: f64::INFINITY,
+            lag_window_end: frame.timestamp_micros as f64 * 0.048 + LAG_WINDOW_FRAMES,
         }
     }
 
@@ -3538,7 +3552,25 @@ impl SourceClock {
         // tolerance; genuine missing intervals remain silence in the bus.
         let gap = device_start - self.device_end;
         let gap = if gap.abs() < 0.05 { 0.0 } else { gap };
-        let start = self.mapped_end + gap * self.ratio;
+        let mut start = self.mapped_end + gap * self.ratio;
+        // Retest 153: on a loaded Linux desktop Pulse overruns lose a few
+        // milliseconds at a time, each too short to read as a dropout, so the
+        // count falls behind the capture clock faster than the rate estimate
+        // may follow (0.1%). Unchecked, the mapping drifted past the playout
+        // delay, every buffer landed on audio already played, and the
+        // microphone went silent for 2 s until the timeline re-anchored. A
+        // mapping that stays behind its capture times for half a second steps
+        // forward by the least lag it saw: the lost audio becomes a gap of its
+        // own length. Only forward: a count ahead of its capture times is
+        // slewed by the rate estimate, never replayed.
+        self.lag_min = self.lag_min.min(observed_end - frames - start);
+        if device_end >= self.lag_window_end {
+            if self.lag_min > LAG_STEP_FRAMES {
+                start += self.lag_min;
+            }
+            self.lag_min = f64::INFINITY;
+            self.lag_window_end = device_end + LAG_WINDOW_FRAMES;
+        }
         self.mapped_end = start + frames * self.ratio;
         self.device_end = device_end;
         let start = start.round().max(0.0) as u64;
@@ -6671,6 +6703,70 @@ mod tests {
         assert_eq!(timeline.counters().generated_frames, 0);
         assert_eq!(timeline.losses().discarded_overlap, 0);
         assert_eq!(timeline.counters().captured_frames, 994 * 480);
+    }
+
+    /// Retest 153: under load a Pulse microphone loses 5 ms every half
+    /// second in overruns too short to read as dropouts. Its count falls
+    /// 1% behind its capture clock, ten times what the rate estimate may
+    /// follow. The mapping steps forward instead of drifting past the playout
+    /// delay: nothing lands on audio already played, no silence reaches
+    /// 200 ms, and every packet stays within 60 ms of its capture time.
+    #[test]
+    fn a_count_losing_audio_to_short_overruns_steps_forward_with_its_capture_clock() {
+        let epoch = Instant::now();
+        let playout = 7_200_u64;
+        let mut packet = frame(0.3, 480);
+        packet.captured_at = epoch + Duration::from_millis(10);
+        let mut clock = SourceClock::new(&packet, epoch);
+        let mut timeline = AudioTimeline::new();
+        let mut captured_end = 0_u64;
+        let (mut silent_run, mut longest_silence, mut heard) = (0_u64, 0_u64, false);
+        for index in 0..12_000_u64 {
+            captured_end += 480 + if index % 50 == 49 { 240 } else { 0 };
+            packet.timestamp_micros = index * 10_000;
+            packet.captured_at = epoch + Duration::from_secs_f64(captured_end as f64 / 48_000.0);
+            let (start, count) = clock.interval(&packet).unwrap();
+            let lag = (captured_end - 480) as i64 - start as i64;
+            assert!(
+                lag.abs() <= 2_880,
+                "packet {index} mapped {lag} frames from its capture"
+            );
+            timeline.push(0, start, resample_frame(packet.clone(), count));
+            while timeline.cursor() + 480 + playout <= captured_end {
+                for captured in timeline.render_with_provenance().captured {
+                    heard |= captured;
+                    silent_run = if captured { 0 } else { silent_run + 1 };
+                    if heard {
+                        longest_silence = longest_silence.max(silent_run);
+                    }
+                }
+            }
+        }
+        assert_eq!(timeline.losses().discarded_overlap, 0);
+        assert!(
+            longest_silence < 9_600,
+            "silence of {longest_silence} frames"
+        );
+    }
+
+    /// The step reads the least lag of a half second, so callbacks that wake
+    /// late (a capture time 30 ms past the count, one packet in seven) never
+    /// move a mapping that keeps time.
+    #[test]
+    fn late_callbacks_never_step_a_mapping_that_keeps_time() {
+        let epoch = Instant::now();
+        let mut packet = frame(0.3, 480);
+        packet.captured_at = epoch + Duration::from_millis(10);
+        let mut clock = SourceClock::new(&packet, epoch);
+        let mut end = 0;
+        for index in 0..6_000_u64 {
+            packet.timestamp_micros = index * 10_000;
+            let late = if index % 7 == 3 { 0.030 } else { 0.0 };
+            packet.captured_at = epoch + Duration::from_secs_f64((index + 1) as f64 * 0.01 + late);
+            let (start, count) = clock.interval(&packet).unwrap();
+            assert!(start.abs_diff(end) <= 1, "packet {index} stepped");
+            end = start + count as u64;
+        }
     }
 
     #[test]

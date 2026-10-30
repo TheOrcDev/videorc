@@ -587,6 +587,7 @@
         "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
       },
       "autoChat": {
+        "talk": "suggest",
         "mode": "suggest",
         "greetings": {
           "enabled": true,
@@ -638,6 +639,7 @@
         "reactions": {}
       },
       "autoChat": {
+        "talk": "bubble",
         "mode": "off",
         "greetings": {
           "enabled": true,
@@ -1014,7 +1016,7 @@
           "byChat": 0,
           "onStream": 0,
           "manual": 0,
-          "skipped": { "noLine": 1, "held": 4, "youtubePaused": 2 }
+          "skipped": { "noLine": 1, "held": 4, "youtubePaused": 2, "noBubble": 3 }
         },
         "recap": { "offered": 0, "drafted": 0, "dismissed": 0 },
         "posts": [
@@ -1043,6 +1045,21 @@
             "text": "hello",
             "destinations": ["twitch"],
             "result": "sent"
+          }
+        ],
+        "said": [
+          {
+            "id": "utt-4-fixture",
+            "at": "2026-08-22T10:08:00Z",
+            "trigger": "greeting",
+            "text": "Welcome, Ada!",
+            "source": "line"
+          },
+          {
+            "id": "utt-5-fixture",
+            "at": "2026-08-22T10:09:00Z",
+            "trigger": "manual",
+            "text": "Hello horde"
           }
         ]
       },

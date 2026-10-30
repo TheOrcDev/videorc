@@ -3,6 +3,7 @@ import { Window, type HTMLButtonElement, type Node } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type State = {
+  screenHidden?: boolean
   sessionState: string
   sessionActive: boolean
   streamEnabled: boolean
@@ -10,6 +11,8 @@ type State = {
   micMuted: boolean
   systemAudioAvailable: boolean
   systemAudioOn: boolean
+  savedScenes?: Array<{ id: string; name: string }>
+  activeSavedSceneId?: string | null
   layoutPreset: string
 }
 type FakeClient = {
@@ -420,7 +423,26 @@ describe('shipping phone remote states and semantics (plan 174 S3.20)', () => {
     const mic = keyNamed('Mic muted')
     expect(mic.dataset.on).toBe('false')
     expect(mic.dataset.accent).toBeUndefined()
+    expect(mic.dataset.lit).toBeUndefined()
     expect(mic.querySelector('.hint')!.textContent).toBe('Tap to unmute')
+  })
+
+  it('wears the desktop chrome: Record an LED, Go Live the primary, stop the lit LED (plan 208 D8)', () => {
+    const lit = (key: HTMLButtonElement) => key.dataset.lit !== undefined
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    stateUpdate({ sessionActive: false, sessionState: 'idle' })
+    expect(keyNamed('Record').dataset.accent).toBe('record')
+    expect(lit(keyNamed('Record'))).toBe(false)
+    stateUpdate({ streamEnabled: true })
+    expect(keyNamed('Go Live').dataset.accent).toBe('primary')
+    expect(lit(keyNamed('Go Live'))).toBe(false)
+    stateUpdate({ sessionActive: true, sessionState: 'streaming' })
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    // Nothing else is ever an LED: a scene that is on wears the plate.
+    expect(keyNamed('Screen only').dataset.accent).toBeUndefined()
+    expect(lit(keyNamed('Screen only'))).toBe(false)
   })
 
   it('marks keys that stay on with aria-pressed (I-12)', () => {
@@ -579,4 +601,28 @@ describe('shipping phone remote sounds (plan 189 S10)', () => {
     await settle()
     expect(soundKeys().at(-1)).toEqual({ name: 'Stop all sounds', hint: null, disabled: true })
   })
+})
+
+it('shows saved scenes above layouts and sends their ids, marking confirmed state', () => {
+  stateUpdate({
+    savedScenes: [{ id: 'figma', name: 'Figma <script>' }],
+    activeSavedSceneId: 'figma'
+  })
+  const keys = [...page.document.querySelectorAll<HTMLButtonElement>('#deck-scenes .key')]
+  expect(keys[0].querySelector('.name')!.textContent).toBe('Figma <script>')
+  expect(keys[0].getAttribute('aria-pressed')).toBe('true')
+  expect(keys[1].getAttribute('aria-pressed')).toBe('false')
+  keys[0].click()
+  expect(client().intent).toHaveBeenCalledWith({ kind: 'sceneApply', sceneId: 'figma' })
+})
+
+it('the phone privacy key toggles and follows confirmed hidden state', () => {
+  const button = () => page.document.querySelector<HTMLButtonElement>('#deck-takeovers button')!
+  expect(button().textContent).toContain('Hide screen')
+  button().click()
+  expect(client().intent).toHaveBeenLastCalledWith({ kind: 'screenHideToggle' })
+  remote.state.screenHidden = true
+  client().emit('state', remote.state)
+  expect(button().textContent).toContain('Screen hidden')
+  expect(button().getAttribute('aria-pressed')).toBe('true')
 })

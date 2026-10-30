@@ -7,7 +7,8 @@ import { CheckIcon } from '@/components/icons'
 
 // `checked="indeterminate"` (plan 174 S3.11, E-18: a header checkbox over
 // some of its rows) fills like checked and draws a dash instead of the check:
-// a 2 px bar, so the mixed state needs no glyph of its own.
+// a 2 px bar, so the mixed state needs no glyph of its own. Checked is the
+// chrome fill (plan 208 S4) on a transparent rim, with its ink.
 function Checkbox({
   className,
   id,
@@ -21,7 +22,7 @@ function Checkbox({
       aria-describedby={describedBy}
       data-slot="checkbox"
       className={cn(
-        'peer group/checkbox relative flex size-4 shrink-0 items-center justify-center rounded-[5px] border border-transparent bg-input/90 transition-shadow outline-none group-has-disabled/field:opacity-50 after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 aria-invalid:aria-checked:border-primary dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground dark:data-[state=checked]:bg-primary data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground',
+        'peer group/checkbox relative flex size-4 shrink-0 items-center justify-center rounded-[5px] border border-transparent bg-input/90 transition-shadow outline-none group-has-disabled/field:opacity-50 after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 not-data-[state=unchecked]:chrome-fill',
         className
       )}
       {...props}

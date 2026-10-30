@@ -71,20 +71,25 @@ fn next_revision() -> u64 {
 // --- Legs and placement ------------------------------------------------------------
 
 /// The two compositor legs (plan 164 D12): the primary canvas (the recording,
-/// or the only stream) and the auxiliary (split or vertical stream) canvas.
+/// or the only stream) and the auxiliary (split or vertical stream) canvas;
+/// plus the Preview leg (plan 205 S9): the Electron proof surface's canvas
+/// (Windows idle, Linux), drawn on demand by `preview_buddy_layer`, with its
+/// own atlas so it never fights an output leg over one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuddySpriteLeg {
     Primary,
     Auxiliary,
+    Preview,
 }
 
 impl BuddySpriteLeg {
-    pub const ALL: [Self; 2] = [Self::Primary, Self::Auxiliary];
+    pub const ALL: [Self; 3] = [Self::Primary, Self::Auxiliary, Self::Preview];
 
     pub(crate) fn index(self) -> usize {
         match self {
             Self::Primary => 0,
             Self::Auxiliary => 1,
+            Self::Preview => 2,
         }
     }
 
@@ -92,9 +97,22 @@ impl BuddySpriteLeg {
         match self {
             Self::Primary => "primary",
             Self::Auxiliary => "auxiliary",
+            Self::Preview => "preview",
         }
     }
+
+    /// An output leg: the primary or the auxiliary canvas, never the Preview.
+    pub fn is_output(self) -> bool {
+        !matches!(self, Self::Preview)
+    }
 }
+
+/// How long an output leg's last frame clock stays the Preview leg's clock
+/// (plan 205 S9): while the compositor draws, the proof surface's pet reads
+/// the same instant the legs drew, so the animator is never stepped twice
+/// for one frame nor backwards; once the legs stop, the Preview leg runs
+/// its own clock.
+pub const BUDDY_OUTPUT_CLOCK_FRESH_FOR: Duration = Duration::from_millis(500);
 
 /// The pre-scaled cell side for a rect on a canvas (D5): `round(rect.w ×
 /// canvasWidth)`, at least 1.
@@ -931,11 +949,14 @@ struct SlotState {
     /// Bumped whenever the pack's pixels changed: atlases of an older
     /// generation are stale (still drawn until replaced).
     generation: u64,
-    legs: [LegState; 2],
+    legs: [LegState; 3],
     source: Box<dyn BuddySpriteSource>,
     worker_running: bool,
     last_activity: Instant,
     clock_origin: Instant,
+    /// The frame clock an output leg last drew with, and when (plan 205 S9):
+    /// the Preview leg follows it while it is fresh.
+    output_clock: Option<(f64, Instant)>,
 }
 
 impl SlotState {
@@ -1101,6 +1122,7 @@ impl BuddySpriteSlot {
                     worker_running: false,
                     last_activity: now,
                     clock_origin: now,
+                    output_clock: None,
                 }),
                 wake: Condvar::new(),
                 events,
@@ -1149,6 +1171,13 @@ impl BuddySpriteSlot {
         self.inner.lock().layout = layout;
     }
 
+    /// The Buddy's layout as the slot knows it (the stored
+    /// `overlayLayout.buddy`, kept current by `set_layout`): its rects and
+    /// its two output switches.
+    pub fn layout(&self) -> OverlayItemLayout {
+        self.inner.lock().layout
+    }
+
     /// `AppState::new` installs the animator here (plan 168 Phase C).
     pub fn set_source(&self, source: Box<dyn BuddySpriteSource>) {
         self.inner.lock().source = source;
@@ -1177,6 +1206,29 @@ impl BuddySpriteSlot {
     pub fn clock_seconds(&self, at: Instant) -> f64 {
         let origin = self.inner.lock().clock_origin;
         at.saturating_duration_since(origin).as_secs_f64()
+    }
+
+    /// The Preview leg's frame clock (plan 205 S9): the instant an output
+    /// leg last drew with, while that is fresh
+    /// ([`BUDDY_OUTPUT_CLOCK_FRESH_FOR`]), so the proof surface reads the
+    /// very frame the compositor composed and never steps the animator
+    /// backwards against it; otherwise `clock_seconds(now)`.
+    pub fn preview_clock_seconds(&self) -> f64 {
+        self.preview_clock_seconds_at(Instant::now())
+    }
+
+    fn preview_clock_seconds_at(&self, now: Instant) -> f64 {
+        let state = self.inner.lock();
+        match state.output_clock {
+            Some((seconds, at))
+                if now.saturating_duration_since(at) <= BUDDY_OUTPUT_CLOCK_FRESH_FOR =>
+            {
+                seconds
+            }
+            _ => now
+                .saturating_duration_since(state.clock_origin)
+                .as_secs_f64(),
+        }
     }
 
     /// Start building atlases for legs a session is about to draw, so the
@@ -1251,6 +1303,9 @@ impl BuddySpriteSlot {
             self.ensure_worker(&mut state);
         } else if state.legs[request.leg.index()].want.is_some() && !state.worker_running {
             self.ensure_worker(&mut state);
+        }
+        if request.leg.is_output() && request.now_seconds.is_finite() {
+            state.output_clock = Some((request.now_seconds, now));
         }
         let atlas = state.legs[request.leg.index()].atlas.clone();
         let head_top = atlas
@@ -1813,6 +1868,94 @@ pub(crate) fn blit_sprite_affine_to_yuv420p(
         });
 }
 
+/// The canvas pixels a draw's quad can touch, `[x, y, w, h]` clipped to the
+/// canvas; `None` when the draw is not drawable or lies off the canvas. The
+/// box `blit_sprite_affine_to_yuv420p` iterates, as a rect.
+pub fn sprite_canvas_rect(
+    draw: &BuddySpriteDraw,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Option<[u32; 4]> {
+    if !draw.is_drawable() {
+        return None;
+    }
+    let corners = draw.corners();
+    let min_x = corners.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|c| c[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|c| c[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let x0 = min_x.floor().max(0.0) as u32;
+    let y0 = min_y.floor().max(0.0) as u32;
+    let x1 = (max_x.ceil().max(0.0) as u32).min(canvas_width.max(1));
+    let y1 = (max_y.ceil().max(0.0) as u32).min(canvas_height.max(1));
+    (x0 < x1 && y0 < y1).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
+/// Plan 205 S9: source-over the sprite into a straight-alpha BGRA frame that
+/// covers the canvas rect at `origin` (`dest` is `dest_width × dest_height`
+/// pixels of canvas starting at `origin`). The same inverse map and bilinear
+/// fetch as [`blit_sprite_affine_to_yuv420p`]; the only difference is the
+/// blend target: straight alpha over straight alpha, so the proof surface's
+/// `<img>` composes it over the scene the way the legs burn it in.
+pub(crate) fn blit_sprite_affine_to_bgra(
+    dest: &mut [u8],
+    dest_width: u32,
+    dest_height: u32,
+    origin: (u32, u32),
+    atlas: &BuddySpriteAtlas,
+    draw: &BuddySpriteDraw,
+) {
+    let width = dest_width.max(1) as usize;
+    let height = dest_height.max(1) as usize;
+    if dest.len() < width * height * 4 {
+        return;
+    }
+    let Some(sampler) = SpriteSampler::new(atlas, draw) else {
+        return;
+    };
+    let (origin_x, origin_y) = (origin.0 as usize, origin.1 as usize);
+    let Some((x0, y0, x1, y1)) = sampler.bounds(origin_x + width, origin_y + height) else {
+        return;
+    };
+    let opacity = draw.opacity.clamp(0.0, 1.0);
+    for y in y0.max(origin_y)..y1 {
+        for x in x0.max(origin_x)..x1 {
+            let Some([r, g, b, a]) = sampler.sample(x as f32 + 0.5, y as f32 + 0.5) else {
+                continue;
+            };
+            let source_alpha = (a / 255.0 * opacity).clamp(0.0, 1.0);
+            if source_alpha <= 0.0 {
+                continue;
+            }
+            let index = ((y - origin_y) * width + (x - origin_x)) * 4;
+            let pixel = &mut dest[index..index + 4];
+            source_over_straight_bgra(pixel, [b, g, r], source_alpha);
+        }
+    }
+}
+
+/// Straight-alpha source-over of one `bgr` (0..255) sample at `alpha` onto a
+/// straight-alpha BGRA pixel in place.
+pub(crate) fn source_over_straight_bgra(pixel: &mut [u8], bgr: [f32; 3], alpha: f32) {
+    let dest_alpha = f32::from(pixel[3]) / 255.0;
+    let out_alpha = alpha + dest_alpha * (1.0 - alpha);
+    if out_alpha <= 0.0 {
+        return;
+    }
+    for channel in 0..3 {
+        let current = f32::from(pixel[channel]);
+        let value = (bgr[channel] * alpha + current * dest_alpha * (1.0 - alpha)) / out_alpha;
+        pixel[channel] = value.round().clamp(0.0, 255.0) as u8;
+    }
+    pixel[3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2200,6 +2343,128 @@ pub(crate) mod tests {
         // The 1 px ring is half alpha: its luma lies between black and blue.
         let ring = frame[(6 * width + 18) as usize];
         assert!(ring > 16 && ring < blue_y, "ring luma {ring}");
+    }
+
+    /// Plan 205 S9: the BGRA blit and the yuv blit agree on the same cell and
+    /// draw. The BGRA layer composed over the yuv frame's flat background
+    /// (in RGB, then converted) lands within rounding of the yuv blit's
+    /// luma, pixel for pixel; the opaque interior's chroma is exact.
+    #[test]
+    fn the_bgra_blit_matches_the_yuv_blit_for_the_same_cell() {
+        let atlas = parity_atlas(16);
+        let cell = atlas.cell("cell-2").unwrap().rect;
+        let (width, height) = (40_u32, 30_u32);
+        // A turned, half-transparent draw so the inverse map and the alpha
+        // path are both exercised, not just the identity copy.
+        let mut draw = BuddySpriteDraw::at_rest(cell, [10.0, 6.0, 16.0, 16.0], [0.5, 0.9]);
+        draw.affine = [0.96, 0.28, -0.28, 0.96];
+        draw.opacity = 0.75;
+        // The background: a flat grey, in yuv and in RGB.
+        let (background_y, background_u, background_v) =
+            crate::color::rgb_to_yuv_video_range_bt709(90, 90, 90);
+        let mut yuv = vec![0_u8; (width * height + 2 * (width / 2) * (height / 2)) as usize];
+        yuv[..(width * height) as usize].fill(background_y);
+        let chroma = (width * height) as usize;
+        let block_count = ((width / 2) * (height / 2)) as usize;
+        yuv[chroma..chroma + block_count].fill(background_u);
+        yuv[chroma + block_count..].fill(background_v);
+        blit_sprite_affine_to_yuv420p(&mut yuv, width, height, &atlas, &draw);
+
+        let rect = sprite_canvas_rect(&draw, width, height).expect("the quad is on the canvas");
+        let [rx, ry, rw, rh] = rect;
+        let mut layer = vec![0_u8; (rw * rh * 4) as usize];
+        blit_sprite_affine_to_bgra(&mut layer, rw, rh, (rx, ry), &atlas, &draw);
+
+        let mut touched = 0;
+        let mut worst = 0_i32;
+        for y in 0..height {
+            for x in 0..width {
+                let expected = i32::from(yuv[(y * width + x) as usize]);
+                let inside = x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+                let composed = if inside {
+                    let index = (((y - ry) * rw + (x - rx)) * 4) as usize;
+                    let [b, g, r, a] = [
+                        layer[index],
+                        layer[index + 1],
+                        layer[index + 2],
+                        layer[index + 3],
+                    ];
+                    let alpha = f32::from(a) / 255.0;
+                    let over = |source: u8| {
+                        (f32::from(source) * alpha + 90.0 * (1.0 - alpha))
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    };
+                    if a > 0 {
+                        touched += 1;
+                    }
+                    crate::color::rgb_to_yuv_video_range_bt709(over(r), over(g), over(b)).0
+                } else {
+                    background_y
+                };
+                worst = worst.max((expected - i32::from(composed)).abs());
+            }
+        }
+        assert!(
+            touched > 100,
+            "the layer carries the pet ({touched} pixels)"
+        );
+        assert!(worst <= 2, "luma differs by {worst} somewhere");
+        // The opaque interior: the yuv blit's chroma block and the BGRA
+        // pixel agree on the cell colour, at 75 % over grey.
+        let (cx, cy) = (18_u32, 14_u32);
+        let index = (((cy - ry) * rw + (cx - rx)) * 4) as usize;
+        let [b, g, r, a] = [
+            layer[index],
+            layer[index + 1],
+            layer[index + 2],
+            layer[index + 3],
+        ];
+        assert_eq!(a, 191, "75 % of the opaque cell");
+        assert_eq!([r, g, b], [50, 70, 230]);
+        // Outside the quad the layer is fully transparent.
+        assert_eq!(layer[3], 0, "the rect's corner is outside the turned quad");
+    }
+
+    /// Plan 205 S9: while an output leg draws, the Preview leg reads the
+    /// same clock; once the legs have been quiet, it runs its own.
+    #[test]
+    fn the_preview_leg_follows_a_fresh_output_clock_and_then_its_own() {
+        let slot = BuddySpriteSlot::new(&CohostPersona::default(), buddy_layout(), None)
+            .with_roots(Vec::new());
+        let origin = Instant::now();
+        // Nothing drew yet: the slot's own clock.
+        let own = slot.preview_clock_seconds_at(origin + Duration::from_secs(3));
+        assert!((own - slot.clock_seconds(origin + Duration::from_secs(3))).abs() < 1e-6);
+        let request = BuddyLegRequest {
+            leg: BuddySpriteLeg::Primary,
+            canvas: (1920, 1080),
+            now_seconds: 42.5,
+            highlight_rect: None,
+            caption_rect: None,
+        };
+        // Bracket the draw's own instant: fresh until `before + FRESH_FOR` at
+        // least, stale after `after + FRESH_FOR` at most.
+        let before = Instant::now();
+        let _ = slot.leg_frame(request);
+        let after = Instant::now();
+        assert_eq!(slot.preview_clock_seconds_at(after), 42.5);
+        assert_eq!(
+            slot.preview_clock_seconds_at(before + BUDDY_OUTPUT_CLOCK_FRESH_FOR),
+            42.5
+        );
+        let later = after + BUDDY_OUTPUT_CLOCK_FRESH_FOR + Duration::from_millis(1);
+        assert!((slot.preview_clock_seconds_at(later) - slot.clock_seconds(later)).abs() < 1e-6);
+        // The Preview leg's own draw never becomes the output clock.
+        let _ = slot.leg_frame(BuddyLegRequest {
+            leg: BuddySpriteLeg::Preview,
+            now_seconds: 99.0,
+            ..request
+        });
+        assert_eq!(slot.preview_clock_seconds_at(Instant::now()), 42.5);
+        assert_eq!(BuddySpriteLeg::ALL.len(), 3);
+        assert!(!BuddySpriteLeg::Preview.is_output());
+        assert_eq!(BuddySpriteLeg::Preview.label(), "preview");
     }
 
     #[test]

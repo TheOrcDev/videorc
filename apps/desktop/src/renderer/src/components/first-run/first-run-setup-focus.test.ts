@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // Plan 203 S5 (from the retired permissions dialog): grants flip while
@@ -10,6 +10,7 @@ const bridgeSpies = vi.hoisted(() => ({ refreshBackend: vi.fn(async () => undefi
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   useEffect: vi.fn(),
+  useRef: vi.fn((initial: unknown) => ({ current: initial })),
   useState: (initial: unknown) => [typeof initial === 'function' ? initial() : initial, vi.fn()]
 }))
 vi.mock('@/hooks/use-studio', () => ({
@@ -22,6 +23,7 @@ vi.mock('@/hooks/use-studio-mic-visual', () => ({
   StudioMicVisualProvider: ({ children }: { children: ReactNode }) => children
 }))
 vi.mock('./permissions-step', () => ({ PermissionsStep: () => null }))
+vi.mock('./goal-step', () => ({ GoalStep: () => null }))
 
 import { FirstRunSetup } from './first-run-setup'
 
@@ -57,5 +59,28 @@ describe('first-run setup focus refresh', () => {
     await vi.waitFor(() => expect(bridgeSpies.refreshBackend).toHaveBeenCalledOnce())
     for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup()
     expect(removeEventListener).toHaveBeenCalledWith('focus', onFocus)
+  })
+
+  it('focuses the step a first run resumes at, and leaves Permissions to focus itself', () => {
+    vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() })
+    const focus = vi.fn()
+    const card = {
+      querySelector: (selector: string) =>
+        selector === '[data-first-run-autofocus]' ? { focus } : null
+    }
+    const mount = (initialStep?: 'goal'): void => {
+      vi.mocked(useEffect).mockClear()
+      // The first ref is the card's.
+      vi.mocked(useRef).mockImplementationOnce(() => ({ current: card }))
+      FirstRunSetup({ mode: { kind: 'first-run' }, initialStep, onLeave: vi.fn() })
+      for (const [effect] of vi.mocked(useEffect).mock.calls) effect()
+    }
+
+    mount('goal')
+    expect(focus).toHaveBeenCalledOnce()
+
+    focus.mockClear()
+    mount()
+    expect(focus).not.toHaveBeenCalled()
   })
 })

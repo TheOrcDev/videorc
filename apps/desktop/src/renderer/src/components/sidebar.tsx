@@ -68,8 +68,10 @@ function NavRow({
       onClick={onClick}
       className={cn(
         'group flex h-row-compact items-center gap-2.5 rounded-row px-2.5 text-sm',
+        // The page you're on wears the chrome plate (plan 208 S4); hover stays
+        // the flat block, so rows highlight instantly.
         isActive
-          ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
+          ? 'chrome-plate font-medium text-sidebar-accent-foreground'
           : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground'
       )}
     >

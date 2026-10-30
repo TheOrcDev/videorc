@@ -26,6 +26,8 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
+import { acquireHostSmokeLock, waitForHostMemory, withBuildSlot } from './host-lock.mjs'
+
 import { assertSmokeCommandConnection } from './smoke-command-client.mjs'
 
 export const repoRoot = resolve(import.meta.dirname, '..', '..')
@@ -230,6 +232,19 @@ export function smokeAppEnv(env = {}, options = {}) {
   // a parent shell must not silently redirect a new harness into an older run.
   if (!explicitStateDir) delete result.VIDEORC_SMOKE_STATE_DIR
   if (!explicitOutputDir) delete result.VIDEORC_SMOKE_OUTPUT_DIR
+  // The smoke Trash stand-in (plan 209 S16) lives in this run's own state, or
+  // nowhere: a Library delete in any other smoke still reaches the real Trash.
+  const smokeTrashDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_TRASH_DIR')
+  if (smokeTrashDir) {
+    result.VIDEORC_SMOKE_TRASH_DIR = isolatedSmokePath(
+      env,
+      'VIDEORC_SMOKE_TRASH_DIR',
+      smokeTrashDir,
+      isolationRoots
+    )
+  } else {
+    delete result.VIDEORC_SMOKE_TRASH_DIR
+  }
   return result
 }
 
@@ -340,7 +355,28 @@ export function releaseBackendFakeOriginRefusal(env = {}, processEnv = process.e
   )
 }
 
-export function launchDevApp({
+export async function prepareSmokeLaunch({
+  dev = true,
+  env = process.env,
+  onLine,
+  prebuild = () => {
+    const spec = devBackendPrebuildSpec({ env })
+    if (spec) {
+      const failure = runDevBackendPrebuild(spec, { onLine, env: smokeAppEnv(env) })
+      if (failure) throw new Error(failure)
+    }
+  },
+  buildSlot = withBuildSlot,
+  hostLock = acquireHostSmokeLock,
+  memory = waitForHostMemory
+} = {}) {
+  const options = { env, log: onLine }
+  if (dev && env.VIDEORC_SMOKE_SKIP_PREBUILD !== '1') await buildSlot(prebuild, options)
+  await hostLock(options)
+  await memory(options)
+}
+
+export async function launchDevApp({
   env = {},
   timeoutMs = 120000,
   requiredMarkers = ['backend-ready'],
@@ -351,6 +387,11 @@ export function launchDevApp({
 } = {}) {
   const fakeOriginRefusal = requestedSpawnSpec ? null : releaseBackendFakeOriginRefusal(env)
   if (fakeOriginRefusal) return Promise.reject(new Error(fakeOriginRefusal))
+  await prepareSmokeLaunch({
+    dev: !launchViaMacosLaunchServices && !requestedSpawnSpec,
+    env: { ...process.env, ...env },
+    onLine
+  })
   return new Promise((resolveLaunch, rejectLaunch) => {
     const connections = {}
     let settled = false
@@ -376,23 +417,6 @@ export function launchDevApp({
     }
     if (spawnSpec.appOwnership) {
       mkdirSync(dirname(spawnSpec.appOwnership.path), { recursive: true })
-    }
-
-    if (!launchViaMacosLaunchServices && !requestedSpawnSpec) {
-      // `pnpm dev` runs `cargo run --quiet`, which prints nothing while the
-      // debug backend recompiles (5-7 min on ogre after a pull), so the
-      // launch clock used to race the compiler and fail with misleading GPU
-      // noise from a SIGTERMed Electron (Plan 0009). Build first, with its
-      // own bounded deadline, then start the launch clock.
-      const prebuild = devBackendPrebuildSpec({ env: process.env })
-      if (prebuild) {
-        const failure = runDevBackendPrebuild(prebuild, { onLine, env: childEnv })
-        if (failure) {
-          settled = true
-          rejectLaunch(new Error(failure))
-          return
-        }
-      }
     }
 
     const child = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)

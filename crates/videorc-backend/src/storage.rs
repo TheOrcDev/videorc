@@ -253,7 +253,19 @@ pub struct PendingRecordingFinalization {
     pub duration_ms: Option<i64>,
     pub diagnostics_json: String,
     pub keep_original_mkv: bool,
+    /// An interrupted take being recovered: its MKV is kept whatever the
+    /// keep-original setting says.
+    pub interrupted_take: bool,
 }
+
+/// How long after its start an interrupted take is still recovered
+/// automatically. Older failed rows keep the manual Export MP4 action, so the
+/// first launch of this version never re-exports a whole history.
+pub const INTERRUPTED_TAKE_RECOVERY_WINDOW: chrono::Duration = chrono::Duration::days(7);
+
+/// A capture file smaller than this holds no media worth recovering (a start
+/// that failed before the first cluster).
+pub const INTERRUPTED_TAKE_MIN_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -775,7 +787,9 @@ fn pending_session_deletion_from_records(
     let mut blocked_paths = Vec::new();
     for record in records {
         match deletion_path_state(&record)? {
-            DeletionPathState::Missing => {}
+            DeletionPathState::Missing => {
+                remove_empty_session_deletion_quarantine_directory(&record)
+            }
             DeletionPathState::Ready(path) => paths.push(path),
             DeletionPathState::Blocked(path) => blocked_paths.push(path),
         }
@@ -1415,10 +1429,21 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
         None => {}
     }
 
+    match std::fs::symlink_metadata(original_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DeletionPathState::Missing);
+        }
+        _ => {}
+    }
+    if !ensure_session_deletion_quarantine_directory(original_path, quarantine_path)? {
+        return Ok(DeletionPathState::Blocked(record.original_path.clone()));
+    }
+
     // Move first, verify second. Checking the original path and then renaming
     // it lets a replacement race into the checked name and be sent to Trash.
     match crate::session_ops::rename_session_file_no_replace(original_path, quarantine_path) {
         Ok(()) => {
+            crate::session_ops::sync_session_file_parent(original_path)?;
             crate::session_ops::sync_session_file_parent(quarantine_path)?;
             match capture_session_file_bound_identity(quarantine_path)? {
                 Some(actual)
@@ -1488,12 +1513,76 @@ fn deletion_path_state(record: &SessionDeletionPathRecord) -> Result<DeletionPat
     }
 }
 
+const SESSION_DELETION_QUARANTINE_PREFIX: &str = ".videorc-trash-";
+
+/// The quarantine keeps the recording's own file name inside a private hidden
+/// folder beside it, so the system Trash (and Restore/Put Back) shows the real
+/// `videorc-session-….mp4` instead of a nameless hidden file.
 fn session_deletion_quarantine_path(
     original_path: &Path,
     operation_id: &str,
     index: usize,
 ) -> PathBuf {
-    original_path.with_file_name(format!(".videorc-trash-{operation_id}-{index}"))
+    let directory = original_path.with_file_name(format!(
+        "{SESSION_DELETION_QUARANTINE_PREFIX}{operation_id}-{index}"
+    ));
+    match original_path.file_name() {
+        Some(name) => directory.join(name),
+        None => directory,
+    }
+}
+
+/// The private quarantine folder of a current-format record, `None` for a
+/// legacy tombstone whose quarantine is a hidden file beside the original.
+fn session_deletion_quarantine_directory<'a>(
+    original_path: &Path,
+    quarantine_path: &'a Path,
+) -> Option<&'a Path> {
+    let directory = quarantine_path.parent()?;
+    let is_private = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(SESSION_DELETION_QUARANTINE_PREFIX));
+    (is_private && directory.parent() == original_path.parent()).then_some(directory)
+}
+
+/// Creates the private quarantine folder before the move. `false` means the
+/// name is taken by something that is not a real folder, so the file stays
+/// where it is instead of following a link out of the recordings folder.
+fn ensure_session_deletion_quarantine_directory(
+    original_path: &Path,
+    quarantine_path: &Path,
+) -> Result<bool> {
+    let Some(directory) = session_deletion_quarantine_directory(original_path, quarantine_path)
+    else {
+        return Ok(true);
+    };
+    match std::fs::create_dir(directory) {
+        Ok(()) => crate::session_ops::sync_session_file_parent(directory)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Could not create deletion quarantine {}",
+                    directory.display()
+                )
+            });
+        }
+    }
+    Ok(std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_dir()))
+}
+
+/// Best effort: once its file is gone (trashed or renamed back), the empty
+/// private quarantine folder goes too. A non-empty folder is left alone.
+fn remove_empty_session_deletion_quarantine_directory(record: &SessionDeletionPathRecord) {
+    let Some(quarantine_path) = record.quarantine_path.as_deref().map(Path::new) else {
+        return;
+    };
+    if let Some(directory) =
+        session_deletion_quarantine_directory(Path::new(&record.original_path), quarantine_path)
+    {
+        let _ = std::fs::remove_dir(directory);
+    }
 }
 
 fn distinct_nonempty_paths<const N: usize>(paths: [Option<String>; N]) -> Vec<String> {
@@ -2866,7 +2955,7 @@ impl Database {
         let conn = self.lock()?;
         let mut statement = conn.prepare(
             "SELECT id, output_path, ended_at, duration_ms, COALESCE(diagnostics_json, '{}'),
-                    output_json
+                    output_json, interruption_recovery IS 'pending'
              FROM sessions
              WHERE finalization_state = 'finalizing'
              ORDER BY started_at ASC",
@@ -2884,10 +2973,113 @@ impl Database {
                 duration_ms: row.get(3)?,
                 diagnostics_json: row.get(4)?,
                 keep_original_mkv,
+                interrupted_take: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(anyhow::Error::from)
+    }
+
+    /// Interrupted takes: recording rows that ended `failed` (a crash, a
+    /// killed backend, a power loss, a capture that died mid-take) with their
+    /// capture MKV still on disk and no MP4. Each one with media is claimed
+    /// for recovery (`finalization_state = 'finalizing'`, so
+    /// [`Self::sessions_pending_finalization`] picks it up, and
+    /// `interruption_recovery = 'pending'`); one without media is marked
+    /// `none` and never looked at again. Returns the claimed ids.
+    ///
+    /// Only rows started at or after `since` qualify, and `only_session`
+    /// narrows the scan to one row (the take that just failed).
+    pub fn claim_interrupted_takes(
+        &self,
+        since: &str,
+        only_session: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let candidates = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare(
+                "SELECT id, output_path FROM sessions
+                 WHERE status = 'failed'
+                   AND finalization_state IS NULL
+                   AND interruption_recovery IS NULL
+                   AND mp4_path IS NULL
+                   AND output_path IS NOT NULL
+                   AND lower(output_path) LIKE '%.mkv'
+                   AND library_hidden = 0
+                   AND derived_from_session_id IS NULL
+                   AND processing_kind IS NULL
+                   AND (recording_role IS NULL OR recording_role = 'combined')
+                   AND started_at >= ?1
+                   AND (?2 IS NULL OR id = ?2)
+                 ORDER BY started_at DESC",
+            )?;
+            statement
+                .query_map(params![since, only_session], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // Filesystem metadata never runs under the SQLite mutex.
+        let candidates = candidates
+            .into_iter()
+            .map(|(id, path)| {
+                let has_media = std::fs::metadata(&path).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.len() >= INTERRUPTED_TAKE_MIN_BYTES
+                });
+                (id, has_media)
+            })
+            .collect::<Vec<_>>();
+        let conn = self.lock()?;
+        let mut claimed = Vec::new();
+        for (id, has_media) in candidates {
+            let updated = if has_media {
+                conn.execute(
+                    "UPDATE sessions
+                     SET finalization_state = 'finalizing', finalization_error = NULL,
+                         interruption_recovery = 'pending'
+                     WHERE id = ?1 AND status = 'failed' AND finalization_state IS NULL
+                       AND interruption_recovery IS NULL",
+                    params![id],
+                )?
+            } else {
+                conn.execute(
+                    "UPDATE sessions SET interruption_recovery = 'none'
+                     WHERE id = ?1 AND interruption_recovery IS NULL",
+                    params![id],
+                )?;
+                0
+            };
+            if updated == 1 {
+                claimed.push(id);
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// Settles a pending interrupted-take recovery. Returns the new value
+    /// (`recovered` | `failed`), or `None` when the row was not being
+    /// recovered (an ordinary finalization).
+    pub fn settle_interruption_recovery(
+        &self,
+        session_id: &str,
+        recovered: bool,
+    ) -> Result<Option<&'static str>> {
+        let value = if recovered {
+            crate::recording_finalization::INTERRUPTION_RECOVERY_RECOVERED
+        } else {
+            crate::recording_finalization::INTERRUPTION_RECOVERY_FAILED
+        };
+        // The finalization commit writes `completed`; a recovery that made no
+        // MP4 leaves the take as failed as it was before.
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE sessions
+             SET interruption_recovery = ?2,
+                 status = CASE WHEN ?3 THEN status ELSE 'failed' END
+             WHERE id = ?1 AND interruption_recovery = 'pending'",
+            params![session_id, value, recovered],
+        )?;
+        Ok((updated == 1).then_some(value))
     }
 
     pub fn session_finalization_snapshot(&self, session_id: &str) -> Result<SessionFinalization> {
@@ -4852,7 +5044,7 @@ impl Database {
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
                            derived_from_session_id, source_title, processing_kind,
                            finalization_state, finalization_error, sources_json,
-                           take_id, recording_role
+                           take_id, recording_role, interruption_recovery
                     FROM sessions
                     WHERE library_hidden = 0
                       AND (
@@ -5006,7 +5198,8 @@ impl Database {
                     page_sessions.finalization_state, page_sessions.finalization_error,
                     clean_cut_outputs.source_session_id, clean_cut_outputs.mode,
                     page_sessions.sources_json,
-                    page_sessions.take_id, page_sessions.recording_role
+                    page_sessions.take_id, page_sessions.recording_role,
+                    page_sessions.interruption_recovery
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -5101,6 +5294,9 @@ impl Database {
                     finalization_error: row.get(23)?,
                     take_id: row.get(27)?,
                     recording_role: row.get(28)?,
+                    interruption_recovery: row
+                        .get::<_, Option<String>>(29)?
+                        .filter(|value| matches!(value.as_str(), "recovered" | "failed")),
                 })
             })?;
         let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -5935,7 +6131,9 @@ impl Database {
             // when Trash reported an error, a now-missing path is complete;
             // any present or uninspectable path remains retryable.
             match inspect_path(&record)? {
-                DeletionPathState::Missing => {}
+                DeletionPathState::Missing => {
+                    remove_empty_session_deletion_quarantine_directory(&record)
+                }
                 DeletionPathState::Ready(path) | DeletionPathState::Blocked(path) => {
                     pending_paths.push(path);
                     pending_records.push(record);
@@ -6226,6 +6424,18 @@ impl Database {
         post: crate::protocol::CohostReportPost,
     ) -> Result<bool> {
         self.upsert_cohost_report(&CohostSessionReport::post_only(session_id, post))
+    }
+
+    /// Plan 211 D11: fold one line Buddy said in its bubble into the
+    /// session's report as it shows, the same way posts land. Same
+    /// session-row rule as `upsert_cohost_report`: `false` when the session
+    /// row is gone.
+    pub fn append_cohost_report_said(
+        &self,
+        session_id: &str,
+        said: crate::protocol::CohostReportSaid,
+    ) -> Result<bool> {
+        self.upsert_cohost_report(&CohostSessionReport::said_only(session_id, said))
     }
 
     /// Plan 192 D7: add greeting skip counts to the session's report as they
@@ -8228,6 +8438,14 @@ impl Database {
         // `take_id` (the Combined session's id); `recording_role` names the
         // file (`combined`, `screen`, `camera`). Both NULL on ordinary rows.
         ensure_column(&conn, "sessions", "take_id", "take_id TEXT")?;
+        // An interrupted take's automatic recovery: `pending` | `recovered` |
+        // `failed` | `none`. NULL on every row Videorc did not stop mid-take.
+        ensure_column(
+            &conn,
+            "sessions",
+            "interruption_recovery",
+            "interruption_recovery TEXT",
+        )?;
         ensure_column(&conn, "sessions", "recording_role", "recording_role TEXT")?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_take_id ON sessions(take_id)",
@@ -8357,7 +8575,122 @@ impl Database {
             "pipeline_reported_audio_loss",
             "pipeline_reported_audio_loss INTEGER NOT NULL DEFAULT 0",
         )?;
+        // Plan 209 S2: every agent action, who made it and how it ended.
+        // Capped at AGENT_ACTIVITY_MAX_ROWS rows or AGENT_ACTIVITY_MAX_DAYS
+        // days by `prune_agent_activity`. A new table only; older backends
+        // ignore it.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_activity (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_activity_at ON agent_activity(at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_activity_agent_at
+                ON agent_activity(agent_id, at DESC, id DESC);",
+        )?;
         Ok(())
+    }
+
+    // --- Agent activity (plan 209) -------------------------------------------
+
+    /// Insert one activity row, then keep the table inside its caps.
+    pub(crate) fn insert_agent_activity(&self, entry: &AgentActivityEntry) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO agent_activity (id, at, agent_id, agent_name, tool, summary, outcome, message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.id,
+                entry.at,
+                entry.agent_id,
+                entry.agent_name,
+                entry.tool,
+                entry.summary,
+                entry.outcome.as_str(),
+                entry.message,
+            ],
+        )?;
+        prune_agent_activity_locked(&conn, Utc::now())
+    }
+
+    /// A Studio call that ended unanswered, then answered late (plan 209
+    /// review fix 1): its row takes the answer's outcome and sentence.
+    pub(crate) fn update_agent_activity_outcome(
+        &self,
+        id: &str,
+        outcome: AgentActivityOutcome,
+        message: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE agent_activity SET outcome = ?2, message = ?3 WHERE id = ?1",
+            params![id, outcome.as_str(), message],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// The newest rows first, optionally one agent's, at most `limit`.
+    pub(crate) fn list_agent_activity(
+        &self,
+        limit: usize,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<AgentActivityEntry>> {
+        let conn = self.lock()?;
+        let limit = i64::try_from(limit.clamp(1, AGENT_ACTIVITY_MAX_ROWS)).unwrap_or(100);
+        let mut rows = Vec::new();
+        let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<AgentActivityEntry> {
+            let outcome: String = row.get(6)?;
+            Ok(AgentActivityEntry {
+                id: row.get(0)?,
+                at: row.get(1)?,
+                agent_id: row.get(2)?,
+                agent_name: row.get(3)?,
+                tool: row.get(4)?,
+                summary: row.get(5)?,
+                outcome: AgentActivityOutcome::parse(&outcome),
+                message: row.get(7)?,
+            })
+        };
+        match agent_id {
+            Some(agent_id) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, at, agent_id, agent_name, tool, summary, outcome, message
+                     FROM agent_activity WHERE agent_id = ?1
+                     ORDER BY at DESC, id DESC LIMIT ?2",
+                )?;
+                for row in stmt.query_map(params![agent_id, limit], map)? {
+                    rows.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, at, agent_id, agent_name, tool, summary, outcome, message
+                     FROM agent_activity ORDER BY at DESC, id DESC LIMIT ?1",
+                )?;
+                for row in stmt.query_map(params![limit], map)? {
+                    rows.push(row?);
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prune_agent_activity_for_test(&self, now: chrono::DateTime<Utc>) -> Result<()> {
+        let conn = self.lock()?;
+        prune_agent_activity_locked(&conn, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_activity_count(&self) -> Result<i64> {
+        let conn = self.lock()?;
+        Ok(conn.query_row("SELECT COUNT(*) FROM agent_activity", [], |row| row.get(0))?)
     }
 
     /// Inserts or replaces a persisted repair job so it survives an app restart.
@@ -9200,7 +9533,10 @@ fn chat_moderation_operation_from_row(
         provider_message_id: row.get(5)?,
         author_name: row.get(6)?,
         excerpt: row.get(7)?,
-        source: json_column(row, 8)?,
+        // Plan 209 review fix 20: a source this build doesn't know (one a
+        // newer Videorc wrote) reads as `manual` instead of failing the row.
+        source: serde_json::from_str(&row.get::<_, String>(8)?)
+            .unwrap_or(crate::live_chat_moderation::ModerationSource::Manual),
         reason: row.get(9)?,
         phase: json_column(row, 10)?,
         confirm_mode: json_column(row, 11)?,
@@ -9578,6 +9914,70 @@ fn clip_mark_source_label(source: crate::protocol::ClipMarkSource) -> &'static s
         crate::protocol::ClipMarkSource::Voice => "voice",
         crate::protocol::ClipMarkSource::Manual => "manual",
     }
+}
+
+/// Plan 209 S2: the activity list keeps 1,000 rows or 30 days, whichever
+/// is smaller.
+pub(crate) const AGENT_ACTIVITY_MAX_ROWS: usize = 1_000;
+pub(crate) const AGENT_ACTIVITY_MAX_DAYS: i64 = 30;
+
+/// How an agent action ended. The wire word is the Settings list's word.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentActivityOutcome {
+    Ok,
+    Refused,
+    Failed,
+    Timeout,
+}
+
+impl AgentActivityOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    fn parse(text: &str) -> Self {
+        match text {
+            "ok" => Self::Ok,
+            "refused" => Self::Refused,
+            "timeout" => Self::Timeout,
+            _ => Self::Failed,
+        }
+    }
+}
+
+/// One row of the agents' Activity list (plan 209 S2): who did what, when,
+/// and how it ended. `summary` is a short rendering of the arguments, never
+/// a secret (tool arguments carry none by design).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityEntry {
+    pub id: String,
+    pub at: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub tool: String,
+    pub summary: String,
+    pub outcome: AgentActivityOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn prune_agent_activity_locked(conn: &Connection, now: chrono::DateTime<Utc>) -> Result<()> {
+    let cutoff = (now - chrono::Duration::days(AGENT_ACTIVITY_MAX_DAYS)).to_rfc3339();
+    conn.execute("DELETE FROM agent_activity WHERE at < ?1", params![cutoff])?;
+    conn.execute(
+        "DELETE FROM agent_activity WHERE id NOT IN (
+            SELECT id FROM agent_activity ORDER BY at DESC, id DESC LIMIT ?1
+        )",
+        params![i64::try_from(AGENT_ACTIVITY_MAX_ROWS).unwrap_or(1_000)],
+    )?;
+    Ok(())
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
@@ -10832,6 +11232,7 @@ mod tests {
             ended_at: ended_at.to_string(),
             segments: 1,
             posts: Vec::new(),
+            said: Vec::new(),
             stream_title: Some("Rust night".to_string()),
             messages_seen: 10,
             shown_on_stream: 1,
@@ -11019,6 +11420,68 @@ mod tests {
                 .append_cohost_report_greeting_skips("nope", expected, at)
                 .unwrap()
         );
+    }
+
+    /// Plan 211 D11: lines Buddy said in its bubble fold into the session's
+    /// report as they show, oldest first, capped at 200 (the oldest go),
+    /// kept once per id, survive the stop-time merge, and a report saved
+    /// without `said` reads and writes unchanged.
+    #[test]
+    fn said_lines_fold_into_the_session_report_as_they_show_and_cap_at_two_hundred() {
+        use crate::protocol::{COHOST_REPORT_SAID_CAP, CohostReportPostSource, CohostReportSaid};
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        let said = |n: usize| CohostReportSaid {
+            id: format!("utt-{n}"),
+            at: format!("2026-10-04T10:{:02}:{:02}Z", n / 60, n % 60),
+            trigger: crate::cohost::CohostUtteranceTriggerKind::Greeting,
+            text: format!("Welcome, Fan{n}!"),
+            source: (n % 2 == 0).then_some(CohostReportPostSource::Line),
+        };
+        for n in 0..=COHOST_REPORT_SAID_CAP {
+            assert!(database.append_cohost_report_said("s-1", said(n)).unwrap());
+        }
+        let report = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(report.said.len(), COHOST_REPORT_SAID_CAP);
+        assert_eq!(report.said[0].id, "utt-1", "the oldest went");
+        assert_eq!(
+            report.said.last().unwrap().id,
+            format!("utt-{COHOST_REPORT_SAID_CAP}")
+        );
+        assert_eq!(report.said[1].source, Some(CohostReportPostSource::Line));
+        assert_eq!(report.segments, 0);
+        assert!(report.posts.is_empty(), "a said line is not a post");
+        // The same line twice is kept once.
+        assert!(
+            database
+                .append_cohost_report_said("s-1", said(COHOST_REPORT_SAID_CAP))
+                .unwrap()
+        );
+        assert_eq!(
+            database
+                .get_cohost_report("s-1")
+                .unwrap()
+                .unwrap()
+                .said
+                .len(),
+            COHOST_REPORT_SAID_CAP
+        );
+        // The stop-time report folds in without clobbering them.
+        let stop = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&stop).unwrap());
+        let merged = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.said.len(), COHOST_REPORT_SAID_CAP);
+        assert_eq!(merged.said[0].id, "utt-1");
+        assert_eq!(merged.segments, 1);
+        // A report saved before `said` reads unchanged and writes no `said`.
+        let stored = serde_json::to_value(&stop).unwrap();
+        assert!(stored.get("said").is_none(), "empty is omitted");
+        let read = CohostSessionReport::from_stored_json(&stored.to_string()).unwrap();
+        assert!(read.said.is_empty());
+        assert_eq!(serde_json::to_value(&read).unwrap(), stored);
+        // A missing session is skipped, not an error.
+        assert!(!database.append_cohost_report_said("nope", said(1)).unwrap());
+        assert_eq!(database.get_cohost_report("nope").unwrap(), None);
     }
 
     #[test]
@@ -11731,6 +12194,151 @@ mod tests {
 
         // Second boot is a no-op.
         assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+    }
+
+    #[test]
+    fn interrupted_takes_with_media_are_claimed_once_and_settled() {
+        let dir = std::env::temp_dir().join(format!("videorc-interrupted-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_in_memory_for_tests();
+        let row = |id: &str, file: Option<(&str, u64)>| {
+            let mut session = sample_session(id);
+            session.started_at = "2026-10-27T10:00:00+00:00".to_string();
+            let path = dir.join(format!("{id}.mkv"));
+            if let Some((_, len)) = file {
+                std::fs::write(&path, vec![0u8; len as usize]).unwrap();
+            }
+            session.output_path = Some(path.display().to_string());
+            database.create_session(&session).unwrap();
+        };
+        // Killed backend / power loss: still `running` until the boot reconcile.
+        row("crashed", Some(("crashed", INTERRUPTED_TAKE_MIN_BYTES)));
+        // The capture died mid-take; the row is already `failed`.
+        row("died", Some(("died", 2 * INTERRUPTED_TAKE_MIN_BYTES)));
+        database
+            .finish_session("died", "failed", None, None, Some(89_599))
+            .unwrap();
+        // A start that failed before the first cluster: nothing to recover.
+        row("empty", Some(("empty", 512)));
+        row("missing", None);
+        // Finished normally: never touched.
+        row("done", Some(("done", INTERRUPTED_TAKE_MIN_BYTES)));
+        database
+            .finish_session("done", "completed", None, None, Some(1_000))
+            .unwrap();
+        // Outside the recovery window.
+        let mut old = sample_session("old");
+        let old_path = dir.join("old.mkv");
+        std::fs::write(&old_path, vec![0u8; INTERRUPTED_TAKE_MIN_BYTES as usize]).unwrap();
+        old.output_path = Some(old_path.display().to_string());
+        old.started_at = "2026-01-01T00:00:00+00:00".to_string();
+        database.create_session(&old).unwrap();
+        // A separate Screen file keeps its own interrupted-capture flow.
+        row(
+            "take-screen",
+            Some(("take-screen", INTERRUPTED_TAKE_MIN_BYTES)),
+        );
+        database
+            .set_session_take_role("take-screen", "take", "screen")
+            .unwrap();
+        database.reconcile_orphaned_sessions().unwrap();
+
+        let since = "2026-10-20T00:00:00+00:00";
+        let mut claimed = database.claim_interrupted_takes(since, None).unwrap();
+        claimed.sort();
+        assert_eq!(claimed, vec!["crashed".to_string(), "died".to_string()]);
+        // Claimed rows are what the startup finalization resume picks up.
+        let mut pending = database
+            .sessions_pending_finalization()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.session_id, row.interrupted_take))
+            .collect::<Vec<_>>();
+        pending.sort();
+        assert_eq!(
+            pending,
+            vec![("crashed".to_string(), true), ("died".to_string(), true)]
+        );
+        // A second scan (the next launch) claims nothing again.
+        assert!(
+            database
+                .claim_interrupted_takes(since, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            database
+                .settle_interruption_recovery("crashed", true)
+                .unwrap(),
+            Some("recovered")
+        );
+        assert_eq!(
+            database
+                .settle_interruption_recovery("died", false)
+                .unwrap(),
+            Some("failed")
+        );
+        // An ordinary finalization has nothing to settle.
+        assert_eq!(
+            database.settle_interruption_recovery("done", true).unwrap(),
+            None
+        );
+        let page = database.list_session_items_page(None, 20).unwrap();
+        let recovery = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .interruption_recovery
+                .clone()
+        };
+        assert_eq!(recovery("crashed").as_deref(), Some("recovered"));
+        assert_eq!(recovery("died").as_deref(), Some("failed"));
+        let status = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .status
+                .clone()
+        };
+        assert_eq!(status("died"), "failed", "a failed recovery stays failed");
+        // `none` is bookkeeping, never shown.
+        assert_eq!(recovery("empty"), None);
+        assert_eq!(recovery("missing"), None);
+        assert_eq!(recovery("done"), None);
+        assert_eq!(recovery("old"), None);
+        assert_eq!(recovery("take-screen"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claiming_one_interrupted_take_leaves_the_others() {
+        let dir = std::env::temp_dir().join(format!("videorc-interrupted-one-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = Database::open_in_memory_for_tests();
+        for id in ["a", "b"] {
+            let mut session = sample_session(id);
+            session.started_at = "2026-10-27T10:00:00+00:00".to_string();
+            let path = dir.join(format!("{id}.mkv"));
+            std::fs::write(&path, vec![0u8; INTERRUPTED_TAKE_MIN_BYTES as usize]).unwrap();
+            session.output_path = Some(path.display().to_string());
+            database.create_session(&session).unwrap();
+            database
+                .finish_session(id, "failed", None, None, None)
+                .unwrap();
+        }
+        let since = "2026-10-20T00:00:00+00:00";
+        assert_eq!(
+            database.claim_interrupted_takes(since, Some("b")).unwrap(),
+            vec!["b".to_string()]
+        );
+        assert_eq!(
+            database.claim_interrupted_takes(since, None).unwrap(),
+            vec!["a".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -15219,7 +15827,7 @@ mod tests {
             .paths
             .iter()
             .map(PathBuf::from)
-            .find(|path| path.parent() == backup.parent())
+            .find(|path| path.parent().and_then(Path::parent) == backup.parent())
             .expect("the backup's quarantine sits in the backup folder");
         assert_eq!(
             std::fs::read(&quarantined_backup).unwrap(),
@@ -15602,10 +16210,233 @@ mod tests {
             .unwrap();
         assert!(completion.deleted);
         assert!(!quarantine.exists());
+        assert!(!quarantine.parent().unwrap().exists());
         assert_eq!(
             std::fs::read(&media_path).unwrap(),
             b"unrelated quarantine replacement"
         );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_path_keeps_the_recording_file_name() {
+        let original = Path::new("/recordings/videorc-session-2026-10-29.mp4");
+        let quarantine = session_deletion_quarantine_path(original, "op-id", 1);
+
+        assert_eq!(
+            quarantine,
+            Path::new("/recordings/.videorc-trash-op-id-1/videorc-session-2026-10-29.mp4")
+        );
+        assert_eq!(quarantine.file_name(), original.file_name());
+        assert_eq!(quarantine.extension().unwrap(), "mp4");
+        assert_eq!(
+            session_deletion_quarantine_directory(original, &quarantine),
+            Some(Path::new("/recordings/.videorc-trash-op-id-1"))
+        );
+        // A legacy tombstone's hidden file beside the recording has no
+        // private folder, so cleanup never touches the recordings folder.
+        assert_eq!(
+            session_deletion_quarantine_directory(
+                original,
+                Path::new("/recordings/.videorc-trash-op-id-1")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn delete_quarantine_moves_files_under_their_names_and_completion_removes_the_folders() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap();
+        let mp4 = directory.join("videorc-session-named.mp4");
+        let mkv = directory.join("videorc-session-named.mkv");
+        std::fs::write(&mp4, b"exported recording").unwrap();
+        std::fs::write(&mkv, b"capture recording").unwrap();
+        let mut session = sample_session("named-delete");
+        session.output_path = Some(mkv.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session(
+                "named-delete",
+                "completed",
+                None,
+                Some(mp4.display().to_string()),
+                None,
+            )
+            .unwrap();
+
+        let operation = database
+            .prepare_session_deletions(&["named-delete".to_string()])
+            .unwrap()
+            .remove(0);
+        assert!(!mp4.exists() && !mkv.exists());
+        let resolved = database.pending_session_deletions().unwrap().remove(0);
+        assert_eq!(resolved.paths, operation.paths);
+        assert!(resolved.blocked_paths.is_empty());
+        let mut names = Vec::new();
+        for path in resolved.paths.iter().map(PathBuf::from) {
+            let folder = path.parent().unwrap();
+            assert_eq!(folder.parent().unwrap(), directory);
+            assert!(
+                folder
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(".videorc-trash-")
+            );
+            names.push(path.file_name().unwrap().to_str().unwrap().to_string());
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            ["videorc-session-named.mkv", "videorc-session-named.mp4"]
+        );
+        assert_eq!(
+            std::fs::read(
+                resolved
+                    .paths
+                    .iter()
+                    .find(|path| path.ends_with(".mp4"))
+                    .unwrap()
+            )
+            .unwrap(),
+            b"exported recording"
+        );
+
+        // Electron moves both to the Trash.
+        for path in &resolved.paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        let completion = database
+            .complete_session_deletion(&operation.operation_id, &[])
+            .unwrap();
+        assert!(completion.deleted);
+        for path in resolved.paths.iter().map(PathBuf::from) {
+            assert!(!path.parent().unwrap().exists(), "{}", path.display());
+        }
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_restores_a_replacement_to_its_name() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-delete-folder-replacement-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let original = directory.join("videorc-session-replaced.mp4");
+        let quarantine = session_deletion_quarantine_path(&original, "op", 0);
+        std::fs::write(&original, b"owned recording").unwrap();
+        let record = SessionDeletionPathRecord {
+            original_path: original.display().to_string(),
+            quarantine_path: Some(quarantine.display().to_string()),
+            identity: capture_session_file_identity(&original).unwrap(),
+            object_identity: capture_session_file_object_identity(&original).unwrap(),
+        };
+        std::fs::remove_file(&original).unwrap();
+        std::fs::write(&original, b"replacement before quarantine").unwrap();
+
+        // The replacement is moved first, fails verification, and goes back.
+        assert_eq!(
+            deletion_path_state(&record).unwrap(),
+            DeletionPathState::Missing
+        );
+        assert!(!quarantine.exists());
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"replacement before quarantine"
+        );
+        remove_empty_session_deletion_quarantine_directory(&record);
+        assert!(!quarantine.parent().unwrap().exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_that_is_not_a_directory_never_moves_the_file() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-delete-folder-taken-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let original = directory.join("videorc-session-taken.mp4");
+        let quarantine = session_deletion_quarantine_path(&original, "op", 0);
+        std::fs::write(&original, b"owned recording").unwrap();
+        let record = SessionDeletionPathRecord {
+            original_path: original.display().to_string(),
+            quarantine_path: Some(quarantine.display().to_string()),
+            identity: capture_session_file_identity(&original).unwrap(),
+            object_identity: capture_session_file_object_identity(&original).unwrap(),
+        };
+
+        // A file at the folder name fails closed and stays retryable.
+        std::fs::write(quarantine.parent().unwrap(), b"not a folder").unwrap();
+        assert!(deletion_path_state(&record).is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"owned recording");
+        remove_empty_session_deletion_quarantine_directory(&record);
+        assert_eq!(
+            std::fs::read(quarantine.parent().unwrap()).unwrap(),
+            b"not a folder"
+        );
+        std::fs::remove_file(quarantine.parent().unwrap()).unwrap();
+
+        // A link at the folder name never carries the file out of the folder.
+        #[cfg(unix)]
+        {
+            let elsewhere = directory.join("elsewhere");
+            std::fs::create_dir(&elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, quarantine.parent().unwrap()).unwrap();
+            assert_eq!(
+                deletion_path_state(&record).unwrap(),
+                DeletionPathState::Blocked(original.display().to_string())
+            );
+            assert_eq!(std::fs::read(&original).unwrap(), b"owned recording");
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_quarantine_folder_survives_a_restart_before_and_after_the_move() {
+        let (database, database_path) = file_database();
+        let directory = database_path.parent().unwrap().to_path_buf();
+        let media_path = directory.join("videorc-session-restart.mp4");
+        std::fs::write(&media_path, b"owned recording").unwrap();
+        let mut session = sample_session("restart-delete");
+        session.output_path = Some(media_path.display().to_string());
+        database.create_session(&session).unwrap();
+        database
+            .finish_session("restart-delete", "completed", None, None, None)
+            .unwrap();
+        let operation = database
+            .prepare_session_deletions(&["restart-delete".to_string()])
+            .unwrap()
+            .remove(0);
+        let quarantine = PathBuf::from(&operation.paths[0]);
+        assert_eq!(quarantine.file_name(), media_path.file_name());
+
+        // A crash after the tombstone but before the move: the file is still
+        // at its name and the private folder does not exist yet.
+        crate::session_ops::rename_session_file_no_replace(&quarantine, &media_path).unwrap();
+        std::fs::remove_dir(quarantine.parent().unwrap()).unwrap();
+        drop(database);
+        let database = Database::open_file_for_tests(&database_path);
+        let recovered = database.reconcile_session_deletions().unwrap();
+        assert_eq!(recovered.pending, 1);
+        assert!(!media_path.exists());
+        assert_eq!(std::fs::read(&quarantine).unwrap(), b"owned recording");
+
+        // A crash after the move: the next launch resolves the inner path.
+        drop(database);
+        let database = Database::open_file_for_tests(&database_path);
+        let resolved = database.pending_session_deletions().unwrap().remove(0);
+        assert_eq!(resolved.paths, vec![quarantine.display().to_string()]);
+        assert!(resolved.blocked_paths.is_empty());
+        std::fs::remove_file(&quarantine).unwrap();
+        let recovered = database.reconcile_session_deletions().unwrap();
+        assert_eq!(recovered.completed, 1);
+        assert!(!quarantine.parent().unwrap().exists());
+        assert!(database.pending_session_deletions().unwrap().is_empty());
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
     }

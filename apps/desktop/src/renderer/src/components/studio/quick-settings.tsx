@@ -1,16 +1,27 @@
-import { type AppIcon, CameraIcon, CaptionsIcon, DisplayIcon } from '@/components/icons'
+import { type AppIcon, CameraIcon, CaptionsIcon, DisplayIcon, HiddenIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
+import { StatusBadge } from '@/components/status-badge'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
+import {
+  SCREEN_HIDDEN_LABEL,
+  screenHideAccelerator,
+  screenPrivacyActionLabel,
+  screenPrivacyDisabledReason
+} from '@/lib/screen-privacy-view'
 import { captionsStatusLabel } from '@/lib/state-labels'
+import { toastUserError } from '@/lib/user-error'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
 
@@ -39,7 +50,8 @@ export function QuickSettings(): ReactElement {
     discoveryPending,
     captureDevices,
     cameras,
-    selectedCaptureId
+    selectedCaptureId,
+    screenPrivacy
   } = useStudioSources()
 
   return (
@@ -56,6 +68,7 @@ export function QuickSettings(): ReactElement {
           {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
             searchable picker stays on Sources. */}
           <InspectorRow
+            footer={<ScreenPrivacyLine control={screenPrivacy} />}
             icon={DisplayIcon}
             label="Screen"
             status={<SourceSwitchStatus kind="capture" />}
@@ -139,12 +152,15 @@ function InspectorRow({
   icon: RowIcon,
   label,
   status,
+  footer,
   children
 }: {
   icon: AppIcon
   label: string
   /** A live-switch status line under the row; collapses when it renders nothing. */
   status?: ReactNode
+  /** The row's own line under its status (the Screen row's Hide screen). */
+  footer?: ReactNode
   children: ReactNode
 }): ReactElement {
   return (
@@ -157,8 +173,66 @@ function InspectorRow({
       {status ? (
         <div className="px-3 pb-2 pl-9.5 text-xs text-muted-foreground empty:hidden">{status}</div>
       ) : null}
+      {footer}
     </div>
   )
+}
+
+/**
+ * Hide screen on the Screen row (plan 210 D9): a 24 px button with its key,
+ * never beside Record and Go Live (owner, 2026-10-12). It stays at the right
+ * edge in both states, so Show screen is where Hide screen was. While hidden
+ * the chip says so; it shows with or without a screen in the scene, because
+ * hiding is allowed either way. No toast: the chip and the Preview say it.
+ */
+function ScreenPrivacyLine({ control }: { control: ScreenPrivacyControl }): ReactElement {
+  const { hidden, accelerator, platform, disabledReason, toggle } = control
+  const label = screenPrivacyActionLabel(hidden)
+  const button = (
+    <Button
+      data-videorc-screen-privacy=""
+      disabled={disabledReason !== null}
+      size="xs"
+      variant="outline"
+      onClick={toggle}
+    >
+      {label}
+    </Button>
+  )
+  return (
+    <div
+      className="flex min-h-8 items-center gap-2 pr-1 pb-2 pl-9.5"
+      data-hidden={hidden || undefined}
+      data-slot="screen-privacy"
+    >
+      {hidden ? <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} /> : null}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+        {/* The key teaches itself while there is room; while hidden the chip
+            takes that room, and the tooltip keeps the key. */}
+        {accelerator && !hidden ? (
+          <ShortcutKeys accelerator={accelerator} platform={platform} />
+        ) : null}
+        {disabledReason ? (
+          <DisabledReason reason={disabledReason}>{button}</DisabledReason>
+        ) : (
+          <ShortcutTooltip accelerator={accelerator} label={label} platform={platform}>
+            {button}
+          </ShortcutTooltip>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** What both looks' Hide screen controls show and do (the row and the Retro LCD's). */
+export interface ScreenPrivacyControl {
+  hidden: boolean
+  /** The bound key, absent when the streamer cleared it. */
+  accelerator?: string
+  platform?: string
+  /** Why the action is off (a refused hide, Videorc offline), or null. */
+  disabledReason: string | null
+  toggle: () => void
 }
 
 /**
@@ -183,7 +257,11 @@ export function useStudioSources() {
     systemAudioConfirmed,
     systemAudioJoining,
     systemAudioIssue,
-    runtimeInfo
+    runtimeInfo,
+    settings,
+    screenPrivacy: privacy,
+    hideScreen,
+    showScreen
   } = useStudioCore()
   const { openSettings, openStudioPanel } = useWorkspaceNav()
   const systemAudio = systemAudioSwitchView({
@@ -202,6 +280,24 @@ export function useStudioSources() {
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
+  // Plan 210 S8b: the one Studio action, by the state it shows. A failure
+  // says so; a refused hide is the hook's warning, and success is silent.
+  const screenPrivacy: ScreenPrivacyControl = {
+    hidden: privacy.hidden,
+    accelerator: screenHideAccelerator(settings.globalShortcuts?.screenHideToggle),
+    platform: runtimeInfo?.platform,
+    disabledReason: screenPrivacyDisabledReason(privacy, wsStatus === 'connected'),
+    toggle: () => {
+      const hidden = privacy.hidden
+      void (hidden ? showScreen() : hideScreen()).catch((error: unknown) =>
+        toastUserError(
+          error,
+          { action: hidden ? 'show' : 'hide', object: 'your screen' },
+          { id: 'screen-privacy' }
+        )
+      )
+    }
+  }
   return {
     captureConfig,
     setCaptureConfig,
@@ -219,6 +315,7 @@ export function useStudioSources() {
     discoveryPending,
     captureDevices,
     cameras,
-    selectedCaptureId
+    selectedCaptureId,
+    screenPrivacy
   }
 }

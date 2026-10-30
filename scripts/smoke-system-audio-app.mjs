@@ -103,6 +103,7 @@ import {
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const ALL_CASES = ['clips-idle', 'on', 'toggle-off', 'toggle-on', 'off', 'self', 'stream']
@@ -487,7 +488,7 @@ async function seedRenderer(smoke, sources) {
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const audio = { ...(current.audio ?? {}), systemAudioEnabled: params.systemAudioEnabled, systemAudioGainDb: -6 };
         localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources: params.sources ?? current.sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
-        setTimeout(() => location.reload(), 50);
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       sources,

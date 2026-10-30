@@ -21,6 +21,8 @@ import { describe, expect, it } from 'vitest'
 //   SelectTrigger or Slider outside one names itself, a FieldLabel never
 //   points `htmlFor` at a group no label element can name, and no Switch
 //   sits inside a button.
+// - No hand-rolled gradient on a screen, and the chrome materials only on the
+//   primitives (plan 208 S4): the shine is the controls', never a screen's.
 
 const RENDERER_ROOT = join(__dirname, '..')
 
@@ -49,6 +51,33 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   // instrument's own materials, and the hardware inks are choices Videorc
   // never makes. Videorc draws the ink in --primary (MicLevelMeter).
   'src/components/ui/lcd-display.tsx'
+])
+
+// Plan 208 S4 (D2): the shine lives on the controls. The chrome materials are
+// defined once in styles.css and worn by the primitives in components/ui (and
+// the two primitives outside it: the sidebar's page row and MediaCard). A
+// screen never rolls its own gradient, so the shine can't spread screen by
+// screen. Each exception draws a picture or stream content, never chrome.
+const HAND_ROLLED_GRADIENT =
+  /\bbg-(?:linear|radial|conic|gradient)-|\b(?:linear|radial|conic)-gradient\(/
+const GRADIENT_ALLOWLIST = new Set([
+  // A scrim under a picture's name, over the picture itself.
+  'src/components/live-backgrounds-group.tsx',
+  'src/components/background-replace-dialog.tsx',
+  'src/components/tabs/assets-tab.tsx',
+  // The checkerboard behind a banner's transparent pixels.
+  'src/components/banner-thumbnail.tsx',
+  // The blank picture a scene thumbnail shows before its first frame.
+  'src/components/studio/scenes-gallery.tsx',
+  // The level meter's zones (healthy, hot, clipping) as one gradient.
+  'src/components/studio/mic-level-meter.tsx',
+  // Caption style previews: stand-ins for the stream behind a caption.
+  'src/components/captions/caption-preview.tsx'
+])
+const CHROME_MATERIAL = /\bchrome-(?:fill|plate|bead|bead-ink|led|row-live|row-member)\b/
+const CHROME_PRIMITIVES_OUTSIDE_UI = new Set([
+  'src/components/sidebar.tsx',
+  'src/components/media-card.tsx'
 ])
 
 function rendererFiles(): string[] {
@@ -266,6 +295,59 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
         /\bbackdrop-(?:blur|brightness|contrast|grayscale|hue-rotate|invert|opacity|saturate|sepia)\b|backdrop-filter\s*:/
       )
     ).toEqual([])
+  })
+
+  it('paints the chrome ground from one component: nothing else imports its stills (plan 208)', () => {
+    // The only image under the UI is ChromeGround's (the design skill's new
+    // rule 2). A second import would be a second ground, or a wallpaper.
+    const owner = 'src/components/chrome-ground.tsx'
+    expect(offenders(/chrome-ground-(?:dark|light)\.webp/, (path) => path !== owner)).toEqual([])
+    const source = files.find(({ path }) => path === owner)?.code ?? ''
+    expect(source).toMatch(/chrome-ground-dark\.webp\?no-inline/)
+    expect(source).toMatch(/chrome-ground-light\.webp\?no-inline/)
+  })
+
+  it('keeps hand-rolled gradients out of the screens: the shine is the primitives (plan 208 S4)', () => {
+    const screens = (path: string): boolean =>
+      path !== 'src/styles.css' && !path.startsWith('src/components/ui/')
+    expect(
+      offenders(HAND_ROLLED_GRADIENT, (path) => screens(path) && !GRADIENT_ALLOWLIST.has(path))
+    ).toEqual([])
+    // Each exception still draws its gradient, so the list cannot rot.
+    for (const path of GRADIENT_ALLOWLIST) {
+      expect(
+        offenders(HAND_ROLLED_GRADIENT, (candidate) => candidate === path),
+        path
+      ).not.toEqual([])
+    }
+    expect(HAND_ROLLED_GRADIENT.test("'bg-linear-to-b from-foreground/10'")).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test("'bg-gradient-to-t from-background/95'")).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test("'bg-[radial-gradient(circle,white,black)]'")).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test('`linear-gradient(to right, ${stops})`')).toBe(true)
+    expect(HAND_ROLLED_GRADIENT.test("'chrome-fill border-0'")).toBe(false)
+  })
+
+  it('wears the chrome materials only in the primitives (plan 208 S4)', () => {
+    expect(
+      offenders(
+        CHROME_MATERIAL,
+        (path) =>
+          /\.(tsx|ts)$/.test(path) &&
+          !path.startsWith('src/components/ui/') &&
+          !CHROME_PRIMITIVES_OUTSIDE_UI.has(path)
+      )
+    ).toEqual([])
+    for (const path of CHROME_PRIMITIVES_OUTSIDE_UI) {
+      expect(
+        offenders(CHROME_MATERIAL, (candidate) => candidate === path),
+        path
+      ).not.toEqual([])
+    }
+    expect(CHROME_MATERIAL.test('data-chrome-ground')).toBe(false)
+    // The chrome rows (plan 0011) are materials too: screens take them from
+    // components/ui/chrome-row.ts.
+    expect(CHROME_MATERIAL.test("'chrome-row-member'")).toBe(true)
+    expect(CHROME_MATERIAL.test("'chrome-row-live'")).toBe(true)
   })
 
   it('paints floating surfaces with glass-float, never the popover coat', () => {

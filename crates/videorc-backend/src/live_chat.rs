@@ -1114,6 +1114,10 @@ pub struct LiveChatCoordinator {
     /// What Settings shows: the last 7TV outcome in this app run. Outlives
     /// sessions, so "Loads when you go live" only shows before the first.
     seventv_status: crate::seventv::SevenTvStatus,
+    /// Fake destinations that echo an accepted post back into chat
+    /// (`FakeChatConfig::echo_sends`), each with its echo task's inbox;
+    /// session-scoped like `senders`.
+    fake_echo: HashMap<String, tokio::sync::mpsc::UnboundedSender<LiveChatMessage>>,
 }
 
 /// Minimal authoritative answer needed at the comment-card commit edge. Do
@@ -1197,6 +1201,7 @@ impl LiveChatCoordinator {
             seventv_endpoint: (!cfg!(test)).then(|| crate::seventv::SEVENTV_GQL_URL.to_string()),
             seventv_task: None,
             seventv_status: crate::seventv::SevenTvStatus::default(),
+            fake_echo: HashMap::new(),
         }
     }
 
@@ -1347,6 +1352,7 @@ impl LiveChatCoordinator {
         self.messages_received = 0;
         self.reconnect_count = 0;
         self.senders.clear();
+        self.fake_echo.clear();
         self.chatters_seen.clear();
         self.seventv_indexes = Arc::default();
     }
@@ -1364,6 +1370,7 @@ impl LiveChatCoordinator {
         }
         self.session_id = None;
         self.senders.clear();
+        self.fake_echo.clear();
         self.seventv_indexes = Arc::default();
     }
 
@@ -1886,10 +1893,21 @@ pub struct FakeChatConfig {
     /// "Test Viewer N", so a smoke can say a name ("coders_x", plan 140 S9).
     #[serde(default)]
     pub authors: Vec<String>,
+    /// Message texts to rotate through (`texts[seq % len]`) instead of "Fake
+    /// chat message #N", so a smoke can seed a line (plan 209 S9 reads an
+    /// injection attempt back as `viewerText`).
+    #[serde(default)]
+    pub texts: Vec<String>,
     /// A scripted removal outcome for this destination (plan 140 S9). Absent:
     /// the removal mirrors `send` (sent removes, failed fails, timeout hangs).
     #[serde(default)]
     pub delete: Option<FakeChatDeleteBehavior>,
+    /// Echo every post this fake destination accepts back into chat as the
+    /// streamer's own message, the way YouTube and Twitch show your post in
+    /// their chat (plan 209 S12). Lets a smoke read an agent's post back.
+    /// Off by default, so the smokes that count rows are unchanged.
+    #[serde(default)]
+    pub echo_sends: bool,
 }
 
 /// What a fake destination answers a removal with (plan 140 S9's smoke).
@@ -2076,6 +2094,15 @@ where
             };
         }
         if fake.platform != StreamPlatform::X {
+            if fake.echo_sends {
+                let (inbox, posts) = tokio::sync::mpsc::unbounded_channel();
+                coordinator.fake_echo.insert(destination_id.clone(), inbox);
+                coordinator.attach_task(tokio::spawn(run_fake_echo(
+                    state.clone(),
+                    session_generation,
+                    posts,
+                )));
+            }
             coordinator.register_sender(destination_id, fake_sender(&fake));
         }
         coordinator.attach_task(handle);
@@ -2101,6 +2128,15 @@ where
             };
         }
         if fake.platform != StreamPlatform::X {
+            if fake.echo_sends {
+                let (inbox, posts) = tokio::sync::mpsc::unbounded_channel();
+                coordinator.fake_echo.insert(destination_id.clone(), inbox);
+                coordinator.attach_task(tokio::spawn(run_fake_echo(
+                    state.clone(),
+                    session_generation,
+                    posts,
+                )));
+            }
             coordinator.register_sender(destination_id, fake_sender(&fake));
         }
         coordinator.attach_task(handle);
@@ -2623,11 +2659,12 @@ async fn execute_send_live_chat_message(
         return Ok(existing);
     }
 
-    let (providers, senders) = {
+    let (providers, senders, echo_destinations) = {
         let coordinator = state.live_chat.lock().await;
         if coordinator.session_id.as_deref() != Some(params.session_id.as_str()) {
             return Err("The Comments session changed before this message could send.".to_string());
         }
+        let echo_destinations = coordinator.fake_echo.clone();
         let providers = coordinator
             .providers
             .iter()
@@ -2643,7 +2680,7 @@ async fn execute_send_live_chat_message(
             .iter()
             .map(|provider| (provider.id.clone(), coordinator.sender(&provider.id)))
             .collect::<HashMap<_, _>>();
-        (providers, senders)
+        (providers, senders, echo_destinations)
     };
     if params.destination_ids.is_some() && providers.is_empty() {
         return Err("Pick at least one destination to send to.".to_string());
@@ -2743,6 +2780,35 @@ async fn execute_send_live_chat_message(
         .save_chat_send_operation(&operation)
         .map_err(|error| format!("Could not persist send result: {error}"))?;
     state.emit_event("liveChat.sendOperation", operation.clone());
+    // A fake destination with `echoSends` shows the accepted post in chat,
+    // as the platform would (plan 209 S12's smoke reads it back). Its own
+    // task delivers it: delivery reaches Buddy's auto-chat pump, which posts
+    // through this function.
+    for delivery in operation
+        .destinations
+        .iter()
+        .filter(|delivery| delivery.phase == DestinationDeliveryPhase::Sent)
+    {
+        let Some(inbox) = echo_destinations.get(&delivery.destination_id) else {
+            continue;
+        };
+        let Some(provider) = providers
+            .iter()
+            .find(|provider| provider.id == delivery.destination_id)
+        else {
+            continue;
+        };
+        let echo = fake_echo_message(
+            &operation.session_id,
+            provider,
+            delivery
+                .provider_message_id
+                .as_deref()
+                .unwrap_or(&operation.id),
+            &operation.text,
+        );
+        let _ = inbox.send(echo);
+    }
     // Plan 164 D10: a Buddy send is the streamer's account, so its echo is
     // theirs (noted above), but it is never "the streamer replied": no
     // question closes and nobody is greeted by it.
@@ -3965,10 +4031,54 @@ fn fake_message_for(config: &FakeChatConfig, session_id: &str, seq: u32) -> Live
         message.author_id = Some(format!("fake-author-{}", author.to_lowercase()));
         message.author_name = author.clone();
     }
+    if !config.texts.is_empty() {
+        message.message_text = config.texts[seq as usize % config.texts.len()].clone();
+    }
     message
 }
 
-fn fake_message(
+/// A fake destination's echo task (plan 209 S12): delivers each accepted post
+/// back into chat until the session drops its inbox.
+async fn run_fake_echo(
+    state: AppState,
+    session_generation: u64,
+    mut posts: tokio::sync::mpsc::UnboundedReceiver<LiveChatMessage>,
+) {
+    while let Some(message) = posts.recv().await {
+        let _ = try_deliver_message(&state, session_generation, message).await;
+    }
+}
+
+/// A fake destination's echo of an accepted post: the streamer's own row,
+/// with the provider id the fake send returned (plan 209 S12).
+fn fake_echo_message(
+    session_id: &str,
+    provider: &LiveChatProviderState,
+    provider_message_id: &str,
+    text: &str,
+) -> LiveChatMessage {
+    let mut message = fake_message(
+        session_id,
+        provider.platform,
+        provider.target_id.as_deref(),
+        0,
+    );
+    message.provider_message_id = provider_message_id.to_string();
+    message.id = live_chat_message_id(
+        session_id,
+        provider.platform,
+        provider.target_id.as_deref(),
+        provider_message_id,
+    );
+    message.author_id = Some("fake-broadcaster".to_string());
+    message.author_name = "You".to_string();
+    message.author_roles = vec!["broadcaster".to_string()];
+    message.author_verified = None;
+    message.message_text = text.to_string();
+    message
+}
+
+pub(crate) fn fake_message(
     session_id: &str,
     platform: StreamPlatform,
     target_id: Option<&str>,

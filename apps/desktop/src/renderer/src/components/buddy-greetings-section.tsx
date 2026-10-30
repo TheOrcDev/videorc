@@ -65,9 +65,10 @@ const STATE_OPTIONS: SegmentedControlOption<CohostUtteranceState>[] = [
 ]
 
 /**
- * Greetings (plan 164 S-D5, plan 192, Buddy tab → Chat): what Buddy posts as
- * you when someone chats for the first time (the welcomes) or chat does
- * something (the Activity kinds). Every kind has a built-in line until you
+ * Greetings (plan 164 S-D5, plan 192, Buddy tab → Chat): what Buddy says
+ * when someone chats for the first time (the welcomes) or chat does
+ * something (the Activity kinds): in its bubble in Bubble, as a card you post
+ * in Suggest (plan 211). Every kind has a built-in line until you
  * write your own (plan 192 D1), so an empty list never means silence: a kind
  * with no line of yours shows its built-in one as a Default row, and editing
  * that row or switching it off makes it yours. One row per line; Enter or a
@@ -90,6 +91,9 @@ export function BuddyGreetingsSection({
   const greetings = autoChat.greetings
   const templates = greetings.templates
   const welcomes = greetingWelcomes(greetings)
+  // Plan 211 S-C4: a chat's length cap means nothing while Buddy talks in
+  // its bubble, so those warnings wait for Suggest (and Off, for later).
+  const chatCaps = autoChat.talk !== 'bubble'
   const save = (next: CohostAutoChat): void => {
     setError(null)
     void patchCohostSettings({ autoChat: next }).catch((failure: unknown) =>
@@ -119,7 +123,7 @@ export function BuddyGreetingsSection({
 
   return (
     <PanelSection
-      description="What Buddy posts as you when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
+      description="What Buddy says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Buddy says it on stream; in Suggest, you post it."
       title="Greetings"
     >
       {/* A settings row sits in a grouped card like every Settings row (plan
@@ -166,6 +170,7 @@ export function BuddyGreetingsSection({
         {COHOST_WELCOME_KINDS.map((kind) => (
           <WelcomeRow
             key={kind}
+            chatCaps={chatCaps}
             editing={editing === `welcome:${kind}`}
             kind={kind}
             welcome={welcomes[BUDDY_WELCOME_KEYS[kind]]}
@@ -187,6 +192,7 @@ export function BuddyGreetingsSection({
             return [
               <DefaultGreetingRow
                 key={`default:${kind}`}
+                chatCaps={chatCaps}
                 editing={editing === `default:${kind}`}
                 kind={kind}
                 onCreate={add}
@@ -197,6 +203,7 @@ export function BuddyGreetingsSection({
           return ofKind.map((template) => (
             <GreetingRow
               key={template.id}
+              chatCaps={chatCaps}
               editing={editing === template.id}
               template={template}
               onAddVariant={() => add(newGreetingTemplate(kind, { platform: template.platform }))}
@@ -266,7 +273,7 @@ function RowWarnings({ id, warnings }: { id: string; warnings: string[] }): Reac
   )
 }
 
-/** The tag on a row that posts Buddy's built-in line (plan 192 S0.3). */
+/** The tag on a row that says Buddy's built-in line (plan 192 S0.3). */
 function DefaultTag(): ReactElement {
   return (
     <Badge data-testid="buddy-greeting-default" variant="outline">
@@ -277,6 +284,7 @@ function DefaultTag(): ReactElement {
 
 function GreetingRow({
   template,
+  chatCaps,
   editing,
   onEdit,
   onChange,
@@ -284,13 +292,15 @@ function GreetingRow({
   onRemove
 }: {
   template: CohostGreetingTemplate
+  /** Warn about chat's length caps (not in Bubble, plan 211). */
+  chatCaps: boolean
   editing: boolean
   onEdit: (open: boolean) => void
   onChange: (template: CohostGreetingTemplate) => void
   onAddVariant: () => void
   onRemove: () => void
 }): ReactElement {
-  const warnings = greetingTemplateWarnings(template)
+  const warnings = greetingTemplateWarnings(template, { chatCaps })
   const warningsId = useId()
   const title = BUDDY_TEMPLATE_KIND_TITLES[template.kind]
   return (
@@ -330,6 +340,7 @@ function GreetingRow({
       />
       {editing ? (
         <LineEditor
+          chatCaps={chatCaps}
           kind={template.kind}
           label={`${title} greeting text`}
           platform={template.platform}
@@ -354,11 +365,13 @@ function GreetingRow({
  */
 function DefaultGreetingRow({
   kind,
+  chatCaps,
   editing,
   onEdit,
   onCreate
 }: {
   kind: CohostActivityTemplateKind
+  chatCaps: boolean
   editing: boolean
   onEdit: (open: boolean) => void
   onCreate: (template: CohostGreetingTemplate, open?: boolean) => void
@@ -390,6 +403,7 @@ function DefaultGreetingRow({
       />
       {editing ? (
         <LineEditor
+          chatCaps={chatCaps}
           kind={kind}
           label={`${title} greeting text`}
           state={builtin.state}
@@ -413,12 +427,14 @@ function DefaultGreetingRow({
 function WelcomeRow({
   kind,
   welcome,
+  chatCaps,
   editing,
   onEdit,
   onChange
 }: {
   kind: CohostWelcomeKind
   welcome: CohostWelcomeLine
+  chatCaps: boolean
   editing: boolean
   onEdit: (open: boolean) => void
   onChange: (welcome: CohostWelcomeLine) => void
@@ -426,7 +442,7 @@ function WelcomeRow({
   const builtin = builtinGreeting(kind)
   const title = BUDDY_WELCOME_TITLES[kind]
   const text = welcome.text?.trim() ?? ''
-  const warnings = greetingTemplateWarnings({ kind, text: text || builtin.text })
+  const warnings = greetingTemplateWarnings({ kind, text: text || builtin.text }, { chatCaps })
   const warningsId = useId()
   return (
     <div data-slot="buddy-welcome" data-welcome-kind={kind}>
@@ -458,6 +474,7 @@ function WelcomeRow({
       />
       {editing ? (
         <LineEditor
+          chatCaps={chatCaps}
           fallback={builtin.text}
           fields={BUDDY_WELCOME_FIELDS}
           kind={kind}
@@ -482,6 +499,7 @@ function WelcomeRow({
  * keeps the line it had.
  */
 function LineEditor({
+  chatCaps,
   kind,
   label,
   text,
@@ -496,6 +514,8 @@ function LineEditor({
   onRemove,
   onClose
 }: {
+  /** Warn about chat's length caps (not in Bubble, plan 211). */
+  chatCaps: boolean
   kind: BuddyGreetingKind
   /** The text box's accessible name. */
   label: string
@@ -517,7 +537,7 @@ function LineEditor({
   useEffect(() => setDraft(text), [text])
   const effective = draft.trim() || fallback || ''
   const preview = resolveGreetingPreview(effective, BUDDY_SAMPLE_FIELDS[kind]).text
-  const warnings = greetingTemplateWarnings({ kind, platform, text: effective })
+  const warnings = greetingTemplateWarnings({ kind, platform, text: effective }, { chatCaps })
   const commit = (): void => {
     const next = draft.trim()
     if (next === text) return

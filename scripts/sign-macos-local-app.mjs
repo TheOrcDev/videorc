@@ -42,6 +42,8 @@ if (!identityList.includes(identity)) {
 const toolPaths = [
   join(appPath, 'Contents/Resources/videorc-backend'),
   join(appPath, 'Contents/Resources/native_preview_host_helper'),
+  // Plan 209 S4: the stdio bridge agent apps run, signed like the helper.
+  join(appPath, 'Contents/Resources/videorc-mcp'),
   join(appPath, 'Contents/Resources/videorc_native_preview.node'),
   join(appPath, 'Contents/Resources/ffmpeg/bin/ffmpeg'),
   join(appPath, 'Contents/Resources/ffmpeg/bin/ffprobe')

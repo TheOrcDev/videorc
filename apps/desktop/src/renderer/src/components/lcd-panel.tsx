@@ -207,8 +207,8 @@ export function LcdPanelRow({
  */
 export const LCD_FADER = [
   '[&_[data-slot=fader-track]]:bg-(--lcd-display-ink-dim)',
-  '[&_[data-slot=fader-range]]:bg-(--lcd-display-lit)',
-  '[&_[data-slot=fader-thumb]]:bg-(--lcd-display-lit) [&_[data-slot=fader-thumb]]:shadow-none [&_[data-slot=fader-thumb]]:ring-(--lcd-display-glow)',
+  '[&_[data-slot=fader-range]]:bg-(--lcd-display-lit) [&_[data-slot=fader-range]]:bg-none [&_[data-slot=fader-range]]:shadow-none',
+  '[&_[data-slot=fader-thumb]]:bg-(--lcd-display-lit) [&_[data-slot=fader-thumb]]:bg-none [&_[data-slot=fader-thumb]]:shadow-none [&_[data-slot=fader-thumb]]:ring-(--lcd-display-glow)',
   '[&_[data-slot=source-control-row]>span:first-child]:w-auto [&_[data-slot=source-control-row]>span:first-child]:text-(--lcd-display-ink-dim)',
   '[&_[data-slot=source-control-value]]:text-(--lcd-display-lit) [&_[data-slot=source-control-value]_button]:text-(--lcd-display-lit) [&_[data-slot=source-control-value]_button:hover]:bg-(--lcd-display-ink-unlit)'
 ].join(' ')

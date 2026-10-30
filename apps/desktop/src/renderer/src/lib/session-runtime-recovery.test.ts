@@ -471,6 +471,18 @@ describe('session audio news (plan 076)', () => {
       expect.objectContaining({ id: 'host-overloaded', description: 'host-overloaded message' })
     )
   })
+
+  it('warns at Record that little recording space is left', () => {
+    showSessionHealthEvent(healthEvent('disk-space-low'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Recording space is low',
+      expect.objectContaining({
+        id: 'disk-space-low',
+        description: 'disk-space-low message',
+        duration: 20_000
+      })
+    )
+  })
 })
 
 // Plan 174 B-6: Go Live leaves recording on, and the backend reports that

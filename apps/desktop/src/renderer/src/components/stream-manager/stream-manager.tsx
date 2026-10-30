@@ -105,7 +105,7 @@ import {
   type StreamManagerPane,
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
-import { chatDraftMaxChars, sendablePlatforms } from '@/lib/chat-send'
+import { sendablePlatforms } from '@/lib/chat-send'
 import { shortcutLabel } from '@/lib/platform'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
@@ -128,6 +128,7 @@ import {
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 import type { BannerRelayAction, BannerSummary } from '../../../../shared/banner-commands'
 import type { SoundRelayAction, SoundboardSummary } from '../../../../shared/sound-commands'
+import type { CohostActAnswer } from '../../../../shared/buddy-act'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
@@ -289,6 +290,8 @@ export interface StreamManagerProps {
   onMarkClip?: (seconds: ClipLength) => void
   /** `/clip` in the composer (plan 181 R4): the same action, answered with its words. */
   onClip?: (seconds: ClipLength) => Promise<string>
+  /** Plan 210 S8b: Hide screen (true) or Show screen (false), relayed to Studio. */
+  onScreenPrivacy?: (hidden: boolean) => unknown
   /**
    * Banners (plan 186 S7): the list Studio pushed (null until it loads) and
    * one show or hide, relayed to Studio. The status bar's Banners menu and
@@ -306,6 +309,9 @@ export interface StreamManagerProps {
    */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /** Plan 209 S20: `/buddy <words>`, relayed to Studio; resolves to Buddy's
+   * final answer, which the composer shows. */
+  onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
@@ -358,9 +364,10 @@ export interface StreamManagerProps {
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
   onBuddyReact?: (reaction: string) => void
   /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's
-   * posting mode control and behaviour chips; unknown hides them. */
+   * talk control and behaviour chips; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
-  /** The posting mode (plan 174 S3.14a): `{mode}` alone, never `enabled`. */
+  /** How Buddy talks (plan 174 S3.14a, plan 211 D3): `{talk}` alone, never
+   * `enabled` and never the legacy `mode`. */
   onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
   /** The behaviour chips' link to Buddy → Chat, their one home (plan 174 D7). */
   onCohostOpenChatSettings?: () => void
@@ -413,10 +420,12 @@ export function StreamManager({
   onClear,
   onMarkClip,
   onClip,
+  onScreenPrivacy,
   banners,
   onBanner,
   sounds,
   onSound,
+  onBuddy,
   markerContext,
   onMarker,
   onUndoMarker,
@@ -951,16 +960,17 @@ export function StreamManager({
           />
         ) : null}
       </div>
-      {/* Plan 164 S-D6, plan 174 S3.14a: the posting mode governs only what
-          Buddy posts; the behaviours are read-only chips linking to Buddy →
-          Chat. Neither touches Buddy Live. */}
+      {/* Plan 164 S-D6, plan 174 S3.14a, plan 211 D1: the talk control
+          governs only how Buddy talks on its own; the behaviours are
+          read-only chips linking to Buddy → Chat. Neither touches Buddy Live. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
         <BuddyChatControls
           aiGreetings={cohostGate?.allowed === true && cohostConsented}
           autoChat={cohostAutoChat}
           name={buddyName}
           picture={cohostBuddy ? buddyStateImageUrl(cohostBuddy.persona, 'idle') : null}
-          onModeChange={(mode) => onCohostAutoChatChange({ mode })}
+          // Plan 211 D3: the relay carries `talk` alone, never the legacy `mode`.
+          onTalkChange={(talk) => onCohostAutoChatChange({ talk })}
           onOpenChatSettings={onCohostOpenChatSettings}
         />
       ) : null}
@@ -1084,6 +1094,7 @@ export function StreamManager({
           buddy={cohostBuddy}
           offOutputsNotice={buddyOffOutputsNotice({
             enabled: cohostEnabled,
+            talk: cohostAutoChat?.talk,
             onAir,
             showOnStream: cohostBuddy.showOnStream,
             showInRecording: cohostBuddy.showInRecording,
@@ -1091,9 +1102,7 @@ export function StreamManager({
           })}
           packReactions={buddyPackReactions}
           previewRef={buddyPreviewRef}
-          sayChatCap={sendTargets.length > 0 ? chatDraftMaxChars(sendTargets) : null}
           sayPending={buddyPending}
-          sayPostsToChat={live && cohostAutoChat?.mode === 'auto'}
           onReact={onBuddyReact}
           onSay={onBuddySay}
           onShowOnStreamChange={onBuddyShowOnStream}
@@ -1141,7 +1150,12 @@ export function StreamManager({
         </div>
       ) : null}
 
-      <StatsBar items={stats} layout={statsLayout} onLayoutChange={changeStatsLayout} />
+      <StatsBar
+        items={stats}
+        layout={statsLayout}
+        screenHidden={markerContext?.screen?.hidden === true}
+        onLayoutChange={changeStatsLayout}
+      />
 
       <div className={PANES_GRID} data-slot="stream-manager-panes">
         {/* Below Wide: one segmented control picks the pane. */}
@@ -1252,6 +1266,7 @@ export function StreamManager({
             onBanner={inHistory ? undefined : onBanner}
             sounds={sounds}
             onSound={inHistory ? undefined : onSound}
+            onBuddy={inHistory ? undefined : onBuddy}
             onSend={onSend}
           />
         </div>
@@ -1300,6 +1315,8 @@ export function StreamManager({
         onHighlightAnchorChange={inHistory ? undefined : onHighlightAnchorChange}
         clip={markerContext?.clip}
         onMarkClip={clipAvailable ? onMarkClip : undefined}
+        screen={markerContext?.screen}
+        onScreenPrivacy={onScreenPrivacy}
         banners={banners}
         onBanner={onBanner}
         sounds={sounds}

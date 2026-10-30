@@ -69,8 +69,14 @@ describe('Electron IPC contract', () => {
     // system:recheck-permission-grants, app:relaunch-for-permission).
     // 149: plan 203 S5 adds app:workspace-shown (the launch Preview waits
     // for first-run setup).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(149)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(149)
+    // 150: plan 209 S7 adds agents:bridge (the agent bridge's path for
+    // Settings → Remote → Agents, and the Linux copy on Connect).
+    // 152: plan 209 S20 adds the Stream Manager's `/buddy` relay pair.
+    // 153: plan 209 S22 adds agents:add-to-app ("Add to …" in Connect).
+    // 155: plan 210 S9 adds foreground window watch and self bundle ids.
+    // 156: plan 210 S5 adds app icons for New scene… (S4 fills main's side).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(156)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(156)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -109,6 +115,28 @@ describe('Electron IPC contract', () => {
     expect(() => validateElectronInvokeArgs('shell:exec', ['calc.exe'])).toThrow(
       'Electron IPC channel is not declared'
     )
+  })
+
+  it('takes only a known app and an agent token for Add to … (plan 209 S22)', () => {
+    const token = `vrc_agent_${'ab12'.repeat(16)}`
+    expect(validateElectronInvokeArgs('agents:add-to-app', ['codex', token])).toEqual([
+      'codex',
+      token
+    ])
+    // Other has no config file, and nothing but a token's shape crosses.
+    expect(() => validateElectronInvokeArgs('agents:add-to-app', ['other', token])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('agents:add-to-app', ['cursor', 'vrc_agent_short'])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('agents:add-to-app', ['cursor', token, '/tmp/evil'])
+    ).toThrow()
+    expect(
+      validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'Added.' })
+    ).toEqual({ added: true, message: 'Added.' })
+    expect(() =>
+      validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'x', path: '/' })
+    ).toThrow()
   })
 
   it('validates account authorization URLs and callback identifiers', () => {
@@ -1477,6 +1505,27 @@ describe('Stream Manager clip IPC (plan 199)', () => {
     }
   })
 
+  it('pushes Hide screen’s state, refusal and key for the Stream Manager (plan 210 S8b)', () => {
+    for (const screen of [
+      { hidden: false, accelerator: 'Control+Alt+H' },
+      { hidden: true },
+      { hidden: false, unavailable: "Hide screen isn't available on this recording." }
+    ]) {
+      const payload = { ...context, screen }
+      expect(validateElectronEventPayload('comments-window:marker-context', payload)).toEqual(
+        payload
+      )
+      expect(validateElectronInvokeResult('comments-window:marker-context-get', payload)).toEqual(
+        payload
+      )
+    }
+    for (const screen of [{}, { hidden: 'yes' }, { hidden: true, reason: 'you' }]) {
+      expect(() =>
+        validateElectronEventPayload('comments-window:marker-context', { ...context, screen })
+      ).toThrow()
+    }
+  })
+
   it('carries a clip length on the relay command, and none for the 30-second clip', () => {
     for (const command of [
       { requestId: 'r-30' },
@@ -1489,4 +1538,24 @@ describe('Stream Manager clip IPC (plan 199)', () => {
       )
     }
   })
+})
+
+it('admits saved scene key maps and rejects empty or oversized ids', () => {
+  expect(() =>
+    validateElectronInvokeArgs('global-shortcuts:set', [{ scenes: { figma: 'Control+F13' } }])
+  ).not.toThrow()
+  for (const id of ['', ' '.repeat(2), 'a'.repeat(129)]) {
+    expect(() =>
+      validateElectronInvokeArgs('global-shortcuts:set', [{ scenes: { [id]: 'Control+F13' } }])
+    ).toThrow()
+  }
+})
+
+it('delivers saved-scene actions through the validated global shortcut event', () => {
+  expect(validateElectronEventPayload('global-shortcuts:triggered', 'scene:figma')).toBe(
+    'scene:figma'
+  )
+  for (const value of ['scene:', `scene:${'a'.repeat(129)}`, 'unknown']) {
+    expect(() => validateElectronEventPayload('global-shortcuts:triggered', value)).toThrow()
+  }
 })

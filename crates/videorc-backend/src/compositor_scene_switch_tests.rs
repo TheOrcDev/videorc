@@ -258,6 +258,7 @@ async fn publish(
         false,
         false,
         super::LiveBackgroundLeg::unmeasured(&mut None),
+        super::ProgramLeg::off(&mut None),
     )
     .await
 }
@@ -338,7 +339,7 @@ async fn latest_bytes(state: &AppState) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn source_switch_retries_contention_and_never_exposes_previous_device() {
+async fn source_switch_holds_the_last_frame_and_never_proves_the_previous_device() {
     let state = state();
     let mut scene = snapshot(SceneSourceKind::Screen);
     state.compositor.lock().await.scene = Some(scene.clone());
@@ -359,6 +360,8 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
     scene.scene.as_mut().unwrap().sources[0].device_id = Some("screen:next".into());
     state.compositor.lock().await.scene = Some(scene.clone());
     let held = state.preview_screen.lock().await;
+    // Plan 210 S3: the frame on air holds while the next device is not
+    // delivering, under contention too. It is no evidence for `screen:next`.
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
             .await
@@ -366,10 +369,11 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
             .screen,
         None
     );
-    assert_black(&latest_bytes(&state).await, 64, 36);
+    assert_eq!(latest_bytes(&state).await, green);
     drop(held);
     // The old device is still installed. Its perfectly valid frame must not
-    // masquerade as the selected device after the registry becomes accessible.
+    // masquerade as the selected device after the registry becomes accessible;
+    // it still draws, as the last picture on air.
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
             .await
@@ -377,7 +381,7 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
             .screen,
         None
     );
-    assert_black(&latest_bytes(&state).await, 64, 36);
+    assert_eq!(latest_bytes(&state).await, green);
     install_screen(&state, "screen:next", 2, 22, [255, 0, 0, 255]).await;
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
@@ -389,7 +393,8 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
     let blue = latest_bytes(&state).await;
     assert_ne!(blue, green);
 
-    // Rapid A→B→A: a late B producer cannot paint the now-selected A scene.
+    // Rapid A→B→A: a late B producer cannot prove the now-selected A scene;
+    // its last frame holds on air until A delivers again.
     scene.revision = 3;
     scene.scene.as_mut().unwrap().sources[0].device_id = Some("screen:fixture".into());
     state.compositor.lock().await.scene = Some(scene);
@@ -400,6 +405,7 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
             .screen,
         None
     );
+    assert_eq!(latest_bytes(&state).await, blue);
     install_screen(&state, "screen:fixture", 3, 33, [0, 255, 0, 255]).await;
     assert_eq!(
         publish(&state, &mut sources, &mut cache)
@@ -409,6 +415,607 @@ async fn source_switch_retries_contention_and_never_exposes_previous_device() {
         Some(33)
     );
     assert_eq!(latest_bytes(&state).await, green);
+}
+
+/// Plan 210 S3: a window switch changes the running capture in place. The
+/// store is the same; frames of the next window carry the next generation.
+/// The compositor keeps the previous window's last frame until the scene
+/// commit names the next window and a frame of its generation is there,
+/// then cuts: never the next window under the previous layout, never black.
+#[tokio::test]
+async fn a_window_swap_holds_the_last_frame_until_the_commit_then_cuts() {
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    assert_eq!(
+        publish(&state, &mut sources, &mut cache)
+            .await
+            .fingerprint
+            .screen,
+        Some(11)
+    );
+    let alpha = latest_bytes(&state).await;
+    assert!(sources.screen_frame_is_current());
+
+    // The stream changes target: generation 2 from here, same store.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    // Beta's first frame lands while the scene still names Alpha. The
+    // periodic refresh may adopt the new identity before the commit does.
+    crate::preview_screen::test_publish_screen_pixels(&state, 22, [255, 0, 0, 255], Instant::now())
+        .await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert!(matches!(
+        change,
+        Some(CompositorScreenSourceChange::Adopted { generation: 2, .. })
+    ));
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(
+        result.fingerprint.screen, None,
+        "Beta is no evidence for Alpha's scene"
+    );
+    assert_eq!(
+        latest_bytes(&state).await,
+        alpha,
+        "Alpha's last frame holds, never Beta, never black"
+    );
+    assert!(!sources.screen_frame_is_current());
+
+    // The commit names Beta: the first publish after it cuts.
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, Some(22));
+    let beta = latest_bytes(&state).await;
+    assert_ne!(beta, alpha);
+    assert!(sources.screen_frame_is_current());
+    // And the cut holds: the next tick draws Beta again, as live.
+    publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(latest_bytes(&state).await, beta);
+}
+
+/// Publish one tick of a dual-orientation session: the program at 64x36 and
+/// the vertical leg (its own scene) at 36x64 into the stream frame store.
+async fn publish_dual(
+    state: &AppState,
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    sequence: u64,
+) -> CompositorPublishResult {
+    publish_compositor_frame(
+        state,
+        "scene-switch-test",
+        sequence,
+        64,
+        36,
+        sources,
+        cache,
+        None,
+        CompositorFrameConsumer::RawYuvEncoder,
+        Some(CompositorAuxiliaryOutput {
+            width: 36,
+            height: 64,
+            frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+            composes_simulcast_scene: true,
+        }),
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        super::LiveBackgroundLeg::unmeasured(&mut None),
+        super::ProgramLeg::off(&mut None),
+    )
+    .await
+}
+
+/// Plan 210 S3 follow-up: in a dual-orientation session the vertical leg
+/// composes its own scene, and the renderer sends that scene after the
+/// program commit. Each leg adopts the next window only when its OWN scene
+/// names it; until then it keeps the frame it drew before the cut. Never the
+/// next window under the vertical leg's previous layout, and the same rule
+/// the other way round when the vertical commit lands first.
+#[tokio::test]
+async fn each_leg_cuts_to_the_next_window_only_when_its_own_scene_names_it() {
+    let state = state();
+    let mut program = snapshot(SceneSourceKind::Window);
+    program.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    let mut vertical = program.clone();
+    let stream_store = Arc::new(StdMutex::new(FrameStore::new(2)));
+    {
+        let mut compositor = state.compositor.lock().await;
+        compositor.scene = Some(program.clone());
+        compositor.simulcast_scene = Some(vertical.clone());
+        compositor.stream_frame_store = Some(stream_store.clone());
+    }
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    let vertical_bytes = || {
+        stream_store
+            .lock()
+            .unwrap()
+            .latest()
+            .unwrap()
+            .bytes
+            .to_vec()
+    };
+
+    let result = publish_dual(&state, &mut sources, &mut cache, 1).await;
+    assert_eq!(result.fingerprint.screen, Some(11));
+    let alpha_program = latest_bytes(&state).await;
+    let alpha_vertical = vertical_bytes();
+
+    // Alpha -> Beta: the program commit lands first.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    crate::preview_screen::test_publish_screen_pixels(&state, 22, [255, 0, 0, 255], Instant::now())
+        .await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert!(matches!(
+        change,
+        Some(CompositorScreenSourceChange::Adopted { generation: 2, .. })
+    ));
+    program.revision = 2;
+    program.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(program.clone());
+    let result = publish_dual(&state, &mut sources, &mut cache, 2).await;
+    assert_eq!(
+        result.fingerprint.screen,
+        Some(22),
+        "the program cuts to Beta"
+    );
+    let beta_program = latest_bytes(&state).await;
+    assert_ne!(beta_program, alpha_program);
+    assert_eq!(
+        vertical_bytes(),
+        alpha_vertical,
+        "the vertical leg still names Alpha: it keeps Alpha's last frame, never Beta under Alpha's layout"
+    );
+    // Another tick before the vertical commit: the hold is steady.
+    publish_dual(&state, &mut sources, &mut cache, 3).await;
+    assert_eq!(latest_bytes(&state).await, beta_program);
+    assert_eq!(vertical_bytes(), alpha_vertical);
+
+    // The vertical commit names Beta: that leg cuts now.
+    vertical.revision = 2;
+    vertical.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.simulcast_scene = Some(vertical.clone());
+    publish_dual(&state, &mut sources, &mut cache, 4).await;
+    let beta_vertical = vertical_bytes();
+    assert_ne!(beta_vertical, alpha_vertical);
+    assert_eq!(latest_bytes(&state).await, beta_program);
+    publish_dual(&state, &mut sources, &mut cache, 5).await;
+    assert_eq!(vertical_bytes(), beta_vertical);
+
+    // Beta -> Alpha: this time the vertical commit lands first. The program
+    // holds Beta until its own scene names Alpha.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:alpha", 3).await;
+    crate::preview_screen::test_publish_screen_pixels(&state, 33, [0, 255, 0, 255], Instant::now())
+        .await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert!(matches!(
+        change,
+        Some(CompositorScreenSourceChange::Adopted { generation: 3, .. })
+    ));
+    vertical.revision = 3;
+    vertical.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.simulcast_scene = Some(vertical);
+    let result = publish_dual(&state, &mut sources, &mut cache, 6).await;
+    assert_eq!(
+        result.fingerprint.screen, None,
+        "Alpha's frame is no evidence for the program, which still names Beta"
+    );
+    assert_eq!(
+        vertical_bytes(),
+        alpha_vertical,
+        "the vertical leg cuts to Alpha"
+    );
+    assert_eq!(
+        latest_bytes(&state).await,
+        beta_program,
+        "the program still names Beta: it keeps Beta's last frame, never Alpha under Beta's layout"
+    );
+    program.revision = 3;
+    program.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(program);
+    let result = publish_dual(&state, &mut sources, &mut cache, 7).await;
+    assert_eq!(result.fingerprint.screen, Some(33));
+    assert_eq!(latest_bytes(&state).await, alpha_program);
+    assert_eq!(vertical_bytes(), alpha_vertical);
+}
+
+/// Plan 210 D5: the commit can land a tick or more before the compositor
+/// adopts the next capture (the preview slot's lock is contended; the
+/// stop-then-start path installs the new capture later still). For those
+/// ticks the leg must not draw the previous window under the next layout:
+/// it keeps the scene it drew, with its frame, and cuts layout and window
+/// together. Red before the fix: Alpha's frame drawn inside Beta's shrunk
+/// layout for one tick.
+#[tokio::test]
+async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    assert_eq!(
+        publish(&state, &mut sources, &mut cache)
+            .await
+            .fingerprint
+            .screen,
+        Some(11)
+    );
+    let alpha_full = latest_bytes(&state).await;
+    assert!(
+        alpha_full[0] > 100,
+        "Alpha fills the canvas: a bright corner"
+    );
+
+    // Beta's capture replaces Alpha's in place and delivers its first frame.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    crate::preview_screen::test_publish_screen_pixels(&state, 22, [255, 0, 0, 255], Instant::now())
+        .await;
+    // The commit names Beta in a shrunk freeform layout...
+    let mut shrunk = scene.clone();
+    shrunk.revision = 2;
+    shrunk.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+    {
+        let source = &mut shrunk.scene.as_mut().unwrap().sources[0];
+        source.device_id = Some("window:beta".into());
+        source.transform = SceneTransform {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+    }
+    state.compositor.lock().await.scene = Some(shrunk.clone());
+    // ...but the compositor cannot adopt the capture this tick: the preview
+    // slot is busy (a swap installing, a metrics poll, a status read).
+    let busy_slot = state.preview_screen.lock().await;
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(
+        result.fingerprint.screen, None,
+        "no Beta frame proves anything yet"
+    );
+    assert_eq!(
+        latest_bytes(&state).await,
+        alpha_full,
+        "Alpha's frame stays under Alpha's layout: never Alpha inside Beta's shrunk layout"
+    );
+    publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(latest_bytes(&state).await, alpha_full, "the hold is steady");
+    drop(busy_slot);
+
+    // The next tick adopts Beta: layout and window cut together.
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, Some(22));
+    let beta_shrunk = latest_bytes(&state).await;
+    assert_ne!(beta_shrunk, alpha_full);
+    assert!(
+        beta_shrunk[0] < 40,
+        "Beta's shrunk layout leaves the corner dark"
+    );
+    publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(latest_bytes(&state).await, beta_shrunk, "and the cut holds");
+
+    // A layout edit on the same, delivering capture cuts at once: no hold.
+    let mut edited = shrunk.clone();
+    edited.revision = 3;
+    edited.scene.as_mut().unwrap().sources[0].transform.x = 0.0;
+    state.compositor.lock().await.scene = Some(edited);
+    publish(&state, &mut sources, &mut cache).await;
+    assert_ne!(latest_bytes(&state).await, beta_shrunk);
+}
+
+/// Plan 210 D5: the hold is bounded. A scene naming a capture that never
+/// delivers takes the layout after `LEG_SCENE_HOLD_MAX`, with the frame on
+/// air, rather than pinning the previous layout for good.
+#[test]
+fn a_leg_scene_hold_is_bounded() {
+    let drawn = snapshot(SceneSourceKind::Window);
+    let mut next = drawn.clone();
+    next.revision = 2;
+    next.scene.as_mut().unwrap().sources[0].device_id = Some("window:gone".into());
+    let t0 = Instant::now();
+    let frame = crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+        storage: crate::frame_store::FrameStorage::untracked(),
+        sequence: 1,
+        width: 1,
+        height: 1,
+        pixel_format: PreviewScreenPixelFormat::Bgra8,
+        metadata: (),
+        bytes: vec![0, 0, 0, 255],
+        source_iosurface: None,
+        source_pixel_buffer: None,
+        source_d3d11_texture: None,
+        recycle_pool: None,
+        captured_at: t0,
+    });
+    let hold = LegScreenHold {
+        frame: Some(frame),
+        scene: Some(drawn.clone()),
+        waiting_since: None,
+    };
+    let (scene, since) = leg_scene_for_tick(Some(next.clone()), &hold, false, None, t0);
+    assert_eq!(
+        scene.as_ref().map(|s| s.revision),
+        Some(1),
+        "holds the drawn scene"
+    );
+    assert_eq!(since, Some(t0));
+    let waiting = LegScreenHold {
+        waiting_since: since,
+        ..hold.clone()
+    };
+    let (scene, since) = leg_scene_for_tick(
+        Some(next.clone()),
+        &waiting,
+        false,
+        None,
+        t0 + LEG_SCENE_HOLD_MAX / 2,
+    );
+    assert_eq!(scene.as_ref().map(|s| s.revision), Some(1));
+    assert_eq!(since, Some(t0), "the wait keeps its start");
+    let (scene, since) = leg_scene_for_tick(
+        Some(next.clone()),
+        &waiting,
+        false,
+        None,
+        t0 + LEG_SCENE_HOLD_MAX,
+    );
+    assert_eq!(
+        scene.as_ref().map(|s| s.revision),
+        Some(2),
+        "the bound releases"
+    );
+    assert_eq!(since, None);
+    // A current frame of the named capture cuts at once.
+    let key = crate::source_registry::SourceKey {
+        kind: crate::source_registry::SourceKind::Window,
+        id: "window:gone".into(),
+    };
+    let (scene, since) = leg_scene_for_tick(Some(next), &hold, true, Some(&key), t0);
+    assert_eq!(scene.as_ref().map(|s| s.revision), Some(2));
+    assert_eq!(since, None);
+}
+
+/// Plan 210 S3: the stop-then-start fallback retires the old capture before
+/// the new one exists. The frame on air holds through the gap instead of
+/// going black, and the new capture's first frame cuts in at its commit.
+#[tokio::test]
+async fn a_capture_retired_mid_switch_keeps_the_last_frame_on_air() {
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    publish(&state, &mut sources, &mut cache).await;
+    let alpha = latest_bytes(&state).await;
+
+    crate::preview_screen::test_detach_live_screen(&state).await;
+    let (refreshed, _, change) = std::mem::take(&mut sources).refresh_sources_nonblocking(&state);
+    sources = refreshed;
+    assert_eq!(change, Some(CompositorScreenSourceChange::Removed));
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, None);
+    assert_eq!(
+        latest_bytes(&state).await,
+        alpha,
+        "no capture, but the last frame holds"
+    );
+
+    install_screen(&state, "window:beta", 2, 22, [255, 0, 0, 255]).await;
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(result.fingerprint.screen, Some(22));
+    assert_ne!(latest_bytes(&state).await, alpha);
+}
+
+/// Plan 210 S3 under S7: a swap while the screen is hidden is a fresh
+/// capture for the gate. The next window's first frame publishes frosted,
+/// stamped with the new generation (so the switch completes), and its live
+/// pixels are held for the show.
+#[tokio::test]
+async fn a_swap_while_hidden_cuts_to_a_frosted_still_never_the_live_window() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 36;
+    let stripes = || {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let value = if (index % WIDTH as usize) / 2 % 2 == 0 {
+                255
+            } else {
+                0
+            };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    };
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    publish(&state, &mut sources, &mut cache).await;
+    let alpha = latest_bytes(&state).await;
+
+    state
+        .screen_privacy
+        .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+    assert!(crate::preview_screen::hold_screen_now(&state).await);
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    assert!(
+        crate::preview_screen::test_publish_screen_bgra(&state, 22, stripes(), Instant::now())
+            .await
+    );
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert_eq!(
+        result.fingerprint.screen,
+        Some(22),
+        "the frosted still completes the switch"
+    );
+    let on_air = latest_bytes(&state).await;
+    assert_ne!(on_air, alpha);
+    // Luma along one row: the live stripes alternate every two pixels; the
+    // frost is smooth.
+    let row: Vec<u8> = (8..WIDTH - 8)
+        .map(|x| on_air[(18 * WIDTH + x) as usize])
+        .collect();
+    let max_step = row
+        .windows(2)
+        .map(|pair| pair[0].abs_diff(pair[1]))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_step < 40,
+        "the next window's live stripes reached the program: max step {max_step}"
+    );
+    assert_eq!(
+        crate::preview_screen::test_privacy_held_frames(&state).await,
+        1
+    );
+
+    state.screen_privacy.show();
+    assert!(crate::preview_screen::release_screen_now(&state).await);
+    publish(&state, &mut sources, &mut cache).await;
+    let shown = latest_bytes(&state).await;
+    let row: Vec<u8> = (8..WIDTH - 8)
+        .map(|x| shown[(18 * WIDTH + x) as usize])
+        .collect();
+    let max_step = row
+        .windows(2)
+        .map(|pair| pair[0].abs_diff(pair[1]))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_step > 100,
+        "the show publishes the held live frame: max step {max_step}"
+    );
+}
+
+/// The other order (plan 210 D5 under D8): Follow swaps to the next window,
+/// and the hide lands after the swap's completion stamped the new generation
+/// but before that window's first frame. Every leg draws the frame of the
+/// adopted generation, so the still must carry it: the program cuts to the
+/// frost at once, never holding the previous window's last live frame under
+/// a "Screen hidden" chip, and the swap completes on the still, no restart.
+#[tokio::test]
+async fn a_hide_during_an_in_flight_swap_never_keeps_the_previous_window_live() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 36;
+    let stripes = |phase: usize| {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let value = if ((index % WIDTH as usize) / 2 + phase) % 2 == 0 {
+                255
+            } else {
+                0
+            };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    };
+    // Luma steps along one row: live stripes alternate every two pixels;
+    // the frost is smooth.
+    let max_step = |bytes: &[u8]| {
+        (8..WIDTH - 8)
+            .map(|x| bytes[(18 * WIDTH + x) as usize])
+            .collect::<Vec<u8>>()
+            .windows(2)
+            .map(|pair| pair[0].abs_diff(pair[1]))
+            .max()
+            .unwrap_or(0)
+    };
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    assert!(
+        crate::preview_screen::test_publish_screen_bgra(&state, 20, stripes(0), Instant::now())
+            .await
+    );
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    publish(&state, &mut sources, &mut cache).await;
+    let alpha = latest_bytes(&state).await;
+    assert!(max_step(&alpha) > 100, "the previous window is live on air");
+
+    // The swap's completion stamps generation 2; no frame of beta yet.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    state
+        .screen_privacy
+        .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+    assert!(crate::preview_screen::hold_screen_now(&state).await);
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert!(
+        result.fingerprint.screen.is_some(),
+        "the still carries the adopted generation, so the switch completes on it"
+    );
+    let on_air = latest_bytes(&state).await;
+    let step = max_step(&on_air);
+    assert!(
+        step < 40,
+        "the previous window's live stripes stayed on air after the hide: max step {step}"
+    );
+
+    // Beta's first frame holds behind the still.
+    assert!(
+        crate::preview_screen::test_publish_screen_bgra(&state, 30, stripes(1), Instant::now())
+            .await
+    );
+    publish(&state, &mut sources, &mut cache).await;
+    let step = max_step(&latest_bytes(&state).await);
+    assert!(
+        step < 40,
+        "the next window's live stripes reached the program: max step {step}"
+    );
+    assert_eq!(
+        crate::preview_screen::test_privacy_held_frames(&state).await,
+        1
+    );
+
+    state.screen_privacy.show();
+    assert!(crate::preview_screen::release_screen_now(&state).await);
+    publish(&state, &mut sources, &mut cache).await;
+    let step = max_step(&latest_bytes(&state).await);
+    assert!(
+        step > 100,
+        "the show publishes the next window's held live frame: max step {step}"
+    );
 }
 
 #[tokio::test]
@@ -615,6 +1222,7 @@ async fn scene_switch_artifact_fixture() {
                 false,
                 false,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
+                super::ProgramLeg::off(&mut None),
             )
             .await;
             if metal {
@@ -783,6 +1391,7 @@ async fn source_iso_artifact_fixture() {
                 false,
                 false,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
+                super::ProgramLeg::off(&mut None),
             )
             .await;
             if metal {
@@ -889,6 +1498,7 @@ async fn source_iso_artifact_fixture() {
             false,
             false,
             super::LiveBackgroundLeg::unmeasured(&mut None),
+            super::ProgramLeg::off(&mut None),
         )
         .await;
         let latest_sequence =
@@ -1368,6 +1978,7 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             false,
             false,
             super::LiveBackgroundLeg::unmeasured(&mut None),
+            super::ProgramLeg::off(&mut None),
         )
         .await;
         let snapshot = state
@@ -1561,6 +2172,7 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
             false,
             false,
             super::LiveBackgroundLeg::unmeasured(&mut None),
+            super::ProgramLeg::off(&mut None),
         )
         .await;
         let observed = state
@@ -1661,4 +2273,317 @@ async fn windows_source_render_edit_samples_glide_without_mutating_committed_pro
     );
     assert!(compositor.source_edit_is_current(&committed));
     assert!(!compositor.source_edit_is_current(&rendered));
+}
+
+/// Plan 210 S7: while the screen is hidden every leg carries the frosted
+/// still and never a live frame: the program (which Clips and the native
+/// preview read), the vertical aux leg (its own composition from the
+/// simulcast snapshot) and the Screen ISO leg, on CPU and on Metal. The
+/// camera inset is untouched.
+#[tokio::test]
+async fn hidden_screen_frost_reaches_every_leg() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 36;
+    const AUX_WIDTH: u32 = 36;
+    const AUX_HEIGHT: u32 = 64;
+    const CAMERA_WIDTH: u32 = 48;
+    const CAMERA_HEIGHT: u32 = 36;
+    let stripes = || {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let value = if (index % WIDTH as usize) / 2 % 2 == 0 {
+                255
+            } else {
+                0
+            };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    };
+    let white = || vec![0xff_u8; (WIDTH * HEIGHT * 4) as usize];
+    for metal in [false, true] {
+        if metal && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let mut gpus = if metal {
+            (0..4)
+                .map(|_| new_gpu_compositor(false))
+                .collect::<Vec<_>>()
+        } else {
+            vec![None, None, None, None]
+        };
+        if metal && gpus.iter().any(Option::is_none) {
+            eprintln!("SKIP: Metal fixture unavailable");
+            continue;
+        }
+        let mode = if metal { "metal" } else { "cpu" };
+        let state = state();
+        // Program: the screen full-frame with the camera inset top-right.
+        let mut combined = snapshot(SceneSourceKind::Screen);
+        combined.layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
+        let mut camera_source = snapshot(SceneSourceKind::Camera).scene.unwrap().sources[0].clone();
+        camera_source.id = "source:camera".into();
+        camera_source.device_id = Some("camera:fixture".into());
+        camera_source.transform.x = 0.7;
+        camera_source.transform.y = 0.0;
+        camera_source.transform.width = 0.3;
+        camera_source.transform.height = 0.3;
+        camera_source.default_transform = camera_source.transform.clone();
+        combined.scene.as_mut().unwrap().sources.push(camera_source);
+        // The vertical leg: its own scene, the screen alone on a portrait canvas.
+        let mut vertical = snapshot(SceneSourceKind::Screen);
+        vertical.revision = 2;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:fixture",
+            &combined.layout,
+            &crate::protocol::VideoSettings {
+                width: CAMERA_WIDTH,
+                height: CAMERA_HEIGHT,
+                ..video()
+            },
+        )
+        .await;
+        install_screen(&state, "screen:fixture", 1, 1, [0, 255, 0, 255]).await;
+        let stream_store = Arc::new(StdMutex::new(FrameStore::new(2)));
+        let iso_stores = CompositorSourceIsoFrameStores {
+            batches: Arc::new(crate::compositor::source_iso_batch::SourceIsoBatchStore::default()),
+            screen: Arc::new(StdMutex::new(FrameStore::new(2))),
+            camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+            camera_size: (CAMERA_WIDTH, CAMERA_HEIGHT),
+        };
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.stream_frame_store = Some(stream_store.clone());
+            compositor.source_iso_frame_stores = Some(iso_stores.clone());
+            compositor.scene = Some(combined.clone());
+            compositor.simulcast_scene = Some(vertical.clone());
+        }
+        let mut sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let stream_output = CompositorAuxiliaryOutput {
+            width: AUX_WIDTH,
+            height: AUX_HEIGHT,
+            frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+            composes_simulcast_scene: true,
+        };
+        let latest =
+            |store: &CompositorFrameStore| store.lock().unwrap().latest().unwrap().bytes.to_vec();
+        // Luma samples of the screen on each leg, away from the mirrored
+        // borders: the program below and left of the inset, the aux leg's
+        // middle row, the Screen ISO frame's interior columns.
+        let program_screen = |bytes: &[u8]| -> Vec<u8> {
+            (24..36)
+                .flat_map(|y| (8..40).map(move |x| (y, x)))
+                .map(|(y, x)| bytes[(y * WIDTH + x) as usize])
+                .collect()
+        };
+        let aux_screen = |bytes: &[u8]| -> Vec<u8> {
+            (6..AUX_WIDTH - 6)
+                .map(|x| bytes[(32 * AUX_WIDTH + x) as usize])
+                .collect()
+        };
+        let iso_screen = |bytes: &[u8]| -> Vec<u8> {
+            (0..HEIGHT)
+                .flat_map(|y| (8..WIDTH - 8).map(move |x| (y, x)))
+                .map(|(y, x)| bytes[(y * WIDTH + x) as usize])
+                .collect()
+        };
+        let mean = |samples: &[u8]| {
+            samples.iter().map(|&v| f64::from(v)).sum::<f64>() / samples.len() as f64
+        };
+        let max_step = |samples: &[u8]| {
+            samples
+                .windows(2)
+                .map(|pair| pair[0].abs_diff(pair[1]))
+                .max()
+                .unwrap_or(0)
+        };
+        // 1. Visible: the live stripes reach every leg.
+        assert!(
+            crate::preview_screen::test_publish_screen_bgra(&state, 2, stripes(), Instant::now())
+                .await
+        );
+        crate::preview_camera::test_publish_camera_pixels(
+            &state,
+            2,
+            [0, 0, 200, 255],
+            Instant::now(),
+        )
+        .await;
+        hide_screen_render(
+            &state,
+            1,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        assert_eq!(program.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+        assert_eq!(aux.len(), raw_yuv420p_len(AUX_WIDTH, AUX_HEIGHT));
+        assert_eq!(iso.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+        assert!(
+            max_step(&program_screen(&program)) > 150,
+            "{mode}: live stripes on the program"
+        );
+        assert!(
+            max_step(&aux_screen(&aux)) > 100,
+            "{mode}: live stripes on the vertical leg"
+        );
+        assert!(
+            max_step(&iso_screen(&iso)) > 150,
+            "{mode}: live stripes on the Screen ISO"
+        );
+        let inset_live = program[(3 * WIDTH + 55) as usize];
+
+        // 2. Hide: the still replaces the stripes on every leg, and the live
+        //    frames published while hidden (pure white) never show.
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(crate::preview_screen::hold_screen_now(&state).await);
+        for tick in 2..6_u64 {
+            assert!(
+                crate::preview_screen::test_publish_screen_bgra(
+                    &state,
+                    tick + 1,
+                    white(),
+                    Instant::now()
+                )
+                .await
+            );
+            crate::preview_camera::test_publish_camera_pixels(
+                &state,
+                tick + 1,
+                [0, 0, 200, 255],
+                Instant::now(),
+            )
+            .await;
+            hide_screen_render(
+                &state,
+                tick,
+                &mut gpus,
+                &mut sources,
+                &mut cache,
+                stream_output,
+                metal,
+            )
+            .await;
+            let program = latest(&compositor_frame_store(&state).await);
+            let aux = latest(&stream_store);
+            let iso = latest(&iso_stores.screen);
+            for (leg, samples) in [
+                ("program", program_screen(&program)),
+                ("vertical leg", aux_screen(&aux)),
+                ("Screen ISO", iso_screen(&iso)),
+            ] {
+                let mean = mean(&samples);
+                assert!(
+                    (70.0..=190.0).contains(&mean),
+                    "{mode} tick {tick}: the {leg} does not carry the frost (mean luma {mean})"
+                );
+                assert!(
+                    max_step(&samples) < 24,
+                    "{mode} tick {tick}: live stripes on the {leg} while hidden"
+                );
+                assert!(
+                    samples.iter().all(|&v| v < 200),
+                    "{mode} tick {tick}: a live white frame reached the {leg} while hidden"
+                );
+            }
+            let inset = program[(3 * WIDTH + 55) as usize];
+            assert!(
+                inset.abs_diff(inset_live) <= 2,
+                "{mode} tick {tick}: the camera inset changed while hidden ({inset} vs {inset_live})"
+            );
+        }
+        assert_eq!(
+            crate::preview_screen::test_privacy_held_frames(&state).await,
+            4
+        );
+
+        // 3. Show: the held live frame (white) is on every leg at once.
+        state.screen_privacy.show();
+        assert!(crate::preview_screen::release_screen_now(&state).await);
+        hide_screen_render(
+            &state,
+            6,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        for (leg, samples) in [
+            ("program", program_screen(&program)),
+            ("vertical leg", aux_screen(&aux)),
+            ("Screen ISO", iso_screen(&iso)),
+        ] {
+            assert!(
+                samples.iter().all(|&v| v > 200),
+                "{mode}: the {leg} did not return to the live picture after show"
+            );
+        }
+    }
+}
+
+/// One program + vertical aux + Screen/Camera ISO tick for the Hide screen
+/// fixture, at the fixture's canvas sizes.
+async fn hide_screen_render(
+    state: &AppState,
+    tick: u64,
+    gpus: &mut [Option<GpuCompositor>],
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    stream_output: CompositorAuxiliaryOutput,
+    metal: bool,
+) -> CompositorPublishResult {
+    let [gpu, stream_gpu, iso_screen_gpu, iso_camera_gpu] = gpus else {
+        unreachable!()
+    };
+    let result = publish_compositor_frame(
+        state,
+        "hide-screen-test",
+        tick,
+        64,
+        36,
+        sources,
+        cache,
+        gpu.as_mut(),
+        CompositorFrameConsumer::RawYuvEncoder,
+        Some(stream_output),
+        stream_gpu.as_mut(),
+        Some(CompositorSourceIsoOutput {
+            width: 64,
+            height: 36,
+            camera_width: 48,
+            camera_height: 36,
+            frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+        }),
+        iso_screen_gpu.as_mut(),
+        iso_camera_gpu.as_mut(),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        super::LiveBackgroundLeg::unmeasured(&mut None),
+        super::ProgramLeg::off(&mut None),
+    )
+    .await;
+    if metal {
+        assert_eq!(result.compositor_backend, CompositorBackend::Metal);
+    }
+    result
 }

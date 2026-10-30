@@ -128,7 +128,8 @@ fn context<'a>(
     card: Option<[f32; 4]>,
 ) -> BuddySpriteLegContext<'a> {
     let (canvas, buddy_box) = match leg {
-        BuddySpriteLeg::Primary => (PRIMARY_CANVAS, PRIMARY_BOX),
+        // The Preview leg (plan 205 S9) draws the primary's picture.
+        BuddySpriteLeg::Primary | BuddySpriteLeg::Preview => (PRIMARY_CANVAS, PRIMARY_BOX),
         BuddySpriteLeg::Auxiliary => (AUX_CANVAS, AUX_BOX),
     };
     BuddySpriteLegContext {
@@ -1439,7 +1440,10 @@ fn activity_rows_become_their_triggers_and_chat_becomes_activity() {
 
 #[test]
 fn a_greeting_that_answers_the_row_brings_its_own_reaction() {
-    use crate::cohost::{CohostGreetingPlatform, CohostGreetingTemplate, CohostGreetingsSettings};
+    use crate::cohost::{
+        CohostAutoChatMode, CohostGreetingPlatform, CohostGreetingTemplate,
+        CohostGreetingsSettings, CohostTalkMode,
+    };
     let follow = twitch_activity()
         .into_iter()
         .find(|row| row.event_type == LiveChatEventType::Follow)
@@ -1454,7 +1458,7 @@ fn a_greeting_that_answers_the_row_brings_its_own_reaction() {
         reaction: reaction.map(str::to_string),
     };
     let mut auto_chat = CohostAutoChat {
-        mode: CohostAutoChatMode::Auto,
+        talk: Some(CohostTalkMode::Bubble),
         greetings: CohostGreetingsSettings {
             enabled: true,
             templates: vec![
@@ -1488,10 +1492,21 @@ fn a_greeting_that_answers_the_row_brings_its_own_reaction() {
         other => panic!("{other:?}"),
     };
     assert_eq!(reaction(&auto_chat), Some("proud".to_string()));
+    // Plan 211 S-A4: the reaction plays in Bubble and in Suggest alike.
+    auto_chat.talk = Some(CohostTalkMode::Suggest);
+    assert_eq!(reaction(&auto_chat), Some("proud".to_string()));
+    auto_chat.talk = Some(CohostTalkMode::Bubble);
     // Greetings off (or the mode off): the trigger's own reaction.
     auto_chat.greetings.enabled = false;
     assert_eq!(reaction(&auto_chat), None);
     auto_chat.greetings.enabled = true;
+    auto_chat.talk = Some(CohostTalkMode::Off);
+    assert_eq!(reaction(&auto_chat), None);
+    // A block saved before plan 211 reads its talk mode from `mode`:
+    // `auto` means Bubble, so the reaction still plays.
+    auto_chat.talk = None;
+    auto_chat.mode = CohostAutoChatMode::Auto;
+    assert_eq!(reaction(&auto_chat), Some("proud".to_string()));
     auto_chat.mode = CohostAutoChatMode::Off;
     assert_eq!(reaction(&auto_chat), None);
 }

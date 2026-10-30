@@ -137,6 +137,23 @@ export function shouldRunPerformanceCheck(state: PerformanceCheckState | undefin
   )
 }
 
+/**
+ * Whether the packaged launch may measure now: nothing measured (or stale),
+ * capture ready, and no take running. The default Clips ring is a
+ * replay-only session, not a take: it steps aside for the check.
+ */
+export function performanceCheckMayAutoRun(
+  state: PerformanceCheckState | undefined,
+  recording: { state: string; replayOnly?: boolean },
+  captureReady: boolean
+): boolean {
+  return (
+    captureReady &&
+    (recording.state === 'idle' || recording.replayOnly === true) &&
+    shouldRunPerformanceCheck(state)
+  )
+}
+
 /** "1080p · 30 fps": the one video spelling (plan 174 S1.4). */
 export function outputLabel(video: Pick<VideoSettings, 'width' | 'height' | 'fps'>): string {
   return formatVideoQuality(video)

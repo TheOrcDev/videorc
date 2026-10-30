@@ -10,6 +10,8 @@ import {
   overlayLayoutNeedsSplit,
   overlayLayoutsEqual,
   overlayLegPlan,
+  programShows,
+  type OverlaySessionShape,
   overlayOrientationForCanvas,
   overlayRectBottomGravity,
   overlayRectValid,
@@ -299,5 +301,31 @@ describe('banner start notices (plan 186, D13 with the label `banners`)', () => 
         (notice) => notice.item
       )
     ).toStrictEqual(['highlight', 'banners'])
+  })
+})
+
+const programFixture = JSON.parse(
+  readFileSync(
+    new URL('../../../../../../protocol-fixtures/preview-program.json', import.meta.url),
+    'utf8'
+  )
+) as {
+  schemaVersion: number
+  cases: {
+    name: string
+    shape: OverlaySessionShape | null
+    showOnStream: boolean
+    showInRecording: boolean
+    expected: boolean
+  }[]
+}
+
+describe('preview program shared fixture (plan 205)', () => {
+  it('reads the supported fixture schema', () => {
+    expect(programFixture.schemaVersion).toBe(1)
+  })
+
+  it.each(programFixture.cases)('$name', ({ shape, showOnStream, showInRecording, expected }) => {
+    expect(programShows(shape, showOnStream, showInRecording)).toBe(expected)
   })
 })

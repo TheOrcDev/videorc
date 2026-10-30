@@ -125,3 +125,22 @@ describe('the remote intent queue', () => {
     expect(refuseStale).not.toHaveBeenCalled()
   })
 })
+
+it('runs privacy independently of a blocked scene, in privacy arrival order', async () => {
+  const scene = deferred()
+  const ran: string[] = []
+  const queue = createRemoteIntentQueue({
+    run: async (p) => {
+      const kind = remoteIntentKind(p)!
+      ran.push(kind)
+      if (kind === 'sceneApply') await scene.promise
+    },
+    refuseStale: vi.fn()
+  })
+  const pending = queue.enqueue(intent('scene', 'sceneApply'))
+  await queue.enqueue(intent('hide', 'screenHide'))
+  await queue.enqueue(intent('show', 'screenShow'))
+  expect(ran).toEqual(['sceneApply', 'screenHide', 'screenShow'])
+  scene.resolve()
+  await pending
+})

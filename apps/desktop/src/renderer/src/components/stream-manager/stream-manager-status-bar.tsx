@@ -4,12 +4,13 @@ import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platfo
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/comments-header'
 import { providerBadgeTitle } from '@/components/comments-destination-status'
-import { ClipIcon, FrameIcon, MoreIcon, PreviewIcon } from '@/components/icons'
+import { ClipIcon, FrameIcon, HiddenIcon, MoreIcon, PreviewIcon } from '@/components/icons'
 import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarAction } from '@/components/status-bar-action'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -36,8 +37,11 @@ import type {
   LiveChatProviderState
 } from '@/lib/backend'
 import { clipLastWords, clipLengthLabel } from '../../../../shared/clip-lengths'
+import type { ScreenPrivacyContext } from '../../../../shared/session-markers'
+import { shortcutLabel } from '@/lib/platform'
+import { screenPrivacyActionLabel, screenPrivacyDisabledReason } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
-import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
+import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY, WIDE_LABEL } from '@/lib/stream-manager-layout'
 import { chatStateLabel } from '@/lib/state-labels'
 import { DEFAULT_STAT_ORDER } from '@/lib/stream-manager-stats'
 import {
@@ -214,6 +218,26 @@ function clipButtons(clip: ClipContext | undefined): Array<{
   ]
 }
 
+/**
+ * Hide screen (plan 210 D9): the action by the state Studio pushed, the key
+ * in its hint, and why a hide is refused. Null until Studio has said.
+ */
+function screenPrivacyAction(
+  screen: ScreenPrivacyContext | undefined,
+  onScreenPrivacy: ((hidden: boolean) => unknown) | undefined
+): { label: string; hint: string; disabledReason: string | null; run: () => void } | null {
+  if (!screen || !onScreenPrivacy) return null
+  const key = screen.accelerator ? ` (${shortcutLabel(screen.accelerator)})` : ''
+  return {
+    label: screenPrivacyActionLabel(screen.hidden),
+    hint: screen.hidden
+      ? `Show your screen to viewers again${key}`
+      : `Cover your screen with a frosted picture on the recording and every stream${key}`,
+    disabledReason: screenPrivacyDisabledReason(screen),
+    run: () => void onScreenPrivacy(!screen.hidden)
+  }
+}
+
 export function StreamManagerStatusBar({
   providers,
   audience,
@@ -224,6 +248,8 @@ export function StreamManagerStatusBar({
   onClear,
   onMarkClip,
   clip,
+  screen,
+  onScreenPrivacy,
   banners = null,
   onBanner,
   sounds = null,
@@ -248,6 +274,11 @@ export function StreamManagerStatusBar({
   onMarkClip?: (seconds: ClipLength) => void
   /** The two clip lengths and their keys, for the buttons' hints. */
   clip?: ClipContext
+  /** Plan 210 S8b: Hide screen's state as Studio pushed it, on air or not
+   * (it covers recordings and Clips too). Absent until Studio has said. */
+  screen?: ScreenPrivacyContext
+  /** Hide (true) or show (false) the screen, relayed to Studio. */
+  onScreenPrivacy?: (hidden: boolean) => unknown
   /** Plan 186 S7: the Banners menu, on air or not (banners matter in
    * recordings too). `banners` is null until Studio has read the list. */
   banners?: readonly BannerSummary[] | null
@@ -282,6 +313,7 @@ export function StreamManagerStatusBar({
   // The ⋯ menu's Sounds… opens the popover once the menu has let the focus
   // go, so the menu's focus return never dismisses what it opened.
   const soundsAfterMenu = useRef(false)
+  const privacy = screenPrivacyAction(screen, onScreenPrivacy)
   const bannerItems = onBanner ? (
     <BannerMenuItems banners={banners} onBanner={(action) => void onBanner(action)} />
   ) : null
@@ -409,6 +441,23 @@ export function StreamManagerStatusBar({
                     onClick={hint.run}
                   />
                 ))}
+                {/* Icon and word at Wide; below it the word would push the
+                    last control off the bar, so the icon, the tooltip and the
+                    stats bar's Screen hidden chip carry it. Its key is in the
+                    hint. */}
+                {privacy ? (
+                  <DisabledReason reason={privacy.disabledReason} side="top">
+                    <StatusBarAction
+                      data-videorc-screen-privacy=""
+                      disabled={privacy.disabledReason !== null}
+                      hint={privacy.disabledReason ? undefined : privacy.hint}
+                      icon={<HiddenIcon aria-hidden />}
+                      label={privacy.label}
+                      text={<span className={WIDE_LABEL}>{privacy.label}</span>}
+                      onClick={privacy.run}
+                    />
+                  </DisabledReason>
+                ) : null}
                 {onToggleAlwaysOnTop ? (
                   <PinWindowButton
                     pinned={alwaysOnTop}
@@ -533,6 +582,22 @@ export function StreamManagerStatusBar({
                     </>
                   ) : null}
                   <DropdownMenuGroup>
+                    {privacy ? (
+                      <DisabledReason focusable={false} reason={privacy.disabledReason} side="left">
+                        <DropdownMenuItem
+                          disabled={privacy.disabledReason !== null}
+                          onSelect={privacy.run}
+                        >
+                          <HiddenIcon />
+                          {privacy.label}
+                          {screen?.accelerator ? (
+                            <DropdownMenuShortcut>
+                              <ShortcutKeys accelerator={screen.accelerator} variant="text" />
+                            </DropdownMenuShortcut>
+                          ) : null}
+                        </DropdownMenuItem>
+                      </DisabledReason>
+                    ) : null}
                     {anchorControl ? (
                       <DropdownMenuSub>
                         <DropdownMenuSubTrigger>

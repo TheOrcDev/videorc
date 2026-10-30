@@ -56,11 +56,12 @@ import {
   waitForRemoteDescribe
 } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
-import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import {
   analyzeStartupResolution,
   writeStartupReports
 } from './lib/startup-resolution-analyzer.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const { values: args } = parseArgs({
@@ -186,7 +187,7 @@ async function seedRendererVideoProfile(smoke) {
         const seeded = { ...current, video: params.video, layout, recordEnabled: true, streamEnabled: false };
         if (params.systemAudio) seeded.audio = { ...(current.audio ?? {}), systemAudioEnabled: true };
         localStorage.setItem(key, JSON.stringify(seeded));
-        setTimeout(() => location.reload(), 50);
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       video: videoProfile,
@@ -461,6 +462,7 @@ try {
   // The Output switch's own path, through the renderer's smoke hook: on at
   // the measured length (the default already armed it), or off for the bare
   // baseline.
+  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
   const switched = await requestSmokeCommand(
     smoke,
     'eval-js',
