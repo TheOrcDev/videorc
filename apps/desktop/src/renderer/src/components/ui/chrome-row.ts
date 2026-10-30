@@ -5,4 +5,8 @@ const CHROME_ROW_CLASS = Object.freeze({
   member: 'chrome-row-member'
 } as const)
 
+// Chrome rows: the Stream Manager's on-stream row and a member's row wear the
+// Liquid Chrome plates defined in the theme (chrome-row-live,
+// chrome-row-member). Screens take the class from here, so the chrome
+// materials stay in the primitives and a screen never names one.
 export { CHROME_ROW_CLASS }

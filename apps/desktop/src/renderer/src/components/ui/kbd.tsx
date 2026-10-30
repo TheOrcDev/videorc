@@ -1,3 +1,5 @@
+import type { ComponentProps } from 'react'
+
 import { cn } from '@/lib/utils'
 
 /**
@@ -29,7 +31,7 @@ const KBD_ON_FILLED_BUTTON = [
  * the secondary-gray glyph. A shortcut goes through ShortcutKeys, which prints
  * it per platform into this chip.
  */
-function Kbd({ className, ...props }: React.ComponentProps<'kbd'>) {
+function Kbd({ className, ...props }: ComponentProps<'kbd'>) {
   return (
     <kbd
       className={cn(
@@ -44,7 +46,7 @@ function Kbd({ className, ...props }: React.ComponentProps<'kbd'>) {
 }
 
 /** Lays out key chips side by side with the standard gap (↑ ↓, or two shortcuts). */
-function KbdGroup({ className, ...props }: React.ComponentProps<'span'>) {
+function KbdGroup({ className, ...props }: ComponentProps<'span'>) {
   return (
     <span
       className={cn('inline-flex items-center gap-1', className)}
