@@ -4,9 +4,9 @@ import { WINDOW_TITLE_CLASS } from '@/components/pane'
 import { cn } from '@/lib/utils'
 
 // The frame every window shares (plan 050, D2). The window's opaque base
-// (main), the chrome ground (`ChromeGround`, plan 208) and the body's window
-// coat (styles.css) sit under it; this adds the content coat for single-pane
-// windows and the traffic-light gutter for header rows.
+// (main) and the body's window coat (styles.css) sit under it; this adds the
+// content coat for single-pane windows and the traffic-light gutter for
+// header rows.
 
 const MAC_RENDERER = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
 

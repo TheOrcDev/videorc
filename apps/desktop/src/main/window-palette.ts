@@ -1,8 +1,8 @@
 // Main-side palette for surfaces that CANNOT read the renderer's CSS tokens:
 // the Preview frame's data-URL document (dark-always, it frames video) and
-// every BrowserWindow's opaque base: the chrome-ground windows (plan 208), the
-// solid palette with VIDEORC_GLASS=0, and a dark-always window under the
-// clear glass that cannot pin its appearance (window-glass.ts). Values are
+// every BrowserWindow's opaque base: the solid palette (the default), and a
+// dark-always window under the clear glass that cannot pin its appearance
+// (window-glass.ts). Values are
 // the solid equivalents of styles.css (the black-chrome / porcelain columns,
 // chroma 0 since plan 208); styles.css is the source of truth.
 // window-palette.test.ts pins the glass coats to it.
@@ -73,13 +73,12 @@ export function windowPalette(dark: boolean): WindowPalette {
 export const DOCKED_PREVIEW_CORNER_RADIUS = 12
 
 /**
- * How much of the base tone each window region paints over the chrome ground
- * (plan 208, D10; plan 091 D3 for the derivation): styles.css
- * `--glass-cover-sidebar` / `--glass-cover-work` per theme, the same on every
- * platform now that the ground is Videorc's own. The floor under each cover
- * is what chrome-ground-contrast.test.ts computes from the ground's real
- * pixels (about 0.78 dark and 0.83 light for secondary text at 4.5:1).
- * window-palette.test.ts fails when styles.css drifts.
+ * How much of the base tone each window region paints over what sits behind
+ * it (plan 208, D10; plan 091 D3 for the derivation): styles.css
+ * `--glass-cover-sidebar` / `--glass-cover-work` per theme. On the solid
+ * window every region composites to the base; the covers decide the frost
+ * under VIDEORC_GLASS=clear. window-palette.test.ts fails when styles.css
+ * drifts.
  */
 export interface GlassCovers {
   sidebar: number

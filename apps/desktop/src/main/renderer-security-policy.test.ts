@@ -68,12 +68,12 @@ describe('renderer security policy', () => {
   it('keeps every privileged renderer sandboxed with context isolation', () => {
     const mainSource = source('./index.ts')
     for (const role of ['main', 'notes', 'comments', 'captions'] as const) {
-      expect(rendererWindowWebPreferences(role, 'chrome')).toMatchObject({
+      expect(rendererWindowWebPreferences(role, 'solid')).toMatchObject({
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
         // The role and the ground (plan 208) both ride the argv.
-        additionalArguments: [`--videorc-renderer-role=${role}`, '--videorc-window-ground=chrome']
+        additionalArguments: [`--videorc-renderer-role=${role}`, '--videorc-window-ground=solid']
       })
       expect(mainSource).toMatch(
         new RegExp(
