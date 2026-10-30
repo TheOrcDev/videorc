@@ -1383,3 +1383,50 @@ changed-file formatting and repository text integrity pass again; focused
 ESLint also passes. Logs use the `/tmp/videorc-beta-candidate-paths-` prefix
 (`focused-final.log`, `format-final.log`, `text.log`, `lint.log`). These are
 tooling regressions with artificial candidate bytes, not AppImage acceptance.
+
+### Required CI and combined-output evidence, 2026-10-30
+
+On `3ab0900ebafa1992612cd12d47c3b152909112ac`, required JavaScript
+(`124260887567`), Linux compile/tests (`124260856600`), Windows source gates
+(`124260859927`) and Windows installer (`124260859540`) pass. Duplicate
+skipped jobs are not counted. The existing Windows diagnostic failure and
+hosted macOS 75-minute compilation timeout retain their documented runbook
+classification; neither is a pass or a new exception. PR #930 remains draft.
+This source milestone does not close any physical candidate acceptance row.
+
+A fresh, unprofiled Agents smoke on Ogre reproduces the combined-output
+failure. Record-only produces an 18.63-second 1080p artifact that passes its
+analyzer. Record plus local RTMP uses matching 1080p30/6000 kbps profiles and
+two raw inputs in one FFmpeg process: the clean recording and the auxiliary
+stream prepared for live captions. Both FIFO writers stop, and recovery saves
+only 5.4 seconds. The original B1 smoke still reports success because its
+receiver contains some video; the full smoke later fails a camera scene-change
+refusal. Evidence: `/tmp/videorc-beta-combined-no-profiler-KwEs3I/report.json`,
+its isolated SQLite/recordings, and its owned FFmpeg command observation.
+
+The maintained Agents smoke now requires normal completion of the exact
+recording session, rejects interrupted/recovered takes even when their Library
+status is `completed` and their MP4 is finalized, and analyzes both combined
+outputs. It observes at least five seconds after confirmed running, checks the
+same session is still recording before Stop, and requires each artifact to
+cover at least 98% of that observed interval. The existing no-controlled-motion
+and no-controlled-audio scope stays explicit; this is not the physical motion,
+audible-input, whole-session duration or latency acceptance gate.
+
+All three completion regression tests pass, including the exact recovered-row
+shape from this failure. Applying the helper to the retained real row rejects
+it. A proposed FFmpeg buffering experiment did not reach session FFmpeg because
+main pins the bundled binary; its run is therefore not evidence for or against
+that proposed change. No runtime buffering change or production repair is
+claimed. The updated real-app smoke now fails at B1 with "the combined
+session ended before go_live confirmed it", immediately after the recorded FIFO
+failure, rather than accepting the recovered fragment. The failure receipt is
+`/tmp/videorc-beta-agent-completion-gate-2Jh6eV/report.json`; original backend
+and MCP binary hashes remain unchanged. This is a successful negative control
+for the smoke correction, not a passing Agents or recording acceptance run.
+The broader local Node suite passes all 2,972 tests with zero skips
+(`/tmp/videorc-beta-agent-completion-node.log`), including the preserved
+workflow-exit fix/test pair outside this PR. Full lint, full formatting/text
+checks, and focused ESLint/Prettier checks for the changed scripts pass. Source
+verification receipt: `/tmp/videorc-beta-agent-completion-verification.json`.
+No Rust or application runtime code changed in this evidence correction.
