@@ -949,3 +949,46 @@ describe('sounds on the remotes (plan 189 S10)', () => {
     }
   })
 })
+
+it('projects saved scenes with only ids and names', async () => {
+  vi.useFakeTimers()
+  try {
+    const requests: unknown[] = []
+    const publisher = new RemoteSurfacePublisher()
+    publisher.attach({
+      request: async (_method, params) => {
+        requests.push(params)
+        return undefined as never
+      }
+    })
+    publisher.markConnected()
+    const scene = { id: 'figma', name: 'Figma', visual: { privatePath: '/private' } }
+    publisher.syncValues([
+      'idle',
+      false,
+      true,
+      false,
+      false,
+      'screen-only',
+      null,
+      false,
+      false,
+      false,
+      [],
+      [],
+      undefined,
+      false,
+      [],
+      [scene],
+      'figma'
+    ])
+    await vi.runAllTimersAsync()
+    expect(requests.at(-1)).toMatchObject({
+      state: { savedScenes: [{ id: 'figma', name: 'Figma' }], activeSavedSceneId: 'figma' }
+    })
+    expect(JSON.stringify(requests)).not.toContain('privatePath')
+    publisher.detach()
+  } finally {
+    vi.useRealTimers()
+  }
+})

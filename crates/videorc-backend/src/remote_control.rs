@@ -74,12 +74,17 @@ pub enum RemoteIntent {
         screen_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         layout_preset: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scene_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     TakeoverShow {
         asset_id: String,
     },
     TakeoverHide,
+    ScreenHide,
+    ScreenShow,
+    ScreenHideToggle,
     /// Banners (plan 186). Show and hide are explicit and idempotent; the
     /// toggle is for a single deck key. `bannerHide` without a `bannerId`
     /// hides every banner.
@@ -148,6 +153,7 @@ impl RemoteIntent {
     /// a bouncing key cannot interleave `micMute` + `micToggle`.
     pub fn debounce_kind(&self) -> &'static str {
         match self {
+            Self::ScreenHide | Self::ScreenShow | Self::ScreenHideToggle => "privacy",
             Self::RecordStart | Self::RecordStop | Self::RecordToggle => "record",
             Self::StreamStart | Self::StreamStop => "stream",
             Self::MicMute | Self::MicUnmute | Self::MicToggle => "mic",
@@ -196,9 +202,19 @@ impl RemoteIntent {
             Self::SceneApply {
                 screen_id,
                 layout_preset,
+                scene_id,
             } => {
-                if screen_id.is_none() && layout_preset.is_none() {
-                    return Err("sceneApply needs a screenId or a layoutPreset.".to_string());
+                if scene_id
+                    .as_ref()
+                    .is_some_and(|id| id.trim().is_empty() || id.chars().count() > 128)
+                {
+                    return Err(
+                        "sceneApply sceneId must be non-empty and at most 128 characters."
+                            .to_string(),
+                    );
+                }
+                if screen_id.is_none() && layout_preset.is_none() && scene_id.is_none() {
+                    return Err("sceneApply needs a sceneId, screenId or layoutPreset.".to_string());
                 }
                 Ok(())
             }
@@ -386,7 +402,8 @@ mod tests {
             intent,
             RemoteIntent::SceneApply {
                 screen_id: Some("screen-1".to_string()),
-                layout_preset: None
+                layout_preset: None,
+                scene_id: None
             }
         );
         let intent: RemoteIntent =
@@ -535,11 +552,33 @@ mod tests {
     }
 
     #[test]
+    fn saved_scene_ids_are_bounded_and_share_the_scene_debounce_bucket() {
+        for id in ["", "  ", &"a".repeat(129)] {
+            let intent: RemoteIntent =
+                serde_json::from_value(serde_json::json!({"kind": "sceneApply", "sceneId": id}))
+                    .unwrap();
+            assert!(intent.validate().is_err());
+        }
+        for id in ["figma", &"a".repeat(128)] {
+            let intent: RemoteIntent =
+                serde_json::from_value(serde_json::json!({"kind": "sceneApply", "sceneId": id}))
+                    .unwrap();
+            assert!(intent.validate().is_ok());
+            assert_eq!(intent.debounce_kind(), "scene");
+            assert_eq!(
+                serde_json::to_value(&intent).unwrap(),
+                serde_json::json!({"kind": "sceneApply", "sceneId": id})
+            );
+        }
+    }
+
+    #[test]
     fn scene_apply_requires_a_target_and_takeover_an_asset() {
         assert!(
             RemoteIntent::SceneApply {
                 screen_id: None,
-                layout_preset: None
+                layout_preset: None,
+                scene_id: None
             }
             .validate()
             .is_err()
@@ -554,7 +593,8 @@ mod tests {
         assert!(
             RemoteIntent::SceneApply {
                 screen_id: None,
-                layout_preset: Some("screen-camera".to_string())
+                layout_preset: Some("screen-camera".to_string()),
+                scene_id: None
             }
             .validate()
             .is_ok()
@@ -921,5 +961,24 @@ mod tests {
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(discovery_path(Path::new(":memory:")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    #[test]
+    fn privacy_intents_validate_and_share_only_the_privacy_bucket() {
+        for kind in ["screenHide", "screenShow", "screenHideToggle"] {
+            let intent: RemoteIntent =
+                serde_json::from_value(serde_json::json!({"kind": kind})).unwrap();
+            assert!(intent.validate().is_ok());
+            assert_eq!(intent.debounce_kind(), "privacy");
+            assert_eq!(
+                serde_json::to_value(intent).unwrap(),
+                serde_json::json!({"kind": kind})
+            );
+        }
+        assert_ne!(RemoteIntent::TakeoverHide.debounce_kind(), "privacy");
     }
 }

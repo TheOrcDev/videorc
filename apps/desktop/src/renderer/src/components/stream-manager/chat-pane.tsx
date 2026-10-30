@@ -619,6 +619,8 @@ export function ChatPane({
 
 /** The composer's own commands, in the order the completion list offers them. */
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
+  { value: '/hide', hint: ' · Hide screen' },
+  { value: '/show', hint: ' · Show screen' },
   { value: '/marker', hint: ' [title] · Save a timeline point' },
   { value: '/clip', hint: ' · Save the last seconds as a clip' },
   // Plan 199 D6: the 1-minute clip.
@@ -810,7 +812,7 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /buddy [words] asks Buddy to do something, like /buddy switch to BRB.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/hide hides your screen and /show shows it again. /marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /buddy [words] asks Buddy to do something, like /buddy switch to BRB.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -894,6 +896,19 @@ export function Composer({
           localPendingRef.current = false
           setLocalPending(false)
         })
+      return
+    }
+    if (command.kind === 'privacy') {
+      const submitted = draft
+      void window.videorc
+        ?.markerFromCommentsWindow({
+          requestId: crypto.randomUUID(),
+          action: command.hidden ? 'screenHide' : 'screenShow'
+        })
+        .then(() => {
+          if (draftRef.current === submitted) setDraft('')
+        })
+        .catch(() => setNotice("Couldn't change screen visibility. Try again."))
       return
     }
     if (command.kind === 'marker') {

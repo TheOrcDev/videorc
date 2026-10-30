@@ -115,6 +115,8 @@ pub fn list_v4l2_cameras(roots: &V4l2Roots, access: impl Fn(&Path) -> NodeAccess
                 ),
             };
             Device {
+                app: None,
+                window_title: None,
                 id: linux_v4l2_camera_id(&device_path.to_string_lossy()),
                 name,
                 kind: DeviceKind::Camera,

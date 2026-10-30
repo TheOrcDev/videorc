@@ -1,5 +1,31 @@
 # Implementation Plans
 
+- 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
+  Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
+  needs to be much smarter", quoting a user who switches between T3 Code and
+  Figma on stream and hides a sign-in behind a blurry picture in OBS. Today
+  that takes about nine clicks, the scene breaks when the app relaunches (a
+  window id), every switch stops one capture and starts another (a frozen
+  picture, probably a black frame, never measured), saved scenes have no
+  key, Deck or phone button, and nothing can blur the screen.
+  - Phase A (macOS): New scene… makes one scene per app in your current look.
+    The scene follows the app's front window and survives a relaunch. Swap in
+    place on one capture, holding the last frame (no black). A scene list on
+    the Scene page with auto-save. Keys, Deck and phone for saved scenes.
+  - Phase B (all platforms): Hide screen, a frosted still of the screen on
+    every output while the camera and microphone stay on, done at the
+    capture source. A default key (⌃⌥H) and every other surface. Agents can
+    hide, never show.
+  - Phase C (macOS): Follow the app in front, and Hide screen when a password
+    manager comes to the front on a display scene.
+  - Phase D: the smoke, docs and acceptance.
+
+  **EXECUTING** 2026-10-28: the owner took every recommended answer (D1
+  to D13) and asked for the whole plan in one PR. S11's smoke and docs
+  landed 2026-10-29:
+  [acceptance record](../docs/acceptance/2026-10-29-smarter-scenes-acceptance.md)
+  (owner by-eye checks owed).
+
 - 2026-10-28: [Plan 211](211-buddy-talks-only-in-its-bubble.md), Buddy
   talks only in its bubble, and Auto is gone. Owner request, after Auto
   posted an AI welcome in chat as them on the 2026-10-28 stream and Off then

@@ -3,6 +3,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { toastUserError } from '@/lib/user-error'
 import { WorkspaceNavContext } from '@/components/workspace-nav'
 import { FIRST_RUN_SETUP_OPEN_EVENT } from '@/lib/workspace-navigation'
 
@@ -45,6 +46,7 @@ vi.mock('@/hooks/use-agents', () => ({
   useAgents: () => mocked.agents,
   useAgentsActions: () => mocked.agentsActions
 }))
+vi.mock('@/lib/user-error', () => ({ toastUserError: vi.fn() }))
 vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: mocked.theme, setTheme: mocked.setTheme })
 }))
@@ -78,7 +80,10 @@ beforeEach(() => {
   }
   mocked.core = {
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false, captionsWindowEnabled: false },
+    screenPrivacy: { hidden: false },
+    toggleScreenHidden: vi.fn(async () => true),
     savedScenes: [],
+    applySavedSceneResult: vi.fn(async () => ({ ok: true })),
     applySavedScene: vi.fn(async () => true),
     captureConfig: { audio: { microphoneMuted: false } },
     setCaptureConfig: vi.fn(),
@@ -522,4 +527,18 @@ describe('CommandPalette agents (plan 209 S7, D12)', () => {
     await search('claude')
     expect(values()).toEqual(expect.arrayContaining(['Stop agents', 'Connect an agent…']))
   })
+})
+
+it.each([
+  ['app-not-running', "Figma isn't open"],
+  ['app-no-window', 'Figma has no window open'],
+  ['app-minimized', "Figma's window is minimized"]
+])('keeps the shared scene action in charge of the %s refusal copy', async (reason, message) => {
+  mocked.core.savedScenes = [{ id: 'figma', name: 'Figma' }]
+  mocked.core.applySavedSceneResult = vi.fn(async () => ({ ok: false, reason, message }))
+  vi.mocked(toastUserError).mockClear()
+  await render()
+  await act(async () => item('Switch to Figma').click())
+  expect(mocked.core.applySavedSceneResult).toHaveBeenCalledExactlyOnceWith('figma')
+  expect(toastUserError).not.toHaveBeenCalled()
 })

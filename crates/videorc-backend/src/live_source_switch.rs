@@ -1221,6 +1221,8 @@ mod tests {
         request.kind = SourceKind::Camera;
         request.device_id = Some("camera:stable".into());
         let device = Device {
+            app: None,
+            window_title: None,
             id: "camera:stable".into(),
             name: "Camera".into(),
             kind: DeviceKind::Camera,

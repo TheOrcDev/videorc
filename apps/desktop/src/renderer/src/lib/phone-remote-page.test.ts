@@ -3,6 +3,7 @@ import { Window, type HTMLButtonElement, type Node } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type State = {
+  screenHidden?: boolean
   sessionState: string
   sessionActive: boolean
   streamEnabled: boolean
@@ -10,6 +11,8 @@ type State = {
   micMuted: boolean
   systemAudioAvailable: boolean
   systemAudioOn: boolean
+  savedScenes?: Array<{ id: string; name: string }>
+  activeSavedSceneId?: string | null
   layoutPreset: string
 }
 type FakeClient = {
@@ -598,4 +601,28 @@ describe('shipping phone remote sounds (plan 189 S10)', () => {
     await settle()
     expect(soundKeys().at(-1)).toEqual({ name: 'Stop all sounds', hint: null, disabled: true })
   })
+})
+
+it('shows saved scenes above layouts and sends their ids, marking confirmed state', () => {
+  stateUpdate({
+    savedScenes: [{ id: 'figma', name: 'Figma <script>' }],
+    activeSavedSceneId: 'figma'
+  })
+  const keys = [...page.document.querySelectorAll<HTMLButtonElement>('#deck-scenes .key')]
+  expect(keys[0].querySelector('.name')!.textContent).toBe('Figma <script>')
+  expect(keys[0].getAttribute('aria-pressed')).toBe('true')
+  expect(keys[1].getAttribute('aria-pressed')).toBe('false')
+  keys[0].click()
+  expect(client().intent).toHaveBeenCalledWith({ kind: 'sceneApply', sceneId: 'figma' })
+})
+
+it('the phone privacy key toggles and follows confirmed hidden state', () => {
+  const button = () => page.document.querySelector<HTMLButtonElement>('#deck-takeovers button')!
+  expect(button().textContent).toContain('Hide screen')
+  button().click()
+  expect(client().intent).toHaveBeenLastCalledWith({ kind: 'screenHideToggle' })
+  remote.state.screenHidden = true
+  client().emit('state', remote.state)
+  expect(button().textContent).toContain('Screen hidden')
+  expect(button().getAttribute('aria-pressed')).toBe('true')
 })

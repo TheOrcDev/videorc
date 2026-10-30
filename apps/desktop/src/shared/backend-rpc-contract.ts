@@ -2,6 +2,8 @@ import type {
   AudienceSnapshot,
   AudioLevelsEvent,
   SessionSources,
+  ScreenHideParams,
+  ScreenPrivacy,
   SourceSwitchParams,
   BackendHealth,
   ScheduledStreamEvent,
@@ -86,7 +88,12 @@ import type {
   SceneEditorDraftAck,
   SceneEditorDraftParams,
   SceneEditorDraftStatus,
+  ScreenSwitchStatus,
   DeviceList,
+  ResolveAppWindowParams,
+  ResolveAppWindowResult,
+  AppPreviewsParams,
+  AppPreviewsResult,
   DiagnosticStats,
   EntitlementsSnapshot,
   FileAssessment,
@@ -373,6 +380,9 @@ export interface BackendRpcMethodMap {
   >
   'account.sign_out': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
+  'sources.resolve_app_window': BackendRpcDefinition<ResolveAppWindowParams, ResolveAppWindowResult>
+  // Plan 210 S4: New scene…'s picker, only while it is open.
+  'sources.app_previews': BackendRpcDefinition<AppPreviewsParams | undefined, AppPreviewsResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
   'stream.output.topology.probe': BackendRpcDefinition<
@@ -506,6 +516,11 @@ export interface BackendRpcMethodMap {
   'banners.hide': BackendRpcDefinition<BannerHideParams, Banner[]>
   // --- end banners (plan 186) ---
   // --- Soundboard (plan 189) ---
+  // --- Hide screen (plan 210 S7) ---
+  'screen.hide': BackendRpcDefinition<ScreenHideParams, ScreenPrivacy>
+  'screen.show': BackendRpcDefinition<undefined, ScreenPrivacy>
+  'screen.privacy.get': BackendRpcDefinition<undefined, ScreenPrivacy>
+  // --- end Hide screen (plan 210 S7) ---
   'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
   'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
   'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
@@ -657,6 +672,9 @@ export interface BackendEventMap {
   'banners.changed': Banner[]
   // --- Soundboard (plan 189): the whole state and the playing voices, to every window ---
   'sounds.changed': SoundboardState
+  // --- Hide screen (plan 210 S7): the state, on every hide and show ---
+  'remote.state': { screenHidden: boolean; [key: string]: unknown }
+  'screen.privacy.changed': ScreenPrivacy
   'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
@@ -831,8 +849,28 @@ const entitlementsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<EntitlementsSnapshot>
 
+// Plan 210 S4: a small JPEG of an app's front window. 2 MB of base64 is far
+// past a 320 px picture; anything else is not a picture the picker draws.
+const appPreviewPictureSchema = runtimeSchema<string>('a JPEG data URL', (value, path) => {
+  const url = stringSchema({ minLength: 1, maxLength: 2_000_000 }).parse(value, path)
+  if (!url.startsWith('data:image/jpeg;base64,'))
+    throw new RuntimeSchemaError(path, 'a JPEG data URL')
+  return url
+})
+
 const deviceSchema = objectSchema(
   {
+    app: optionalSchema(
+      objectSchema(
+        {
+          bundleId: boundedString,
+          name: boundedString,
+          pid: numberSchema({ integer: true, min: 0, max: 2_147_483_647 })
+        },
+        { allowUnknown: false }
+      )
+    ),
+    windowTitle: optionalText,
     id: boundedString,
     name: boundedString,
     kind: enumSchema(['screen', 'window', 'camera', 'microphone', 'system-audio']),
@@ -1746,6 +1784,18 @@ const liveBackgroundStatusSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const screenSwitchStatusSchema = objectSchema(
+  {
+    mode: enumSchema(['in-place', 'restart']),
+    reason: optionalText,
+    sourceId: boundedString,
+    generation: nonNegativeInteger,
+    firstFrameMs: optionalSchema(nonNegativeInteger),
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ScreenSwitchStatus>
+
 const compositorStatusSchema = objectSchema(
   {
     state: enumSchema(['stopped', 'starting', 'live', 'failed']),
@@ -1773,6 +1823,7 @@ const compositorStatusSchema = objectSchema(
     framePipeline: optionalSchema(boundedBackendPayloadSchema),
     editorDraft: optionalSchema(nullableSchema(sceneEditorDraftStatusSchema)),
     liveBackground: optionalSchema(liveBackgroundStatusSchema),
+    screenSwitch: optionalSchema(screenSwitchStatusSchema),
     updatedAt: timestamp,
     message: optionalText
   },
@@ -3453,6 +3504,23 @@ const soundSchema = objectSchema(
 const soundListSchema = arraySchema(soundSchema, {
   maxLength: SOUND_MAX_COUNT
 }) as RuntimeSchema<Sound[]>
+// --- Hide screen (plan 210 S7) ---
+const screenPrivacyReasonSchema = enumSchema(['you', 'password-manager'])
+const screenPrivacySchema = objectSchema(
+  {
+    hidden: booleanSchema,
+    since: optionalSchema(timestamp),
+    reason: optionalSchema(screenPrivacyReasonSchema),
+    unavailable: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ScreenPrivacy>
+const screenHideParamsSchema = objectSchema(
+  { reason: screenPrivacyReasonSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<ScreenHideParams>
+// --- end Hide screen (plan 210 S7) ---
+
 const soundboardStateSchema = objectSchema(
   {
     sounds: soundListSchema,
@@ -4862,6 +4930,63 @@ const runtimeContracts = {
     params: oauthCompleteParamsSchema,
     result: oauthCallbackResultSchema
   },
+  'sources.resolve_app_window': {
+    params: objectSchema(
+      {
+        bundleId: stringSchema({ minLength: 1, maxLength: 16_384 }),
+        preferWindowId: optionalText,
+        minWidth: optionalSchema(numberSchema({ integer: true, min: 0, max: 65_536 })),
+        minHeight: optionalSchema(numberSchema({ integer: true, min: 0, max: 65_536 }))
+      },
+      { allowUnknown: false }
+    ),
+    result: unionSchema([
+      objectSchema(
+        {
+          ok: literalSchema(true),
+          windowId: boundedString,
+          title: stringSchema({ maxLength: 16_384 }),
+          width: nonNegativeInteger,
+          height: nonNegativeInteger
+        },
+        { allowUnknown: false }
+      ),
+      objectSchema(
+        { ok: literalSchema(false), reason: enumSchema(['not-running', 'no-window', 'minimized']) },
+        { allowUnknown: false }
+      )
+    ])
+  },
+  'sources.app_previews': {
+    params: optionalSchema(
+      objectSchema(
+        { maxWidth: optionalSchema(numberSchema({ integer: true, min: 32, max: 1_920 })) },
+        { allowUnknown: false }
+      )
+    ),
+    result: objectSchema(
+      {
+        apps: arraySchema(
+          objectSchema(
+            {
+              bundleId: boundedString,
+              name: boundedString,
+              pid: numberSchema({ integer: true, min: 0, max: 2_147_483_647 }),
+              windowCount: nonNegativeInteger,
+              frontWindowId: optionalSchema(boundedString),
+              frontWindowTitle: optionalText,
+              picture: optionalSchema(appPreviewPictureSchema),
+              width: optionalSchema(nonNegativeInteger),
+              height: optionalSchema(nonNegativeInteger)
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 512 }
+        )
+      },
+      { allowUnknown: false }
+    )
+  },
   'devices.list': { params: undefinedOrFfmpegPathSchema, result: deviceListSchema },
   'recording.status': { params: undefinedSchema, result: recordingStatusSchema },
   'stream.output.topology.probe': {
@@ -5140,6 +5265,11 @@ const runtimeContracts = {
   'banners.hide': { params: bannerHideParamsSchema, result: bannerListSchema },
   // --- end banners (plan 186) ---
   // --- Soundboard (plan 189) ---
+  // --- Hide screen (plan 210 S7) ---
+  'screen.hide': { params: screenHideParamsSchema, result: screenPrivacySchema },
+  'screen.show': { params: undefinedSchema, result: screenPrivacySchema },
+  'screen.privacy.get': { params: undefinedSchema, result: screenPrivacySchema },
+  // --- end Hide screen (plan 210 S7) ---
   'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
   'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
   'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },
@@ -5349,6 +5479,11 @@ const runtimeEventSchemas = {
   // --- end overlay layout (plan 164) ---
   'banners.changed': bannerListSchema,
   'sounds.changed': soundboardStateSchema,
+  'screen.privacy.changed': screenPrivacySchema,
+  'remote.state': runtimeSchema<BackendEventMap['remote.state']>('remote state', (value, path) => {
+    objectSchema({ screenHidden: booleanSchema }, { allowUnknown: true }).parse(value, path)
+    return value as BackendEventMap['remote.state']
+  }),
   'sounds.playback': soundsPlaybackSchema,
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,

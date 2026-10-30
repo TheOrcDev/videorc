@@ -266,6 +266,8 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
       wsStatus: 'connected',
       systemAudioConfirmed: null,
       systemAudioIssue: null,
+      settings: {},
+      screenPrivacy: { hidden: false },
       ...extra
     }
   }

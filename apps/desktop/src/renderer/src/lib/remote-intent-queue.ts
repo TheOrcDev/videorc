@@ -63,20 +63,25 @@ export function createRemoteIntentQueue({
   staleMs = REMOTE_SOUND_INTENT_STALE_MS
 }: RemoteIntentQueueOptions): RemoteIntentQueue {
   let tail: Promise<void> = Promise.resolve()
+  let privacyTail: Promise<void> = Promise.resolve()
   let soundTail: Promise<void> = Promise.resolve()
   let agentTail: Promise<void> = Promise.resolve()
   return {
     enqueue(payload) {
+      const privacy = ['screenHide', 'screenShow', 'screenHideToggle'].includes(
+        remoteIntentKind(payload) ?? ''
+      )
       const sound = isSoundIntent(payload)
       const queuedAt = now()
-      const turn = (sound ? soundTail : tail)
+      const turn = (privacy ? privacyTail : sound ? soundTail : tail)
         .catch(() => undefined)
         .then(() => (sound && now() - queuedAt > staleMs ? refuseStale(payload) : run(payload)))
       const settled = turn.then(
         () => undefined,
         () => undefined
       )
-      if (sound) soundTail = settled
+      if (privacy) privacyTail = settled
+      else if (sound) soundTail = settled
       else tail = settled
       return turn
     },

@@ -167,3 +167,14 @@ test('soundKeyIntent presses the picked sound by id, and nothing before one is p
   assert.equal(soundKeyIntent(undefined), null)
   assert.equal(soundKeyIntent(''), null)
 })
+
+import { sceneKeyTitle, sceneKeyIntent } from './videorc-client.js'
+test('saved scene keys use ids and render confirmed names and active state', () => {
+  const state = { savedScenes: [{ id: 'figma', name: 'Figma' }], activeSavedSceneId: 'figma' }
+  assert.equal(sceneKeyTitle(state, 'figma', true), 'Figma\nON')
+  assert.equal(sceneKeyTitle({ ...state, activeSavedSceneId: null }, 'figma', true), 'Figma')
+  assert.equal(sceneKeyTitle(state, 'deleted', true), 'Scene')
+  assert.equal(sceneKeyTitle(state, 'figma', false), 'Videorc\noffline')
+  assert.deepEqual(sceneKeyIntent('figma'), { kind: 'sceneApply', sceneId: 'figma' })
+  assert.equal(sceneKeyIntent(undefined), null)
+})

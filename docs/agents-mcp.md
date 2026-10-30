@@ -507,3 +507,16 @@ Rust: `cargo test -p videorc-backend agent` (catalog, admission, guards, rate
 limits, every backend tool). TypeScript: `shared/agent-tools.test.ts`,
 `lib/studio-actions/*.test.ts` (the parity test: one renderer executor per
 Studio tool and none besides) and `lib/agent-surface.test.ts`.
+
+## Hide screen (plan 210 S8a)
+
+| Tool          | Arguments | Runs in | Buddy | On air | Result             |
+| ------------- | --------- | ------- | ----- | ------ | ------------------ |
+| `hide_screen` | none      | Studio  | yes   | yes    | `{ hidden: true }` |
+
+The allowlisted result projects one boolean, never the reason, time,
+screen contents or capture identity. It uses the same Studio action as the
+streamer's key. There is no show tool: agents and Buddy may hide, but only
+the streamer can show the screen again. The shared action refuses show
+and a toggle that would show from either caller with “Only you can show
+your screen again.” No raw privacy RPC is admitted on an agent socket.

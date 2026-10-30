@@ -1,4 +1,3 @@
-import ScenePresetControls from '@/components/scene-presets'
 import {
   AdjustIcon,
   ArrowDownIcon,
@@ -29,6 +28,8 @@ import {
   withOverlayRect,
   type StageItemDraft
 } from '@/components/scene/overlay-stage'
+import { HideScreenSection } from '@/components/scene/hide-screen-section'
+import { SceneList } from '@/components/scene/scene-list'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
 import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
@@ -250,7 +251,6 @@ export function LayoutTab(): ReactElement {
     savedScenePendingId,
     savedScenes,
     activeSavedSceneId,
-    savedSceneModified,
     settings,
     setSettings,
     overlayLayout,
@@ -569,16 +569,18 @@ export function LayoutTab(): ReactElement {
     }
   }, [openPreviewWindow, previewWindow.open, setPreviewWindowMode])
 
-  // The canvas section names the saved scene it shows and whether it has
-  // drifted; its actions ("Update “{name}”", "Save scene") sit in the header
-  // (plan 174, C-23 and V-10).
+  // The canvas edits the scene on stream. A saved scene keeps each edit as it
+  // lands (plan 210 D3), so the section says where they go; there is no
+  // Modified state and no Update to press.
   const activeSavedScene = savedScenes.find((entry) => entry.id === activeSavedSceneId)
   const canvasDescription = activeSavedScene
-    ? `${activeSavedScene.name} · ${savedSceneModified ? 'Modified' : 'Applied'}`
+    ? `Changes save to “${activeSavedScene.name}” as you make them.`
     : 'Drag sources and overlays into place.'
 
   return (
     <div className="flex flex-col">
+      {/* Plan 210 D6: the scene list leads the page. */}
+      <SceneList />
       <div className="grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col lg:border-r">
           <PanelSection
@@ -632,12 +634,16 @@ export function LayoutTab(): ReactElement {
                     // one, so a click on it supersedes a newer pending switch.
                     onClick:
                       !isFreeform && layout.layoutPreset === preset.id
-                        ? () => applyCameraPreset({ layoutPreset: preset.id })
+                        ? () => applyCameraPreset({ layoutPreset: preset.id }, { keepScene: true })
                         : undefined
                   }
                 })}
                 value={isFreeform ? null : layout.layoutPreset}
-                onValueChange={(layoutPreset) => applyCameraPreset({ layoutPreset })}
+                // Plan 210 D3: a layout picked here edits the scene on stream
+                // (a saved one keeps it); the list's Layouts switch to a layout.
+                onValueChange={(layoutPreset) =>
+                  applyCameraPreset({ layoutPreset }, { keepScene: true })
+                }
               />
               <Separator className="data-[orientation=vertical]:h-5" orientation="vertical" />
               {/* Freeform is a mode, not a preset: composition becomes the
@@ -698,11 +704,7 @@ export function LayoutTab(): ReactElement {
               picture and the SVG stage owns pointer input (plan 058);
               elsewhere, or while the surface is hidden or floating, the SVG
               draws the committed composition as a schematic (zero idle IPC). */}
-          <PanelSection
-            action={<ScenePresetControls toolbar />}
-            description={canvasDescription}
-            title="Canvas"
-          >
+          <PanelSection description={canvasDescription} title="Canvas">
             {verticalLeg ? (
               <Field orientation="horizontal">
                 <FieldContent>
@@ -848,6 +850,10 @@ export function LayoutTab(): ReactElement {
               it duplicated the stage: the stage's rects and legend chips ARE
               the source list, clicking one selects it (and enables editing),
               and visibility now lives in the Inspector. */}
+
+          {/* Hide screen's setup (plan 210 D9, D11), under the canvas that
+              shows its frosted picture; the action is on Studio's Screen row. */}
+          <HideScreenSection />
         </div>
 
         {/* The inspector: one section named after the selection, then the

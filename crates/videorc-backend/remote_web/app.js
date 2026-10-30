@@ -555,12 +555,21 @@ function renderDeck() {
   )
 
   const presets = describe.layoutPresets ?? []
-  $('scenes-label').hidden = presets.length === 0
+  const savedScenes = state.savedScenes ?? []
+  $('scenes-label').hidden = presets.length === 0 && savedScenes.length === 0
   $('deck-scenes').replaceChildren(
+    ...savedScenes.map(({ id, name }) =>
+      key({
+        name,
+        on: state.activeSavedSceneId === id,
+        toggle: true,
+        onTap: () => send({ kind: 'sceneApply', sceneId: id })
+      })
+    ),
     ...presets.map((layoutPreset) =>
       key({
         name: presetName(layoutPreset),
-        on: state.layoutPreset === layoutPreset,
+        on: !state.activeSavedSceneId && state.layoutPreset === layoutPreset,
         toggle: true,
         onTap: () => send({ kind: 'sceneApply', layoutPreset })
       })
@@ -568,8 +577,14 @@ function renderDeck() {
   )
 
   const takeovers = describe.takeovers ?? []
-  $('takeovers-label').hidden = takeovers.length === 0
+  $('takeovers-label').hidden = false
   $('deck-takeovers').replaceChildren(
+    key({
+      name: state.screenHidden ? 'Screen hidden' : 'Hide screen',
+      on: Boolean(state.screenHidden),
+      toggle: true,
+      onTap: () => send({ kind: 'screenHideToggle' })
+    }),
     ...takeovers.map((takeover) => {
       const on = state.activeTakeoverId === takeover.id
       return key({

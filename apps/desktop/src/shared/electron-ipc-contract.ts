@@ -1,3 +1,5 @@
+import type { FrontAppChanged } from './front-app'
+import { APP_ICONS_MAX_IDS } from './app-icons'
 import {
   validateChatDelivery,
   validateChatDeliveryBoundary,
@@ -5,7 +7,7 @@ import {
 } from './chat-delivery'
 import { AGENT_TOKEN_PATTERN } from './agent-config-entry'
 import { isGlobalShortcutConfigKey } from './global-shortcut-bindings'
-import { GLOBAL_SHORTCUT_ACTIONS, type GlobalShortcutAction } from './global-shortcuts'
+import { isGlobalShortcutAction, type GlobalShortcutAction } from './global-shortcuts'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -114,6 +116,9 @@ export const electronInvokeApiMethods = {
   'backend:get-connection': 'getBackendConnection',
   'backend:get-logs': 'getBackendLogs',
   'app:get-runtime-info': 'getRuntimeInfo',
+  'app:front-window-watch': 'setFrontWindowWatch',
+  'app:self-bundle-ids': 'getSelfBundleIds',
+  'app:icons': 'getAppIcons',
   'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
   'app:exit': 'exitApp',
@@ -269,9 +274,9 @@ export const electronInvokeApiMethods = {
 
 export type ElectronInvokeChannel = keyof typeof electronInvokeApiMethods
 export type ElectronIpcInvokeMap = {
-  [TChannel in ElectronInvokeChannel]: InvokeDefinition<
-    NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>
-  >
+  [TChannel in ElectronInvokeChannel]: TChannel extends 'app:front-window-watch'
+    ? { args: [options: { enabled: boolean }]; result: void }
+    : InvokeDefinition<NonNullable<VideorcApi[(typeof electronInvokeApiMethods)[TChannel]]>>
 }
 export type ElectronInvokeArgs<TChannel extends ElectronInvokeChannel> =
   ElectronIpcInvokeMap[TChannel]['args']
@@ -294,6 +299,7 @@ export interface BuddyDeepLinkNavigation {
 }
 
 export interface ElectronIpcEventMap {
+  'app:front-changed': FrontAppChanged
   'account:callback': AccountCallbackEnvelope
   'backend:connection': BackendConnection
   'backend:lifecycle': BackendLifecycleEvent
@@ -385,6 +391,7 @@ export const electronEventChannels = [
   'buddy:deep-link',
   'shortcut:modifier',
   'window:visible',
+  'app:front-changed',
   'global-shortcuts:triggered',
   'shortcut-recorder:key',
   'shortcut-recorder:disarmed',
@@ -767,7 +774,14 @@ const globalShortcutsSchema = runtimeSchema<GlobalShortcutsConfig>(
       throw new RuntimeSchemaError(path, 'shortcut bindings')
     const bindings = value as Record<string, unknown>
     for (const [key, entry] of Object.entries(bindings)) {
-      if (key === 'layouts') {
+      if (key === 'scenes') {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+          throw new RuntimeSchemaError(path, 'scene bindings')
+        for (const [id, accelerator] of Object.entries(entry)) {
+          if (!id.trim() || id.length > 128) throw new RuntimeSchemaError(path, 'a scene ID')
+          stringSchema({ maxLength: 160 }).parse(accelerator, `${path}.scenes.${id}`)
+        }
+      } else if (key === 'layouts') {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry))
           throw new RuntimeSchemaError(path, 'layout bindings')
         for (const [id, accelerator] of Object.entries(entry)) {
@@ -1492,6 +1506,18 @@ const starterSoundFilesSchema = arraySchema(
 )
 
 const specificRuntimeInvokeContracts = {
+  'app:front-window-watch': invokeContract(
+    tupleSchema([objectSchema({ enabled: booleanSchema }, { allowUnknown: false })]),
+    undefinedSchema
+  ),
+  'app:self-bundle-ids': invokeContract(noArgs, arraySchema(stringSchema({ maxLength: 1024 }))),
+  // Plan 210 S4/S5: icons for the apps New scene… lists, by bundle id.
+  'app:icons': invokeContract(
+    tupleSchema([
+      arraySchema(stringSchema({ minLength: 1, maxLength: 1024 }), { maxLength: APP_ICONS_MAX_IDS })
+    ]),
+    recordSchema(stringSchema({ maxLength: 4_000_000 }), { maxKeys: APP_ICONS_MAX_IDS })
+  ),
   'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
   'comments-window:marker-context-push': invokeContract(
     tupleSchema([markerContextSchema]),
@@ -1979,7 +2005,24 @@ const specificRuntimeEventSchemas = {
   // Page Visibility API, so document.visibilityState reads 'visible' even when
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
-  'global-shortcuts:triggered': enumSchema(GLOBAL_SHORTCUT_ACTIONS),
+  'app:front-changed': objectSchema(
+    {
+      bundleId: optionalSchema(nullableSchema(stringSchema({ maxLength: 1024 }))),
+      name: stringSchema({ maxLength: 4096 }),
+      pid: numberSchema({ integer: true, min: 0 }),
+      frontWindowId: optionalSchema(stringSchema({ maxLength: 128 })),
+      at: numberSchema({ min: 0 })
+    },
+    { allowUnknown: false }
+  ),
+  'global-shortcuts:triggered': runtimeSchema<GlobalShortcutAction>(
+    'shortcut action',
+    (value, path) => {
+      if (!isGlobalShortcutAction(value))
+        throw new RuntimeSchemaError(path, 'a known shortcut action')
+      return value
+    }
+  ),
   // Plan 062: keys main captured while the Settings shortcut recorder is armed.
   'shortcut-recorder:key': objectSchema({
     type: enumSchema(['keyDown', 'keyUp']),
