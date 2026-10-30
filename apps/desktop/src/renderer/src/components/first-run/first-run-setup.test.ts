@@ -121,6 +121,10 @@ const render = (
     createElement(FirstRunSetup, { mode, onLeave: () => undefined, ...progress })
   )
 
+/** The opening tag of the button with `attribute`, however its attributes are ordered. */
+const buttonTag = (markup: string, attribute: string): string =>
+  markup.match(new RegExp(`<button[^>]*${attribute}[^>]*>`))?.[0] ?? ''
+
 const SYSTEM_AUDIO = { id: 'system-audio:default', kind: 'system-audio', status: 'available' }
 
 beforeEach(() => {
@@ -215,9 +219,8 @@ describe('FirstRunSetup', () => {
 
   it('reads Continue with the arrow once every needed grant is in, Skip for now as an outline before', () => {
     const done = render()
-    expect(done).toMatch(
-      /<button[^>]*class="[^"]*chrome-fill[^"]*"[^>]*data-first-run-primary=""[^>]*>Continue</
-    )
+    expect(buttonTag(done, 'data-first-run-primary=""')).toMatch(/class="[^"]*chrome-fill/)
+    expect(done).toMatch(/data-first-run-primary=""[^>]*>Continue</)
     expect(done).toMatch(/Continue<svg[^>]*data-icon="inline-end"/)
     studio.rows = [
       row('screen-recording', 'first-use'),
@@ -226,9 +229,8 @@ describe('FirstRunSetup', () => {
       row('camera', 'first-use')
     ]
     const skip = render()
-    expect(skip).toMatch(
-      /<button[^>]*class="[^"]*border-border[^"]*"[^>]*data-first-run-primary=""[^>]*>Skip for now</
-    )
+    expect(buttonTag(skip, 'data-first-run-primary=""')).toMatch(/class="[^"]*border-border/)
+    expect(skip).toMatch(/data-first-run-primary=""[^>]*>Skip for now</)
     expect(skip).not.toContain('data-icon="inline-end"')
   })
 
@@ -286,7 +288,7 @@ describe('FirstRunSetup', () => {
     expect(markup).toContain('data-first-run-sound-verdict="none"')
     expect(markup).toContain('Say something. The bar moves when Videorc hears you.')
     // No verdict yet: the level button waits, and says why.
-    expect(markup).toMatch(/<button[^>]*data-first-run-sound-level=""[^>]*disabled=""/)
+    expect(buttonTag(markup, 'data-first-run-sound-level=""')).toMatch(/\sdisabled=""/)
     expect(markup).toContain('Talk for a few seconds first.')
     expect(markup).toContain('data-first-run-primary=""')
   })

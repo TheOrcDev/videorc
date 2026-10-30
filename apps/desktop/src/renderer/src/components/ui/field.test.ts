@@ -177,7 +177,8 @@ describe('Field names its control (plan 174 S0.5)', () => {
     await render(h('div', null, h(FieldLabel, null, 'Loose'), h(Input), h(Switch)))
     expect(fieldLabel().hasAttribute('for')).toBe(false)
     expect(fieldLabel().hasAttribute('id')).toBe(false)
-    expect(find('input').hasAttribute('id')).toBe(false)
+    // Base UI's Input carries an id of its own; the Field wiring adds none.
+    expect(find('input').id).toMatch(/^base-ui-/)
     expect(find('[role="switch"]').hasAttribute('id')).toBe(false)
   })
 })

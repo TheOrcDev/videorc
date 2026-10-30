@@ -124,18 +124,22 @@ export function BuddyChatControls({
             role="group"
           >
             {buddyBehaviourChips(autoChat, { aiGreetings }).map((chip) => (
-              <Badge key={chip.id} asChild variant={chip.on ? 'success' : 'neutral'}>
-                <button
-                  aria-label={chip.name}
-                  data-behaviour={chip.id}
-                  data-on={chip.on || undefined}
-                  data-testid="buddy-behaviour-chip"
-                  disabled={!onOpenChatSettings}
-                  type="button"
-                  onClick={onOpenChatSettings}
-                >
-                  {chip.text}
-                </button>
+              <Badge
+                key={chip.id}
+                render={
+                  <button
+                    aria-label={chip.name}
+                    data-behaviour={chip.id}
+                    data-on={chip.on || undefined}
+                    data-testid="buddy-behaviour-chip"
+                    disabled={!onOpenChatSettings}
+                    type="button"
+                    onClick={onOpenChatSettings}
+                  />
+                }
+                variant={chip.on ? 'success' : 'neutral'}
+              >
+                {chip.text}
               </Badge>
             ))}
           </div>
