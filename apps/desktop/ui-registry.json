@@ -74,7 +74,8 @@
     "use-theme-toggle",
     "pane",
     "fader",
-    "parameter-slider"
+    "parameter-slider",
+    "lock-reason"
   ],
   "keepLocal": ["src/renderer/src/styles.css", "src/renderer/src/components/icons.tsx"]
 }

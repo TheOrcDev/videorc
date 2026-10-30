@@ -9,7 +9,7 @@ import { beginVideorcSignIn, openVideorcWebLink } from './videorc-web-links'
  * (plan 174 S1.5, D-13 and J2-9). Locked means disabled with one reason
  * (videorc-design): a lock is never hidden, it says why in one line and
  * offers at most one action. `components/lock-alert.tsx` (@videorc) draws
- * these and owns the one session and offline wording.
+ * these; the one session and offline wording is `lib/lock-reason.ts`.
  */
 
 /** What unlocks a locked feature: its one action. */

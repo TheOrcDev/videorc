@@ -9,7 +9,7 @@ import type { ReactElement } from 'react'
 import { toastUserError } from '@/lib/user-error'
 
 import { GroupedList } from '@/components/list-row'
-import { LockAlert, SESSION_LOCK_REASON } from '@/components/lock-alert'
+import { LockAlert } from '@/components/lock-alert'
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusDot } from '@/components/status-dot'
@@ -66,6 +66,7 @@ import {
   type CaptionsCaptureSettings
 } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
+import { SESSION_LOCK_REASON } from '@/lib/lock-reason'
 import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { CAPTION_LANGUAGES } from '@/lib/caption-languages'

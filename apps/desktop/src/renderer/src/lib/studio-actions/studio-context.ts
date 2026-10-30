@@ -49,7 +49,7 @@ import {
 import { cloudAiUploadGate, type EntitlementUiGate } from '@/lib/entitlement-ui'
 import { goLiveWithoutDialog, type HeadlessGoLiveStudio } from '@/lib/go-live-headless'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
-import { OFFLINE_LOCK_REASON } from '@/components/lock-alert'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
 import { overlayOrientationForCanvas } from '@/lib/overlay-layout'
 import { clipMarkKeptSomething, clipMarkedToast } from '../../../../shared/clip-marks'
 import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'

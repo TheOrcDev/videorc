@@ -3,16 +3,10 @@ import { act, createElement as h, type ComponentProps, type ReactElement } from 
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { OFFLINE_LOCK_REASON, SESSION_LOCK_REASON } from '@/lib/lock-reason'
 import { lockAlertAction } from '@/lib/lock-view'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
-import {
-  LockAlert,
-  OFFLINE_LOCK_REASON,
-  OfflineAlert,
-  SESSION_LOCK_REASON,
-  SessionLockAlert,
-  sessionLockReason
-} from './lock-alert'
+import { LockAlert, OfflineAlert, SessionLockAlert } from './lock-alert'
 
 // Plan 174 S1.5 (D-13, J2-9): a lock says why in one line and offers at most
 // one action. Premium features stay on screen behind it (owner call
@@ -92,23 +86,6 @@ describe('LockAlert', () => {
 })
 
 describe('SessionLockAlert and OfflineAlert', () => {
-  it('has one wording for a session lock and one for an offline backend', () => {
-    expect(SESSION_LOCK_REASON).toBe(
-      "Locked while you're recording or live. Changes apply the next time you record or go live."
-    )
-    expect(OFFLINE_LOCK_REASON).toBe(
-      'Videorc is reconnecting. These controls come back in a moment.'
-    )
-    for (const copy of [SESSION_LOCK_REASON, OFFLINE_LOCK_REASON]) expect(copy).not.toMatch(/—/)
-  })
-
-  it('names what a session lock locks when asked, with the same second sentence', () => {
-    expect(sessionLockReason()).toBe(SESSION_LOCK_REASON)
-    expect(sessionLockReason('Destinations and stream details')).toBe(
-      "Destinations and stream details are locked while you're recording or live. Changes apply the next time you record or go live."
-    )
-  })
-
   it('say the one session-lock wording', async () => {
     const alert = await render(h(SessionLockAlert))
     expect(alert.textContent).toBe(SESSION_LOCK_REASON)

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { Banner, OverlayLayout, OverlayOrientation, OverlayRect } from '@/lib/backend'
-import { OFFLINE_LOCK_REASON } from '@/components/lock-alert'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
 import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 
 import {
