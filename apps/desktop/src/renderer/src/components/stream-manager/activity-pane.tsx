@@ -485,15 +485,14 @@ export function ActivityPane({
             <ToggleGroup
               aria-label="Filter activity"
               className="flex-wrap justify-start"
-              type="single"
-              value={filter === 'all' ? '' : filter}
-              onValueChange={(value) => setFilter((value || 'all') as ActivityFilter | 'all')}
+              value={filter === 'all' ? [] : [filter]}
+              onValueChange={([value]) => setFilter((value ?? 'all') as ActivityFilter | 'all')}
             >
               {/* A chip shows once it has rows, with its count: the pane's
                   old "This stream: …" sentence, where it can be clicked. */}
               {shownFilters.map((option) => (
-                // ShortcutTooltip wraps the chip: a trigger's own data-state
-                // would overwrite the item's on/off state.
+                // ShortcutTooltip wraps the chip in its own span trigger, so
+                // the chip keeps only its pressed state.
                 <ShortcutTooltip key={option.id} label={option.title}>
                   <ToggleGroupItem className="gap-1 text-xs" value={option.id}>
                     {option.label}

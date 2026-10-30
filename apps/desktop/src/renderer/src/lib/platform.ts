@@ -1,15 +1,14 @@
-// Renderer-side platform awareness. The main process reports the real
-// platform through runtimeInfo.platform ('darwin' | 'win32' | 'linux' | …);
-// components read it to pick OS-correct copy, permission flows, and keyboard
-// glyphs. Before runtimeInfo arrives (and in the windows that never get it)
-// the platform the theme bootstrap wrote on <html> before the first paint
-// stands in, so nothing flashes "Ctrl" on a Mac (plan 174 S1.2).
-
 import {
   acceleratorAriaKeyShortcuts,
   acceleratorLabel,
   commandModifierHeld
-} from '../../../shared/accelerator-format'
+} from '@/lib/accelerator'
+
+// Platform awareness for copy and keyboard glyphs. Pass the real platform
+// when the app knows it ('darwin' | 'win32' | 'linux' | …; Electron's
+// process.platform). Without one, `data-platform` on <html> (set before the
+// first paint) stands in, then the user agent, so nothing flashes "Ctrl" on
+// a Mac.
 
 export type AppPlatform = 'darwin' | 'win32' | 'other'
 
@@ -32,24 +31,27 @@ export function isWindowsPlatform(platform: string | undefined): boolean {
 }
 
 /** Human name for the OS Settings app, for permission copy. */
-export function osSettingsName(platform: string | undefined): string {
-  switch (appPlatform(platform)) {
-    case 'darwin':
+export function osSettingsName(platform?: string): string {
+  switch (appPlatform(currentPlatform(platform))) {
+    case 'darwin': {
       return 'System Settings'
-    case 'win32':
+    }
+    case 'win32': {
       return 'Windows Settings'
-    default:
+    }
+    default: {
       return 'system settings'
+    }
   }
 }
 
 // A glyph authored mac-style, for the platform: ⌘ → Ctrl, ⌥ → Alt, ⇧ → Shift.
-// Shortcuts are authored as accelerators now (lib/shortcuts.ts) and shown
-// through ShortcutKeys / shortcutLabel; this stays for a lone modifier.
+// Shortcuts are authored as accelerators and shown through ShortcutKeys /
+// shortcutLabel; this stays for a lone modifier.
 const NON_MAC_KEY_GLYPHS: Record<string, string> = {
+  '⇧': 'Shift',
   '⌘': 'Ctrl',
-  '⌥': 'Alt',
-  '⇧': 'Shift'
+  '⌥': 'Alt'
 }
 
 /** Translates a single displayed key glyph for the platform (⌘ → Ctrl, etc.). */
@@ -60,9 +62,9 @@ export function displayKeyGlyph(glyph: string, platform: string | undefined): st
   return NON_MAC_KEY_GLYPHS[glyph] ?? glyph
 }
 
-// Non-React callers (sonner toasts) cannot read runtimeInfo. Electron's
-// user agent names the host OS reliably, so it stands in ONLY when no
-// explicit platform was passed.
+// Non-React callers (toasts) cannot read app state. The user agent names the
+// host OS reliably enough, so it stands in ONLY when no explicit platform was
+// passed.
 function detectedPlatform(): string | undefined {
   const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent
   if (userAgent.includes('Windows')) {
@@ -75,12 +77,13 @@ function detectedPlatform(): string | undefined {
 }
 
 /**
- * The platform to print keys for: the one passed (runtimeInfo), else the one
- * theme-bootstrap.js / window-theme-bootstrap.js set on <html> before the
- * first paint, else the user agent.
+ * The platform to print keys for: the one passed, else `data-platform` on
+ * <html>, else the user agent.
  */
 export function currentPlatform(platform?: string): string | undefined {
-  if (platform) return platform
+  if (platform) {
+    return platform
+  }
   const bootstrapped =
     typeof document === 'undefined' ? undefined : document.documentElement?.dataset.platform
   return bootstrapped || detectedPlatform()
@@ -96,32 +99,33 @@ export function shortcutAriaKeys(accelerator: string, platform?: string): string
   return acceleratorAriaKeyShortcuts(accelerator, currentPlatform(platform))
 }
 
-/** A shell shortcut's modifier: ⌘ alone on macOS, Ctrl elsewhere (A-17). */
+/** A shell shortcut's modifier: ⌘ alone on macOS, Ctrl elsewhere. */
 export function isCommandKey(
   event: { metaKey: boolean; ctrlKey: boolean },
   platform?: string
 ): boolean {
   return commandModifierHeld(
-    { meta: event.metaKey, control: event.ctrlKey },
+    { control: event.ctrlKey, meta: event.metaKey },
     currentPlatform(platform)
   )
 }
 
 /** Label for "reveal this file in the OS file manager" actions. */
-export function revealInFileManagerLabel(
-  platform: string | undefined = detectedPlatform()
-): string {
-  switch (appPlatform(platform)) {
-    case 'darwin':
+export function revealInFileManagerLabel(platform?: string): string {
+  switch (appPlatform(currentPlatform(platform))) {
+    case 'darwin': {
       return 'Show in Finder'
-    case 'win32':
+    }
+    case 'win32': {
       return 'Show in Explorer'
-    default:
+    }
+    default: {
       return 'Show in folder'
+    }
   }
 }
 
-/** The OS's name for where a deleted file goes: a Library delete moves there (plan 174 E-2). */
-export function trashName(platform: string | undefined = detectedPlatform()): string {
-  return appPlatform(platform) === 'win32' ? 'Recycle Bin' : 'Trash'
+/** The OS's name for where a deleted file goes. */
+export function trashName(platform?: string): string {
+  return appPlatform(currentPlatform(platform)) === 'win32' ? 'Recycle Bin' : 'Trash'
 }

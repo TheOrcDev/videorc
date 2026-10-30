@@ -70,7 +70,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(markup).toContain('data-slot="source-item"')
     expect(markup).toContain('data-videorc-system-audio-settings=""')
     expect(markup).toContain('>System audio<')
-    expect(markup).toMatch(/<button[^>]*aria-label="System audio"/)
+    expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="System audio"/)
     expect(markup).toContain('Everything your Mac plays, except Videorc.')
     // Plan 173, D4: the long explanation is folded into More.
     expect(markup).not.toContain('browser tab')
@@ -170,7 +170,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   })
 
   it('has the echo guard On by default, and it can be turned off (plan 076)', () => {
-    const guard = /<button[^>]*role="switch"[^>]*>/
+    const guard = /<span[^>]*role="switch"[^>]*>/
     const echoRow = (markup: string): string =>
       markup.slice(markup.indexOf('data-videorc-echo-guard'))
     expect(echoRow(render({}, { open: true })).match(guard)?.[0]).toContain('aria-checked="true"')
@@ -186,7 +186,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(echo).toMatch(
       /data-slot="field-description"[^>]*>Stops System audio when your own stream/
     )
-    expect(echo).toMatch(/<button[^>]*role="switch"/)
+    expect(echo).toMatch(/<span[^>]*role="switch"/)
   })
 
   it('locks the row with one reason without Screen Recording permission', () => {
@@ -195,11 +195,11 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(markup).toContain('Uses the Screen Recording permission. Turn it on above.')
     expect(markup).not.toContain('Open Permissions')
     expect(markup).toContain('>Needs permission<')
-    const onSwitch = markup.match(/<button[^>]*aria-label="System audio"[^>]*>/)?.[0]
-    expect(onSwitch).toContain('disabled=""')
-    expect(markup).toMatch(/data-disabled="true"[^>]*data-slot="source-item"/)
+    const onSwitch = markup.match(/<span[^>]*aria-label="System audio"[^>]*>/)?.[0]
+    expect(onSwitch).toContain('aria-disabled="true"')
+    expect(markup).toMatch(/<section(?=[^>]*data-slot="source-item")[^>]*data-disabled="true"/)
     const echo = markup.slice(markup.indexOf('data-videorc-echo-guard'))
-    expect(echo.match(/<button[^>]*role="switch"[^>]*>/)?.[0]).toContain('disabled=""')
+    expect(echo.match(/<span[^>]*role="switch"[^>]*>/)?.[0]).toContain('aria-disabled="true"')
   })
 
   it('makes an issue a warning Alert, with its action (plan 174 S3.8)', () => {
@@ -219,10 +219,10 @@ describe('Sources System audio row (plans 069, 173)', () => {
 
   it('keeps the On switch styled by its own state under the shortcut tooltip', () => {
     // The tooltip's trigger is a wrapper, so nothing it writes lands on the
-    // Switch, whose track styles read its own checked/unchecked.
-    const onSwitch = /<button[^>]*aria-label="System audio"[^>]*>/
-    expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-state="checked"')
-    expect(render({}).match(onSwitch)?.[0]).toContain('data-state="unchecked"')
+    // Switch, whose track styles read its own data-checked/data-unchecked.
+    const onSwitch = /<span[^>]*aria-label="System audio"[^>]*>/
+    expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-checked=""')
+    expect(render({}).match(onSwitch)?.[0]).toContain('data-unchecked=""')
   })
 
   it('chips On outside a session, Receiving while mixed, and nothing while Off', () => {
@@ -381,7 +381,7 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(markup).toContain('>Keep microphone ready<')
     // A settings row: the Field's label names its switch once mounted.
     expect(markup).toMatch(
-      /data-videorc-mic-keep-ready=""[^]*>Keep microphone ready<[^]*role="switch" aria-checked="true"/
+      /data-videorc-mic-keep-ready=""[^]*>Keep microphone ready<[^]*role="switch"[^>]*aria-checked="true"/
     )
     expect(markup).toContain('macOS shows its microphone indicator while it&#x27;s open')
     expect(renderMicrophone({ defaultMoreOpen: true })).not.toContain('Keep microphone ready')

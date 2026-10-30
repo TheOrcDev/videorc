@@ -386,7 +386,7 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
   })
 
   it('never passes data-slot to a component: hooks on components are data-testid', () => {
-    // components/ui is shadcn's own: its primitives name their Radix parts.
+    // components/ui is shadcn's own: its primitives name their own parts.
     const offending = files
       .filter(({ path, code }) => path.endsWith('.tsx') && code.includes('data-slot'))
       .filter(({ path }) => !path.startsWith('src/components/ui/'))

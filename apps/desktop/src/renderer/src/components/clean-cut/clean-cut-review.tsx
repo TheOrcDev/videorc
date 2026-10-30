@@ -1054,7 +1054,7 @@ function KindChips({
       data-testid="clean-cut-chips"
       size="xs"
       spacing={1}
-      type="multiple"
+      multiple
       value={pressed}
       onValueChange={(values) => {
         const changed = chips.find(
@@ -1093,7 +1093,7 @@ function KindChips({
           )
         }
         // What a click does, on hover and on focus (plan 174 S1.10). The chip
-        // sits in a span trigger: the toggle's own data-state must stay on/off.
+        // sits in a span trigger, so it carries only its own pressed state.
         return (
           <Tooltip key={chip.group.id}>
             <TooltipTrigger render={<span className="inline-flex" />}>{item}</TooltipTrigger>

@@ -426,8 +426,8 @@ Everything except ⌘K uses the desktop scale.
 - **One control per kind of choice** (plan 174 S1.7, D13). Each wears one
   look:
   - Choosing one of 2–4 exclusive values: `SegmentedControl`
-    (`ui/segmented-control.tsx`), the glass Tabs track with no Radix, a
-    radio group with arrow keys. Its Field label names it; disabled, it says
+    (`ui/segmented-control.tsx`), the glass Tabs track with no Tabs
+    primitive, a radio group with arrow keys. Its Field label names it; disabled, it says
     why (`disabledReason`).
   - Switching a view (a page or a pane): `Tabs`.
   - Filter chips (several on at once, or a filter row): `ToggleGroup`, only
@@ -618,9 +618,10 @@ made it chat first: one thin stats bar and fewer words.
   and Stickers) chat's paid fill `bg-warning/10` without its ring (the rows
   are flush, split by hairlines); on stream, `bg-accent` wins, and hover
   paints over either. A long fact truncates and every ⋯ stays in the pane.
-- **ScrollArea content is a block** (plan 177): `ui/scroll-area.tsx`
-  overrides Radix's `display: table` wrapper, which let one long unbreakable
-  row widen every row past the pane. Never reintroduce it per call site.
+- **ScrollArea content is a block** (plan 177): the viewport of
+  `ui/scroll-area.tsx` (Base UI) holds the rows itself, with no
+  `display: table` wrapper (Radix's let one long unbreakable row widen every
+  row past the pane). Never reintroduce one per call site.
 - **The Buddy pane** has one header: Buddy's identity (the living preview at
   32 px, the name, the bubble while one is up), the Alpha tag, listening,
   the status and the **Buddy Live** switch. Under it, "{name} talks" is a
@@ -795,8 +796,8 @@ moved onto the utility.
 - Editable fields get the native context menu (Cut, Copy, Paste, Select All,
   spelling), which main builds on `context-menu` (`main/context-menu.ts`).
   Notes has none: a popup menu is not capture-protected.
-- macOS overlay scrollbars: no custom scrollbar recipe. Radix `ScrollArea`
-  uses `type="scroll"`.
+- macOS overlay scrollbars: no custom scrollbar recipe. `ScrollArea`
+  uses `type="scroll"` (its default).
 - Rows highlight instantly. No `cursor-pointer`: desktop controls use the
   arrow.
 - Copying: `copyText(text, failure?)` or `useCopyText() → { copied, copy }`.

@@ -87,12 +87,9 @@ function chips(): HTMLButtonElement[] {
   return [...document.querySelectorAll<HTMLButtonElement>('[data-testid="buddy-behaviour-chip"]')]
 }
 
-/** Radix toggles on mousedown with the primary button. */
+/** A segment checks on a click. */
 async function press(button: HTMLElement): Promise<void> {
-  await act(async () => {
-    button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-    button.click()
-  })
+  await act(async () => button.click())
 }
 
 function dialog(): HTMLElement | null {

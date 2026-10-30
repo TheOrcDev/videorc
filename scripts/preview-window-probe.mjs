@@ -805,11 +805,11 @@ async function runPassThroughScenario() {
       const sources = [...document.querySelectorAll('[data-videorc-stage-source]')]
       if (!sources.length) return null
       // The toolbar's source toggles render in the same order as the stage
-      // sources (both map scene.sources), and Radix marks the pressed item
-      // with data-state="on" (aria-checked in a single-select group).
+      // sources (both map scene.sources), and Base UI marks the pressed item
+      // with data-pressed (and aria-pressed).
       const toggles = [...document.querySelectorAll('[data-videorc-stage-toolbar] button[aria-label^="Select "]')]
       const isOn = (button) =>
-        button?.dataset.state === 'on' ||
+        button?.hasAttribute('data-pressed') ||
         button?.getAttribute('aria-checked') === 'true' ||
         button?.getAttribute('aria-pressed') === 'true'
       const selectedBefore = toggles.findIndex(isOn)
@@ -837,7 +837,7 @@ async function runPassThroughScenario() {
         downs: window.__videorcPassThrough.downs,
         selectedIndex: [...document.querySelectorAll('[data-videorc-stage-toolbar] button[aria-label^="Select "]')]
           .findIndex((button) =>
-            button.dataset.state === 'on' ||
+            button.hasAttribute('data-pressed') ||
             button.getAttribute('aria-checked') === 'true' ||
             button.getAttribute('aria-pressed') === 'true'),
         inspectorTitle: [...document.querySelectorAll('h3, h2, [data-slot="panel-section-title"]')].map((el) => el.textContent).join(' | '),

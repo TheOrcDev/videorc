@@ -282,7 +282,7 @@ describe('selection in view (E-18)', () => {
     const header = document.querySelector<HTMLElement>(
       '[aria-label="Select all recordings in view"]'
     )!
-    expect(header.getAttribute('data-state')).toBe('indeterminate')
+    expect(header.hasAttribute('data-indeterminate')).toBe(true)
     const search = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search recordings"]'
     )!
@@ -335,7 +335,7 @@ describe('Clean cut in the Library (E-4)', () => {
     await render()
     expect(row('bravo').querySelector('[data-library-clean-cut]')?.textContent).toBe('Cutting 40%')
     expect(
-      row('bravo').querySelector<HTMLElement>('[role="checkbox"]')?.hasAttribute('disabled')
+      row('bravo').querySelector<HTMLElement>('[role="checkbox"]')?.hasAttribute('data-disabled')
     ).toBe(true)
     await act(async () =>
       row('bravo').querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')!.click()

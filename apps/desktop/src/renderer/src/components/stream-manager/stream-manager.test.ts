@@ -439,10 +439,10 @@ describe('StreamManager Buddy Live and how Buddy talks (plan 174 S3.14a, D7, pla
     }
     const locked = renderWith({ cohostGate: basic })
     expect(locked).toMatch(/data-slot="buddy-live-switch"[\s\S]*?data-slot="disabled-reason"/)
-    expect(locked).toMatch(/role="switch"[^>]*disabled=""/)
+    expect(locked).toMatch(/role="switch"[^>]*aria-disabled="true"/)
     // On already: the lock never keeps a streamer from turning Buddy off.
     const on = renderWith({ cohostGate: basic, cohostEnabled: true })
-    expect(on).not.toMatch(/role="switch"[^>]*disabled=""/)
+    expect(on).not.toMatch(/role="switch"[^>]*aria-disabled="true"/)
   })
 })
 

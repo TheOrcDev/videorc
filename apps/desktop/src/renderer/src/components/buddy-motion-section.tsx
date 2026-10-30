@@ -71,15 +71,12 @@ export function BuddyMotionSection({
               max={1}
               min={0}
               step={0.05}
-              value={[intensity]}
-              onValueChange={([value]) => {
-                if (value === undefined) return
+              value={intensity}
+              onValueChange={(value) => {
                 setIntensity(value)
                 onDraft({ ...motion, intensity: value })
               }}
-              onValueCommit={([value]) => {
-                if (value !== undefined) commitIntensity(value)
-              }}
+              onValueCommitted={(value) => commitIntensity(value)}
             />
             <div className="relative h-6" data-testid="buddy-motion-ticks">
               {BUDDY_MOTION_TICKS.map((tick) => (

@@ -260,12 +260,10 @@ function CohostCooldownField({
           max={max}
           min={5}
           step={5}
-          value={[draft]}
-          onValueChange={([value]) => {
-            if (value !== undefined) setDraft(value)
-          }}
-          onValueCommit={([value]) => {
-            if (value !== undefined && value !== cooldown) {
+          value={draft}
+          onValueChange={(value) => setDraft(value)}
+          onValueCommitted={(value) => {
+            if (value !== cooldown) {
               onChange({ enabled, cooldownSeconds: value })
             }
           }}

@@ -288,10 +288,9 @@ export function CaptionsControls(): ReactElement {
             aria-label="Caption style"
             className="grid w-full grid-cols-2 gap-2"
             disabled={locked}
-            type="single"
-            value={captions.styleId}
+            value={[captions.styleId]}
             variant="outline"
-            onValueChange={(value) => {
+            onValueChange={([value]) => {
               if (CAPTION_STYLE_IDS.includes(value as CaptionStyleId)) {
                 patchCaptions({ styleId: value as CaptionStyleId }, true)
               }
@@ -302,7 +301,7 @@ export function CaptionsControls(): ReactElement {
               return (
                 <ToggleGroupItem
                   aria-label={definition.label}
-                  className="h-auto min-w-0 flex-col items-stretch gap-2 overflow-hidden rounded-row p-2 text-left whitespace-normal data-[state=on]:border-primary/50 data-[state=on]:bg-primary/10"
+                  className="h-auto min-w-0 flex-col items-stretch gap-2 overflow-hidden rounded-row p-2 text-left whitespace-normal data-pressed:border-primary/50 data-pressed:bg-primary/10"
                   key={styleId}
                   value={styleId}
                 >
