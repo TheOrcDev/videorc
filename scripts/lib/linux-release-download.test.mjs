@@ -105,6 +105,16 @@ for (const [name, transform] of [
       new Response(bytes, { status: 206, headers: { 'content-length': String(bytes.length) } })
   ],
   ['redirect', () => new Response(null, { status: 302 })],
+  [
+    'partial envelope with HTTP 200',
+    (bytes) =>
+      new Response(bytes, {
+        headers: {
+          'content-length': String(bytes.length),
+          'content-range': `bytes 0-${bytes.length - 1}/${bytes.length + 1}`
+        }
+      })
+  ],
   ['missing length', (bytes) => new Response(bytes)],
   [
     'compressed body',

@@ -67,6 +67,7 @@ async function downloadObject({ response, path, maxBytes, expectedSize, expected
     !Number.isSafeInteger(size) ||
     size > maxBytes ||
     (expectedSize !== undefined && size !== expectedSize) ||
+    response.headers.get('content-range') !== null ||
     ![null, 'identity'].includes(response.headers.get('content-encoding'))
   ) {
     await response.body?.cancel()

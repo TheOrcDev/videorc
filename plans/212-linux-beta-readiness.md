@@ -107,6 +107,17 @@ probe does not launch Videorc or certify any of those requirements. PipeWire
 drain returns 0); the receipt retains that actual exit and requires the owned
 stop after sufficient PCM, empty stderr, and successful signal handling.
 
+A further owned-tone check on ogre shows that Pulse-compatible playback
+clients' `pipewire.sec.pid` names the Pulse server (PID 954 in this run), not
+the player. Their `application.process.id` matches the player normally but
+accepts a deliberately false `PULSE_PROP` value of 1. It is not authenticated
+process identity and cannot by itself establish Videorc/Electron exclusion.
+Receipts: `/tmp/videorc-beta-pipewire-peer-identity-kUCPWP/report.json` and
+`/tmp/videorc-beta-pipewire-peer-spoof-ekDjSE/report.json`. Both use only two
+owned tones/null sinks and close their own fixtures; no default routing changes
+or production capture occur. The production design must account for this
+Pulse-server indirection rather than trusting the advertised process ID.
+
 The microphone artifact analyzer now accepts one exact backend-reported FFmpeg
 tee output shared by recording and stream only when their applied offsets agree.
 Duplicate roles, mismatched offsets and foreign session/process owners still
@@ -180,8 +191,11 @@ does not close their acceptance rows.
   private probe key; it cannot provision or release the publication journal.
   The adapter has no CLI and has only run against artificial test transports.
   These modules have no publication credentials. Their
-  protected coordinator, public artifact/pointer transport, pilot enrollment and
-  updater/rollback proof remain open. The planner does not alter the
+  public-pointer S3 adapter now hashes actual immutable GET bodies and signs
+  conditional pointer writes, with bounded requests and reads. It is bound to
+  the exact plan and configured origins and has only artificial-transport test
+  evidence. Protected coordination, immutable artifact upload, storage capability
+  proof, pilot enrollment and updater/rollback proof remain open. The planner does not alter the
   release-controller setting.
 
 ### Private measurement receipts
@@ -1150,3 +1164,70 @@ against 100 ms and two; its 13 ms A/V tail passes. The bridge records about
 passes all 100 cycles. These are development results on that preceding source,
 not full profile coverage or an accepted candidate. Evidence:
 `/tmp/videorc-beta-matrix-build-env-fixed-VNXs83/report.json`.
+
+### Current-source verification and interrupted build, 2026-10-30
+
+On `294717d0`, replay-module tests pass 30 cases with two ignored, and the
+`live_control_` filter passes 17 with no ignores. The filters overlap; these
+are not 47 distinct tests. Both replay namespace ownership regressions execute.
+Standard Linux Clippy passes with the four existing platform allowances.
+Receipt: `/tmp/videorc-beta-replay-ownership-verification-Nz4LMo/report.json`.
+The test target alone used opt-level 0; runtime evidence requires the normal
+optimized development binaries.
+
+Linux job `124111916053` on that head received a runner shutdown during test
+compilation after FFmpeg policy/provisioning and Clippy passed. One exact-job
+retry was requested; the interrupted run supplies no test pass. Hosted macOS
+Rust job `124111915712` reached its confirmed 75-minute limit during test
+compilation. Audit, formatting and Clippy passed, but tests and the sentinel
+did not complete. The existing release-runbook exclusion applies to that check;
+it is not successful validation. Windows diagnostics job `124111953268` passes
+OpenH264 comparison and all 48 controlled-audio cases, but its independent
+control fails 36 streaming cases on 117–267 ms tails; five also fail frame-count
+tolerance. Its diagnostic-only exclusion does not waive required Windows
+source/installer checks or repeated/full-suite stability evidence.
+
+The server restart interrupted the owned normal backend/bridge build before
+completion. The predecessor's recorded processes were confirmed gone and its
+report remains incomplete. The resumed sequential build and instrumented
+Agents smoke use unchanged Rust source and the normal opt-level 2 profile:
+`/tmp/videorc-beta-agent-control-trace-build-0TzaGz/report.json`.
+The prior reproduction places roughly 13 seconds of the Stop tool's delay
+before the backend receives Stop. Event receipt, renderer RPC and timer-gap
+traces are being collected to distinguish delivery delay from backend stop
+work. No timeout or artifact budget has changed; completion remains pending.
+
+### Public-pointer storage adapter, 2026-10-30
+
+The Beta transaction core now has an S3 adapter with separate caller-supplied
+candidate-read and public-origin configurations. It snapshots the verified plan
+and configurations; only that plan's immutable destinations, candidate feed and
+two public Beta pointers are addressable. Immutable verification streams and
+hashes the actual GET bytes. Pointer reads require bounded complete unencoded
+bodies and strong ETags. Writes accept only the exact planned bytes and an
+explicit create-only or compare-and-swap condition; signed payload checksums
+and conditions bind the request. Request/body deadlines close or cancel owned
+resources. Lost responses, conflicts and changed readback stop the transaction
+without retries, adoption, journal release or success claims.
+
+All 75 focused planner, transaction, journal and storage tests pass with zero
+skips (`/tmp/videorc-beta-publication-s3-focused.log`), including integration
+through artificial HTTP transports on both origins, mirror-first writes and
+ambiguous-result preservation. This adapter has no CLI, ambient credential
+fallback, immutable uploader or production execution evidence. Protected
+coordination, real storage capability proofs and exact-candidate acceptance
+remain mandatory before publication.
+
+The full Node suite passes 2,965 tests with zero skips
+(`/tmp/videorc-beta-publication-s3-full-node.log`). Its storage module loaded
+before the final streamed-error redaction regression was added; the final
+storage-only suite then passes all 25 cases with zero skips
+(`/tmp/videorc-beta-publication-s3-storage-final.log`). Focused ESLint,
+formatting and diff checks pass. These checks include the preserved local
+workflow-exit fix; that workflow/test pair remains excluded from the PR until
+workflow-capable authorization is available.
+
+The candidate downloader also rejects a `Content-Range` envelope even when
+the server reports HTTP 200. All 20 downloader tests pass after this change
+(`/tmp/videorc-beta-download-range-tests.log`), including cleanup restricted
+to the newly created partial directory; focused lint/format checks pass.

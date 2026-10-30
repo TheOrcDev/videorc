@@ -72,7 +72,7 @@ export function assertLinuxBetaPointerTransition({ current, next, publishedRelea
   return comparison === 0 ? 'idempotent' : 'advance'
 }
 
-function assertPlan(plan) {
+export function assertLinuxBetaPublicationPlan(plan) {
   const manifest = plan.manifest
   assertLinuxReleaseManifest(manifest, { requireAccepted: true })
   requireState(
@@ -182,7 +182,7 @@ export async function finalizeVerifiedLinuxBetaPlan({
   journal
 }) {
   const plan = structuredClone(input)
-  assertPlan(plan)
+  assertLinuxBetaPublicationPlan(plan)
   requireState(Array.isArray(publishedReleaseIds), 'Verified publication history is required.')
   origins = [...origins]
   publishedReleaseIds = [...publishedReleaseIds]
