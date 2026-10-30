@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { performanceAppSpawnSpec } from './lib/app-launcher.mjs'
+import { readPackagedBuildFlags } from './lib/packaged-app-hardening.mjs'
 import {
   evaluateBlankFallback,
   evaluateClearGlassLaunch,
@@ -35,6 +36,11 @@ if (process.platform !== 'win32') {
 const spawnSpec = performanceAppSpawnSpec()
 if (!spawnSpec) {
   throw new Error('Set VIDEORC_PERF_APP_EXECUTABLE to the packaged Videorc.exe.')
+}
+if (readPackagedBuildFlags(spawnSpec.command)?.packagedTestHooks !== true) {
+  throw new Error(
+    'The recovery probe needs a CDP-enabled test package. Run pnpm smoke:windows-main-window-recovery to build one separately.'
+  )
 }
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
@@ -172,6 +178,8 @@ async function launch(name, env, userData) {
       ...env,
       VIDEORC_SMOKE_SKIP_FIRST_RUN:
         env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? process.env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
+      VIDEORC_APP_DATA_DIR: join(userData, 'app-data'),
+      VIDEORC_DISABLE_BACKEND_REAP: '1',
       VIDEORC_USER_DATA_DIR: userData,
       VIDEORC_REMOTE_DEBUG_PORT: String(port)
     },

@@ -235,3 +235,24 @@ until app gates run; the optimized debug backend is still compiling.
 
 The current full desktop Node suite also passed all 2,783 tests with zero
 failures/skips, using the new web checkout for cross-repository contracts.
+
+Web PR #101 merged normally at
+`4f758dbd3b95f676d06218b7be606347c6b1b0a2` after all three checks passed;
+the merge tree matches the tested branch. No Beta availability configuration
+changed, and production deployment remains unverified.
+
+### Windows regression gate correction, 2026-10-30
+
+PR #930 run `40974150748`, installer job `123798234376`, built the installer
+and passed packaged recording/native-preview checks, then failed the window
+recovery smoke. Its uploaded app log explicitly reports that the hardened
+production package ignored `VIDEORC_REMOTE_DEBUG_PORT`. Retrying cannot fix that
+test/package mismatch. The recovery command now prepares a separate test-only
+directory, validates production hardening and test fuses, and verifies that the
+production executable/app.asar hashes remain unchanged. The recovery evidence
+is explicitly test-build evidence; the original installer is never rebuilt with
+hooks enabled. Direct invocation against production fails immediately with an
+actionable explanation. Twenty-four focused hardening/recovery tests pass.
+The full current Node suite passed 2,792 tests with zero failures/skips; lint
+and formatting passed. The Windows package/recovery run remains required;
+Linux unit tests do not supply Windows execution evidence.
