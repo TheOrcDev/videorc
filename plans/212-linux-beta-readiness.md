@@ -1309,3 +1309,35 @@ The candidate downloader also rejects a `Content-Range` envelope even when
 the server reports HTTP 200. All 20 downloader tests pass after this change
 (`/tmp/videorc-beta-download-range-tests.log`), including cleanup restricted
 to the newly created partial directory; focused lint/format checks pass.
+
+### Windows source-gate path portability, 2026-10-30
+
+Required Windows source job `124111953482` on `294717d0` passes Clippy,
+both 25-run stability groups and all three full Rust runs, including the
+replay ownership correction. It then fails ten desktop assertions across
+three files (599 files and 6,622 tests pass; five tests are skipped).
+All later source checks are skipped; the required job remains failed.
+Classification: `/tmp/videorc-beta-windows-source-124111953482-classification.json`.
+
+The installer tests used macOS path semantics on Windows temporary paths,
+which placed staging files outside their intended directory or refused the
+wrong parent. Real-filesystem tests now use the host platform; explicit
+macOS/Windows/Linux path-selection cases remain. The Windows unchanged-file
+mode test now asserts successful unchanged resolution on a Windows-shaped
+mock filesystem, instead of accepting a refusal before reaching that branch.
+The Linux-only desktop-entry helper always uses POSIX separators. The smoke
+Trash fixture uses native temporary paths and still asserts two distinct
+moves with the original basenames. No failure assertions or gate thresholds
+are removed. All 56 focused tests pass on Ogre:
+`/tmp/videorc-beta-windows-paths-focused.log`.
+The broader main-process desktop suite passes all 106 files / 1,058 tests,
+with the existing Windows-only OBS test skipped on Linux:
+`/tmp/videorc-beta-windows-paths-main-suite.log`.
+Typecheck and full lint pass (`/tmp/videorc-beta-windows-paths-typecheck.log`
+and `/tmp/videorc-beta-windows-paths-lint.log`). The full formatting scan
+reported only the installer test; after formatting it, the changed-file
+Prettier check and repository text-integrity check pass:
+`/tmp/videorc-beta-windows-paths-format-final.log`.
+Fresh Windows desktop/source CI remains required; Linux verification does
+not substitute for it. There are no Rust or recording-path changes in this
+correction, and no new candidate acceptance or publication evidence.
