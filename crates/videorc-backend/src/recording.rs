@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -10233,7 +10233,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
     let mut microphone_generation = 0;
-    let mut microphone_reopen_attempts = 0_u32;
+    let microphone_reopen_attempts = Arc::new(AtomicU32::new(0));
     loop {
         ticker.tick().await;
         let counters = {
@@ -10311,16 +10311,15 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             );
             if microphone_auto_reopen_due(
                 source_loss_after_ms.reason,
-                microphone_reopen_attempts,
+                microphone_reopen_attempts.load(Ordering::Acquire),
                 cfg!(any(target_os = "linux", target_os = "windows")),
             ) {
-                microphone_reopen_attempts += 1;
                 tokio::spawn(reopen_stopped_microphone(
                     state.clone(),
                     session_id.clone(),
                     source_loss_after_ms.device_name.clone(),
                     source_loss_after_ms.after_ms,
-                    microphone_reopen_attempts,
+                    Arc::clone(&microphone_reopen_attempts),
                 ));
             }
         }
@@ -10577,60 +10576,84 @@ fn microphone_auto_reopen_due(
         && attempts < MICROPHONE_AUTO_REOPEN_LIMIT
 }
 
+/// The next reopen attempt's number, or `None` once the session's bounded
+/// attempts are spent. Counted here, not per source-loss event: a reopen
+/// whose worker dies during the switch itself (the field Intel SST
+/// microphone refused its clock record two seconds after it came back)
+/// never went live, so it raises no new loss event; waiting for one left the
+/// session silent after "attempt 1 of 5".
+fn next_microphone_reopen_attempt(attempts: &AtomicU32) -> Option<u32> {
+    let mut taken = attempts.load(Ordering::Acquire);
+    loop {
+        if taken >= MICROPHONE_AUTO_REOPEN_LIMIT {
+            return None;
+        }
+        match attempts.compare_exchange_weak(taken, taken + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return Some(taken + 1),
+            Err(current) => taken = current,
+        }
+    }
+}
+
 /// Opens the session's confirmed microphone again after its capture stopped,
-/// unless it already came back, the user is changing it, or it is gone.
+/// unless it already came back, the user is changing it, or it is gone. A
+/// failed reopen is tried again after the same delay, up to the session's
+/// limit.
 async fn reopen_stopped_microphone(
     state: AppState,
     session_id: String,
     device_name: String,
     stopped_after_ms: u64,
-    attempt: u32,
+    attempts: Arc<AtomicU32>,
 ) {
-    tokio::time::sleep(MICROPHONE_AUTO_REOPEN_DELAY).await;
-    let Ok(sources) = crate::live_source_switch::get(&state, &session_id).await else {
-        return;
-    };
-    let Some(device_id) = sources.confirmed.microphone_id.clone() else {
-        return;
-    };
-    let lost = sources.health.iter().any(|health| {
-        health.kind == crate::live_source_switch::SourceKind::Microphone
-            && health.health == crate::live_source_switch::SourceHealth::Unavailable
-    });
-    if !lost || sources.pending.is_some() {
-        return;
-    }
-    let request = crate::live_source_switch::SourceSwitchParams {
-        session_id: session_id.clone(),
-        request_id: format!("microphone-reopen-{attempt}-{}", Uuid::new_v4()),
-        expected_source_revision: sources.source_revision,
-        kind: crate::live_source_switch::SourceKind::Microphone,
-        device_id: Some(device_id),
-        protected_overlay_window_ids: Vec::new(),
-    };
-    let reopened = crate::live_source_switch::reopen_microphone(&state, request)
-        .await
-        .is_ok_and(|after| {
-            after.health.iter().any(|health| {
-                health.kind == crate::live_source_switch::SourceKind::Microphone
-                    && matches!(
-                        health.health,
-                        crate::live_source_switch::SourceHealth::Ready
-                            | crate::live_source_switch::SourceHealth::Starting
-                    )
-            })
+    while let Some(attempt) = next_microphone_reopen_attempt(&attempts) {
+        tokio::time::sleep(MICROPHONE_AUTO_REOPEN_DELAY).await;
+        let Ok(sources) = crate::live_source_switch::get(&state, &session_id).await else {
+            return;
+        };
+        let Some(device_id) = sources.confirmed.microphone_id.clone() else {
+            return;
+        };
+        let lost = sources.health.iter().any(|health| {
+            health.kind == crate::live_source_switch::SourceKind::Microphone
+                && health.health == crate::live_source_switch::SourceHealth::Unavailable
         });
-    if reopened {
-        let message = microphone_reopened_message(&device_name, stopped_after_ms);
-        state.emit_log("info", &message);
-        let _ = emit_health_event(
-            &state,
-            Some(&session_id),
-            HealthLevel::Info,
-            MICROPHONE_REOPENED_CODE,
-            &message,
-        );
-    } else {
+        if !lost || sources.pending.is_some() {
+            return;
+        }
+        let request = crate::live_source_switch::SourceSwitchParams {
+            session_id: session_id.clone(),
+            request_id: format!("microphone-reopen-{attempt}-{}", Uuid::new_v4()),
+            expected_source_revision: sources.source_revision,
+            kind: crate::live_source_switch::SourceKind::Microphone,
+            device_id: Some(device_id),
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let reopened = crate::live_source_switch::reopen_microphone(&state, request)
+            .await
+            .is_ok_and(|after| {
+                after.health.iter().any(|health| {
+                    health.kind == crate::live_source_switch::SourceKind::Microphone
+                        && matches!(
+                            health.health,
+                            crate::live_source_switch::SourceHealth::Ready
+                                | crate::live_source_switch::SourceHealth::Starting
+                        )
+                })
+            });
+        if reopened {
+            let message = microphone_reopened_message(&device_name, stopped_after_ms);
+            state.emit_log("info", &message);
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                MICROPHONE_REOPENED_CODE,
+                &message,
+            );
+            return;
+        }
         state.emit_log(
             "warn",
             format!(
@@ -27117,6 +27140,19 @@ mod tests {
         // A timeline loss keeps its own re-anchor; macOS is unchanged.
         assert!(!microphone_auto_reopen_due(TimelineRejected, 0, true));
         assert!(!microphone_auto_reopen_due(CaptureStopped, 0, false));
+        // The reopen task counts its own attempts, so a worker that dies
+        // during the switch (no new loss event) is still tried again, and
+        // the session's limit holds across loss events.
+        let attempts = AtomicU32::new(0);
+        let taken: Vec<u32> = std::iter::from_fn(|| next_microphone_reopen_attempt(&attempts))
+            .take(10)
+            .collect();
+        assert_eq!(taken, vec![1, 2, 3, 4, 5]);
+        assert!(!microphone_auto_reopen_due(
+            CaptureStopped,
+            attempts.load(Ordering::Acquire),
+            true
+        ));
         // The `-recovered` code clears the renderer's "stopped" notice.
         assert!(MICROPHONE_REOPENED_CODE.ends_with("-recovered"));
         assert_eq!(

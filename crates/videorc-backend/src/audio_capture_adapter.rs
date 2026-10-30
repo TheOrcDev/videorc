@@ -195,8 +195,17 @@ const DSHOW_STAMP_JITTER: Duration = Duration::from_millis(10);
 /// FFmpeg carries those stamps into the PCM `pts` (one packet started 95
 /// samples before the previous one ended), so DirectShow PCM is placed on a
 /// sample count by `PulseTimeline`; only a stamp more than the jitter allowance
-/// late is lost audio.
+/// late, confirmed by the next buffer at the device's own cadence, is lost
+/// audio (`PulseTimeline::place_delivery_stamped`).
 const DSHOW_DROPOUT_FRAMES: i64 = DSHOW_STAMP_JITTER.as_millis() as i64 * 48;
+/// How far a delivery-stamped packet's smoothed clock may sit past the anchor
+/// it matches. After a capture-thread stall the held buffers arrive in a
+/// burst whose stamps run ahead of the smoothed count, so each matches the
+/// last pre-stall anchor, one packet plus the stall behind. Every anchor maps
+/// through the same graph clock, so that extrapolation is as exact as the
+/// anchor's own bracket; `MAX_CAPTURE_AGE`, not this window, decides what a
+/// stall loses (twice it, so the age check always judges first).
+const DSHOW_STALL_ALLOWANCE: Duration = Duration::from_millis(200);
 
 /// The worker names the check a refused packet failed (`reason=wall-bracket
 /// sample_100ns=...`). A field stop 32 s into an idle session carried no
@@ -452,6 +461,9 @@ const PULSE_SLEW_FRAMES: i64 = 48;
 struct PulseTimeline {
     next: Option<i64>,
     offset: Option<i64>,
+    /// The last delivery-stamped packet's stamp and lateness, for
+    /// [`Self::place_delivery_stamped`].
+    previous_late: Option<(i64, i64)>,
 }
 
 impl PulseTimeline {
@@ -485,6 +497,37 @@ impl PulseTimeline {
         self.offset = Some(offset);
         self.next = Some(position + frames as i64);
         (position, position + offset)
+    }
+
+    /// [`Self::place_within`] for delivery-stamped DirectShow buffers: a
+    /// stamp more than `dropout_frames` late is lost audio only once the next
+    /// buffer confirms it at the device's own cadence. A capture thread that
+    /// stalls under load (field: the MP4 finalization after a take) hands
+    /// over the buffers the driver held in a burst, their stamps a
+    /// millisecond apart. Counted as lost audio on the first of them, a 40 ms
+    /// stall became a silence gap, put every later sample 40 ms late, and
+    /// left the burst's stamps so far behind the count that the worker
+    /// stopped ("PCM lies outside its captured packet clock interval"). Lost
+    /// audio keeps every later stamp late at a normal cadence; a burst drains
+    /// back to on time.
+    fn place_delivery_stamped(
+        &mut self,
+        stamp: i64,
+        frames: usize,
+        dropout_frames: i64,
+    ) -> (i64, i64) {
+        let late = match (self.next, self.offset) {
+            (Some(next), Some(offset)) => stamp - (next + offset),
+            _ => 0,
+        };
+        let previous = self.previous_late.replace((stamp, late));
+        let confirmed = late > dropout_frames
+            && previous.is_some_and(|(previous_stamp, previous_late)| {
+                previous_late > dropout_frames
+                    && stamp - previous_stamp >= frames as i64 - dropout_frames
+            });
+        let dropout_frames = if confirmed { dropout_frames } else { i64::MAX };
+        self.place_within(stamp, frames, dropout_frames)
     }
 }
 
@@ -574,6 +617,9 @@ impl CaptureClock {
         }
         Ok(())
     }
+    /// [`Self::interval_at`] for a packet whose own `pts` is its stamp (the
+    /// AVFoundation and Pulse workers); the assembler calls `interval_at`.
+    #[cfg(test)]
     fn interval(&mut self, packet: PcmDescription, now: Instant) -> Result<(u64, Instant)> {
         self.interval_at(packet, packet.pts, now)
     }
@@ -614,12 +660,22 @@ impl CaptureClock {
         // by its stamp jitter.
         let delta_us = pts_us - anchor.pts_us;
         let slack_us = anchor.stamp_jitter.as_micros() as i64 + 25;
+        let stall_allowance_us = if anchor.stamp_jitter.is_zero() {
+            0
+        } else {
+            DSHOW_STALL_ALLOWANCE.as_micros() as i64
+        };
         let max_delta_us = anchor
             .input_duration
             .map_or(100_000, |duration| duration.as_micros() as i64)
-            + slack_us;
+            + slack_us
+            + stall_allowance_us;
         if delta_us < -slack_us || delta_us > max_delta_us {
-            bail!("PCM lies outside its captured packet clock interval");
+            bail!(
+                "PCM lies outside its captured packet clock interval (pcm at {pts_us} us is {delta_us} us past its anchor at {} us; allowed -{slack_us}..{max_delta_us} us for a {}-frame packet)",
+                anchor.pts_us,
+                packet.frames
+            );
         }
         let start = if delta_us >= 0 {
             anchor
@@ -1268,6 +1324,35 @@ impl ClockPair {
     }
 }
 
+/// What a worker stderr line says about why the worker is stopping, if
+/// anything. A named capture-clock refusal comes first: the patched worker
+/// prints it just before FFmpeg's generic "Error during demuxing" line, and
+/// the first failure recorded is the one the session reports. Left to the
+/// metadata thread (which polls every 10 ms) the generic line won that race
+/// on the field Intel SST microphone, and the check that killed the capture
+/// went unnamed.
+fn stderr_line_failure(text: &str) -> Option<String> {
+    if text.contains("VIDEORC_DSHOW_CLOCK_INVALID") {
+        return Some(format!(
+            "DirectShow could not map the selected device capture clock{}",
+            dshow_invalid_detail(text)
+        ));
+    }
+    if text.contains("VIDEORC_AVF_CLOCK_INVALID") {
+        return Some(
+            "AVFoundation could not convert the selected device capture clock".to_string(),
+        );
+    }
+    if text.contains("Error")
+        || text.contains("error")
+        || text.contains("denied")
+        || text.contains("Could not")
+    {
+        return Some(text.chars().take(512).collect());
+    }
+    None
+}
+
 fn fail(failure: &Failure, message: impl Into<String>) {
     let mut slot = failure.lock().unwrap_or_else(|p| p.into_inner());
     if slot.is_none() {
@@ -1320,7 +1405,12 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
         .take()
         .context("Capture metadata pipe is unavailable")?;
     let (raw_tx, raw_rx) = mpsc::sync_channel::<Vec<u8>>(RAW_PCM_QUEUE_CHUNKS);
-    let (metadata_tx, metadata_rx) = mpsc::sync_channel::<String>(64);
+    // Two records per packet (clock, then ashowinfo). FFmpeg drains its
+    // 17-packet real-time buffer in a burst after a stall; with the assembler
+    // starved by the same load, 64 records overflowed 9.7 s into a field
+    // session. 256 holds 2.5 s of 20 ms packets; the age check drops what
+    // arrives stale.
+    let (metadata_tx, metadata_rx) = mpsc::sync_channel::<String>(256);
     let (pcm_tx, receiver) = mpsc::sync_channel::<AudioFrame>(4);
     let read_stop = stop.clone();
     let read_failure = failure.clone();
@@ -1380,12 +1470,8 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
                                     return;
                                 }
                             }
-                            if text.contains("Error")
-                                || text.contains("error")
-                                || text.contains("denied")
-                                || text.contains("Could not")
-                            {
-                                fail(&read_failure, text.chars().take(512).collect::<String>());
+                            if let Some(reason) = stderr_line_failure(&text) {
+                                fail(&read_failure, reason);
                             }
                         } else {
                             line.push(*byte);
@@ -1587,7 +1673,7 @@ fn assemble_pcm(
         let mut clock_pts = packet.pts;
         if protocol == CaptureProtocol::DirectShow {
             (packet.pts, clock_pts) =
-                pulse.place_within(packet.pts, packet.frames, DSHOW_DROPOUT_FRAMES);
+                pulse.place_delivery_stamped(packet.pts, packet.frames, DSHOW_DROPOUT_FRAMES);
         }
         let wanted = packet.frames * 8;
         let deadline = Instant::now() + Duration::from_millis(100);
@@ -1686,6 +1772,40 @@ mod tests {
             );
             assert_eq!(result.is_ok(), accepted);
         }
+    }
+
+    #[test]
+    fn a_named_clock_refusal_is_the_stop_reason_not_ffmpegs_generic_error_line() {
+        // The worker prints the named check first; FFmpeg's demux error
+        // follows. The reader must record the named one so a stop is never
+        // reported as "Invalid data found when processing input".
+        assert_eq!(
+            stderr_line_failure(
+                "[dshow @ 0x1] VIDEORC_DSHOW_CLOCK_INVALID reason=wall-bracket sample_100ns=1 graph_100ns=2 wall_bracket_100ns=24000 bytes=3840"
+            )
+            .as_deref(),
+            Some(
+                "DirectShow could not map the selected device capture clock (reason=wall-bracket sample_100ns=1 graph_100ns=2 wall_bracket_100ns=24000 bytes=3840)"
+            )
+        );
+        assert_eq!(
+            stderr_line_failure("VIDEORC_AVF_CLOCK_INVALID").as_deref(),
+            Some("AVFoundation could not convert the selected device capture clock")
+        );
+        assert_eq!(
+            stderr_line_failure(
+                "[in#0/dshow @ 0x1] Error during demuxing: Invalid data found when processing input"
+            )
+            .as_deref(),
+            Some(
+                "[in#0/dshow @ 0x1] Error during demuxing: Invalid data found when processing input"
+            )
+        );
+        assert_eq!(
+            stderr_line_failure("VIDEORC_DSHOW_CLOCK version=1 sample_100ns=0 bytes=3840"),
+            None
+        );
+        assert_eq!(stderr_line_failure("size=  12kB time=00:00:01"), None);
     }
 
     #[test]
@@ -2071,7 +2191,7 @@ mod tests {
             clock.push(anchor)?;
             let stamp = (n as i64 * 20 + late) * 48;
             let (position, clock_pts) = if placed {
-                timeline.place_within(stamp, 960, DSHOW_DROPOUT_FRAMES)
+                timeline.place_delivery_stamped(stamp, 960, DSHOW_DROPOUT_FRAMES)
             } else {
                 (stamp, stamp)
             };
@@ -2148,7 +2268,63 @@ mod tests {
         let positions = delivery_stamped_intervals(&lost, DSHOW_STAMP_JITTER, true).unwrap();
         let steps: Vec<i64> = positions.windows(2).map(|pair| pair[1] - pair[0]).collect();
         assert_eq!(steps.iter().filter(|step| **step != 960).count(), 1);
-        assert!(steps[19] >= 960 + DSHOW_DROPOUT_FRAMES, "{steps:?}");
+        // On the buffer after the first late one: that one confirms the loss.
+        assert!(steps[20] >= 960 + DSHOW_DROPOUT_FRAMES, "{steps:?}");
+    }
+
+    #[test]
+    fn delivery_stamped_directshow_counts_through_a_stall_burst() {
+        // Field (idle session after a take, MP4 finalization load): the
+        // capture thread stalled 40 ms, then handed over the three buffers
+        // the driver held a millisecond apart. Against each buffer's own
+        // slot the stamps run +43, +24, +5, then on time again. The audio
+        // was never lost: the count stays contiguous, and the burst's PCM
+        // (its smoothed clock up to the stall past the last pre-stall
+        // anchor) still maps. Before: a 40 ms silence gap, every later
+        // sample 40 ms late, and the worker stopped on the burst's third
+        // buffer ("PCM lies outside its captured packet clock interval").
+        let jitter = [3, 0, 4, 1, 3, 0, 2, 4, 1, 0];
+        let burst: Vec<i64> = (0..30)
+            .map(|n| {
+                jitter[n % 10]
+                    + match n {
+                        10 => 40,
+                        11 => 24,
+                        12 => 1,
+                        _ => 0,
+                    }
+            })
+            .collect();
+        let positions = delivery_stamped_intervals(&burst, DSHOW_STAMP_JITTER, true).unwrap();
+        assert!(
+            positions.windows(2).all(|pair| pair[1] - pair[0] == 960),
+            "a stall is not lost audio: {positions:?}"
+        );
+    }
+
+    #[test]
+    fn a_delivery_stamped_stall_is_lost_audio_only_once_the_next_buffer_confirms_it() {
+        let place = |timeline: &mut PulseTimeline, stamp: i64| {
+            timeline.place_delivery_stamped(stamp, 960, DSHOW_DROPOUT_FRAMES)
+        };
+        // 40 ms late, then the held buffers a millisecond apart: counted.
+        let mut timeline = PulseTimeline::default();
+        place(&mut timeline, 0);
+        assert_eq!(place(&mut timeline, 960 + 1_920).0, 960);
+        assert_eq!(place(&mut timeline, 960 + 1_920 + 48).0, 1_920);
+        assert_eq!(place(&mut timeline, 960 + 1_920 + 96).0, 2_880);
+        // 40 ms late twice at the device's cadence: lost, the count jumps
+        // once and the clock lands on the confirming stamp.
+        let mut timeline = PulseTimeline::default();
+        place(&mut timeline, 0);
+        assert_eq!(place(&mut timeline, 960 + 1_920).0, 960);
+        let (position, captured) = place(&mut timeline, 1_920 + 1_920);
+        assert_eq!(captured, 1_920 + 1_920);
+        assert!(
+            position <= 1_920 + 1_920 && position >= 1_920 + 1_920 - 2 * PULSE_SLEW_FRAMES,
+            "{position}"
+        );
+        assert_eq!(place(&mut timeline, 2_880 + 1_920).0, position + 960);
     }
 
     #[test]
