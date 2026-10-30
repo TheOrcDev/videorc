@@ -335,3 +335,20 @@ actionable explanation. Twenty-four focused hardening/recovery tests pass.
 The full current Node suite passed 2,792 tests with zero failures/skips; lint
 and formatting passed. The Windows package/recovery run remains required;
 Linux unit tests do not supply Windows execution evidence.
+
+The next Windows run, `40977608889` / job `123809760536`, successfully built
+and hardened the separate test package. Crash recovery passed, but default,
+clear and software-rendering scenarios could not read runtime information.
+The uploaded app log rejected renderer IPC. Node registered the trusted
+short-path document with `RUNNER%7E1`, while Electron 39's `loadFile` loaded
+`RUNNER~1`. A reproduction using both URL formatters confirmed the mismatch.
+The document policy now canonicalizes percent-escaped unreserved ASCII only
+for file URLs; sender, role, main-frame and exact-document checks still apply.
+Encoded separators/delimiters, different files and remote URLs remain refused.
+All 82 focused authorization/preload/IPC tests pass. Full source verification
+and a fresh Windows installer/recovery run remain required.
+
+The Linux rerun on the older `06d0f4c` head also ended with runner shutdown
+and exit 143 during Rust test compilation (job `123812040834`). Policy and
+Clippy passed; Rust tests never executed. This is not a test pass or an observed
+source failure. Current-head CI must replace that incomplete evidence.

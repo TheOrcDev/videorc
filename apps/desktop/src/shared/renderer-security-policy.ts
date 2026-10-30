@@ -264,6 +264,16 @@ function normalizedDocumentUrl(rawUrl: string): string | null {
     if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'file:') {
       url.search = ''
     }
+    if (url.protocol === 'file:') {
+      // Node's pathToFileURL escapes Windows short-path tildes (%7E), while
+      // Electron loadFile's legacy URL formatter leaves them literal. They
+      // identify the same file. Normalize only unreserved ASCII characters;
+      // never decode separators, URL delimiters, or another percent escape.
+      url.pathname = url.pathname.replace(/%([0-9a-f]{2})/gi, (escape, hex: string) => {
+        const character = String.fromCharCode(Number.parseInt(hex, 16))
+        return /^[A-Za-z0-9._~-]$/.test(character) ? character : escape
+      })
+    }
     return url.toString()
   } catch {
     return null
