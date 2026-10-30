@@ -125,21 +125,21 @@ export function captionRuntimeStartBlocked(input: {
 }
 
 /**
- * Live captions transcribe the microphone after gain and mute, which needs
- * the native microphone path (CoreAudio). Linux feeds its microphone straight
- * to FFmpeg, so the backend refuses every captioned session there and tells
- * the streamer to pick "a supported microphone" Linux doesn't have (ogre,
- * 2026-10-13). On Linux, sessions start without captions and say why; the
- * saved setting is kept for when the path exists.
+ * Captions need the session's post-controls microphone bus. Linux Pulse
+ * capture now feeds that bus through the capture worker. The backend still
+ * refuses a captioned start if that worker falls back to direct FFmpeg input;
+ * a platform-wide suppression would silently discard the user's choice even
+ * on the supported bus. Deployment and per-session output checks still apply.
  */
-export const CAPTIONS_LINUX_TITLE = "Live captions aren't available on Linux yet"
-export const CAPTIONS_LINUX_DETAIL =
-  "Videorc can't pass the microphone to captions here. Recordings and livestreams start without them, and your setting is kept."
-export const CAPTIONS_UNAVAILABLE_ON_LINUX = `${CAPTIONS_LINUX_TITLE}. ${CAPTIONS_LINUX_DETAIL}`
+export const CAPTIONS_PLATFORM_TITLE = "Live captions aren't available on this system"
+export const CAPTIONS_PLATFORM_DETAIL =
+  'Recordings and livestreams start without captions on this system, and your setting is kept.'
 
 /** Why live captions can't run on this platform at all, or null. */
 export function captionsPlatformUnavailableReason(platform: string | undefined): string | null {
-  return platform === 'linux' ? CAPTIONS_UNAVAILABLE_ON_LINUX : null
+  return platform === undefined || ['darwin', 'win32', 'linux'].includes(platform)
+    ? null
+    : `${CAPTIONS_PLATFORM_TITLE}. ${CAPTIONS_PLATFORM_DETAIL}`
 }
 
 export function decideGoLiveCaptionsReadiness(input: {

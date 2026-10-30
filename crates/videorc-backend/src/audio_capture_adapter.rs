@@ -725,6 +725,7 @@ fn capture_command(ffmpeg: &str, device: &str, protocol: CaptureProtocol) -> Com
         "0",
     ]);
     if protocol == CaptureProtocol::Pulse {
+        crate::linux_pulse_audio::bind_pipewire_capture_source(&mut command);
         // 10 ms fragments (480 stereo s16 frames): one bounded PCM record per
         // fragment. `-wallclock` is FFmpeg's default and spelled out because
         // the capture clock depends on it.
@@ -2034,6 +2035,23 @@ mod tests {
         assert!(args.contains(&"-copyts".into()));
         assert!(!args.iter().any(|arg| arg.contains("videorc_audio")));
         assert_eq!(args.last().unwrap(), "pipe:1");
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == "PULSE_PROP")
+                .unwrap()
+                .1,
+            Some(std::ffi::OsStr::new(
+                "node.dont-reconnect=true node.dont-fallback=true"
+            ))
+        );
+        for protocol in [CaptureProtocol::AvFoundation, CaptureProtocol::DirectShow] {
+            assert!(
+                !capture_command("ffmpeg", "device", protocol)
+                    .get_envs()
+                    .any(|(name, _)| name == "PULSE_PROP")
+            );
+        }
     }
 
     #[test]

@@ -177,6 +177,7 @@ describe('smoke command security', () => {
     expect(SMOKE_BACKEND_RPC_METHOD_NAMES).toEqual(
       new Set([
         'audio.test.disconnect',
+        'audio.test.output-timing',
         'audio.test.inject-pcm',
         'captions.test.inject-audio',
         'captions.test.snapshot',

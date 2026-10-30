@@ -325,6 +325,7 @@ mod tests {
             "recording.start_test",
             "captions.test.inject-audio",
             "audio.test.disconnect",
+            "audio.test.output-timing",
             "audio.test.inject-pcm",
             "test.future.mutation",
         ] {

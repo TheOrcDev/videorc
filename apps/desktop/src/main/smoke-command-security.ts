@@ -148,6 +148,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
  */
 export const SMOKE_BACKEND_RPC_METHOD_NAMES = new Set([
   'audio.test.disconnect',
+  'audio.test.output-timing',
   'audio.test.inject-pcm',
   'captions.test.inject-audio',
   'captions.test.snapshot',

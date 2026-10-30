@@ -18,6 +18,20 @@ use crate::protocol::{Device, DeviceKind, DeviceStatus};
 
 pub const LINUX_PULSE_MICROPHONE_PREFIX: &str = "microphone:linux-pulse:";
 
+/// Both supported Beta desktops use pipewire-pulse. An explicit Pulse source
+/// name alone does not bind capture: when it disappears, PipeWire moves the
+/// stream to the default microphone. These per-child properties destroy the
+/// stream on loss and prevent fallback during acquisition. Do not apply them
+/// to playback, which should still follow a user's output-device changes.
+/// Native PulseAudio does not enforce PipeWire properties; its device-loss
+/// behavior requires separate acceptance and is not certified by this guard.
+pub fn bind_pipewire_capture_source(command: &mut std::process::Command) {
+    command.env(
+        "PULSE_PROP",
+        "node.dont-reconnect=true node.dont-fallback=true",
+    );
+}
+
 /// Pulse's 48 kHz stereo matches the session audio bus; 20 ms fragments keep
 /// capture latency near the native paths instead of Pulse's default buffer.
 const PULSE_SAMPLE_RATE: &str = "48000";
@@ -190,6 +204,25 @@ pub async fn list_linux_microphones(ffmpeg_path: &str) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_properties_override_conflicting_child_properties_without_changing_parent() {
+        let mut command = std::process::Command::new("ffmpeg");
+        command.env("PULSE_PROP", "node.dont-reconnect=false");
+        let parent = std::env::var_os("PULSE_PROP");
+        bind_pipewire_capture_source(&mut command);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == "PULSE_PROP")
+                .unwrap()
+                .1,
+            Some(std::ffi::OsStr::new(
+                "node.dont-reconnect=true node.dont-fallback=true"
+            ))
+        );
+        assert_eq!(std::env::var_os("PULSE_PROP"), parent);
+    }
 
     const OGRE_SOURCES: &str = "Auto-detected sources for pulse:\n  alsa_output.pci-0000_02_00.3.HiFi__Speaker__sink.monitor [Monitor of Apple Audio Device Internal Speakers] (none)\n* alsa_input.pci-0000_02_00.3.HiFi__Mic__source [Apple Audio Device Internal Microphone] (none)\n";
 

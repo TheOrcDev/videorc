@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { startLinuxPulseFixtures } from './lib/linux-pulse-fixture.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   decodeSourcePcm,
@@ -24,20 +25,27 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 // Phase S3 encoded-output gate. Synthetic sources enter through real native
 // producer ownership, preparation, bus cutover, controls, FFmpeg and muxer.
 // Physical-device, visual-source, A/V timing and endurance acceptance remain separate.
+const pulseFixtures = process.argv.includes('--linux-pulse')
+if (pulseFixtures && process.platform !== 'linux')
+  throw new Error('The Pulse worker source-switch gate requires Linux.')
 const mode = process.env.VIDEORC_SOURCE_SWITCH_MODE
 if (!mode) {
   for (const nextMode of ['record', 'stream', 'combined']) {
     await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          VIDEORC_SOURCE_SWITCH_MODE: nextMode,
-          ...(process.env.VIDEORC_SMOKE_OUTPUT_DIR
-            ? { VIDEORC_SMOKE_OUTPUT_DIR: join(process.env.VIDEORC_SMOKE_OUTPUT_DIR, nextMode) }
-            : {})
+      const child = spawn(
+        process.execPath,
+        [fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+        {
+          stdio: 'inherit',
+          env: {
+            ...process.env,
+            VIDEORC_SOURCE_SWITCH_MODE: nextMode,
+            ...(process.env.VIDEORC_SMOKE_OUTPUT_DIR
+              ? { VIDEORC_SMOKE_OUTPUT_DIR: join(process.env.VIDEORC_SMOKE_OUTPUT_DIR, nextMode) }
+              : {})
+          }
         }
-      })
+      )
       child.once('error', reject)
       child.once('close', (code) =>
         code === 0
@@ -56,8 +64,9 @@ const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-live-sources-${Date.now()}`)
 )
 const reportPath = join(outputDirectory, 'live-source-switch-evidence.json')
-const fixtureA = 'microphone:coreaudio:4294967295'
-const fixtureB = 'microphone:coreaudio:4294967294'
+let fixtureA = 'microphone:coreaudio:4294967295'
+let fixtureB = 'microphone:coreaudio:4294967294'
+let fixtures
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 mkdirSync(outputDirectory, { recursive: true })
@@ -68,8 +77,13 @@ let receiver
 const events = { recording: [], health: [], sources: [] }
 const switches = []
 let lostInput
+let automaticRecovery
 let outputAudioTiming
-let report = { pass: false, scope: `native-microphone-${mode}`, completePlanAcceptance: false }
+let report = {
+  pass: false,
+  scope: `${pulseFixtures ? 'linux-pulse-worker' : 'native'}-microphone-${mode}`,
+  completePlanAcceptance: false
+}
 
 try {
   launched = await launchDevApp({
@@ -87,6 +101,11 @@ try {
       VIDEORC_USER_DATA_DIR: join(outputDirectory, 'user-data')
     }
   })
+  if (pulseFixtures) {
+    fixtures = await startLinuxPulseFixtures({ ffmpegPath })
+    fixtureA = fixtures.sources[0].deviceId
+    fixtureB = fixtures.sources[1].deviceId
+  }
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
   backend.addEventListener('message', (event) => {
     let message
@@ -138,7 +157,15 @@ try {
         streamKey: receiver?.streamKey ?? ''
       },
       outputDirectoryCapability: authorization.capabilityId,
-      video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 }
+      // Linux shares one encode for a combined session. Match the explicit
+      // stream preset instead of accidentally testing unsupported split sizes.
+      video: {
+        preset: streamEnabled ? 'tutorial-1080p30' : 'custom',
+        width: streamEnabled ? 1920 : 640,
+        height: streamEnabled ? 1080 : 360,
+        fps: 30,
+        bitrateKbps: 2000
+      }
     },
     audio: { microphoneGainDb: 0, microphoneMuted: false, microphoneSyncOffsetMs: 0 },
     captions: { enabled: false },
@@ -226,18 +253,19 @@ try {
     })
     await delay(1000) // A complete post-cutover codec identity window.
     if (index === 0) {
-      const disconnected = await requestSmokeCommand(
+      const evidence = await requestSmokeCommand(
         smoke,
         'backend-debug-rpc',
         {
-          method: 'audio.test.disconnect',
+          method: pulseFixtures ? 'audio.test.output-timing' : 'audio.test.disconnect',
           params: { sessionId, outputProcessId },
           timeoutMs
         },
         { timeoutMs }
       )
-      assert.equal(disconnected.disconnected, true)
-      outputAudioTiming = disconnected.outputAudioTiming
+      if (pulseFixtures) await fixtures.sources[0].disconnect()
+      else assert.equal(evidence.disconnected, true)
+      outputAudioTiming = evidence.outputAudioTiming
       // Refuse absent/ambiguous evidence while the exact session is still
       // owned, before artifact measurements can report a false result.
       if (recordEnabled)
@@ -275,18 +303,56 @@ try {
         'Loss must not silently select another device.'
       )
       lostInput = { sample: snapshot.audio.sampleCursor, generation: snapshot.audio.generation }
+      if (pulseFixtures) {
+        // Linux automatically tries to reopen a stopped worker. Keep the
+        // source physically absent until that owned transaction finishes;
+        // reconnecting it here raced the following user switch. Observe the
+        // terminal receipt rather than sleeping through or retrying Busy.
+        const lostSnapshot = snapshot
+        const recoveryDeadline = Date.now() + 5000
+        do {
+          snapshot = await request(backend, timeoutMs, 'session.sources.get', { sessionId })
+          if (
+            !snapshot.pending &&
+            snapshot.lastOperation?.requestId.startsWith('microphone-reopen-')
+          )
+            break
+          await delay(20)
+        } while (Date.now() < recoveryDeadline)
+        assert.equal(snapshot.pending, null, 'Automatic microphone recovery did not settle.')
+        assert.ok(
+          snapshot.lastOperation?.requestId.startsWith('microphone-reopen-'),
+          'Linux did not attempt to recover the stopped microphone worker.'
+        )
+        assert.equal(snapshot.lastOperation.stage, 'failed')
+        assert.equal(snapshot.lastOperation.previousSource, 'unavailable')
+        assert.equal(snapshot.sessionId, sessionId)
+        assert.equal(snapshot.outputProcessId, outputProcessId)
+        assert.equal(snapshot.sourceRevision, lostSnapshot.sourceRevision)
+        assert.equal(snapshot.confirmed.microphoneId, fixtureA)
+        assert.ok(
+          snapshot.health.some(
+            (source) => source.kind === 'microphone' && source.health === 'unavailable'
+          ),
+          'An absent microphone must remain unavailable after automatic recovery.'
+        )
+        automaticRecovery = snapshot.lastOperation
+      }
       const failed = await request(backend, timeoutMs, 'session.source.switch', {
         sessionId,
         requestId: 'missing-after-loss',
         expectedSourceRevision: snapshot.sourceRevision,
         kind: 'microphone',
-        deviceId: 'microphone:coreaudio:4294967293'
+        deviceId: pulseFixtures
+          ? `microphone:linux-pulse:${Buffer.from(`${fixtures.sources[0].source}_missing`).toString('hex')}`
+          : 'microphone:coreaudio:4294967293'
       })
       assert.equal(failed.lastOperation.stage, 'failed')
       assert.equal(failed.lastOperation.previousSource, 'unavailable')
       assert.equal(failed.confirmed.microphoneId, fixtureA)
       assert.equal(failed.sourceRevision, snapshot.sourceRevision)
       await delay(1000) // Decode a silence window before successful replacement B.
+      if (pulseFixtures) await fixtures.sources[0].reconnect()
     }
   }
   const stopRequestedAt = Date.now()
@@ -374,15 +440,23 @@ try {
     transport,
     artifacts,
     lostInput,
+    automaticRecovery,
     failures,
     events
   }
   assert.deepEqual(failures, [])
   console.log(
-    `Live source switch ${mode} gate PASS: two decoded microphone identities, None, duplicate fencing, one encoder and monotonic DTS. Evidence: ${reportPath}`
+    `Live source switch ${mode} gate PASS${pulseFixtures ? ' (Linux Pulse workers)' : ''}: two decoded microphone identities, None, duplicate fencing, one encoder and monotonic DTS. Evidence: ${reportPath}`
   )
 } catch (error) {
-  report.error = error instanceof Error ? error.message : String(error)
+  report = {
+    ...report,
+    error: error instanceof Error ? error.message : String(error),
+    events,
+    switches,
+    lostInput,
+    automaticRecovery
+  }
   throw error
 } finally {
   writeFileSync(reportPath, JSON.stringify(report, null, 2))
@@ -390,8 +464,15 @@ try {
     if (active) await request(backend, timeoutMs, 'session.stop', {}).catch(() => {})
     backend.close()
   }
-  await receiver?.stop()
-  await launched?.stop()
+  try {
+    await receiver?.stop()
+  } finally {
+    try {
+      await launched?.stop()
+    } finally {
+      await fixtures?.stop()
+    }
+  }
 }
 
 async function startReceiver(file) {

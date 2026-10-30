@@ -645,6 +645,9 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
 /// Runs a bounded FFmpeg `volumedetect` capture and maps its levels.
 async fn run_ffmpeg_volume_meter(ffmpeg_path: &str, args: Vec<String>) -> AudioMeterResult {
     let mut command = Command::new(ffmpeg_path);
+    if args.windows(2).any(|pair| pair == ["-f", "pulse"]) {
+        crate::linux_pulse_audio::bind_pipewire_capture_source(command.as_std_mut());
+    }
     command
         .args(&args)
         .stdout(Stdio::piped())

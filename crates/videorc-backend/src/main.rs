@@ -5913,6 +5913,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.camera.status"
         | "preview.screen.status"
         | "audio.meter.probeNative"
+        | "audio.test.output-timing"
         | "scene.get"
         | "stream.output.topology.probe"
         | "performance.check.get"
@@ -10963,6 +10964,40 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "audio.test.output-timing" => {
+            // A read-only, admin-only smoke receipt for real capture workers.
+            // Keep it independent of the synthetic caption injector and bind
+            // it to both owners. No paths, destinations or PCM are returned.
+            let timing = {
+                let recording = state.recording.lock().await;
+                recording
+                    .as_ref()
+                    .filter(|active| {
+                        command.params.get("sessionId").and_then(|id| id.as_str())
+                            == Some(active.session_id.as_str())
+                            && command
+                                .params
+                                .get("outputProcessId")
+                                .and_then(|pid| pid.as_u64())
+                                == Some(u64::from(active.pid))
+                    })
+                    .and_then(|active| active.source_switch_output_audio_timing())
+            };
+            match timing {
+                Some(timing) => ServerResponse::ok(
+                    command.id,
+                    serde_json::json!({
+                        "outputAudioTiming": timing,
+                    }),
+                ),
+                None => ServerResponse::error(
+                    command.id,
+                    "source-switch-timing-unavailable",
+                    "The matching active session has no unambiguous output audio timing receipt.",
+                ),
             }
         }
         #[cfg(debug_assertions)]
@@ -20201,6 +20236,65 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[cfg(all(unix, debug_assertions))]
+    #[tokio::test]
+    async fn source_timing_receipt_requires_exact_owners_and_smoke_authority_without_an_injector() {
+        assert_eq!(
+            websocket_method_execution_policy("audio.test.output-timing"),
+            Some(WebSocketMethodExecutionPolicy::Observation)
+        );
+        let mut state = test_state();
+        state.smoke_rpc_enabled = true;
+        let mut active = recording::test_active_recording_stub("real-worker");
+        active.pid = 42;
+        assert!(active.native_audio.is_none());
+        active.install_source_switch_timing_for_test();
+        *state.recording.lock().await = Some(active);
+        let command = |session: &str, pid: serde_json::Value| {
+            serde_json::json!({
+                "id": "timing", "method": "audio.test.output-timing",
+                "params": { "sessionId": session, "outputProcessId": pid },
+            })
+            .to_string()
+        };
+        for (session, pid) in [
+            ("old", serde_json::json!(42)),
+            ("real-worker", serde_json::json!(41)),
+            ("real-worker", serde_json::json!("42")),
+            ("real-worker", serde_json::Value::Null),
+        ] {
+            let response =
+                handle_text_message_with_role(&state, &command(session, pid), BackendRole::Admin)
+                    .await;
+            assert!(!response.ok);
+            assert!(response.payload.is_none());
+        }
+        let valid = command("real-worker", serde_json::json!(42));
+        let denied = handle_text_message_with_role(&state, &valid, BackendRole::Renderer).await;
+        assert_eq!(denied.error.unwrap().code, "forbidden-method");
+        let response = handle_text_message_with_role(&state, &valid, BackendRole::Admin).await;
+        assert!(response.ok);
+        assert_eq!(
+            response.payload.unwrap(),
+            serde_json::json!({
+                "outputAudioTiming": {
+                    "sessionId": "real-worker", "outputProcessId": 42,
+                    "legs": [{ "role": "stream", "outputIndex": 0, "inputOffsetMs": 0, "filterShiftMs": 0 }],
+                },
+            })
+        );
+        state.smoke_rpc_enabled = false;
+        let denied = handle_text_message_with_role(&state, &valid, BackendRole::Admin).await;
+        assert_eq!(denied.error.unwrap().code, "smoke-method-disabled");
+        state.smoke_rpc_enabled = true;
+        drop(state.recording.lock().await.take());
+        assert!(
+            !handle_text_message_with_role(&state, &valid, BackendRole::Admin)
+                .await
+                .ok
+        );
     }
 
     #[cfg(all(unix, debug_assertions))]

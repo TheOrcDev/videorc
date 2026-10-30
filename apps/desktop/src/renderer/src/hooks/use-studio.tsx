@@ -3794,8 +3794,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
-  // Linux can't caption at all (no native microphone path): every session
-  // skips captions there, as if "Continue without captions" were chosen.
+  // Only an unsupported platform suppresses captions automatically. A Linux
+  // worker feeds the same post-controls bus; a direct-input fallback is refused
+  // by the backend instead of silently dropping requested captions.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
   const suppressCaptionsForSession = suppressCaptionsChoice || captionsPlatformUnavailable !== null
   // "Go live without …" for this attempt only (plan 174 S3.4, B-8).

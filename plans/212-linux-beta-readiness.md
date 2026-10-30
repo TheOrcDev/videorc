@@ -78,8 +78,8 @@ file size or successful build is not a pass.
 | Feature                            | Current finding                                                           | Required completion                                                                                         |
 | ---------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | System audio                       | Linux unsupported                                                         | Implement and prove before broad streaming Beta, or obtain an explicit narrower scope decision.             |
-| Live camera/mic/screen replacement | Recording path refuses Linux replacement                                  | Implement/prove replacement and recovery; do not disguise refusal as support.                               |
-| Captions                           | Renderer hard-disabled although normal microphone now uses shared PCM bus | Trace backend path and implement/prove with fake Gateway, or obtain explicit exclusion.                     |
+| Live camera/mic/screen replacement | Shared-bus microphone replacement passes development artifact checks; camera/screen still refused | Finish camera/screen replacement and exact-candidate physical recovery evidence.                         |
+| Captions                           | Shared PCM bus enabled; fake contract and rendered local-stream/recording artifacts pass | Exact-candidate physical microphone, supported-profile and packaged acceptance still required.          |
 | Separate source recordings         | macOS-only                                                                | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
 | Preview                            | CPU/BMP proof presenter                                                   | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
 | Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix   | Prove shared-bus mix and fallback warning.                                                                  |
@@ -598,3 +598,60 @@ stop tails 114–267 ms against 100 ms, with some frame counts 2.1–2.3% off ag
 2%. All 12 recording-only controls passed. Artifact `12955554639` retains that
 evidence. The release runbook excludes this diagnostic job from routine release
 gates; this failed result remains recorded and no limit was relaxed.
+
+### Microphone and caption runtime proof, 2026-10-30
+
+The current-source Rust suite finished with 4,072 passed, one failed and 19
+ignored. The timing receipt's execution-policy and authority tests now pass.
+The remaining failure is the GLES Beams reference mismatch described above;
+Cargo stopped on that main test binary, so the package suite did not pass.
+An explicit subsequent backend build re-established the development binary's
+identity before app testing. Its SHA-256 was
+`3aeea22340efa17610c351fc1f7b339c6d73414af63bdb63e83d8867ded6fc8d`;
+the queue checked the Rust/Cargo source digest and binary hash at each step.
+These are dirty-worktree development measurements, not a release candidate.
+
+The fake caption transport contract and the real renderer/local RTMP caption
+smoke pass. The latter verifies mute and +6 dB gain ordering, API retry without
+replacing the output process, caption pixels in the received stream, a clean
+original recording, the SRT and captioned recording copy, and silence after
+producer loss. The Linux raw-video split supports matching horizontal profiles
+up to 30 fps; unsupported splits remain refused. Direct microphone input cannot
+provide the caption bus and is not silently accepted.
+
+All three Linux Pulse microphone modes now pass: recording, streaming and
+combined. Owned null-sink fixtures feed 440/880 Hz through production capture
+workers. Decoded artifacts prove replacement, None and loss silence, duplicate
+fencing, one encoder and monotonic DTS. The fixture stays unplugged while the
+smoke observes Linux's automatic recovery attempt fail without changing the
+confirmed source or output process; only then does it request another switch.
+This avoids racing recovery, without ignoring Busy errors or weakening audio
+measurements. Per-child PipeWire properties prevent capture silently moving to
+the default microphone on source loss. Sixteen focused analyzer/fixture tests
+pass with zero skips. Real device/operator acceptance remains open.
+
+The named-box 1080p30 matrix passes for both forced OpenH264 and approved Intel
+VAAPI, including color tags, level and stop tails (1 ms and 8 ms respectively).
+This debug-backend subset is not full-profile, motion, release pacing or physical
+acceptance. The Linux proof-presenter lifecycle gate passes 100 cycles with clean
+owned-process teardown and no budget failures. The enforced record-latency gate
+stops before measurement because its first Clips buffer-only session stays off;
+there are no passing latency samples. First-run remains under investigation:
+its production-style prebuild passed motion, sound, saved look and restart but
+lacked the development diagnostic hook for replay. Both the ordinary Vite run
+and an explicitly bundled development renderer then remained at `starting`
+with zero backdrop draws at the deadline. The latter's Electron window was
+visible and focused with a nonzero canvas size and no renderer exception.
+That narrows the investigation beyond module loading; first-run is still not a
+PASS. The harness diagnostics remain a separate local draft. No startup budget
+was relaxed.
+
+Private development receipts are retained in the source-checked runtime queues
+under `/tmp/videorc-beta-verified-runtime-F8LKyj`,
+`/tmp/videorc-beta-recovery-runtime-bi6q7h` and
+`/tmp/videorc-beta-broader-runtime-3RwLc3`. They must not be substituted for exact
+AppImage evidence. The generic recording-studio aggregate includes unavailable
+macOS ScreenCaptureKit/Metal gates; its Linux-adapted full coverage, real devices,
+full matrix, latency and packaged checks remain incomplete. No skipped macOS
+check counts as Linux acceptance. System audio, live camera/screen replacement,
+publication wiring and the physical/pilot/update gates remain open.
