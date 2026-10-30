@@ -364,8 +364,10 @@ The document policy now canonicalizes percent-escaped unreserved ASCII only
 for file URLs; sender, role, main-frame and exact-document checks still apply.
 Encoded separators/delimiters, different files and remote URLs remain refused.
 All 82 focused authorization/preload/IPC tests pass. Full source verification
-has now passed typecheck, lint and formatting; the full desktop suite and a
-fresh Windows installer/recovery run remain required.
+passed typecheck, lint and formatting. The bounded desktop suite passed all
+582 files: 6,383 tests passed, with one Windows-only OBS junction test skipped
+on Linux. That skip is not Windows evidence; a fresh Windows installer/recovery
+run and the platform-specific test remain required.
 
 The Linux rerun on the older `06d0f4c` head also ended with runner shutdown
 and exit 143 during Rust test compilation (job `123812040834`). Policy and
@@ -379,8 +381,9 @@ including a real temporary Git repository, pinned record reads, ancestry/version
 refusals, changed candidate/evidence bytes, incomplete acceptance and short
 pilots. Focused ESLint and formatting passed. The full worktree Node suite passed
 all 2,820 tests with zero failures or skips, using two workers and the isolated
-web checkout (including the locally preserved workflow regression tests). These artificial contract tests
-do not supply physical acceptance or authorize storage publication. No real
+web checkout (including the locally preserved workflow regression tests).
+These artificial contract tests do not supply physical acceptance or authorize
+storage publication. No real
 candidate has been accepted and no public object or availability setting changed.
 
 Linux CI run `40983512321` on `aa6fff68` again received a runner shutdown
