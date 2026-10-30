@@ -124,12 +124,57 @@ function CommandEmpty({
   )
 }
 
+/**
+ * cmdk brings the selected row (and its group's heading) into view with the
+ * element's own scrollIntoView, which also scrolls the page when the list
+ * sits below the fold: a page showing a Command jumped down on load. Items
+ * and headings scroll their list instead, and nothing else.
+ */
+function scrollIntoList(element: HTMLElement): void {
+  const list = element.closest<HTMLElement>('[cmdk-list]')
+  if (!list) {
+    return
+  }
+  const bounds = list.getBoundingClientRect()
+  const box = element.getBoundingClientRect()
+  if (box.top < bounds.top) {
+    list.scrollTop -= bounds.top - box.top
+  } else if (box.bottom > bounds.bottom) {
+    list.scrollTop += box.bottom - bounds.bottom
+  }
+}
+
+function keepScrollInList(element: HTMLElement | null): void {
+  if (element) {
+    element.scrollIntoView = () => scrollIntoList(element)
+  }
+}
+
+function assignRef<T>(ref: React.Ref<T> | undefined, value: T | null): void {
+  if (typeof ref === 'function') {
+    ref(value)
+  } else if (ref) {
+    ref.current = value
+  }
+}
+
 function CommandGroup({
   className,
+  ref,
   ...props
 }: React.ComponentProps<typeof CommandPrimitive.Group>) {
+  const groupRef = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      for (const heading of node?.querySelectorAll<HTMLElement>('[cmdk-group-heading]') ?? []) {
+        keepScrollInList(heading)
+      }
+      assignRef(ref, node)
+    },
+    [ref]
+  )
   return (
     <CommandPrimitive.Group
+      ref={groupRef}
       className={cn(
         'text-foreground **:[[cmdk-group-heading]]:text-subtle overflow-hidden p-1.5 **:[[cmdk-group-heading]]:px-2.5 **:[[cmdk-group-heading]]:pt-3 **:[[cmdk-group-heading]]:pb-2 **:[[cmdk-group-heading]]:text-xs **:[[cmdk-group-heading]]:leading-none **:[[cmdk-group-heading]]:font-semibold',
         className
@@ -157,10 +202,19 @@ function CommandSeparator({
 function CommandItem({
   className,
   children,
+  ref,
   ...props
 }: React.ComponentProps<typeof CommandPrimitive.Item>) {
+  const itemRef = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      keepScrollInList(node)
+      assignRef(ref, node)
+    },
+    [ref]
+  )
   return (
     <CommandPrimitive.Item
+      ref={itemRef}
       className={cn(
         // A 40 px row: icon, title, secondary context, then right-aligned
         // metadata. Selection is the theme's 8% block at the row radius, and
