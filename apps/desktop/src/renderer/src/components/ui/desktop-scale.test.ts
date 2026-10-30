@@ -109,12 +109,8 @@ describe('desktop scale', () => {
       expect(surfaces.length, name).toBeGreaterThan(0)
       for (const classes of surfaces) {
         expect(classes.has('border'), name).toBe(true)
-        // TODO(videorc-ui): the registry's ChartTooltipContent sits on the
-        // popup glass at rounded-row; once chart.tsx gives it rounded-lg like
-        // every other popup, drop the chart.tsx exception.
-        const tooltipRadius = name === 'tooltip.tsx' || name === 'chart.tsx'
         expect(
-          tooltipRadius
+          name === 'tooltip.tsx'
             ? classes.has('rounded-row')
             : classes.has('rounded-lg') || classes.has('rounded-xl'),
           name
