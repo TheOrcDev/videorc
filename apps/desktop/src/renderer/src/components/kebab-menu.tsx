@@ -151,7 +151,6 @@ function KebabMenu({
         aria-busy={busy || undefined}
         aria-label={label}
         className={cn(reveal === 'hover' && REVEAL_ON_HOVER, className)}
-        data-slot="kebab-menu-trigger"
         disabled={disabled}
         onClick={stopRowClick}
         render={<Button size="icon" variant="ghost" />}
