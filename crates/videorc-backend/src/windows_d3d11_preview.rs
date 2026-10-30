@@ -2,6 +2,8 @@
 use crate::native_preview_host::NativePreviewHostBounds;
 use crate::protocol::{WindowsD3d11PresenterBounds, WindowsD3d11PresenterDiagnostics};
 use crate::windows_d3d11_device::DxgiAdapterLuid;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowsD3d11PreviewFallbackReason {
@@ -155,11 +157,76 @@ fn finite_f32(value: f64) -> f32 {
     }
 }
 
+/// One window above the Electron Preview window, as the presenter's stacking
+/// walk sees it. The walk lists windows nearest-first and stops at the first
+/// window outside Preview's owned group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowsD3d11StackedWindow {
+    pub(crate) is_presenter: bool,
+    /// Owned by the Preview window, directly or through another owned window
+    /// (the proof surface, the IME windows, the presenter itself).
+    pub(crate) owned_by_target: bool,
+    pub(crate) visible: bool,
+}
+
+/// Where `SetWindowPos` should put the presenter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsD3d11PresenterSlot {
+    InPlace,
+    /// Directly below the walk entry at this index: the first window above
+    /// Preview's owned group.
+    Below(usize),
+    /// Preview's owned group already tops the z-order.
+    Top,
+}
+
+/// Windows keeps a window's owned windows grouped above it, and the Preview
+/// window always owns the proof surface (and the IME windows while focused),
+/// so nothing can sit *immediately* above Preview except one of those. The
+/// presenter, itself owned by Preview, therefore claims the top of Preview's
+/// owned group: every window between it and Preview belongs to Preview, and
+/// no visible window of that group covers it. Hidden owned windows above it
+/// (the IME pair) do not draw. This never lifts the presenter over an
+/// unrelated window.
+pub(crate) fn presenter_in_owner_slot(windows_above_target: &[WindowsD3d11StackedWindow]) -> bool {
+    let mut found = false;
+    for window in windows_above_target {
+        if window.is_presenter {
+            if !window.owned_by_target {
+                return false;
+            }
+            found = true;
+        } else if !window.owned_by_target {
+            break;
+        } else if found && window.visible {
+            return false;
+        }
+    }
+    found
+}
+
+pub(crate) fn presenter_slot(
+    windows_above_target: &[WindowsD3d11StackedWindow],
+) -> WindowsD3d11PresenterSlot {
+    if presenter_in_owner_slot(windows_above_target) {
+        return WindowsD3d11PresenterSlot::InPlace;
+    }
+    windows_above_target
+        .iter()
+        .position(|window| !window.is_presenter && !window.owned_by_target)
+        .map_or(
+            WindowsD3d11PresenterSlot::Top,
+            WindowsD3d11PresenterSlot::Below,
+        )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WindowsD3d11PreviewWindowReadback {
     pub(crate) target_exists: bool,
     pub(crate) owner_process_matches: bool,
-    pub(crate) stacked_immediately_above: bool,
+    /// See [`presenter_in_owner_slot`]; also false when the presenter's
+    /// topmost band differs from Preview's.
+    pub(crate) stacked_in_owner_slot: bool,
     pub(crate) layered: bool,
     pub(crate) transparent: bool,
     pub(crate) no_activate: bool,
@@ -186,6 +253,100 @@ pub(crate) enum WindowsD3d11PreviewPresentOutcome {
     Failed(WindowsD3d11PreviewFallbackReason),
 }
 
+/// The presenter's own cadence and compositor-handoff-to-present latency. The
+/// canonical D3D11 status reports these instead of whatever the hidden proof
+/// surface last measured.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct WindowsD3d11PresenterTiming {
+    pub(crate) present_fps: Option<f64>,
+    pub(crate) interval_p95_ms: Option<f64>,
+    pub(crate) interval_p99_ms: Option<f64>,
+    pub(crate) latency_ms: Option<u64>,
+    pub(crate) latency_p50_ms: Option<u64>,
+    pub(crate) latency_p95_ms: Option<u64>,
+    pub(crate) latency_p99_ms: Option<u64>,
+}
+
+/// About four seconds at 60 fps, so a steady-state measurement window is not
+/// diluted by startup presents.
+const PRESENT_TIMING_SAMPLE_LIMIT: usize = 240;
+
+/// Latency runs from the compositor offering a finished preview texture to the
+/// latest-wins slot until `Present` returns, the D3D11 analogue of the macOS
+/// helper's compositor-frame-age-plus-handoff measurement.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WindowsD3d11PresentTimingWindow {
+    last_present_at: Option<Instant>,
+    intervals_ms: VecDeque<f64>,
+    latencies_ms: VecDeque<f64>,
+}
+
+impl WindowsD3d11PresentTimingWindow {
+    pub(crate) fn observe(&mut self, offered_at: Instant, presented_at: Instant) {
+        if let Some(previous) = self.last_present_at {
+            push_bounded(
+                &mut self.intervals_ms,
+                duration_ms(presented_at.saturating_duration_since(previous)),
+            );
+        }
+        self.last_present_at = Some(presented_at);
+        push_bounded(
+            &mut self.latencies_ms,
+            duration_ms(presented_at.saturating_duration_since(offered_at)),
+        );
+    }
+
+    /// A hidden or re-armed presenter resumes without counting the gap as one
+    /// long frame interval.
+    pub(crate) fn break_cadence(&mut self) {
+        self.last_present_at = None;
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn timing(&self) -> WindowsD3d11PresenterTiming {
+        let intervals = sorted_samples(&self.intervals_ms);
+        let latencies = sorted_samples(&self.latencies_ms);
+        let interval_total_ms: f64 = intervals.iter().sum();
+        let rounded = |value: Option<f64>| value.map(|ms| ms.round() as u64);
+        WindowsD3d11PresenterTiming {
+            present_fps: (interval_total_ms > 0.0)
+                .then(|| intervals.len() as f64 * 1000.0 / interval_total_ms),
+            interval_p95_ms: nearest_rank(&intervals, 0.95),
+            interval_p99_ms: nearest_rank(&intervals, 0.99),
+            latency_ms: rounded(self.latencies_ms.back().copied()),
+            latency_p50_ms: rounded(nearest_rank(&latencies, 0.5)),
+            latency_p95_ms: rounded(nearest_rank(&latencies, 0.95)),
+            latency_p99_ms: rounded(nearest_rank(&latencies, 0.99)),
+        }
+    }
+}
+
+fn push_bounded(samples: &mut VecDeque<f64>, value: f64) {
+    if samples.len() == PRESENT_TIMING_SAMPLE_LIMIT {
+        samples.pop_front();
+    }
+    samples.push_back(value);
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn sorted_samples(samples: &VecDeque<f64>) -> Vec<f64> {
+    let mut sorted: Vec<f64> = samples.iter().copied().collect();
+    sorted.sort_by(f64::total_cmp);
+    sorted
+}
+
+fn nearest_rank(sorted: &[f64], rank: f64) -> Option<f64> {
+    let last = sorted.len().checked_sub(1)?;
+    let index = ((sorted.len() as f64 * rank).ceil() as usize).saturating_sub(1);
+    Some(sorted[index.min(last)])
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WindowsD3d11PreviewContract {
     media_generation: u64,
@@ -194,6 +355,7 @@ pub(crate) struct WindowsD3d11PreviewContract {
     target_window_handle: Option<u64>,
     configuration_ready: bool,
     diagnostics: WindowsD3d11PresenterDiagnostics,
+    timing: WindowsD3d11PresentTimingWindow,
 }
 
 impl WindowsD3d11PreviewContract {
@@ -214,6 +376,7 @@ impl WindowsD3d11PreviewContract {
             target_window_handle: None,
             configuration_ready: false,
             diagnostics,
+            timing: WindowsD3d11PresentTimingWindow::default(),
         }
     }
 
@@ -228,6 +391,7 @@ impl WindowsD3d11PreviewContract {
             self.diagnostics.first_present_succeeded = false;
             self.diagnostics.source_live = false;
             self.diagnostics.last_presented_sequence = None;
+            self.timing.reset();
         }
         self.preview_generation = Some(placement.preview_generation);
         self.target_window_handle = Some(placement.target_window_handle);
@@ -255,7 +419,7 @@ impl WindowsD3d11PreviewContract {
                     .as_str()
                     .to_string(),
             )
-        } else if !readback.stacked_immediately_above {
+        } else if !readback.stacked_in_owner_slot {
             Some(
                 WindowsD3d11PreviewFallbackReason::WindowStackingFailed
                     .as_str()
@@ -339,6 +503,7 @@ impl WindowsD3d11PreviewContract {
             }
             WindowsD3d11PreviewPresentOutcome::Hidden => {
                 self.diagnostics.hidden_drops = self.diagnostics.hidden_drops.saturating_add(1);
+                self.timing.break_cadence();
             }
             WindowsD3d11PreviewPresentOutcome::Busy => {
                 self.diagnostics.busy_drops = self.diagnostics.busy_drops.saturating_add(1);
@@ -363,6 +528,15 @@ impl WindowsD3d11PreviewContract {
             && self.diagnostics.first_present_succeeded
             && self.diagnostics.source_live
             && self.diagnostics.fallback_reason.is_none()
+    }
+
+    /// Call after a `Presented` outcome with the frame's slot-offer time.
+    pub(crate) fn observe_present_timing(&mut self, offered_at: Instant, presented_at: Instant) {
+        self.timing.observe(offered_at, presented_at);
+    }
+
+    pub(crate) fn timing(&self) -> WindowsD3d11PresenterTiming {
+        self.timing.timing()
     }
 
     pub(crate) fn diagnostics(&self) -> WindowsD3d11PresenterDiagnostics {
@@ -394,14 +568,14 @@ mod runtime {
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GUITHREADINFO, GW_HWNDPREV, GWL_EXSTYLE,
-        GetGUIThreadInfo, GetTopWindow, GetWindow, GetWindowDisplayAffinity, GetWindowLongPtrW,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GUITHREADINFO, GW_HWNDPREV, GW_OWNER,
+        GWL_EXSTYLE, GetGUIThreadInfo, GetWindow, GetWindowDisplayAffinity, GetWindowLongPtrW,
         GetWindowRect, GetWindowThreadProcessId, HTTRANSPARENT, HWND_TOP, IsIconic, IsWindow,
         IsWindowVisible, MA_NOACTIVATE, RegisterClassExW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
         SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
         WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WM_CLOSE, WM_MOUSEACTIVATE, WM_NCHITTEST,
         WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-        WS_EX_TRANSPARENT, WS_POPUP,
+        WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
     use windows::core::{Interface, PCWSTR, w};
 
@@ -412,6 +586,7 @@ mod runtime {
     pub(crate) struct WindowsD3d11PresenterStatus {
         pub(crate) diagnostics: WindowsD3d11PresenterDiagnostics,
         pub(crate) canonical_claim_ready: bool,
+        pub(crate) timing: WindowsD3d11PresenterTiming,
     }
 
     struct DirectCompositionResources {
@@ -519,6 +694,7 @@ mod runtime {
             device: &WindowsD3d11Device,
             texture: &ID3D11Texture2D,
             frame: WindowsD3d11PreviewFrameMetadata,
+            offered_at: Instant,
             width: u32,
             height: u32,
         ) -> Result<WindowsD3d11PresenterStatus, WindowsD3d11Error> {
@@ -579,6 +755,8 @@ mod runtime {
             }
             self.contract
                 .observe_present(frame, WindowsD3d11PreviewPresentOutcome::Presented);
+            self.contract
+                .observe_present_timing(offered_at, Instant::now());
             Ok(self.status())
         }
 
@@ -598,6 +776,7 @@ mod runtime {
             WindowsD3d11PresenterStatus {
                 diagnostics: self.contract.diagnostics(),
                 canonical_claim_ready: self.contract.canonical_claim_ready(),
+                timing: self.contract.timing(),
             }
         }
 
@@ -771,62 +950,74 @@ mod runtime {
             Ok(())
         }
 
+        /// Runs before every present on the media thread that also composes
+        /// and encodes, so window-manager mutations happen only when the
+        /// readback differs from the contract; the readback itself is cheap.
         fn apply_window_contract(&mut self) -> Result<(), WindowsD3d11Error> {
             let target = validate_target_window(self.placement)?;
-            unsafe {
-                SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE).map_err(|error| {
-                    preview_error(
-                        WindowsD3d11PreviewFallbackReason::CaptureExclusionFailed,
-                        "SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)",
-                        error,
-                    )
-                })?;
+            let mut affinity = 0_u32;
+            let excluded = unsafe { GetWindowDisplayAffinity(self.hwnd, &mut affinity) }.is_ok()
+                && affinity == WDA_EXCLUDEFROMCAPTURE.0;
+            if !excluded {
+                unsafe {
+                    SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE).map_err(
+                        |error| {
+                            preview_error(
+                                WindowsD3d11PreviewFallbackReason::CaptureExclusionFailed,
+                                "SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)",
+                                error,
+                            )
+                        },
+                    )?;
+                }
             }
             if let Some(bounds) = self.placement.visible_bounds() {
                 // `hWndInsertAfter` names the window that must precede the
-                // positioned window. Therefore using `target` directly would
-                // place the presenter *behind* the Electron window. Anchor to
-                // the target's current predecessor so the presenter lands
-                // immediately above the target without becoming topmost.
-                let (insert_after, z_order_flags) = match unsafe { GetWindow(target, GW_HWNDPREV) }
-                {
-                    Ok(window_above) if window_above == self.hwnd => (None, SWP_NOZORDER),
-                    Ok(window_above) => (Some(window_above), Default::default()),
-                    Err(_) => {
-                        let top = unsafe { GetTopWindow(None) }.map_err(|error| {
+                // positioned window, so the presenter goes directly below the
+                // first window above Preview's owned group: the top of that
+                // group (see `presenter_in_owner_slot`).
+                let windows = windows_above_target(self.hwnd, target)?;
+                let walk: Vec<_> = windows.iter().map(|(_, window)| *window).collect();
+                let slot = presenter_slot(&walk);
+                let placed = slot == WindowsD3d11PresenterSlot::InPlace
+                    && unsafe { IsWindowVisible(self.hwnd) }.as_bool()
+                    && window_bounds(self.hwnd) == Some(bounds);
+                let (insert_after, z_order_flags) = match slot {
+                    WindowsD3d11PresenterSlot::InPlace => (None, SWP_NOZORDER),
+                    // A topmost window above a non-topmost group means the
+                    // group already tops its band; HWND_TOP keeps the
+                    // presenter in that band instead of naming a topmost
+                    // anchor.
+                    WindowsD3d11PresenterSlot::Below(index)
+                        if is_topmost(windows[index].0) && !is_topmost(target) =>
+                    {
+                        (Some(HWND_TOP), Default::default())
+                    }
+                    WindowsD3d11PresenterSlot::Below(index) => {
+                        (Some(windows[index].0), Default::default())
+                    }
+                    WindowsD3d11PresenterSlot::Top => (Some(HWND_TOP), Default::default()),
+                };
+                if !placed {
+                    unsafe {
+                        SetWindowPos(
+                            self.hwnd,
+                            insert_after,
+                            bounds.x,
+                            bounds.y,
+                            i32::try_from(bounds.width).unwrap_or(i32::MAX),
+                            i32::try_from(bounds.height).unwrap_or(i32::MAX),
+                            SWP_NOACTIVATE | SWP_SHOWWINDOW | z_order_flags,
+                        )
+                        .map_err(|error| {
                             preview_error(
-                                WindowsD3d11PreviewFallbackReason::WindowStackingFailed,
-                                "GetTopWindow",
+                                WindowsD3d11PreviewFallbackReason::WindowCreationFailed,
+                                "SetWindowPos",
                                 error,
                             )
                         })?;
-                        if top != target {
-                            return Err(WindowsD3d11Error::new(
-                                WindowsD3d11ErrorCode::CompositorUnavailable,
-                                WindowsD3d11PreviewFallbackReason::WindowStackingFailed.as_str(),
-                            ));
-                        }
-                        (Some(HWND_TOP), Default::default())
+                        let _ = ShowWindow(self.hwnd, SW_SHOWNA);
                     }
-                };
-                unsafe {
-                    SetWindowPos(
-                        self.hwnd,
-                        insert_after,
-                        bounds.x,
-                        bounds.y,
-                        i32::try_from(bounds.width).unwrap_or(i32::MAX),
-                        i32::try_from(bounds.height).unwrap_or(i32::MAX),
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW | z_order_flags,
-                    )
-                    .map_err(|error| {
-                        preview_error(
-                            WindowsD3d11PreviewFallbackReason::WindowCreationFailed,
-                            "SetWindowPos",
-                            error,
-                        )
-                    })?;
-                    let _ = ShowWindow(self.hwnd, SW_SHOWNA);
                 }
             } else {
                 unsafe {
@@ -835,7 +1026,7 @@ mod runtime {
             }
             let readback = read_window_contract(self.hwnd, target, self.placement)?;
             self.contract.configure(self.placement, readback);
-            if !readback.stacked_immediately_above {
+            if !readback.stacked_in_owner_slot {
                 return Err(WindowsD3d11Error::new(
                     WindowsD3d11ErrorCode::CompositorUnavailable,
                     WindowsD3d11PreviewFallbackReason::WindowStackingFailed.as_str(),
@@ -947,8 +1138,7 @@ mod runtime {
                 error,
             )
         })?;
-        let mut rect = RECT::default();
-        unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|error| {
+        let actual_bounds = window_rect(hwnd).map_err(|error| {
             preview_error(
                 WindowsD3d11PreviewFallbackReason::WindowStyleReadbackFailed,
                 "GetWindowRect",
@@ -964,28 +1154,93 @@ mod runtime {
         let mut owner_pid = 0_u32;
         let target_exists = unsafe { IsWindow(Some(target)) }.as_bool();
         let target_thread = unsafe { GetWindowThreadProcessId(target, Some(&mut owner_pid)) };
-        let stacked_immediately_above = unsafe { GetWindow(target, GW_HWNDPREV) }
-            .is_ok_and(|window_above| window_above == hwnd);
-        let width = rect.right.saturating_sub(rect.left);
-        let height = rect.bottom.saturating_sub(rect.top);
+        let stacked_in_owner_slot = windows_above_target(hwnd, target).is_ok_and(|windows| {
+            let walk: Vec<_> = windows.iter().map(|(_, window)| *window).collect();
+            presenter_in_owner_slot(&walk)
+        }) && (!is_topmost(hwnd) || is_topmost(target));
         Ok(WindowsD3d11PreviewWindowReadback {
             target_exists,
             owner_process_matches: target_thread != 0
                 && owner_pid == placement.expected_owner_process_id,
-            stacked_immediately_above,
+            stacked_in_owner_slot,
             layered: ex_style.0 & WS_EX_LAYERED.0 != 0,
             transparent: ex_style.0 & WS_EX_TRANSPARENT.0 != 0,
             no_activate: ex_style.0 & WS_EX_NOACTIVATE.0 != 0,
             excluded_from_capture: affinity == WDA_EXCLUDEFROMCAPTURE.0,
             window_active: gui_read && gui.hwndActive == hwnd,
             window_focused: gui_read && gui.hwndFocus == hwnd,
-            actual_bounds: (width > 0 && height > 0).then_some(WindowsD3d11PresenterBounds {
+            actual_bounds,
+        })
+    }
+
+    fn window_rect(
+        hwnd: HWND,
+    ) -> Result<Option<WindowsD3d11PresenterBounds>, windows::core::Error> {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut rect) }?;
+        let width = rect.right.saturating_sub(rect.left);
+        let height = rect.bottom.saturating_sub(rect.top);
+        Ok(
+            (width > 0 && height > 0).then_some(WindowsD3d11PresenterBounds {
                 x: rect.left,
                 y: rect.top,
                 width: width as u32,
                 height: height as u32,
             }),
-        })
+        )
+    }
+
+    fn window_bounds(hwnd: HWND) -> Option<WindowsD3d11PresenterBounds> {
+        window_rect(hwnd).ok().flatten()
+    }
+
+    /// Windows above `target`, nearest first, through the first window outside
+    /// its owned group. Bounded so a z-order that churns under the walk cannot
+    /// spin.
+    fn windows_above_target(
+        hwnd: HWND,
+        target: HWND,
+    ) -> Result<Vec<(HWND, WindowsD3d11StackedWindow)>, WindowsD3d11Error> {
+        const WALK_LIMIT: usize = 64;
+        let mut windows = Vec::new();
+        let mut current = unsafe { GetWindow(target, GW_HWNDPREV) }.ok();
+        while let Some(window) = current {
+            if windows.len() == WALK_LIMIT {
+                return Err(WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::CompositorUnavailable,
+                    WindowsD3d11PreviewFallbackReason::WindowStackingFailed.as_str(),
+                ));
+            }
+            let entry = WindowsD3d11StackedWindow {
+                is_presenter: window == hwnd,
+                owned_by_target: owned_by(window, target),
+                visible: unsafe { IsWindowVisible(window) }.as_bool(),
+            };
+            windows.push((window, entry));
+            if !entry.is_presenter && !entry.owned_by_target {
+                break;
+            }
+            current = unsafe { GetWindow(window, GW_HWNDPREV) }.ok();
+        }
+        Ok(windows)
+    }
+
+    fn owned_by(window: HWND, owner: HWND) -> bool {
+        const OWNER_CHAIN_LIMIT: usize = 8;
+        let mut current = window;
+        for _ in 0..OWNER_CHAIN_LIMIT {
+            match unsafe { GetWindow(current, GW_OWNER) } {
+                Ok(next) if next == owner => return true,
+                Ok(next) => current = next,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    fn is_topmost(hwnd: HWND) -> bool {
+        let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        ex_style & WS_EX_TOPMOST.0 != 0
     }
 
     fn register_presenter_class() -> Result<(), WindowsD3d11Error> {
@@ -1148,7 +1403,7 @@ mod tests {
         WindowsD3d11PreviewWindowReadback {
             target_exists: true,
             owner_process_matches: true,
-            stacked_immediately_above: true,
+            stacked_in_owner_slot: true,
             layered: true,
             transparent: true,
             no_activate: true,
@@ -1244,7 +1499,7 @@ mod tests {
         );
 
         let mut readback = trusted_readback();
-        readback.stacked_immediately_above = false;
+        readback.stacked_in_owner_slot = false;
         contract.configure(placement(3, 10), readback);
         let mut frame = frame;
         frame.preview_generation = 10;
@@ -1254,6 +1509,165 @@ mod tests {
             contract.diagnostics().fallback_reason.as_deref(),
             Some(WindowsD3d11PreviewFallbackReason::WindowStackingFailed.as_str())
         );
+    }
+
+    const PRESENTER: WindowsD3d11StackedWindow = WindowsD3d11StackedWindow {
+        is_presenter: true,
+        owned_by_target: true,
+        visible: true,
+    };
+    const PROOF_SURFACE: WindowsD3d11StackedWindow = WindowsD3d11StackedWindow {
+        is_presenter: false,
+        owned_by_target: true,
+        visible: true,
+    };
+    const HIDDEN_IME: WindowsD3d11StackedWindow = WindowsD3d11StackedWindow {
+        is_presenter: false,
+        owned_by_target: true,
+        visible: false,
+    };
+    const FOREIGN: WindowsD3d11StackedWindow = WindowsD3d11StackedWindow {
+        is_presenter: false,
+        owned_by_target: false,
+        visible: true,
+    };
+
+    #[test]
+    fn windows_d3d11_preview_presenter_claims_the_top_of_previews_owned_group() {
+        // The z-order seen on a physical box before the claim: the proof
+        // surface and the IME pair sit between Preview and everything else.
+        let before = [PROOF_SURFACE, HIDDEN_IME, HIDDEN_IME, FOREIGN];
+        assert!(!presenter_in_owner_slot(&before));
+        assert_eq!(presenter_slot(&before), WindowsD3d11PresenterSlot::Below(3));
+
+        let after = [PROOF_SURFACE, HIDDEN_IME, HIDDEN_IME, PRESENTER, FOREIGN];
+        assert!(presenter_in_owner_slot(&after));
+        assert_eq!(presenter_slot(&after), WindowsD3d11PresenterSlot::InPlace);
+
+        // With nothing between them this is the old "immediately above" rule.
+        assert!(presenter_in_owner_slot(&[PRESENTER, FOREIGN]));
+        assert!(presenter_in_owner_slot(&[PRESENTER]));
+    }
+
+    #[test]
+    fn windows_d3d11_preview_hidden_owned_windows_may_cover_the_presenter() {
+        let mut hidden_proof = PROOF_SURFACE;
+        hidden_proof.visible = false;
+        let ime_raised = [hidden_proof, PRESENTER, HIDDEN_IME, HIDDEN_IME, FOREIGN];
+        assert!(presenter_in_owner_slot(&ime_raised));
+        assert_eq!(
+            presenter_slot(&ime_raised),
+            WindowsD3d11PresenterSlot::InPlace
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_preview_visible_owned_window_over_presenter_is_restacked() {
+        let covered = [PRESENTER, PROOF_SURFACE, FOREIGN];
+        assert!(!presenter_in_owner_slot(&covered));
+        assert_eq!(
+            presenter_slot(&covered),
+            WindowsD3d11PresenterSlot::Below(2)
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_preview_foreign_window_inside_the_slot_fails_stacking() {
+        let foreign_between = [FOREIGN, PRESENTER];
+        assert!(!presenter_in_owner_slot(&foreign_between));
+        assert_eq!(
+            presenter_slot(&foreign_between),
+            WindowsD3d11PresenterSlot::Below(0)
+        );
+
+        let mut unowned_presenter = PRESENTER;
+        unowned_presenter.owned_by_target = false;
+        assert!(!presenter_in_owner_slot(&[
+            PROOF_SURFACE,
+            unowned_presenter,
+            FOREIGN
+        ]));
+        assert!(!presenter_in_owner_slot(&[]));
+    }
+
+    #[test]
+    fn windows_d3d11_preview_owned_group_at_the_top_of_the_z_order_uses_hwnd_top() {
+        assert_eq!(
+            presenter_slot(&[PROOF_SURFACE, HIDDEN_IME]),
+            WindowsD3d11PresenterSlot::Top
+        );
+        assert_eq!(presenter_slot(&[]), WindowsD3d11PresenterSlot::Top);
+    }
+
+    #[test]
+    fn windows_d3d11_preview_timing_measures_the_presenters_own_cadence_and_latency() {
+        let mut window = WindowsD3d11PresentTimingWindow::default();
+        assert_eq!(window.timing(), WindowsD3d11PresenterTiming::default());
+
+        let start = Instant::now();
+        for frame in 0..60_u64 {
+            let presented_at = start + Duration::from_micros(frame * 16_667);
+            // Nine in ten frames reach Present 4ms after the offer, one in ten 30ms.
+            let latency = if frame % 10 == 9 { 30 } else { 4 };
+            window.observe(presented_at - Duration::from_millis(latency), presented_at);
+        }
+        let timing = window.timing();
+        let fps = timing.present_fps.unwrap();
+        assert!((fps - 60.0).abs() < 0.1, "{fps}");
+        assert!((timing.interval_p95_ms.unwrap() - 16.667).abs() < 0.01);
+        assert_eq!(timing.latency_ms, Some(30));
+        assert_eq!(timing.latency_p50_ms, Some(4));
+        assert_eq!(timing.latency_p95_ms, Some(30));
+        assert_eq!(timing.latency_p99_ms, Some(30));
+    }
+
+    #[test]
+    fn windows_d3d11_preview_timing_skips_hidden_gaps_and_resets_on_rearm() {
+        let mut contract = WindowsD3d11PreviewContract::new(3, DxgiAdapterLuid::from_u64(7));
+        contract.configure(placement(3, 9), trusted_readback());
+        let frame = WindowsD3d11PreviewFrameMetadata {
+            media_generation: 3,
+            preview_generation: 9,
+            adapter_luid: DxgiAdapterLuid::from_u64(7),
+            sequence: 1,
+            source_live: true,
+        };
+        let start = Instant::now();
+        contract.observe_present_timing(start, start);
+        contract.observe_present_timing(
+            start + Duration::from_millis(16),
+            start + Duration::from_millis(17),
+        );
+        contract.observe_present(frame, WindowsD3d11PreviewPresentOutcome::Hidden);
+        contract.observe_present_timing(
+            start + Duration::from_secs(5),
+            start + Duration::from_secs(5),
+        );
+        let gapless = contract.timing().interval_p99_ms.unwrap();
+        assert!((gapless - 17.0).abs() < 1e-6, "{gapless}");
+
+        // A new preview generation must not inherit the retired one's samples.
+        contract.configure(placement(3, 10), trusted_readback());
+        assert_eq!(contract.timing(), WindowsD3d11PresenterTiming::default());
+    }
+
+    #[test]
+    fn windows_d3d11_preview_timing_window_is_bounded() {
+        let mut window = WindowsD3d11PresentTimingWindow::default();
+        let start = Instant::now();
+        // An old slow stretch ages out of the window.
+        for frame in 0..10_u64 {
+            let presented_at = start + Duration::from_millis(frame * 100);
+            window.observe(presented_at, presented_at);
+        }
+        let resumed = start + Duration::from_secs(1);
+        for frame in 0..PRESENT_TIMING_SAMPLE_LIMIT as u64 {
+            let presented_at = resumed + Duration::from_millis(frame * 16);
+            window.observe(presented_at, presented_at);
+        }
+        assert_eq!(window.intervals_ms.len(), PRESENT_TIMING_SAMPLE_LIMIT);
+        let steady = window.timing().interval_p99_ms.unwrap();
+        assert!((steady - 16.0).abs() < 1e-6, "{steady}");
     }
 
     #[test]

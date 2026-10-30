@@ -20,6 +20,7 @@ import {
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { evaluateMicrophoneLossContinuity } from './lib/microphone-loss-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -628,7 +629,13 @@ async function seedRendererCaptionsProfile(smoke) {
       // Use the Studio's real setter. A raw storage write races the mounted
       // provider persisting its previous config before the reload occurs.
       window.__videorcSmokeScenePresets.configure(next)
+      // Pin the same value synchronously: configure commits React state later,
+      // while the reload helper captures storage now for its pagehide write.
+      localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
       localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+      // The reload rides the seed's own eval: a second eval could find the
+      // renderer's own write already over the seed (plan 0008).
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
       return {
         captions: next.captions,
         video: next.video,
@@ -648,13 +655,6 @@ async function seedRendererCaptionsProfile(smoke) {
   ) {
     throw new Error(`Could not seed renderer caption profile: ${JSON.stringify(seeded)}`)
   }
-  await waitForSeededCaptionProfile(smoke)
-  await smokeCommand(smoke, 'eval-js', {
-    code: `
-      window.setTimeout(() => window.location.reload(), 150)
-      return { reloadScheduled: true }
-    `
-  })
   await sleep(750)
   await waitForSeededCaptionProfile(smoke)
   // A fresh profile opens the Library. The session pill and live caption

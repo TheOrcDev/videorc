@@ -1128,6 +1128,16 @@ pub async fn update_windows_d3d11_presenter_status(
             next.frames_rendered = next.frames_rendered.max(presented_frame_id);
             next.frame_polling_suppressed = true;
             next.source_pixels_present = true;
+            // The slot's cadence and latency were last written by the proof
+            // surface's present reports; the canonical status owns its own.
+            let timing = presenter.timing;
+            next.present_fps = timing.present_fps;
+            next.interval_p95_ms = timing.interval_p95_ms;
+            next.interval_p99_ms = timing.interval_p99_ms;
+            next.input_to_present_latency_ms = timing.latency_ms;
+            next.input_to_present_latency_p50_ms = timing.latency_p50_ms;
+            next.input_to_present_latency_p95_ms = timing.latency_p95_ms;
+            next.input_to_present_latency_p99_ms = timing.latency_p99_ms;
             next.message =
                 Some("Backend D3D11 DirectComposition preview is presenting.".to_string());
         } else {

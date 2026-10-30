@@ -1032,3 +1032,35 @@ Fresh Rust verification for `713a2a6d` is running under
 `/tmp/videorc-beta-state-capability-verification-OhMWpx/report.json`.
 The measured-interval smoke will run only after that queue releases the app
 and its final normal-profile backend/bridge hashes have been verified.
+
+### Main integration for microphone loss and smoke ownership, 2026-10-30
+
+Integrating main `7feda92f` resolves conflicts with the reviewed Linux
+microphone-loss protection and caption-smoke seed changes. Capture workers,
+direct Pulse inputs and the meter now all use main's
+`node.dont-fallback=true node.dont-move=true` policy. Its complete source-list
+check refuses an unplugged selection and keeps the session on silence.
+The earlier Beta `node.dont-reconnect` helper is removed: main documents
+that it can leave the lost stream blocked instead of delivering EOF.
+Live microphone replacement on the shared PCM bus and its tests are retained.
+The caption smoke both commits the requested Studio state and synchronously
+pins that same storage value before installing main's reload protection;
+the post-reload configuration assertion remains required.
+
+This merge also brings main's Linux idle-preview picture fix for Agents,
+Windows camera/startup/presenter fixes, shared host smoke/build ownership,
+Chat preview sizing and shortcut fixes. The published 0.16.0 Alpha waiver
+is historical Alpha evidence only. It does not close a Beta acceptance row.
+Heavy Cargo work now uses `pnpm cargo:slot`; app smokes retain the shared
+host lock and memory admission checks.
+
+The old owned Rust test compiler was deliberately terminated before the
+source merge. Its receipt is
+`/tmp/videorc-beta-state-capability-verification-OhMWpx/interrupted-for-main.json`.
+The dependent latency queue refused to launch without a completed backend
+build. Both runs are incomplete; no old binary is used as merged-source proof.
+Rust formatting, 58 focused script tests and all 2,941 Node tests pass
+(zero Node skips). Standard Linux Clippy passes with the same four documented
+platform allowances. Full desktop/source verification, focused Rust tests,
+the normal backend/bridge build and affected app smokes are being rerun.
+No recording budgets, permission requirements or physical gates change.

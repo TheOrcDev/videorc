@@ -45,6 +45,16 @@ export function appShortcutOwner(
 }
 
 /**
+ * The key that already does the action inside Videorc, shown in its global
+ * row while nothing is recorded there: Record's Space on the Studio page.
+ */
+export interface ShortcutRecorderAppKey {
+  accelerator: string
+  /** Where the key works, read after it: "in Studio". */
+  where: string
+}
+
+/**
  * The recorder's accessible name (plan 174 I-17): the action and its binding,
  * as the field shows it, so a screen reader hears what is set, not only how
  * to change it.
@@ -52,16 +62,21 @@ export function appShortcutOwner(
 export function shortcutRecorderName({
   label,
   value,
+  appKey,
   armed,
   platform
 }: {
   label: string
   value: string | undefined
+  appKey?: ShortcutRecorderAppKey
   armed: boolean
   platform: string | undefined
 }): string {
   if (armed) return `${label}: press the new shortcut`
-  return `${label}: ${value ? acceleratorInlineLabel(value, platform) : 'Unassigned'}`
+  if (value) return `${label}: ${acceleratorInlineLabel(value, platform)}`
+  if (appKey)
+    return `${label}: ${acceleratorInlineLabel(appKey.accelerator, platform)} ${appKey.where}`
+  return `${label}: Unassigned`
 }
 
 export function shortcutRecorderStep(

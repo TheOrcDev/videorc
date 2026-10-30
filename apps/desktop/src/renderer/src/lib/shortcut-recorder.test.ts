@@ -126,6 +126,22 @@ describe('shortcutRecorderName (plan 174 I-17)', () => {
     ).toBe('Mark a clip: Unassigned')
   })
 
+  it("names Videorc's own key while no global key is set", () => {
+    const appKey = { accelerator: 'Space', where: 'in Studio' }
+    expect(
+      shortcutRecorderName({ label: 'Record', value: '', appKey, armed: false, platform: 'darwin' })
+    ).toBe('Record: Space in Studio')
+    expect(
+      shortcutRecorderName({
+        label: 'Record',
+        value: 'Cmd+Shift+R',
+        appKey,
+        armed: false,
+        platform: 'darwin'
+      })
+    ).toBe('Record: ⇧⌘R')
+  })
+
   it('says what to do while it records', () => {
     expect(
       shortcutRecorderName({

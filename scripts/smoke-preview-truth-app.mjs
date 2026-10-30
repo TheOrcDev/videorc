@@ -13,7 +13,7 @@ import { writeBuddyPetFixturePack, classifyBuddyPetTag } from './lib/buddy-pet-f
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { FORGET_WORKING_SCENE_JS } from './lib/renderer-profile-seed.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 assert.equal(process.platform, 'darwin', 'Preview truth requires the macOS dev app')
@@ -267,8 +267,7 @@ try {
         replayBuffer: { enabled: false, explicit: true }
       }));
       window.__previewTruthBeforeReload = true;
-      ${FORGET_WORKING_SCENE_JS}
-      setTimeout(() => location.reload(), 50);
+      ${RELOAD_KEEPING_SEED_JS}
       return true;
     `
   })

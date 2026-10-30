@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -6,7 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GroupedList, ListRow } from './list-row'
 import { ConfigGrid, PageHeader } from './page'
-import { PANE_OWNS_SCROLL, Pane, PaneBody, PaneStrip, Toolbar, WINDOW_TITLE_CLASS } from './pane'
+import {
+  PANE_OWNS_SCROLL,
+  PANE_STABLE_GUTTER,
+  Pane,
+  PaneBody,
+  PaneStrip,
+  Toolbar,
+  WINDOW_TITLE_CLASS
+} from './pane'
 import { PanelSection } from './panel-section'
 import { STATUS_BAR_ACTION_CLASS, StatusBar, StatusBarHint } from './status-bar'
 import { StatusBarAction } from './status-bar-action'
@@ -68,6 +78,25 @@ describe('Toolbar', () => {
     for (const rule of ['flex', 'flex-col', 'overflow-y-hidden']) {
       expect(markup).toContain(`has-[&gt;[data-pane-scroll=own]]:${rule}`)
     }
+  })
+
+  it('is the containing block of what it scrolls, so nothing escapes to the window (plan 0009)', () => {
+    // An `sr-only` span positioned against <body> stretched the document past
+    // the window: a window scrollbar took 15 px from the Studio preview.
+    for (const scroll of [true, false]) {
+      const markup = renderToStaticMarkup(createElement(PaneBody, { scroll, children: 'x' }))
+      expect(markup).toMatch(/class="relative\s/)
+    }
+  })
+
+  it('keeps the gutter for a page whose width must not move, and Studio asks (plan 0009)', () => {
+    // Chat showing up on air grew the Studio past the pane: a classic
+    // scrollbar appeared and the preview card shrank 604 → 589 px.
+    expect(PANE_STABLE_GUTTER).toEqual({ 'data-pane-gutter': 'stable' })
+    const markup = renderToStaticMarkup(createElement(PaneBody, null, 'x'))
+    expect(markup).toContain('has-[&gt;[data-pane-gutter=stable]]:[scrollbar-gutter:stable]')
+    const studio = readFileSync(join(__dirname, 'tabs/studio-tab.tsx'), 'utf8')
+    expect(studio).toContain('<div className={STUDIO_CONTAINER} {...PANE_STABLE_GUTTER}>')
   })
 
   it('titles the toolbar with the one window title recipe: 14 px / 600', () => {

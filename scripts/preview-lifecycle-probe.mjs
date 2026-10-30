@@ -58,6 +58,7 @@ import {
   windowsPreviewLifecycleDiagnosticFailures,
   windowsPreviewLifecycleOpenFailures
 } from './lib/windows-preview-lifecycle-gates.mjs'
+import { configureWindowsD3d11ProbeSources } from './lib/windows-d3d11-preview-sources.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const windowsPreviewMode = parseWindowsPreviewLifecycleMode(process.argv.slice(2), process.env)
@@ -336,14 +337,17 @@ async function main() {
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-      VIDEORC_DISABLE_AUTO_PREVIEW: '1',
+      // The unified D3D11 session draws from the renderer's screen preview, so
+      // that mode lets the renderer start it.
+      ...(windowsPreviewMode === 'windows-d3d11' ? {} : { VIDEORC_DISABLE_AUTO_PREVIEW: '1' }),
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_PREVIEW_LIFECYCLE_PROBE: '1',
       ...(windowsPreviewMode === 'windows-d3d11'
         ? {
             VIDEORC_WINDOWS_D3D11_MEDIA: '1',
             VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
-            VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
+            VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts',
+            VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1'
           }
         : {}),
       ...(windowsPreviewMode === 'windows-fallback'
@@ -356,6 +360,17 @@ async function main() {
     }
   })
   smoke = launched.connections['preview-motion-ready']
+  if (windowsPreviewMode === 'windows-d3d11') {
+    // The renderer harness waits up to 15s for the studio to mount.
+    const harnessTimeouts = { timeoutMs: 20_000, requestTimeoutMs: 20_000 }
+    const screenId = await configureWindowsD3d11ProbeSources({
+      backendConnection: launched.connections['backend-ready'],
+      smokeCommand: (command, params) =>
+        lifecycleEvidence.request(smoke, command, params, harnessTimeouts),
+      timeoutMs
+    })
+    console.log(`Preview lifecycle probe feeds the D3D11 media path from ${screenId}.`)
+  }
 
   lifecycleEvidence.setContext({ cycle: null, action: 'initial-close' })
   const initialState = await ensureClosed('initial close')

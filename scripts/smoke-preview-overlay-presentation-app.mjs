@@ -18,6 +18,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { writeBuddyPetFixturePack } from './lib/buddy-pet-fixture.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 assert.equal(process.platform, 'darwin', 'The native Preview smoke requires the macOS dev app')
@@ -195,7 +196,7 @@ try {
         replayBuffer: { enabled: false, explicit: true }
       }));
       window.__overlayPresentationBeforeReload = true;
-      setTimeout(() => location.reload(), 50);
+      ${reloadKeepingSeedJs()}
       return true;
     `
   })

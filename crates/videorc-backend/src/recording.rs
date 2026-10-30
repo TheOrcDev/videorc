@@ -410,7 +410,9 @@ enum WorkerMicrophoneFallback {
     /// test 147, plan 0001). The soundboard can't reach such a session.
     DirectPulse,
     /// Record silence: no Windows input to fall back to, or the device is
-    /// not in the DirectShow inventory, so a direct input would fail too.
+    /// not in the DirectShow inventory or the Pulse source list (unplugged),
+    /// so a direct input would fail too or, on Linux, fall back to another
+    /// microphone (retest 154, C4).
     Silence,
 }
 
@@ -464,8 +466,18 @@ fn worker_microphone_fallback(
         Some(MicrophoneInput::WindowsDshow { .. }) if !device_missing => {
             WorkerMicrophoneFallback::DirectDshow
         }
-        Some(MicrophoneInput::LinuxPulse { .. }) => WorkerMicrophoneFallback::DirectPulse,
+        Some(MicrophoneInput::LinuxPulse { .. }) if !device_missing => {
+            WorkerMicrophoneFallback::DirectPulse
+        }
         _ => WorkerMicrophoneFallback::Silence,
+    }
+}
+
+/// Retest 154 (C4): FFmpeg's direct Pulse input is pinned to its source like
+/// the capture worker, so pipewire-pulse never hands it the default mic.
+fn pin_direct_pulse_microphone(command: &mut Command, microphone: Option<&MicrophoneInput>) {
+    if matches!(microphone, Some(MicrophoneInput::LinuxPulse { .. })) {
+        command.envs(crate::linux_pulse_audio::pulse_pinned_source_env());
     }
 }
 
@@ -4287,14 +4299,30 @@ async fn start_session_with_timeline(
                             "warn",
                             format!("Capture-worker microphone unavailable: {error:#}"),
                         );
+                        // Retest 154 (C4): an unplugged Linux mic says so
+                        // in the "Going on without a microphone" toast.
+                        let message = match &resolved_microphone {
+                            Some(MicrophoneInput::LinuxPulse { source_name })
+                                if crate::audio_capture_adapter::worker_start_failure_kind(
+                                    &error,
+                                ) == Some(
+                                    crate::audio_capture_adapter::WorkerStartFailureKind::DeviceNotInInventory,
+                                ) =>
+                            {
+                                crate::linux_pulse_audio::pulse_source_not_connected_message(
+                                    source_name,
+                                )
+                            }
+                            _ => format!(
+                                "The selected microphone could not supply timestamped audio: {error:#}"
+                            ),
+                        };
                         let _ = emit_health_event(
                             &state,
                             Some(&session_id),
                             HealthLevel::Warn,
                             "microphone-capture-worker-unavailable",
-                            &format!(
-                                "The selected microphone could not supply timestamped audio: {error:#}"
-                            ),
+                            &message,
                         );
                     }
                 }
@@ -5869,9 +5897,7 @@ async fn start_session_with_timeline(
         });
     }
     let mut command = ffmpeg_command(&ffmpeg_path);
-    if matches!(capture.microphone, Some(MicrophoneInput::LinuxPulse { .. })) {
-        crate::linux_pulse_audio::bind_pipewire_capture_source(command.as_std_mut());
-    }
+    pin_direct_pulse_microphone(&mut command, capture.microphone.as_ref());
     command
         .args(&args)
         .stdin(if retain_ffmpeg_stdin {
@@ -35304,14 +35330,28 @@ mod tests {
         let message = worker_microphone_fallback_message("probe timed out");
         assert!(message.contains("microphone is live") && message.contains("probe timed out"));
         // Release test 147, plan 0001: a Linux worker failure keeps the direct
-        // Pulse input, whatever the reason, and says the soundboard is out.
+        // Pulse input and says the soundboard is out...
         let pulse = MicrophoneInput::LinuxPulse {
             source_name: "videorc_test_tone".to_string(),
         };
-        for error in [&probe_timeout, &open_budget, &missing] {
+        for error in [&probe_timeout, &open_budget] {
             assert_eq!(
                 worker_microphone_fallback(Some(&pulse), error),
                 WorkerMicrophoneFallback::DirectPulse,
+                "{error}"
+            );
+        }
+        // ...unless the source is unplugged (retest 154, C4): the session
+        // records silence, never the default (built-in) microphone.
+        let unplugged = anyhow::Error::from(WorkerStartError::for_test(
+            WorkerStartFailureKind::DeviceNotInInventory,
+            &crate::linux_pulse_audio::pulse_source_not_connected_message("usb_mic"),
+        ))
+        .context("Microphone opening failed");
+        for error in [&missing, &unplugged] {
+            assert_eq!(
+                worker_microphone_fallback(Some(&pulse), error),
+                WorkerMicrophoneFallback::Silence,
                 "{error}"
             );
         }
@@ -35336,6 +35376,34 @@ mod tests {
         assert!(session_microphone_replaceable(true, "windows", true));
         assert!(!session_microphone_replaceable(true, "windows", false));
         assert!(!session_microphone_replaceable(true, "unknown", true));
+    }
+
+    #[test]
+    fn a_direct_pulse_microphone_is_pinned_to_its_source() {
+        let pulse_prop = |microphone: Option<&MicrophoneInput>| {
+            let mut command = ffmpeg_command("ffmpeg");
+            pin_direct_pulse_microphone(&mut command, microphone);
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "PULSE_PROP")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            pulse_prop(Some(&MicrophoneInput::LinuxPulse {
+                source_name: "usb_mic".to_string(),
+            }))
+            .as_deref(),
+            Some(crate::linux_pulse_audio::PULSE_PINNED_SOURCE_PROPS)
+        );
+        assert_eq!(
+            pulse_prop(Some(&MicrophoneInput::WindowsDshow {
+                device_name: "Mic".to_string(),
+            })),
+            None
+        );
+        assert_eq!(pulse_prop(None), None);
     }
 
     #[test]

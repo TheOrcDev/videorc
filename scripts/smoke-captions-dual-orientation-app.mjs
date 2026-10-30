@@ -10,6 +10,7 @@ import {
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Plan 077 gate: live captions on BOTH legs of a dual-orientation stream.
@@ -383,7 +384,7 @@ async function seedRendererDualProfile(smoke) {
       }
       localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
       localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
-      window.setTimeout(() => window.location.reload(), 150)
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
       return true
     `
   })

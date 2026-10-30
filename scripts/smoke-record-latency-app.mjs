@@ -64,7 +64,7 @@ import {
   analyzeStartupResolution,
   writeStartupReports
 } from './lib/startup-resolution-analyzer.mjs'
-import { FORGET_WORKING_SCENE_JS } from './lib/renderer-profile-seed.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const { values: args } = parseArgs({
@@ -190,8 +190,7 @@ async function seedRendererVideoProfile(smoke) {
         const seeded = { ...current, video: params.video, layout, recordEnabled: true, streamEnabled: false };
         if (params.systemAudio) seeded.audio = { ...(current.audio ?? {}), systemAudioEnabled: true };
         localStorage.setItem(key, JSON.stringify(seeded));
-        ${FORGET_WORKING_SCENE_JS}
-        setTimeout(() => location.reload(), 50);
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       video: videoProfile,
