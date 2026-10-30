@@ -17854,6 +17854,18 @@ async fn resolve_windows_recordable_video(
         return None;
     }
     let requested = params.output.video.clone();
+    // A unit test may supply this app state's hardware verdict without
+    // querying a physical adapter. This branch does not exist in app builds.
+    #[cfg(test)]
+    if state
+        .test_windows_recordable_video_accepts_requested
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Some(WindowsRecordableVideo {
+            video: requested,
+            reason: None,
+        });
+    }
     let identity = graphics_adapter_driver_identity();
     // Plan 195 S5: this machine's own measured verdict, when it has one.
     let verdict_cap =
@@ -28172,60 +28184,38 @@ mod tests {
             bitrate_kbps: 50_000,
         };
         // A Windows runner without a suitable GPU legitimately steps a
-        // record-only request down to a bridge-supported canvas. This test
-        // needs a genuinely legacy session, so seed a successful capability
-        // result for this fixture's unique FFmpeg path. No hardware probe or
-        // process-wide encoder override may decide which branch is tested.
+        // record-only request down to a bridge-supported canvas. Its unknown
+        // adapter identity is deliberately non-cacheable. Inject the hardware
+        // acceptance into this app state so the real start stays at 4K60.
         #[cfg(target_os = "windows")]
-        let recordable_video_cache_key = {
+        {
             let ffmpeg_path = output_dir
                 .join("fixture-ffmpeg.exe")
                 .to_string_lossy()
                 .into_owned();
             params.output.ffmpeg_path = Some(ffmpeg_path.clone());
-            let identity = graphics_adapter_driver_identity();
-            let verdict_cap = performance_check_software_cap(
-                &crate::performance_check::current_state(&state).await,
+            state
+                .test_windows_recordable_video_accepts_requested
+                .store(true, std::sync::atomic::Ordering::Release);
+            let selected = resolve_windows_recordable_video(&state, &ffmpeg_path, &params)
+                .await
+                .expect("the fixture supplies a recordable canvas");
+            assert_eq!(selected.video, params.output.video);
+            assert_eq!(selected.reason, None);
+            assert!(
+                !test_state()
+                    .test_windows_recordable_video_accepts_requested
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "the capability fixture belongs only to this app state"
             );
-            let key = (
-                format!(
-                    "{identity}|h264={}|cap={verdict_cap:?}",
-                    windows_h264_encoder_preference_label(windows_h264_encoder_preference().0)
-                ),
-                ffmpeg_path,
-                params.output.video.width,
-                params.output.video.height,
-                params.output.video.fps,
-                params.output.video.bitrate_kbps,
-            );
-            WINDOWS_RECORDABLE_VIDEO_CACHE
-                .get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
-                .lock()
-                .unwrap()
-                .insert(
-                    key.clone(),
-                    WindowsRecordableVideo {
-                        video: params.output.video.clone(),
-                        reason: None,
-                    },
-                );
-            key
-        };
+        }
         assert!(compositor_encoder_bridge_ruled_out(&params));
         let result = tokio::time::timeout(
             Duration::from_secs(20),
             start_session(state.clone(), params),
         )
-        .await;
-        // Remove only this fixture's entry, even if the bounded start failed.
-        #[cfg(target_os = "windows")]
-        WINDOWS_RECORDABLE_VIDEO_CACHE
-            .get()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .remove(&recordable_video_cache_key);
-        let result = result.expect("the refusal is immediate");
+        .await
+        .expect("the refusal is immediate");
         let error = format!(
             "{:#}",
             result.expect_err("a hidden legacy start is refused")

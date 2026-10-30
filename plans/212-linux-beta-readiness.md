@@ -965,3 +965,40 @@ by `/tmp/videorc-beta-hidden-legacy-verification-latest.txt`. Focused tests
 use only the backend test target with test optimization disabled; the final
 backend/bridge build and runtime smokes retain the normal optimized
 development profile. No recording-quality or timing budget changes.
+
+### State-scoped Windows capability fixture, 2026-10-30
+
+The cache-based correction did not pass Windows. Required source job
+`124041737662` on `17acc1d9` passed Clippy and 25 preview-concurrency passes,
+then failed the first `live_control_` repetition: 14 tests passed and the
+same hidden-start test failed. Full-suite and downstream source gates did
+not run. The software-reduction companion test passed. A missing Windows
+adapter deliberately produces a new UUID in its identity on every query;
+this prevents production cache reuse under an unknown driver, and also
+made the test's seeded cache entry unreachable.
+
+The fixture now injects hardware acceptance into only its `AppState`, via
+a field and resolver branch compiled exclusively for Windows unit tests.
+It checks the selected canvas before calling the real start and verifies
+that a fresh app state has no override. Global cache writes are removed.
+The production identity policy, exact refusal assertions, bounded start,
+25-repeat filter and three-full-suite requirement remain unchanged.
+
+An isolated harness runs the exact maintained resolver/selector bodies with
+substitute hardware. It reproduces the missed cache entry with changing
+identities, verifies the fixture returns 4K60 without querying an adapter,
+and verifies an independent state still follows the software reduction.
+Its non-test build compiles without the fixture field, proving the guarded
+branch is absent. Report:
+`/tmp/videorc-beta-windows-capability-isolated-7uwr2rty/report.json`.
+This is focused logic evidence, not Windows or full-backend acceptance.
+
+On the preceding source, local Cargo passes all three Agent-role tests,
+both recording live-control tests and standard Linux Clippy with the same
+four allowances. Its normal backend build is still running; the changed
+source guard will prevent its result from launching app acceptance. The
+replacement verification waits for that owned queue to finish, then runs
+focused tests, Clippy, a final normal-profile backend/bridge build and the
+app smokes sequentially. Wait receipt:
+`/tmp/videorc-beta-state-capability-wait.json`. Fresh Windows stability and
+full-suite results remain pending.

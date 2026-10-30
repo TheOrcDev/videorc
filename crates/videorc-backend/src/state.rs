@@ -986,6 +986,11 @@ pub struct AppState {
     pub oauth_callback_port: Option<u16>,
     pub events: broadcast::Sender<ServerEvent>,
     pub recording: RecordingSlot,
+    /// State-scoped hardware acceptance for real-start unit tests. An absent
+    /// GPU deliberately has a different cache identity on every query, so
+    /// tests must inject the capability result instead of seeding that cache.
+    #[cfg(all(test, target_os = "windows"))]
+    pub(crate) test_windows_recordable_video_accepts_requested: Arc<AtomicBool>,
     pub live_source_switch:
         Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
     /// Serializes user Stop/Force-stop with the shutdown-only idempotent stop
@@ -1338,6 +1343,8 @@ impl AppState {
             oauth_callback_port: None,
             events,
             recording: Arc::new(tokio::sync::Mutex::new(None)),
+            #[cfg(all(test, target_os = "windows"))]
+            test_windows_recordable_video_accepts_requested: Arc::new(AtomicBool::new(false)),
             live_source_switch: Arc::new(std::sync::Mutex::new(
                 crate::live_source_switch::SourceSwitchCoordinator::default(),
             )),
