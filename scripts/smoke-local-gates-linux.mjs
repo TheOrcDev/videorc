@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { stopProcess } from './lib/app-launcher.mjs'
+import { linuxHostPerformanceSnapshot } from './lib/linux-host-performance.mjs'
 import {
   LINUX_SOURCE_GATES,
   LINUX_RUNTIME_GATES,
@@ -80,7 +81,12 @@ try {
     if (interrupted) throw new Error('Interrupted')
     const outputDir = join(directory, step.id)
     await mkdir(outputDir, { recursive: true })
-    const row = { id: step.id, status: 'running', startedAt: new Date().toISOString() }
+    const row = {
+      id: step.id,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      hostBefore: await linuxHostPerformanceSnapshot()
+    }
     report.steps.push(row)
     await save()
     console.log(`Running ${step.id}: ${step.command} ${step.args.join(' ')}`)
@@ -123,6 +129,7 @@ try {
       await stopProcess(owned)
       child = null
       await writeFile(join(outputDir, 'output.log'), output)
+      row.hostAfter = await linuxHostPerformanceSnapshot()
       row.finishedAt = new Date().toISOString()
       await save()
     }

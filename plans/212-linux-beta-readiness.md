@@ -1430,3 +1430,71 @@ workflow-exit fix/test pair outside this PR. Full lint, full formatting/text
 checks, and focused ESLint/Prettier checks for the changed scripts pass. Source
 verification receipt: `/tmp/videorc-beta-agent-completion-verification.json`.
 No Rust or application runtime code changed in this evidence correction.
+
+### Combined-output attribution and host context, 2026-10-30
+
+The captured production raw-split FFmpeg command completes both 360-frame,
+12-second controlled moving-bar outputs with the unchanged two-second FIFO
+writer deadline. The original command and a diagnostic variant with
+`-shortest_buf_duration 0.25` both pass this limited fixture. This does not
+attribute the real-app failure to synchronization buffering and does not
+justify changing that policy. Receipt:
+`/tmp/videorc-beta-raw-split-command-1b4kw5bl/report.json`.
+
+A subsequent real-app timing diagnostic completes the combined Agents B1
+session normally. Its recording still has a 133 ms corroborated freeze and a
+three-frame repeat, beyond the full motion gate. Sequential 12-, 4- and
+2-worker Rayon diagnostics also complete combined output, but all fail the
+full motion constraints. These diagnostic scripts deliberately exit after B1;
+they are neither full Agents passes nor physical candidate acceptance. The
+failure is intermittent; no runtime repair is established. Receipts:
+`/tmp/videorc-beta-media-timing-jtzKgl/report.json` and
+`/tmp/videorc-beta-media-pool-dcETnK/report.json`.
+
+During the worker comparison, Ogre reports disconnected mains, a discharging
+battery and approximately 800 MHz on every CPU policy despite recording load.
+A later read reports connected mains while the clocks remain near 800 MHz.
+Clocks were not recorded throughout each earlier case, so this comparison
+cannot select a worker count or establish the cause of the earlier failures.
+No governor, power setting, worker count, encoder setting or threshold changes.
+The latest read-only host receipt is
+`/tmp/videorc-beta-host-context-actual.json`.
+
+Linux development gate rows now retain host snapshots before and after each
+step. Each Linux recording-matrix case also writes a private host report before
+start, before Stop, and after completion or failure; successful case results
+link that report. Measurements include mains state, battery state and capacity,
+per-policy current/configured/hardware clocks, governor and energy preference.
+Unreadable fields remain explicit and unknown; peripheral battery identifiers
+are omitted. These are point-in-time diagnostics, not continuous frequency
+measurements, a throttle verdict, a waiver or a new path to PASS. Existing
+artifact gates still decide recording quality.
+
+Focused snapshot and Linux gate tests pass all seven cases with zero skips.
+All 2,976 Node tests pass with zero skips (including the preserved local
+workflow-exit fix/test outside this PR); full lint/format and focused script
+lint/format pass. Logs:
+`/tmp/videorc-beta-host-context-full-node.log`,
+`/tmp/videorc-beta-host-context-lint.log`,
+`/tmp/videorc-beta-host-context-format-full.log` and
+`/tmp/videorc-beta-host-context-script-lint.log`.
+
+The fresh direct OpenH264 1080p30 case passes its strict artifact gates,
+including a 13 ms A/V tail. Its private host report retains all three snapshots,
+which report connected mains, a charging battery and approximately 800 MHz.
+Receipt: `/tmp/videorc-beta-host-context-runtime-Kwi7d3/report.json`;
+host-report SHA-256:
+`0b6baf891f98e5e351645017810e37bb14a4d17a0cb40d424ff802417240b9bd`.
+This is one development recording profile on the unchanged verified backend,
+not combined-output stability, the full matrix or a physical candidate pass.
+No AppImage, version or public Beta pointer changes.
+
+A second controlled command probe repeats 60 decoded frames from the passing
+real-app recording instead of the simple bar pattern. Both video producers
+deliver all 360 frames without a writer error; FFmpeg and the local receiver
+exit normally. The recording contains 362 frames and the receiver 360 after
+wall-clock FPS filtering. The slowest whole-frame write is 65 ms, below the
+unchanged two-second delivery limit. This isolates command/content handling
+from the app's frame production and scheduling; it does not prove that the
+full app or a candidate sustains combined output. Receipt:
+`/tmp/videorc-beta-raw-real-content-yi2xm_hl/report.json`.

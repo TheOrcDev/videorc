@@ -26,6 +26,7 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
+import { linuxHostPerformanceSnapshot } from './lib/linux-host-performance.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import {
@@ -161,7 +162,31 @@ async function waitForStableRing(ws, label) {
   throw new Error(`${label}: the ring never settled before the combo: ${JSON.stringify(last)}`)
 }
 
-async function recordCombo({
+async function recordCombo(options) {
+  const before = await linuxHostPerformanceSnapshot()
+  if (!before) return recordComboWithArtifactGates(options)
+  const path = join(mkdtempSync(join(outputDirectory, 'linux-host-')), 'performance.json')
+  const evidence = { combo: options.combo.label, before, beforeStop: null, after: null }
+  const save = () => writeFileSync(path, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 })
+  save()
+  console.log(`[matrix:${options.combo.label}] Linux host snapshots: ${path}`)
+  try {
+    const result = await recordComboWithArtifactGates({
+      ...options,
+      captureHostPerformance: async () => {
+        evidence.beforeStop = await linuxHostPerformanceSnapshot()
+        save()
+      }
+    })
+    return { ...result, hostPerformancePath: path }
+  } finally {
+    // Retain the host context even when start, encoding or finalization fails.
+    evidence.after = await linuxHostPerformanceSnapshot()
+    save()
+  }
+}
+
+async function recordComboWithArtifactGates({
   ws,
   smoke,
   combo,
@@ -169,7 +194,8 @@ async function recordCombo({
   assertPreviewLiveness = false,
   stress = false,
   requireTransientFifoPressure = false,
-  getTransientFifoPauseFiredCount = () => 0
+  getTransientFifoPauseFiredCount = () => 0,
+  captureHostPerformance = async () => {}
 }) {
   // The output-directory capability is single-use: one grant per session.start.
   const { capabilityId } = await requestSmokeCommand(
@@ -211,6 +237,7 @@ async function recordCombo({
   } else {
     await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
   }
+  await captureHostPerformance()
   const activeStatus = await request(ws, timeoutMs, 'recording.status')
   const streamTargetsSnapshot = streamTarget
     ? await request(ws, timeoutMs, 'stream.targets.snapshot')
