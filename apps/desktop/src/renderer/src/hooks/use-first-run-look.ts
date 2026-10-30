@@ -12,7 +12,7 @@ import {
 } from '@/lib/capture'
 import {
   firstRunLayoutOptions,
-  registryLiveBackgroundId,
+  firstRunLookFromState,
   type FirstRunLayoutOption,
   type FirstRunLook
 } from '@/lib/first-run-look'
@@ -43,18 +43,7 @@ export type FirstRunLookController = {
   setBackground: (id: LiveBackgroundId | null) => void
 }
 
-/** The look the Studio's state shows (the hold, when one waits, wins). */
-export function firstRunLookFromState(
-  config: Pick<CaptureConfig, 'layout'>,
-  registry: Pick<BackgroundAssetRegistry, 'activeSlotId' | 'live'>
-): FirstRunLook {
-  return {
-    orientation: layoutPresetOrientation(config.layout.layoutPreset),
-    layoutPreset: config.layout.layoutPreset,
-    cameraShape: config.layout.cameraShape,
-    liveBackgroundId: registryLiveBackgroundId(registry)
-  }
-}
+export { firstRunLookFromState } from '@/lib/first-run-look'
 
 export type FirstRunLookControllerInput = {
   config: CaptureConfig
@@ -62,7 +51,7 @@ export type FirstRunLookControllerInput = {
   hold: FirstRunLook | null
   mediaAccess: MediaAccessSnapshot | null
   devices: readonly Device[]
-  apply: (look: FirstRunLook) => void
+  apply: (patch: Partial<FirstRunLook>) => void
 }
 
 /** The controller's pure half: what the hook shows and what each setter applies. */
@@ -90,27 +79,22 @@ export function firstRunLookController(input: FirstRunLookControllerInput): Firs
     ),
     held: input.hold !== null,
     setOrientation: (orientation) => {
-      if (orientation === look.orientation) return
       // The gallery's toggle: the scene remembered for that orientation when
       // the sources can show it, otherwise one that works.
       const remembered = studioModeTogglePreset(orientation, input.config)
       input.apply({
-        ...look,
         orientation,
         layoutPreset: optionsFor(orientation, remembered).preselected
       })
     },
     setLayout: (preset) => {
-      if (preset === look.layoutPreset) return
-      input.apply({ ...look, orientation: layoutPresetOrientation(preset), layoutPreset: preset })
+      input.apply({ orientation: layoutPresetOrientation(preset), layoutPreset: preset })
     },
     setShape: (cameraShape) => {
-      if (cameraShape === look.cameraShape) return
-      input.apply({ ...look, cameraShape })
+      input.apply({ cameraShape })
     },
     setBackground: (liveBackgroundId) => {
-      if (liveBackgroundId === look.liveBackgroundId) return
-      input.apply({ ...look, liveBackgroundId })
+      input.apply({ liveBackgroundId })
     }
   }
 }

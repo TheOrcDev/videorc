@@ -1419,7 +1419,7 @@ export type StudioContextValue = {
    * is held here and applied through one transaction when setup closes.
    */
   firstRunLookHold: FirstRunLook | null
-  applyFirstRunLook: (look: FirstRunLook) => void
+  applyFirstRunLook: (patch: Partial<FirstRunLook>) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
   savedScenePendingId: string | null
@@ -10519,19 +10519,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Studio with no undo history and no saved-scene origin (a built-in look).
   // The setup chunk has already loaded the look's helpers when this runs.
   const applyFirstRunLook = useCallback(
-    (look: FirstRunLook): void => {
-      if (firstRunLookWritesHeld(recordingRef.current)) {
-        firstRunLookHoldRef.current = look
-        setFirstRunLookHold(look)
-        return
-      }
-      // The session that held an earlier look has ended: this write wins.
-      if (firstRunLookHoldRef.current) {
-        firstRunLookHoldRef.current = null
-        setFirstRunLookHold(null)
-      }
+    (patch: Partial<FirstRunLook>): void => {
+      // Each control owns only its changed fields. Resolve against the latest
+      // refs after the lazy module loads, so a fast background/shape choice
+      // cannot restore the layout from an earlier render.
       void import('@/lib/first-run-look').then(
-        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+        ({ firstRunBackgroundChoice, firstRunLookPatch, firstRunLookFromState }) => {
+          const previous =
+            firstRunLookHoldRef.current ??
+            firstRunLookFromState(captureConfigRef.current, backgroundRegistryRef.current)
+          const look = { ...previous, ...patch }
+          if (
+            look.orientation === previous.orientation &&
+            look.layoutPreset === previous.layoutPreset &&
+            look.cameraShape === previous.cameraShape &&
+            look.liveBackgroundId === previous.liveBackgroundId
+          )
+            return
+          if (firstRunLookWritesHeld(recordingRef.current)) {
+            firstRunLookHoldRef.current = look
+            setFirstRunLookHold(look)
+            return
+          }
+          if (firstRunLookHoldRef.current) {
+            firstRunLookHoldRef.current = null
+            setFirstRunLookHold(null)
+          }
           const current = captureConfigRef.current
           if (current.layout.arrangementMode === 'freeform') {
             noteLayoutLeavingFreeform(current.layout)
@@ -10541,6 +10554,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           workingOriginRef.current = 'builtin'
           activeSavedSceneIdRef.current = null
           setActiveSavedSceneId(null)
+          captureConfigRef.current = next
           setCaptureConfig((latest) => firstRunLookPatch(latest, look))
           const registry = backgroundRegistryRef.current
           const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
@@ -10548,7 +10562,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
           workingBackgroundRef.current = background
           setWorkingBackground(background)
-          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+          if (nextRegistry !== registry) {
+            backgroundRegistryRef.current = nextRegistry
+            setBackgroundRegistry(nextRegistry)
+          }
         }
       )
     },
@@ -17687,6 +17704,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         visual: workingVisual,
         diagnostics: {
           wsStatus,
+          replay: {
+            armed: replayArmedRef.current,
+            state: replayStateRef.current.state,
+            firstRunSetupOpen,
+            recordBlockedReason,
+            grantWait: replayGrantWait,
+            startInFlight: replayStartInFlightRef.current,
+            reconcileHeld: replayReconcileHoldRef.current,
+            performanceCheckHeld: performanceCheckHoldRef.current,
+            failedStarts: replayFailedStartsRef.current,
+            blocked: replayBlockedReasonRef.current !== null
+          },
           layoutIntentId: layoutIntentIdRef.current,
           layoutIntentAwaitingProof: layoutIntentAwaitingProofRef.current,
           confirmedSceneRevision: nativePreviewCommittedSceneRef.current?.sceneRevision ?? null,

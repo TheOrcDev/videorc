@@ -2,7 +2,15 @@
 // Plans 203 S7, 207 S8 and 212. Real macOS/Linux dev app, isolated profile.
 // No permission buttons are pressed. Cold TCC prompts need the owner's S0 pass.
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { get } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -10,6 +18,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import {
   evaluateFirstRunSmokeStep,
   FIRST_RUN_SMOKE_LIMITS,
@@ -30,7 +39,15 @@ delete process.env.ELECTRON_RUN_AS_NODE
 const outputRoot = resolve(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir())
 mkdirSync(outputRoot, { recursive: true })
 const output = mkdtempSync(join(outputRoot, 'videorc-first-run-'))
-const report = { platform: process.platform, limits: FIRST_RUN_SMOKE_LIMITS, output, steps: [] }
+const report = {
+  platform: process.platform,
+  appMode: 'vite-development',
+  screenshotSource: process.platform === 'linux' ? 'electron-content' : 'surface',
+  limits: FIRST_RUN_SMOKE_LIMITS,
+  output,
+  steps: [],
+  rendererErrors: []
+}
 const save = () =>
   writeFileSync(join(output, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
 let cdp
@@ -117,9 +134,10 @@ async function connect(url) {
     call: (method, params = {}) =>
       new Promise((resolveCall, reject) => {
         const id = ++nextId
+        const timeoutError = new Error(`CDP ${method} timed out`)
         const timer = setTimeout(() => {
           pending.delete(id)
-          reject(new Error(`CDP ${method} timed out`))
+          reject(timeoutError)
         }, 10000)
         pending.set(id, { resolve: resolveCall, reject, timer })
         ws.send(JSON.stringify({ id, method, params }))
@@ -145,8 +163,11 @@ const instrument = `(() => {
   const evidence = window.__firstRunSmoke = {
     documentId: crypto.randomUUID(), mountedAt: null, movingAt: null, setupEver: false,
     workspaceBeforeSetup: false, whatsNewOverSetup: false, draws: [], pictureDraws: [], contexts: [], toasts: [], closedAt: null,
-    tones: [], flipMark: null
+    tones: [], flipMark: null, animationFrames: 0, windowVisible: null
   };
+  const countFrame = () => { evidence.animationFrames++; requestAnimationFrame(countFrame); };
+  requestAnimationFrame(countFrame);
+  window.videorc?.onWindowVisible?.(visible => { evidence.windowVisible = visible; });
   const draw = WebGL2RenderingContext.prototype.drawArrays;
   WebGL2RenderingContext.prototype.drawArrays = function(...args) {
     const backdrop = this.canvas.closest('[data-first-run-backdrop-canvas]');
@@ -192,6 +213,14 @@ const stateExpression = `(() => {
   const registryRaw = localStorage.getItem('videorc.backgroundAssets');
   const look = document.querySelector('[data-first-run-look-layout]');
   return {
+    documentVisibility: document.visibilityState, documentFocused: document.hasFocus(),
+    animationFrames: e?.animationFrames, windowVisible: e?.windowVisible,
+    animationTimelineMs: document.timeline.currentTime,
+    animations: document.getAnimations().slice(0, 8).map(animation => ({
+      state: animation.playState, currentTime: animation.currentTime, startTime: animation.startTime
+    })),
+    backdropDraws: e?.draws.length ?? 0,
+    backdropSize: (() => { const r = document.querySelector('[data-first-run-backdrop-canvas] canvas')?.getBoundingClientRect(); return r ? { width: r.width, height: r.height } : null })(),
     setup: setup?.dataset.firstRunSetup ?? null, mode: setup?.dataset.firstRunMode ?? null,
     cardStep: document.querySelector('[data-slot="first-run-card"]')?.dataset.firstRunStep ?? null,
     position: document.querySelector('[data-slot="first-run-card"]')?.dataset.firstRunStepPosition,
@@ -272,8 +301,25 @@ async function check(step, observation) {
 }
 
 async function screenshot(name) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' })
   const path = join(output, `${name}.png`)
+  if (process.platform === 'linux') {
+    // CDP's platform-view screenshot can hang on Wayland. Electron captures
+    // the real web contents without needing an X11 view or a portal grant.
+    const captured = await requestSmokeCommand(
+      launched.connections['preview-motion-ready'],
+      'capture-page',
+      { name },
+      { timeoutMs: 10000 }
+    )
+    if (!captured?.file || statSync(captured.file).size === 0)
+      throw new Error('Electron returned an empty first-run screenshot.')
+    copyFileSync(captured.file, path)
+    return path
+  }
+  const { data } = await cdp.call('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true
+  })
   writeFileSync(path, Buffer.from(data, 'base64'))
   return path
 }
@@ -464,6 +510,7 @@ async function startApp(name) {
   const startMs = Date.now()
   launched = await launchDevApp({
     timeoutMs: 180000,
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: profile,
       VIDEORC_SMOKE_STATE_DIR: profile,
@@ -471,6 +518,7 @@ async function startApp(name) {
       VIDEORC_USER_DATA_DIR: join(profile, 'user-data'),
       VIDEORC_DEV_BACKEND_PROFILE: 'debug',
       VIDEORC_SMOKE_SKIP_FIRST_RUN: '0',
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_REMOTE_DEBUG_PORT: '0',
       RUST_LOG: 'videorc_backend=info'
     },
@@ -488,6 +536,15 @@ async function startApp(name) {
     }
   })
   if (!devtoolsUrl) throw new Error('Missing DevTools listening handshake')
+  // Backend READY can precede Vite transforming the Studio module on a cold
+  // launch. Wait for the real renderer within the original launch deadline,
+  // before attaching observations. The reload below still measures mount to
+  // first moving frame against the unchanged three-second budget.
+  await waitForRendererHook(
+    launched.connections['preview-motion-ready'],
+    '__videorcSmokeSetReplayBuffer',
+    { timeoutMs: Math.max(1, 180000 - (Date.now() - startMs)) }
+  )
   const { host } = new URL(devtoolsUrl)
   const targets = await fetchTargets(host)
   const target = targets.find(
@@ -498,6 +555,16 @@ async function startApp(name) {
   browserCdp = await connect(devtoolsUrl)
   backend = await connectBackend(launched.connections['backend-ready'], 10000)
   cdp.listeners.add((message) => {
+    if (message.method === 'Runtime.exceptionThrown') {
+      const details = message.params.exceptionDetails
+      report.rendererErrors.push({
+        profile: name,
+        text: details.exception?.description ?? details.text,
+        url: details.url,
+        line: details.lineNumber
+      })
+      save()
+    }
     if (
       message.method === 'Runtime.bindingCalled' &&
       message.params.name === '__firstRunSetupClosed' &&
@@ -509,6 +576,14 @@ async function startApp(name) {
   await cdp.call('Runtime.enable')
   await cdp.call('Runtime.addBinding', { name: '__firstRunSetupClosed' })
   await cdp.call('Page.enable')
+  // CDP activates a target but does not necessarily show its Electron window
+  // on Wayland. Exercise the foreground first-run UI through the owned window.
+  await requestSmokeCommand(
+    launched.connections['preview-motion-ready'],
+    'main-window-focus',
+    {},
+    { timeoutMs: 10000 }
+  )
   await cdp.call('Page.bringToFront')
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: instrument })
   await evaluate(instrument)
@@ -516,6 +591,13 @@ async function startApp(name) {
     'fresh',
     await waitFor('initial fresh setup', (s) => s.setup === 'open' && firstRunPermissionsReady(s))
   )
+  report.windowState = await requestSmokeCommand(
+    launched.connections['preview-motion-ready'],
+    'main-window-state',
+    {},
+    { timeoutMs: 10000 }
+  )
+  save()
   await beginGuard(startMs, false)
   report.hostGrants = await evaluate('window.videorc.getMediaAccessStatus()')
 }

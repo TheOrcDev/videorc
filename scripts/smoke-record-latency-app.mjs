@@ -409,6 +409,7 @@ let stopApp = null
 let renderer = null
 let remote = null
 let recorder = null
+let smoke = null
 try {
   mkdirSync(outputDirectory, { recursive: true })
   const launch = await launchDevApp({
@@ -430,7 +431,7 @@ try {
   })
   stopApp = launch.stop
   renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
-  const smoke = launch.connections['preview-motion-ready']
+  smoke = launch.connections['preview-motion-ready']
   recorder = new BackendEventRecorder(renderer, { debug, timeoutMs })
 
   const health = await request(renderer, timeoutMs, 'health.ping', { ffmpegPath })
@@ -580,6 +581,45 @@ try {
       : 'PASS (report-only; budgets NOT met, see above)'
   )
 } catch (error) {
+  // Keep the refusal state before disposing the isolated profile. Never dump
+  // the full Studio state: it includes destinations and resource capabilities.
+  try {
+    const response = smoke
+      ? await requestSmokeCommand(
+          smoke,
+          'eval-js',
+          {
+            code: `
+              const hook = window.__videorcSmokeScenePresets;
+              const diagnostics = hook?.state().diagnostics;
+              const state = hook?.streamingState();
+              return {
+                hookPresent: Boolean(hook),
+                wsStatus: diagnostics?.wsStatus,
+                replay: diagnostics?.replay,
+                hasScene: diagnostics?.hasScene,
+                visualTransactionPending: diagnostics?.visualTransactionPending,
+                recordingState: state?.recording?.state,
+                startBlockedReason: state?.startBlockedReason,
+                testPattern: state?.captureConfig?.sources?.testPattern,
+                microphoneOff: state?.captureConfig?.sources?.microphoneOff,
+                replayConfig: state?.captureConfig?.replayBuffer
+              };
+            `
+          },
+          { timeoutMs: 5000 }
+        )
+      : null
+    const failurePath = join(outputDirectory, 'record-latency-failure.json')
+    writeFileSync(
+      failurePath,
+      `${JSON.stringify({ generatedAt: new Date().toISOString(), commit: gitHead(), renderer: response?.result ?? null }, null, 2)}\n`,
+      { mode: 0o600 }
+    )
+    log(`failure diagnostics written to ${failurePath}`)
+  } catch {
+    log('failure diagnostics unavailable')
+  }
   console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
   process.exitCode = 1
 } finally {

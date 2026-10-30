@@ -75,17 +75,17 @@ file size or successful build is not a pass.
 
 ## Runtime scope decisions still to resolve
 
-| Feature                            | Current finding                                                           | Required completion                                                                                         |
-| ---------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| System audio                       | Linux unsupported                                                         | Implement and prove before broad streaming Beta, or obtain an explicit narrower scope decision.             |
-| Live camera/mic/screen replacement | Shared-bus microphone replacement passes development artifact checks; camera/screen still refused | Finish camera/screen replacement and exact-candidate physical recovery evidence.                         |
-| Captions                           | Shared PCM bus enabled; fake contract and rendered local-stream/recording artifacts pass | Exact-candidate physical microphone, supported-profile and packaged acceptance still required.          |
-| Separate source recordings         | macOS-only                                                                | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
-| Preview                            | CPU/BMP proof presenter                                                   | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
-| Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix   | Prove shared-bus mix and fallback warning.                                                                  |
-| First run                          | Linux setup enabled with sharing guidance; focused tests pass             | Real-app smoke and packaged physical proof still required.                                                  |
-| Notes protection                   | Capture exclusion unsupported                                             | Tell users Notes may be captured; prove behavior.                                                           |
-| Split profiles / dual orientation  | Restricted encoded paths                                                  | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
+| Feature                            | Current finding                                                                                   | Required completion                                                                                         |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| System audio                       | Linux unsupported                                                                                 | Implement and prove before broad streaming Beta, or obtain an explicit narrower scope decision.             |
+| Live camera/mic/screen replacement | Shared-bus microphone replacement passes development artifact checks; camera/screen still refused | Finish camera/screen replacement and exact-candidate physical recovery evidence.                            |
+| Captions                           | Shared PCM bus enabled; fake contract and rendered local-stream/recording artifacts pass          | Exact-candidate physical microphone, supported-profile and packaged acceptance still required.              |
+| Separate source recordings         | macOS-only                                                                                        | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
+| Preview                            | CPU/BMP proof presenter                                                                           | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
+| Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix                           | Prove shared-bus mix and fallback warning.                                                                  |
+| First run                          | Linux setup enabled with sharing guidance; focused tests pass                                     | Real-app smoke and packaged physical proof still required.                                                  |
+| Notes protection                   | Capture exclusion unsupported                                                                     | Tell users Notes may be captured; prove behavior.                                                           |
+| Split profiles / dual orientation  | Restricted encoded paths                                                                          | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
 
 ### System-audio routing investigation
 
@@ -655,3 +655,43 @@ macOS ScreenCaptureKit/Metal gates; its Linux-adapted full coverage, real device
 full matrix, latency and packaged checks remain incomplete. No skipped macOS
 check counts as Linux acceptance. System audio, live camera/screen replacement,
 publication wiring and the physical/pilot/update gates remain open.
+
+### First-run choices and runtime diagnostics, 2026-10-30
+
+Hyprland's sleeping display explained the zero-frame first-run observations:
+the output reported `dpmsStatus: false`, while Electron still reported a
+visible, focused window. Chromium's animation clock stayed at zero. Waking
+the output restored animation under the unchanged budget. This is a host
+precondition, not a shader fix or accepted presentation evidence. The smoke
+now retains animation/visibility counters and captures Electron web contents
+on Linux instead of the unreliable platform-view screenshot route.
+
+The awake smoke exposed a real setup race: clicking a layout and then a
+background could restore the previous layout. Each control now sends only
+its changed fields; the provider merges against current state after the lazy
+module loads and synchronizes its refs before another queued choice. Rapid
+choices and reversals pass regression tests. Actual app checks preserve the
+chosen look through completion, restart and replay, including dark and light
+setup flows. An isolated Skip setup probe also passes. Two whole-run attempts
+still failed during later fresh-profile attachment, before the renderer
+mounted. The harness now waits for its renderer hook within the existing
+180-second launch deadline; the mount-to-motion limit remains three seconds.
+The full smoke with that readiness barrier still needs its result recorded.
+
+One five-cycle enforced Clips latency run passed: cold start 202 ms, warm
+start p95 200 ms, stop p95 145 ms and finalization p95 132 ms, with every
+artifact checked. A subsequent fresh run reproduced the initial Clips
+failure. Its saved snapshot shows a connected, unblocked renderer, a live
+test pattern and explicit Clips intent, but three failed startup attempts.
+This remains unresolved; the successful run does not establish reliability.
+The failure report projects readiness fields instead of saving destinations
+or resource capabilities. Receipts are under
+`/tmp/videorc-beta-clips-diagnostics-cHWG41` and
+`/tmp/videorc-beta-first-run-regression-bV5Iog`.
+
+Both named-box 1080p30 encoder subsets pass again. The current setup changes
+pass 56 focused desktop tests and 158 first-run/latency/command-client Node
+tests with no skips; typecheck, lint and formatting pass. Broader desktop
+tests and a fresh frontend build are running sequentially after runtime
+measurements. These remain development/debug results. Physical AppImage,
+real OAuth, full profile, endurance and pilot acceptance remain open.

@@ -102,6 +102,14 @@ Make sure `WAYLAND_DISPLAY`, `DISPLAY`, and `DBUS_SESSION_BUS_ADDRESS` are set
 when launching from a service or over SSH: `systemctl --user
 show-environment` prints the session's values.
 
+Keep the desktop display awake for first-run animation and presented-preview
+checks. On Hyprland, `hyprctl -j monitors` must report `dpmsStatus: true` for the
+output showing the app. With the panel asleep, Electron can report a visible,
+focused window while Chromium's animation clock and frame callbacks stop.
+That run cannot prove animation timing or presented pixels. The first-run
+smoke retains animation-clock/frame counters to distinguish this from a
+shader or setup failure; waking the display does not change any gate budget.
+
 ### Where things are
 
 - App data (owned-process ledger, `linux-vaapi/` probe files, settings):
