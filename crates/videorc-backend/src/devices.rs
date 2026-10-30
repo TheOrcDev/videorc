@@ -565,11 +565,34 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
         .and_then(crate::linux_pulse_audio::parse_linux_pulse_microphone_id)
     {
         let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
-        return run_ffmpeg_volume_meter(
-            &ffmpeg_path,
-            crate::linux_pulse_audio::pulse_meter_args(&source_name),
-        )
-        .await;
+        // Retest 154 (C4): an unplugged source says so; the check itself is
+        // pinned, so it never measures the default (built-in) microphone.
+        #[cfg(target_os = "linux")]
+        {
+            let lister = ffmpeg_path.clone();
+            let listing = tokio::task::spawn_blocking(move || {
+                crate::linux_pulse_audio::linux_pulse_sources_blocking(&lister)
+            })
+            .await
+            .ok()
+            .flatten();
+            if crate::linux_pulse_audio::pulse_source_missing(listing.as_deref(), &source_name) {
+                return AudioMeterResult {
+                    status: AudioMeterStatus::Unavailable,
+                    level: None,
+                    peak_db: None,
+                    mean_db: None,
+                    message: Some(
+                        crate::linux_pulse_audio::pulse_source_not_connected_message(&source_name),
+                    ),
+                };
+            }
+        }
+        let mut command = Command::new(&ffmpeg_path);
+        command
+            .envs(crate::linux_pulse_audio::pulse_pinned_source_env())
+            .args(crate::linux_pulse_audio::pulse_meter_args(&source_name));
+        return run_ffmpeg_volume_meter_command(&ffmpeg_path, command).await;
     }
 
     if !cfg!(target_os = "macos") {
@@ -645,10 +668,15 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
 /// Runs a bounded FFmpeg `volumedetect` capture and maps its levels.
 async fn run_ffmpeg_volume_meter(ffmpeg_path: &str, args: Vec<String>) -> AudioMeterResult {
     let mut command = Command::new(ffmpeg_path);
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.args(&args);
+    run_ffmpeg_volume_meter_command(ffmpeg_path, command).await
+}
+
+async fn run_ffmpeg_volume_meter_command(
+    ffmpeg_path: &str,
+    mut command: Command,
+) -> AudioMeterResult {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let output = timeout(Duration::from_secs(6), output_owned_tokio(&mut command)).await;
     let output = match output {
