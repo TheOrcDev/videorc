@@ -1064,3 +1064,89 @@ Rust formatting, 58 focused script tests and all 2,941 Node tests pass
 platform allowances. Full desktop/source verification, focused Rust tests,
 the normal backend/bridge build and affected app smokes are being rerun.
 No recording budgets, permission requirements or physical gates change.
+
+### Merged-source runtime results and remote fixture correction, 2026-10-30
+
+On `8af8d97d`, the full desktop suite passes 6,648 tests across 603 files
+(one Windows-only OBS test skipped), and the frontend build, typecheck,
+lint and formatting pass. All six focused Rust filters pass; the normal
+optimized development backend and MCP bridge build succeeds. This remains
+development verification, not an AppImage or physical acceptance result.
+The complete source/binary receipt and individual logs are in
+`/tmp/videorc-beta-main-mic-merge-verification-JKZ6wW/report.json`.
+
+Live microphone replacement passes recording, streaming and combined modes,
+including two decoded source identities, None, duplicate fencing, monotonic
+DTS and one encoder. Both caption contract and fake-gateway/local-RTMP smokes
+pass: microphone controls affect the bus, microphone loss pads with silence,
+recordings remain clean, and SRT plus captioned export are produced.
+
+The remaining runtime failures are retained:
+
+- Remote control passes discovery, authorization, microphone, debounce and
+  scene acknowledgement, then waits for a default Clips ring that stays off.
+  This run forces OpenH264, which intentionally refuses automatic replay
+  startup. The smoke now explicitly enables the ring through the same Output
+  switch action before testing `clipMark`. It still requires confirmed ring
+  state and both successful and refused exact-ticket acknowledgements. It no
+  longer claims this proves automatic startup; the production guard is unchanged.
+- Agents passes authorization, catalog, a decoded 1280×719 picture and scene,
+  banner, takeover, microphone and privacy round trips. Its recording starts
+  and receives a marker, but Stop times out waiting for Studio. The unfinished
+  take and failure remain available; no successful session completion is claimed.
+- VAAPI completes all five measured recordings, each passing the artifact
+  checks including measured-interval coverage. Cold start is 2,263 ms, warm
+  start p95 1,338 ms, and Stop p95 1,168 ms, failing the unchanged
+  1,000/350/300 ms limits. Finalization p95 1,033 ms passes its 5,000 ms limit.
+- OpenH264 fails the first recording's startup gate with four repeated frames
+  against a maximum of two. Timing evidence survives in `cycle-0-timing.json`;
+  the remaining cycles did not run. This is not a latency pass.
+
+The sequential diagnostic run
+(`/tmp/videorc-beta-control-diagnostics-Qxwr22/report.json`) passes the corrected
+remote-control smoke through its real app. Agents reproduces the Stop timeout;
+its log records the stop intent and stopping state, but no terminal receipt
+before the tool deadline. Its cause remains unconfirmed. Both runs use the
+same built backend. The direct matrix follow-on's first two launches
+never reach backend readiness; they produce no recording evidence. Its scratch
+runner omitted the build's Cargo debug settings while skipping prebuild, so the
+dev app's `cargo run` can rebuild a different configuration. Corrected runs must
+keep the original build environment and verify binary hashes. No timeouts,
+recording budgets or physical acceptance requirements are relaxed.
+
+### Windows replay namespace ownership, 2026-10-30
+
+Required Windows source job `124073766336` on `8af8d97d` passes Clippy, all
+25 preview-concurrency runs and all 25 source/audio ownership groups. The
+first two full Rust passes each complete with 4,180 backend tests passing and
+20 ignored. The third has 4,179 passing, one failing and 20 ignored: the replay
+prepare/attach/retire test finds its root still present after cleanup. Later
+source gates are skipped, so the required job remains failed. The prior
+state-scoped hidden-start fixture passes its repeated Windows filter.
+
+Every in-memory AppState previously used a replay root named only by the
+process ID. Independent tests could delete or recreate each other's ring
+namespace. The correction stores a lazy unique root on the shared replay
+registry: independent states differ; clones keep their owner's root. The
+file-backed app path and every cleanup assertion stay unchanged. A regression
+creates the same session name in two states and proves cleaning one leaves
+the other's segment intact. It and the existing lifecycle test use the
+`live_control_` prefix so the existing PowerShell 25-run ownership group
+exercises both before the three full Windows suites.
+
+An isolated harness using the exact maintained root, directory and cleanup
+functions, with minimal AppState/Database substitutes, fails deterministically
+on the old implementation and passes all 25 runs with the correction:
+`/tmp/videorc-beta-replay-root-probe-pl4250tk/report.json`. It is not a full
+backend build or Windows stability result. The correction is applied after the preceding source's matrix/preview runs
+finish. Fresh replay-module and ownership crate tests, Clippy and the Windows
+stability/full-suite gates remain required.
+
+The corrected matrix runner keeps the original Cargo environment and verifies
+built bytes. On `8af8d97d`, the direct VAAPI 1080p30 case passes. OpenH264
+1080p30 fails actual artifact checks: a 167 ms freeze and four repeated frames
+against 100 ms and two; its 13 ms A/V tail passes. The bridge records about
+21.3 input fps and 17 pre-encode skips. The Linux proof-preview lifecycle gate
+passes all 100 cycles. These are development results on that preceding source,
+not full profile coverage or an accepted candidate. Evidence:
+`/tmp/videorc-beta-matrix-build-env-fixed-VNXs83/report.json`.
