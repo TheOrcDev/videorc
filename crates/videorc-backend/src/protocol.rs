@@ -239,6 +239,7 @@ pub struct Device {
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
     Screen,
+    #[cfg_attr(target_os = "windows", allow(dead_code))] // Windows lists no window sources yet
     Window,
     Camera,
     Microphone,

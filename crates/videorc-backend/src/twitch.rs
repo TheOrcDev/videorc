@@ -441,11 +441,10 @@ mod tests {
             prepared.stream_key_secret_ref,
             "platform:twitch:141981764:stream-key"
         );
-        assert_eq!(
-            serde_json::to_string(&prepared)
+        assert!(
+            !serde_json::to_string(&prepared)
                 .unwrap()
-                .contains("live_secret_key"),
-            false
+                .contains("live_secret_key")
         );
         assert_eq!(
             stored,

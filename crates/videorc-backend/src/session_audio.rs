@@ -640,6 +640,7 @@ impl ProducerSource {
     /// Windows) for [`SystemAudioHandle::prepare`]. The bus never retires it
     /// for silence; it retires only when `failure` is filled or the receiver
     /// disconnects.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub fn system(
         device_id: String,
         device_name: String,
@@ -1453,6 +1454,11 @@ impl BusLevels {
     }
 }
 
+/// A cancellation test's probe: the timeline generation the ramp must keep,
+/// and how to prepare that timeline's input.
+#[cfg(test)]
+type CancellationInput = (u64, fn(&mut AudioTimeline));
+
 struct AudioShared {
     owner_present: bool,
     retiring: Vec<(String, tokio::sync::watch::Receiver<ProducerCompletion>)>,
@@ -1476,7 +1482,7 @@ struct AudioShared {
     #[cfg(test)]
     after_ramp: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     #[cfg(test)]
-    cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
+    cancellation_input: Option<CancellationInput>,
     #[cfg(test)]
     mix_observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
     #[cfg(test)]
@@ -1817,18 +1823,18 @@ impl SessionAudio {
     pub fn status(&self) -> AudioBusStatus {
         self.handle.status()
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn has_selected_input(&self) -> bool {
         self.status().selected_input
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn captured_frames(&self) -> u64 {
         self.stats().captured_frames()
     }
     pub fn input_state(&self) -> NativeAudioInputState {
         self.stats().input_state()
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn source_loss_after_ms(&self) -> Option<u64> {
         self.stats().source_loss_after_ms()
     }
@@ -1841,7 +1847,7 @@ impl SessionAudio {
             .unwrap_or_else(|p| p.into_inner())
             .owner_present
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn claim_source_loss_event(&self) -> Option<SourceLoss> {
         self.handle
             .shared
@@ -3085,7 +3091,7 @@ impl MixWindowTrace {
             "availableFrames": available, "inspectedFramesPerChannel": covered,
             "missingFramesPerChannel": (to - from).saturating_sub(covered),
             "complete": omitted == 0 && covered == to - from,
-            "trailingUnpairedSample": samples.len() % 2 != 0
+            "trailingUnpairedSample": !samples.len().is_multiple_of(2)
         })
     }
 
@@ -8447,10 +8453,10 @@ mod tests {
                 task_count,
                 spawn_owner,
                 move |phase| {
-                    if phase == OwnerPhase::BeforeOpened {
-                        if let Some(tx) = opened_tx.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
+                    if phase == OwnerPhase::BeforeOpened
+                        && let Some(tx) = opened_tx.lock().unwrap().take()
+                    {
+                        let _ = tx.send(());
                     }
                 },
                 Some(ReadinessPolicy {
@@ -8544,10 +8550,10 @@ mod tests {
                 task_count,
                 spawn_owner,
                 move |phase| {
-                    if phase == OwnerPhase::BeforeOpened {
-                        if let Some(tx) = opened_tx.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
+                    if phase == OwnerPhase::BeforeOpened
+                        && let Some(tx) = opened_tx.lock().unwrap().take()
+                    {
+                        let _ = tx.send(());
                     }
                 },
                 Some(ReadinessPolicy {
@@ -12390,7 +12396,7 @@ mod mix_tests {
             PeakLimiter::default(),
         );
         assert_eq!(write.microphone, mixed.microphone);
-        assert!(write.microphone.iter().any(|sample| *sample == 1.0));
+        assert!(write.microphone.contains(&1.0));
         assert!(
             write
                 .written

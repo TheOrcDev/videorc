@@ -486,7 +486,7 @@ async fn buddy_library_use_downloads_the_account_pack_verified_and_wears_it() {
         })
     );
     // The pack wears like any of the persona's own.
-    let loaded = crate::buddy_pet::load_pack(&[root.clone()], "default", PACK).unwrap();
+    let loaded = crate::buddy_pet::load_pack(std::slice::from_ref(&root), "default", PACK).unwrap();
     assert_eq!(loaded.pack_id, PACK);
 }
 

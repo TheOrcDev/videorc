@@ -134,7 +134,7 @@ jobs:
         run: |
           set -euo pipefail
           run_clippy() {
-            cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+            cargo clippy -p videorc-backend -- -D warnings
           }
           if run_clippy; then
             exit 0

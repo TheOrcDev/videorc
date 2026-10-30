@@ -2105,6 +2105,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::identity_op)] // spells out the 200 ppm term, which rounds to zero
     fn pulse_capture_clock_stays_continuous_through_stalls_and_follows_drift() {
         // Under encode load the stamps jumped by more than 10 ms and the
         // worker stopped as "discontinuous". Adjacent capture instants must
@@ -2590,7 +2591,7 @@ mod tests {
         );
         assert_eq!(worker_start_failure_kind(&spawn_failed), None);
         // The typed kind survives the context layers session_audio adds.
-        let wrapped = anyhow::Error::from(timed_out).context("Microphone opening failed");
+        let wrapped = timed_out.context("Microphone opening failed");
         assert_eq!(
             worker_start_failure_kind(&wrapped),
             Some(WorkerStartFailureKind::ProbeTimedOut)

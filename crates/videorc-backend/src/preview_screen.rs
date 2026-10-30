@@ -49,7 +49,9 @@ use crate::state::AppState;
 
 const PREVIEW_SCREEN_DEFAULT_DEBUG_PNG_WIDTH: u32 = 1600;
 const PREVIEW_SCREEN_MAX_DEBUG_PNG_WIDTH: u32 = 2560;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const PREVIEW_SCREEN_MAX_PRODUCTION_CAPTURE_WIDTH: u32 = 3840;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const PREVIEW_SCREEN_MAX_PRODUCTION_CAPTURE_HEIGHT: u32 = 2160;
 const PREVIEW_SCREEN_CAPTURE_QUEUE_DEPTH: u32 = 3;
 const PREVIEW_SCREEN_TIMING_WINDOW: usize = 180;
@@ -60,7 +62,9 @@ const SCREEN_CAPTUREKIT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(30)
 /// native shutdown latency. The transition worker keeps owning the physical
 /// session after this deadline and publishes the eventual terminal status.
 const SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
 const SCREEN_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_SCREEN_CAPTURE_CPU_COPY";
+#[cfg(target_os = "macos")]
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT_MESSAGE: &str = "ScreenCaptureKit source discovery timed out after Screen Recording permission preflight passed.";
 
 fn native_screen_preview_thread_startup_timeout() -> Duration {
@@ -161,6 +165,7 @@ impl ScreenStartupPhase {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn native_preview_surface_env_enabled() -> bool {
     // v1 default: the native CAMetalLayer surface IS the production preview. The env
     // var remains a developer kill switch only (VIDEORC_NATIVE_PREVIEW_SURFACE=0).
@@ -170,10 +175,12 @@ fn native_preview_surface_env_enabled() -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn forced_screen_capture_cpu_copy_enabled() -> bool {
     truthy_env_value(std::env::var(SCREEN_CAPTURE_CPU_COPY_ENV).ok().as_deref())
 }
 
+#[cfg(target_os = "macos")]
 fn truthy_env_value(value: Option<&str>) -> bool {
     matches!(
         value.map(|value| value.trim().to_ascii_lowercase()),
@@ -181,6 +188,7 @@ fn truthy_env_value(value: Option<&str>) -> bool {
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn should_skip_screen_capture_cpu_copy_for_config(
     zero_copy_source_handle_available: bool,
     source_zerocopy_enabled: bool,
@@ -193,6 +201,7 @@ fn should_skip_screen_capture_cpu_copy_for_config(
         && !forced_cpu_copy_enabled
 }
 
+#[cfg(target_os = "macos")]
 fn should_skip_screen_capture_cpu_copy(zero_copy_source_handle_available: bool) -> bool {
     should_skip_screen_capture_cpu_copy_for_config(
         zero_copy_source_handle_available,
@@ -204,12 +213,6 @@ fn should_skip_screen_capture_cpu_copy(zero_copy_source_handle_available: bool) 
 
 #[cfg(target_os = "macos")]
 use crate::metal_compositor::source_zerocopy_enabled;
-
-/// Zero-copy source handoff is Metal/IOSurface-backed and exists only on macOS.
-#[cfg(not(target_os = "macos"))]
-fn source_zerocopy_enabled() -> bool {
-    false
-}
 
 pub type PreviewScreenSlot = Arc<tokio::sync::Mutex<PreviewScreenRuntime>>;
 
@@ -507,6 +510,7 @@ pub enum PreviewScreenPixelFormat {
     Bgra8,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenCaptureFrameStatus {
     Complete,
@@ -518,12 +522,14 @@ enum ScreenCaptureFrameStatus {
     Unknown,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl ScreenCaptureFrameStatus {
     fn is_valid_current_image(self) -> bool {
         self == Self::Complete
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn classify_screen_capture_frame_status(raw: Option<i64>) -> ScreenCaptureFrameStatus {
     match raw {
         Some(0) => ScreenCaptureFrameStatus::Complete,
@@ -548,6 +554,7 @@ struct ScreenCaptureFrameStatusCounts {
 }
 
 impl ScreenCaptureFrameStatusCounts {
+    #[cfg(any(target_os = "macos", test))]
     fn record(&mut self, status: ScreenCaptureFrameStatus) {
         let counter = match status {
             ScreenCaptureFrameStatus::Complete => &mut self.complete,
@@ -3422,6 +3429,7 @@ fn preview_screen_png_max_width(requested_max_width: Option<u32>) -> u32 {
         .clamp(1, PREVIEW_SCREEN_MAX_DEBUG_PNG_WIDTH)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn choose_preview_dimensions(
     source_width: u32,
     source_height: u32,
@@ -3446,6 +3454,7 @@ fn choose_preview_dimensions(
 // Backing scales live in [1, 4] on shipping Macs (2x Retina, fractional
 // "looks like" modes land between); anything outside that range is a broken
 // display-mode readback and must not distort the capture request.
+#[cfg(any(target_os = "macos", test))]
 fn clamp_backing_scale(scale: f64) -> f64 {
     if scale.is_finite() {
         scale.clamp(1.0, 4.0)
@@ -3454,12 +3463,14 @@ fn clamp_backing_scale(scale: f64) -> f64 {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn points_to_pixels(points: f64, scale: f64) -> u32 {
     (points.max(0.0) * clamp_backing_scale(scale))
         .round()
         .max(1.0) as u32
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[allow(clippy::too_many_arguments)]
 fn rects_intersect(
     a_x: f64,
@@ -3481,6 +3492,7 @@ fn rects_intersect(
         && b_y < a_y + a_height
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn rect_contains_point(
     origin_x: f64,
     origin_y: f64,
@@ -3495,6 +3507,7 @@ fn rect_contains_point(
         && y < origin_y + height.max(0.0)
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreviewScreenCaptureRequest {
     native_width: u32,
@@ -3509,6 +3522,7 @@ struct PreviewScreenCaptureRequest {
     scales_to_fit: bool,
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn select_preview_screen_capture_request(
     source_kind: &PreviewScreenSourceKind,
     source_width: u32,
@@ -3552,6 +3566,7 @@ fn normalized_protected_overlay_window_ids(mut window_ids: Vec<u32>) -> Vec<u32>
     window_ids
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn should_exclude_protected_overlay_window(window_id: u32, protected_ids: &[u32]) -> bool {
     protected_ids.binary_search(&window_id).is_ok()
 }
@@ -4476,13 +4491,20 @@ fn downscale_rgba_for_preview(
 #[derive(Clone)]
 struct NativeScreenPreviewConfig {
     source_id: String,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    // the Linux portal picks its own source
     source_kind: PreviewScreenSourceKind,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    // the Linux portal picks its own source
     display_id: Option<u32>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only ScreenCaptureKit reads it
     window_id: Option<u32>,
     ffmpeg_path: String,
     video: VideoSettings,
     include_cursor: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only ScreenCaptureKit reads it
     exclude_current_process_windows: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only ScreenCaptureKit reads it
     protected_overlay_window_ids: Vec<u32>,
     /// Set when a newer screen transition is admitted while this start waits
     /// on its share dialog (plan 0010). Transitions run in FIFO order, so a

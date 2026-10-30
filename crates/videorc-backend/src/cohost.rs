@@ -13728,7 +13728,7 @@ mod tests {
             CohostPromiseTriggerKind::Viewers,
             Some(100.0),
         )]);
-        answer.recap = Some(format!("{}", "r".repeat(200)));
+        answer.recap = Some("r".repeat(200));
         assert!(engine.apply_tick_result(generation, 0, Ok(answer), start + secs(21), "t1"));
         let state = engine.snapshot();
         assert!(state.questions[0].on_topic);
@@ -18107,8 +18107,7 @@ mod tests {
         );
         let published = seen
             .iter()
-            .filter(|event| event.event == COHOST_STATE_EVENT)
-            .last()
+            .rfind(|event| event.event == COHOST_STATE_EVENT)
             .expect("the stopped state is published");
         assert_eq!(published.payload["status"], "off");
         assert_eq!(published.payload["sessionId"], serde_json::Value::Null);

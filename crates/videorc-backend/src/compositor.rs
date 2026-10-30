@@ -72,6 +72,7 @@ use crate::scene_geometry::{
     chroma_key_alpha, chroma_key_despill, scene_crop_from_transform, scene_source_fit,
     scene_source_rect_pixels, scene_source_render_transform,
 };
+#[cfg(target_os = "macos")]
 pub use crate::source_mask::SourceMask;
 use crate::source_registry::SourceKey;
 use crate::state::AppState;
@@ -90,7 +91,9 @@ const COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER: Duration = Duration::from_sec
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER: Duration = Duration::from_millis(67);
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES: u32 = 1;
 const COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
 const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 2;
+#[cfg(target_os = "macos")]
 const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 2;
 const COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET: usize = 256;
@@ -276,7 +279,12 @@ pub enum CompositorPixelFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositorFrameExportKind {
     CpuYuv420p,
-    MetalIosurfaceTarget { width: u32, height: u32 },
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // only the Metal compositor builds it outside tests
+    MetalIosurfaceTarget {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl CompositorPixelFormat {
@@ -286,6 +294,7 @@ impl CompositorPixelFormat {
         }
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub const fn yuv420p_with_metal_iosurface_target(width: u32, height: u32) -> Self {
         Self::Yuv420p {
             export: CompositorFrameExportKind::MetalIosurfaceTarget { width, height },
@@ -1303,6 +1312,8 @@ struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
     /// Plan 205 S6: the program leg's store (see `CompositorRuntime`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // only the macOS program leg reads it; elsewhere the session draws the program
     program_frame_store: CompositorFrameStore,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
@@ -6764,6 +6775,8 @@ struct CompositorPublishResult {
 /// not), the program's verdict for the two layout-driven items, and whether
 /// a Preview surface is live to show the picture (no surface, no twin).
 struct ProgramLeg<'a> {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // only the macOS program leg composes; elsewhere the session draws the program
     gpu: &'a mut Option<GpuCompositor>,
     highlight_on_program: bool,
     buddy_on_program: bool,
@@ -6813,10 +6826,12 @@ fn should_emit_preview_surface_compositor_progress(
 
 /// Whether the Metal/GPU compositor path is requested. Metal is default-on for OBS
 /// parity; the env var is now an escape hatch for debugging CPU fallback.
+#[cfg(target_os = "macos")]
 fn metal_compositor_enabled() -> bool {
     metal_compositor_enabled_from_env(std::env::var("VIDEORC_METAL_COMPOSITOR").ok().as_deref())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn metal_compositor_enabled_from_env(value: Option<&str>) -> bool {
     !matches!(
         value.map(|value| value.trim().to_ascii_lowercase()),
@@ -7618,7 +7633,7 @@ fn test_trace_source_iso_composition(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn test_take_source_iso_composition_trace() -> Vec<SourceIsoCompositionTiming> {
     std::mem::take(
         &mut *SOURCE_ISO_COMPOSITION_TRACE
@@ -8493,6 +8508,7 @@ struct SyntheticTestPatternBgra {
     height: usize,
 }
 
+#[cfg(target_os = "macos")]
 struct MissingSourcePlaceholderBgra {
     bytes: Vec<u8>,
     width: usize,
@@ -8522,6 +8538,7 @@ fn evidence_fingerprint(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn missing_source_black_bgra() -> MissingSourcePlaceholderBgra {
     let width = MISSING_SOURCE_PLACEHOLDER_WIDTH;
     let height = MISSING_SOURCE_PLACEHOLDER_HEIGHT;
@@ -10034,6 +10051,8 @@ struct CompositorRenderInputs<'a> {
 #[derive(Clone)]
 pub(crate) struct BannerDraw {
     pub bitmap: Arc<BannerBitmap>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // only the Metal leg draws from the slot
     pub slot: u64,
     pub image: (u32, u32),
     pub rect: OverlayRect,
@@ -14057,7 +14076,7 @@ mod tests {
         ));
         assert_eq!(circle[3], 0, "top-left corner must be transparent");
         assert_eq!(
-            circle[((1 * 4 + 1) * 4) + 3],
+            circle[((4 + 1) * 4) + 3],
             255,
             "circle center must remain opaque"
         );
@@ -16225,6 +16244,7 @@ mod tests {
         .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn set_latest_frame_evidence_for_scene(
         state: &AppState,
         sequence: u64,
@@ -20912,6 +20932,7 @@ mod buddy_sprite_tests {
     /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
     /// sides), 150 px on canvas from 120 px cells, turned 30 degrees and
     /// scaled 1.1 x 0.9 about page-pet's pivot, nudged by (12, -7).
+    #[cfg(target_os = "macos")]
     fn parity_leg() -> BuddyLegFrame {
         let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
         let buddy_box = [565.0, 285.0, 150.0, 150.0];
@@ -20934,6 +20955,7 @@ mod buddy_sprite_tests {
 
     /// Distance from a canvas point to the quad's outline, and whether the
     /// point is inside.
+    #[cfg(target_os = "macos")]
     fn edge_distance(corners: [[f32; 2]; 4], point: [f32; 2]) -> (f32, bool) {
         // Outline order: top-left, top-right, bottom-right, bottom-left.
         let outline = [corners[0], corners[1], corners[3], corners[2]];
@@ -22661,14 +22683,13 @@ mod program_leg_tests {
             );
             // Captions exist only in a session; their program is any leg,
             // so an aux-only bar needs the twin and a primary bar never does.
-            assert_eq!(
+            assert!(
                 preview_needs_program_leg(
                     session,
                     replay_only,
                     overlays(OverlayLegFlags::default_for_test(), (false, true)),
                     &none
                 ),
-                true,
                 "{name}: captions on the aux leg only"
             );
             assert!(!preview_needs_program_leg(
@@ -22734,6 +22755,7 @@ mod program_leg_tests {
 
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
+    #[cfg(target_os = "macos")]
     const PET: [u8; 3] = [230, 40, 40];
 
     fn state_with_scene() -> AppState {
@@ -22778,6 +22800,7 @@ mod program_leg_tests {
     }
 
     /// The pet's box on `canvas`, as an oracle rect around its centre.
+    #[cfg(target_os = "macos")]
     fn pet_rect() -> crate::preview_debug_sample::Rect {
         let [x, y, w, h] = crate::buddy_sprite::buddy_box(
             OverlayLayout::default().buddy.horizontal,
@@ -22792,6 +22815,7 @@ mod program_leg_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn sample(store: &CompositorFrameStore) -> [f64; 3] {
         let value = crate::preview_debug_sample::sample_frame_store(store, &[pet_rect()])
             .expect("the leg published a readable frame");
@@ -22803,6 +22827,7 @@ mod program_leg_tests {
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn is_pet(rgb: [f64; 3]) -> bool {
         rgb.iter()
             .zip(PET)
@@ -23154,6 +23179,7 @@ mod program_leg_tests {
 
     /// The idle run's configuration a Clips lease parks (a stream-only
     /// Buddy is in the idle program).
+    #[cfg(target_os = "macos")]
     fn idle_config() -> CompositorLoopConfig {
         CompositorLoopConfig {
             target_fps: 30,
@@ -24402,11 +24428,15 @@ mod background_yuv_cache_tests {
 #[cfg(test)]
 mod live_background_cpu_tests {
     use std::sync::Arc;
+    #[cfg(not(target_os = "linux"))]
     use std::time::Instant;
 
     use super::*;
+    use crate::live_background::CpuLiveFrame;
+    #[cfg(not(target_os = "linux"))]
     use crate::live_background::runtime::sync as sync_live_background;
-    use crate::live_background::{CpuLiveFrame, LiveBackgroundBoard, LiveBackgroundTick};
+    #[cfg(not(target_os = "linux"))]
+    use crate::live_background::{LiveBackgroundBoard, LiveBackgroundTick};
     use crate::protocol::{
         LiveBackgroundId, LiveBackgroundMotion, LiveBackgroundRendering, LiveBackgroundSpec,
     };

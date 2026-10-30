@@ -200,7 +200,9 @@ pub struct LiveDraw<'a> {
 /// This composition's live frame, at the Full internal size.
 pub struct LiveFrame {
     pub texture: ID3D11Texture2D,
+    #[cfg_attr(not(test), allow(dead_code))] // tests check the Full size
     pub width: u32,
+    #[cfg_attr(not(test), allow(dead_code))] // tests check the Full size
     pub height: u32,
     pub rendering: LiveBackgroundRendering,
 }
@@ -857,7 +859,7 @@ impl LiveBackgroundD3d11Renderer {
         (self.pixels.len() as u32, bytes)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)] // mirrors the Metal renderer; nothing reads it on Windows yet
     pub fn guard_level(&self) -> GuardLevel {
         self.guard.level()
     }

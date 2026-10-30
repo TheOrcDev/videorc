@@ -133,6 +133,7 @@ impl LivePass {
     }
 
     /// The pass's key in the generated desktop JSON.
+    #[cfg(test)]
     pub fn key(self) -> &'static str {
         match self {
             Self::SilkField | Self::BeamsField | Self::FerrofluidField => "field",

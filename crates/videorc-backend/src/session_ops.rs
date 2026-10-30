@@ -304,6 +304,8 @@ pub(crate) fn sync_session_file_parent(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::File::open(parent)?.sync_all()?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     // MoveFileExW uses MOVEFILE_WRITE_THROUGH above; opening directories for
     // FlushFileBuffers is not portable through std on Windows.
     Ok(())
