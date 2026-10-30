@@ -173,8 +173,14 @@ does not close their acceptance rows.
   therefore cannot admit a new publisher. Missing journals require explicit
   provisioning/recovery, and initialization cannot overwrite an existing journal.
   It revalidates stored receipt/intent identity and origin order after reload.
-  These modules have no CLI, network transport or publication credentials. Their
-  protected coordinator, actual storage transport, pilot enrollment and
+  The private journal now has an S3 adapter with a separate credential namespace,
+  a reserved private prefix, signed conditional writes and exact body/ETag readback.
+  It never retries or adopts an ambiguous write. Its explicit capability probe
+  exercises create-only, stale-update and concurrent-update conditions on a fresh
+  private probe key; it cannot provision or release the publication journal.
+  The adapter has no CLI and has only run against artificial test transports.
+  These modules have no publication credentials. Their
+  protected coordinator, public artifact/pointer transport, pilot enrollment and
   updater/rollback proof remain open. The planner does not alter the
   release-controller setting.
 
@@ -551,3 +557,44 @@ The prior queued test command was intentionally stopped before it spawned
 children so these app smokes run first; its exit 143 is not a test failure.
 Current runtime results are still pending. No release readiness is inferred
 from the successful compilation or Clippy result.
+
+### Current-source runtime findings and journal transport, 2026-10-30
+
+The fresh source-checked backend build passed, as did the fake caption transport
+contract. Linux Pulse microphone replacement/loss passed both recording-only
+and streaming-only modes with two decoded source identities, intentional silence,
+duplicate fencing, one encoder and monotonic packet DTS. The combined mode was
+refused because the harness requested 640x360 recording against a 1080p stream.
+The harness draft now requests matching profiles; its artifact gate still needs
+to pass. Caption-live stopped before its pixel gate because the harness checked
+Studio's session pill while the fresh profile showed the Library. First-run
+passed initial setup, motion and reduced-motion checks, then timed out capturing
+a CDP platform-view screenshot. Draft fixes open Studio explicitly and capture
+Electron web contents on Wayland; they are not accepted runtime evidence yet.
+
+The attempted app rerun collided with the full Rust suite's Cargo build lock:
+development launches invoke `cargo run` even when prebuild is suppressed. The
+microphone and caption reruns timed out before backend readiness and therefore
+provide no new runtime behavior evidence. Run these app gates sequentially after Cargo releases
+the lock. The full current-source Rust suite is still compiling. Rust source
+remains frozen during compilation; analyzer/first-run logic tests passed all 133
+cases with zero skips. No physical acceptance row is closed by these dev runs.
+
+The new private S3 journal adapter signs the exact body checksum and conditional
+headers, requires strong ETags and bounded uncompressed GETs, and compares both
+readback bytes and generation. Missing/stale conditions fail; ambiguous PUTs do
+not retry or adopt a later observation. Bounded reads clean up owned Node/Web
+streams. Separate journal instances use the real journal state machine against
+an artificial S3 transport to prove only one claim wins. An explicit capability
+probe uses fresh private objects and verifies concurrent CAS; no real storage
+probe, journal initialization or public write has run. The full Node suite passed
+all 2,865 tests with zero failures/skips, including 16 new adapter tests. Focused
+ESLint, Prettier and diff checks passed. Private IAM/durability provisioning and
+protected coordinator integration remain required.
+
+Windows startup incident diagnostics on `598a29b0`, job `123889294179` in run
+`41002230883`, again failed all 36 independent FFmpeg-tone stream controls:
+stop tails 114–267 ms against 100 ms, with some frame counts 2.1–2.3% off against
+2%. All 12 recording-only controls passed. Artifact `12955554639` retains that
+evidence. The release runbook excludes this diagnostic job from routine release
+gates; this failed result remains recorded and no limit was relaxed.
