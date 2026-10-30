@@ -1,0 +1,5 @@
+{
+  "$comment": "Items synced from the @videorc registry (ui.videorc.com, source TheOrcDev/videorc-ui). pnpm ui:sync installs them, pnpm ui:check fails when one drifts: edit them in videorc-ui, never here. keepLocal lists files (relative to apps/desktop) an item would write that Videorc keeps as its own.",
+  "items": [],
+  "keepLocal": ["src/renderer/src/styles.css", "src/renderer/src/components/icons.tsx"]
+}

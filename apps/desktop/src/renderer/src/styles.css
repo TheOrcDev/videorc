@@ -1,15 +1,15 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+/* shadcn's variants (data-open, data-closed, data-checked, data-active,
+   data-disabled, data-horizontal, data-vertical, …) and accordion keyframes.
+   Each variant matches the Base UI attribute and Radix's data-state, so the
+   @videorc components and the Radix ones not yet replaced both style by it. */
+@import 'shadcn/tailwind.css';
 
 @custom-variant dark (&:is(.dark *));
 /* Windows-only chrome. theme-bootstrap.js sets data-platform before the
    first paint, so this never waits for runtime info. */
 @custom-variant win32 (&:is([data-platform='win32'] *));
-/* The radix-rhea registry components style by orientation through these
-   variants; without them Tailwind matches a literal data-horizontal
-   attribute that radix never sets, and e.g. slider tracks get zero height. */
-@custom-variant data-horizontal (&[data-orientation='horizontal']);
-@custom-variant data-vertical (&[data-orientation='vertical']);
 
 /*
  * Videorc design tokens (.claude/skills/videorc-design, v2: the window family).
