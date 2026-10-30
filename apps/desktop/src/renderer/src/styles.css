@@ -470,11 +470,6 @@
   --chrome-chromatic-pressed-shadow:
     inset 0 2px 5px var(--chrome-chromatic-recess), 0 0 0 1px var(--chrome-edge),
     0 0 0 1px var(--chrome-chromatic-rim);
-
-  /* The signal glitch: a broadcast breaking up, on the video ground in both
-     themes. Red and cyan split the ink and fringe the edges. */
-  --signal-glitch-red: oklch(0.63 0.26 25);
-  --signal-glitch-cyan: oklch(0.82 0.14 200);
 }
 
 /* Increase Contrast: hairlines strong enough to read on any backing, the
@@ -913,92 +908,6 @@
 @keyframes chrome-chromatic-surge {
   to {
     --chrome-chromatic-surge: 360deg;
-  }
-}
-
-/* The signal glitch (Button's `glitch`): a CRT on the video ground, with
-   scanlines, a tracking band parked below the edge and the ink split into
-   red and cyan. Hover rolls the band and jitters the split. Reduced motion
-   collapses both to their resting frame. */
-@utility signal-glitch {
-  color: var(--video-ground-foreground);
-  background-color: var(--video-ground);
-  background-image:
-    linear-gradient(to bottom, transparent 40%, oklch(1 0 0 / 18%) 50%, transparent 60%),
-    repeating-linear-gradient(to bottom, oklch(1 0 0 / 7%) 0 1px, transparent 1px 3px);
-  background-size:
-    100% 400%,
-    100% 100%;
-  background-position:
-    0 0%,
-    0 0;
-  font-family: var(--font-mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  text-shadow:
-    -1px 0 var(--signal-glitch-red),
-    1px 0 var(--signal-glitch-cyan);
-  --tw-shadow:
-    0 0 0 1px oklch(1 0 0 / 14%), -2px 0 8px -2px var(--signal-glitch-red),
-    2px 0 8px -2px var(--signal-glitch-cyan);
-  box-shadow:
-    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
-    var(--tw-ring-shadow), var(--tw-shadow);
-  &:is(button, a):hover:not(:disabled) {
-    animation:
-      signal-glitch-roll 1.1s linear infinite,
-      signal-glitch-split 0.6s steps(1, end) infinite;
-  }
-  &:is(button, a):active:not(:disabled) {
-    animation: none;
-    text-shadow:
-      -3px 0 var(--signal-glitch-red),
-      3px 0 var(--signal-glitch-cyan);
-  }
-}
-
-/* The band rolls up through the face; the scanlines crawl with it. */
-@keyframes signal-glitch-roll {
-  from {
-    background-position:
-      0 0%,
-      0 0;
-  }
-  to {
-    background-position:
-      0 100%,
-      0 3px;
-  }
-}
-
-/* Mostly still, then a few torn frames: the split swaps sides and the face
-   skews. The last frame is the resting one. */
-@keyframes signal-glitch-split {
-  0%,
-  55%,
-  100% {
-    text-shadow:
-      -1px 0 var(--signal-glitch-red),
-      1px 0 var(--signal-glitch-cyan);
-    transform: none;
-  }
-  60% {
-    text-shadow:
-      -4px 0 var(--signal-glitch-red),
-      3px 0 var(--signal-glitch-cyan);
-    transform: translateX(-1px) skewX(-6deg);
-  }
-  70% {
-    text-shadow:
-      3px 0 var(--signal-glitch-red),
-      -3px 0 var(--signal-glitch-cyan);
-    transform: translateX(2px) skewX(4deg);
-  }
-  80% {
-    text-shadow:
-      -2px 1px var(--signal-glitch-red),
-      2px -1px var(--signal-glitch-cyan);
-    transform: translateX(-1px);
   }
 }
 
