@@ -47,6 +47,15 @@ Use the smallest gate that proves the change, then run the broader gate before h
 
 CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advisory audit, TS format, TS lint, TS typecheck, desktop unit tests, and Node script tests. Device, preview, recording, and packaging smokes still need a local macOS environment with the right permissions.
 
+### Shared host
+
+- App smokes queue behind one host lock per machine, held across app relaunches.
+- Backend prebuilds and `pnpm cargo:slot …` share two build slots; use the wrapper for heavy cargo work.
+- App launches wait for host memory pressure to clear before starting.
+- `VIDEORC_SMOKE_LOCK_PORT` selects the lock port; `VIDEORC_SMOKE_BUILD_SLOTS` sets capacity (0 disables).
+- `VIDEORC_SMOKE_HOST_LOCK=0` and `VIDEORC_SMOKE_MEMORY_CHECK=0` disable their respective checks.
+- Wait limits: `VIDEORC_SMOKE_HOST_LOCK_WAIT_MS`, `VIDEORC_SMOKE_BUILD_SLOT_WAIT_MS`, `VIDEORC_SMOKE_MEMORY_WAIT_MS`.
+
 ## Recording Studio Regression Rules
 
 - Run `pnpm smoke:recording-studio` before handing off changes that touch capture selection, preview, layout composition, recording output, FFmpeg/video encoding, audio capture, or audio sync.

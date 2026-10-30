@@ -1,3 +1,7 @@
+// Synthetic child launches must not contend with real app smokes on this host.
+process.env.VIDEORC_SMOKE_HOST_LOCK = '0'
+process.env.VIDEORC_SMOKE_MEMORY_CHECK = '0'
+
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
