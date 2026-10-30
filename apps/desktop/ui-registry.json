@@ -72,7 +72,9 @@
     "device-picker",
     "use-reduced-motion",
     "use-theme-toggle",
-    "pane"
+    "pane",
+    "fader",
+    "parameter-slider"
   ],
   "keepLocal": ["src/renderer/src/styles.css", "src/renderer/src/components/icons.tsx"]
 }
