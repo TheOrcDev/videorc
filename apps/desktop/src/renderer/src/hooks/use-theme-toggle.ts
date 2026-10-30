@@ -24,7 +24,7 @@ export function useThemeToggle(): { toggleTheme: () => void } {
         return
       }
 
-      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
         return
       }
 
