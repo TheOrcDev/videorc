@@ -87,6 +87,33 @@ file size or successful build is not a pass.
 | Notes protection                   | Capture exclusion unsupported                                             | Tell users Notes may be captured; prove behavior.                                                           |
 | Split profiles / dual orientation  | Restricted encoded paths                                                  | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
 
+### System-audio routing investigation
+
+`pnpm probe:system-audio-routing:linux` is a development-only PipeWire routing
+probe. It creates two owned tones/null sinks, moves both tones to one owned sink,
+and uses explicit output-port links with automatic target selection disabled.
+Its simultaneous control must contain both 440 Hz and 880 Hz; the selective
+capture must contain 440 Hz and exclude 880 Hz on both channels. It verifies the
+capture client's server-reported PID, bounds capture/cleanup, and writes a
+private JSON receipt. Only its own processes/modules are stopped or unloaded;
+desktop configuration and default devices are unchanged.
+
+The probe passed on ogre with PipeWire 1.6.8. That establishes a possible routing
+primitive, **not Linux system-audio support**. Production registry tracking,
+Videorc/Electron process exclusion, source disappearance/replacement, timestamp
+alignment, bus integration, and real app/device acceptance are still open. The
+probe does not launch Videorc or certify any of those requirements. PipeWire
+1.6.8's `pw-record` returns 1 for an intentional capture SIGINT (only playback
+drain returns 0); the receipt retains that actual exit and requires the owned
+stop after sufficient PCM, empty stderr, and successful signal handling.
+
+The microphone artifact analyzer now accepts one exact backend-reported FFmpeg
+tee output shared by recording and stream only when their applied offsets agree.
+Duplicate roles, mismatched offsets and foreign session/process owners still
+fail. Sixteen focused analyzer/fixture tests pass. The modified Rust backend,
+Clippy and full app microphone/caption gates remain pending; this investigation
+does not close their acceptance rows.
+
 ## Maintained evidence tooling
 
 - `pnpm smoke:local-gates:linux --list` lists explicit source and Linux runtime

@@ -178,6 +178,7 @@
     "probe:ffmpeg-capture-clock": "node scripts/ffmpeg-capture-clock.mjs",
     "probe:caption-stt": "node scripts/probe-caption-stt-latency.mjs",
     "smoke:live-source-switch": "node scripts/smoke-live-source-switch-app.mjs",
+    "probe:system-audio-routing:linux": "node scripts/probe-linux-system-audio-routing.mjs",
     "smoke:youtube-quota": "node scripts/smoke-youtube-quota-app.mjs",
     "smoke:captions-contract": "cargo build -p videorc-backend && node scripts/smoke-captions-contract.mjs",
     "smoke:cohost-fake": "cargo build -p videorc-backend && node scripts/smoke-cohost-fake.mjs",
