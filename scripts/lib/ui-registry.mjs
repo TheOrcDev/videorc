@@ -377,17 +377,40 @@ export function describeDifference(local, registry, maxLines = 3) {
   ].join('\n')
 }
 
+const LEADING_COMMENTS = /^(?:\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/)+/
+
 /**
- * Drift between the registry's files (already formatted the way the sync
- * formats) and the app's: each file that is missing or differs.
+ * A file without the comments before its first statement. The shadcn CLI
+ * (4.23) writes files that way: its transforms hand back ts-morph's
+ * `getText()`, which skips the file's leading trivia, so a header comment
+ * never reaches the app.
+ */
+export function withoutLeadingComments(text) {
+  return text.replace(LEADING_COMMENTS, '')
+}
+
+/**
+ * The forms a synced file may take, before formatting: what the CLI writes
+ * today first, then the registry's text as it is, so a CLI that keeps
+ * header comments is not drift either.
+ */
+export function syncedFileForms(content) {
+  const written = withoutLeadingComments(content)
+  return written === content ? [content] : [written, content]
+}
+
+/**
+ * Drift between the registry's files (each with its `forms`, formatted the
+ * way the sync formats) and the app's: every file that is missing or matches
+ * none of its forms.
  */
 export function findDrift(expected, readLocal) {
   const drift = []
   for (const file of expected) {
     const local = readLocal(file.path)
     if (local === null) drift.push({ ...file, kind: 'missing' })
-    else if (local !== file.content) {
-      drift.push({ ...file, kind: 'differs', detail: describeDifference(local, file.content) })
+    else if (!file.forms.includes(local)) {
+      drift.push({ ...file, kind: 'differs', detail: describeDifference(local, file.forms[0]) })
     }
   }
   return drift

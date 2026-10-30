@@ -38,7 +38,8 @@ import {
   registryTemplateFrom,
   resolveItemClosure,
   serializeUiManifest,
-  shadcnAddArgs
+  shadcnAddArgs,
+  syncedFileForms
 } from './lib/ui-registry.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
@@ -305,7 +306,9 @@ async function check(names, template) {
   const expected = await Promise.all(
     compared.map(async (file) => ({
       ...file,
-      content: await formatLikeRepo(file.content, file.path)
+      forms: await Promise.all(
+        syncedFileForms(file.content).map((form) => formatLikeRepo(form, file.path))
+      )
     }))
   )
   for (const drift of findDrift(expected, (path) => readText(appPath(path)))) {
