@@ -44,6 +44,7 @@ import {
 import { BackendEventRecorder } from './lib/record-latency-events.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120_000)
@@ -202,7 +203,7 @@ try {
       try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
       localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false }));
       localStorage.setItem('videorc.aiConsent', '1');
-      setTimeout(() => location.reload(), 50);
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
       return true;
     `,
     video: { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }

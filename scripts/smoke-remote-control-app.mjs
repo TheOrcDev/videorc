@@ -26,7 +26,7 @@ import {
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import {
   CAPTURE_CONFIG_STORAGE_KEY,
-  FORGET_WORKING_SCENE_JS
+  RELOAD_KEEPING_SEED_JS
 } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -92,9 +92,8 @@ try {
         // Camera None on purpose: no id (capture.ts drops cameraOff beside one).
         const sources = { ...(current.sources ?? {}), cameraId: undefined, cameraName: undefined, cameraOff: true };
         localStorage.setItem(key, JSON.stringify({ ...current, sources }));
-        ${FORGET_WORKING_SCENE_JS}
         window.__remoteSmokeBeforeReload = true;
-        setTimeout(() => location.reload(), 50);
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `
     },
