@@ -117,6 +117,16 @@ can be overwritten by initial working-scene persistence. Startup and whole-file
 motion checks both apply, with at least 98% requested duration coverage; the
 synthetic run does not replace real camera/microphone acceptance.
 
+The full recording matrix also selects the synthetic source in the renderer
+and confirms its screen-only scene before sending the original output profiles
+to the backend. Backend-only test-pattern params leave the renderer's automatic
+Clips re-arm using its previous source, which can open an unexpected portal
+picker between profiles. Ordinary profiles and the 1080p60 hard-content case
+require moving pixels as well as correct container timing. Repeated frames and
+corroborated freezes fail, even when FFmpeg fills a CFR container. The existing
+4K noise survival and deliberate FIFO-pressure cases retain their specialized
+contracts; they do not establish normal moving-content acceptance.
+
 ### Where things are
 
 - App data (owned-process ledger, `linux-vaapi/` probe files, settings):

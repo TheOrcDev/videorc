@@ -27,7 +27,11 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
-import { analyzeRecording, DEFAULT_GATES, writeReports } from './lib/recording-analyzer.mjs'
+import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import {
+  prepareRecordingMatrixFixture,
+  recordingMatrixGates
+} from './lib/recording-matrix-fixture.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
@@ -76,20 +80,7 @@ const EXPECTED_RESULT_LABELS = [
     : [])
 ]
 
-// The strict quality-law gates. requireMotion stays off: the test pattern is
-// deliberately reused from the layout smoke and can be near-static.
-const MATRIX_GATES = Object.freeze({
-  requireMotion: false,
-  requireColorTags: true,
-  requireValidLevel: true,
-  // The test tone is never silent, so any mid-take digital-zero run is a
-  // dropped audio packet (plan 056).
-  requireNoDigitalZeroRuns: true,
-  minDurationSeconds: (recordingMs / 1000) * (1 - DEFAULT_GATES.frameCountTolerance),
-  requireKeyframeEvidence: true,
-  keyframeMaxIntervalSeconds: 2.5,
-  maxTailMismatchMs: 100
-})
+const MATRIX_GATES = Object.freeze(recordingMatrixGates(recordingMs))
 
 function sessionParams({ outputDirectoryCapability, combo, streamTarget = null }) {
   return {
@@ -137,6 +128,8 @@ function sessionParams({ outputDirectoryCapability, combo, streamTarget = null }
 // the 0.9.44 bug.
 const STRESS_GATES = Object.freeze({
   ...MATRIX_GATES,
+  // This existing 4K noise case proves survival, not moving-content acceptance.
+  requireMotion: false,
   frameCountTolerance: Number.POSITIVE_INFINITY,
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY,
   maxDurationStretchRatio: Number.POSITIVE_INFINITY,
@@ -150,6 +143,8 @@ const STRESS_GATES = Object.freeze({
 // is exactly accounted for by bounded pre-encode skips (never lost H.264 AUs).
 const TRANSIENT_FIFO_GATES = Object.freeze({
   ...MATRIX_GATES,
+  // Deliberate FIFO stalls have their own accounted-loss gate below.
+  requireMotion: false,
   frameCountTolerance: Number.POSITIVE_INFINITY,
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
@@ -407,6 +402,14 @@ async function runPass({
     stopApp = launch.stop
     const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
     const smoke = launch.connections['preview-motion-ready']
+
+    const fixture = await prepareRecordingMatrixFixture({
+      command: (name, params, waitMs) =>
+        requestSmokeCommand(smoke, name, params, { timeoutMs: waitMs }),
+      request: (method, waitMs) => request(ws, waitMs, method),
+      timeoutMs
+    })
+    console.log(`Recording matrix synthetic fixture committed: ${JSON.stringify(fixture)}`)
 
     if (streamTarget) {
       listener = spawnLocalRtmpListener(streamTarget)

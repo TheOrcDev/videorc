@@ -747,3 +747,30 @@ handover. The host was on battery; no power setting was changed, and that
 observation does not waive the failure. VAAPI latency, full profile matrices
 for both encoders and the broader Node suite continue sequentially under
 `/tmp/videorc-beta-profile-regression-ucVwWu`; their outcomes remain pending.
+
+### Full-profile fixture and motion gates, 2026-10-30
+
+The completed VAAPI latency run passed all five strict startup/whole-file
+artifact checks, but failed timing: cold 2,243 ms, warm start p95 979 ms,
+Stop p95 825 ms. Finalization p95 1,091 ms passed. Its backend timelines
+attribute 291–341 ms to admission/Clips handover, 163–172 ms to microphone
+worker preparation and 361–476 ms of Stop to waiting for FFmpeg exit. These
+are diagnostic observations, not waived budgets or release-build evidence.
+
+The full OpenH264 matrix completed with only 2/18 cases passing. Most starts
+were refused by an unexpected portal picker; the hard-content 1080p60 take
+ran but delivered approximately 27.7 fps. The harness supplied test-pattern
+params only to the backend, leaving the renderer's source selection stale
+when it automatically re-armed Clips. The matrix now selects synthetic input
+through the renderer, commits screen-only layout and checks the backend scene
+before starting its unchanged profile inventory.
+
+The original VAAPI matrix also exposed false-positive motion results: among
+its early passing profiles, 1080p60 had seven identical frames and a 217 ms
+freeze, and 4K30 had sixteen identical frames and an 800 ms freeze. Container
+fps alone is insufficient. Ordinary profile gates now enforce motion; the
+existing 4K noise survival and deliberate FIFO-pressure contracts are kept
+separate. Twenty-eight focused matrix fixture/profile tests pass with zero
+skips, and changed-script lint passes. Full corrected runtime results and
+the broader Node suite remain pending. No AppImage or physical acceptance
+claim follows from these debug-backend observations.
