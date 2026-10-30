@@ -716,7 +716,10 @@ pub mod d3d11 {
         unsafe { device.CreateTexture2D(&desc, Some(&initial), Some(&mut texture)) }
             .context("could not create the Hide screen still texture")?;
         let texture = texture.context("D3D11 returned no still texture")?;
-        Ok(RetainedD3D11Texture::new(texture, like.adapter_luid()))
+        Ok(RetainedD3D11Texture::new(
+            std::sync::Arc::new(texture),
+            like.adapter_luid(),
+        ))
     }
 
     /// The frosted still of a capture texture, as a texture plus its pixels.
