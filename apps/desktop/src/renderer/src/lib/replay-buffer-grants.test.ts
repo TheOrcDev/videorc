@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   nextPortalShareGrant,
   REPLAY_WAITS_FOR_PORTAL_SHARE,
+  REPLAY_WAITS_FOR_PREVIEW,
   REPLAY_WAITS_FOR_SCREEN,
   REPLAY_WAITS_FOR_SHARE_DIALOG,
   replayStartWaitsForGrant,
@@ -196,6 +197,44 @@ describe('replayStartWaitsForScreen (plan 207 S2)', () => {
   it('leaves Screen set to None to the record block', () => {
     expect(
       replayStartWaitsForScreen({ sources: { ...noScreen, captureOff: true }, layout: preset })
+    ).toBeNull()
+  })
+
+  it('waits for a chosen screen whose preview has not started yet (setup just closed)', () => {
+    const chosen = { ...noScreen, screenId: 'screen:screencapturekit:1' }
+    // The backend's idle status names no source (never started, or stopped).
+    const idle = { state: 'source-missing', sourceId: undefined } as const
+    expect(
+      replayStartWaitsForScreen({
+        sources: chosen,
+        layout: preset,
+        previewScreen: idle,
+        previewStarts: true
+      })
+    ).toBe(REPLAY_WAITS_FOR_PREVIEW)
+    // Once the preview names the source, a screen without frames fails as today.
+    for (const state of ['starting', 'live', 'failed', 'source-missing'] as const) {
+      expect(
+        replayStartWaitsForScreen({
+          sources: chosen,
+          layout: preset,
+          previewScreen: { state, sourceId: 'screen:screencapturekit:1' },
+          previewStarts: true
+        })
+      ).toBeNull()
+    }
+    // Smokes and auto-preview opt-outs never start that preview: no wait.
+    expect(
+      replayStartWaitsForScreen({ sources: chosen, layout: preset, previewScreen: idle })
+    ).toBeNull()
+    // A layout without a screen never waits for its preview.
+    expect(
+      replayStartWaitsForScreen({
+        sources: chosen,
+        layout: { layoutPreset: 'camera-only', arrangementMode: 'preset' },
+        previewScreen: idle,
+        previewStarts: true
+      })
     ).toBeNull()
   })
 })

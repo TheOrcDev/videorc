@@ -16591,6 +16591,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // what Sources says. A chosen screen without frames still fails as today.
   // On Linux the portal placeholder is not a choice: the ring waits for this
   // run's share to be granted, and never opens the share dialog itself.
+  // Closing setup starts the preview half a second later: the ring waits
+  // until the screen preview names its source (REPLAY_WAITS_FOR_PREVIEW).
   const replayGrantWait =
     firstRunSetupOpen ||
     replayStartWaitsForGrant({
@@ -16602,7 +16604,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       portalShareGrantedSourceId,
-      previewScreen: previewScreenStatus
+      previewScreen: previewScreenStatus,
+      previewStarts:
+        nativePreviewSurfaceEnabled &&
+        !runtimeInfo?.previewSmokeMode &&
+        !runtimeInfo?.disableAutoPreview &&
+        !runtimeInfo?.disableAutoSourcePreview
     })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
