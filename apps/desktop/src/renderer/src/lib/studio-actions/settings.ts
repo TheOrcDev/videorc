@@ -20,7 +20,7 @@ import {
 } from '@/lib/capture'
 import { CAPTION_LANGUAGES } from '@/lib/caption-languages'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
-import { SESSION_LOCK_REASON } from '@/lib/lock-view'
+import { SESSION_LOCK_REASON } from '@/components/lock-alert'
 import { pickRecordingResolution } from '@/lib/output-quality'
 import type { VideoSettings } from '../../../../shared/backend'
 import type { AgentToolExecutor } from './agent'

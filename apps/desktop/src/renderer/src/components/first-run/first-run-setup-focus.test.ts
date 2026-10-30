@@ -11,7 +11,8 @@ vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   useEffect: vi.fn(),
   useRef: vi.fn((initial: unknown) => ({ current: initial })),
-  useState: (initial: unknown) => [typeof initial === 'function' ? initial() : initial, vi.fn()]
+  useState: (initial: unknown) => [typeof initial === 'function' ? initial() : initial, vi.fn()],
+  useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot()
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => ({

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Banner } from '@/lib/backend'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { BANNER_SHOWN_LIMIT_REASON } from '@/lib/banners'
-import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
+import { OFFLINE_LOCK_REASON } from '@/components/lock-alert'
 
 import {
   BANNER_AT_BACK_REASON,

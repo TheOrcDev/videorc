@@ -32,7 +32,7 @@ import type {
   VideoSettings
 } from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
-import { unlockActionForGate } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { GO_LIVE_DIALOG_TITLE, goLiveConfirmLabel, goLiveOnReadyLabel } from '@/lib/go-live-copy'
 import {
@@ -339,7 +339,7 @@ export function GoLiveConfirmationDialog({
 
             {entitlementBlocker ? (
               <LockAlert
-                action={unlockActionForGate(entitlementBlocker)}
+                action={lockAlertAction(unlockActionForGate(entitlementBlocker))}
                 reason={entitlementBlocker.reason}
               />
             ) : null}

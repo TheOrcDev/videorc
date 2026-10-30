@@ -214,28 +214,32 @@ function AppCard({
 }): ReactElement {
   const meta = windowCountLabel(app.windowCount) ?? app.frontWindowTitle
   return (
-    <MediaCard asChild interactive={!selected} selected={selected}>
-      <button
-        aria-pressed={selected}
-        className="flex flex-col gap-2 p-2 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
-        data-app-choice={app.bundleId}
-        type="button"
-        onClick={onToggle}
-      >
-        <span className="flex aspect-video w-full items-center justify-center overflow-hidden rounded-chip bg-inset">
-          {picture && app.picture ? (
-            <img alt="" className="size-full object-contain" draggable={false} src={app.picture} />
-          ) : (
-            <AppIconImage className="size-10" icon={icon} />
-          )}
-        </span>
-        <span className="flex min-w-0 items-center gap-2">
-          {app.picture ? <AppIconImage icon={icon} /> : null}
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">{app.name}</span>
-          {selected ? <CheckIcon aria-hidden className="size-4 shrink-0" weight="bold" /> : null}
-        </span>
-        <span className="min-h-4 truncate text-xs text-muted-foreground">{meta}</span>
-      </button>
+    <MediaCard
+      interactive={!selected}
+      render={
+        <button
+          aria-pressed={selected}
+          className="flex flex-col gap-2 p-2 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
+          data-app-choice={app.bundleId}
+          type="button"
+          onClick={onToggle}
+        />
+      }
+      selected={selected}
+    >
+      <span className="flex aspect-video w-full items-center justify-center overflow-hidden rounded-chip bg-inset">
+        {picture && app.picture ? (
+          <img alt="" className="size-full object-contain" draggable={false} src={app.picture} />
+        ) : (
+          <AppIconImage className="size-10" icon={icon} />
+        )}
+      </span>
+      <span className="flex min-w-0 items-center gap-2">
+        {app.picture ? <AppIconImage icon={icon} /> : null}
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{app.name}</span>
+        {selected ? <CheckIcon aria-hidden className="size-4 shrink-0" weight="bold" /> : null}
+      </span>
+      <span className="min-h-4 truncate text-xs text-muted-foreground">{meta}</span>
     </MediaCard>
   )
 }

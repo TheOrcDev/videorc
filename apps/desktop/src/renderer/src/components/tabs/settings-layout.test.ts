@@ -96,8 +96,8 @@ describe('Settings layout', () => {
     // Plan 050, D4: sections are flush, so the columns stretch (the hairline
     // runs the full height) and no gap separates them.
     const configGrid = pageSource.slice(
-      pageSource.indexOf('export function ConfigGrid'),
-      pageSource.indexOf('export function Gallery')
+      pageSource.indexOf('function ConfigGrid'),
+      pageSource.indexOf('const CONFIG_GRID_PAIR')
     )
     expect(configGrid).toContain("'grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r'")
     expect(configGrid).not.toMatch(/\bgap-\d/)
@@ -209,7 +209,10 @@ describe('Settings layout', () => {
     const scroll = pageTabsSource.indexOf('data-slot="page-tabs-scroll"')
     expect(strip).toBeGreaterThan(-1)
     expect(scroll).toBeGreaterThan(strip)
-    const scrollRegion = pageTabsSource.slice(pageTabsSource.lastIndexOf('<div', scroll), scroll)
+    const scrollRegion = pageTabsSource.slice(
+      pageTabsSource.lastIndexOf('<div', scroll),
+      pageTabsSource.indexOf('>', scroll)
+    )
     expect(scrollRegion).toContain('key={value}')
     expect(scrollRegion).toContain('overflow-y-auto')
     expect(pageTabsSource.indexOf('{children}')).toBeGreaterThan(scroll)

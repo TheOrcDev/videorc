@@ -3,7 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactEle
 const CommandPalette = lazy(async () => ({
   default: (await import('@/components/command-palette')).CommandPalette
 }))
-import { AppErrorBoundary } from '@/components/error-boundary'
+import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { PageErrorBoundary } from '@/components/page-error-boundary'
 import { Sidebar } from '@/components/sidebar'

@@ -6,7 +6,7 @@
 
 import { isStreamTargetStartReady } from '@/lib/capture'
 import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
-import { sessionLockReason } from '@/lib/lock-view'
+import { sessionLockReason } from '@/components/lock-alert'
 import { destinationLabel } from '@/lib/platform-copy'
 import { metadataPlatformLabel } from '@/lib/stream-metadata-summary'
 import type {

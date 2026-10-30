@@ -36,6 +36,7 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
 import { BUDDY_POSTS_PROMISE, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
+import { lockAlertAction } from '@/lib/lock-view'
 import { useCleanCut } from '@/hooks/use-clean-cut'
 import { BuddyLookClientProvider } from '@/hooks/use-buddy-look'
 import {
@@ -220,7 +221,9 @@ function BuddyUnlockAlert({
   if (!view.unlock) return null
   const premium = view.unlock.action?.kind === 'view-premium'
   const reason = premium && freeNote ? `${view.unlock.reason} ${freeNote}` : view.unlock.reason
-  return <LockAlert action={view.unlock.action} data-testid={testId} reason={reason} />
+  return (
+    <LockAlert action={lockAlertAction(view.unlock.action)} data-testid={testId} reason={reason} />
+  )
 }
 
 /**

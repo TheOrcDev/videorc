@@ -9,7 +9,7 @@ import type {
 import { OVERLAY_ITEMS } from '@/lib/backend'
 import { bannerFitRect } from '@/lib/banner-place'
 import type { WsStatus } from '@/lib/capture'
-import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
+import { OFFLINE_LOCK_REASON } from '@/components/lock-alert'
 import {
   OVERLAY_ITEM_LABELS,
   clampOverlayRect,

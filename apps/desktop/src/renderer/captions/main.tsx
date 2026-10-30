@@ -2,7 +2,7 @@ import React, { useEffect, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 
 import { CaptionsReader } from '@/components/captions-reader'
-import { AppErrorBoundary } from '@/components/error-boundary'
+import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { WindowFrame } from '@/components/window-frame'
 import { WindowProviders } from '@/components/window-providers'
 import type { CaptionWindowSnapshot } from '@/lib/backend'
