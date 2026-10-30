@@ -1,3 +1,4 @@
+import { acquireHostSmokeLock, waitForHostMemory } from './lib/host-lock.mjs'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -1054,7 +1055,9 @@ function waitFor(predicate, deadlineMs, label) {
   })
 }
 
-function launchAndReadConnection() {
+async function launchAndReadConnection() {
+  await acquireHostSmokeLock()
+  await waitForHostMemory()
   return new Promise((resolveConnection, rejectConnection) => {
     const timer = setTimeout(() => {
       rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
