@@ -23,6 +23,9 @@ const buttonVariants = cva(
         xs: "h-6 gap-1 px-2.5 text-xs has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2 [&_svg:not([class*='size-'])]:size-3"
       },
       variant: {
+        // The fill's chrome under an oil-slick spectrum that slides across on
+        // hover. Colour where the theme keeps chrome neutral: one per screen.
+        chromatic: 'chrome-chromatic border-0',
         // Polished chrome: no border, so its light and shade reach the edge;
         // the focus ring still draws.
         default: 'chrome-fill border-0',
@@ -30,6 +33,9 @@ const buttonVariants = cva(
           'bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40 border-transparent',
         ghost:
           'hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50 border-transparent',
+        // A broadcast breaking up: a CRT face with split red and cyan ink
+        // that glitches on hover. Dark in both themes, like the video ground.
+        glitch: 'signal-glitch border-0',
         link: 'text-primary border-transparent underline-offset-4 hover:underline',
         outline:
           'border-border hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-input/30 bg-transparent',
@@ -40,7 +46,10 @@ const buttonVariants = cva(
         // The chip recipe: the same glass as a badge, with the secondary
         // tone under it on hover.
         secondary:
-          'glass-chip text-secondary-foreground hover:bg-secondary aria-expanded:bg-secondary'
+          'glass-chip text-secondary-foreground hover:bg-secondary aria-expanded:bg-secondary',
+        // The regular button: a flat fill in the primary ink, no chrome.
+        solid:
+          'bg-primary text-primary-foreground hover:bg-primary/85 active:bg-primary/75 aria-expanded:bg-primary/85 border-transparent'
       }
     }
   }
