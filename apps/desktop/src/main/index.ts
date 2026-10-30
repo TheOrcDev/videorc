@@ -119,6 +119,7 @@ import {
   BackendRuntimeOwner,
   backendRuntimeAcceptsBootstrap,
   claimDurableBackendPid,
+  observedExitedPid,
   requestBackendRuntimeTermination,
   settleBackendRuntimeExit,
   type OwnedBackendRuntime
@@ -3131,7 +3132,11 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   }
   window.on('close', (event) => {
     if (notesWindow === window) {
-      if (!notesWindowCloseFlushReady) {
+      // Electron reads a prevented window close during app.quit() as a
+      // cancelled quit, which on macOS leaves the app running with no
+      // windows and no backend. The quit path asked for the flush already
+      // (before-quit), so a close during the quit never prevents.
+      if (!notesWindowCloseFlushReady && !appIsQuitting) {
         event.preventDefault()
         requestNotesWindowCloseFlush(window)
         return
@@ -9883,10 +9888,17 @@ function finalizeBackendRuntimeExit(
   code: number | null,
   signal: NodeJS.Signals | null
 ): void {
+  // Only an observed exit proves the child pid dead. A stop that timed out
+  // after SIGKILL observed none, so that pid goes through the ledger probe
+  // like every other owned pid instead of losing its record.
   const settlement = settleBackendRuntimeExit(
     backendRuntimeOwner,
     runtime,
-    validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+    observedExitedPid(
+      validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+      code,
+      signal
+    ),
     (pid) => recordedBackendProcessMayStillBeOwned(runtime, pid)
   )
   for (const pid of settlement.confirmedDead) {
@@ -16979,6 +16991,12 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
     accountSignInTransactions?.dispose()
     providerOAuthCallbacks?.dispose()
     cancelBackendRestart()
+    // Notes flushes its unsaved text before it closes. Ask now, while the
+    // backend shuts down, so the window closes itself ahead of the final
+    // quit instead of prevent-defaulting that quit away.
+    if (notesWindow && !notesWindow.isDestroyed()) {
+      requestNotesWindowCloseFlush(notesWindow)
+    }
     handleBackendBeforeQuit(event, backendQuitState, {
       stopBackend,
       quit: () => app.quit(),

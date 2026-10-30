@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   OwnedProcessRegistry,
+  acquireOwnedProcessStartupLock,
   globalOwnedProcessLedgerPath,
+  startupLockIsStale,
   linuxProcessBirthToken,
   linuxProcessStatIsDead,
   linuxProcessStatState,
@@ -750,5 +752,85 @@ describe('linux /proc/<pid>/stat parsing', () => {
     expect(linuxProcessStatIsDead(running)).toBe(false)
     expect(linuxProcessStatIsDead(running.replace(') S ', ') D '))).toBe(false)
     expect(linuxProcessStatIsDead('')).toBe(false)
+  })
+})
+
+describe('owned process startup lock', () => {
+  const alive = new Set([4242])
+  const processAlive = (pid: number) => alive.has(pid)
+
+  it('judges a lock stale when its holder is gone, this process, or never wrote a pid in time', () => {
+    const options = { currentPid: 1000, staleAfterMs: 60_000, processAlive }
+    expect(startupLockIsStale(JSON.stringify({ pid: 4242 }), 10, options)).toBe(false)
+    expect(startupLockIsStale(JSON.stringify({ pid: 9999 }), 10, options)).toBe(true)
+    // PID reuse: the lock cannot be ours while we are trying to take it.
+    expect(startupLockIsStale(JSON.stringify({ pid: 1000 }), 10, options)).toBe(true)
+    // No pid yet: a writer between open and write, stale only once old.
+    expect(startupLockIsStale('', 100, options)).toBe(false)
+    expect(startupLockIsStale('', 60_000, options)).toBe(true)
+    expect(startupLockIsStale('{not json', 60_000, options)).toBe(true)
+    expect(startupLockIsStale(null, null, options)).toBe(false)
+  })
+
+  function lockHarness(initial: { contents: string; ageMs: number } | null) {
+    let file = initial
+    const events: string[] = []
+    const release = acquireOwnedProcessStartupLock({
+      lockPath: '/locks/startup.lock',
+      timeoutMs: 200,
+      retryMs: 50,
+      currentPid: 1000,
+      nowMs: () => 0,
+      sleep: (delayMs) => {
+        events.push(`sleep:${delayMs}`)
+        // Advance past the deadline so a wait that is not reclaimed times out.
+        throw new Error('slept')
+      },
+      makeDir: () => {},
+      openFileExclusive: () => {
+        if (file) {
+          throw Object.assign(new Error('exists'), { code: 'EEXIST' })
+        }
+        file = { contents: '', ageMs: 0 }
+        events.push('open')
+        return 7
+      },
+      closeFile: () => events.push('close'),
+      removeFile: () => {
+        events.push('remove')
+        file = null
+      },
+      writeFile: (_path, contents) => {
+        file = { contents, ageMs: 0 }
+      },
+      readFile: () => {
+        if (!file) throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+        return file.contents
+      },
+      fileAgeMs: () => (file ? file.ageMs : null),
+      processAlive
+    })
+    return { release, events, current: () => file }
+  }
+
+  it('reclaims a lock left by a crashed holder instead of waiting for a timeout', () => {
+    const harness = lockHarness({ contents: JSON.stringify({ pid: 9999 }), ageMs: 5 })
+    expect(harness.events).toEqual(['remove', 'open'])
+    expect(JSON.parse(harness.current()?.contents ?? '{}').pid).toBe(1000)
+    harness.release()
+    expect(harness.current()).toBeNull()
+  })
+
+  it('waits for a lock whose holder is still alive', () => {
+    expect(() => lockHarness({ contents: JSON.stringify({ pid: 4242 }), ageMs: 5 })).toThrow(
+      'slept'
+    )
+  })
+
+  it('leaves a fresh lock with no pid alone and reclaims an old one', () => {
+    expect(() => lockHarness({ contents: '', ageMs: 100 })).toThrow('slept')
+    const harness = lockHarness({ contents: '', ageMs: 120_000 })
+    expect(harness.events).toEqual(['remove', 'open'])
+    harness.release()
   })
 })
