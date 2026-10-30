@@ -153,3 +153,81 @@ export function replayStartWaitsForScreen({
   }
   return null
 }
+
+/**
+ * A buffer-only start needs the frames the previews produce: the backend
+ * refuses a scene whose visible screen or camera has produced none. At
+ * launch the ring armed (on `replay.status`) before the Studio had asked for
+ * its previews (`refreshPreview` starts the camera, then the screen), and
+ * `session.start`'s two-second wait for frames also fences the
+ * `preview.*.start` commands queued behind it: the attempt could only fail,
+ * and it delayed the very previews it waited for. The backend now refuses an
+ * automatic start whose camera has no frame before its probes
+ * (`replay-sources-not-ready`), but the screen preview is the one that lags
+ * where it starts after the camera (the Windows Intel box: three refusals
+ * and a "Clips couldn't start" toast on every launch, until a status change
+ * reset the count). So the ring waits while a preview the scene needs has
+ * not reported for the chosen source yet (the idle status carries no id) or
+ * is still starting without a frame. A reported device that is missing,
+ * denied or failed is not waited for: that start fails as it always did, and
+ * Sources says why. The gate mirrors what `ensureNativePreviewCamera` /
+ * `ensureNativePreviewScreen` start, so it never waits for a preview nothing
+ * will open.
+ */
+export const REPLAY_WAITS_FOR_CAMERA_PREVIEW = 'Waiting for the camera preview.'
+export const REPLAY_WAITS_FOR_SCREEN_PREVIEW = 'Waiting for the screen preview.'
+
+type PreviewReport = {
+  state: string
+  framesCaptured: number
+}
+
+/** The preview for `chosenId` has no frame yet: unreported, or starting. */
+function previewHasNoFrameYet(
+  report: PreviewReport,
+  reportedId: string | undefined,
+  chosenId: string
+): boolean {
+  if (!reportedId || reportedId !== chosenId) return true
+  if (report.state === 'live' || report.framesCaptured > 0) return false
+  return report.state === 'starting'
+}
+
+export function replayStartWaitsForPreview({
+  autoPreview,
+  sources,
+  layoutPreset,
+  previewCamera,
+  previewScreen
+}: {
+  /** The Studio opens the native previews itself (off in some smokes). */
+  autoPreview: boolean
+  sources: Pick<
+    CaptureConfig['sources'],
+    'screenId' | 'windowId' | 'captureOff' | 'testPattern' | 'cameraId' | 'cameraOff'
+  >
+  layoutPreset: string
+  previewCamera: PreviewReport & { cameraId?: string }
+  previewScreen: PreviewReport & { sourceId?: string }
+}): string | null {
+  if (!autoPreview) return null
+  const screenId = sources.windowId ?? sources.screenId
+  if (
+    screenId &&
+    sources.captureOff !== true &&
+    !sources.testPattern &&
+    layoutPreset !== 'camera-only' &&
+    previewHasNoFrameYet(previewScreen, previewScreen.sourceId, screenId)
+  ) {
+    return REPLAY_WAITS_FOR_SCREEN_PREVIEW
+  }
+  if (
+    sources.cameraId &&
+    sources.cameraOff !== true &&
+    layoutPreset !== 'screen-only' &&
+    previewHasNoFrameYet(previewCamera, previewCamera.cameraId, sources.cameraId)
+  ) {
+    return REPLAY_WAITS_FOR_CAMERA_PREVIEW
+  }
+  return null
+}

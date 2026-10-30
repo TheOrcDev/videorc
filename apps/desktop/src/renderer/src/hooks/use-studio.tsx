@@ -123,6 +123,7 @@ import {
 import {
   nextPortalShareGrant,
   replayStartWaitsForGrant,
+  replayStartWaitsForPreview,
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
@@ -16608,6 +16609,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       portalShareGrantedSourceId,
+      previewScreen: previewScreenStatus
+    }) ||
+    // The previews the Studio opens itself (refreshPreview) must have a
+    // frame first: a start before them is refused and, through the command
+    // lane's fence, holds them back for its two-second wait. The backend
+    // refuses the camera case early; the screen is the renderer's to wait for.
+    replayStartWaitsForPreview({
+      autoPreview:
+        nativePreviewSurfaceEnabled &&
+        !firstRunSetupOpen &&
+        !runtimeInfo?.disableAutoPreview &&
+        !runtimeInfo?.disableAutoSourcePreview &&
+        !runtimeInfo?.previewSmokeMode,
+      sources: captureConfig.sources,
+      layoutPreset: captureConfig.layout.layoutPreset,
+      previewCamera: previewCameraStatus,
       previewScreen: previewScreenStatus
     })
   const startReplayBuffer = useCallback(async (): Promise<void> => {
