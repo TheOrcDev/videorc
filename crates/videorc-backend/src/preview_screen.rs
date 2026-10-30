@@ -712,6 +712,28 @@ impl PreviewScreenFrameSource {
         }
     }
 
+    /// While the screen is hidden (plan 210 S7): the store's newest frame
+    /// only when it is the Hide screen still. A consumer that composes from
+    /// this store while hidden (the Windows D3D11 session's BGRA stand-in)
+    /// must never pick up a live frame from before the hide edge, nor one
+    /// published between the gate closing and `screen.hide` covering the
+    /// store; until the still is there it draws no screen at all. No frame
+    /// beats a live one.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn try_latest_still_frame_result(
+        &self,
+    ) -> Result<Option<FrameHandle<PreviewScreenPixelFormat>>, ()> {
+        let still = |guard: &PreviewScreenShared| {
+            latest_frame_of_generation(guard, self.generation)
+                .filter(|frame| Some(frame.storage_identity()) == guard.still_identity)
+        };
+        match self.shared.try_lock() {
+            Ok(guard) => Ok(still(&guard)),
+            Err(TryLockError::WouldBlock) => Err(()),
+            Err(TryLockError::Poisoned(poisoned)) => Ok(still(&poisoned.into_inner())),
+        }
+    }
+
     pub fn latest_frame_blocking(&self) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
         latest_frame_of_generation(
             &self
@@ -1273,8 +1295,20 @@ fn frost_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
     };
     guard.frames_captured = guard.frames_captured.saturating_add(1);
     let sequence = guard.frames_captured;
-    // The still covers the frame in the store: the same generation.
-    let generation = guard.latest_frame_generation;
+    // The still carries the CURRENT capture generation, not the covered
+    // frame's. They differ only while a swap is in flight (plan 210 S3: the
+    // completion stamped the next generation and the next target's first
+    // frame hasn't arrived). Every leg draws only frames of the generation
+    // its scene adopted, so a still under the previous generation would
+    // leave the previous window's last live frame on air under "Screen
+    // hidden" until the show, and the swap's first-frame wait would time
+    // out into a restart. Under the current generation the program cuts to
+    // the frost and the swap completes on it; the next target's first frame
+    // then holds (one still per hide). The covered frame is held under its
+    // own generation, so a show before that first frame publishes it only
+    // to a scene still naming its window.
+    let still_generation = guard.capture_generation;
+    let held_generation = guard.latest_frame_generation;
     publish_cpu_still(
         guard,
         sequence,
@@ -1282,14 +1316,14 @@ fn frost_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
         height,
         still,
         Instant::now(),
-        generation,
+        still_generation,
     );
     // The live picture stays private for the show.
     guard.held_live = Some(HeldLiveFrame {
         width,
         height,
         bytes: frame.bytes.clone(),
-        generation,
+        generation: held_generation,
         source_iosurface: frame.source_iosurface.clone(),
         source_pixel_buffer: frame.source_pixel_buffer.clone(),
         #[cfg(target_os = "windows")]
@@ -1405,11 +1439,14 @@ fn frost_d3d11_store_now(guard: &mut PreviewScreenShared) -> bool {
     }
     guard.frames_captured = guard.frames_captured.saturating_add(1);
     let sequence = guard.frames_captured;
+    // Read before the still moves the store to the current generation: a
+    // hide during an in-flight swap keeps the covered frame under its own.
+    let held_generation = guard.latest_frame_generation;
     frost_d3d11_texture_into_store(guard, sequence, &texture, Instant::now());
     guard.held_live_d3d11 = Some(HeldLiveFrame {
         width: frame.width,
         height: frame.height,
-        generation: guard.latest_frame_generation,
+        generation: held_generation,
         source_d3d11_texture: Some(texture),
         ..HeldLiveFrame::default()
     });
@@ -8304,6 +8341,130 @@ mod tests {
             privacy_stripes(1)
         );
         assert_eq!(shared.latest_frame_generation, 2);
+    }
+
+    /// The other order (plan 210 D5 under D8): the swap's completion has
+    /// stamped the next generation, and the hide lands before the next
+    /// target's first frame. Every leg draws only frames of the generation
+    /// its scene adopted, so the still must carry the CURRENT generation:
+    /// the program cuts to the frost (and the swap's first-frame wait
+    /// completes on it) instead of holding the previous window's last live
+    /// frame while the Studio says "Screen hidden". The previous window's
+    /// live frame is held under its own generation; the next target's
+    /// frames hold under theirs.
+    #[test]
+    fn a_hide_during_an_in_flight_swap_frosts_under_the_current_generation() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.capture_generation = 1;
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        begin_capture_generation(&mut shared, 2);
+        assert_eq!(shared.latest_frame_generation, 1);
+
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        let still = latest_frame_of_generation(&shared, 2)
+            .expect("the still carries the current generation, so the switch cuts to it");
+        assert_frosted_stripes(&still.bytes);
+        assert_eq!(shared.latest_frame_generation, 2);
+        assert!(latest_frame_of_generation(&shared, 1).is_none());
+        assert_eq!(
+            shared.held_live.as_ref().unwrap().generation,
+            1,
+            "the previous window's live frame keeps its own generation"
+        );
+
+        // The next target's first frame holds: one still per hide, nothing
+        // restarts.
+        shared.frames_captured = 3;
+        publish_gated_bgra_frame(
+            &mut shared,
+            3,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().storage_identity(),
+            still.storage_identity()
+        );
+        assert_eq!(shared.held_live.as_ref().unwrap().generation, 2);
+        assert_eq!(shared.privacy_held_frames, 1);
+
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(shared.frame_store.latest().unwrap().bytes, privacy_white());
+        assert_eq!(shared.latest_frame_generation, 2);
+    }
+
+    /// The Windows D3D11 session composes from this store while hidden. Its
+    /// read answers only the still: never the live frame from before the
+    /// hide edge (the gate closes before `screen.hide` covers the store),
+    /// and nothing once the show released the live picture.
+    #[test]
+    fn a_hidden_consumer_reads_only_the_still_from_the_store() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
+            Arc::clone(&gate),
+        )));
+        shared.lock().unwrap().capture_generation = 1;
+        let source = PreviewScreenFrameSource {
+            shared: Arc::clone(&shared),
+            source_key: None,
+            generation: 1,
+        };
+        {
+            let mut guard = shared.lock().unwrap();
+            guard.frames_captured = 1;
+            publish_gated_bgra_frame(
+                &mut guard,
+                1,
+                PRIVACY_W,
+                PRIVACY_H,
+                privacy_stripes(0),
+                Instant::now(),
+            );
+        }
+        assert!(source.try_latest_frame_result().unwrap().is_some());
+        assert!(source.try_latest_still_frame_result().unwrap().is_none());
+
+        // The gate closed; the store still holds the live frame.
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(
+            source.try_latest_still_frame_result().unwrap().is_none(),
+            "a live frame from before the hide edge is never the still"
+        );
+        assert!(frost_cpu_store_now(&mut shared.lock().unwrap()));
+        let still = source
+            .try_latest_still_frame_result()
+            .unwrap()
+            .expect("the still");
+        assert_frosted_stripes(&still.bytes);
+        assert_eq!(
+            source
+                .try_latest_frame_result()
+                .unwrap()
+                .unwrap()
+                .storage_identity(),
+            still.storage_identity()
+        );
+
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared.lock().unwrap()));
+        assert!(source.try_latest_still_frame_result().unwrap().is_none());
+        assert_eq!(
+            source.try_latest_frame_result().unwrap().unwrap().bytes,
+            privacy_stripes(0)
+        );
     }
 
     /// A show between the swap and the next target's first frame publishes

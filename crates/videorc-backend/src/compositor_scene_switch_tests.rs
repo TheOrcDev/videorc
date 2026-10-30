@@ -922,6 +922,102 @@ async fn a_swap_while_hidden_cuts_to_a_frosted_still_never_the_live_window() {
     );
 }
 
+/// The other order (plan 210 D5 under D8): Follow swaps to the next window,
+/// and the hide lands after the swap's completion stamped the new generation
+/// but before that window's first frame. Every leg draws the frame of the
+/// adopted generation, so the still must carry it: the program cuts to the
+/// frost at once, never holding the previous window's last live frame under
+/// a "Screen hidden" chip, and the swap completes on the still, no restart.
+#[tokio::test]
+async fn a_hide_during_an_in_flight_swap_never_keeps_the_previous_window_live() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 36;
+    let stripes = |phase: usize| {
+        let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let value = if ((index % WIDTH as usize) / 2 + phase) % 2 == 0 {
+                255
+            } else {
+                0
+            };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    };
+    // Luma steps along one row: live stripes alternate every two pixels;
+    // the frost is smooth.
+    let max_step = |bytes: &[u8]| {
+        (8..WIDTH - 8)
+            .map(|x| bytes[(18 * WIDTH + x) as usize])
+            .collect::<Vec<u8>>()
+            .windows(2)
+            .map(|pair| pair[0].abs_diff(pair[1]))
+            .max()
+            .unwrap_or(0)
+    };
+    let state = state();
+    let mut scene = snapshot(SceneSourceKind::Window);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
+    state.compositor.lock().await.scene = Some(scene.clone());
+    install_screen(&state, "window:alpha", 1, 11, [0, 255, 0, 255]).await;
+    assert!(
+        crate::preview_screen::test_publish_screen_bgra(&state, 20, stripes(0), Instant::now())
+            .await
+    );
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    publish(&state, &mut sources, &mut cache).await;
+    let alpha = latest_bytes(&state).await;
+    assert!(max_step(&alpha) > 100, "the previous window is live on air");
+
+    // The swap's completion stamps generation 2; no frame of beta yet.
+    crate::preview_screen::test_swap_live_screen_generation(&state, "window:beta", 2).await;
+    state
+        .screen_privacy
+        .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+    assert!(crate::preview_screen::hold_screen_now(&state).await);
+    scene.revision = 2;
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:beta".into());
+    state.compositor.lock().await.scene = Some(scene);
+    let result = publish(&state, &mut sources, &mut cache).await;
+    assert!(
+        result.fingerprint.screen.is_some(),
+        "the still carries the adopted generation, so the switch completes on it"
+    );
+    let on_air = latest_bytes(&state).await;
+    let step = max_step(&on_air);
+    assert!(
+        step < 40,
+        "the previous window's live stripes stayed on air after the hide: max step {step}"
+    );
+
+    // Beta's first frame holds behind the still.
+    assert!(
+        crate::preview_screen::test_publish_screen_bgra(&state, 30, stripes(1), Instant::now())
+            .await
+    );
+    publish(&state, &mut sources, &mut cache).await;
+    let step = max_step(&latest_bytes(&state).await);
+    assert!(
+        step < 40,
+        "the next window's live stripes reached the program: max step {step}"
+    );
+    assert_eq!(
+        crate::preview_screen::test_privacy_held_frames(&state).await,
+        1
+    );
+
+    state.screen_privacy.show();
+    assert!(crate::preview_screen::release_screen_now(&state).await);
+    publish(&state, &mut sources, &mut cache).await;
+    let step = max_step(&latest_bytes(&state).await);
+    assert!(
+        step > 100,
+        "the show publishes the next window's held live frame: max step {step}"
+    );
+}
+
 #[tokio::test]
 async fn same_device_new_generation_is_adopted_at_scene_commit() {
     let state = state();

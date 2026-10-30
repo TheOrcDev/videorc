@@ -2453,6 +2453,14 @@ mod runtime {
                 privacy_resume_pending = !privacy_hidden_now;
                 retained_capture_ticket = None;
                 pending_capture = None;
+                if privacy_hidden_now {
+                    // The BGRA frame in hand and its upload are live pixels
+                    // from before the edge: drop them with the texture lease.
+                    // The still replaces them below; until it is read, no
+                    // screen is drawn at all.
+                    capture_frame = None;
+                    last_capture_upload = None;
+                }
                 cfr.replace_source();
             }
             let fresh_committed = live_sources.snapshot();
@@ -2657,7 +2665,15 @@ mod runtime {
                     .as_ref()
                     .and_then(|current| current.capture.as_ref())
                 {
-                    if let Ok(Some(frame)) = source.try_latest_frame_result()
+                    // Hidden, only the gate's still is taken from the store:
+                    // the gate closes before `screen.hide` covers the store,
+                    // so its newest frame can still be live for a tick.
+                    let latest = if privacy_hidden {
+                        source.try_latest_still_frame_result()
+                    } else {
+                        source.try_latest_frame_result()
+                    };
+                    if let Ok(Some(frame)) = latest
                         && frame.bytes.len() == frame.width as usize * frame.height as usize * 4
                         && capture_frame
                             .as_ref()

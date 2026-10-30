@@ -1135,6 +1135,13 @@ rectangle are told apart by the completion alone (today's behaviour).
 cursor resets at the swap, so the next window's first frame publishes frosted
 and its live pixels wait for the show. A show between the swap and that first
 frame publishes the previous window's held live frame under its own generation.
+The other order (review, 2026-10-29): a hide after the swap's completion
+stamped the next generation but before the next window's first frame publishes
+the still under the CURRENT generation, so every leg cuts to the frost at once
+and the swap completes on it (no restart); the covered frame is held under its
+own generation. The Windows D3D11 session's hidden stand-in reads only the
+gate's still from the store and drops the live BGRA frame and upload it held at
+the hide edge.
 
 **Renderer preflight.** `lib/scene-apply-preflight.ts`: the strict check judges
 the device list the Studio already holds, refuses a source turned off at once,
