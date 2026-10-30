@@ -101,6 +101,14 @@ file size or successful build is not a pass.
 - `pnpm release:validate:linux-beta-acceptance --template <release.json>` emits a
   pending JSON template. Save it separately from frozen candidate source. Fill
   it from real observations; no template values authorize publication.
+- `pnpm release:candidate:download:linux --release-id <id> --source-commit
+<full-sha> --sha256 <appimage-sha256> --output-parent <private-directory>`
+  retrieves the six private candidate objects using candidate-read storage
+  authority. It creates a new mode-0700 directory, refuses any mismatched
+  identity/feed/checksum or partial/compressed/oversized response, and retains
+  the AppImage without execute permission. Existing files are never replaced.
+  Strip storage authority before the later payload inspection and app launch;
+  downloading and hashing does not execute candidate code or pass acceptance.
 - `pnpm release:validate:linux-beta-acceptance <release.json> <record.json>
 <private-evidence-root>` checks identity, both desktops, all categories,
   metrics/endurance/pilot and actual private evidence-file SHA-256s. This checks
@@ -218,6 +226,50 @@ the default. No production configuration or deployment changed. The website
 checks manifest claims; protected publication still must verify full evidence
 and exact feed/artifact bytes. Packaged pilot enrollment and real update/rollback
 rehearsals remain open.
+
+### Runtime investigation, 2026-10-30
+
+The debug backend build completed (SHA-256
+`d756ca3fe639016bc909a9d0c463f86ec2582c19d893e8c9b872c1b3df611fe0`), and
+the fake-service caption transport contract passed. These are development
+results from dirty source, not candidate acceptance. The OpenH264 1080p30
+matrix passed its format/profile checks, but its static-source run reported
+700 ms freeze, a 20-frame repeat run and 6.678 s silence. It does **not** pass
+the Beta motion/audio budgets; no thresholds changed.
+
+The real renderer/local RTMP caption smoke produced a correct clean recording
+and captioned copy but zero caption pixels in the received stream. Linux's raw
+bridge had no auxiliary caption picture. A draft now supplies separate clean
+and captioned CPU YUV feeds for matching profiles up to 30 fps. It remains
+unaccepted pending Rust and final-artifact gates. Other split profiles and dual
+orientation remain restricted. The microphone smoke also failed because its
+synthetic-only disconnect RPC cannot operate a real Pulse worker. Its draft
+now disconnects/restores only the owned fixture source and reads a separate
+admin-only timing receipt bound to the session and encoder process. Raw Linux
+output timing and exact shared tee fanout are being added to that inspector.
+
+A separate real Pulse fixture probe found PipeWire moving FFmpeg to the system
+default input when the named source disappeared. Per-child
+`node.dont-reconnect=true node.dont-fallback=true` properties closed capture
+with no further PCM in the repeated probe. The draft applies them to workers,
+direct-input fallback and meters, leaving playback and system settings alone.
+The complete app loss/replacement gate still has to pass. These properties are
+specific to PipeWire (the supported desktops' default); they do not certify a
+native PulseAudio server's loss behavior.
+
+First-run acceptance remains open: a prebuilt renderer completed five initial
+checks before a screenshot timeout on a static reduced-motion frame. A draft
+view-screenshot retry has not passed. A later run inadvertently rebuilt the
+backend with inconsistent Cargo profile settings; that owned process group was
+stopped. Use the same bounded Cargo settings for prebuild and app launch.
+
+The web companion #101 merged normally at
+`4f758dbd3b95f676d06218b7be606347c6b1b0a2` after all three checks passed.
+Production deployment and Beta availability have not been verified or enabled.
+Desktop #930 remains draft. Its Linux job on `06d0f4c` was interrupted with
+exit 143 during Rust compilation, after policy and Clippy passed; a job-only
+rerun was requested. Neither that interruption nor a successful skip proves
+Rust execution.
 
 Web typecheck and lint passed (five existing lint warnings); the focused
 cross-platform download/update suite passed 115 tests, and the final Beta/card
