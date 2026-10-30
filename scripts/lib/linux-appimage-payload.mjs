@@ -10,10 +10,13 @@ import { sha256File } from './linux-release.mjs'
 export async function withLinuxAppImagePayload(
   { artifactPath, sha256, sizeBytes },
   inspect,
-  { extract = execFileSync } = {}
+  { extract = execFileSync, temporaryParent = tmpdir() } = {}
 ) {
-  const directory = await mkdtemp(join(tmpdir(), 'videorc-appimage-validation-'))
+  let directory = await mkdtemp(join(temporaryParent, 'videorc-appimage-validation-'))
   try {
+    // Resolve legitimate temporary-parent aliases before extraction, so the
+    // exact root comparison below still rejects links created by the payload.
+    directory = await realpath(directory)
     const artifact = join(directory, 'candidate.AppImage')
     await copyFile(artifactPath, artifact)
     if (

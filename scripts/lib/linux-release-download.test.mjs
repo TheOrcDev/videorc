@@ -77,8 +77,12 @@ for (const channel of ['alpha', 'beta'])
       await readFile(join(result.directory, h.manifest.filename)),
       h.objects.get(`${h.prefix}/${h.manifest.filename}`)
     )
-    assert.equal((await stat(join(result.directory, h.manifest.filename))).mode & 0o777, 0o600)
-    assert.equal((await stat(result.directory)).mode & 0o777, 0o700)
+    // POSIX mode bits do not represent Windows ACLs. Byte identity, fresh
+    // directory ownership and cleanup are still exercised on every platform.
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(join(result.directory, h.manifest.filename))).mode & 0o777, 0o600)
+      assert.equal((await stat(result.directory)).mode & 0o777, 0o700)
+    }
     assert.equal(h.requests.length, 6)
     assert.ok(h.requests.every((key) => key.startsWith(`${h.prefix}/`)))
     assert.equal(await readFile(join(h.parentDirectory, 'keep.txt'), 'utf8'), 'existing user data')

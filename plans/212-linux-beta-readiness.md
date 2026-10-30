@@ -1341,3 +1341,45 @@ Prettier check and repository text-integrity check pass:
 Fresh Windows desktop/source CI remains required; Linux verification does
 not substitute for it. There are no Rust or recording-path changes in this
 correction, and no new candidate acceptance or publication evidence.
+
+### Windows candidate-tooling portability, 2026-10-30
+
+Required Windows source job `124210299772` on `0a84338e` passes Clippy,
+both 25-run stability groups and all three full Rust runs. Desktop tests now
+pass all 602 files / 6,638 tests, with five existing platform skips. This
+confirms the earlier desktop path correction. The subsequent Node suite has
+2,840 passing, three failing and 94 skipped tests; later source checks do not
+run. The required job remains failed. Evidence:
+`/tmp/videorc-beta-windows-source-0a84338.log` and
+`/tmp/videorc-beta-windows-source-124210299772-classification.json`.
+
+The AppImage fixture creates a real extraction directory, but the validator's
+raw path comparison mistakes a canonical temporary-parent alias for a payload
+symlink. The validator now canonicalizes its owned temporary directory before
+copying or extracting. The exact extracted-root comparison, payload-file
+containment, ELF/hash checks and environment isolation remain enforced. A
+new directory-alias regression fails with the prior comparison and passes
+with canonicalization. A separate regression rejects an extracted-root
+symlink, removes the owned extraction directory and preserves unrelated data;
+directory junctions keep these tests executable on Windows without symlink
+privileges.
+
+The two download failures compare Windows mode bits to POSIX `0600`/`0700`.
+These permission assertions now apply on POSIX hosts. Windows still exercises
+both channels' exact bytes, identity, storage requests and cleanup; this is
+not Windows ACL evidence. No Linux permission or artifact requirement changes.
+All 23 focused tests pass with no skips:
+`/tmp/videorc-beta-candidate-paths-focused.log`.
+The original reproduced failure is retained in
+`/tmp/videorc-beta-candidate-paths-before.log`.
+No Rust, desktop runtime or release identity changes are involved. Fresh
+Windows source CI and all physical Beta acceptance remain required.
+
+The broader Node suite passes all 2,969 tests with zero skips:
+`/tmp/videorc-beta-candidate-paths-node.log`. This local suite includes the
+preserved workflow-exit correction/test pair that remains outside the PR.
+After the test import's formatting-only correction, the 23 focused tests,
+changed-file formatting and repository text integrity pass again; focused
+ESLint also passes. Logs use the `/tmp/videorc-beta-candidate-paths-` prefix
+(`focused-final.log`, `format-final.log`, `text.log`, `lint.log`). These are
+tooling regressions with artificial candidate bytes, not AppImage acceptance.

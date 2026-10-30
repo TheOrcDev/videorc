@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -88,4 +97,65 @@ test('payload inspection uses hash-checked AppImage copy and removes it even on 
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+async function payloadFixture(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'appimage-root-test-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const artifactPath = join(directory, 'candidate.AppImage')
+  const elf = Buffer.alloc(64)
+  elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1])
+  elf.writeUInt16LE(62, 18)
+  await writeFile(artifactPath, elf)
+  return {
+    directory,
+    candidate: { artifactPath, sha256: await sha256File(artifactPath), sizeBytes: elf.length }
+  }
+}
+
+test('accepts a temporary-parent alias without mistaking it for an extracted symlink', async (t) => {
+  const { directory, candidate } = await payloadFixture(t)
+  const parent = join(directory, 'actual-parent')
+  const alias = join(directory, 'parent-alias')
+  await mkdir(parent)
+  // Directory junctions also work on Windows without symlink privileges.
+  await symlink(parent, alias, 'junction')
+  let extractedDirectory
+  const result = await withLinuxAppImagePayload(
+    candidate,
+    async (root) => {
+      assert.equal(await payloadFilePresent(root, 'payload'), true)
+      return readFile(join(root, 'payload'), 'utf8')
+    },
+    {
+      temporaryParent: alias,
+      extract: (_path, _args, { cwd }) => {
+        extractedDirectory = cwd
+        mkdirSync(join(cwd, 'squashfs-root'))
+        writeFileSync(join(cwd, 'squashfs-root', 'payload'), 'exact payload')
+      }
+    }
+  )
+  assert.equal(result, 'exact payload')
+  assert.equal(dirname(extractedDirectory), await realpath(parent))
+  assert.deepEqual(await readdir(parent), [])
+})
+
+test('rejects an extracted root symlink and cleans only the owned extraction directory', async (t) => {
+  const { directory, candidate } = await payloadFixture(t)
+  const outside = join(directory, 'outside')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'unrelated data')
+  let extractedDirectory
+  await assert.rejects(
+    withLinuxAppImagePayload(candidate, () => assert.fail('must not inspect a redirected root'), {
+      extract: (_path, _args, { cwd }) => {
+        extractedDirectory = cwd
+        symlinkSync(outside, join(cwd, 'squashfs-root'), 'junction')
+      }
+    }),
+    /extraction root is a symlink/
+  )
+  await assert.rejects(readFile(join(extractedDirectory, 'candidate.AppImage')), { code: 'ENOENT' })
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'unrelated data')
 })
