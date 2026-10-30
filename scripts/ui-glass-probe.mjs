@@ -1,7 +1,8 @@
-// probe:ui-glass: chrome ground by default; VIDEORC_GLASS=clear runs the
-// original real-composited glass A/B checks. Ground mode requires no native
-// effect views, exact pixel stability in every maintained chrome sample,
-// the loaded theme asset, and captured worst-pixel contrast for all S2 tiers.
+// probe:ui-glass: the solid palette by default (the chrome ground was removed
+// on 2026-10-29); VIDEORC_GLASS=clear runs the original real-composited glass
+// A/B checks. The default requires no native effect views, exact pixel
+// stability in every maintained chrome sample, no ground image mounted, and
+// captured worst-pixel contrast for all S2 tiers.
 // --dom-only collects DOM/native diagnostics without claiming capture acceptance.
 //
 // Launches the dev app with isolated user data, puts a stand-in wallpaper
@@ -86,7 +87,7 @@ import {
   groundDomChecks,
   isClearGlassRun,
   pixelStability
-} from './lib/chrome-ground-checks.mjs'
+} from './lib/window-ground-checks.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import {
   belowSheen,

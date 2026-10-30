@@ -11,7 +11,7 @@ import {
 
 describe('window ground argument', () => {
   it('round-trips every ground through the argv', () => {
-    for (const ground of ['chrome', 'glass', 'solid'] as const) {
+    for (const ground of ['glass', 'solid'] as const) {
       const argument = windowGroundArgument(ground)
       expect(argument).toBe(`${WINDOW_GROUND_ARGUMENT_PREFIX}${ground}`)
       expect(
@@ -22,14 +22,16 @@ describe('window ground argument', () => {
 
   it('reads the final occurrence, so an inherited app argument cannot pick a window ground', () => {
     expect(
-      windowGroundFromArguments(['--videorc-window-ground=glass', '--videorc-window-ground=chrome'])
-    ).toBe('chrome')
+      windowGroundFromArguments(['--videorc-window-ground=glass', '--videorc-window-ground=solid'])
+    ).toBe('solid')
   })
 
   it('returns null without an argument or with a value it does not know', () => {
     expect(windowGroundFromArguments([])).toBeNull()
     expect(windowGroundFromArguments(['electron', '--videorc-renderer-role=notes'])).toBeNull()
     expect(windowGroundFromArguments(['--videorc-window-ground=desktop'])).toBeNull()
+    // The chrome ground is gone (2026-10-29).
+    expect(windowGroundFromArguments(['--videorc-window-ground=chrome'])).toBeNull()
     expect(windowGroundFromArguments(['--videorc-window-ground='])).toBeNull()
   })
 })

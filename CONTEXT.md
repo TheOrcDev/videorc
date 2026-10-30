@@ -295,10 +295,10 @@ The two other windows, by these names.
 _Avoid_: Teleprompter, Preview window (as a title)
 
 **Chrome ground**:
-The still of Liquid Chrome under every Videorc window (plan 208): black
-metal with soft silver streaks in dark, and the same turned around,
-porcelain with graphite streaks, in light. It never moves, and the desktop
-never shows through it. The Preview has none, because it frames video.
+The still of Liquid Chrome that plan 208 put under every Videorc window. The
+owner removed it on 2026-10-29: windows are now the plain solid (chrome
+black in dark, porcelain in light), and only the phone remote still shows
+the still.
 _Avoid_: wallpaper, background (a scene has one), live background (it never
 moves), glass
 

@@ -42,7 +42,8 @@ const api: VideorcApi = {
   getAppIcons: (bundleIds) => invoke('app:icons', bundleIds),
   // What this window sits on (plan 208): main's call, off the window's argv,
   // so the theme bootstrap can set data-ground before the first paint. Every
-  // Videorc window names one; a missing value leaves the bootstrap's default.
+  // Videorc window names one; a missing value leaves the bootstrap's default
+  // (solid).
   ...(() => {
     const windowGround = windowGroundFromArguments(process.argv)
     return windowGround ? { windowGround } : {}
