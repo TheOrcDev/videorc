@@ -673,7 +673,10 @@ class StudioBackend {
           this.accountTransportFailuresRemaining -= 1
           throw new Error('Temporary account sign-in transport failure.')
         }
-        return signedInAccount
+        // A successful exchange persists before its reply. Subsequent account
+        // refreshes must read that committed snapshot, just like the backend.
+        this.accountSnapshot = signedInAccount
+        return this.accountSnapshot
       case 'account.sign_out':
         return { status: 'signed-out' }
       case 'overlays.layout.get':
@@ -11785,6 +11788,7 @@ describe('real StudioProvider lifecycle', () => {
   })
 
   it('boots, commits a layout, records, stops, and acknowledges a bound account callback', async () => {
+    vi.useFakeTimers()
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -11831,13 +11835,23 @@ describe('real StudioProvider lifecycle', () => {
       )
     })
 
-    await waitForObservation(
-      () =>
-        latest()?.core.wsStatus === 'connected' &&
-        latest()?.core.account?.status === 'signed-in' &&
-        acknowledgedCallbacks.includes(callbackEnvelope.id) &&
-        acknowledgedProviderCallbacks.includes(providerCallbackEnvelope.id)
-    )
+    const callbacksCommitted = (): boolean =>
+      latest()?.core.wsStatus === 'connected' &&
+      latest()?.core.account?.status === 'signed-in' &&
+      acknowledgedCallbacks.includes(callbackEnvelope.id) &&
+      acknowledgedProviderCallbacks.includes(providerCallbackEnvelope.id)
+    // Drive the transport, provider and acknowledgement retries without
+    // spending nearly the entire test deadline in real backoff timers.
+    for (let attempt = 0; attempt < 500 && !callbacksCommitted(); attempt += 1) {
+      await act(async () => {
+        await vi.dynamicImportSettled()
+        await vi.advanceTimersByTimeAsync(10)
+      })
+    }
+    expect(callbacksCommitted()).toBe(true)
+    vi.useRealTimers()
+    // The fake Electron window copied the timer functions at installation.
+    Object.assign(window, { setTimeout, clearTimeout, setInterval, clearInterval })
     expect(latest()?.core.deviceList.devices.map((device) => device.id)).toEqual([
       'screen:dxgi:0000000000000001:1',
       'camera:1',
@@ -11873,6 +11887,8 @@ describe('real StudioProvider lifecycle', () => {
       backend.commands.filter((command) => command.method === 'platformAccounts.oauth.complete')
     ).toHaveLength(4)
     expect(acknowledgedProviderCallbacks).toEqual([providerCallbackEnvelope.id])
+    expect(backend.accountSnapshot).toEqual(signedInAccount)
+    expect(latest()?.core.account).toEqual(backend.accountSnapshot)
 
     await act(async () => {
       latest()?.core.applyLayoutPatch({ layoutPreset: 'screen-only' })
@@ -15738,7 +15754,7 @@ describe('real StudioProvider lifecycle', () => {
     const flushAsyncWork = async (): Promise<void> => {
       for (let iteration = 0; iteration < 12; iteration += 1) {
         await act(async () => {
-          await Promise.resolve()
+          await vi.dynamicImportSettled()
           await vi.advanceTimersByTimeAsync(0)
           await Promise.resolve()
         })

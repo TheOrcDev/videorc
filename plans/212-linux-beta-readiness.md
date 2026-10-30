@@ -872,3 +872,32 @@ Neither Rust check nor the new backend build is reported as complete.
 Logs use the `/tmp/videorc-beta-main-merge-` prefix. The old runtime binary is
 not used for this merged source; fresh backend provenance is recorded in
 `/tmp/videorc-beta-main-merge-backend-provenance.json`.
+
+### Account fixture and desktop regression follow-up, 2026-10-30
+
+The delayed exit-143 notification for
+`/tmp/videorc-beta-replay-regression-Wc4WGx` matches its recorded intentional
+interruption after main advanced. Its earlier matrix and latency failures
+remain failed evidence; the interrupted desktop step is not a pass.
+
+The merged-source StudioProvider file then reported 65 failures, beginning
+with its combined boot/sign-in/recording case and followed by overlapping
+React `act` calls. An isolated trace showed the fake backend acknowledged
+sign-in but returned its old signed-out snapshot on the next account refresh.
+The fixture now persists the successful exchange before replying, as the real
+backend does. The test asserts both the persisted and observed identity.
+Its transport/provider/acknowledgement retries use a controlled clock and
+wait for lazy imports to settle; four OAuth attempts, both acknowledgements,
+record/start/stop assertions and the normal test deadline remain enforced.
+The cooldown recovery test also waits for pending imports before advancing
+its clock. Temporary diagnostic instrumentation is removed.
+
+Eight focused account/recovery cases pass on the final fixture. The full
+desktop rerun is queued in
+`/tmp/videorc-beta-account-persistence-0rqgg8vr/report.json`; it waits for the
+owned prior suite to exit before starting another full suite. Full desktop
+success is still pending. Typecheck, ESLint and formatting pass; a final
+renderer typecheck is also queued after restoring the fake window's real
+timer bindings. These test-fixture changes do not alter the Rust/Cargo source digest;
+the fresh backend build and its queued production-target Clippy check remain
+in progress. No merged-source runtime or exact-AppImage pass is claimed.
