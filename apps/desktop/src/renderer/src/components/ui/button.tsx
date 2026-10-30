@@ -33,9 +33,6 @@ const buttonVariants = cva(
           'bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40 border-transparent',
         ghost:
           'hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50 border-transparent',
-        // A broadcast breaking up: a CRT face with split red and cyan ink
-        // that glitches on hover. Dark in both themes, like the video ground.
-        glitch: 'signal-glitch border-0',
         link: 'text-primary border-transparent underline-offset-4 hover:underline',
         outline:
           'border-border hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-input/30 bg-transparent',
