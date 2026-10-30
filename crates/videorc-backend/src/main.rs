@@ -23577,11 +23577,13 @@ mod agent_role_tests {
     use super::*;
     use crate::agent_mcp::test_support;
 
-    /// D19: Phone remote's event list and the remote intent surface are
-    /// byte-identical to `dc1309cb`. A change here needs its own plan and a
-    /// leak argument, never a ride on the Agents work.
+    /// D19: Agents cannot widen Phone remote's event list or intent surface.
+    /// Plan 210 separately added a bounded saved-scene ID and the three
+    /// screen privacy intents in `9028bec9`; their leak arguments are in
+    /// docs/remote-control.md. Pin that reviewed enum and keep the original
+    /// LAN events. Further changes still need their own plan and leak argument.
     #[test]
-    fn remote_surface_is_pinned_to_dc1309cb() {
+    fn remote_surface_is_pinned_to_reviewed_plan_210() {
         assert_eq!(
             crate::remote_lan::LAN_EVENTS,
             &[
@@ -23608,8 +23610,8 @@ mod agent_role_tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            hash, "4858a6c539c15f41af2682f40b038cbf53d89f8d2897a6db4a089c4f9d45f466",
-            "RemoteIntent is not byte-identical to dc1309cb"
+            hash, "b68d8ae70b3a142f2b45be1ed66959360bd9104a78048461c280dfcfca605fa8",
+            "RemoteIntent differs from the reviewed Plan 210 surface in 9028bec9; review the plan and leak argument before changing this pin"
         );
     }
 

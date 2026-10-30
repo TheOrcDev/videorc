@@ -775,7 +775,6 @@ skips, and changed-script lint passes. Full corrected runtime results and
 the broader Node suite remain pending. No AppImage or physical acceptance
 claim follows from these debug-backend observations.
 
-
 ### Corrected matrix results and automatic Clips-start race, 2026-10-30
 
 The corrected OpenH264 full matrix ran every case without the unexpected
@@ -901,3 +900,35 @@ renderer typecheck is also queued after restoring the fake window's real
 timer bindings. These test-fixture changes do not alter the Rust/Cargo source digest;
 the fresh backend build and its queued production-target Clippy check remain
 in progress. No merged-source runtime or exact-AppImage pass is claimed.
+
+### Protocol pin and completed desktop verification, 2026-10-30
+
+The corrected full desktop run completed successfully: 603 test files and
+6,641 tests passed; the one Windows-only OBS test remains skipped, not a
+Linux pass. This includes all 203 StudioProvider cases. The tested fixture
+bytes match `6c6f950c`; its report and commit provenance are retained under
+`/tmp/videorc-beta-account-persistence-0rqgg8vr`. The final renderer
+typecheck passed. The earlier merged-source backend build and required
+production-target Clippy check also completed successfully, with the same
+four documented Linux allowances.
+
+Linux CI job `123992118254` on `6c6f950c` passed FFmpeg policy, provisioning
+and Clippy, then reported 4,116 Rust tests passed, one failed and 19 ignored.
+The sole failure was an outdated Agents guard that still pinned Phone
+remote's intent enum to `dc1309cb`. The enum is byte-identical to reviewed
+main `9028bec9`: Plan 210 added a bounded saved-scene ID and three fieldless
+screen privacy intents, with leak arguments already in `docs/remote-control.md`.
+The guard now pins that reviewed enum and retains the original five LAN
+events. No remote method, event or production behavior changes in this fix.
+
+An isolated Rust harness executes the exact updated test with the production
+enum and event constant. The reviewed baseline passes; adding an unreviewed
+intent or LAN event fails as expected. This is not full-crate validation.
+Report: `/tmp/videorc-beta-remote-pin-z40e7ixd/report.json`. Rust formatting
+and diff checks pass. Focused Cargo tests, standard Linux Clippy, a final
+backend/bridge build and the remote-control/Agents app smokes are queued
+sequentially in `/tmp/videorc-beta-remote-pin-verification-latest.txt`.
+They refuse changed Rust source or a changed backend binary. The test edit
+changes the source digest, so the earlier build is not claimed as validation
+of the final source. Full Rust CI and these new runtime results remain
+pending; no candidate or release acceptance is implied.
