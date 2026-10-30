@@ -310,7 +310,8 @@
     "probe:windows-openh264": "node scripts/probe-windows-openh264-comparison.mjs",
     "release:validate:linux-beta-acceptance": "node scripts/validate-linux-beta-acceptance.mjs",
     "smoke:local-gates:linux": "node scripts/smoke-local-gates-linux.mjs",
-    "release:candidate:download:linux": "node scripts/download-linux-release-candidate.mjs"
+    "release:candidate:download:linux": "node scripts/download-linux-release-candidate.mjs",
+    "release:plan:linux-beta-promotion": "node scripts/plan-linux-beta-promotion.mjs"
   },
   "devDependencies": {
     "@electron/fuses": "1.8.0",

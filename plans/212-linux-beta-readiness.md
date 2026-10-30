@@ -146,6 +146,24 @@ does not close their acceptance rows.
   route. A future promotion workflow must call this validator against retrieved
   private evidence, not merely trust the manifest URL. **Promotion wiring is
   still open; this first slice does not create a public release path.**
+- `pnpm release:plan:linux-beta-promotion -- --candidate-dir <verified-directory>
+  --release-id <id> --source-commit <sha> --sha256 <appimage-sha256>
+  --trusted-main-commit <sha> --acceptance-record-url <pinned-url>
+  --evidence-root <private-directory> --output <new-private-plan.json>` prepares
+  a read-only public-promotion plan. It loads the acceptance blob from the pinned
+  Git commit (never the working file), checks candidate/record ancestry and the
+  trusted tree's package version, enforces the full physical/pilot contract,
+  and hashes every private receipt and measured artifact. It also rechecks all
+  six candidate files and feed/sidecar consistency. The plan contains only
+  isolated Beta destinations and exact source hashes; Alpha is refused. It
+  neither executes the AppImage nor writes storage. The output file is created
+  exclusively, so an existing plan is never overwritten.
+- A plan is not publication authority. Protected automation must independently
+  establish current main, exact candidate build provenance and payload validity,
+  retrieve private evidence, compare remote versions/bytes, bind pointer writes
+  to prior state, journal ambiguous writes and verify all configured origins.
+  The protected finalizer, pilot enrollment and updater/rollback proof remain
+  open. The planner does not alter the release-controller setting.
 
 ### Private measurement receipts
 
@@ -346,9 +364,27 @@ The document policy now canonicalizes percent-escaped unreserved ASCII only
 for file URLs; sender, role, main-frame and exact-document checks still apply.
 Encoded separators/delimiters, different files and remote URLs remain refused.
 All 82 focused authorization/preload/IPC tests pass. Full source verification
-and a fresh Windows installer/recovery run remain required.
+has now passed typecheck, lint and formatting; the full desktop suite and a
+fresh Windows installer/recovery run remain required.
 
 The Linux rerun on the older `06d0f4c` head also ended with runner shutdown
 and exit 143 during Rust test compilation (job `123812040834`). Policy and
 Clippy passed; Rust tests never executed. This is not a test pass or an observed
 source failure. Current-head CI must replace that incomplete evidence.
+
+### Public promotion preparation, 2026-10-30
+
+The read-only Beta promotion planner passes 79 focused release/acceptance tests,
+including a real temporary Git repository, pinned record reads, ancestry/version
+refusals, changed candidate/evidence bytes, incomplete acceptance and short
+pilots. Focused ESLint and formatting passed. The full worktree Node suite passed
+all 2,820 tests with zero failures or skips, using two workers and the isolated
+web checkout (including the locally preserved workflow regression tests). These artificial contract tests
+do not supply physical acceptance or authorize storage publication. No real
+candidate has been accepted and no public object or availability setting changed.
+
+Linux CI run `40983512321` on `aa6fff68` again received a runner shutdown
+signal, ending with exit 143 during test compilation after FFmpeg checks and
+Clippy passed. The job lasted six minutes, below its 45-minute timeout. No Rust
+test result exists. A job-only retry was requested for job `123829230084`; keep
+the PR head stable until that retry reports a result.
