@@ -9,7 +9,7 @@ import type { ReactElement } from 'react'
 import { toastUserError } from '@/lib/user-error'
 
 import { GroupedList } from '@/components/list-row'
-import { LockAlert } from '@/components/lock-alert'
+import { LockAlert, SESSION_LOCK_REASON } from '@/components/lock-alert'
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusDot } from '@/components/status-dot'
@@ -66,7 +66,7 @@ import {
   type CaptionsCaptureSettings
 } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
-import { SESSION_LOCK_REASON, unlockActionForGate } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { CAPTION_LANGUAGES } from '@/lib/caption-languages'
 import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
@@ -194,7 +194,9 @@ export function CaptionsControls(): ReactElement {
     >
       <FieldGroup>
         {/* Locked means disabled with one reason, and the lock leads (S1.5). */}
-        {locked ? <LockAlert action={unlockActionForGate(gate)} reason={gate.reason} /> : null}
+        {locked ? (
+          <LockAlert action={lockAlertAction(unlockActionForGate(gate))} reason={gate.reason} />
+        ) : null}
         {/* One state signal (V-5): the switch says on or off; while on, one
             dot names what captions are doing, with its line. */}
         <FieldGroup variant="grouped">

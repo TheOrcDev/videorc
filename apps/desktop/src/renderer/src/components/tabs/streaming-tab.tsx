@@ -68,7 +68,7 @@ import type {
 import { streamingDestinationCap, streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
-import { unlockActionForReason } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForReason } from '@/lib/lock-view'
 import { destinationSetup } from '@/lib/destination-readiness'
 import { destinationLabel } from '@/lib/platform-copy'
 import { otherDestinationsLine } from '@/lib/stream-target-notices'
@@ -246,7 +246,7 @@ function StreamingSetup(): ReactElement {
           <div className="flex flex-col gap-2 border-b border-border p-gutter">
             {livestreamingEntitlementReason && !isSessionActive ? (
               <LockAlert
-                action={unlockActionForReason(livestreamingEntitlementReason)}
+                action={lockAlertAction(unlockActionForReason(livestreamingEntitlementReason))}
                 reason={livestreamingEntitlementReason}
               />
             ) : null}

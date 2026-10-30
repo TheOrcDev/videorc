@@ -54,7 +54,7 @@ import {
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { formatVideoQuality } from '@/lib/format-video'
 import { performanceCheckLine } from '@/lib/performance-check-line'
-import { unlockActionForGate } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { platformCopy } from '@/lib/platform-copy'
 import { recordingsFolderView } from '@/lib/recordings-folder'
@@ -378,7 +378,7 @@ function LocalRecordingSection(): ReactElement {
           ) : null}
           {profileEntitlementMessage ? (
             <LockAlert
-              action={unlockActionForGate(profileGate)}
+              action={lockAlertAction(unlockActionForGate(profileGate))}
               reason={profileEntitlementMessage}
             />
           ) : null}

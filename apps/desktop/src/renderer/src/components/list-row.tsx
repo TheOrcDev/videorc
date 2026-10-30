@@ -4,15 +4,15 @@ import { SectionLabel } from '@/components/section-label'
 import { cn } from '@/lib/utils'
 
 /** What every ListRow draws, whatever element it renders as. */
-type ListRowOwnProps = {
-  /** A control before the title (a sound's play button, plan 189), never clipped like the icon tile. */
+interface ListRowOwnProps {
+  /** A control before the title (a sound's play button), never clipped like the icon tile. */
   leading?: ReactNode
-  /** The icon tile content (app/source icon: the colourful slot). */
+  /** The icon tile content (an app or source icon: the colourful slot). */
   icon?: ReactNode
   title: ReactNode
   /** Inline secondary context after the title (platform, owner, kind). */
   context?: ReactNode
-  /** Optional key chips right after the context (e.g. an alias). */
+  /** Optional key chips right after the context (an alias). */
   alias?: ReactNode
   /** Small status icons just before the meta label. */
   statusIcons?: ReactNode
@@ -42,20 +42,22 @@ type ListRowAsButtonProps = ListRowOwnProps & { as: 'button' } & Omit<
     keyof ListRowOwnProps
   >
 
+type ListRowProps = ListRowDivProps | ListRowAsButtonProps
+
 /**
- * The shared row (plan 050, D4; plan 174 S1.6a): every icon + title + meta
- * list renders through this one anatomy. A 20 px icon tile on the chip radius
- * (larger for platform marks, and YouTube's official icon is never clipped:
- * plan 165), the primary title, inline secondary context, optional alias
- * chips, spring space, then right-aligned status icons and a secondary meta
- * label. 32 px, or 28 px when compact. Selection is the theme's accent block.
+ * The shared row: every icon + title + meta list renders through this one
+ * anatomy. A 20 px icon tile on the chip radius (larger for platform marks,
+ * which are never clipped), the primary title, inline secondary context,
+ * optional alias chips, spring space, then right-aligned status icons and a
+ * secondary meta label. 32 px, or 28 px when compact. Selection is the
+ * theme's accent block.
  *
  * A row is a fact unless it says otherwise: `interactive` adds the hover, and
  * `as="button"` makes the whole row one button with the focus ring. A row
  * that holds its own controls keeps the div and stretches a ListRowButton
  * over itself instead.
  */
-export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactElement {
+function ListRow(props: ListRowProps): ReactElement {
   const {
     as = 'div',
     leading,
@@ -66,19 +68,20 @@ export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactEle
     statusIcons,
     meta,
     selected = false,
-    interactive = as === 'button',
+    interactive: interactiveProp,
     compact = false,
     className,
     children,
     ...rest
   } = props
+  const interactive = interactiveProp ?? as === 'button'
   const rowClassName = cn(
-    'flex items-center gap-2.5 rounded-row px-3 text-sm in-data-[slot=grouped-list]:rounded-none',
+    'rounded-row flex items-center gap-2.5 px-3 text-sm in-data-[slot=grouped-list]:rounded-none',
     compact ? 'h-row-compact' : 'h-row',
-    interactive && 'cursor-default hover:bg-accent',
+    interactive && 'hover:bg-accent cursor-default',
     selected && 'bg-accent',
     as === 'button' &&
-      'w-full text-left outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:pointer-events-none disabled:opacity-50',
+      'focus-visible:ring-ring w-full text-left outline-hidden focus-visible:ring-2 focus-visible:ring-inset disabled:pointer-events-none disabled:opacity-50',
     className
   )
   const body = (
@@ -86,18 +89,18 @@ export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactEle
       {leading}
       {icon ? (
         <span
+          className="rounded-chip flex min-h-5 min-w-5 shrink-0 items-center justify-center overflow-hidden has-data-[slot=platform-mark]:overflow-visible has-data-[slot=platform-mark]:rounded-none [&_svg:not([class*='size-'])]:size-4"
           data-slot="list-row-icon"
-          className="flex min-h-5 min-w-5 shrink-0 items-center justify-center overflow-hidden rounded-chip has-data-[slot=platform-mark]:overflow-visible has-data-[slot=platform-mark]:rounded-none [&_svg:not([class*='size-'])]:size-4"
         >
           {icon}
         </span>
       ) : null}
       <span className="flex min-w-0 items-baseline gap-2">
-        <span data-slot="list-row-title" className="truncate font-medium text-foreground">
+        <span className="text-foreground truncate font-medium" data-slot="list-row-title">
           {title}
         </span>
         {context ? (
-          <span data-slot="list-row-context" className="truncate text-muted-foreground">
+          <span className="text-muted-foreground truncate" data-slot="list-row-context">
             {context}
           </span>
         ) : null}
@@ -106,12 +109,12 @@ export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactEle
       <span className="ml-auto flex shrink-0 items-center gap-2">
         {children}
         {statusIcons ? (
-          <span className="flex items-center gap-1.5 text-muted-foreground [&_svg:not([class*='size-'])]:size-4">
+          <span className="text-muted-foreground flex items-center gap-1.5 [&_svg:not([class*='size-'])]:size-4">
             {statusIcons}
           </span>
         ) : null}
         {meta ? (
-          <span data-slot="list-row-meta" className="text-meta text-muted-foreground">
+          <span className="text-meta text-muted-foreground" data-slot="list-row-meta">
             {meta}
           </span>
         ) : null}
@@ -122,8 +125,8 @@ export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactEle
   if (as === 'button') {
     return (
       <button
-        data-slot="list-row"
         data-selected={selected || undefined}
+        data-slot="list-row"
         type="button"
         {...(rest as Omit<ComponentProps<'button'>, keyof ListRowOwnProps>)}
         className={rowClassName}
@@ -134,8 +137,8 @@ export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactEle
   }
   return (
     <div
-      data-slot="list-row"
       data-selected={selected || undefined}
+      data-slot="list-row"
       {...(rest as Omit<ComponentProps<'div'>, keyof ListRowOwnProps>)}
       className={rowClassName}
     >
@@ -144,26 +147,24 @@ export function ListRow(props: ListRowDivProps | ListRowAsButtonProps): ReactEle
   )
 }
 
+type GroupedListProps = {
+  /** The group's name, as a SectionLabel over it. */
+  label?: ReactNode
+  children: ReactNode
+  className?: string
+} & Omit<ComponentProps<'div'>, 'children' | 'className'>
+
 /**
  * A grouped list (macOS Settings style): like things in one inset group,
  * split by hairlines. An optional section label names the group. Extra
  * attributes (an `aria-label`, a `data-testid`) land on the list itself.
  */
-export function GroupedList({
-  label,
-  children,
-  className,
-  ...props
-}: {
-  label?: ReactNode
-  children: ReactNode
-  className?: string
-} & Omit<ComponentProps<'div'>, 'children' | 'className'>): ReactElement {
+function GroupedList({ label, children, className, ...props }: GroupedListProps): ReactElement {
   return (
     <div className={cn('flex flex-col gap-1.5', className)}>
       {label ? <SectionLabel className="px-1">{label}</SectionLabel> : null}
       <div
-        className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-inset"
+        className="divide-border rounded-row border-border bg-inset flex flex-col divide-y overflow-hidden border"
         data-slot="grouped-list"
         {...props}
       >
@@ -174,17 +175,16 @@ export function GroupedList({
 }
 
 /**
- * A row's title as its button (plan 174 S0.5): stretched over the whole row,
- * so a click anywhere on the row acts, while a control in the row (a switch)
- * stays its sibling instead of nesting inside a button. Give the ListRow
- * `relative`; a control meant to stay clickable must be positioned too, as
- * the Switch is.
+ * A row's title as its button: stretched over the whole row, so a click
+ * anywhere on the row acts, while a control in the row (a switch) stays its
+ * sibling instead of nesting inside a button. Give the ListRow `relative`; a
+ * control meant to stay clickable must be positioned too, as the Switch is.
  */
-export function ListRowButton({ className, ...props }: ComponentProps<'button'>): ReactElement {
+function ListRowButton({ className, ...props }: ComponentProps<'button'>): ReactElement {
   return (
     <button
       className={cn(
-        'block max-w-full truncate text-left outline-hidden after:absolute after:inset-0 focus-visible:after:ring-2 focus-visible:after:ring-ring focus-visible:after:ring-inset',
+        'focus-visible:after:ring-ring block max-w-full truncate text-left outline-hidden after:absolute after:inset-0 focus-visible:after:ring-2 focus-visible:after:ring-inset',
         className
       )}
       data-slot="list-row-button"
@@ -193,3 +193,5 @@ export function ListRowButton({ className, ...props }: ComponentProps<'button'>)
     />
   )
 }
+
+export { ListRow, GroupedList, ListRowButton, type ListRowProps, type GroupedListProps }

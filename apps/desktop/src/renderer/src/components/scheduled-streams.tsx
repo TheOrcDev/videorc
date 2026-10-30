@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { lastCheckedLabel } from '@/hooks/use-scheduled-streams'
 import { openLivestreamView } from '@/lib/livestream-tabs'
-import { SESSION_LOCK_REASON } from '@/lib/lock-view'
+import { SESSION_LOCK_REASON } from '@/components/lock-alert'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Spinner } from '@/components/ui/spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'

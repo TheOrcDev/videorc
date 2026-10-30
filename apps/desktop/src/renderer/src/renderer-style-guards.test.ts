@@ -26,6 +26,17 @@ import { describe, expect, it } from 'vitest'
 
 const RENDERER_ROOT = join(__dirname, '..')
 
+// The primitives synced from the @videorc registry (apps/desktop/ui-registry.json,
+// pnpm ui:sync) are videorc-ui's own, like components/ui: they name their own
+// parts, and they change there, never here.
+const SYNCED_PRIMITIVES = new Set(
+  (
+    JSON.parse(readFileSync(join(RENDERER_ROOT, '..', '..', 'ui-registry.json'), 'utf8')) as {
+      items: string[]
+    }
+  ).items.map((name) => `src/components/${name}.tsx`)
+)
+
 const COLOUR_LITERAL_ALLOWLIST = new Set([
   // Caption rendering burned into the video, and its previews.
   'src/lib/caption-overlay.ts',
@@ -386,10 +397,11 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
   })
 
   it('never passes data-slot to a component: hooks on components are data-testid', () => {
-    // components/ui is shadcn's own: its primitives name their own parts.
+    // components/ui and the synced primitives are the registry's own: they
+    // name their own parts.
     const offending = files
       .filter(({ path, code }) => path.endsWith('.tsx') && code.includes('data-slot'))
-      .filter(({ path }) => !path.startsWith('src/components/ui/'))
+      .filter(({ path }) => !path.startsWith('src/components/ui/') && !SYNCED_PRIMITIVES.has(path))
       .flatMap(({ path }) => passedSlots(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))
     expect(offending).toEqual([])
   })
