@@ -391,3 +391,20 @@ signal, ending with exit 143 during test compilation after FFmpeg checks and
 Clippy passed. The job lasted six minutes, below its 45-minute timeout. No Rust
 test result exists. A job-only retry was requested for job `123829230084`; keep
 the PR head stable until that retry reports a result.
+
+### Windows diagnostic observation, 2026-10-30
+
+Run `40983512504`, job `123829383523`, passed the debug backend build,
+OpenH264 comparison, Media Foundation diagnostic step and controlled-audio
+incident matrix. The independent FFmpeg-tone control failed its stream receiver
+artifacts: A/V stop tails were 117–267 ms against the unchanged 100 ms limit;
+some frame counts missed the unchanged 2% budget by reaching 2.1–2.3% error.
+Record-only controls passed. GitHub retained the control evidence as artifact
+`12948646220` for 14 days. This remains failed diagnostic evidence, not a PASS.
+
+The existing release runbook's “Known-bad CI checks” explicitly excludes
+`Windows startup incident diagnostics` from release source/signing gates and
+says not to repair it as part of cutting a release. No thresholds or workflow
+requirements were changed here. The actual Windows source and installer gates,
+plus Linux exact-candidate quality acceptance, remain required. This diagnostic
+failure does not establish a regression from the file-URL authorization fix.
