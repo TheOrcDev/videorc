@@ -27,6 +27,9 @@ function bounded(promise) {
 async function observeCaller(t, script, scenario) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'videorc-oauth-launch-test-'))
   const environmentKeys = [
+    'VIDEORC_SMOKE_HOST_LOCK',
+    'VIDEORC_SMOKE_BUILD_SLOTS',
+    'VIDEORC_SMOKE_MEMORY_CHECK',
     'VIDEORC_SMOKE_STATE_DIR',
     'VIDEORC_SMOKE_TIMEOUT_MS',
     'VIDEORC_SMOKE_SKIP_PREBUILD',
@@ -93,6 +96,10 @@ async function observeCaller(t, script, scenario) {
 
   try {
     for (const key of environmentKeys) delete process.env[key]
+    // This fixture mocks OS process APIs and clocks; host admission has its own real-port tests.
+    process.env.VIDEORC_SMOKE_HOST_LOCK = '0'
+    process.env.VIDEORC_SMOKE_BUILD_SLOTS = '0'
+    process.env.VIDEORC_SMOKE_MEMORY_CHECK = '0'
     process.env.VIDEORC_SMOKE_STATE_DIR = fixtureRoot
     t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000_000 })
     const controlledSetTimeout = globalThis.setTimeout
