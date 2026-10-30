@@ -186,7 +186,9 @@ describe('BuddyLiveSwitch (plan 174 S3.14a, D7)', () => {
     const markup = render({ checked: true })
     expect(markup).toContain('data-slot="buddy-live-switch"')
     expect(markup).toMatch(/<label[^>]*for="buddy-live-switch"[^>]*>Buddy Live<\/label>/)
-    expect(markup).toMatch(/role="switch"[^>]*aria-checked="true"[^>]*id="buddy-live-switch"/)
+    expect(markup).toMatch(/role="switch"[^>]*aria-checked="true"/)
+    // Base UI puts the id on the switch's hidden input, which the label points at.
+    expect(markup).toMatch(/<input[^>]*id="buddy-live-switch"[^>]*type="checkbox"/)
     expect(markup).not.toContain('disabled=""')
   })
 

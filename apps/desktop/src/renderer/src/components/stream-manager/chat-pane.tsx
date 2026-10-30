@@ -399,7 +399,7 @@ export function ChatPane({
           />
           <ToggleGroup
             aria-label="Chat filters"
-            type="multiple"
+            multiple
             value={[
               ...(filter.questions ? ['questions'] : []),
               ...(filter.mentions ? ['mentions'] : [])

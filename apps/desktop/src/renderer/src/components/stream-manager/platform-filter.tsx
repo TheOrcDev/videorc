@@ -33,9 +33,8 @@ export function PlatformFilter({
   return (
     <ToggleGroup
       aria-label={label}
-      type="single"
-      value={value}
-      onValueChange={(next) => onValueChange((next || 'all') as PlatformFilterValue)}
+      value={[value]}
+      onValueChange={(next) => onValueChange((next[0] ?? 'all') as PlatformFilterValue)}
     >
       <ToggleGroupItem className="text-xs" value="all">
         All

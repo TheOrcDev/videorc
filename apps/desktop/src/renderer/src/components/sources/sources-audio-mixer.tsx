@@ -541,14 +541,14 @@ export function SyncCalibrationView({
 
   return (
     <Collapsible className="group/calibrate" defaultOpen={defaultOpen}>
-      <CollapsibleTrigger asChild>
-        <Button className="-ml-2 self-start" size="xs" type="button" variant="ghost">
-          <ChevronRightIcon
-            className="transition-transform duration-150 group-data-[state=open]/calibrate:rotate-90"
-            data-icon="inline-start"
-          />
-          Calibrate
-        </Button>
+      <CollapsibleTrigger
+        render={<Button className="-ml-2 self-start" size="xs" type="button" variant="ghost" />}
+      >
+        <ChevronRightIcon
+          className="transition-transform duration-150 group-data-open/calibrate:rotate-90"
+          data-icon="inline-start"
+        />
+        Calibrate
       </CollapsibleTrigger>
       <CollapsibleContent className="grid gap-2 pt-2" data-videorc-sync-calibration="">
         <div className="flex flex-wrap items-center justify-between gap-2">

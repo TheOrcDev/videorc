@@ -41,7 +41,7 @@ const openUpcoming = async () => {
   await waitFor(
     () =>
       evaluate(
-        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.dispatchEvent(new MouseEvent('mousedown',{button:0,bubbles:true})); return Boolean(tab)`
+        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(tab)`
       ),
     'Upcoming tab mounted'
   )

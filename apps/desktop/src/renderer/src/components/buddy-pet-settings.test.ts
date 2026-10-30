@@ -182,7 +182,7 @@ function button(testId: string): HTMLButtonElement {
 describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
   it('shows Still with the four state tiles and the Still preview at 160 px', async () => {
     await render()
-    expect(kindButton('Still').getAttribute('data-state')).toBe('on')
+    expect(kindButton('Still').hasAttribute('data-checked')).toBe(true)
     expect(document.querySelectorAll('[data-testid="buddy-look-tile"]')).toHaveLength(4)
     expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160, paused: false })
   })

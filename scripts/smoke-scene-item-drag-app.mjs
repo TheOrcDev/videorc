@@ -439,7 +439,7 @@ async function select(item) {
   await settled()
   await cdp.eval(`document.querySelector(${JSON.stringify(item.chip)}).click()`)
   await waitUntil(
-    `document.querySelector(${JSON.stringify(item.chip)})?.getAttribute('data-state') === 'on'`
+    `document.querySelector(${JSON.stringify(item.chip)})?.hasAttribute('data-pressed')`
   )
   await cdp.eval(
     `document.activeElement?.blur(); document.querySelector('[data-videorc-stage-phase]').scrollIntoView({block:'center',behavior:'instant'})`

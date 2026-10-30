@@ -649,7 +649,8 @@ export function LibraryTab({
                   <div role="columnheader">
                     <Checkbox
                       aria-label="Select all recordings in view"
-                      checked={selectAllState}
+                      checked={selectAllState === true}
+                      indeterminate={selectAllState === 'indeterminate'}
                       disabled={selectableIds.length === 0}
                       onCheckedChange={() =>
                         setSelection((current) => ({

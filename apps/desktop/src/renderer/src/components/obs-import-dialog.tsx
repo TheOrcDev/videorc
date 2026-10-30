@@ -339,8 +339,8 @@ export function ObsImportDialog({
                 Reading your OBS setup…
               </p>
             ) : (
-              // The viewport carries the bound: Radix only scrolls a viewport
-              // whose own height is limited.
+              // The viewport carries the bound: a scroll area only scrolls a
+              // viewport whose own height is limited.
               <ScrollArea className="rounded-row border *:data-[slot=scroll-area-viewport]:max-h-80">
                 <div className="flex flex-col gap-4 p-3">
                   {groups.map(({ verdict, lines }) => {

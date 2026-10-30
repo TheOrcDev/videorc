@@ -458,7 +458,11 @@ function CloudAiSection(): ReactElement {
               </ul>
               <p className="text-xs text-muted-foreground">{CLOUD_AI_KEEPS}</p>
             </div>
-            <Switch checked={aiConsent} id="buddy-cloud-ai" onCheckedChange={setAiConsent} />
+            <Switch
+              checked={aiConsent}
+              id="buddy-cloud-ai"
+              onCheckedChange={(consent) => setAiConsent(consent)}
+            />
           </div>
         </Field>
       </FieldGroup>

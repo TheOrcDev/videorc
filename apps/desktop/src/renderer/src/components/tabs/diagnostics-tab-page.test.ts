@@ -155,7 +155,7 @@ describe('Health page', () => {
     await render()
     expect(container.querySelector('[data-testid="support-bundle-button"]')).not.toBeNull()
     const details = container.querySelector('[data-testid="health-technical-details"]')!
-    expect(details.getAttribute('data-state')).toBe('closed')
+    expect(details.hasAttribute('data-closed')).toBe(true)
     expect(container.textContent).not.toContain('Bridge queue')
 
     await act(async () => button('Technical details')!.click())
@@ -164,8 +164,8 @@ describe('Health page', () => {
       [...details.querySelectorAll('[data-slot="collapsible"]')].find((entry) =>
         entry.querySelector('h3')?.textContent?.startsWith(title)
       )!
-    expect(group('Overview').getAttribute('data-state')).toBe('open')
-    expect(group('Start and stop').getAttribute('data-state')).toBe('closed')
+    expect(group('Overview').hasAttribute('data-open')).toBe(true)
+    expect(group('Start and stop').hasAttribute('data-closed')).toBe(true)
     expect(container.textContent).toContain('Bridge queue')
     // One Pipeline (V-7).
     expect(

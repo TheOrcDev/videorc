@@ -451,7 +451,7 @@ function BannerTimingFold({
           <ChevronDownIcon
             aria-hidden
             className={cn(
-              'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-[state=open]/timing:rotate-180',
+              'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-open/timing:rotate-180',
               summary ? null : 'ml-auto'
             )}
           />

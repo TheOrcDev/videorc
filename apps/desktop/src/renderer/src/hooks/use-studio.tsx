@@ -18,7 +18,7 @@ import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, withoutSceneShortcut } from '../../../shared/global-shortcuts'
 import { screenHideAccelerator } from '@/lib/screen-privacy-view'
 import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
-import { acceleratorLabel } from '../../../shared/accelerator-format'
+import { acceleratorLabel } from '@/lib/accelerator'
 import {
   DEFAULT_CLIP_SECONDS,
   LONG_CLIP_SECONDS,

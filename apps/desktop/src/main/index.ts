@@ -13612,7 +13612,7 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
           await sleep(Number(params.settleMs ?? 600));
           return { enabled: true, alreadyEnabled: true };
         }
-        if (toggle.disabled) {
+        if (toggle.hasAttribute('data-disabled')) {
           throw new Error('Synthetic source toggle is disabled.');
         }
         toggle.click();
@@ -13748,11 +13748,11 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         if (!button) {
           throw new Error('Could not find camera shape ' + shape + '.');
         }
-        if (button.getAttribute('data-state') !== 'on') {
+        if (!button.hasAttribute('data-checked')) {
           button.click();
         }
         while (Date.now() < deadline) {
-          if (button.getAttribute('data-state') === 'on') {
+          if (button.hasAttribute('data-checked')) {
             await sleep(Number(params.settleMs ?? 600));
             return {
               shape,

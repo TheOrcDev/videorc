@@ -105,9 +105,9 @@ export function PowerSlider({
     }
   }
 
-  // Radix moves by `step` on a plain arrow; intercept Shift+arrow in the capture
-  // phase (before the thumb's own handler) so the large step replaces it rather
-  // than stacking on top.
+  // The slider moves by `step` on a plain arrow and by its own large step on
+  // Shift+arrow; intercept Shift+arrow in the capture phase (before the thumb's
+  // own handler) so this large step replaces it rather than stacking on top.
   const onKeyDownCapture = (event: KeyboardEvent<HTMLSpanElement>): void => {
     if (disabled || !event.shiftKey || !ARROW_KEYS.has(event.key)) {
       return
@@ -212,9 +212,9 @@ export function PowerSlider({
           max={max}
           min={min}
           step={step}
-          value={[value]}
-          onValueChange={([next]) => emit(next, false)}
-          onValueCommit={([next]) => emit(next, true)}
+          value={value}
+          onValueChange={(next) => emit(next, false)}
+          onValueCommitted={(next) => emit(next, true)}
         />
       </span>
 

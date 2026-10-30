@@ -603,7 +603,7 @@ export function MetadataEditor({
           {visibleOverrides.length ? (
             <Accordion
               aria-label="Details for each destination"
-              type="multiple"
+              multiple
               value={accordionValue}
               onValueChange={setOpenPlatforms}
             >

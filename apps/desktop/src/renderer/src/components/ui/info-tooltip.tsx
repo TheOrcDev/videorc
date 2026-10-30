@@ -1,30 +1,12 @@
-import { useId, type ComponentProps, type ReactElement, type ReactNode } from 'react'
+'use client'
+
+import { useId } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
-/**
- * What a chip, a dot or a short status word means, on hover and on keyboard
- * focus (plan 174 S1.10, J1-6). A badge is not focusable, so a `title=` on it
- * never reaches the keyboard or a screen reader: the wrapper is the tooltip's
- * focusable trigger, and the text stays in the DOM as its description
- * (`aria-describedby`), not only while the tooltip is open.
- *
- * `focusable={false}` is for a control that takes focus itself (a button
- * whose outcome or reason needs a sentence): it becomes the trigger and is
- * described, with no wrapper. A plain hint on a control is `Tooltip`; a
- * disabled control's reason is `DisabledReason`. Pass the text only when
- * there is one: with none the child renders exactly as it is.
- */
-export function InfoTooltip({
-  content,
-  children,
-  focusable = true,
-  tabIndex = 0,
-  className,
-  side,
-  align
-}: {
+interface InfoTooltipProps {
   /** The explanation, in a sentence; null or empty when there is none. */
   content: ReactNode
   /** The chip, dot or status word it explains. */
@@ -40,7 +22,31 @@ export function InfoTooltip({
   className?: string
   side?: ComponentProps<typeof TooltipContent>['side']
   align?: ComponentProps<typeof TooltipContent>['align']
-}): ReactElement {
+}
+
+/**
+ * What a chip, a dot or a short status word means, on hover and on keyboard
+ * focus. A badge is not focusable, so a `title=` on it never reaches the
+ * keyboard or a screen reader: the wrapper is the tooltip's focusable
+ * trigger, and the text stays in the DOM as its description
+ * (`aria-describedby`), not only while the tooltip is open. Base UI's tooltip
+ * is visual only and describes nothing itself.
+ *
+ * `focusable={false}` is for a control that takes focus itself (a button
+ * whose outcome or reason needs a sentence): it becomes the trigger and is
+ * described, with no wrapper. A plain hint on a control is `Tooltip`; a
+ * disabled control's reason is `DisabledReason`. Pass the text only when
+ * there is one: with none the child renders exactly as it is.
+ */
+function InfoTooltip({
+  content,
+  children,
+  focusable = true,
+  tabIndex = 0,
+  className,
+  side,
+  align
+}: InfoTooltipProps): ReactElement {
   const descriptionId = useId()
   if (content === null || content === undefined || content === false || content === '') {
     return children
@@ -54,7 +60,7 @@ export function InfoTooltip({
               <span
                 aria-describedby={descriptionId}
                 className={cn(
-                  'inline-flex rounded-chip outline-none focus-visible:ring-3 focus-visible:ring-ring/30',
+                  'rounded-chip focus-visible:ring-ring/30 inline-flex outline-none focus-visible:ring-3',
                   className
                 )}
                 data-slot="info-tooltip"
@@ -82,3 +88,5 @@ export function InfoTooltip({
     </>
   )
 }
+
+export { InfoTooltip }

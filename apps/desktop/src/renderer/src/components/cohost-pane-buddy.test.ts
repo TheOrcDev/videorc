@@ -197,15 +197,15 @@ describe('BuddyIdentity and BuddySayFooter (plan 164 S-C4, plan 174 S3.14c)', ()
   it('relays the switch and disables it without a handler', async () => {
     const onShowOnStreamChange = vi.fn()
     await render(buddy({ showOnStream: false }), { onShowOnStreamChange })
-    const toggle = container.querySelector<HTMLButtonElement>(
-      '[data-testid="buddy-show-on-stream"]'
-    )!
+    const toggle = container.querySelector<HTMLElement>('[data-testid="buddy-show-on-stream"]')!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await act(async () => toggle.click())
     expect(onShowOnStreamChange).toHaveBeenCalledWith(true)
     await render(buddy())
     expect(
-      container.querySelector<HTMLButtonElement>('[data-testid="buddy-show-on-stream"]')?.disabled
+      container
+        .querySelector<HTMLElement>('[data-testid="buddy-show-on-stream"]')
+        ?.hasAttribute('data-disabled')
     ).toBe(true)
     expect(sayInput().disabled).toBe(true)
   })

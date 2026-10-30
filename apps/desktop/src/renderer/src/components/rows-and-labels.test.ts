@@ -151,7 +151,10 @@ describe('SettingsRow and FieldDescription (I-7, F-17)', () => {
     expect(row.dataset.orientation).toBe('horizontal')
     const control = container.querySelector('[role="switch"]') as HTMLElement
     const label = container.querySelector('label') as HTMLLabelElement
-    expect(label.htmlFor).toBe(control.id)
+    // Base UI points the label at the switch's hidden input and names the
+    // switch by the label.
+    expect(label.htmlFor).toBe(container.querySelector('input[type="checkbox"]')?.id)
+    expect(control.getAttribute('aria-labelledby')).toBe(label.id)
     const describedBy = control.getAttribute('aria-describedby')
     expect(describedBy).toBeTruthy()
     expect(document.getElementById(describedBy!)?.textContent).toBe(

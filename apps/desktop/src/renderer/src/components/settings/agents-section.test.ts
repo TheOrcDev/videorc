@@ -121,8 +121,8 @@ async function render(): Promise<void> {
 const byTestId = (id: string): HTMLElement | null =>
   document.querySelector<HTMLElement>(`[data-testid="${id}"]`)
 const text = (): string => document.body.textContent ?? ''
-const agentsSwitch = (): HTMLButtonElement =>
-  document.querySelector<HTMLButtonElement>('[aria-label="Let AI agents control Videorc"]')!
+const agentsSwitch = (): HTMLElement =>
+  document.querySelector<HTMLElement>('[aria-label="Let AI agents control Videorc"]')!
 
 describe('AgentsSection states (plan 209 S7)', () => {
   it('empty: off by default, says what turning it on does, and turns it on', async () => {
@@ -143,7 +143,7 @@ describe('AgentsSection states (plan 209 S7)', () => {
   it('waits for Videorc before the switch can change', async () => {
     mocked.snapshot = snapshot({ status: null })
     await render()
-    expect(agentsSwitch().disabled).toBe(true)
+    expect(agentsSwitch().hasAttribute('data-disabled')).toBe(true)
   })
 
   it('on with no agents: Connect an agent… and the apps it works with', async () => {

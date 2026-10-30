@@ -102,8 +102,10 @@ describe('ActivityPane Auto-show switch', () => {
     const off = render(false)
     expect(off).toContain('data-testid="activity-auto-show"')
     expect(off).toContain('Auto-show')
-    expect(off).toContain('data-state="unchecked"')
-    expect(render(true)).toContain('data-state="checked"')
+    const autoShowSwitch = (markup: string): string =>
+      markup.match(/<span[^>]*data-testid="activity-auto-show"[^>]*>/)?.[0] ?? ''
+    expect(autoShowSwitch(off)).toContain('data-unchecked=""')
+    expect(autoShowSwitch(render(true))).toContain('data-checked=""')
   })
 })
 
@@ -515,8 +517,8 @@ describe('ActivityPane reward rows', () => {
   })
 
   it('lays rows out as a block, so a long reward truncates instead of widening every row', () => {
-    // The shared ScrollArea's viewport overrides Radix's table layout.
-    expect(render()).toMatch(/data-slot="scroll-area-viewport"[^>]*\[&amp;&gt;div\]:block!/)
+    // Base UI's viewport holds the rows itself: no table wrapper between them.
+    expect(render()).toMatch(/data-slot="scroll-area-viewport"[^>]*><ol aria-label="Activity"/)
   })
 
   it("paints chat's paid tint on tips, without its ring", () => {

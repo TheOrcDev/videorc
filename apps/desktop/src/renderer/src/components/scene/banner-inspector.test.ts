@@ -91,11 +91,14 @@ const button = (label: string): HTMLButtonElement => {
   expect(found, label).toBeTruthy()
   return found!
 }
-const switchFor = (label: string): HTMLButtonElement => {
+/** The switch a label names: Base UI points the label at its hidden input. */
+const switchFor = (label: string): HTMLElement => {
   const labelElement = [...document.querySelectorAll('label')].find(
     (candidate) => candidate.textContent === label
   )
-  return document.getElementById(labelElement!.getAttribute('for')!) as HTMLButtonElement
+  return document.querySelector<HTMLElement>(
+    `[role="switch"][aria-labelledby="${labelElement!.id}"]`
+  )!
 }
 
 describe('BannerInspector', () => {
@@ -249,7 +252,7 @@ describe('BannerInspector', () => {
     await renderInspector(inspectorProps())
     const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
     expect(fold.querySelector('h3')?.textContent).toBe('Timing')
-    expect(fold.getAttribute('data-state')).toBe('closed')
+    expect(fold.hasAttribute('data-closed')).toBe(true)
     expect(fold.querySelector('[data-videorc-banner-hide-after]')).toBeNull()
     expect(fold.querySelector('[data-videorc-banner-timing-summary]')).toBeNull()
 
@@ -271,7 +274,7 @@ describe('BannerInspector', () => {
     await renderInspector(props)
     const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
     await act(async () => fold.querySelector<HTMLButtonElement>('h3 button')!.click())
-    expect(fold.getAttribute('data-state')).toBe('open')
+    expect(fold.hasAttribute('data-open')).toBe(true)
     // The helper is essential: secondary text that describes the control.
     const repeat = fold.querySelector<HTMLButtonElement>('[data-videorc-banner-repeat]')!
     const help = [...fold.querySelectorAll('[data-slot="field-description"]')].find(
@@ -349,8 +352,8 @@ describe('BannerInspector', () => {
     expect(document.querySelector('[data-variant="locked"]')).not.toBeNull()
     for (const label of ['Hide', 'Top left', 'Full frame', 'Bring to front', 'Send to back'])
       expect(button(label).disabled, label).toBe(true)
-    expect(switchFor('Stream').disabled).toBe(true)
-    expect(switchFor('Recording').disabled).toBe(true)
+    expect(switchFor('Stream').hasAttribute('data-disabled')).toBe(true)
+    expect(switchFor('Recording').hasAttribute('data-disabled')).toBe(true)
     expect(button('Manage in Assets').disabled).toBe(false)
     const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
     await act(async () => fold.querySelector<HTMLButtonElement>('h3 button')!.click())

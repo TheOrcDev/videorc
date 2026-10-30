@@ -9,7 +9,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 // shell's PaneBody stops scrolling for it (PANE_OWNS_SCROLL). The selected
 // tab is the caller's: the shell keeps it, remembers it on this device and
 // opens a named tab from a link. Lazy pages only import this module, so
-// Radix Tabs stays out of the eager chunk.
+// Base UI Tabs stays out of the eager chunk.
 
 export type PageTab<Id extends string> = { readonly id: Id; readonly label: ReactNode }
 

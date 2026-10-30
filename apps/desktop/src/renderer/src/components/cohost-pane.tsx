@@ -927,16 +927,18 @@ function AnsweredOnAir({
       {line(
         newest,
         older.length > 0 ? (
-          <CollapsibleTrigger asChild>
-            <Button
-              aria-label={`${older.length} more answered on air`}
-              className="shrink-0 tabular-nums"
-              size="xs"
-              type="button"
-              variant="ghost"
-            >
-              +{older.length}
-            </Button>
+          <CollapsibleTrigger
+            render={
+              <Button
+                aria-label={`${older.length} more answered on air`}
+                className="shrink-0 tabular-nums"
+                size="xs"
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            +{older.length}
           </CollapsibleTrigger>
         ) : undefined
       )}
