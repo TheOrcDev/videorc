@@ -1546,9 +1546,10 @@ fn session_deletion_quarantine_directory<'a>(
     (is_private && directory.parent() == original_path.parent()).then_some(directory)
 }
 
-/// Creates the private quarantine folder before the move. `false` means the
-/// name is taken by something that is not a real folder, so the file stays
-/// where it is instead of following a link out of the recordings folder.
+/// Creates the private quarantine folder before the move. An ordinary file
+/// occupying the name is an error on every platform; other non-directory
+/// objects return `false`, keeping the recording from following a link out
+/// of its folder.
 fn ensure_session_deletion_quarantine_directory(
     original_path: &Path,
     quarantine_path: &Path,
@@ -1569,7 +1570,22 @@ fn ensure_session_deletion_quarantine_directory(
             });
         }
     }
-    Ok(std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_dir()))
+    let metadata = std::fs::symlink_metadata(directory).with_context(|| {
+        format!(
+            "Could not inspect deletion quarantine {}",
+            directory.display()
+        )
+    })?;
+    // Windows can report a child of a regular file as NotFound, whereas Unix
+    // reports NotADirectory. Do not rely on the earlier child lookup to reject
+    // an occupied quarantine name consistently.
+    if metadata.file_type().is_file() {
+        bail!(
+            "Deletion quarantine {} is occupied by a regular file.",
+            directory.display()
+        );
+    }
+    Ok(metadata.file_type().is_dir())
 }
 
 /// Best effort: once its file is gone (trashed or renamed back), the empty
@@ -16371,6 +16387,12 @@ mod tests {
 
         // A file at the folder name fails closed and stays retryable.
         std::fs::write(quarantine.parent().unwrap(), b"not a folder").unwrap();
+        // Exercise the directory guard directly as well: Unix rejects the
+        // child lookup before deletion_path_state reaches this guard, but
+        // Windows can classify that lookup as a missing file.
+        let error =
+            ensure_session_deletion_quarantine_directory(&original, &quarantine).unwrap_err();
+        assert!(error.to_string().contains("occupied by a regular file"));
         assert!(deletion_path_state(&record).is_err());
         assert_eq!(std::fs::read(&original).unwrap(), b"owned recording");
         remove_empty_session_deletion_quarantine_directory(&record);

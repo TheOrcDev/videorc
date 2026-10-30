@@ -147,9 +147,9 @@ does not close their acceptance rows.
   private evidence, not merely trust the manifest URL. **Promotion wiring is
   still open; this first slice does not create a public release path.**
 - `pnpm release:plan:linux-beta-promotion -- --candidate-dir <verified-directory>
-  --release-id <id> --source-commit <sha> --sha256 <appimage-sha256>
-  --trusted-main-commit <sha> --acceptance-record-url <pinned-url>
-  --evidence-root <private-directory> --output <new-private-plan.json>` prepares
+--release-id <id> --source-commit <sha> --sha256 <appimage-sha256>
+--trusted-main-commit <sha> --acceptance-record-url <pinned-url>
+--evidence-root <private-directory> --output <new-private-plan.json>` prepares
   a read-only public-promotion plan. It loads the acceptance blob from the pinned
   Git commit (never the working file), checks candidate/record ancestry and the
   trusted tree's package version, enforces the full physical/pilot contract,
@@ -389,8 +389,9 @@ candidate has been accepted and no public object or availability setting changed
 Linux CI run `40983512321` on `aa6fff68` again received a runner shutdown
 signal, ending with exit 143 during test compilation after FFmpeg checks and
 Clippy passed. The job lasted six minutes, below its 45-minute timeout. No Rust
-test result exists. A job-only retry was requested for job `123829230084`; keep
-the PR head stable until that retry reports a result.
+test result exists. A job-only retry was requested for job `123829230084`.
+The required Windows storage correction below subsequently needed a new head;
+current-head Linux Rust execution remains required.
 
 ### Windows diagnostic observation, 2026-10-30
 
@@ -417,3 +418,29 @@ subsequently found no report. This is incomplete macOS test/sentinel evidence,
 not a source-test failure or a PASS. The runbook already excludes this hosted
 job from release completion; relevant shared-platform regression evidence is
 still owed. No timeout, test, or acceptance threshold was changed.
+
+### Windows required source-gate correction, 2026-10-30
+
+Run `40983512504`, required source job `123829383691`, passed Clippy and
+both sets of 25 stability passes. Its first full Rust pass failed
+`storage::tests::delete_quarantine_folder_that_is_not_a_directory_never_moves_the_file`:
+4,111 tests passed, one failed, and 20 were ignored. Later source steps were
+skipped. This is a required source failure, unlike the excluded diagnostics.
+
+The directory guard previously returned a blocked deletion when a regular file
+occupied the quarantine directory name. Unix rejects the earlier child lookup
+with `NotADirectory`, while Windows can report `NotFound` and reach that guard,
+so the test's expected error depended on the OS. The guard now explicitly errors
+on a regular-file collision and propagates metadata inspection errors. The
+existing no-move/no-byte-change assertions remain; the same test now exercises
+the guard directly on every platform. Symlink blocking remains intact.
+
+The exact regression and all 144 storage tests passed on Linux with zero
+failures or ignores. This used the current full backend test source in an
+isolated, unoptimized Rust test executable with the existing Cargo dependency
+artifacts; it is focused functional evidence, not Windows or performance
+acceptance. Rust formatting and diff checks passed. Optimized Cargo compilation,
+full backend tests and Clippy remain in progress or queued.
+
+Fresh Windows source and installer execution remains required. No test was
+ignored and no quality threshold or release requirement was relaxed.
