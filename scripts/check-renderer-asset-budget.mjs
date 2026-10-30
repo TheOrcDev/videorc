@@ -85,9 +85,18 @@ const htmlPath = resolve(
 // 2,053,284 raw / 415,618 gzip. Raise raw to 2,060,000 (~1.5%) and gzip to
 // 420,000 (~2.4%, two of the usual steps); keep re-splitting the answer for
 // net-new UI.
+// Recalibrated 2026-10-30 (videorc-ui plan 001, Phase 7, the leaf family):
+// main measured 2,055,020 raw / 416,191 gzip. Button and Badge now come from
+// the @videorc registry on Base UI, and Button is in the eager shell, so
+// Base UI's button, render and merge-props core joins it: 19,200 raw (the
+// renderer is not minified) and ~4.9 KB gzip, with no new UI. Radix stays
+// eager beside it until the migration's last step removes radix-ui, which is
+// when to tighten this again. Measured 2,076,549 raw / 421,102 gzip. Raise
+// raw to 2,082,000 and gzip to 425,000, keeping the headroom main had (~5 KB
+// raw, ~3.9 KB gzip); keep re-splitting the answer for net-new UI.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_060_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 420_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_082_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 425_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

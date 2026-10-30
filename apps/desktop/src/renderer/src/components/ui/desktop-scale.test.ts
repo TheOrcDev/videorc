@@ -3,6 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
+import { Alert } from './alert'
 import { Button } from './button'
 import { dialogContentVariants } from './dialog'
 import { Input } from './input'
@@ -209,8 +210,12 @@ describe('desktop scale', () => {
   })
 
   it('keeps the feedback primitives on the desktop scale (plan 174 S1.5)', () => {
-    // Alert: a flush inline row on the row radius, never a card.
-    expect(read('alert.tsx')).toContain('rounded-row px-3 py-2.5')
+    // Alert: a flush inline row on the row radius, never a card. Its class
+    // order is the registry's, so check the classes, not a run of them.
+    const alert = renderToStaticMarkup(createElement(Alert, null, 'Saved'))
+    expect(alert.match(/class="([^"]*)"/)?.[1].split(' ')).toEqual(
+      expect.arrayContaining(['rounded-row', 'px-3', 'py-2.5'])
+    )
     expect(read('alert.tsx')).not.toMatch(/\bshadow|rounded-(lg|xl|panel)/)
     // Empty: 14 px text, no media tile, no oversized title.
     const empty = read('empty.tsx')

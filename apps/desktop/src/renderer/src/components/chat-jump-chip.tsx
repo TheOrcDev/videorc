@@ -20,16 +20,19 @@ export function ChatJumpChip({
   onFollow: () => void
 }): ReactElement {
   return (
-    <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto">
-      <button
-        aria-label={`Chat paused: ${incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'reading back'}. Jump to the newest`}
-        data-testid="chat-paused"
-        type="button"
-        onClick={onFollow}
-      >
-        {incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'Latest'}
-        <ArrowDownIcon data-icon="inline-end" />
-      </button>
+    <Badge
+      className="absolute inset-x-0 bottom-2 mx-auto"
+      render={
+        <button
+          aria-label={`Chat paused: ${incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'reading back'}. Jump to the newest`}
+          data-testid="chat-paused"
+          type="button"
+          onClick={onFollow}
+        />
+      }
+    >
+      {incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'Latest'}
+      <ArrowDownIcon data-icon="inline-end" />
     </Badge>
   )
 }
