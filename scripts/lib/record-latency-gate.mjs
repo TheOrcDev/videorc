@@ -2,6 +2,24 @@
 // (scripts/smoke-record-latency-app.mjs). Kept free of I/O so `pnpm test:scripts`
 // covers the arithmetic and the budget evaluation.
 
+/** A persisted camera scene must not become part of the screen-only fixture. */
+export function recordLatencySceneReady(scene) {
+  if (!Array.isArray(scene?.sources)) return false
+  const visible = scene.sources.filter((source) => source?.visible === true)
+  return visible.length === 1 && visible[0].kind === 'test-pattern'
+}
+
+/** The backend may publish a trial scene while its layout transaction is pending. */
+export function recordLatencyRendererReady(state) {
+  return Boolean(
+    state?.wsStatus === 'connected' &&
+    state.layoutPreset === 'screen-only' &&
+    state.committedLayoutPreset === 'screen-only' &&
+    state.visualTransactionPending === false &&
+    state.layoutSwitchPending === null
+  )
+}
+
 /**
  * OBS-parity budgets (milliseconds), ENFORCED by `pnpm smoke:record-latency:gate`.
  * `calibratedFrom` names the reviewed docs/acceptance note built from three

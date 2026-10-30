@@ -83,7 +83,7 @@ file size or successful build is not a pass.
 | Separate source recordings         | macOS-only                                                                                        | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
 | Preview                            | CPU/BMP proof presenter                                                                           | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
 | Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix                           | Prove shared-bus mix and fallback warning.                                                                  |
-| First run                          | Linux setup enabled with sharing guidance; focused tests pass                                     | Real-app smoke and packaged physical proof still required.                                                  |
+| First run                          | Linux setup enabled with sharing guidance; full development smoke passes                          | Packaged physical proof and real OAuth still required.                                                      |
 | Notes protection                   | Capture exclusion unsupported                                                                     | Tell users Notes may be captured; prove behavior.                                                           |
 | Split profiles / dual orientation  | Restricted encoded paths                                                                          | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
 
@@ -676,14 +676,20 @@ setup flows. An isolated Skip setup probe also passes. Two whole-run attempts
 still failed during later fresh-profile attachment, before the renderer
 mounted. The harness now waits for its renderer hook within the existing
 180-second launch deadline; the mount-to-motion limit remains three seconds.
-The full smoke with that readiness barrier still needs its result recorded.
+The full smoke with that readiness barrier passed all 51 development steps on
+`9f65ce1f`, including dark/light setup, completion, restart, reopening setup,
+and the fresh Skip profile. Its report is
+`/tmp/videorc-beta-readiness-reprobe-mbNKxs/first-run/videorc-first-run-nYnhMt/report.json`.
+Real OAuth is explicitly skipped by this development smoke and remains open
+for packaged acceptance.
 
 One five-cycle enforced Clips latency run passed: cold start 202 ms, warm
 start p95 200 ms, stop p95 145 ms and finalization p95 132 ms, with every
 artifact checked. A subsequent fresh run reproduced the initial Clips
 failure. Its saved snapshot shows a connected, unblocked renderer, a live
 test pattern and explicit Clips intent, but three failed startup attempts.
-This remains unresolved; the successful run does not establish reliability.
+The successful run does not establish reliability or pass the stronger
+whole-file motion gate added below.
 The failure report projects readiness fields instead of saving destinations
 or resource capabilities. Receipts are under
 `/tmp/videorc-beta-clips-diagnostics-cHWG41` and
@@ -691,7 +697,53 @@ or resource capabilities. Receipts are under
 
 Both named-box 1080p30 encoder subsets pass again. The current setup changes
 pass 56 focused desktop tests and 158 first-run/latency/command-client Node
-tests with no skips; typecheck, lint and formatting pass. Broader desktop
-tests and a fresh frontend build are running sequentially after runtime
-measurements. These remain development/debug results. Physical AppImage,
+tests with no skips; typecheck, lint and formatting pass. The full desktop
+suite passed 582 files and 6,385 tests, with one Windows-only OBS path test
+skipped on Linux. The production frontend build also passed. These ran
+sequentially after the runtime measurements and retained unchanged backend
+and Rust-source hashes; logs are in the same regression directory above.
+These remain development/debug results. Physical AppImage,
 real OAuth, full profile, endurance and pilot acceptance remain open.
+
+### Latency fixture correction and cadence failures, 2026-10-30
+
+The private Clips error probe captured `session-start-failed`: the camera
+preview had no frames. A follow-up projection showed that capture config,
+working visual, confirmed visual and persisted scene all contained
+`screen-camera`, despite the smoke's earlier screen-only storage seed. The
+video preset remained 1080p30. Initial working-scene persistence can race that
+seed/reload; this failure was not proof of an encoder-start defect.
+
+The maintained latency smoke now invokes the same layout action as the UI
+and waits for both the renderer's completed layout transaction and the
+backend's visible synthetic-only scene. Observing the backend's trial scene
+alone is insufficient: an intermediate probe started before confirmation,
+then the renderer restored screen-plus-camera and refused Record. Regression
+tests reject both stale/pending renderer state and a live pattern accompanied
+by a visible camera. Failure snapshots retain reduced layout state.
+
+Clips starts after this correction, but recording cadence remains failing.
+The first corrected take had six identical startup frames and a 433 ms
+whole-file freeze. A diagnostic repeat passed the startup motion check but
+had a 367 ms freeze and ten identical frames later in the take. The latency
+smoke now requires motion over the entire artifact and at least 98% requested
+duration coverage; its previous whole-file check only warned about freezes.
+The final run with renderer-transaction confirmation still failed at three
+identical startup frames (limit two). No timing or quality limit was relaxed.
+
+Evidence: `/tmp/videorc-beta-readiness-reprobe-mbNKxs/replay-errors`,
+`/tmp/videorc-beta-replay-scene-sPzubt`,
+`/tmp/videorc-beta-latency-scene-fixed-H6mEOc`,
+`/tmp/videorc-beta-latency-cadence-cntxb9` and
+`/tmp/videorc-beta-latency-scene-fixed-tdB9kj`.
+The diagnostic run observed the raw-YUV bridge; its first Record and Stop
+also exceeded latency budgets. These are failing development observations,
+not accepted evidence. Thirty-seven focused Node tests and lint pass.
+The corrected Clips-off baseline passed the first four artifacts but failed
+the fifth: a 267 ms freeze and seven identical frames. Its measured starts
+and stops also exceeded budgets (cold 1,149 ms; observed warm up to 473 ms;
+Stop up to 821 ms). The cadence defect therefore is not confined to Clips
+handover. The host was on battery; no power setting was changed, and that
+observation does not waive the failure. VAAPI latency, full profile matrices
+for both encoders and the broader Node suite continue sequentially under
+`/tmp/videorc-beta-profile-regression-ucVwWu`; their outcomes remain pending.

@@ -110,6 +110,13 @@ That run cannot prove animation timing or presented pixels. The first-run
 smoke retains animation-clock/frame counters to distinguish this from a
 shader or setup failure; waking the display does not change any gate budget.
 
+The latency smoke uses a moving, screen-only synthetic scene. It applies that
+layout through the Studio action and waits for the renderer's confirmed
+transaction and backend scene before arming Clips. A localStorage seed alone
+can be overwritten by initial working-scene persistence. Startup and whole-file
+motion checks both apply, with at least 98% requested duration coverage; the
+synthetic run does not replace real camera/microphone acceptance.
+
 ### Where things are
 
 - App data (owned-process ledger, `linux-vaapi/` probe files, settings):

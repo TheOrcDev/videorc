@@ -45,6 +45,8 @@ import {
   formatSummaryTable,
   nextCycleDelayMs,
   readBudgetOverrides,
+  recordLatencyRendererReady,
+  recordLatencySceneReady,
   summarizeRecordCycles,
   timelinePhaseDeltas
 } from './lib/record-latency-gate.mjs'
@@ -243,6 +245,35 @@ async function waitForBackendState(ws, method, predicate, label) {
   fail(`timed out waiting for ${label}; last ${method}: ${JSON.stringify(last)}`)
 }
 
+async function waitForScreenOnlyRenderer(smoke) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const response = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `
+          const hook = window.__videorcSmokeScenePresets;
+          const state = hook?.state();
+          return {
+            wsStatus: state?.diagnostics?.wsStatus,
+            layoutPreset: hook?.streamingState().captureConfig?.layout?.layoutPreset,
+            committedLayoutPreset: state?.diagnostics?.confirmedVisual?.layout?.layoutPreset,
+            visualTransactionPending: state?.diagnostics?.visualTransactionPending,
+            layoutSwitchPending: state?.pendingLayout
+          };
+        `
+      },
+      { timeoutMs: Math.max(1, deadline - Date.now()) }
+    )
+    last = response?.result
+    if (recordLatencyRendererReady(last)) return last
+    await sleep(100)
+  }
+  fail(`screen-only layout did not commit: ${JSON.stringify(last)}`)
+}
+
 async function verifyArtifact({ mp4Path, cycleIndex }) {
   if (!mp4Path || !existsSync(mp4Path)) fail(`artifact missing for cycle ${cycleIndex}: ${mp4Path}`)
   const [startupReport, qualityReport] = await Promise.all([
@@ -258,7 +289,7 @@ async function verifyArtifact({ mp4Path, cycleIndex }) {
       ffprobePath,
       intendedFps,
       expectAudio: false,
-      gates: { requireMotion: false }
+      gates: { requireMotion: true }
     })
   ])
   const [startupPaths, qualityPaths] = await Promise.all([
@@ -283,7 +314,8 @@ async function verifyArtifact({ mp4Path, cycleIndex }) {
   }
   const durationFailures = evaluateRecordingWallDuration({
     expectedDurationMs: recordingMs,
-    actualDurationSeconds: durationSeconds
+    actualDurationSeconds: durationSeconds,
+    minRatio: 0.98
   })
   if (durationFailures.length > 0) {
     fail(`cycle ${cycleIndex} duration gate failed: ${durationFailures.join('; ')}`)
@@ -456,6 +488,31 @@ try {
   )
   log('synthetic source live; preview compositor rendering')
 
+  // The renderer can persist its initial working scene after the profile seed
+  // but before reload. Commit the screen-only fixture through the same layout
+  // action as the UI, then check the backend scene before arming Clips. Merely
+  // writing a layout to localStorage can leave a camera in the actual scene.
+  await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `
+        const scenes = window.__videorcSmokeScenePresets;
+        if (!scenes) throw new Error('Studio scene actions are not ready.');
+        scenes.layout({ layoutPreset: 'screen-only' });
+        return true;
+      `
+    },
+    { timeoutMs }
+  )
+  await waitForScreenOnlyRenderer(smoke)
+  const fixtureScene = await waitForBackendState(
+    renderer,
+    'scene.get',
+    recordLatencySceneReady,
+    'screen-only synthetic scene'
+  )
+
   const { discovery } = await enableRemoteControl(renderer, { timeoutMs })
   remote = await connectRemote(discovery.host, discovery.port, discovery.token, { timeoutMs })
   await waitForRemoteDescribe(remote, { timeoutMs })
@@ -546,6 +603,12 @@ try {
       replayBuffer
     },
     systemAudioEvidence: systemAudio ? systemAudioEvidence : undefined,
+    sceneFixture: {
+      layoutPreset: 'screen-only',
+      visibleSourceKinds: fixtureScene.sources
+        .filter((source) => source.visible)
+        .map((source) => source.kind)
+    },
     budgets,
     enforce,
     verdict,
@@ -602,6 +665,8 @@ try {
                 recordingState: state?.recording?.state,
                 startBlockedReason: state?.startBlockedReason,
                 testPattern: state?.captureConfig?.sources?.testPattern,
+                layoutPreset: state?.captureConfig?.layout?.layoutPreset,
+                committedLayoutPreset: hook?.state().diagnostics?.confirmedVisual?.layout?.layoutPreset,
                 microphoneOff: state?.captureConfig?.sources?.microphoneOff,
                 replayConfig: state?.captureConfig?.replayBuffer
               };
