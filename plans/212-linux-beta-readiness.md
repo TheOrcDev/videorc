@@ -162,8 +162,15 @@ does not close their acceptance rows.
   establish current main, exact candidate build provenance and payload validity,
   retrieve private evidence, compare remote versions/bytes, bind pointer writes
   to prior state, journal ambiguous writes and verify all configured origins.
-  The protected finalizer, pilot enrollment and updater/rollback proof remain
-  open. The planner does not alter the release-controller setting.
+  The publication transaction core now checks every origin's immutable bytes
+  before any pointer write, rejects downgrade/same-version drift, uses strong
+  ETag or create-only conditions, publishes mirrors before the primary, and
+  requires durable intent/readback/completion records. Ambiguous writes retain
+  their generation; recovery inspection only compares prior/intended bytes.
+  This core has no CLI, network transport or publication credentials. Its
+  protected coordinator, actual storage/journal adapters, pilot enrollment and
+  updater/rollback proof remain open. The planner does not alter the
+  release-controller setting.
 
 ### Private measurement receipts
 
@@ -444,3 +451,62 @@ full backend tests and Clippy remain in progress or queued.
 
 Fresh Windows source and installer execution remains required. No test was
 ignored and no quality threshold or release requirement was relaxed.
+
+### Runtime compilation and publication transaction, 2026-10-30
+
+The configured backend test build completed in 162 minutes. It includes the
+caption split, live microphone and output-timing drafts, but predates the later
+storage correction. Twenty focused runtime tests passed with no ignores in
+that optimized backend test executable. The alternate unoptimized executable
+overflowed its test-thread stack in the timing RPC test; the normal executable
+passes that exact case. No core dump or OOM event was found. This remains a
+limitation of that temporary unoptimized harness, not packaged evidence.
+
+The broader optimized snapshot run executed 4,092 tests: 4,071 passed, two
+failed and 19 were ignored. The source-derived RPC inventory found the missing
+`audio.test.output-timing` execution policy. The draft now classifies the
+read-only receipt as an Observation and asserts that choice in its authority
+test; recompilation is still required. The other failure is the real GLES
+Beams/studio golden comparison on the explicitly approved Intel renderD128:
+mean pixel error 20.405, maximum 193, against unchanged limits 2.0 and 10.
+The reference was captured through ANGLE/Metal on Apple M4. A temporary
+two-pass GLES probe using the actual generated shaders/uniforms reproduced
+that exact error on Intel UHD 630. Higher sampler precision had no effect;
+CPU-derived lane-hash variants reduced but did not meet the limits. Exact
+integer permutation and gradient variants had no effect, ruling out those
+modulo/rounding hypotheses for this reproduction. No shader,
+golden fixture or tolerance was changed. This visual correctness gate remains
+failed. The quarantined renderD129 was not selected or opened for rendering.
+
+The publication transaction core is tested against artificial storage/journal
+adapters, including the actual verified planner's output. It binds claims to
+the exact plan and configured origins, checks all immutable objects before
+writes, refuses missing/inconsistent/downgraded pointers, and uses conditional
+writes plus readback. Lost PUT/journal/completion responses preserve the
+unresolved generation. Recovery refuses foreign generations or pointer bytes;
+it neither unlocks nor retries writes. These tests do not provide a production
+storage adapter, workflow authorization, actual acceptance or publication.
+
+The fresh full worktree Node suite passed 2,834 tests with zero failures/skips.
+The latest 48 focused release tests also pass with no skips, including planner/core
+integration, bounds checks, and the two asynchronous caller/journal mutation
+regressions added after the full suite loaded this module. Focused ESLint,
+Prettier and diff checks passed. Optimized current-source backend compilation,
+Clippy and full Rust execution remain in progress or queued. No runtime draft
+is accepted on the strength of source tests, and no Beta has been published.
+
+### Fresh committed-head CI, 2026-10-30
+
+At `8251f911`, Linux run `40993109799`, job `123860005093`, passed the
+executed FFmpeg policy/provisioning, Clippy and Test steps. The separate skip
+job is not reused as evidence. Windows run `40993109705`, installer job
+`123860022266`, passed the build and packaged capture-worker, live microphone,
+recording A/V, screen/BMP preview, recording-preview continuity and renderer
+crash recovery steps. This verifies the previously failing installer path.
+Neither job includes the current uncommitted microphone/caption drafts.
+
+The JavaScript job also passed. The independent Windows source gate and hosted
+macOS Rust job were still running at this observation. Windows startup incident
+diagnostics failed again; that runbook-excluded job still cannot count as a
+PASS. Required source and physical/runtime acceptance remain separate. The
+existing watched head is left running while the next tested slice is prepared.

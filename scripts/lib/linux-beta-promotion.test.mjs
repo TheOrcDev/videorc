@@ -3,13 +3,14 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import test from 'node:test'
 import { linuxBetaAcceptanceTemplate } from './linux-beta-acceptance.mjs'
 import {
   buildLinuxBetaPublicPromotionPlan,
   linuxPromotionGitReader
 } from './linux-beta-promotion.mjs'
+import { finalizeVerifiedLinuxBetaPlan } from './linux-beta-publication.mjs'
 import {
   buildLinuxReleaseManifest,
   buildLinuxUpdateFeedYml,
@@ -200,6 +201,52 @@ test('plans exact Beta bytes and pinned measured evidence without changing the c
   assert.deepEqual(
     plan.pointers.map((p) => p.objectKey),
     ['updates/linux-beta/latest-linux.yml', 'releases/linux-beta/latest/release.json']
+  )
+})
+
+test('the verified planner output can cross the publication core with exact staged bytes', async (t) => {
+  const f = await fixture(t)
+  const plan = await f.plan()
+  const objects = new Map()
+  for (const artifact of plan.immutable) {
+    const body = artifact.bodyBase64
+      ? Buffer.from(artifact.bodyBase64, 'base64')
+      : await readFile(join(f.root, basename(artifact.sourceObjectKey)))
+    objects.set(artifact.objectKey, { body, etag: '"staged"' })
+  }
+  const journalEntries = []
+  const result = await finalizeVerifiedLinuxBetaPlan({
+    plan,
+    origins: ['fixture'],
+    primaryName: 'fixture',
+    publishedReleaseIds: [],
+    storage: {
+      readCandidate: (key) => readFile(join(f.root, basename(key))),
+      inspectImmutable: async (_origin, key) => {
+        const object = objects.get(key)
+        return object && { sha256: sha256(object.body), sizeBytes: object.body.length }
+      },
+      readPointer: async (_origin, key) => objects.get(key) ?? null,
+      putPointer: async (_origin, key, body, condition) => {
+        assert.deepEqual(condition, { ifMatch: null, ifNoneMatch: '*' })
+        assert.equal(objects.has(key), false)
+        objects.set(key, { body, etag: '"published-fixture"' })
+      }
+    },
+    journal: {
+      claim: async (identity) => ({ identity, generation: 1 }),
+      intent: async (entry) => journalEntries.push(['intent', entry]),
+      verified: async (entry) => journalEntries.push(['verified', entry]),
+      complete: async (entry) => journalEntries.push(['complete', entry]),
+      unknown: async () => assert.fail('fixture publication must not become ambiguous'),
+      abandon: async () => assert.fail('fixture publication must not abandon')
+    }
+  })
+  assert.equal(result.receipts.length, 2)
+  assert.equal(journalEntries.at(-1)[0], 'complete')
+  assert.deepEqual(
+    JSON.parse(objects.get('releases/linux-beta/latest/release.json').body.toString()),
+    plan.manifest
   )
 })
 
