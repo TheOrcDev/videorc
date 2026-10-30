@@ -49,8 +49,8 @@ const CAPTURE_RECOVERY_DOWNSTREAM_RATE_WINDOW: Duration = Duration::from_secs(2)
 const CAPTURE_RECOVERY_DOWNSTREAM_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CAPTURE_RECOVERY_RECOVERED_DWELL: Duration = Duration::from_secs(5);
 /// Recovery awaits the fenced camera transition rather than the shorter stop
-/// response. Keep this aligned with `CAMERA_COMMAND_TRANSITION_TIMEOUT` in
-/// `preview_camera`.
+/// response, so it covers the native startup (12 s for an FFmpeg-fed camera)
+/// plus inventory, not the shorter command reply budget in `preview_camera`.
 const CAPTURE_RECOVERY_CAMERA_NATIVE_RESTART_CONTRACT: Duration = Duration::from_secs(15);
 /// Preserve the former 60-second public bound for a stalled screen restart,
 /// but apply it only to predecessor teardown. The native join itself remains
