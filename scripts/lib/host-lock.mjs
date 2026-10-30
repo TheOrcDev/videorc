@@ -87,6 +87,9 @@ async function acquirePorts({
   waitKnob
 }) {
   if (process.platform === 'win32') return noop()
+  if (ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)) {
+    throw new Error('Invalid VIDEORC_SMOKE_LOCK_PORT: expected fixed TCP ports in 1..65535')
+  }
   const start = Date.now()
   let nextLog = 0
   for (;;) {

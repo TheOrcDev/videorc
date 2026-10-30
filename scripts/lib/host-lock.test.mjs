@@ -23,6 +23,7 @@ async function freePort() {
   await once(server, 'listening')
   const port = server.address().port
   await new Promise((done) => server.close(done))
+  if ((port >= 47868 && port <= 47872) || port > 65533) return freePort()
   return port
 }
 function child(code, env = {}) {
@@ -115,14 +116,17 @@ portTest('exactly N slots, nested builds and inherited holders', async (t) => {
   let base
   for (;;) {
     base = await freePort()
+    let a
     try {
-      const a = await acquirePortLock({ port: base + 1, waitMs: 0 })
+      a = await acquirePortLock({ port: base + 1, waitMs: 0 })
       const b = await acquirePortLock({ port: base + 2, waitMs: 0 })
       await a.release()
       await b.release()
       break
     } catch {
       /* Pick another ephemeral range. */
+    } finally {
+      await a?.release()
     }
   }
   const env = { VIDEORC_SMOKE_LOCK_PORT: String(base), VIDEORC_SMOKE_BUILD_SLOTS: '2' }
@@ -224,4 +228,8 @@ test('launch preparation orders prebuild, release, host lock, memory for every l
       dev ? ['slot', 'build', 'release', 'lock', 'memory'] : ['lock', 'memory']
     )
   }
+})
+
+portTest('port zero cannot accidentally disable mutual exclusion', async () => {
+  await assert.rejects(acquirePortLock({ port: 0 }), /Invalid VIDEORC_SMOKE_LOCK_PORT/)
 })
