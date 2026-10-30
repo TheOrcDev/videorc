@@ -92,8 +92,13 @@ release acceptance is complete:
   `pnpm package:desktop:windows` run on Windows 11 x64.
 - **Window chrome is platform-gated.** macOS vibrancy, traffic lights, hidden
   inset titlebar, and wallpaper fetch stay mac-only; Windows currently uses a
-  normal native frame and themed base. Evidence: commit `c2cc42b9`. Dragging
-  the preview window and toggling theme still need Windows-box verification.
+  normal native frame and themed base. Evidence: commit `c2cc42b9`. The
+  exception is the detached Preview: Electron never turns
+  `-webkit-app-region: drag` into HTCAPTION on a framed Windows window, so a
+  grab in its strip or video did nothing. It now hides the OS title bar and
+  draws a Window Controls Overlay on its 28 px strip (`window-glass.ts`), and
+  `probe:preview-window` drags it by the video on a physical box
+  (2026-10-27). Toggling theme still needs Windows-box verification.
 - **Capture-input and FIFO seams are tested.** `capture_input.rs` and
   `fifo.rs` isolate the platform arms, and the first Windows ffmpeg input
   builders now cover ddagrab/gdigrab display capture plus dshow camera and

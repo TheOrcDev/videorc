@@ -245,14 +245,40 @@ export function solidWindowBase(role: GlassWindowRole, dark: boolean): string {
   return (DARK_ALWAYS_ROLES.has(role) || dark ? DARK_WINDOW_PALETTE : LIGHT_WINDOW_PALETTE).base
 }
 
+/**
+ * The Windows Preview's caption buttons, drawn by Windows over the right end
+ * of its own strip (a Window Controls Overlay) in the strip's colours.
+ */
+export const WINDOWS_PREVIEW_TITLE_BAR_OVERLAY = Object.freeze({
+  color: DARK_WINDOW_PALETTE.base,
+  symbolColor: DARK_WINDOW_PALETTE.textSecondary,
+  height: WINDOW_HEADER_HEIGHT.preview
+})
+
+// The Preview promises that a grab anywhere in its strip or video moves it.
+// A framed Windows window cannot keep that promise: Electron's WinFrameView
+// hands a framed window's hit test to the client view, so
+// `-webkit-app-region: drag` never becomes HTCAPTION and only the OS title bar
+// drags. Like macOS's hiddenInset, the Windows Preview drops the OS title bar
+// and keeps its caption buttons on the strip; the resize edges stay.
+function platformChrome(
+  role: GlassWindowRole,
+  platform: NodeJS.Platform
+): BrowserWindowConstructorOptions {
+  if (platform === 'darwin') {
+    return { titleBarStyle: 'hiddenInset', trafficLightPosition: trafficLightPosition(role) }
+  }
+  if (platform === 'win32' && role === 'preview') {
+    return { titleBarStyle: 'hidden', titleBarOverlay: { ...WINDOWS_PREVIEW_TITLE_BAR_OVERLAY } }
+  }
+  return {}
+}
+
 export function windowGlassOptions(
   role: GlassWindowRole,
   context: { platform: NodeJS.Platform; mode: GlassMode; dark: boolean }
 ): BrowserWindowConstructorOptions {
-  const chrome: BrowserWindowConstructorOptions =
-    context.platform === 'darwin'
-      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: trafficLightPosition(role) }
-      : {}
+  const chrome = platformChrome(role, context.platform)
   if (context.mode.kind === 'mica') {
     // The web contents must be transparent for the backdrop to show through;
     // the body's window coat does the rest. The native frame stays.

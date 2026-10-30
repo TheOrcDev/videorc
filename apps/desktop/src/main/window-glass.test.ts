@@ -324,4 +324,33 @@ describe('Windows Mica under VIDEORC_GLASS=clear (plan 050, D7; plan 208, D9)', 
       expect(glassModeForRole(role, mica, false)).toEqual({ kind: 'mica' })
     }
   })
+
+  it('drops the OS title bar only on the preview, so its strip and video drag it', () => {
+    const solid = glassModeForRole('preview', resolveGlassMode(win(22631)), false)
+    expect(windowGlassOptions('preview', { platform: 'win32', mode: solid, dark: false })).toEqual({
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: DARK_WINDOW_PALETTE.base,
+        symbolColor: DARK_WINDOW_PALETTE.textSecondary,
+        height: 28
+      },
+      backgroundColor: DARK_WINDOW_PALETTE.base
+    })
+    for (const role of ['main', 'chat', 'captions', 'notes'] as const) {
+      const options = windowGlassOptions(role, {
+        platform: 'win32',
+        mode: { kind: 'mica' },
+        dark: true
+      })
+      expect(options.titleBarStyle).toBeUndefined()
+      expect(options.titleBarOverlay).toBeUndefined()
+    }
+    expect(
+      windowGlassOptions('preview', {
+        platform: 'linux',
+        mode: { kind: 'solid', reason: 'platform' },
+        dark: true
+      }).titleBarStyle
+    ).toBeUndefined()
+  })
 })
