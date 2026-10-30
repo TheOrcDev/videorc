@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs'
-
 import js from '@eslint/js'
 import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
@@ -10,34 +8,15 @@ const PHOSPHOR_RESTRICTION = {
     'Import icons from @/components/icons instead. Add a new semantic slot there only if no existing slot already means the same thing.'
 }
 
-// Base UI is the primitive layer of the registries Videorc installs from:
-// audiocn (plan 092) and @videorc (videorc-ui). Until a family moves to
-// @videorc, Videorc's own UI is Radix (components.json: radix-rhea), so only
-// registry files may import it: the audiocn files docs/audiocn.md lists, and
-// the items in apps/desktop/ui-registry.json (pnpm ui:sync).
-const BASE_UI_RESTRICTION = {
-  group: ['@base-ui/react', '@base-ui/react/*'],
+// Videorc's UI is on Base UI, the primitive layer of the registries it
+// installs from: @videorc (videorc-ui, apps/desktop/ui-registry.json,
+// pnpm ui:sync) and @audiocn (docs/audiocn.md). Radix is gone (videorc-ui
+// plan 001, Phase 7), and nothing may bring it back.
+const RADIX_RESTRICTION = {
+  group: ['radix-ui', '@radix-ui/*'],
   message:
-    "Base UI is the registries' primitive layer; Videorc UI not yet synced from @videorc uses Radix. Only files installed from @audiocn (docs/audiocn.md) or listed in apps/desktop/ui-registry.json may import it."
+    "Videorc's UI is on Base UI, from the @videorc registry: use the synced component (pnpm ui:sync), or add what is missing to videorc-ui."
 }
-
-const AUDIOCN_BASE_UI_FILES = [
-  'channel-strip',
-  'channel-toggle',
-  'clip-indicator',
-  'fader',
-  'lcd-display',
-  'parameter-slider'
-].map((name) => `apps/desktop/src/renderer/src/components/ui/${name}.tsx`)
-
-// A @videorc item's file is named after it (a videorc-ui registry rule), in
-// components/ui/ or components/.
-const VIDEORC_UI_BASE_UI_FILES = JSON.parse(
-  readFileSync(new URL('./apps/desktop/ui-registry.json', import.meta.url), 'utf8')
-).items.flatMap((name) => [
-  `apps/desktop/src/renderer/src/components/ui/${name}.{ts,tsx}`,
-  `apps/desktop/src/renderer/src/components/${name}.tsx`
-])
 
 export default tseslint.config(
   {
@@ -74,7 +53,8 @@ export default tseslint.config(
         }
       ],
       'react-hooks/exhaustive-deps': 'warn',
-      'react-hooks/rules-of-hooks': 'error'
+      'react-hooks/rules-of-hooks': 'error',
+      'no-restricted-imports': ['error', { patterns: [RADIX_RESTRICTION] }]
     }
   },
   {
@@ -90,19 +70,11 @@ export default tseslint.config(
       'apps/desktop/src/renderer/src/components/stream-manager/activity-icons.tsx'
     ],
     rules: {
+      // Flat config does not merge rule options: the Radix ban again.
       'no-restricted-imports': [
         'error',
-        { paths: [PHOSPHOR_RESTRICTION], patterns: [BASE_UI_RESTRICTION] }
+        { paths: [PHOSPHOR_RESTRICTION], patterns: [RADIX_RESTRICTION] }
       ]
-    }
-  },
-  {
-    // Registry files may build on Base UI (plan 092; videorc-ui). Flat config
-    // does not merge rule options, so this block re-declares the rule with the
-    // icon ban only.
-    files: [...AUDIOCN_BASE_UI_FILES, ...VIDEORC_UI_BASE_UI_FILES],
-    rules: {
-      'no-restricted-imports': ['error', { paths: [PHOSPHOR_RESTRICTION] }]
     }
   }
 )
