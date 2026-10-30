@@ -650,6 +650,10 @@ struct QuotaInner {
     /// The pause end the remote `youtube.pausedUntil` flag set, so a flag that
     /// is withdrawn lifts its own pause and nothing else.
     remote_pause: Option<DateTime<Utc>>,
+    /// The pause end a `quotaExceeded` set, kept while a longer remote flag
+    /// extends it so the flag's withdrawal restores this deadline instead of
+    /// lifting a pause the quota still owns.
+    quota_pause: Option<DateTime<Utc>>,
     /// When the last pause expired (the probe cleared it or it lapsed).
     last_expiry: Option<DateTime<Utc>>,
     /// A probe task is sleeping towards the current pause.
@@ -853,6 +857,7 @@ fn record_quota_exhausted_at(state: &AppState, source: &str, now: DateTime<Utc>)
         let until = pause_target(now, inner.last_expiry);
         let arm_probe = !inner.probe_armed;
         inner.probe_armed = true;
+        inner.quota_pause = Some(until);
         state.youtube_quota.paused.send_replace(Some(until));
         (until, arm_probe)
     };
@@ -887,6 +892,7 @@ fn clear_pause_matching(state: &AppState, expected: DateTime<Utc>, why: &str) ->
         let was_paused = state.youtube_quota.paused.send_replace(None).is_some();
         inner.last_expiry = Some(Utc::now());
         inner.remote_pause = None;
+        inner.quota_pause = None;
         was_paused
     };
     if was_paused {
@@ -917,15 +923,15 @@ fn apply_probe_verdict(state: &AppState, expected: DateTime<Utc>, verdict: Probe
                 state.youtube_quota.paused.send_replace(None);
                 inner.last_expiry = Some(Utc::now());
                 inner.remote_pause = None;
+                inner.quota_pause = None;
                 inner.probe_armed = false;
                 true
             }
             ProbeVerdict::StillExhausted => {
-                state
-                    .youtube_quota
-                    .paused
-                    .send_replace(Some(Utc::now() + REARM_PAUSE));
+                let rearmed = Utc::now() + REARM_PAUSE;
+                state.youtube_quota.paused.send_replace(Some(rearmed));
                 inner.remote_pause = None;
+                inner.quota_pause = Some(rearmed);
                 false
             }
         }
@@ -1423,7 +1429,34 @@ pub fn apply_remote_pause(state: &AppState, until: Option<DateTime<Utc>>) {
             if let Some(remote) = previous_remote
                 && current == Some(remote)
             {
-                clear_pause_matching(state, remote, "the remote service flag was withdrawn");
+                // A flag that extended a quota pause gives the quota its
+                // deadline back; only a pause the flag alone set lifts.
+                let quota_deadline = state
+                    .youtube_quota
+                    .lock()
+                    .quota_pause
+                    .filter(|deadline| *deadline > now);
+                match quota_deadline {
+                    Some(deadline) => {
+                        {
+                            let mut inner = state.youtube_quota.lock();
+                            inner.remote_pause = None;
+                            state.youtube_quota.paused.send_replace(Some(deadline));
+                        }
+                        tracing::info!(
+                            "[youtube-quota] remote service flag withdrawn; the quota pause stands until {}",
+                            deadline.to_rfc3339()
+                        );
+                        emit_status(state);
+                    }
+                    None => {
+                        clear_pause_matching(
+                            state,
+                            remote,
+                            "the remote service flag was withdrawn",
+                        );
+                    }
+                }
             } else if previous_remote.is_some() {
                 state.youtube_quota.lock().remote_pause = None;
             }
@@ -1442,16 +1475,12 @@ pub fn chat_poll_floor_ms(state: &AppState) -> u64 {
 }
 
 /// The viewer sampler's cadence while a YouTube sampler runs: the remote
-/// `viewerSampleMs` (≥ 30,000) or 120 s; only YouTube uses this interval.
+/// `viewerSampleMs` (30 s to 120 s) or 120 s; only YouTube uses this interval.
 pub fn viewer_sample_interval(state: &AppState) -> Duration {
-    Duration::from_millis(
-        state
-            .youtube_quota
-            .flags
-            .borrow()
-            .viewer_sample_ms
-            .max(crate::service_flags::VIEWER_SAMPLE_FLOOR_MS),
-    )
+    Duration::from_millis(state.youtube_quota.flags.borrow().viewer_sample_ms.clamp(
+        crate::service_flags::VIEWER_SAMPLE_FLOOR_MS,
+        crate::service_flags::VIEWER_SAMPLE_CEILING_MS,
+    ))
 }
 
 /// Whether the remote flag parks the chat reader.
@@ -2309,6 +2338,15 @@ mod tests {
         // A remote pause shorter than the quota pause does not shorten it.
         apply_remote_pause(&state, Some(Utc::now() + chrono::Duration::minutes(5)));
         assert_eq!(paused_until(&state), Some(quota_until));
+        // A longer remote pause extends it, and its withdrawal hands the
+        // deadline back to the quota instead of lifting the pause: the daily
+        // quota is still exhausted until Pacific midnight.
+        let extended = quota_until + chrono::Duration::hours(2);
+        apply_remote_pause(&state, Some(extended));
+        assert_eq!(paused_until(&state), Some(extended));
+        apply_remote_pause(&state, None);
+        assert_eq!(paused_until(&state), Some(quota_until));
+        assert!(refuse_if_paused(&state).is_err());
         // A past pause is a no-op.
         clear_for_tests(&state);
         apply_remote_pause(&state, Some(Utc::now() - chrono::Duration::minutes(5)));

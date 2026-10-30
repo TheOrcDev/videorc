@@ -1469,6 +1469,21 @@ fn next_backoff_ms(current: u64) -> u64 {
         .clamp(MIN_BACKOFF_MS, MAX_BACKOFF_MS)
 }
 
+/// Pure: how long to wait before the next EventSub connect, and the backoff
+/// to carry forward, as `(wait_ms, next_backoff_ms)`. A session that reached
+/// Welcome starts the ladder over: its drop is a new fault, not a repeat of
+/// the last one, so hours of healthy chat never ratchet the wait to its 30 s
+/// cap. Twitch's own `session_reconnect` URL is followed at once, because
+/// Twitch closes the old socket shortly after it hands the URL over.
+fn reconnect_plan(backoff_ms: u64, welcomed: bool, twitch_handoff: bool) -> (u64, u64) {
+    let base = if welcomed { MIN_BACKOFF_MS } else { backoff_ms };
+    if twitch_handoff {
+        (0, base)
+    } else {
+        (base, next_backoff_ms(base))
+    }
+}
+
 // --- Live transport ---
 
 enum SessionOutcome {
@@ -1754,6 +1769,7 @@ async fn run_eventsub_session(
     avatars: &mut TwitchAvatarCache,
     points_name: &mut ChannelPointsName,
     extras_live: &mut ExtraEvents,
+    welcomed: &mut bool,
 ) -> SessionOutcome {
     let (session_id, session_generation) = session_owner;
     let Ok((ws_stream, _response)) = connect_async(ws_url).await else {
@@ -1775,6 +1791,7 @@ async fn run_eventsub_session(
                 EventSubFrame::Welcome {
                     session_id: socket_session,
                 } => {
+                    *welcomed = true;
                     // A socket from Twitch's reconnect URL keeps the old
                     // socket's subscriptions, follows included.
                     if subscribe {
@@ -2004,6 +2021,7 @@ pub async fn run_twitch_chat_connector(
     let mut points_name = ChannelPointsName::default();
     let mut extras_live = ExtraEvents::default();
     loop {
+        let mut welcomed = false;
         match run_eventsub_session(
             &state,
             (&session_id, session_generation),
@@ -2016,13 +2034,15 @@ pub async fn run_twitch_chat_connector(
             &mut avatars,
             &mut points_name,
             &mut extras_live,
+            &mut welcomed,
         )
         .await
         {
             SessionOutcome::Reconnect(next_url) => {
                 // Twitch's own reconnect URL carries the subscriptions over;
                 // a dropped socket starts a new session that needs them.
-                subscribe = next_url.is_none();
+                let twitch_handoff = next_url.is_some();
+                subscribe = !twitch_handoff;
                 ws_url = next_url.unwrap_or_else(|| default_ws_url.clone());
                 set_provider_and_emit(
                     &state,
@@ -2034,8 +2054,11 @@ pub async fn run_twitch_chat_connector(
                     "Reconnecting to Twitch live chat…",
                 )
                 .await;
-                sleep(Duration::from_millis(backoff_ms)).await;
-                backoff_ms = next_backoff_ms(backoff_ms);
+                let (wait_ms, next_backoff) = reconnect_plan(backoff_ms, welcomed, twitch_handoff);
+                if wait_ms > 0 {
+                    sleep(Duration::from_millis(wait_ms)).await;
+                }
+                backoff_ms = next_backoff;
             }
             SessionOutcome::Fatal(message) => {
                 if extras_live.follows {
@@ -4188,6 +4211,23 @@ mod tests {
         assert_eq!(next_backoff_ms(2_000), 4_000);
         assert_eq!(next_backoff_ms(20_000), MAX_BACKOFF_MS);
         assert_eq!(next_backoff_ms(MAX_BACKOFF_MS), MAX_BACKOFF_MS);
+    }
+
+    #[test]
+    fn reconnect_backoff_resets_after_a_welcomed_session_and_follows_twitch_at_once() {
+        // Connect failures ratchet the wait.
+        assert_eq!(reconnect_plan(MIN_BACKOFF_MS, false, false), (1_000, 2_000));
+        assert_eq!(
+            reconnect_plan(16_000, false, false),
+            (16_000, MAX_BACKOFF_MS)
+        );
+        // A socket that reached Welcome before dropping starts over at 1 s,
+        // however many drops a long stream has seen before it.
+        assert_eq!(reconnect_plan(MAX_BACKOFF_MS, true, false), (1_000, 2_000));
+        // Twitch's session_reconnect URL is followed without a wait and does
+        // not count as a failure.
+        assert_eq!(reconnect_plan(MAX_BACKOFF_MS, true, true), (0, 1_000));
+        assert_eq!(reconnect_plan(4_000, false, true), (0, 4_000));
     }
 
     // --- Removing (plan 140 S4) ----------------------------------------------------
