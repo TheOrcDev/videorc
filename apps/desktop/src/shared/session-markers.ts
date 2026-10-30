@@ -77,6 +77,15 @@ export interface MarkerContext {
   }
   /** The Clip action (plan 181 R4), for the window's button and `/clip`. */
   clip?: ClipContext
+  /** Hide screen (plan 210 S8b), for the window's action and its stats chip. */
+  screen?: ScreenPrivacyContext
+}
+/** What the Stream Manager shows of Hide screen: the state, why a hide is
+ * refused, and its key as an Electron accelerator when one is bound. */
+export interface ScreenPrivacyContext {
+  hidden: boolean
+  unavailable?: string
+  accelerator?: string
 }
 export interface ClipContext {
   /** The ring holds frames or a recording runs: a press keeps something. */
@@ -96,11 +105,12 @@ export interface ClipContext {
   off?: 'switch' | 'blocked' | 'starting' | 'idle'
 }
 export type MarkerRelayCommand = { requestId: string } & (
+  | { action: 'screenHide' | 'screenShow' }
   | { action: 'create'; params: CreateMarkerParams }
   | { action: 'get'; params: MarkerParams }
   | { action: 'delete'; params: MarkerParams }
 )
-export type MarkerRelayResult = SessionMarker | MarkerLookup | MarkerChanged
+export type MarkerRelayResult = SessionMarker | MarkerLookup | MarkerChanged | { hidden: boolean }
 
 export const MARKER_LABEL_MAX_CHARS = 120
 export function markerLabel(raw: string): string | undefined {
@@ -217,12 +227,23 @@ export const markerContextSchema = nullableSchema(
           },
           strict
         )
+      ),
+      screen: optionalSchema(
+        objectSchema(
+          {
+            hidden: booleanSchema,
+            unavailable: optionalSchema(stringSchema({ maxLength: 1000 })),
+            accelerator: optionalSchema(stringSchema({ maxLength: 160 }))
+          },
+          strict
+        )
       )
     },
     strict
   )
 )
 export const markerRelayCommandSchema = unionSchema([
+  objectSchema({ requestId: id, action: enumSchema(['screenHide', 'screenShow']) }, strict),
   objectSchema(
     { requestId: id, action: literalSchema('create'), params: createMarkerParamsSchema },
     strict
@@ -234,6 +255,7 @@ export const markerRelayCommandSchema = unionSchema([
   )
 ])
 export const markerRelayResultSchema = unionSchema([
+  objectSchema({ hidden: booleanSchema }, strict),
   sessionMarkerSchema,
   markerLookupSchema,
   markerChangedSchema
@@ -258,6 +280,7 @@ export type ComposerCommand =
   | { kind: 'sound'; action: SoundRelayAction }
   /** Plan 209 S20: ask Buddy to do something; never posts to chat. */
   | { kind: 'buddy'; sentence: string }
+  | { kind: 'privacy'; hidden: boolean }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 /**
@@ -273,6 +296,8 @@ export function classifyComposerDraft(
   const text = raw.trim()
   if (!text.startsWith('/')) return { kind: 'chat', text }
   if (text.startsWith('//')) return { kind: 'chat', text: text.slice(1) }
+  if (/^\/hide\s*$/i.test(text)) return { kind: 'privacy', hidden: true }
+  if (/^\/show\s*$/i.test(text)) return { kind: 'privacy', hidden: false }
   if (/^\/help\s*$/i.test(text)) return { kind: 'help' }
   const clip = /^\/clip(?:\s+([\s\S]*))?$/i.exec(text)
   if (clip) return classifyClipCommand(clip[1]?.trim() ?? '')
@@ -293,7 +318,7 @@ export function classifyComposerDraft(
   return {
     kind: 'error',
     message:
-      'Unknown command. Use /marker [title], /clip, /banner [name], /sound [name], /buddy [words], or /help. To send a literal slash, start with //.'
+      'Unknown command. Use /hide, /show, /marker [title], /clip, /banner [name], /sound [name], /buddy [words], or /help. To send a literal slash, start with //.'
   }
 }
 /** Plan 199 D6: what `/clip` says when it is given a length nobody offers. */

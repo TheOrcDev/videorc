@@ -66,6 +66,11 @@ export function buildRecordingStudioGateSteps({
       args: ['smoke:scene-switch-pixels']
     },
     {
+      label: 'app scenes, follow the app in front and Hide screen smoke (plan 210)',
+      command: 'pnpm',
+      args: ['smoke:smart-scenes']
+    },
+    {
       label: 'separate source recordings fixture take',
       command: 'pnpm',
       args: ['smoke:separate-source-fixture']

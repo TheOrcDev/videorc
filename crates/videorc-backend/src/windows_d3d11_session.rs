@@ -2418,6 +2418,14 @@ mod runtime {
         let mut capture_frame: Option<
             FrameHandle<crate::preview_screen::PreviewScreenPixelFormat>,
         > = None;
+        // Plan 210 S7 (Hide screen): the native texture route only runs while
+        // the screen is visible. Hidden, this loop composes from the gated
+        // BGRA store, the one `screen.hide` covers synchronously; the capture
+        // owner keeps running, nothing is retired, and the next native frame
+        // after a show takes over again.
+        let screen_privacy = Arc::clone(&live_sources.state.screen_privacy);
+        let mut privacy_hidden = false;
+        let mut privacy_resume_pending = false;
         let mut upload_revision = 0u64;
         let mut last_capture_upload: Option<(u64, WindowsD3d11UploadPixels, u64)> = None;
         let mut camera_upload_revision = 0u64;
@@ -2439,6 +2447,22 @@ mod runtime {
                     .is_some_and(|previous| {
                         frame_started_at.duration_since(previous) > frame_interval * 3 / 2
                     });
+            let privacy_hidden_now = screen_privacy.view().hidden;
+            if privacy_hidden_now != privacy_hidden {
+                privacy_hidden = privacy_hidden_now;
+                privacy_resume_pending = !privacy_hidden_now;
+                retained_capture_ticket = None;
+                pending_capture = None;
+                if privacy_hidden_now {
+                    // The BGRA frame in hand and its upload are live pixels
+                    // from before the edge: drop them with the texture lease.
+                    // The still replaces them below; until it is read, no
+                    // screen is drawn at all.
+                    capture_frame = None;
+                    last_capture_upload = None;
+                }
+                cfr.replace_source();
+            }
             let fresh_committed = live_sources.snapshot();
             if fresh_committed
                 .as_ref()
@@ -2551,7 +2575,7 @@ mod runtime {
                 }
             }
             let mut new_capture_sequence = None;
-            if native_capture && pending_capture.is_none() {
+            if native_capture && !privacy_hidden && pending_capture.is_none() {
                 match client.begin_capture_poll(
                     super::WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS,
                     vec![WindowsD3d11MediaRole::Compositor],
@@ -2573,6 +2597,11 @@ mod runtime {
                 pending_capture = None;
             }
             match acquired.unwrap_or(Ok(None)) {
+                Ok(Some(capture)) if privacy_hidden => {
+                    // Hidden between the poll and its answer: the lease is
+                    // released unadopted. The still comes from the BGRA store.
+                    drop(capture);
+                }
                 Ok(Some(capture)) => {
                     let sequence = capture.metadata.sequence;
                     let source_ticket = match ticket_for_role(
@@ -2589,6 +2618,13 @@ mod runtime {
                     };
                     retained_capture_ticket = Some(source_ticket);
                     new_capture_sequence = Some(sequence);
+                    if privacy_resume_pending {
+                        // The first native frame after a show: the BGRA
+                        // stand-in is done.
+                        privacy_resume_pending = false;
+                        capture_frame = None;
+                        last_capture_upload = None;
+                    }
                     update_snapshot(&snapshot, |current| {
                         current.captured_frames = current.captured_frames.saturating_add(1);
                         current.latest_capture_sequence = Some(sequence);
@@ -2624,12 +2660,20 @@ mod runtime {
                     break;
                 }
             }
-            if !native_capture {
+            if !native_capture || privacy_hidden || privacy_resume_pending {
                 if let Some(source) = committed
                     .as_ref()
                     .and_then(|current| current.capture.as_ref())
                 {
-                    if let Ok(Some(frame)) = source.try_latest_frame_result()
+                    // Hidden, only the gate's still is taken from the store:
+                    // the gate closes before `screen.hide` covers the store,
+                    // so its newest frame can still be live for a tick.
+                    let latest = if privacy_hidden {
+                        source.try_latest_still_frame_result()
+                    } else {
+                        source.try_latest_frame_result()
+                    };
+                    if let Ok(Some(frame)) = latest
                         && frame.bytes.len() == frame.width as usize * frame.height as usize * 4
                         && capture_frame
                             .as_ref()

@@ -50,6 +50,9 @@ describe('the remote intent entry point', () => {
   it('has one executor for every kind on the wire (docs/remote-control.md)', () => {
     expect(Object.keys(REMOTE_INTENT_EXECUTORS).sort()).toEqual(
       [
+        'screenHide',
+        'screenShow',
+        'screenHideToggle',
         'recordStart',
         'recordStop',
         'recordToggle',
@@ -171,4 +174,29 @@ describe('the remote intent entry point', () => {
     ).resolves.toBeUndefined()
     expect(context.setMicrophoneMuted).toHaveBeenCalledWith('toggle')
   })
+})
+
+it('applies a saved scene and acknowledges its typed refusal', async () => {
+  const applySavedSceneResult = vi.fn(async () => ({
+    ok: false as const,
+    reason: 'app-not-running' as const,
+    message: 'Open Figma to use this scene.'
+  }))
+  const { context, requests } = studioContext({ applySavedSceneResult })
+  await executeRemoteIntent(
+    { intentId: 'saved', intent: { kind: 'sceneApply', sceneId: 'figma' } },
+    context
+  )
+  expect(applySavedSceneResult).toHaveBeenCalledWith('figma')
+  expect(requests.at(-1)?.params).toEqual({
+    intentId: 'saved',
+    ok: false,
+    message: 'Open Figma to use this scene.'
+  })
+  applySavedSceneResult.mockResolvedValueOnce({ ok: true } as never)
+  await executeRemoteIntent(
+    { intentId: 'yes', intent: { kind: 'sceneApply', sceneId: 'figma' } },
+    context
+  )
+  expect(requests.at(-1)?.params).toEqual({ intentId: 'yes', ok: true })
 })

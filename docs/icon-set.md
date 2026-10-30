@@ -29,6 +29,10 @@ expects to diverge.
 Plan 206 (2026-10-27) added `FacebookIcon`, Phosphor's `FacebookLogo`: a
 seventh platform brand mark, outside the Nucleo count like the others.
 
+Plan 210 S8b (2026-10-29) added `HiddenIcon` (EyeSlash) for Hide screen: the
+screen is hidden from viewers, a meaning no slot had (`PreviewIcon`'s eye opens
+the Preview window). It is one more glyph inside the Nucleo count.
+
 The Buddy page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
 a small picture opened larger to look at it, a meaning no slot had
 (`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is

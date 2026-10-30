@@ -223,6 +223,10 @@ pub struct DeviceList {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<DeviceApp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
     pub id: String,
     pub name: String,
     pub kind: DeviceKind,
@@ -233,6 +237,51 @@ pub struct Device {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceApp {
+    pub bundle_id: String,
+    pub name: String,
+    pub pid: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveAppWindowParams {
+    pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefer_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ResolveAppWindowResult {
+    Found {
+        ok: bool,
+        #[serde(rename = "windowId")]
+        window_id: String,
+        title: String,
+        width: u32,
+        height: u32,
+    },
+    Unavailable {
+        ok: bool,
+        reason: AppWindowUnavailableReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppWindowUnavailableReason {
+    NotRunning,
+    NoWindow,
+    Minimized,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -3877,9 +3926,38 @@ pub struct CompositorStatus {
     /// while the scene has no live background.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_background: Option<LiveBackgroundStatus>,
+    /// Plan 210 S3: how the last screen or window switch changed the
+    /// capture, and why the in-place change was not used when it wasn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_switch: Option<ScreenSwitchStatus>,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Plan 210 S3: how the last screen or window switch changed the capture.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenSwitchStatus {
+    pub mode: ScreenSwitchMode,
+    /// Why the running stream was not changed in place (`restart` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub source_id: String,
+    pub generation: u64,
+    /// Switch request to the new source's first frame, when it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_frame_ms: Option<u64>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenSwitchMode {
+    /// The running ScreenCaptureKit stream changed its target.
+    InPlace,
+    /// The stream was stopped and another started.
+    Restart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4900,6 +4978,39 @@ pub struct ImportScreenImageParams {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenIdParams {
     pub screen_id: String,
+}
+
+/// Who hid the screen (plan 210 D9/D11): the streamer, or the password-manager
+/// list acting on their behalf. Only the streamer's own surfaces show it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenPrivacyReason {
+    You,
+    PasswordManager,
+}
+
+/// Hide screen state (plan 210 S7), in memory only and cleared at launch.
+/// `screen.privacy.get` returns it, `screen.privacy.changed` carries it on
+/// every hide and show. Absent fields are omitted, never `null`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPrivacy {
+    pub hidden: bool,
+    /// RFC 3339, the moment of the hide; present only while hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ScreenPrivacyReason>,
+    /// Why `screen.hide` would be refused right now (a legacy FFmpeg session
+    /// reads the display through FFmpeg itself); absent when it would work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenHideParams {
+    pub reason: ScreenPrivacyReason,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

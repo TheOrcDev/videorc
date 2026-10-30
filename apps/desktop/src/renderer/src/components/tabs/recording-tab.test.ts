@@ -120,6 +120,7 @@ function Harness({
     captionsStatus: { state: 'idle' },
     captionsCommandPending: false,
     wsStatus: 'connected',
+    screenPrivacy: { hidden: false },
     systemAudioConfirmed: null,
     systemAudioIssue: null
   }

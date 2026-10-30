@@ -127,6 +127,7 @@ mod scheduled_streams_service;
 mod scheduled_x;
 mod scheduled_youtube;
 mod screen_capture;
+mod screen_privacy;
 mod secrets;
 #[cfg(test)]
 mod served_page_palette;
@@ -5771,7 +5772,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sounds.press"
         | "sounds.stop"
         | "preview.live.start"
-        | "preview.live.stop" => Some(DEFAULT_MUTATION_POLICY),
+        | "preview.live.stop"
+        | "screen.hide"
+        | "screen.show" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.source.switch" => Some(Mutation {
             max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
@@ -5899,6 +5902,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "ai.capabilities.get"
         | "ai.quota.get"
         | "devices.list"
+        | "sources.resolve_app_window"
+        | "sources.app_previews"
         | "diagnostics.stats"
         | "capture.recovery.status"
         | "preview.surface.status"
@@ -5967,6 +5972,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.live.status"
         | "session.sources.get"
         | "recording.status"
+        | "screen.privacy.get"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),
@@ -6030,7 +6036,9 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "captions.stop"
         | "captions.style.set"
         | "comments.highlight.set"
-        | "comments.highlight.clear" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
+        | "comments.highlight.clear"
+        | "screen.hide"
+        | "screen.show" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
         "session.stop" | COMMAND_LANE_SMOKE_RELEASE_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::Stop)
         }
@@ -10390,6 +10398,61 @@ async fn handle_text_message_with_role(
             Ok(quota) => ServerResponse::ok(command.id, quota),
             Err(error) => ServerResponse::error(command.id, "ai-quota-failed", error.to_string()),
         },
+        "sources.app_previews" => {
+            let params = if command.params.is_null() {
+                Ok(screen_capture::AppPreviewsParams::default())
+            } else {
+                serde_json::from_value(command.params)
+            };
+            match params {
+                Ok(params) => {
+                    match tokio::task::spawn_blocking(move || screen_capture::app_previews(params))
+                        .await
+                    {
+                        Ok(Ok(apps)) => {
+                            ServerResponse::ok(command.id, serde_json::json!({"apps": apps}))
+                        }
+                        Ok(Err(error)) => {
+                            ServerResponse::error(command.id, "app-previews-failed", error)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "app-previews-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sources.resolve_app_window" => {
+            match serde_json::from_value::<protocol::ResolveAppWindowParams>(command.params) {
+                Ok(params) if !params.bundle_id.trim().is_empty() => {
+                    match tokio::task::spawn_blocking(move || {
+                        screen_capture::resolve_app_window(&params)
+                    })
+                    .await
+                    {
+                        Ok(Ok(result)) => ServerResponse::ok(command.id, result),
+                        Ok(Err(error)) => {
+                            ServerResponse::error(command.id, "app-window-resolution-failed", error)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "app-window-resolution-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                _ => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected a non-empty bundleId and optional window id and minimum dimensions.",
+                ),
+            }
+        }
         "devices.list" => {
             let ffmpeg_path = resolve_trusted_ffmpeg_path(
                 command
@@ -13477,6 +13540,70 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "screen-clear-failed", error.to_string())
                 }
+            }
+        }
+        // Plan 210 S7: Hide screen. Renderer and admin sockets only (the
+        // remote and agent roles never reach these methods); the LiveControl
+        // lane, so a hide never queues behind a scene commit.
+        "screen.hide" => match serde_json::from_value::<protocol::ScreenHideParams>(command.params)
+        {
+            Ok(params) => {
+                if recording::active_session_reads_display_directly(state)
+                    .await
+                    .is_some()
+                {
+                    // The legacy FFmpeg graph grabs the display itself and
+                    // never reads the gated store: refuse, never succeed
+                    // uncovered.
+                    ServerResponse::error(
+                        command.id,
+                        "screen-hide-unavailable",
+                        screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY,
+                    )
+                } else {
+                    let privacy = state
+                        .screen_privacy
+                        .hide(params.reason, chrono::Utc::now().to_rfc3339());
+                    // The gate is hidden before this runs, so a frame landing
+                    // in between frosts itself; this covers a static screen.
+                    preview_screen::hold_screen_now(state).await;
+                    state.emit_event("screen.privacy.changed", privacy.clone());
+                    ServerResponse::ok(command.id, privacy)
+                }
+            }
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "screen.show" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "screen.show does not accept parameters",
+                )
+            } else {
+                let privacy = state.screen_privacy.show();
+                preview_screen::release_screen_now(state).await;
+                state.emit_event("screen.privacy.changed", privacy.clone());
+                ServerResponse::ok(command.id, privacy)
+            }
+        }
+        "screen.privacy.get" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "screen.privacy.get does not accept parameters",
+                )
+            } else {
+                let mut privacy = state.screen_privacy.snapshot();
+                if recording::active_session_reads_display_directly(state)
+                    .await
+                    .is_some()
+                {
+                    privacy.unavailable =
+                        Some(screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY.to_string());
+                }
+                ServerResponse::ok(command.id, privacy)
             }
         }
         "session.remux_mp4" => {
@@ -16626,6 +16753,95 @@ mod tests {
         }
     }
 
+    /// Plan 210 S7: hide and show through the renderer socket, with the event
+    /// and the exact wire shapes (absent fields omitted, never null).
+    #[tokio::test]
+    async fn screen_hide_and_show_round_trip_with_the_event() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let get = json!({ "id": "get", "method": "screen.privacy.get", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &get, BackendRole::Renderer).await;
+        assert!(response.ok);
+        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+
+        let hide = json!({ "id": "hide", "method": "screen.hide", "params": { "reason": "you" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+        let payload = response.payload.unwrap();
+        assert_eq!(payload["hidden"], json!(true));
+        assert_eq!(payload["reason"], json!("you"));
+        assert!(payload["since"].is_string());
+        assert!(payload.get("unavailable").is_none());
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "screen.privacy.changed");
+        assert_eq!(event.payload, payload);
+        assert!(state.screen_privacy.view().hidden);
+
+        // A password-manager hide while hidden by you keeps "you".
+        let hide_again = json!({
+            "id": "hide2", "method": "screen.hide", "params": { "reason": "password-manager" }
+        })
+        .to_string();
+        let response =
+            handle_text_message_with_role(&state, &hide_again, BackendRole::Renderer).await;
+        assert_eq!(response.payload.unwrap()["reason"], json!("you"));
+        let _ = events.recv().await.unwrap();
+
+        let bad = json!({ "id": "bad", "method": "screen.hide", "params": { "reason": "agent" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &bad, BackendRole::Renderer).await;
+        assert_eq!(response.error.unwrap().code, "invalid-params");
+
+        let show = json!({ "id": "show", "method": "screen.show", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &show, BackendRole::Admin).await;
+        assert!(response.ok);
+        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "screen.privacy.changed");
+        assert_eq!(event.payload, json!({ "hidden": false }));
+        assert!(!state.screen_privacy.view().hidden);
+
+        // Never the remote role.
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Remote).await;
+        assert_eq!(response.error.unwrap().code, "forbidden-method");
+        assert!(!state.screen_privacy.view().hidden);
+    }
+
+    /// Plan 210 S7.5: a legacy FFmpeg session grabs the display itself, so a
+    /// hide is refused with the exact copy and the status says why. It never
+    /// succeeds uncovered.
+    #[tokio::test]
+    async fn screen_hide_is_refused_while_a_legacy_ffmpeg_session_runs() {
+        let state = test_state();
+        *state.recording.lock().await = Some(recording::test_active_recording_stub("legacy"));
+        let hide = json!({ "id": "hide", "method": "screen.hide", "params": { "reason": "you" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Renderer).await;
+        let error = response.error.expect("refused");
+        assert_eq!(error.code, "screen-hide-unavailable");
+        assert_eq!(
+            error.message,
+            "Hide screen isn't available on this recording. Stop and record again."
+        );
+        assert!(
+            !state.screen_privacy.view().hidden,
+            "a refusal changes nothing"
+        );
+        let get = json!({ "id": "get", "method": "screen.privacy.get", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &get, BackendRole::Renderer).await;
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({
+                "hidden": false,
+                "unavailable": "Hide screen isn't available on this recording. Stop and record again."
+            })
+        );
+        *state.recording.lock().await = None;
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+    }
+
     #[test]
     fn preview_debug_sample_is_read_only_without_a_mutation_lane() {
         let text = json!({"id":"sample", "method":"preview.debug.sample", "params":{"rects":[]}})
@@ -16652,6 +16868,8 @@ mod tests {
             "captions.style.set",
             "comments.highlight.set",
             "comments.highlight.clear",
+            "screen.hide",
+            "screen.show",
             "capture.recovery.retry",
             CAPTURE_RECOVERY_SMOKE_INJECT_METHOD,
             CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD,

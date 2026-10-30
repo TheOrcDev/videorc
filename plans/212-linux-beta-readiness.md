@@ -835,4 +835,23 @@ therefore improves scene consistency but does not establish cadence or
 latency readiness. Reports are under
 `/tmp/videorc-beta-replay-regression-Wc4WGx`.
 Typecheck, lint, formatting and all 2,886 Node tests pass (zero Node skips).
-Desktop tests and the frontend build remain in progress at this checkpoint.
+The remaining desktop suite was deliberately stopped when main advanced to
+`9028bec9` (Plan 210); the old frontend build was not run. The partial suite
+is not a pass. Owned process IDs and the interruption receipt are retained
+beside the queue report. Validation restarts on the merged source below.
+
+### Main integration, 2026-10-30
+
+Main `9028bec9` adds app scenes and Hide screen. Both plan-index entries are
+retained. Its scene/capture changes and the Linux caption, microphone and
+Clips changes merge without a source conflict; only the plan index required
+manual resolution. Every subsequent runtime pass needs a freshly compiled
+backend for this source, not the earlier binary hash.
+
+Hide screen is now also part of Linux physical acceptance: verify the frosted
+still on Preview, recording, every supported stream leg and Clips, including
+Hide/Show across start/stop and source recovery. Legacy paths must refuse the
+unsupported combination rather than expose live screen pixels. App-following
+features remain subject to their platform capability guards. The maintained
+smart-scenes smoke requires macOS fixture apps and cannot certify Linux;
+its Linux skip is not acceptance. Merged-source checks remain pending.

@@ -293,6 +293,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn app_window_resolution_is_local_studio_authority() {
+        for role in [BackendRole::Renderer, BackendRole::Admin] {
+            assert!(authorize_backend_method(role, "sources.resolve_app_window", false).is_ok());
+            assert!(authorize_backend_method(role, "sources.app_previews", false).is_ok());
+        }
+        for role in [BackendRole::Remote, BackendRole::Agent] {
+            assert!(authorize_backend_method(role, "sources.resolve_app_window", false).is_err());
+            assert!(authorize_backend_method(role, "sources.app_previews", false).is_err());
+        }
+    }
+
+    #[test]
     fn renderer_and_admin_credentials_are_distinct_roles() {
         assert_eq!(
             authenticate_backend_token("renderer-secret", "renderer-secret", "admin-secret"),
@@ -495,6 +507,25 @@ mod remote_role_tests {
             assert!(
                 authorize_backend_method(BackendRole::Remote, forbidden, false).is_err(),
                 "remote role must not reach {forbidden}"
+            );
+        }
+    }
+
+    /// Plan 210 S7: Hide screen is the Studio window's and main's. The remote
+    /// (Stream Deck, phone) and agent roles never reach it; agents get a
+    /// hide-only tool through the renderer in S8.
+    #[test]
+    fn hide_screen_methods_admit_renderer_and_admin_only() {
+        for method in ["screen.hide", "screen.show", "screen.privacy.get"] {
+            assert!(authorize_backend_method(BackendRole::Renderer, method, false).is_ok());
+            assert!(authorize_backend_method(BackendRole::Admin, method, false).is_ok());
+            assert!(
+                authorize_backend_method(BackendRole::Remote, method, false).is_err(),
+                "remote role must not reach {method}"
+            );
+            assert!(
+                authorize_backend_method(BackendRole::Agent, method, true).is_err(),
+                "agent role must not reach {method}"
             );
         }
     }

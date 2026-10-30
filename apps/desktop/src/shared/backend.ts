@@ -360,7 +360,50 @@ export type VideorcAccountRefreshResult =
 export type DeviceKind = 'screen' | 'window' | 'camera' | 'microphone' | 'system-audio'
 export type DeviceStatus = 'available' | 'unavailable' | 'permission-required'
 
+export interface DeviceApp {
+  bundleId: string
+  name: string
+  pid: number
+}
+
+export interface ResolveAppWindowParams {
+  bundleId: string
+  preferWindowId?: string
+  minWidth?: number
+  minHeight?: number
+}
+
+export type ResolveAppWindowResult =
+  | { ok: true; windowId: string; title: string; width: number; height: number }
+  | { ok: false; reason: 'not-running' | 'no-window' | 'minimized' }
+
+/** Plan 210 S4: New scene…'s picker asks for these only while it is open. */
+export interface AppPreviewsParams {
+  /** The widest picture to return, in pixels. */
+  maxWidth?: number
+}
+
+/** One running app with a normal window, and a small picture of its front window. */
+export interface AppPreview {
+  bundleId: string
+  name: string
+  pid: number
+  windowCount: number
+  frontWindowId?: string
+  frontWindowTitle?: string
+  /** `data:image/jpeg;base64,…`; absent below macOS 14. */
+  picture?: string
+  width?: number
+  height?: number
+}
+
+export interface AppPreviewsResult {
+  apps: AppPreview[]
+}
+
 export interface Device {
+  app?: DeviceApp
+  windowTitle?: string
   id: string
   name: string
   kind: DeviceKind
@@ -2431,8 +2474,25 @@ export interface CompositorStatus {
   editorDraft?: SceneEditorDraftStatus | null
   /** Plan 190: the applied live background and how it is drawn. */
   liveBackground?: LiveBackgroundStatus
+  /** Plan 210 S3: how the last screen or window switch changed the capture. */
+  screenSwitch?: ScreenSwitchStatus
   updatedAt: string
   message?: string
+}
+
+/**
+ * Plan 210 S3: how the last screen or window switch changed the capture:
+ * the running stream changed its target in place, or it was stopped and
+ * another started, with the reason the in-place change was not used.
+ */
+export interface ScreenSwitchStatus {
+  mode: 'in-place' | 'restart'
+  reason?: string
+  sourceId: string
+  generation: number
+  /** Switch request to the new source's first frame, when it arrived. */
+  firstFrameMs?: number
+  updatedAt: string
 }
 
 /** Capacity-one/latest-wins notification used by native preview presentation. */
@@ -4155,6 +4215,29 @@ export interface ScreenIdParams {
   screenId: string
 }
 
+// --- Hide screen (plan 210 S7) ---
+/** Who hid the screen: the streamer, or the password-manager list on their behalf. */
+export type ScreenPrivacyReason = 'you' | 'password-manager'
+
+/**
+ * Hide screen state, in memory only and cleared at launch. `screen.privacy.get`
+ * returns it; `screen.privacy.changed` carries it on every hide and show.
+ * Absent fields are omitted by the backend, never `null`.
+ */
+export interface ScreenPrivacy {
+  hidden: boolean
+  /** RFC 3339, the moment of the hide; present only while hidden. */
+  since?: string
+  reason?: ScreenPrivacyReason
+  /** Why `screen.hide` would be refused right now (a legacy FFmpeg session). */
+  unavailable?: string
+}
+
+export interface ScreenHideParams {
+  reason: ScreenPrivacyReason
+}
+// --- end Hide screen (plan 210 S7) ---
+
 export interface RenameScreenParams {
   screenId: string
   name: string
@@ -4888,8 +4971,10 @@ export interface GlobalShortcutsConfig {
   layoutNext?: string
   layoutPrevious?: string
   layouts?: Partial<Record<LayoutPreset, string>>
+  scenes?: Record<string, string>
   recordToggle?: string
   streamToggle?: string
+  screenHideToggle?: string
   micToggle?: string
   /** Turn system audio on/off (plan 069 S6). Unbound by default. */
   systemAudioToggle?: string

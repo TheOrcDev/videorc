@@ -3094,6 +3094,49 @@ pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
     recording.as_ref().map(ActiveRecording::accepts_banners)
 }
 
+/// Plan 210 S7.5: whether this session's screen reaches its output through
+/// FFmpeg's own display grab (the legacy graph: avfoundation, gdigrab or
+/// x11grab) instead of the gated frame store. Every compositor path (the
+/// encoder bridge on Metal, CPU and Linux, the direct D3D11 recording, the
+/// Windows D3D11 media session) reads the store Hide screen covers; the
+/// legacy graph never does, so Hide screen cannot cover it.
+fn session_reads_display_directly(active: &ActiveRecording) -> bool {
+    let bridge = active.encoder_bridge.is_some() || active.encoder_bridge_stream.is_some();
+    #[cfg(target_os = "windows")]
+    let bridge = bridge || active.windows_d3d11_media.is_some();
+    !bridge
+}
+
+/// What a refused legacy start says after the exact Hide screen copy.
+pub const SCREEN_HIDE_LEGACY_START_DETAIL: &str = "This profile records through the legacy FFmpeg capture path, which cannot hide the screen; show the screen first, or choose a profile the encoder bridge supports.";
+
+/// Plan 210 S7.5 at start: the start path's check once the bridge decision is
+/// made and before any process spawns. A session that will read the display
+/// through FFmpeg itself (no encoder bridge) cannot carry the still, so while
+/// the screen is hidden it is refused with the exact copy and the reason. The
+/// bridge records the gated store's still and starts as always.
+fn refuse_legacy_start_while_hidden(use_encoder_bridge: bool, hidden: bool) -> Result<()> {
+    if !use_encoder_bridge && hidden {
+        bail!(
+            "{} {}",
+            crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY,
+            SCREEN_HIDE_LEGACY_START_DETAIL
+        );
+    }
+    Ok(())
+}
+
+/// `Some(session_id)` while a session that reads the display directly runs:
+/// `screen.hide` refuses with [`crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY`]
+/// and `screen.privacy.get` says why.
+pub async fn active_session_reads_display_directly(state: &AppState) -> Option<String> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| session_reads_display_directly(active))
+        .map(|active| active.session_id.clone())
+}
+
 /// Plan 186 S4: recompose the legacy FFmpeg overlay frame when the banner
 /// set changes mid-session (Show, Hide, a rect or opacity change, a reorder).
 /// The compositor paths read the set on their next tick; only the legacy
@@ -4304,6 +4347,10 @@ async fn start_session_with_timeline(
     let shown_banners_at_start = crate::banners::shown_banners_for_compositor(&state.database)?;
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
+    // Plan 210 S7.5: the legacy graph grabs the display through FFmpeg itself,
+    // outside the gated frame store. Starting it while the screen is hidden
+    // would record the live screen under a "Screen hidden" chip: refuse.
+    refuse_legacy_start_while_hidden(use_encoder_bridge, state.screen_privacy.view().hidden)?;
     if matches!(capture.video, VideoInput::TestPattern)
         && !linux_bridge_composes_native_sources(use_encoder_bridge, &params)
     {
@@ -27943,6 +27990,179 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Plan 210 S7.5: only the legacy FFmpeg graph reads the display outside
+    /// the gated frame store.
+    #[tokio::test]
+    async fn hide_screen_refuses_only_the_legacy_ffmpeg_session() {
+        let state = test_state();
+        assert_eq!(active_session_reads_display_directly(&state).await, None);
+        let legacy = test_active_recording_stub("legacy-session");
+        assert!(legacy.encoder_bridge.is_none() && legacy.encoder_bridge_stream.is_none());
+        assert!(session_reads_display_directly(&legacy));
+        *state.recording.lock().await = Some(legacy);
+        assert_eq!(
+            active_session_reads_display_directly(&state)
+                .await
+                .as_deref(),
+            Some("legacy-session")
+        );
+        *state.recording.lock().await = None;
+        assert_eq!(active_session_reads_display_directly(&state).await, None);
+    }
+
+    /// Plan 210 D8: while hidden the store never advances (held frames are
+    /// never published), so a Record, Go Live or Clips start after a hide
+    /// meets the frosted still as the screen's only frame, however long the
+    /// hide. The start barrier asks for a frame, not a fresh one: the start
+    /// takes the bridge, which records the gated store's still, instead of
+    /// refusing with "produced no frames" or waiting out the barrier.
+    #[tokio::test]
+    async fn a_start_while_hidden_takes_the_bridge_on_the_frosted_still() {
+        let state = test_state();
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 64,
+            height: 36,
+            fps: 30,
+            bitrate_kbps: 2000,
+        };
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            "screen:fixture",
+            1,
+            11,
+            &video,
+        )
+        .await;
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(crate::preview_screen::hold_screen_now(&state).await);
+        let still = preview_screen_latest_frame_info(&state)
+            .await
+            .expect("the still is in the store");
+        // A long hide: the capture keeps delivering, nothing publishes.
+        for sequence in 20..23 {
+            let _ = crate::preview_screen::test_publish_screen_pixels(
+                &state,
+                sequence,
+                [255, 255, 255, 255],
+                Instant::now(),
+            )
+            .await;
+        }
+        assert_eq!(
+            crate::preview_screen::test_privacy_held_frames(&state).await,
+            3
+        );
+        assert_eq!(
+            preview_screen_latest_frame_info(&state)
+                .await
+                .unwrap()
+                .sequence,
+            still.sequence,
+            "the store never advances while hidden"
+        );
+
+        let mut params = base_params(true, false);
+        params.sources.camera_id = None;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.output.video = video;
+        let started = Instant::now();
+        let use_bridge = should_use_compositor_encoder_bridge(&state, &params, None)
+            .await
+            .expect("a hidden screen is a screen with a frame");
+        assert!(
+            use_bridge,
+            "the start takes the bridge, which records the gated store's still"
+        );
+        assert!(
+            started.elapsed() < RECORDING_ENCODER_BRIDGE_SOURCE_READY_TIMEOUT / 2,
+            "the barrier answered at once, no stall: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Plan 210 S7.5 at start: the check the start path runs once the bridge
+    /// decision is made. Only the legacy FFmpeg path while hidden is refused,
+    /// with the exact copy first; the bridge (which records the still) and a
+    /// visible screen start as always. A 4K60 recording is the shipping
+    /// profile that rules the bridge out, so that start meets the refusal.
+    #[test]
+    fn a_legacy_start_while_hidden_is_refused_with_the_exact_copy() {
+        let error = refuse_legacy_start_while_hidden(false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY),
+            "{error}"
+        );
+        assert!(error.ends_with(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
+        assert!(
+            refuse_legacy_start_while_hidden(true, true).is_ok(),
+            "the bridge records the still"
+        );
+        assert!(refuse_legacy_start_while_hidden(false, false).is_ok());
+        assert!(refuse_legacy_start_while_hidden(true, false).is_ok());
+
+        let mut four_k_sixty = base_params(true, false);
+        four_k_sixty.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        assert!(
+            compositor_encoder_bridge_ruled_out(&four_k_sixty),
+            "4K60 records through the legacy path, so a hidden start there is refused"
+        );
+    }
+
+    /// The same refusal through the real start path: a 4K60 recording
+    /// (legacy FFmpeg) requested while hidden fails with the exact copy and
+    /// leaves no session, before any capture or encoder process spawns.
+    #[tokio::test]
+    async fn a_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
+        let state = test_state();
+        let output_dir = std::env::temp_dir().join(format!(
+            "videorc-hidden-legacy-start-{}",
+            uuid::Uuid::new_v4()
+        ));
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        let mut params = base_params(true, false);
+        params.sources.camera_id = None;
+        params.sources.microphone_id = None;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.output.output_directory = Some(output_dir.to_string_lossy().into_owned());
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            start_session(state.clone(), params),
+        )
+        .await
+        .expect("the refusal is immediate");
+        let error = format!(
+            "{:#}",
+            result.expect_err("a hidden legacy start is refused")
+        );
+        assert!(
+            error.contains(crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY),
+            "{error}"
+        );
+        assert!(error.contains(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
+        assert!(state.recording.lock().await.is_none());
+        let _ = std::fs::remove_dir_all(&output_dir);
+    }
+
     /// Plan 186 S4: which sessions take a banner shown after their start.
     #[test]
     fn session_accepts_banners_follows_the_render_path() {
@@ -31087,8 +31307,8 @@ mod tests {
             // The same capture producers must admit a subsequent real Start.
         }
         state.live_source_switch.lock().unwrap().observe_devices(&[
-            crate::protocol::Device { id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
-            crate::protocol::Device { id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+            crate::protocol::Device { app: None, window_title: None, id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+            crate::protocol::Device { app: None, window_title: None, id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
         ]);
         let failure_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").ok();
         // Plan 198 (owner's 0.11.0 take): a screen latch from an incident long

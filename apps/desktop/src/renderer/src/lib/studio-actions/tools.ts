@@ -9,6 +9,7 @@
 // the Studio's, from the `notice` the backend puts on the `agents.activity`
 // event.
 
+import { screenPrivacyAction } from './privacy'
 import { layoutPresetLabel } from '@/lib/layout-labels'
 import { soundboard } from '@/lib/soundboard-store'
 import type { LayoutPreset } from '@/lib/backend'
@@ -80,13 +81,20 @@ const switchScene: AgentToolExecutor = async (context, args) => {
   if (!sceneId) return { ok: false, message: AGENT_TOOL_COPY.sceneMissing }
   const saved = context.savedScenes?.find((scene) => scene.id === sceneId)
   if (saved && context.applySavedScene) {
-    return (await context.applySavedScene(saved.id))
+    const outcome = context.applySavedSceneResult
+      ? await context.applySavedSceneResult(saved.id)
+      : { ok: await context.applySavedScene(saved.id) }
+    return outcome.ok
       ? {
           ok: true,
           message: `Switched to ${saved.name}.`,
           result: { scene: { id: saved.id, name: saved.name, kind: 'saved' } }
         }
-      : { ok: false, message: AGENT_TOOL_COPY.sceneFailed }
+      : {
+          ok: false,
+          message: ('message' in outcome && outcome.message) || AGENT_TOOL_COPY.sceneFailed,
+          ...('reason' in outcome && outcome.reason ? { result: { reason: outcome.reason } } : {})
+        }
   }
   const outcome = await sceneApply(context, { layoutPreset: sceneId })
   if (!outcome.ok) return outcome
@@ -169,6 +177,12 @@ const notify: AgentToolExecutor = async (_context, args) => {
 
 /** Every `runsIn: studio` tool, by catalog name. */
 export const STUDIO_AGENT_TOOLS: Readonly<Record<string, AgentToolExecutor>> = {
+  hide_screen: async (context, _args, intent) => {
+    const caller = intent.agentId === 'buddy' ? 'buddy' : 'agent'
+    const outcome = await (context.runScreenPrivacy?.('hide', caller) ??
+      screenPrivacyAction(context.client, 'hide', caller))
+    return outcome.ok ? { ok: true, message: 'Screen hidden.', result: { hidden: true } } : outcome
+  },
   start_recording: startRecording,
   stop,
   switch_scene: switchScene,

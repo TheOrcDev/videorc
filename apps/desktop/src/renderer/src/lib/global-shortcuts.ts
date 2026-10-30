@@ -21,6 +21,7 @@ import { systemAudioTarget } from '@/lib/system-audio'
 type RegisterFn = (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
 
 export interface GlobalShortcutContext {
+  toggleScreenHidden?: () => Promise<unknown>
   sessionActive: boolean
   /**
    * The Studio's two explicit starts (plan 174 S3.1, B-3): the record key
@@ -49,7 +50,7 @@ export function executeGlobalShortcut(
   context: GlobalShortcutContext
 ): void {
   if (!isGlobalShortcutAction(action)) return
-  if (action.startsWith('layout')) {
+  if (action.startsWith('layout') || action.startsWith('scene:')) {
     context.switchLayout?.(action)
     return
   }
@@ -63,6 +64,7 @@ export function executeGlobalShortcut(
     void (context.sessionActive ? context.stopSession() : context.startLivestream())
     return
   }
+  if (action === 'screen-hide-toggle') void context.toggleScreenHidden?.()
   if (action === 'mic-toggle') context.toggleMicrophoneMute()
   if (action === 'system-audio-toggle') toggleSystemAudio(context)
   if (action === 'clip-mark') context.markClip?.()
@@ -94,6 +96,7 @@ function toggleSystemAudio(context: GlobalShortcutContext): void {
 // "Already used by" refusal and the registration toast all read it (plan 174
 // S2.3a, after S2.4). The session pair is S2.2's verb pair.
 const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
+  'screen-hide-toggle': 'Hide screen',
   'record-toggle': RECORD_SHORTCUT_LABEL,
   'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
   'mic-toggle': 'Mute / unmute microphone',

@@ -221,6 +221,26 @@ function CommentsWindowApp(): ReactElement {
       return false
     }
   }, [])
+  // Hide screen or Show screen (plan 210 S8b), relayed to Studio like `/hide`.
+  // Nothing says so when it works: the stats chip and the Preview do.
+  const runScreenPrivacy = useCallback(async (hidden: boolean): Promise<boolean> => {
+    try {
+      if (!window.videorc?.markerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.markerFromCommentsWindow({
+        requestId: crypto.randomUUID(),
+        action: hidden ? 'screenHide' : 'screenShow'
+      })
+      return true
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: hidden ? 'hide' : 'show', object: 'your screen' },
+        { id: 'screen-privacy' }
+      )
+      return false
+    }
+  }, [])
   // `/buddy <words>` (plan 209 S20): relayed to Studio, which owns the
   // backend socket and the Cloud AI consent. The answer is the composer's
   // notice, so nothing toasts here.
@@ -855,6 +875,7 @@ function CommentsWindowApp(): ReactElement {
               )
           }}
           onClip={(seconds) => saveClip(seconds).then((copy) => copy.title)}
+          onScreenPrivacy={runScreenPrivacy}
           banners={banners}
           onBanner={runBanner}
           sounds={sounds}

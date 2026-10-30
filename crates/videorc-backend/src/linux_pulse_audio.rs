@@ -98,6 +98,8 @@ pub fn pulse_microphone_devices(sources: &[PulseSource]) -> Vec<Device> {
     sources
         .iter()
         .map(|source| Device {
+            app: None,
+            window_title: None,
             id: linux_pulse_microphone_id(&source.name),
             name: if source.description.is_empty() {
                 source.name.clone()
@@ -189,6 +191,8 @@ pub async fn list_linux_microphones(ffmpeg_path: &str) -> Vec<Device> {
         Err(_) => "Listing PulseAudio/PipeWire microphones timed out".to_string(),
     };
     vec![Device {
+        app: None,
+        window_title: None,
         id: "microphone:linux-pulse-unavailable".to_string(),
         name: "Microphone".to_string(),
         kind: DeviceKind::Microphone,

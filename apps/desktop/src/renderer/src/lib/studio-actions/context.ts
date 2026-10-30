@@ -1,3 +1,4 @@
+import type { SavedSceneApplyResult } from '../scene-window-resolution'
 // The Studio's action context (plan 209 S5): what every action needs from the
 // Studio, built per intent (studio-context.ts) from the latest render's
 // handlers that hooks/use-studio.tsx hands over. A Stream Deck key, the phone
@@ -57,6 +58,10 @@ export type StudioActionExecutor = (
 ) => Promise<StudioActionOutcome>
 
 export interface StudioActionContext {
+  runScreenPrivacy?: (
+    mode: 'hide' | 'show' | 'toggle',
+    caller: import('./privacy').PrivacyCaller
+  ) => Promise<import('./context').StudioActionOutcome>
   client: StudioActionClient
   sessionActive: boolean
   /**
@@ -109,6 +114,7 @@ export interface StudioActionContext {
   /** The streamer's saved scenes, by id and name (`switch_scene`). */
   savedScenes?: readonly { id: string; name: string }[]
   /** Applies a saved scene exactly as clicking it in the Studio does. */
+  applySavedSceneResult?: (id: string) => Promise<SavedSceneApplyResult>
   applySavedScene?: (id: string) => Promise<boolean>
   /** Each built-in layout's name; `layoutPresetLabel` when left out. */
   layoutLabels?: Readonly<Record<string, string>>

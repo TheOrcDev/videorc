@@ -36,6 +36,10 @@ function subscribe<TChannel extends ElectronEventChannel>(
 }
 
 const api: VideorcApi = {
+  onFrontAppChanged: (callback) => subscribe('app:front-changed', callback),
+  setFrontWindowWatch: (enabled) => invoke('app:front-window-watch', { enabled }),
+  getSelfBundleIds: () => invoke('app:self-bundle-ids'),
+  getAppIcons: (bundleIds) => invoke('app:icons', bundleIds),
   // What this window sits on (plan 208): main's call, off the window's argv,
   // so the theme bootstrap can set data-ground before the first paint. Every
   // Videorc window names one; a missing value leaves the bootstrap's default.

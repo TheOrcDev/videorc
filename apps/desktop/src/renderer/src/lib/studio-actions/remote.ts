@@ -3,6 +3,7 @@
 // maps to one executor; the ack is `{intentId, ok, message?}`, with a message
 // only when there is one, so a deck key can show the reason.
 
+import { screenPrivacyAction } from './privacy'
 import { clipMark } from './clips'
 import { commentHighlight, commentHighlightClear } from './comments'
 import type { StudioActionContext, StudioActionExecutor } from './context'
@@ -23,6 +24,12 @@ import { windowFront } from './windows'
 
 /** The Studio's executor for each remote intent kind on the wire. */
 export const REMOTE_INTENT_EXECUTORS: Readonly<Record<string, StudioActionExecutor>> = {
+  screenHide: (c) =>
+    c.runScreenPrivacy?.('hide', 'remote') ?? screenPrivacyAction(c.client, 'hide', 'remote'),
+  screenShow: (c) =>
+    c.runScreenPrivacy?.('show', 'remote') ?? screenPrivacyAction(c.client, 'show', 'remote'),
+  screenHideToggle: (c) =>
+    c.runScreenPrivacy?.('toggle', 'remote') ?? screenPrivacyAction(c.client, 'toggle', 'remote'),
   recordStart,
   recordStop,
   recordToggle,

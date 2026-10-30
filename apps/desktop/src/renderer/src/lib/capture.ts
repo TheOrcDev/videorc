@@ -2756,8 +2756,10 @@ export function buildCaptureSources(
   captureId: string | undefined
 ): SourceSelection {
   const selected = captureDevices.find((device) => device.id === captureId)
+  const next = { ...current }
+  delete (next as SourceSelection & { app?: unknown }).app
   return {
-    ...current,
+    ...next,
     screenId: selected?.kind === 'screen' ? captureId : undefined,
     screenName: selected?.kind === 'screen' ? selected.name : undefined,
     windowId: selected?.kind === 'window' ? captureId : undefined,
@@ -2810,6 +2812,7 @@ export function mergeSourceKind(
   kind: keyof typeof SOURCE_KIND_FIELDS
 ): SourceSelection {
   const next: Record<string, unknown> = { ...current }
+  if (kind === 'capture') delete next.app
   for (const field of SOURCE_KIND_FIELDS[kind]) next[field] = picked[field]
   return next as SourceSelection
 }

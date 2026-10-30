@@ -1459,6 +1459,8 @@ fn permission_or_unavailable(message: &str) -> AudioMeterStatus {
 
 fn unavailable_microphone(id: &str, name: &str, detail: &str) -> Device {
     Device {
+        app: None,
+        window_title: None,
         id: id.to_string(),
         name: name.to_string(),
         kind: DeviceKind::Microphone,
@@ -1731,6 +1733,8 @@ mod windows_native {
         // symbolic link in detail for support bundles only.
         let capture_name = friendly_name.clone();
         Device {
+            app: None,
+            window_title: None,
             id: windows_dshow_microphone_device_id(&capture_name),
             name: friendly_name.clone(),
             kind: DeviceKind::Microphone,
@@ -1798,6 +1802,8 @@ fn list_platform_microphones() -> Result<Vec<Device>> {
             get_device_name(device_id).unwrap_or_else(|_| format!("CoreAudio device {device_id}"));
         let is_default = default_input == Some(device_id);
         devices.push(Device {
+            app: None,
+            window_title: None,
             id: format!("microphone:coreaudio:{device_id}"),
             name,
             kind: DeviceKind::Microphone,

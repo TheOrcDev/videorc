@@ -1,3 +1,5 @@
+import { createAppIconHandler } from './app-icons'
+import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
@@ -2312,6 +2314,36 @@ function applyMicaBlankFallback(window: BrowserWindow): void {
   window.webContents.invalidate()
 }
 
+let frontAppMonitor: ReturnType<typeof createFrontAppMonitor> | undefined
+secureIpcHandle('app:front-window-watch', (event, { enabled }: { enabled: boolean }) => {
+  if (frontAppSenderIsMain(event.sender.id, mainWindow?.webContents.id)) {
+    frontAppMonitor?.setWatch(enabled)
+  }
+})
+secureIpcHandle('app:self-bundle-ids', (event) => {
+  return frontAppSenderIsMain(event.sender.id, mainWindow?.webContents.id)
+    ? (frontAppMonitor?.selfBundleIds() ?? [])
+    : []
+})
+// Plan 210 S4: resolve native app icons once per session, for the main window.
+// The addon draws the icon on the main thread; `app.getFileIcon` kills main on
+// macOS 26 (AppKit traps on its thread-pool worker), so it is never called.
+const getAppIcons = createAppIconHandler({
+  platform: process.platform,
+  pngForBundleId: (bundleId, pixels) => {
+    if (!nativePreviewInProcessModuleResolution.path) return null
+    const binding = requireNativePreviewRealSurfaceModule(
+      nativePreviewInProcessModuleResolution.path
+    ) as {
+      appIconPngForBundleId?: (id: string, pixels: number) => Uint8Array | null
+    }
+    return binding.appIconPngForBundleId?.(bundleId, pixels) ?? null
+  }
+})
+secureIpcHandle('app:icons', (event, bundleIds: unknown) =>
+  frontAppSenderIsMain(event.sender.id, mainWindow?.webContents.id) ? getAppIcons(bundleIds) : {}
+)
+
 function createWindow(): void {
   const chrome = glassWindowChrome('main')
   mainWindow = new BrowserWindow({
@@ -2336,6 +2368,24 @@ function createWindow(): void {
       autoplayPolicy: 'no-user-gesture-required'
     }
   })
+  if (process.platform === 'darwin' && nativePreviewInProcessModuleResolution.path) {
+    try {
+      const binding = requireNativePreviewRealSurfaceModule(
+        nativePreviewInProcessModuleResolution.path
+      ) as FrontAppBinding
+      frontAppMonitor ??= createFrontAppMonitor({
+        platform: process.platform,
+        binding,
+        send: (event) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            sendElectronEvent(mainWindow.webContents, 'app:front-changed', event)
+          }
+        }
+      })
+    } catch {
+      safeConsole.warn('Front-app observer unavailable.')
+    }
+  }
   finishGlassWindow(mainWindow, 'main', glassMode)
   installContextMenu(mainWindow.webContents)
   applyVideorcWindowCaptureProtection(mainWindow, 'main', {
@@ -2490,7 +2540,17 @@ function createWindow(): void {
   mainWindow.on('maximize', () => publishWindowVisible(true))
   mainWindow.on('hide', () => publishWindowVisible(false))
   mainWindow.on('minimize', () => publishWindowVisible(false))
+  mainWindow.webContents.on('did-start-loading', () => frontAppMonitor?.stop())
+  mainWindow.on('closed', () => {
+    frontAppMonitor?.stop()
+    frontAppMonitor = undefined
+  })
   mainWindow.webContents.on('did-finish-load', () => {
+    try {
+      frontAppMonitor?.start()
+    } catch {
+      safeConsole.warn('Front-app observer unavailable.')
+    }
     publishWindowVisible(Boolean(mainWindow?.isVisible() && !mainWindow.isMinimized()))
   })
 
