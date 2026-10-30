@@ -17,7 +17,8 @@ import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-sh
 import { globalShortcutTakenReason } from '@/lib/global-shortcut-owner'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
-import { shortcutsByGroup } from '@/lib/shortcuts'
+import type { ShortcutRecorderAppKey } from '@/lib/shortcut-recorder'
+import { shortcutAccelerator, shortcutsByGroup } from '@/lib/shortcuts'
 import { systemAudioDevice } from '@/lib/system-audio'
 
 const GLOBAL_ACTION_ROWS = [
@@ -32,6 +33,15 @@ const GLOBAL_ACTION_ROWS = [
   'layout-next',
   'layout-previous'
 ] as const satisfies readonly GlobalShortcutAction[]
+
+/**
+ * Keys that already do a row's action inside Videorc. Space records on the
+ * Studio page (plan 174 D1), so the Record row shows it until a global key is
+ * recorded; Space keeps working there either way.
+ */
+export const GLOBAL_ROW_APP_KEYS: Partial<Record<GlobalShortcutAction, ShortcutRecorderAppKey>> = {
+  'record-toggle': { accelerator: shortcutAccelerator('record-toggle'), where: 'in Studio' }
+}
 
 /**
  * The global shortcut rows this computer can act on. System audio has no
@@ -101,6 +111,7 @@ export function ShortcutsSettings(): ReactElement {
               validate={validateGlobalShortcut(action)}
               registrationFailed={shortcutRegistration[action] === false}
               value={globalShortcutValue(action)}
+              appKey={GLOBAL_ROW_APP_KEYS[action]}
               onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
             />
           ))}
