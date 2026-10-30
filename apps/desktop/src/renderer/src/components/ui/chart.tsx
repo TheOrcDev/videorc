@@ -296,11 +296,11 @@ function ChartTooltipContent({
   const nestLabel = payload.length === 1 && indicator !== 'dot'
 
   return (
-    // A chart tooltip floats on the popup glass, never bg-popover with a
-    // ring and a shadow.
+    // A chart tooltip floats on the popup glass like every other popup, with
+    // no ring or shadow of its own.
     <div
       className={cn(
-        'rounded-row glass-float text-popover-foreground grid min-w-32 items-start gap-1.5 border px-2.5 py-1.5 text-xs',
+        'glass-float text-popover-foreground grid min-w-32 items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs',
         className
       )}
       data-slot="chart-tooltip"
