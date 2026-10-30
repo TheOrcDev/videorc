@@ -28119,11 +28119,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn live_control_windows_recordable_canvas_decides_whether_hide_needs_legacy_refusal() {
+        let mut params = base_params(true, false);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        let requested = params.output.video.clone();
+        let hardware = select_windows_recordable_video(&requested, 4, None, |_| true);
+        assert_eq!(hardware.video, requested);
+        assert!(compositor_encoder_bridge_ruled_out(&params));
+        let software = select_windows_recordable_video(&requested, 4, None, |_| false);
+        assert_eq!(
+            software.reason,
+            Some(WindowsRecordableVideoReason::SoftwareCap)
+        );
+        params.output.video = software.video;
+        assert!(
+            !compositor_encoder_bridge_ruled_out(&params),
+            "the stepped-down canvas takes the bridge, which can carry the hidden still"
+        );
+    }
+
     /// The same refusal through the real start path: a 4K60 recording
     /// (legacy FFmpeg) requested while hidden fails with the exact copy and
-    /// leaves no session, before any capture or encoder process spawns.
+    /// leaves no session, before any capture or encoder process spawns. The
+    /// live_control_ prefix includes this in Windows' 25-pass stability gate.
     #[tokio::test]
-    async fn a_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
+    async fn live_control_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
         let state = test_state();
         let output_dir = std::env::temp_dir().join(format!(
             "videorc-hidden-legacy-start-{}",
@@ -28144,12 +28171,61 @@ mod tests {
             fps: 60,
             bitrate_kbps: 50_000,
         };
+        // A Windows runner without a suitable GPU legitimately steps a
+        // record-only request down to a bridge-supported canvas. This test
+        // needs a genuinely legacy session, so seed a successful capability
+        // result for this fixture's unique FFmpeg path. No hardware probe or
+        // process-wide encoder override may decide which branch is tested.
+        #[cfg(target_os = "windows")]
+        let recordable_video_cache_key = {
+            let ffmpeg_path = output_dir
+                .join("fixture-ffmpeg.exe")
+                .to_string_lossy()
+                .into_owned();
+            params.output.ffmpeg_path = Some(ffmpeg_path.clone());
+            let identity = graphics_adapter_driver_identity();
+            let verdict_cap = performance_check_software_cap(
+                &crate::performance_check::current_state(&state).await,
+            );
+            let key = (
+                format!(
+                    "{identity}|h264={}|cap={verdict_cap:?}",
+                    windows_h264_encoder_preference_label(windows_h264_encoder_preference().0)
+                ),
+                ffmpeg_path,
+                params.output.video.width,
+                params.output.video.height,
+                params.output.video.fps,
+                params.output.video.bitrate_kbps,
+            );
+            WINDOWS_RECORDABLE_VIDEO_CACHE
+                .get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+                .lock()
+                .unwrap()
+                .insert(
+                    key.clone(),
+                    WindowsRecordableVideo {
+                        video: params.output.video.clone(),
+                        reason: None,
+                    },
+                );
+            key
+        };
+        assert!(compositor_encoder_bridge_ruled_out(&params));
         let result = tokio::time::timeout(
             Duration::from_secs(20),
             start_session(state.clone(), params),
         )
-        .await
-        .expect("the refusal is immediate");
+        .await;
+        // Remove only this fixture's entry, even if the bounded start failed.
+        #[cfg(target_os = "windows")]
+        WINDOWS_RECORDABLE_VIDEO_CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&recordable_video_cache_key);
+        let result = result.expect("the refusal is immediate");
         let error = format!(
             "{:#}",
             result.expect_err("a hidden legacy start is refused")

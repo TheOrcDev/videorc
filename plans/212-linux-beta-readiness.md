@@ -932,3 +932,36 @@ They refuse changed Rust source or a changed backend binary. The test edit
 changes the source digest, so the earlier build is not claimed as validation
 of the final source. Full Rust CI and these new runtime results remain
 pending; no candidate or release acceptance is implied.
+
+### Windows hidden-start fixture correction, 2026-10-30
+
+Required Windows source job `124004914823` on `31bd1804` passed Clippy and
+both 25-pass stability groups. Its first full Rust pass reported 4,159
+passed, one failed and 20 ignored; passes two and three and subsequent
+source checks did not run. The reviewed remote-intent pin passed in this
+run. The sole failure was the real-start Hide screen test: it expected a
+legacy-path refusal but received the bridge's missing-preview-frame error.
+
+The fixture requested 4K60 without fixing the runner's encoder capability.
+Windows correctly reduces a record-only canvas when hardware cannot encode
+it; that reduced canvas can use the bridge. The test now seeds the existing
+capability cache with a 4K60 result under its unique, non-executable FFmpeg
+path and removes only that entry after the bounded start. It retains the
+exact privacy message and no-active-session assertions. No production
+selection policy or process-wide environment override changes. A companion
+test covers both a hardware-accepted 4K60 request and the software reduction
+that makes the bridge eligible. Both tests join the existing `live_control_`
+filter, so the Windows PowerShell gate will exercise them 25 times before
+the three full-suite passes. Those Windows results remain required and
+pending; the earlier stability successes do not validate this correction.
+
+The prior local verification queue was compiling an older normal backend
+after its test-target compilation. Its one owned compiler was terminated
+after the fixture correction made the source obsolete; cleanup and the
+changed-source refusal are retained under
+`/tmp/videorc-beta-remote-pin-verification-oP8ODR`. This is an interrupted
+check, not a pass or an assertion failure. The replacement queue is tracked
+by `/tmp/videorc-beta-hidden-legacy-verification-latest.txt`. Focused tests
+use only the backend test target with test optimization disabled; the final
+backend/bridge build and runtime smokes retain the normal optimized
+development profile. No recording-quality or timing budget changes.
