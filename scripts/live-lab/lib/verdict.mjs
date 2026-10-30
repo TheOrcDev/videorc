@@ -167,18 +167,24 @@ function round(value, digits = 1) {
   return Math.round(value * factor) / factor
 }
 
-/** Pure: longest run (ms) of consecutive samples where `bad(sample)` holds. */
+/**
+ * Pure: longest run (ms) of consecutive samples where `bad(sample)` holds.
+ * A run is measured from the last good sample before it (the moment the
+ * stream was last known healthy) to its last bad sample, so N bad samples at
+ * a cadence of c count N·c, not (N−1)·c. A run that opens the series starts
+ * at its first bad sample.
+ */
 export function longestBadRunMs(samples, bad) {
   let longest = 0
   let runStart = null
-  let last = null
+  let lastGoodAtMs = null
   for (const sample of samples) {
     if (bad(sample)) {
-      if (runStart === null) runStart = sample.atMs
-      last = sample.atMs
-      longest = Math.max(longest, last - runStart)
+      if (runStart === null) runStart = lastGoodAtMs ?? sample.atMs
+      longest = Math.max(longest, sample.atMs - runStart)
     } else {
       runStart = null
+      lastGoodAtMs = sample.atMs
     }
   }
   return longest
