@@ -2409,6 +2409,13 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_performance_check_recording_stub(session_id: &str) -> ActiveRecording {
+    let mut active = test_active_recording_stub(session_id);
+    active.performance_check = true;
+    active
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
 struct WindowsD3d11SessionMonitorTask {
@@ -2946,6 +2953,12 @@ pub struct ActiveLivePreview {
 }
 
 impl ActiveRecording {
+    /// The benchmark's internal status still drives its stop/monitor path,
+    /// but must never seed a client's user-session state after reconnect.
+    pub(crate) fn is_performance_check(&self) -> bool {
+        self.performance_check
+    }
+
     #[cfg(all(test, debug_assertions))]
     pub(crate) fn install_source_switch_timing_for_test(&mut self) {
         self.source_switch_output_audio_timing = Some(vec![SourceSwitchOutputAudioTiming {

@@ -432,6 +432,14 @@ pub struct PerformanceCheckRuntime {
 }
 
 impl PerformanceCheckRuntime {
+    #[cfg(test)]
+    pub(crate) fn running_for_test() -> Self {
+        Self {
+            running: AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -674,6 +682,12 @@ pub async fn current_state(state: &AppState) -> PerformanceCheckState {
 pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result<()> {
     if state.recording.lock().await.is_some() {
         bail!("A capture session is running; the performance check needs an idle studio");
+    }
+    // The monitor acquires this lease before removing the session from the
+    // recording slot. Do not overlap a user's finalization or hide its
+    // Stopping status behind the benchmark's private lifecycle.
+    if state.ffmpeg_work.snapshot().finalizing_active {
+        bail!("A capture session is finalizing; the performance check needs an idle studio");
     }
     if state
         .performance_check

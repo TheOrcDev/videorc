@@ -14414,6 +14414,13 @@ async fn current_diagnostics_stats(state: &AppState) -> protocol::DiagnosticStat
 
 async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus {
     let active_status = state.recording.lock().await.as_ref().map(|active| {
+        // Benchmark events are hidden at the relay, but a renderer reload
+        // also bootstraps through this query. Exposing a rung here leaves it
+        // stuck on Recording: the benchmark's later Idle event is suppressed.
+        // Keep the real session's status authoritative during a takeover.
+        if active.is_performance_check() {
+            return idle_status();
+        }
         let state = if active.stop_requested {
             RecordingState::Stopping
         } else if active.mode == "stream" {
@@ -14426,7 +14433,7 @@ async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus
     if let Some(status) = active_status {
         return status;
     }
-    if state.ffmpeg_work.snapshot().finalizing_active {
+    if !state.performance_check.is_running() && state.ffmpeg_work.snapshot().finalizing_active {
         return protocol::RecordingStatus {
             state: RecordingState::Stopping,
             session_id: None,
@@ -21285,6 +21292,112 @@ mod tests {
         assert!(matches!(
             current_recording_status(&state).await.state,
             RecordingState::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn recording_status_rpc_hides_benchmark_rungs_and_finalization_on_reload() {
+        let mut state = test_state();
+        state.performance_check =
+            Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
+        let finalizing = state.ffmpeg_work.begin_finalizing();
+        let query = r#"{"id":"reloaded-renderer","method":"recording.status","params":{}}"#;
+        for stopping in [false, true] {
+            let mut benchmark = recording::test_performance_check_recording_stub("benchmark");
+            benchmark.stop_requested = stopping;
+            benchmark.output_path = Some(PathBuf::from("private-benchmark.mkv"));
+            *state.recording.lock().await = Some(benchmark);
+
+            let response =
+                handle_text_message_with_role(&state, query, BackendRole::Renderer).await;
+            assert!(response.ok, "{:?}", response.error);
+            assert_eq!(
+                response.payload.unwrap(),
+                serde_json::to_value(idle_status()).unwrap()
+            );
+            // Projection must not consume the owner's session or change the
+            // status the internal stop/monitor path still needs.
+            let active = state.recording.lock().await;
+            let active = active.as_ref().expect("benchmark remains owned");
+            assert!(active.is_performance_check());
+            assert_eq!(active.stop_requested, stopping);
+            assert_eq!(
+                active
+                    .status(RecordingState::Recording, None)
+                    .session_id
+                    .as_deref(),
+                Some("benchmark")
+            );
+        }
+        *state.recording.lock().await = None;
+        // There may be a finalization lease after a rung leaves the slot.
+        let response = handle_text_message_with_role(&state, query, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(
+            response.payload.unwrap(),
+            serde_json::to_value(idle_status()).unwrap()
+        );
+
+        state.performance_check = Arc::default();
+        assert!(matches!(
+            current_recording_status(&state).await.state,
+            RecordingState::Stopping
+        ));
+        drop(finalizing);
+        assert!(matches!(
+            current_recording_status(&state).await.state,
+            RecordingState::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn recording_status_keeps_real_sessions_authoritative_during_benchmark_takeover() {
+        let mut state = test_state();
+        state.performance_check =
+            Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
+        for (mode, replay_only) in [("record", false), ("stream", false), ("record", true)] {
+            for stopping in [false, true] {
+                let mut active = recording::test_active_recording_stub("user-session");
+                active.mode = mode.to_string();
+                active.replay_only = replay_only;
+                active.stop_requested = stopping;
+                let expected_state = if stopping {
+                    RecordingState::Stopping
+                } else if mode == "stream" {
+                    RecordingState::Streaming
+                } else {
+                    RecordingState::Recording
+                };
+                let expected = serde_json::to_value(active.status(expected_state, None)).unwrap();
+                *state.recording.lock().await = Some(active);
+                assert_eq!(
+                    serde_json::to_value(current_recording_status(&state).await).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn performance_check_refuses_to_hide_an_existing_user_finalization() {
+        let state = test_state();
+        let _finalizing = state.ffmpeg_work.begin_finalizing();
+        let error = performance_check::start(
+            state.clone(),
+            protocol::PerformanceCheckRunParams {
+                ceiling_width: 1920,
+                ceiling_height: 1080,
+                ceiling_fps: 30,
+                separate_source_recordings: false,
+            },
+        )
+        .await
+        .expect_err("a finalizing user take must keep ownership");
+        assert!(error.to_string().contains("finalizing"));
+        assert!(!state.performance_check.is_running());
+        assert!(matches!(
+            current_recording_status(&state).await.state,
+            RecordingState::Stopping
         ));
     }
 
