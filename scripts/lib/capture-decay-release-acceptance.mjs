@@ -128,6 +128,8 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'scripts/lib/acceptance-gate.mjs',
   'scripts/lib/app-launcher.mjs',
   'scripts/lib/host-lock.mjs',
+  'scripts/lib/process-group.mjs',
+  'scripts/lib/smoke-env.mjs',
   'scripts/lib/av-sync-stimulus.mjs',
   'scripts/lib/beta-release-manifest.mjs',
   'scripts/lib/changelog.mjs',
