@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 import test from 'node:test'
+import { PassThrough } from 'node:stream'
 
 const realSetTimeout = globalThis.setTimeout
 const realClearTimeout = globalThis.clearTimeout
@@ -122,18 +123,24 @@ async function observeCaller(t, script, scenario) {
         close() {}
       }
     )
-    t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
-      captureEnvironment(options.env)
-      trace.push({ owner: 'preparation', command, args, timeoutMs: options.timeout })
-      if (scenario === 'prebuild-failure') {
-        return { status: 101, stdout: '', stderr: 'fixture build refused' }
-      }
-      // Controlled elapsed preparation exceeds the unchanged app budget but
-      // not the existing preparation budget. This is not a wall-clock sleep.
-      t.mock.timers.tick(90_001)
-      return { status: 0, stdout: '', stderr: '' }
-    })
     t.mock.method(childProcess, 'spawn', (command, args, options) => {
+      if (command === 'cargo') {
+        captureEnvironment(options.env)
+        trace.push({ owner: 'preparation', command, args })
+        const build = new EventEmitter()
+        build.stdout = new PassThrough()
+        build.stderr = new PassThrough()
+        queueMicrotask(() => {
+          if (scenario === 'prebuild-failure') build.stderr.write('fixture build refused')
+          else t.mock.timers.tick(90_001)
+          build.stdout.end()
+          build.stderr.end()
+          const status = scenario === 'prebuild-failure' ? 101 : 0
+          build.emit('exit', status, null)
+          build.emit('close', status, null)
+        })
+        return build
+      }
       captureEnvironment(options.env)
       trace.push({ owner: 'app', command, args, at: Date.now() })
       spawned.resolve()
@@ -224,9 +231,9 @@ for (const script of scripts) {
       ['preparation', 'app']
     )
     assert.deepEqual(result.trace[0].args, ['build', '-p', 'videorc-backend'])
-    assert.equal(result.trace[0].timeoutMs, 20 * 60 * 1000)
-    assert.equal(result.timers[0].delay, 90_000)
-    assert.equal(result.timers[0].at, result.trace[1].at)
+    assert.equal(result.timers[0].delay, 20 * 60 * 1000)
+    assert.equal(result.timers.find((timer) => timer.delay === 90_000).delay, 90_000)
+    assert.equal(result.timers.find((timer) => timer.delay === 90_000).at, result.trace[1].at)
     assert.equal(result.backendConnections, 1)
     assert.match(result.error?.message ?? '', /Could not connect/)
   })
@@ -250,7 +257,7 @@ for (const script of scripts) {
 
   test(`${script} retains its original startup deadline and awaited normal teardown`, async (t) => {
     const result = await observeCaller(t, script, 'no-ready')
-    assert.equal(result.timers[0].delay, 90_000)
+    assert.equal(result.timers.find((timer) => timer.delay === 90_000).delay, 90_000)
     assert.equal(result.backendConnections, 0)
     assert.equal(result.beforeRelease.settled, false)
     assert.equal(result.beforeRelease.signalCount, 1)
