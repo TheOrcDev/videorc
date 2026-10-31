@@ -8883,6 +8883,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         clearTimeout(nativePreviewCompositorPumpTimerRef.current)
         nativePreviewCompositorPumpTimerRef.current = null
       }
+      if (replayReconcileTimerRef.current) {
+        clearTimeout(replayReconcileTimerRef.current)
+        replayReconcileTimerRef.current = null
+      }
       nativePreviewSurfaceCreatedRef.current = false
       nativePreviewSurfaceLastSyncedBoundsRef.current = null
       nativePreviewSurfaceBoundsPendingGenerationRef.current = undefined

@@ -6220,6 +6220,13 @@ mod windows {
             .last_error = Some(error);
     }
 
+    /// Half a 60 Hz vblank: the most a frame may arrive before its slot and
+    /// still be admitted. Capture stamps jitter by a few hundred microseconds
+    /// and `SetMinUpdateInterval` is best-effort, so a gate with no tolerance
+    /// rejects a frame stamped 333_2xx after the last one at 30 fps and
+    /// admits the next at ~666_6xx: bursts of 15 fps on a healthy source.
+    const CADENCE_EARLY_TOLERANCE_100NS: i64 = 80_000;
+
     struct WindowsCaptureCadenceGate {
         interval_100ns: i64,
         last_admitted_100ns: Option<i64>,
@@ -6235,12 +6242,18 @@ mod windows {
 
         fn admit(&mut self, timestamp_100ns: i64) -> bool {
             if let Some(last) = self.last_admitted_100ns
-                && timestamp_100ns.saturating_sub(last) < self.interval_100ns
+                && timestamp_100ns.saturating_sub(last) < self.required_gap_100ns()
             {
                 return false;
             }
             self.last_admitted_100ns = Some(timestamp_100ns);
             true
+        }
+
+        /// A frame interval less the tolerance, never under three quarters of
+        /// the interval so a high target fps keeps rejecting duplicates.
+        fn required_gap_100ns(&self) -> i64 {
+            self.interval_100ns - CADENCE_EARLY_TOLERANCE_100NS.min(self.interval_100ns / 4)
         }
     }
 
@@ -6467,6 +6480,27 @@ mod windows {
             assert!(!gate.admit(1_100_000));
             assert!(!gate.admit(900_000));
             assert!(gate.admit(1_333_333));
+        }
+
+        #[test]
+        fn graphics_capture_cadence_gate_tolerates_a_slightly_early_frame() {
+            // 30 fps from a 60 Hz display: every other vblank, stamped a few
+            // hundred microseconds early, must still pass as 30 fps.
+            let mut gate = WindowsCaptureCadenceGate::new(30);
+            assert!(gate.admit(0));
+            assert!(!gate.admit(166_667));
+            assert!(gate.admit(333_100));
+            assert!(!gate.admit(499_800));
+            assert!(gate.admit(666_300));
+            // Much too early is still a duplicate.
+            assert!(!gate.admit(666_300 + 250_000));
+
+            // At 120 fps the tolerance shrinks so the gate keeps rejecting
+            // duplicates inside the 83_333 interval.
+            let mut fast = WindowsCaptureCadenceGate::new(120);
+            assert!(fast.admit(0));
+            assert!(!fast.admit(60_000));
+            assert!(fast.admit(63_000));
         }
 
         #[test]

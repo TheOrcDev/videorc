@@ -62,9 +62,40 @@ test('pure helpers: roles, census, bad runs, dropped-frame windows, slope', () =
     atMs: s * 1000,
     value: s >= 5 && s <= 15 ? 0.9 : 1
   }))
+  // Three bad samples at a 5 s cadence are 15 s of slow encoding: the run is
+  // measured from the last good sample, not from its own first sample.
   assert.equal(
     longestBadRunMs(samples, (p) => p.value < 0.97),
-    10_000
+    15_000
+  )
+  // Twelve bad samples at 5 s reach a 60 s `forSeconds` gate.
+  const twelveSlow = Array.from({ length: 13 }, (_, i) => ({
+    atMs: i * 5000,
+    value: i === 0 ? 1 : 0.9
+  }))
+  assert.equal(
+    longestBadRunMs(twelveSlow, (p) => p.value < 0.97),
+    60_000
+  )
+  // Samples without a speed are a gap, not good time: one bad sample after
+  // a minute of missing measurements is not a minute of slow encoding.
+  const gapped = [
+    { atMs: 0, value: 1 },
+    ...Array.from({ length: 11 }, (_, i) => ({ atMs: (i + 1) * 5000, value: null })),
+    { atMs: 60_000, value: 0.9 }
+  ]
+  assert.equal(
+    longestBadRunMs(
+      gapped,
+      (p) => p.value < 0.97,
+      (p) => p.value !== null
+    ),
+    0
+  )
+  // A series that opens bad starts its run at the first bad sample.
+  assert.equal(
+    longestBadRunMs([{ atMs: 0, value: 0.9 }], (p) => p.value < 0.97),
+    0
   )
   const journal = Array.from({ length: 13 }, (_, i) => ({
     kind: 'sample',

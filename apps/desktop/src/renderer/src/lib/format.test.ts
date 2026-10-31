@@ -64,6 +64,12 @@ describe('formatBytes', () => {
     expect(formatBytes(175 * 1024 ** 3)).toBe('175 GB')
   })
 
+  it('never shows 1024 of a unit: a value that rounds up moves to the next unit', () => {
+    expect(formatBytes(1_048_500)).toBe('1 MB')
+    expect(formatBytes(1023.6 * 1024 ** 2)).toBe('1 GB')
+    expect(formatBytes(1023.4 * 1024)).toBe('1023 KB')
+  })
+
   it('answers a calm dash for the unknowable', () => {
     expect(formatBytes(undefined)).toBe('-')
     expect(formatBytes(null)).toBe('-')

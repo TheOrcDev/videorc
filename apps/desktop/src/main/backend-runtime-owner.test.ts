@@ -5,6 +5,7 @@ import {
   backendRuntimeAcceptsBootstrap,
   claimDurableBackendPid,
   classifyOwnedProcessPids,
+  observedExitedPid,
   requestBackendRuntimeTermination,
   settleBackendRuntimeExit
 } from './backend-runtime-owner'
@@ -289,6 +290,34 @@ describe('BackendRuntimeOwner', () => {
         signalRuntimeProcess: () => true
       })
     ).toThrow('Backend termination could not be confirmed as requested.')
+  })
+})
+
+describe('observedExitedPid', () => {
+  it('proves the child pid dead only when its exit or signal was observed', () => {
+    expect(observedExitedPid(101, 0, null)).toBe(101)
+    expect(observedExitedPid(101, null, 'SIGKILL')).toBe(101)
+    expect(observedExitedPid(undefined, 0, null)).toBeUndefined()
+  })
+
+  it('sends a pid whose shutdown timed out without an exit through the ledger probe', () => {
+    // A SIGKILL'd backend that is still alive after the stop deadline has
+    // exitCode and signalCode both null; treating it as confirmed dead would
+    // drop its ledger record and let the next launch leave it orphaned.
+    expect(observedExitedPid(101, null, null)).toBeUndefined()
+    const owner = new BackendRuntimeOwner<{ pid: number }>()
+    const runtime = owner.start({ pid: 101 })
+    owner.recordOwnedPid(runtime, 101)
+    owner.beginShutdownReceiptWait(runtime)
+    const timedOut = settleBackendRuntimeExit(
+      owner,
+      runtime,
+      observedExitedPid(101, null, null),
+      () => true
+    )
+    expect(timedOut.completed).toBe(false)
+    expect(timedOut.stillLive).toEqual([101])
+    expect(owner.current()).toBe(runtime)
   })
 })
 
