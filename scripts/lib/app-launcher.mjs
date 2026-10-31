@@ -9,7 +9,7 @@
 // Harnesses default to isolated app/user data and ledger reaping. Product launches
 // still use the normal app data path unless a smoke explicitly opts into this helper.
 
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   closeSync,
@@ -28,6 +28,8 @@ import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:p
 
 import './smoke-env.mjs'
 import { acquireHostSmokeLock, waitForHostMemory, withBuildSlot } from './host-lock.mjs'
+
+import { spawnProcessGroup } from './process-group.mjs'
 
 import { assertSmokeCommandConnection } from './smoke-command-client.mjs'
 
@@ -360,10 +362,10 @@ export async function prepareSmokeLaunch({
   dev = true,
   env = process.env,
   onLine,
-  prebuild = () => {
+  prebuild = async () => {
     const spec = devBackendPrebuildSpec({ env })
     if (spec) {
-      const failure = runDevBackendPrebuild(spec, { onLine, env: smokeAppEnv(env) })
+      const failure = await runDevBackendPrebuild(spec, { onLine, env: smokeAppEnv(env) })
       if (failure) throw new Error(failure)
     }
   },
@@ -1150,27 +1152,35 @@ export function devBackendPrebuildFailure(spec, { status, signal, error, stderrT
   return null
 }
 
-function runDevBackendPrebuild(spec, { onLine, env }) {
+export async function runDevBackendPrebuild(spec, { onLine, env } = {}) {
+  if (!spec) return null
   const startedAt = Date.now()
   const describe = `${spec.command} ${spec.args.join(' ')}`
   onLine?.(`[smoke:prebuild] ${describe} (timeout ${Math.round(spec.timeoutMs / 1000)}s)`)
-  const result = spawnSync(spec.command, spec.args, {
+  const { child, result } = spawnProcessGroup(spec.command, spec.args, {
     cwd: spec.cwd,
     env,
-    encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: spec.timeoutMs,
-    killSignal: 'SIGTERM',
-    maxBuffer: 64 * 1024 * 1024
+    timeoutMs: spec.timeoutMs
   })
-  const stderrTail = `${result.stdout ?? ''}${result.stderr ?? ''}`.split(/\r?\n/)
-  for (const line of stderrTail.slice(-20)) {
+  const stderrTail = []
+  const keepLine = (line) => {
+    stderrTail.push(line)
+    if (stderrTail.length > 20) stderrTail.shift()
+  }
+  const stdout = createLineBuffer(keepLine)
+  const stderr = createLineBuffer(keepLine)
+  child.stdout.setEncoding('utf8').on('data', (chunk) => stdout.write(chunk))
+  child.stderr.setEncoding('utf8').on('data', (chunk) => stderr.write(chunk))
+  const outcome = await result
+  stdout.flush()
+  stderr.flush()
+  for (const line of stderrTail) {
     if (line.trim()) onLine?.(`[smoke:prebuild] ${line}`)
   }
   const failure = devBackendPrebuildFailure(spec, {
-    status: result.status,
-    signal: result.signal,
-    error: result.error,
+    ...outcome,
+    error: outcome.timedOut ? { code: 'ETIMEDOUT' } : outcome.error,
     stderrTail
   })
   if (!failure) {
