@@ -1287,7 +1287,7 @@ try {
     stopApp = launch.stop
     const renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
     const smoke = launch.connections['preview-motion-ready']
-    const recorder = new BackendEventRecorder(renderer, { debug })
+    const recorder = new BackendEventRecorder(renderer)
 
     const health = await request(renderer, timeoutMs, 'health.ping', {})
     if (!health?.ffmpeg?.available) fail(health?.ffmpeg?.message ?? 'FFmpeg is unavailable.')
