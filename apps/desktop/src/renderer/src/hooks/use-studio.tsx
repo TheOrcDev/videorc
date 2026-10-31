@@ -18177,6 +18177,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         value.setCaptureConfig((current) => ({ ...current, ...patch })),
       start: value.startSession,
       stop: value.stopSession,
+      // Plan 212 S1: "Check this computer" the way the Output panel runs it
+      // (Clips stopped first, re-armed after), so a smoke can read the
+      // Preview while a real check runs. Errors reach the smoke.
+      checkComputer: requestPerformanceCheck,
       confirmGoLive: value.confirmGoLive,
       cancelGoLive: value.cancelGoLiveConfirmation,
       setSettings: value.setSettings,

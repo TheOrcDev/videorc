@@ -248,6 +248,14 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:preview-overlay-presentation']
       },
       {
+        // Plan 212: a performance check never shows in the Preview. Reads the
+        // frame main is handed (the lease-free dev oracle) while a real check
+        // runs with Clips on, off, and with Record pressed during rung 2.
+        label: 'performance check invisible in the Preview smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-check-invisible']
+      },
+      {
         label: 'real ScreenCaptureKit screen recording smoke',
         command: 'pnpm',
         args: ['smoke:screen-recording-real'],
