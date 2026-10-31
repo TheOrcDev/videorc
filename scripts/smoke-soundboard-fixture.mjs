@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnProcessGroup } from './lib/process-group.mjs'
 // Soundboard fixture smoke (plan 189 S8).
 //
 // No camera or microphone is needed. One backend fixture test runs first:
@@ -29,6 +28,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { spawnProcessGroup } from './lib/process-group.mjs'
 import { toneAmplitude } from './lib/separate-source-take-gates.mjs'
 
 const root = resolve(import.meta.dirname, '..')

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnProcessGroup } from './lib/process-group.mjs'
 // No-device acceptance through the real Rust session coordinator. The test
 // replaces capture producers only; encoders, muxers, Stop and export are real.
 import { spawn } from 'node:child_process'
@@ -8,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { once } from 'node:events'
 import { mkdirSync } from 'node:fs'
+import { spawnProcessGroup } from './lib/process-group.mjs'
 import './lib/smoke-env.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { summarizeRecordCycles, evaluateRecordLatencyBudget } from './lib/record-latency-gate.mjs'

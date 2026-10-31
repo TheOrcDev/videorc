@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnProcessGroup } from './lib/process-group.mjs'
 // Separate source recordings fixture smoke (plan 157).
 //
 // No camera or microphone is needed. Two backend fixture tests run first:
@@ -35,6 +34,7 @@ import { existsSync, mkdtempSync, readFileSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { spawnProcessGroup } from './lib/process-group.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { assertSceneSwitchPixels } from './lib/scene-switch-pixels.mjs'
 import {

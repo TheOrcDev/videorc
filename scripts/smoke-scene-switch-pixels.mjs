@@ -1,10 +1,10 @@
-import { spawnProcessGroup } from './lib/process-group.mjs'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { once } from 'node:events'
+import { spawnProcessGroup } from './lib/process-group.mjs'
 import { assertSceneSwitchPixels } from './lib/scene-switch-pixels.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 
