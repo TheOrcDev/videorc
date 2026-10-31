@@ -473,6 +473,10 @@ pub struct CompositorRuntime {
     /// session's output canvas and the preview reconciler must neither
     /// resize nor retire it.
     capture_lease: Option<CompositorCaptureLease>,
+    /// The run belongs to a buffer-only session started fresh
+    /// (`CompositorStartParams::replay_only`): the tick treats it as it does
+    /// a buffer-only lease. Reset with the run.
+    buffer_only_run: bool,
     /// The banners the picture carries (plan 186 S3), at snapshot level
     /// beside the takeover and never inside `Scene`: the primary leg, the
     /// auxiliary leg and the idle preview read one set. Swapped whole by
@@ -571,6 +575,19 @@ pub struct CompositorStartParams {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// The run is a buffer-only (Clips) session's own (plan 181), started
+    /// fresh because no preview run could be armed in place (a cold launch
+    /// starts the ring before the Preview): scene editor drafts follow it and
+    /// the Preview plans the program idle, as under a buffer-only lease
+    /// (`CompositorArmParams::replay_only`).
+    pub replay_only: bool,
+    /// Plan 205 S6: whether the program carries the item. The idle run and a
+    /// session's own run pass the union of their legs; a buffer-only run
+    /// passes the idle program (either switch), which its primary leg burns
+    /// by "Show in recording" alone (D2), so the Preview composes its own
+    /// picture for the rest.
+    pub highlight_overlay_on_program: bool,
+    pub buddy_overlay_on_program: bool,
 }
 
 /// Plan 157: the separate-source (ISO) legs. The Screen leg renders at the
@@ -1419,10 +1436,11 @@ impl CompositorRenderCache {
                     .as_ref()
                     .is_none_or(|lease| lease.replay_only)
             }),
-            drafts_follow_capture: compositor
-                .capture_lease
-                .as_ref()
-                .is_some_and(|lease| lease.replay_only),
+            drafts_follow_capture: compositor.buffer_only_run
+                || compositor
+                    .capture_lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.replay_only),
             active_image_source,
             background_image_source,
             banners: Arc::clone(&compositor.banners),
@@ -2911,6 +2929,24 @@ mod editor_draft_tests {
         assert!(runtime.editor_draft.is_none());
     }
 
+    /// A buffer-only session's own run (a cold launch finds no preview run to
+    /// arm) is buffer-only to the tick as well: the draft follows it.
+    #[test]
+    fn editor_draft_follows_a_fresh_buffer_only_run() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), now);
+        runtime.buffer_only_run = true;
+        let cache = CompositorRenderCache::from_runtime(&runtime);
+        assert!(cache.drafts_follow_capture);
+        assert_eq!(
+            cache.editor_draft.map(|draft| draft.source_id),
+            Some("source:camera".to_string()),
+            "the tick draws it"
+        );
+    }
+
     /// The Clips ring (plan 181, on by default) leases the preview run
     /// buffer-only: the draft keeps following the run, so a drag on the live
     /// canvas moves the picture. The per-tick reap once dropped it on the
@@ -3402,6 +3438,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         preview_resize_revision: None,
         loop_config_tx: None,
         capture_lease: None,
+        buffer_only_run: false,
         banners: Arc::new(BannerSet::default()),
         banner_session_shape: None,
         stream_output: None,
@@ -3501,13 +3538,12 @@ async fn start_synthetic_compositor_with_lifecycle(
         highlight_overlay_on_aux: params.highlight_overlay_on_aux,
         buddy_overlay_on_primary: params.buddy_overlay_on_primary,
         buddy_overlay_on_aux: params.buddy_overlay_on_aux,
-        // Plan 205 S6: a fresh run's program is the union of its legs. The
-        // idle run has one leg, which is the program; a session run's legs
-        // are the running outputs. Only a buffer-only lease differs, and
-        // that arms the idle run in place (`CompositorArmParams`).
-        highlight_overlay_on_program: params.highlight_overlay_on_primary
-            || params.highlight_overlay_on_aux,
-        buddy_overlay_on_program: params.buddy_overlay_on_primary || params.buddy_overlay_on_aux,
+        // Plan 205 S6: the caller's program verdict. The idle run and a
+        // session's own run pass the union of their legs; a buffer-only run
+        // (the ring started before the Preview, so no run was armed in
+        // place) passes the idle program, which its legs do not burn.
+        highlight_overlay_on_program: params.highlight_overlay_on_program,
+        buddy_overlay_on_program: params.buddy_overlay_on_program,
     });
     let stream_frame_store = params
         .stream_output
@@ -3544,6 +3580,7 @@ async fn start_synthetic_compositor_with_lifecycle(
         compositor.preview_resize_revision = None;
         compositor.loop_config_tx = Some(loop_config_tx);
         compositor.capture_lease = None;
+        compositor.buffer_only_run = params.replay_only;
         // A new run is a new world: a drag from the previous run re-drafts.
         compositor.editor_draft = None;
         // Banners stay (they are not run state); the session that owns this
@@ -3812,6 +3849,7 @@ async fn stop_compositor_if_run_id_with_lifecycle(
             compositor.preview_resize_revision = None;
             compositor.loop_config_tx = None;
             compositor.capture_lease = None;
+            compositor.buffer_only_run = false;
         }
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
@@ -5970,6 +6008,7 @@ async fn stop_current_compositor(state: &AppState) -> bool {
         compositor.preview_resize_revision = None;
         compositor.loop_config_tx = None;
         compositor.capture_lease = None;
+        compositor.buffer_only_run = false;
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
         compositor.source_iso_frame_stores = None;
@@ -16690,6 +16729,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -16748,6 +16790,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -16842,6 +16887,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -17872,6 +17920,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -17897,6 +17948,9 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            replay_only: false,
+            highlight_overlay_on_program: false,
+            buddy_overlay_on_program: false,
         };
 
         let first = start_synthetic_compositor(state.clone(), params(64)).await;
@@ -17927,6 +17981,9 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            replay_only: false,
+            highlight_overlay_on_program: false,
+            buddy_overlay_on_program: false,
         }
     }
 
@@ -18076,6 +18133,8 @@ mod tests {
             CompositorStartParams {
                 highlight_overlay_on_primary: idle.highlight_on_primary,
                 buddy_overlay_on_primary: idle.buddy_on_primary,
+                highlight_overlay_on_program: idle.highlight_on_program,
+                buddy_overlay_on_program: idle.buddy_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -18150,6 +18209,100 @@ mod tests {
         stop_compositor(&state).await;
     }
 
+    /// A cold launch starts the Clips ring before the Preview's run exists,
+    /// so the buffer-only session starts a run of its own instead of arming
+    /// one in place (`recording-compositor-restarted`, `no-live-run`). That
+    /// run takes the verdict the in-place arm carries: its legs burn the
+    /// recording plan (D2) while the program is idle, so a stream-only Buddy
+    /// the ring leaves out is in the program, the Preview composes its own
+    /// picture, and the tick treats the run as buffer-only. Before this, the
+    /// fresh run's program was the union of its legs, and the owner's Buddy
+    /// was missing from the Preview from launch until the first Record.
+    #[tokio::test]
+    async fn a_fresh_buffer_only_run_takes_the_programs_flags() {
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        let ring_shape = OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: false,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+        };
+        let flags = OverlayLegFlags::for_session(ring_shape, true, &layout);
+        assert!(
+            !flags.buddy_on_primary && flags.buddy_on_program,
+            "the ring leaves a stream-only Buddy out; the program keeps it"
+        );
+
+        let state = test_state();
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                replay_only: true,
+                highlight_overlay_on_primary: flags.highlight_on_primary,
+                buddy_overlay_on_primary: flags.buddy_on_primary,
+                highlight_overlay_on_program: flags.highlight_on_program,
+                buddy_overlay_on_program: flags.buddy_on_program,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        let config = loop_config_for_test(&state).await.expect("live run");
+        assert!(
+            !config.buddy_overlay_on_primary && config.buddy_overlay_on_program,
+            "the run carries the program's verdict, not the union of its legs"
+        );
+        let cache = CompositorRenderCache::from_runtime(&*state.compositor.lock().await);
+        assert!(
+            cache.drafts_follow_capture,
+            "the tick treats the run as buffer-only, as it does a buffer-only lease"
+        );
+        assert!(
+            preview_needs_program_leg(
+                Some(ring_shape),
+                cache.drafts_follow_capture,
+                ProgramLegOverlays {
+                    highlight_on_primary: config.highlight_overlay_on_primary,
+                    highlight_on_program: config.highlight_overlay_on_program,
+                    buddy_on_primary: config.buddy_overlay_on_primary,
+                    buddy_on_program: config.buddy_overlay_on_program,
+                    caption_on_primary: false,
+                    caption_on_aux: false,
+                },
+                &BannerSet::default()
+            ),
+            "the Preview composes its own picture with the Buddy"
+        );
+        stop_compositor(&state).await;
+        assert!(
+            !CompositorRenderCache::from_runtime(&*state.compositor.lock().await)
+                .drafts_follow_capture,
+            "the stop forgets the buffer-only run"
+        );
+
+        // A session's own run (Record pressed with no preview run to arm)
+        // passes the union of its legs, as before.
+        let record = OverlayLegFlags::for_session(ring_shape, false, &layout);
+        assert!(!record.buddy_on_primary && !record.buddy_on_program);
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                buddy_overlay_on_primary: record.buddy_on_primary,
+                buddy_overlay_on_program: record.buddy_on_program,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        let config = loop_config_for_test(&state).await.expect("live run");
+        assert!(!config.buddy_overlay_on_program);
+        assert!(
+            !CompositorRenderCache::from_runtime(&*state.compositor.lock().await)
+                .drafts_follow_capture
+        );
+        stop_compositor(&state).await;
+    }
+
     /// Plan 205 (S1): `overlays.layout.set` while nothing runs swaps the idle
     /// run's flags in place, both ways, and leaves fps and the consumer alone.
     #[tokio::test]
@@ -18162,6 +18315,8 @@ mod tests {
             CompositorStartParams {
                 highlight_overlay_on_primary: idle.highlight_on_primary,
                 buddy_overlay_on_primary: idle.buddy_on_primary,
+                highlight_overlay_on_program: idle.highlight_on_program,
+                buddy_overlay_on_program: idle.buddy_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -18280,6 +18435,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -18315,6 +18473,9 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            replay_only: false,
+            highlight_overlay_on_program: false,
+            buddy_overlay_on_program: false,
         };
         let (left, right) = tokio::join!(
             start_synthetic_compositor(state.clone(), params(64)),
@@ -18350,6 +18511,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -18387,6 +18551,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
