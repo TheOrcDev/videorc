@@ -486,6 +486,7 @@ import {
   emptyPresentingWatch,
   nativePreviewFirstFrameWatchdogEnabled,
   nativePreviewProofWatchdogEnabled,
+  PREVIEW_HOLD_REASON,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
   proofWatchdogRendererReadAllowed,
@@ -1423,6 +1424,9 @@ let firstFrameLastPresentedFrameId: number | null = null
 // states distinct makes the first hide update observable without a magic
 // string sentinel (and keeps this source file valid text).
 let firstFrameLastHint: string | null | undefined
+// Plan 212 S5: whether the floating Preview's strip says a check holds the
+// picture. `undefined`: nothing published to this window's document yet.
+let previewWindowStripHeld: boolean | undefined
 const firstFrameTickOwnership = new WatchdogTickOwnership()
 const firstFrameProofRendererReads = new ProofWatchdogRendererReadSingleFlight<Record<
   string,
@@ -1446,6 +1450,7 @@ function startFirstFrameWatchdog(): void {
   firstFrameLastFramesRendered = null
   firstFrameLastPresentedFrameId = null
   firstFrameLastHint = undefined
+  previewWindowStripHeld = undefined
   firstFrameWatchdogMode = 'first-frame'
   presentingWatch = emptyPresentingWatch()
   presentingWatchLastKind = 'presenting'
@@ -1497,6 +1502,32 @@ function setFirstFrameStatus(
     firstFrameContract: contract,
     ...(reason ? { firstFrameReason: reason } : {})
   }
+}
+
+// Plan 212 S5: while a performance check holds the Preview's last picture,
+// the floating window's strip (always visible above the video) says why the
+// picture stopped moving. Docked, the strip is hidden and the Studio's row
+// under the slot says it, with the check's progress.
+function updatePreviewWindowStripLabel(held: boolean): void {
+  if (held === previewWindowStripHeld) {
+    return
+  }
+  previewWindowStripHeld = held
+  const window = previewWindow
+  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
+    return
+  }
+  const label = held ? `${WINDOW_NAMES.preview} · ${PREVIEW_HOLD_REASON}` : WINDOW_NAMES.preview
+  void window.webContents
+    .executeJavaScript(
+      `(() => {
+        const el = document.querySelector('.drag-bar .label');
+        if (el) { el.textContent = ${JSON.stringify(label)} }
+      })()`
+    )
+    .catch(() => {
+      // Best-effort words; the hold itself is in the compositor status.
+    })
 }
 
 // S4 (plan 024): `null` means the contract is met/recovered — HIDE the .hint
@@ -1753,6 +1784,7 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
     // quiet socket is not a stalled pump.
     const previewHeld = Boolean(compositor?.previewHold)
     retireStalledNativePreviewMainPump(framesAdvancing && !previewHeld)
+    updatePreviewWindowStripLabel(previewHeld)
 
     const snapshot: FirstFrameSnapshot = {
       elapsedMs: Date.now() - firstFrameWatchdogStartedAtMs,

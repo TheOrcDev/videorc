@@ -15,6 +15,7 @@ import {
   performanceCheckCeiling,
   firstRunSetupStartsPerformanceCheck,
   performanceCheckTooHeavyToast,
+  previewHoldLabel,
   shouldRunPerformanceCheck
 } from './performance-check'
 import {
@@ -169,7 +170,7 @@ describe('shouldRunPerformanceCheck', () => {
       })
     ).toMatchObject({
       checkLabel: 'Check this computer',
-      text: "This computer hasn't been measured yet."
+      text: 'Not checked on this computer yet.'
     })
     const trustedV2 = { ...poison, capabilityKey: 'performance-check-v2:abc' }
     expect(isUntrustedPerformanceCheckResult(trustedV2)).toBe(false)
@@ -213,6 +214,7 @@ describe('performanceCheckLine', () => {
       busy: false,
       text: '1440p · 30 fps is too heavy for this computer. Recordings will stutter. 720p · 30 fps held steady.',
       checkLabel: 'Check again',
+      checkHint: 'Takes about 20 seconds.',
       applyPreset: 'tutorial-720p30',
       applyLabel: 'Use 720p · 30 fps'
     })
@@ -225,6 +227,55 @@ describe('performanceCheckLine', () => {
       text: '1440p · 30 fps is verified for this computer.'
     })
     expect(verified?.applyPreset).toBeUndefined()
+  })
+
+  it('names the computer the way the platform does (plan 212 S5)', () => {
+    const unchecked = { running: false, stale: false }
+    const words = (platform: string) =>
+      performanceCheckLine({
+        state: unchecked,
+        progress: null,
+        video: videoPresets['tutorial-1080p30'],
+        platform
+      })?.text
+    expect(words('darwin')).toBe('Not checked on this Mac yet.')
+    expect(words('win32')).toBe('Not checked on this PC yet.')
+    expect(words('linux')).toBe('Not checked on this computer yet.')
+  })
+
+  it('offers a check again when the computer changed, without the old verdict', () => {
+    expect(
+      performanceCheckLine({
+        state: { running: false, stale: true, result: weak },
+        progress: null,
+        video: videoPresets['tutorial-1440p30'],
+        platform: 'darwin'
+      })
+    ).toEqual({
+      tone: 'muted',
+      busy: false,
+      text: 'Your Mac changed since the last check.',
+      checkLabel: 'Check again',
+      checkHint: 'Takes about 20 seconds.'
+    })
+  })
+
+  it('says a busy computer stopped the check and keeps the old verdict quiet (D3)', () => {
+    expect(
+      performanceCheckLine({
+        state: { running: false, stale: false, result: strong, lastRunNotRecorded: 'host-busy' },
+        progress: null,
+        video: videoPresets['tutorial-1440p30'],
+        platform: 'darwin',
+        clipsOn: true
+      })
+    ).toEqual({
+      tone: 'warning',
+      busy: false,
+      text: "Your Mac was busy, so the check stopped. Try again when it's quieter.",
+      checkLabel: 'Check again',
+      checkHint: 'Takes about 20 seconds. Clips pauses while it runs.'
+    })
   })
 
   it('says so when an output was never measured, and when nothing held', () => {
@@ -243,6 +294,20 @@ describe('performanceCheckLine', () => {
       checkLabel: 'Check again',
       text: 'Nothing held steady on this computer, not even 720p · 30 fps. Close other apps and check again.'
     })
+  })
+})
+
+describe('previewHoldLabel', () => {
+  it('says why the Preview holds while a check runs, then nothing (plan 212 S5)', () => {
+    expect(previewHoldLabel(undefined, null)).toBeNull()
+    expect(previewHoldLabel({ running: false, stale: false }, null)).toBeNull()
+    expect(previewHoldLabel({ running: true, stale: false }, null)).toBe('Checking this computer')
+    expect(
+      previewHoldLabel(
+        { running: true, stale: false },
+        { rungIndex: 1, rungCount: 3, video: videoPresets['tutorial-1440p30'] }
+      )
+    ).toBe('Checking this computer · 2 of 3')
   })
 })
 

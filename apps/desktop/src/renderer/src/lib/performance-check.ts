@@ -1,4 +1,5 @@
 import type {
+  PerformanceCheckProgress,
   PerformanceCheckResult,
   PerformanceCheckRunParams,
   PerformanceCheckState,
@@ -151,6 +152,23 @@ export function firstRunSetupStartsPerformanceCheck(
   sessionActive: boolean
 ): boolean {
   return mode.kind === 'first-run' && !sessionActive && shouldRunPerformanceCheck(state)
+}
+
+/**
+ * Plan 212 S5: the words under the Preview while a check runs. The backend
+ * holds the Preview's last picture for the whole check, so this says why it
+ * stopped moving: "Checking this computer · 2 of 3", then nothing.
+ */
+export function previewHoldLabel(
+  state: PerformanceCheckState | undefined,
+  progress: PerformanceCheckProgress | null
+): string | null {
+  if (!state?.running) {
+    return null
+  }
+  return progress && progress.rungCount > 0
+    ? `Checking this computer · ${progress.rungIndex + 1} of ${progress.rungCount}`
+    : 'Checking this computer'
 }
 
 /** "1080p · 30 fps": the one video spelling (plan 174 S1.4). */

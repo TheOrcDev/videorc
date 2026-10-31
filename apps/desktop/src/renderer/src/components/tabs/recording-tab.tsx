@@ -37,6 +37,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { VideoPresetSelectItems, videoPresetItems } from '@/components/video-preset-select-items'
 import { useStudioCore, useStudioReplay } from '@/hooks/use-studio'
 import type { DirectoryFacts, VideoSettings } from '@/lib/backend'
@@ -226,7 +227,9 @@ function LocalRecordingSection(): ReactElement {
   const checkLine = performanceCheckLine({
     state: performanceCheck,
     progress: performanceCheckProgress,
-    video
+    video,
+    platform: runtimeInfo?.platform,
+    clipsOn: captureConfig.replayBuffer.enabled
   })
   const sessionLocked = isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
   // Off means stream-only: the quality is the file's, so it waits for the
@@ -365,14 +368,23 @@ function LocalRecordingSection(): ReactElement {
                 </Button>
               ) : null}
               {checkLine.checkLabel ? (
-                <Button
-                  disabled={sessionLocked}
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => void runPerformanceCheck()}
-                >
-                  {checkLine.checkLabel}
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        disabled={sessionLocked}
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => void runPerformanceCheck()}
+                      />
+                    }
+                  >
+                    {checkLine.checkLabel}
+                  </TooltipTrigger>
+                  {checkLine.checkHint ? (
+                    <TooltipContent>{checkLine.checkHint}</TooltipContent>
+                  ) : null}
+                </Tooltip>
               ) : null}
             </div>
           ) : null}
