@@ -21302,14 +21302,16 @@ mod tests {
             std::sync::Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
         let finalizing = state.ffmpeg_work.begin_performance_check_finalizing();
         let query = r#"{"id":"reloaded-renderer","method":"recording.status","params":{}}"#;
+        // Use production's boxed dispatch future. Multiple inline copies of
+        // the full RPC router overflow the default unoptimized test stack.
+        let dispatch = production_websocket_command_handler(BackendRole::Renderer);
         for stopping in [false, true] {
             let mut benchmark = recording::test_performance_check_recording_stub("benchmark");
             benchmark.stop_requested = stopping;
             benchmark.output_path = Some(PathBuf::from("private-benchmark.mkv"));
             *state.recording.lock().await = Some(benchmark);
 
-            let response =
-                handle_text_message_with_role(&state, query, BackendRole::Renderer).await;
+            let response = dispatch(state.clone(), query.to_string()).await;
             assert!(response.ok, "{:?}", response.error);
             assert_eq!(
                 response.payload.unwrap(),
@@ -21331,7 +21333,7 @@ mod tests {
         }
         *state.recording.lock().await = None;
         // There may be a finalization lease after a rung leaves the slot.
-        let response = handle_text_message_with_role(&state, query, BackendRole::Renderer).await;
+        let response = dispatch(state.clone(), query.to_string()).await;
         assert!(response.ok, "{:?}", response.error);
         assert_eq!(
             response.payload.unwrap(),
