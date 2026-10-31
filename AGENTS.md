@@ -32,6 +32,7 @@ Use the smallest gate that proves the change, then run the broader gate before h
 - TypeScript format check: `pnpm format:check`
 - JS production advisory audit: `pnpm audit:js`
 - Node logic tests: `pnpm test:scripts`
+- UI registry drift (files synced from `@videorc`, `apps/desktop/ui-registry.json`; needs the network): `pnpm ui:check`
 - Desktop unit tests: `pnpm --filter @videorc/desktop test`
 - Desktop build: `pnpm build`
 - Preview lifecycle probe: `pnpm probe:preview-lifecycle`

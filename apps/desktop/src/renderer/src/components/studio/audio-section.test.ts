@@ -275,8 +275,7 @@ describe('Audio section: System audio row (plan 201 S2)', () => {
     input: Partial<SystemAudioSwitchInput> = {},
     overrides: Partial<SystemAudioRowProps> = {}
   ): string => row(render({}, systemAudioProps(input, overrides)), 'studio-system-audio')
-  const toggle = (markup: string): string =>
-    /<button[^>]*role="switch"[^>]*>/.exec(markup)?.[0] ?? ''
+  const toggle = (markup: string): string => /<span[^>]*role="switch"[^>]*>/.exec(markup)?.[0] ?? ''
 
   it('shows the switch, and while On its meter and Gain; Off, neither', () => {
     const on = systemAudioRow()
@@ -317,9 +316,9 @@ describe('Audio section: System audio row (plan 201 S2)', () => {
       systemAudioProps({ device: { status: 'permission-required' } }, { gainDb: -12 })
     )
     const markup = row(section, 'studio-system-audio')
-    expect(toggle(markup)).toContain('disabled=""')
+    expect(toggle(markup)).toContain('aria-disabled="true"')
     expect(section).toMatch(
-      /data-disabled="true"[^>]*data-slot="source-item"[^>]*data-source="studio-system-audio"/
+      /<section(?=[^>]*data-disabled="true")(?=[^>]*data-slot="source-item")[^>]*data-source="studio-system-audio"/
     )
     expect(markup).toContain('>Needs permission</span>')
     expect(markup).toContain('System audio needs Screen Recording permission.')

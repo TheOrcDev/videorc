@@ -662,10 +662,12 @@ async function turnOnStudioChat(smoke) {
   const result = await studioEval(
     smoke,
     `await openTab('settings', '#studio-chat')
+     // The id is on the Switch's hidden checkbox input (Base UI), which
+     // mirrors its state and toggles it on a click.
      const toggle = document.querySelector('#studio-chat')
-     if (toggle.getAttribute('aria-checked') !== 'true') toggle.click()
+     if (!toggle.checked) toggle.click()
      await sleep(150)
-     const checked = document.querySelector('#studio-chat')?.getAttribute('aria-checked')
+     const checked = String(document.querySelector('#studio-chat')?.checked)
      await openTab('studio')
      await sleep(400)
      return {
@@ -876,13 +878,15 @@ async function shootStudio(smoke, theme, name) {
  * the card's 10 s lifetime never meets the detour through Settings.
  */
 async function shootStudioChatRetroLcd(smoke, scenarioDirectory) {
+  // The id is on the Switch's hidden checkbox input (Base UI).
   const retro = `await openTab('settings', '#retro-lcd-studio')
      const toggle = document.querySelector('#retro-lcd-studio')
-     if (toggle.getAttribute('aria-checked') !== String(params.on)) toggle.click()
+     if (toggle.checked !== params.on) toggle.click()
      await sleep(150)
      await openTab('studio', ${JSON.stringify(STUDIO_CHAT)})
      await sleep(400)
-     return document.querySelector('#retro-lcd-studio')?.getAttribute('aria-checked') ?? null`
+     const checked = document.querySelector('#retro-lcd-studio')?.checked
+     return checked === undefined ? null : String(checked)`
   await studioEval(smoke, retro, { on: true })
   const file = await shootStudio(smoke, 'dark', 'retro-dark')
   await studioEval(smoke, retro, { on: false })

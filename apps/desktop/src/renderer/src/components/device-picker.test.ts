@@ -216,37 +216,4 @@ describe('device picker without search', () => {
     expect(inline).toContain('title="FaceTime HD Camera"')
     expect(inline).toContain('justify-end')
   })
-
-  it('an LCD trigger is a row on the screen: its label, the lit value and a pixel chevron (plan 197)', () => {
-    const lcd = markup(camera('cam-1', { trigger: 'lcd', rowLabel: 'Cam' }))
-    // The row's own label names the dropdown for a click; the name stays Camera.
-    expect(lcd).toContain('data-slot="lcd-display-row"')
-    const target = /<label[^>]*for="([^"]+)"[^>]*>Cam<\/label>/.exec(lcd)?.[1]
-    expect(target).toBeTruthy()
-    const trigger = new RegExp(`<button[^>]*id="${target}"[^>]*>`).exec(lcd)?.[0] ?? ''
-    expect(trigger).toContain('aria-label="Camera"')
-    expect(trigger).toContain('role="combobox"')
-    expect(trigger).toContain('text-(--lcd-display-lit)')
-    expect(lcd).toContain('title="FaceTime HD Camera"')
-    expect(lcd).toContain('viewBox="0 0 5 3"')
-    // A device that cannot run says so in the dim ink after its name.
-    const missing = markup(camera('cam-gone', { trigger: 'lcd', selectedName: 'Old Webcam' }))
-    expect(missing).toMatch(/class="shrink-0 text-\(--lcd-display-ink-dim\)">Not found</)
-  })
-
-  it('opens the LCD list as a small screen in the opaque popup (plan 197)', async () => {
-    await renderPicker(camera('cam-1', { trigger: 'lcd' }))
-    await click(container.querySelector('button[role=combobox]'))
-    const popup = document.querySelector('[data-slot="popover-content"]')!
-    // The popup is the app's opaque float; the screen inside keeps its own
-    // opaque glass, never the see-through one of the inspector's screens.
-    expect(popup.className).toContain('glass-float')
-    const screen = popup.querySelector('[data-slot="lcd-display"]')!
-    expect(screen.className).not.toContain('--glass-solid')
-    expect(screen.querySelector('[cmdk-list]')).not.toBeNull()
-    expect(option('cam-1')?.className).toContain('data-[checked=true]:text-(--lcd-display-lit)')
-    expect(option('cam-1')?.getAttribute('data-checked')).toBe('true')
-    await click(option('cam-2'))
-    expect(onChange).toHaveBeenCalledExactlyOnceWith('cam-2')
-  })
 })

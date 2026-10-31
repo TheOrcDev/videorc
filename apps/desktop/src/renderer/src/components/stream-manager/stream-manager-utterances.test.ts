@@ -67,7 +67,7 @@ async function render(
 /** The active tab's label, without its unseen badge. */
 function activeTab(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
   const tab = container.querySelector<HTMLElement>(
-    `[data-slot="${slot}"] [role="tab"][data-state="active"]`
+    `[data-slot="${slot}"] [role="tab"][data-active]`
   )
   if (!tab) return null
   const badge = tab.querySelector('[data-testid="pane-unseen"]')?.textContent ?? ''
@@ -145,14 +145,11 @@ describe('StreamManager: how Buddy talks reaches the relay (plan 211 S-C1, D3)',
     banter: { enabled: false, cooldownSeconds: 240 }
   }
 
-  /** Radix-style segments check on mousedown with the primary button, then click. */
+  /** A segment checks on a click. */
   async function choose(talk: string): Promise<void> {
     const option = container.querySelector<HTMLButtonElement>(`[data-buddy-talk="${talk}"]`)
     expect(option, talk).toBeTruthy()
-    await act(async () => {
-      option!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-      option!.click()
-    })
+    await act(async () => option!.click())
   }
 
   it('sends `{ talk }` alone for each value, never `mode`', async () => {

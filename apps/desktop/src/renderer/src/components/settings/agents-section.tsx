@@ -277,6 +277,10 @@ function AgentActivity({
       <div className="flex min-w-0 items-center justify-between gap-2 px-1">
         <SectionLabel>Activity</SectionLabel>
         <Select
+          items={[
+            { value: ALL_AGENTS, label: 'All agents' },
+            ...agents.map((agent) => ({ value: agent.id, label: agent.name }))
+          ]}
           value={agentId ?? ALL_AGENTS}
           onValueChange={(value) => onAgentChange(value === ALL_AGENTS ? null : value)}
         >

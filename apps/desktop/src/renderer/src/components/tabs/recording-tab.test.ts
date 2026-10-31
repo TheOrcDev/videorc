@@ -149,10 +149,17 @@ async function render(
   )
 }
 
+/**
+ * The control a label names: the element it points at, or the Base UI switch
+ * whose hidden input it points at (the switch is labelled by it).
+ */
 function labelled(text: string): HTMLElement {
   const label = [...document.querySelectorAll('label')].find((entry) => entry.textContent === text)!
   expect(label, text).toBeTruthy()
-  return document.getElementById(label.htmlFor)!
+  return (
+    document.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label.id}"]`) ??
+    document.getElementById(label.htmlFor)!
+  )
 }
 
 function button(text: string): HTMLButtonElement | undefined {

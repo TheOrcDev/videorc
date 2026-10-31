@@ -22,8 +22,7 @@ function render(blockedReason: string | null): string {
   )
 }
 
-const switches = (markup: string): string[] =>
-  markup.match(/<button[^>]*role="switch"[^>]*>/g) ?? []
+const switches = (markup: string): string[] => markup.match(/<span[^>]*role="switch"[^>]*>/g) ?? []
 // The snaps are one-shot Buttons inside the "Snap overlay" group (plan 174 S1.7, C-37).
 const snaps = (markup: string): string[] =>
   markup
@@ -41,18 +40,16 @@ describe('the overlay inspector (plan 174, C-6)', () => {
     expect(markup).toContain('data-variant="locked"')
     expect(markup).toContain('role="status"')
     expect(switches(markup)).toHaveLength(2)
-    for (const control of [...switches(markup), ...snaps(markup)]) {
-      expect(control).toContain('disabled=""')
-    }
+    for (const control of switches(markup)) expect(control).toContain('aria-disabled="true"')
+    for (const control of snaps(markup)) expect(control).toContain('disabled=""')
     expect(snaps(markup).length).toBeGreaterThan(0)
   })
 
   it('keeps the controls on, with no notice, while connected', () => {
     const markup = render(overlayEditsBlockedReason('connected'))
     expect(markup).not.toContain('data-slot="alert"')
-    for (const control of [...switches(markup), ...snaps(markup)]) {
-      expect(control).not.toContain('disabled=""')
-    }
+    for (const control of switches(markup)) expect(control).not.toContain('aria-disabled')
+    for (const control of snaps(markup)) expect(control).not.toContain('disabled=""')
   })
 })
 

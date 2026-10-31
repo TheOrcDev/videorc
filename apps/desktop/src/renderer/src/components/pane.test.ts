@@ -138,7 +138,9 @@ describe('flush sections', () => {
     expect(markup).toContain('p-gutter')
     // The type tokens (plan 174 S1.6a): 13 / 600 header, 12 px description,
     // and the header is an h2 under the toolbar's h1 (A-24).
-    expect(markup).toContain('text-section font-semibold')
+    expect(/<h2 class="([^"]*)"/.exec(markup)?.[1].split(' ')).toEqual(
+      expect.arrayContaining(['text-section', 'font-semibold'])
+    )
     expect(markup).toContain('text-meta text-muted-foreground')
     expect(markup).toMatch(/<h2[^>]*>Recording<\/h2>/)
   })
@@ -182,7 +184,9 @@ describe('lists', () => {
       })
     )
     expect(markup).toContain('data-slot="grouped-list"')
-    expect(markup).toContain('divide-y divide-border')
+    expect(/<div class="([^"]*)" data-slot="grouped-list"/.exec(markup)?.[1].split(' ')).toEqual(
+      expect.arrayContaining(['divide-y', 'divide-border'])
+    )
     expect(markup).toContain('>Devices<')
     // Rows inside a group are flush; the group owns the radius.
     expect(markup).toContain('in-data-[slot=grouped-list]:rounded-none')
@@ -232,7 +236,7 @@ describe('StatusBarAction', () => {
     expect(action?.getAttribute('aria-label')).toBe('Open Preview')
     // Named on hover by a tooltip, never a native title (plan 174 S1.10).
     expect(action?.hasAttribute('title')).toBe(false)
-    expect(action?.getAttribute('data-state')).toBe('closed')
+    expect(action?.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     expect(action?.getAttribute('type')).toBe('button')
     expect(action?.className).toContain(STATUS_BAR_ACTION_CLASS)
     act(() => action?.click())
@@ -257,7 +261,8 @@ describe('StatusBarAction', () => {
   })
 
   it('shares one look with the shortcut hints', () => {
-    for (const token of ['h-5', 'text-[11px]', 'text-subtle', 'hover:bg-accent']) {
+    // 11 px is the label size at the body's weight.
+    for (const token of ['h-5', 'text-label', 'font-normal', 'text-subtle', 'hover:bg-accent']) {
       expect(STATUS_BAR_ACTION_CLASS).toContain(token)
     }
     act(() =>

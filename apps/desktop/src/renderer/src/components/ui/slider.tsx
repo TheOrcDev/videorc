@@ -1,14 +1,19 @@
-import * as React from 'react'
-import { Slider as SliderPrimitive } from 'radix-ui'
+'use client'
 
+import { Slider as SliderPrimitive } from '@base-ui/react/slider'
+
+import { useFieldDescribedBy, useFieldLabelledBy } from '@/components/ui/field-context'
 import { cn } from '@/lib/utils'
-import { useFieldLabelledBy } from '@/components/ui/field-context'
 
-// A slider's name and spoken value belong on its thumbs, the elements with
-// role="slider" (plan 174 S0.5, E-3). Radix's root is a plain span, so
-// `aria-label`, `aria-labelledby` and `aria-valuetext` go to every thumb
-// instead. Inside a Field, a slider that names nothing takes the FieldLabel.
-function Slider({
+// A slider's name and spoken value belong on its thumbs, whose inputs carry
+// role="slider". Base UI's root is a group, so `aria-label`,
+// `aria-labelledby`, `aria-describedby` and `aria-valuetext` go to every
+// thumb instead. Inside a Field, a slider that names nothing takes the
+// FieldLabel, and the Field's descriptions describe it.
+// The range is the chrome fill and every thumb a chrome bead on its rim.
+// Generic like Base UI's root, so a scalar `value` gets a scalar
+// `onValueChange` and an array an array.
+function Slider<Value extends number | readonly number[]>({
   className,
   defaultValue,
   value,
@@ -16,49 +21,51 @@ function Slider({
   max = 100,
   'aria-label': ariaLabel,
   'aria-labelledby': ariaLabelledBy,
+  'aria-describedby': ariaDescribedBy,
   'aria-valuetext': ariaValueText,
   ...props
-}: React.ComponentProps<typeof SliderPrimitive.Root>) {
-  const _values = React.useMemo(
-    () => (Array.isArray(value) ? value : Array.isArray(defaultValue) ? defaultValue : [min, max]),
-    [value, defaultValue, min, max]
-  )
+}: SliderPrimitive.Root.Props<Value>) {
+  // One thumb per value: a scalar (or nothing) is one thumb, an array one
+  // each.
+  const values = value ?? defaultValue
+  const thumbCount = Array.isArray(values) ? values.length : 1
   const labelledBy = useFieldLabelledBy(ariaLabelledBy, ariaLabel)
-  // Only a given label replaces Radix's own ("Minimum" and "Maximum" on a range).
-  const thumbLabel = ariaLabel === undefined ? {} : { 'aria-label': ariaLabel }
+  const describedBy = useFieldDescribedBy(ariaDescribedBy)
 
   return (
     <SliderPrimitive.Root
+      className={cn('data-horizontal:w-full data-vertical:h-full', className)}
       data-slot="slider"
       defaultValue={defaultValue}
-      value={value}
-      min={min}
       max={max}
-      className={cn(
-        'relative flex w-full touch-none items-center select-none data-disabled:opacity-50 data-vertical:h-full data-vertical:min-h-40 data-vertical:w-auto data-vertical:flex-col',
-        className
-      )}
+      min={min}
+      thumbAlignment="edge"
+      value={value}
       {...props}
     >
-      <SliderPrimitive.Track
-        data-slot="slider-track"
-        className="relative grow overflow-hidden rounded-full bg-foreground/15 data-horizontal:h-1 data-horizontal:w-full data-vertical:h-full data-vertical:w-1"
-      >
-        <SliderPrimitive.Range
-          data-slot="slider-range"
-          className="absolute chrome-fill select-none data-horizontal:h-full data-vertical:w-full"
-        />
-      </SliderPrimitive.Track>
-      {Array.from({ length: _values.length }, (_, index) => (
-        <SliderPrimitive.Thumb
-          data-slot="slider-thumb"
-          key={index}
-          {...thumbLabel}
-          aria-labelledby={labelledBy}
-          aria-valuetext={ariaValueText}
-          className="block size-4 shrink-0 rounded-full chrome-bead ring-1 ring-knob-ring transition-[color,box-shadow] duration-150 select-none hover:ring-4 hover:ring-ring/30 focus-visible:ring-4 focus-visible:ring-ring/30 focus-visible:outline-hidden disabled:pointer-events-none disabled:opacity-50"
-        />
-      ))}
+      <SliderPrimitive.Control className="relative flex w-full touch-none items-center select-none data-disabled:opacity-50 data-vertical:h-full data-vertical:min-h-40 data-vertical:w-auto data-vertical:flex-col">
+        <SliderPrimitive.Track
+          className="bg-foreground/15 relative grow overflow-hidden rounded-full select-none data-horizontal:h-1 data-horizontal:w-full data-vertical:h-full data-vertical:w-1"
+          data-slot="slider-track"
+        >
+          <SliderPrimitive.Indicator
+            className="chrome-fill select-none data-horizontal:h-full data-vertical:w-full"
+            data-slot="slider-range"
+          />
+        </SliderPrimitive.Track>
+        {Array.from({ length: thumbCount }, (_, index) => (
+          <SliderPrimitive.Thumb
+            aria-describedby={describedBy}
+            aria-label={ariaLabel}
+            aria-labelledby={labelledBy}
+            aria-valuetext={ariaValueText}
+            className="chrome-bead ring-knob-ring hover:ring-ring/30 has-focus-visible:ring-ring/30 block size-4 shrink-0 rounded-full ring-1 transition-[color,box-shadow] duration-150 select-none hover:ring-4 has-focus-visible:ring-4 data-disabled:pointer-events-none"
+            data-slot="slider-thumb"
+            index={index}
+            key={index}
+          />
+        ))}
+      </SliderPrimitive.Control>
     </SliderPrimitive.Root>
   )
 }

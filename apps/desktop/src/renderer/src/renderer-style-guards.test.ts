@@ -386,10 +386,13 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
   })
 
   it('never passes data-slot to a component: hooks on components are data-testid', () => {
-    // components/ui is shadcn's own: its primitives name their Radix parts.
+    // components/ui is shadcn's own: its primitives name their own parts.
+    // SectionLabel's `Element` is the tag name it renders ('span', 'h3'…), so
+    // its slot lands on the element, never on a component.
+    const slotOnIntrinsicTag = new Set(['src/components/section-label.tsx'])
     const offending = files
       .filter(({ path, code }) => path.endsWith('.tsx') && code.includes('data-slot'))
-      .filter(({ path }) => !path.startsWith('src/components/ui/'))
+      .filter(({ path }) => !path.startsWith('src/components/ui/') && !slotOnIntrinsicTag.has(path))
       .flatMap(({ path }) => passedSlots(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))
     expect(offending).toEqual([])
   })

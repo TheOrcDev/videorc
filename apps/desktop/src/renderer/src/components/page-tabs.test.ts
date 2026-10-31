@@ -72,7 +72,7 @@ describe('PageTabs', () => {
       ['setup', 'upcoming']
     )
     expect(
-      container.querySelector('[data-videorc-livestream-view][data-state=active]')?.textContent
+      container.querySelector('[data-videorc-livestream-view][data-active]')?.textContent
     ).toBe('Upcoming')
   })
 
@@ -80,7 +80,7 @@ describe('PageTabs', () => {
     const onValueChange = render('setup')
     const upcoming = container.querySelector<HTMLElement>('[data-videorc-livestream-view=upcoming]')
     act(() => {
-      upcoming?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+      upcoming?.click()
     })
     expect(onValueChange).toHaveBeenCalledWith('upcoming')
   })

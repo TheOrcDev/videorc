@@ -185,13 +185,18 @@ function ReportSwitcher({
 }): ReactElement {
   const selected = options.find((option) => option.id === selectedId)
   return (
-    <Select value={selectedId} onValueChange={onSelect}>
+    <Select
+      value={selectedId}
+      onValueChange={(value) => {
+        if (value !== null) onSelect(value)
+      }}
+    >
       <SelectTrigger aria-label="Stream" className="max-w-56" size="xs">
         <SelectValue>
           <span className="truncate">{selected?.date || selected?.title || 'Stream'}</span>
         </SelectValue>
       </SelectTrigger>
-      <SelectContent align="end" position="popper">
+      <SelectContent align="end" alignItemWithTrigger={false}>
         <SelectGroup>
           {options.map((option) => (
             <SelectItem key={option.id} value={option.id}>
@@ -399,16 +404,18 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
           >
             {view.chat.platforms.map((entry) => (
               <Tooltip key={entry.platform}>
-                <TooltipTrigger asChild>
-                  <span
-                    aria-label={entry.label}
-                    className="inline-flex items-center gap-1 tabular-nums"
-                    role="img"
-                  >
-                    <ChatPlatformIcon decorative platform={entry.platform} />
-                    {/* One platform's count is the total already said. */}
-                    {view.chat.platforms.length > 1 ? formatReportCount(entry.messages) : null}
-                  </span>
+                <TooltipTrigger
+                  render={
+                    <span
+                      aria-label={entry.label}
+                      className="inline-flex items-center gap-1 tabular-nums"
+                      role="img"
+                    />
+                  }
+                >
+                  <ChatPlatformIcon decorative platform={entry.platform} />
+                  {/* One platform's count is the total already said. */}
+                  {view.chat.platforms.length > 1 ? formatReportCount(entry.messages) : null}
                 </TooltipTrigger>
                 <TooltipContent>{entry.label}</TooltipContent>
               </Tooltip>

@@ -268,9 +268,7 @@ describe('Library as a desktop list (E-16, J1-21)', () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     )
     await act(async () =>
-      row('bravo')
-        .querySelector('button[aria-label="Session actions"]')!
-        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      row('bravo').querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')!.click()
     )
     expect(labels([...document.querySelectorAll('[role="menuitem"]')])).toEqual(contextItems)
   })
@@ -284,7 +282,7 @@ describe('selection in view (E-18)', () => {
     const header = document.querySelector<HTMLElement>(
       '[aria-label="Select all recordings in view"]'
     )!
-    expect(header.getAttribute('data-state')).toBe('indeterminate')
+    expect(header.hasAttribute('data-indeterminate')).toBe(true)
     const search = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search recordings"]'
     )!
@@ -337,12 +335,10 @@ describe('Clean cut in the Library (E-4)', () => {
     await render()
     expect(row('bravo').querySelector('[data-library-clean-cut]')?.textContent).toBe('Cutting 40%')
     expect(
-      row('bravo').querySelector<HTMLElement>('[role="checkbox"]')?.hasAttribute('disabled')
+      row('bravo').querySelector<HTMLElement>('[role="checkbox"]')?.hasAttribute('data-disabled')
     ).toBe(true)
     await act(async () =>
-      row('bravo')
-        .querySelector('button[aria-label="Session actions"]')!
-        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      row('bravo').querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')!.click()
     )
     const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
     const remove = items.find((item) => item.textContent?.startsWith('Delete'))!
@@ -369,8 +365,8 @@ describe('Clean cut in the Library (E-4)', () => {
       expect(row('bravo').querySelector('[data-library-clean-cut]')).toBeNull()
       await act(async () =>
         row('bravo')
-          .querySelector('button[aria-label="Session actions"]')!
-          .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+          .querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')!
+          .click()
       )
       const review = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
         (item) => item.textContent === 'Review clean cut'

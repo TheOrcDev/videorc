@@ -12393,7 +12393,8 @@ async function runSmokePreviewMotionCommand(
         if (${JSON.stringify(openMoreMenu)}) {
           const trigger = document.querySelector('button[aria-label="More Stream Manager actions"]');
           if (visible(trigger) && !openMenu()) {
-            trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
+            // A plain click opens the menu (Base UI opens on mousedown or click).
+            trigger.click();
             if (await settle(() => openMenu()?.querySelector('[role^="menuitem"]'))) {
               moreMenuItems = Array.from(openMenu().querySelectorAll('[role^="menuitem"]')).map(
                 (item) => (item.textContent ?? '').trim()
@@ -13611,7 +13612,7 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
           await sleep(Number(params.settleMs ?? 600));
           return { enabled: true, alreadyEnabled: true };
         }
-        if (toggle.disabled) {
+        if (toggle.hasAttribute('data-disabled')) {
           throw new Error('Synthetic source toggle is disabled.');
         }
         toggle.click();
@@ -13747,11 +13748,11 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         if (!button) {
           throw new Error('Could not find camera shape ' + shape + '.');
         }
-        if (button.getAttribute('data-state') !== 'on') {
+        if (!button.hasAttribute('data-checked')) {
           button.click();
         }
         while (Date.now() < deadline) {
-          if (button.getAttribute('data-state') === 'on') {
+          if (button.hasAttribute('data-checked')) {
             await sleep(Number(params.settleMs ?? 600));
             return {
               shape,

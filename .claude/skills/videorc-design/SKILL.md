@@ -31,13 +31,14 @@ drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
 
 ## Hard rules
 
-1. **shadcn/ui only.** Every element is a shadcn/ui component or a composition
-   of them, installed and customized per the `shadcn` skill. No other
-   component libraries and no hand-rolled widgets when a primitive exists.
-   audiocn (the owner's shadcn audio registry, `@audiocn`) counts as shadcn:
-   its meters draw audio, fed by Videorc adapters, never by its
-   Web Audio hooks or blocks. Base UI enters only inside its files
-   (`docs/audiocn.md`).
+1. **shadcn/ui only, from the registries.** Every element is a shadcn/ui
+   component or a composition of them, on Base UI. Videorc's own components
+   come from its registry, `@videorc` ([Where components come
+   from](#where-components-come-from)); audio comes from audiocn (the owner's
+   shadcn audio registry, `@audiocn`), whose meters draw audio fed by Videorc
+   adapters, never by its Web Audio hooks or blocks (`docs/audiocn.md`). No
+   Radix (`radix-ui` and `@radix-ui/*` imports fail lint), no other component
+   libraries, and no hand-rolled widgets when a primitive exists.
 2. **A plain solid ground, never the desktop and never fake blur.** Every
    window is opaque on the theme's solid, and there is no image under the
    UI (owner, 2026-10-29: the Liquid Chrome still that plan 208 put behind
@@ -64,6 +65,35 @@ drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
    shortcuts, device pickers, status words, numbers and times each have one
    shared primitive or helper ([Primitives](#primitives)). Use it. If it
    lacks something, extend it minimally; never hand-roll a competing one.
+
+## Where components come from
+
+videorc-ui (`TheOrcDev/videorc-ui`, served at https://ui.videorc.com) is the
+source of Videorc's components: `components/ui/*`, the primitives
+(`components/pane.tsx`, `list-row.tsx`, `status-bar.tsx`, `kebab-menu.tsx`,
+`device-picker.tsx` and the rest) and their hooks and libs. Each is a shadcn
+registry item on Base UI, with its docs and examples there.
+
+- **Synced, never edited here.** `apps/desktop/ui-registry.json` lists the
+  synced items. `pnpm ui:sync <item…>` installs them with the shadcn CLI,
+  formats them and prints the diff; `pnpm ui:check` (an AGENTS.md gate)
+  fails when a synced file differs from the registry. Its `keepLocal` lists the files an
+  item would write that Videorc keeps as its own: `styles.css` (the tokens
+  start here) and `icons.tsx` (it adds the brand slots).
+- **Changing a synced component:** change it in videorc-ui with its docs and
+  example, let it deploy, then `pnpm ui:sync <item>` here and run the gates.
+  For a tight loop, run videorc-ui's `pnpm dev` and
+  `pnpm ui:sync --local <item>`. A token or utility a component needs goes in
+  `styles.css` here and in videorc-ui's theme.
+- **Videorc's own compositions stay here,** built from synced parts: the
+  root boundary (`components/app-error-boundary.tsx`), the Retro LCD Studio's
+  kit (`components/lcd-panel.tsx`, `components/lcd-device-picker.tsx`), and
+  every screen.
+- **Base UI's API, not Radix's:** `render={<X />}` instead of `asChild`
+  (`nativeButton={false}` when X isn't a button); menu items take
+  `onClick`; ToggleGroup and Accordion values are arrays (`multiple`), a
+  one-thumb Slider's a number; selectors read `data-open`, `data-checked`,
+  `data-pressed`, `data-active` and `data-panel-open`, never `data-state`.
 
 ## Owner calls
 
@@ -408,7 +438,7 @@ Everything except ⌘K uses the desktop scale.
     `rounded-[Npx]` in chrome (a guard checks).
   - Window corners belong to the OS.
 - **Controls.** The default height is 28 px for Button, Toggle, Select
-  trigger, and Input. Retune it once in `components/ui`, never per screen: no
+  trigger, and Input. Retune it once in the registry, never per screen: no
   `h-*` or `size-*` on a control at its call site (a guard checks).
   - **One compact size** (plan 174 S4.1, J1-11): `xs`, 24 px. Button `xs`
     and `icon-xs`, Toggle and ToggleGroup `xs`, SelectTrigger `xs`
@@ -426,8 +456,8 @@ Everything except ⌘K uses the desktop scale.
 - **One control per kind of choice** (plan 174 S1.7, D13). Each wears one
   look:
   - Choosing one of 2–4 exclusive values: `SegmentedControl`
-    (`ui/segmented-control.tsx`), the glass Tabs track with no Radix, a
-    radio group with arrow keys. Its Field label names it; disabled, it says
+    (`ui/segmented-control.tsx`), the glass Tabs track with no Tabs
+    primitive, a radio group with arrow keys. Its Field label names it; disabled, it says
     why (`disabledReason`).
   - Switching a view (a page or a pane): `Tabs`.
   - Filter chips (several on at once, or a filter row): `ToggleGroup`, only
@@ -618,9 +648,10 @@ made it chat first: one thin stats bar and fewer words.
   and Stickers) chat's paid fill `bg-warning/10` without its ring (the rows
   are flush, split by hairlines); on stream, `bg-accent` wins, and hover
   paints over either. A long fact truncates and every ⋯ stays in the pane.
-- **ScrollArea content is a block** (plan 177): `ui/scroll-area.tsx`
-  overrides Radix's `display: table` wrapper, which let one long unbreakable
-  row widen every row past the pane. Never reintroduce it per call site.
+- **ScrollArea content is a block** (plan 177): the viewport of
+  `ui/scroll-area.tsx` holds the rows itself, with no `display: table`
+  wrapper (one let a long unbreakable row widen every row past the pane).
+  Never reintroduce one per call site.
 - **The Buddy pane** has one header: Buddy's identity (the living preview at
   32 px, the name, the bubble while one is up), the Alpha tag, listening,
   the status and the **Buddy Live** switch. Under it, "{name} talks" is a
@@ -751,8 +782,8 @@ over the chrome): `border glass-float` for the popup tier,
 `Command` inside a Dialog or Popover stays transparent. Every toast is the
 same neutral popup glass: a type (success, warning, error, info) colours its
 16 px icon only, never the panel or its rim, and the text stays monochrome.
-Never `bg-popover`: a guard test fails on it, so a fresh shadcn add must be
-moved onto the utility.
+Never `bg-popover`: a guard test fails on it, so a component new to the
+registry is moved onto the utility there.
 
 - **Dialogs**: 12 px radius, `p-5`, the dialog tier with its own drop
   (deeper in light). `DialogContent` and `AlertDialogContent` take
@@ -795,8 +826,8 @@ moved onto the utility.
 - Editable fields get the native context menu (Cut, Copy, Paste, Select All,
   spelling), which main builds on `context-menu` (`main/context-menu.ts`).
   Notes has none: a popup menu is not capture-protected.
-- macOS overlay scrollbars: no custom scrollbar recipe. Radix `ScrollArea`
-  uses `type="scroll"`.
+- macOS overlay scrollbars: no custom scrollbar recipe. `ScrollArea`
+  uses `type="scroll"` (its default).
 - Rows highlight instantly. No `cursor-pointer`: desktop controls use the
   arrow.
 - Copying: `copyText(text, failure?)` or `useCopyText() → { copied, copy }`.
@@ -917,7 +948,8 @@ these are the props that matter. Paths are under
 Asking, locking and explaining
 
 - `AlertDialog` (`ui/alert-dialog.tsx`): shadcn's, on the dialog tier with no
-  close button; Radix focuses Cancel and Escape closes. Use it through
+  close button; it focuses Cancel and Escape closes, and its Action never
+  closes it (the owner does). Use it through
   `ConfirmDialog` unless the question is not a delete (End livestream has
   its own, `components/end-livestream-dialog.tsx`).
 - `ConfirmDialog` (`components/confirm-dialog.tsx`), the recipe in
@@ -928,13 +960,16 @@ Asking, locking and explaining
   `<DisabledReason reason id? label? focusable? tabIndex?>{control}</DisabledReason>`.
   A focusable wrapper with a Tooltip and `aria-describedby`, because a
   disabled control takes no hover. Pass `reason` only while the control is
-  disabled; `focusable={false}` only for Radix select or menu items.
-- `LockAlert` (`components/lock-alert.tsx`): `reason action?`, where
-  `action` is `{ kind: 'sign-in' }` or `{ kind: 'view-premium', url }`
-  (`unlockActionForGate`, `unlockActionForReason` in `lib/lock-view.ts`).
+  disabled; `focusable={false}` only for select or menu items.
+- `LockAlert` (`components/lock-alert.tsx`): `reason action?`. Pass the
+  action through `lockAlertAction(…)` (`lib/lock-view.ts`), which gives
+  sign-in Videorc's sign-in and View Premium the system browser, from
+  `unlockActionForGate` or `unlockActionForReason`.
   `SessionLockAlert locks?` says "Locked while you're recording or live.
   Changes apply the next time you record or go live."; `OfflineAlert` says
-  Videorc is reconnecting.
+  Videorc is reconnecting. The wording is `SESSION_LOCK_REASON`,
+  `sessionLockReason(locks)` and `OFFLINE_LOCK_REASON` in `lib/lock-reason.ts`
+  (strings only, so code that isn't UI imports them without a component).
 
 Rows, forms and choices
 
@@ -949,13 +984,16 @@ Rows, forms and choices
 - `DevicePicker` (`components/device-picker.tsx`):
   `kind label devices value onChange noneLabel? discoveryPending? searchable? groupByKind? trigger? description? statusInTrigger? disabled? labelHidden?`.
   `trigger="field"` is a labelled form control, `"inline"` a row's
-  right-aligned value.
+  right-aligned value. On a Retro LCD screen it is `LcdDevicePicker`
+  (`components/lcd-device-picker.tsx`, `rowLabel?`): the same words and list
+  on the screen.
 - `ListRow`, `GroupedList` and `ListRowButton` (`components/list-row.tsx`),
   `NavigableRow` (`components/navigable-row.tsx`), `SectionLabel`
   (`components/section-label.tsx`) and `PanelSection`
   (`components/panel-section.tsx`, `title description? action? headingLevel?`).
-- `MediaCard` (`components/media-card.tsx`): `selected? interactive? asChild?`
-  on a div, for an object with a picture.
+- `MediaCard` (`components/media-card.tsx`): `selected? interactive? render?`
+  on a div, for an object with a picture. `render={<button … />}` makes the
+  card a button.
 - `KebabMenu` (`components/kebab-menu.tsx`): `items label? busy? disabled? reveal? tabIndex?`,
   each item `id label icon? destructive? disabled? disabledReason? group? shortcut? onSelect`.
 - `BroadcastInfoFields` (`components/streaming/broadcast-info-fields.tsx`):
@@ -966,16 +1004,16 @@ Rows, forms and choices
 
 Windows, bars and pages
 
-- `WindowHeader` (`components/window-frame.tsx`): `title meta? className?`,
+- `WindowHeader` (`components/window-frame.tsx`): `title meta? platform? className?`,
   with the window's controls as children.
 - `PageTabs` (`components/page-tabs.tsx`):
   `tabs value onValueChange label triggerAttribute? testId?`, with the
   `TabsContent` panels as children. `PaneStrip` (`components/pane.tsx`) is
   the strip on its own; `PANE_OWNS_SCROLL` goes on a page that owns its
   scroll.
-- `StatusBarAction` (`components/status-bar.tsx`):
-  `icon? label text? hint? accelerator? pressed?`, plus button props, so it
-  can be a menu trigger. `label` is the name a screen reader says; `text`
+- `StatusBarAction` (`components/status-bar-action.tsx`):
+  `icon? label text? hint? accelerator? platform? pressed?`, plus button
+  props, so it can be a menu trigger's `render`. `label` is the name a screen reader says; `text`
   the visible word when there is room. `StatusBarHint`
   (`accelerator label pressed? onClick`) is a clickable shortcut hint.
 - `PinWindowButton` (`components/pin-window-button.tsx`):
@@ -1038,7 +1076,7 @@ Words, numbers and navigation
 | Views and page tabs          | `Tabs`                                                                      |
 | Filter chips (multi-select)  | `ToggleGroup`                                                               |
 | A boolean                    | `Switch`                                                                    |
-| A screen, camera, microphone | `DevicePicker` (`trigger="lcd"` on a Retro LCD screen)                      |
+| A screen, camera, microphone | `DevicePicker` (`LcdDevicePicker` on a Retro LCD screen)                    |
 | Buttons                      | `Button` ghost/outline/secondary; `default` chrome primary; 28 px default   |
 | Record and its stop button   | `Button` `variant="record"`, `data-lit` while running (never Delete)        |
 | Why a control is disabled    | `DisabledReason`, or `SegmentedControl`'s `disabledReason`                  |
@@ -1060,8 +1098,10 @@ pages, `components/audio/gain-faders.tsx`. Retro LCD skins them from outside
 with `LCD_FADER` in `components/lcd-panel.tsx`, inside the Audio screen
 (plan 201 D5).
 
-Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
-do not hand-roll it.
+Missing a primitive? Add it to videorc-ui (a stock shadcn component is
+ported there onto Base UI and Videorc's tokens), then `pnpm ui:sync <item>`
+here. Do not hand-roll it, and never `shadcn add` stock components into
+Videorc.
 
 ## Do / Don't
 

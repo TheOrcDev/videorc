@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { WORKSPACE_SHORTCUTS } from '@/components/workspace-nav'
 
-import { parseAccelerator } from '../../../shared/accelerator-format'
+import { parseAccelerator } from '@/lib/accelerator'
 
 import { SHORTCUTS, navShortcutDigit, shortcutsByGroup } from './shortcuts'
 

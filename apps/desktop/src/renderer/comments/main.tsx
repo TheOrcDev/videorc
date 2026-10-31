@@ -4,7 +4,7 @@ import { toast } from '@/lib/toast'
 import { toastUserError, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 
 import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
-import { AppErrorBoundary } from '@/components/error-boundary'
+import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
 import { WindowFrame } from '@/components/window-frame'

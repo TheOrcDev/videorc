@@ -1,17 +1,22 @@
-// One answer to "is something modal open?" (plan 174 S3.21, A-2). Every
-// global key in the main window asks it before acting: ⌘1–⌘9 and ⌘, from
-// main, the shell's own chords (⌘K, ⌘P, ⌘J…), Space on Studio and the theme
-// key. Before, each handler kept its own partial list, and a key that
-// navigated from under a dialog lost unsaved schedule edits and bypassed the
-// OBS import lock.
+const OPEN_SURFACES = [
+  '[role="dialog"][data-open]',
+  '[role="alertdialog"][data-open]',
+  '[role="menu"][data-open]',
+  '[role="listbox"][data-open]',
+  // A Base UI Select puts the listbox role on its List, inside the open popup.
+  '[data-open] [role="listbox"]'
+]
+
+// One answer to "is something modal open?". Every global key asks it before
+// acting (navigation chords, Space, the theme key), so a key never acts from
+// under a dialog, an alert, a menu or an open select. Base UI marks an open
+// popup with `data-open`.
+//
+// (Comments sit below the first statement on purpose: the shadcn CLI drops
+// whatever comes before a file's first line of code.)
 
 /** An open floating surface that owns the keyboard: a dialog, an alert, a menu, an open select. */
-export const MODAL_OPEN_SELECTOR = [
-  '[role="dialog"][data-state="open"]',
-  '[role="alertdialog"][data-state="open"]',
-  '[role="menu"][data-state="open"]',
-  '[role="listbox"][data-state="open"]'
-].join(', ')
+export const MODAL_OPEN_SELECTOR = OPEN_SURFACES.join(', ')
 
 /** True while a dialog, an alert, a menu or a select is open anywhere in the window. */
 export function isModalOpen(root: Pick<Document, 'querySelector'> = document): boolean {

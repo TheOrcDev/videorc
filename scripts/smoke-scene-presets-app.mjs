@@ -381,9 +381,10 @@ try {
       const select = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === ${JSON.stringify('Select ')} + ${JSON.stringify(camera.name)});
       if (!select || select.disabled) throw new Error('Camera inspector selection unavailable');
       select.click();
+      // The id is on the Switch's hidden checkbox input (Base UI).
       const toggle = await waitFor(${JSON.stringify('[id="source-visible-' + camera.id + '"]')});
       if (toggle.disabled) throw new Error('Camera visibility control unavailable');
-      if ((toggle.getAttribute('aria-checked') === 'true') !== ${visible}) toggle.click();
+      if (toggle.checked !== ${visible}) toggle.click();
       return true;
     `)
     const confirmed = await waitFor(

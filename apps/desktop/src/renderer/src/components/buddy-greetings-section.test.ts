@@ -502,8 +502,10 @@ describe('Welcomes (plan 192 S1.3)', () => {
 })
 
 describe('Write greetings with AI (plan 192 D3)', () => {
-  function aiSwitch(): HTMLButtonElement {
-    return document.getElementById('buddy-greetings-ai') as HTMLButtonElement
+  // The id is on Base UI's hidden input; the label for it names the switch.
+  function aiSwitch(): HTMLElement {
+    const label = document.querySelector('label[for="buddy-greetings-ai"]')
+    return document.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label?.id}"]`)!
   }
 
   it("says it writes in Buddy's own voice, with your line as the example", async () => {
@@ -516,7 +518,7 @@ describe('Write greetings with AI (plan 192 D3)', () => {
     )
     // An older backend omits the switch: on, Rust's default.
     expect(aiSwitch().getAttribute('aria-checked')).toBe('true')
-    expect(aiSwitch().disabled).toBe(false)
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(false)
   })
 
   it('saves ai alone in the block, keeping the lines and the welcomes', async () => {
@@ -531,12 +533,12 @@ describe('Write greetings with AI (plan 192 D3)', () => {
 
   it('is Premium like Answers and Banter: disabled under the lock, the lines still free', async () => {
     await render([], { premium: false })
-    expect(aiSwitch().disabled).toBe(true)
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
     expect((document.getElementById('buddy-greetings-enabled') as HTMLButtonElement).disabled).toBe(
       false
     )
     await render([], { locked: true })
-    expect(aiSwitch().disabled).toBe(true)
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
     // The lines stay editable: a default row still saves.
     await act(async () => row('follow').querySelector<HTMLElement>('[role="switch"]')!.click())
     expect(patchCohostSettings).toHaveBeenCalledTimes(1)

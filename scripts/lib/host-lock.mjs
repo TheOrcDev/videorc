@@ -37,7 +37,9 @@ function holder(port) {
   return `held by an unknown process on 127.0.0.1:${port}`
 }
 async function tryPort(port) {
-  const server = net.createServer()
+  // Hang up on any peer (port scanners such as T3 Code's probe every localhost listener):
+  // an accepted socket left open makes server.close(), and so release(), wait forever.
+  const server = net.createServer((socket) => socket.destroy())
   const acquired = await new Promise((resolveListen, reject) => {
     server.once('error', (error) =>
       error.code === 'EADDRINUSE'

@@ -201,8 +201,12 @@ async function render({
 }
 
 /** Plan 174 S3.14a: the Buddy Live switch is back on the tab, beside the status. */
-function liveSwitch(): HTMLButtonElement {
-  const control = document.getElementById('buddy-live-switch') as HTMLButtonElement | null
+/** The id is on Base UI's hidden input; the label for it names the switch. */
+function liveSwitch(): HTMLElement {
+  const label = document.querySelector('label[for="buddy-live-switch"]')
+  const control = document.querySelector<HTMLElement>(
+    `[role="switch"][aria-labelledby="${label?.id}"]`
+  )
   expect(control).toBeTruthy()
   expect(document.querySelector('[data-testid="buddy-live-pointer"]')).toBeNull()
   return control!
@@ -227,18 +231,16 @@ function stripTabs(): HTMLElement[] {
 function selectedTab(): string | null {
   return (
     document
-      .querySelector('[data-videorc-buddy-tab][data-state="active"]')
+      .querySelector('[data-videorc-buddy-tab][data-active]')
       ?.getAttribute('data-videorc-buddy-tab') ?? null
   )
 }
 
-/** Radix activates a tab on mousedown with the primary button. */
+/** Base UI activates a tab on a click (or on focus from the arrow keys). */
 async function pressTab(id: BuddyTabId): Promise<void> {
   const trigger = document.querySelector(`[data-videorc-buddy-tab="${id}"]`) as HTMLElement
   expect(trigger).toBeTruthy()
-  await act(async () => {
-    trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-  })
+  await act(async () => trigger.click())
 }
 
 describe('Buddy tab strip (plan 150)', () => {
@@ -342,14 +344,14 @@ describe('Buddy tab (plan 119 S2)', () => {
   it('locks the switch off, with the reason, for an account that cannot turn Buddy on', async () => {
     await render({ gate: basic })
     const control = liveSwitch()
-    expect(control.disabled).toBe(true)
+    expect(control.hasAttribute('data-disabled')).toBe(true)
     const wrapper = control.closest<HTMLElement>('[data-slot="disabled-reason"]')
     expect(
       document.getElementById(wrapper?.getAttribute('aria-describedby') ?? '')?.textContent
     ).toBe('Buddy Live is part of Videorc Premium.')
     // On already: a locked account can still turn Buddy off.
     await render({ gate: basic, cohost: settings({ enabled: true }) })
-    expect(liveSwitch().disabled).toBe(false)
+    expect(liveSwitch().hasAttribute('data-disabled')).toBe(false)
   })
 
   it('asks for consent in a dialog that names every cloud use, and answers it', async () => {
@@ -381,7 +383,7 @@ describe('Buddy tab (plan 119 S2)', () => {
     const unlock = document.querySelector('[data-testid="buddy-live-unlock"]')
     expect(unlock?.textContent).toContain('Sign in to use Buddy Live, part of Videorc Premium.')
     // Locked means disabled with one reason: the switch cannot turn Buddy on.
-    expect(liveSwitch().disabled).toBe(true)
+    expect(liveSwitch().hasAttribute('data-disabled')).toBe(true)
     await act(async () => button('Sign in').click())
     expect(calls.signIn).toHaveBeenCalledTimes(1)
   })
@@ -391,7 +393,7 @@ describe('Buddy tab (plan 119 S2)', () => {
     expect(document.querySelector('[data-testid="buddy-live-unlock"]')?.textContent).toContain(
       'Buddy Live is part of Videorc Premium.'
     )
-    expect(liveSwitch().disabled).toBe(true)
+    expect(liveSwitch().hasAttribute('data-disabled')).toBe(true)
     await act(async () => button('View Premium').click())
     expect(calls.openOAuthUrl).toHaveBeenCalledWith('https://www.videorc.com/premium')
   })
@@ -526,17 +528,28 @@ describe('Reports (plan 119 S3, plan 150)', () => {
 })
 
 describe('Cloud AI and the settings tabs (plan 119 S2, plan 150)', () => {
+  // The id is on Base UI's hidden input, which the label points at; the label
+  // names the switch.
+  function cloudAiSwitch(): HTMLElement {
+    const label = document.querySelector('label[for="buddy-cloud-ai"]')
+    const control = document.querySelector<HTMLElement>(
+      `[role="switch"][aria-labelledby="${label?.id}"]`
+    )
+    expect(control).toBeTruthy()
+    return control!
+  }
+
   it('keeps cloud-AI consent on Live, its single home: it revokes and grants', async () => {
     await render({ cohost: settings({ enabled: true, listen: true }) })
-    const cloudAi = document.getElementById('buddy-cloud-ai') as HTMLButtonElement
-    expect(cloudAi.getAttribute('data-state')).toBe('checked')
+    const cloudAi = cloudAiSwitch()
+    expect(cloudAi.hasAttribute('data-checked')).toBe(true)
     for (const use of CLOUD_AI_USES) expect(document.body.textContent).toContain(use)
     await act(async () => cloudAi.click())
     expect(calls.setAiConsent).toHaveBeenLastCalledWith(false)
 
     await render({ cohost: settings({ enabled: true, listen: true }), consented: false })
-    const revoked = document.getElementById('buddy-cloud-ai') as HTMLButtonElement
-    expect(revoked.getAttribute('data-state')).toBe('unchecked')
+    const revoked = cloudAiSwitch()
+    expect(revoked.hasAttribute('data-unchecked')).toBe(true)
     await act(async () => revoked.click())
     expect(calls.setAiConsent).toHaveBeenLastCalledWith(true)
     // Consent alone never turns Buddy on or off.
@@ -693,7 +706,7 @@ describe('Buddy tab: Voice commands (plan 140, S6 part A)', () => {
       'Reconnect Twitch to let Buddy remove messages.'
     )
     expect(reconnect.hasAttribute('title')).toBe(false)
-    expect(reconnect.getAttribute('data-state')).toBe('closed')
+    expect(reconnect.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     const authorize = rows[2].querySelector('button')!
     expect(rows[2].textContent).toContain('Needs access')
     expect(authorize.textContent).toBe('Authorize X Live')

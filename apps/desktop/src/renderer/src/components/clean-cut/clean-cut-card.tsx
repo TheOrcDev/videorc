@@ -61,6 +61,7 @@ import {
 } from '@/lib/clean-cut-view'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { plural } from '@/lib/format'
+import { lockAlertAction } from '@/lib/lock-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
@@ -274,7 +275,11 @@ export function CleanCutCard({
           leads with (plan 174 E-31): the switch and Make are off under it. */}
       {unlock ? (
         <div className="border-b border-border p-gutter" data-slot="buddy-tab-lock">
-          <LockAlert action={unlock.action} data-testid="clean-cut-unlock" reason={unlock.reason} />
+          <LockAlert
+            action={lockAlertAction(unlock.action)}
+            data-testid="clean-cut-unlock"
+            reason={unlock.reason}
+          />
         </div>
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>

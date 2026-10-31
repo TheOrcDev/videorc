@@ -144,7 +144,7 @@ export function ScenesGallery(): ReactElement {
               canvas is fixed at session start — disabled while live (the
               backend refuses cross-orientation scene switches too). The
               gallery is in the EAGER Studio chunk: SegmentedControl has no
-              Radix, so it costs the initial asset budget nothing. A switch
+              Tabs primitive, so it costs the initial asset budget nothing. A switch
               restarts the canvas, so arrows only move focus (manual). */}
           <DisabledReason
             reason={
@@ -224,7 +224,7 @@ export function ScenesGallery(): ReactElement {
 /**
  * Fill / Fit for the screen in vertical scenes. Fill is the short-form look
  * (the screen fills its area and is cropped); Fit keeps the whole screen
- * visible. A SegmentedControl, Radix-free like the mode toggle.
+ * visible. A SegmentedControl, with no Tabs primitive, like the mode toggle.
  */
 export function ScreenFramingControl({
   value,

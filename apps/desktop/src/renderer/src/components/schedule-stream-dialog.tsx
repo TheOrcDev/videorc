@@ -64,6 +64,12 @@ import {
 import { scheduledProviderLabel, scheduledProviderNoun } from '@/lib/scheduled-streams'
 import { userErrorMessage } from '@/lib/user-error'
 
+/** YouTube's made-for-kids answer, as the select holds it (the API's boolean as a string). */
+const AUDIENCE_ITEMS = [
+  { value: 'false', label: 'No, not made for kids' },
+  { value: 'true', label: 'Yes, made for kids' }
+] as const
+
 /** A failure in the form's words, never the raw error (plan 174 S2.4). */
 function formError(error: unknown, action: string): string {
   return userErrorMessage(error, { action, object: 'the event' }).text
@@ -240,6 +246,10 @@ export function ScheduleStreamDialog({
   // chosen time (D-31), labelled with the two real offsets.
   const offsets = localTimeOffsets(metadata.localStart, metadata.timeZone)
   const ambiguous = offsets.length === 2
+  const offsetItems = [
+    { value: 'earlier', label: `The first, at ${formatGmtOffset(offsets[0])}` },
+    { value: 'later', label: `The second, at ${formatGmtOffset(offsets[1])}` }
+  ] as const
   const zoneAt = resolved ? Date.parse(resolved) : Date.now()
   const accounts = providerCapability?.accounts ?? state.capabilities?.accounts ?? []
   const accountNoun = provider === 'x' ? 'X account' : 'YouTube channel'
@@ -357,8 +367,13 @@ export function ScheduleStreamDialog({
               <Field data-invalid={accounts.length === 0 ? true : undefined}>
                 <FieldLabel htmlFor="schedule-channel">{accountNoun}</FieldLabel>
                 <Select
+                  items={accounts.map((account) => ({
+                    value: account.accountId,
+                    label: account.accountLabel
+                  }))}
                   value={accountId}
                   onValueChange={(value) => {
+                    if (value === null) return
                     setAccountId(value)
                     setDirty(true)
                   }}
@@ -456,16 +471,18 @@ export function ScheduleStreamDialog({
                   <Field>
                     <FieldLabel>Time zone</FieldLabel>
                     <Popover open={zoneOpen} onOpenChange={setZoneOpen}>
-                      <PopoverTrigger asChild>
-                        <Button
-                          aria-haspopup="dialog"
-                          aria-label="Time zone"
-                          className="justify-between font-normal"
-                          variant="outline"
-                        >
-                          {timeZoneLabel(metadata.timeZone, zoneAt)}
-                          <ChevronDownIcon data-icon="inline-end" />
-                        </Button>
+                      <PopoverTrigger
+                        render={
+                          <Button
+                            aria-haspopup="dialog"
+                            aria-label="Time zone"
+                            className="justify-between font-normal"
+                            variant="outline"
+                          />
+                        }
+                      >
+                        {timeZoneLabel(metadata.timeZone, zoneAt)}
+                        <ChevronDownIcon data-icon="inline-end" />
                       </PopoverTrigger>
                       <PopoverContent className="p-0">
                         <TimeZoneList
@@ -482,22 +499,24 @@ export function ScheduleStreamDialog({
                     <Field>
                       <FieldLabel htmlFor="schedule-offset">This time happens twice</FieldLabel>
                       <Select
+                        items={offsetItems}
                         value={metadata.offsetChoice ?? ''}
-                        onValueChange={(value) =>
-                          patch({ offsetChoice: value as 'earlier' | 'later' })
-                        }
+                        onValueChange={(value) => {
+                          if (value === 'earlier' || value === 'later') {
+                            patch({ offsetChoice: value })
+                          }
+                        }}
                       >
                         <SelectTrigger id="schedule-offset" aria-label="This time happens twice">
                           <SelectValue placeholder="Choose which one" />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>
-                            <SelectItem value="earlier">
-                              {`The first, at ${formatGmtOffset(offsets[0])}`}
-                            </SelectItem>
-                            <SelectItem value="later">
-                              {`The second, at ${formatGmtOffset(offsets[1])}`}
-                            </SelectItem>
+                            {offsetItems.map((item) => (
+                              <SelectItem key={item.value} value={item.value}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
                           </SelectGroup>
                         </SelectContent>
                       </Select>
@@ -526,9 +545,11 @@ export function ScheduleStreamDialog({
                     <Field>
                       <FieldLabel htmlFor="schedule-audience">Made for kids</FieldLabel>
                       <Select
+                        items={AUDIENCE_ITEMS}
                         value={audience}
                         disabled={Boolean(published)}
                         onValueChange={(value) => {
+                          if (value === null) return
                           setAudience(value)
                           setDirty(true)
                         }}
@@ -538,8 +559,11 @@ export function ScheduleStreamDialog({
                         </SelectTrigger>
                         <SelectContent>
                           <SelectGroup>
-                            <SelectItem value="false">No, not made for kids</SelectItem>
-                            <SelectItem value="true">Yes, made for kids</SelectItem>
+                            {AUDIENCE_ITEMS.map((item) => (
+                              <SelectItem key={item.value} value={item.value}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
                           </SelectGroup>
                         </SelectContent>
                       </Select>

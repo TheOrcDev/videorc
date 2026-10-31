@@ -8,7 +8,7 @@ import {
 import { Fragment, useContext, type ReactElement, type ReactNode } from 'react'
 
 import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
-import { DevicePicker } from '@/components/device-picker'
+import { LcdDevicePicker } from '@/components/lcd-device-picker'
 import {
   LCD_FADER,
   LCD_MESSAGE,
@@ -401,7 +401,7 @@ function RetroMicrophoneRows({
           </button>
         </ShortcutTooltip>
       </RetroChannelHeader>
-      <DevicePicker
+      <LcdDevicePicker
         devices={devices}
         disabled={disabled}
         discoveryPending={discoveryPending}
@@ -411,7 +411,6 @@ function RetroMicrophoneRows({
         rowLabel="Device"
         selectedDevice={selectedDevice}
         selectedName={selectedName}
-        trigger="lcd"
         value={value}
         onChange={onChange}
       />
@@ -539,7 +538,7 @@ export function RetroQuickSettings(): ReactElement {
             title="Sources"
           />
           {/* F-015: the synthetic diagnostic source replaces the screen. */}
-          <DevicePicker
+          <LcdDevicePicker
             devices={captureDevices}
             disabled={Boolean(sourceSwitchReason('capture'))}
             discoveryPending={discoveryPending}
@@ -550,7 +549,6 @@ export function RetroQuickSettings(): ReactElement {
             selectedDevice={selectedCaptureDevice}
             selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
             selectionLabel={captureConfig.sources.testPattern ? 'Test pattern' : undefined}
-            trigger="lcd"
             value={selectedCaptureId}
             onChange={(captureId) =>
               void switchSourceDeviceLive(
@@ -563,7 +561,7 @@ export function RetroQuickSettings(): ReactElement {
           <RetroScreenPrivacyRow control={screenPrivacy} />
           <LcdDisplaySeparator />
           {/* Off is a choice that sticks (plan 080 S4). */}
-          <DevicePicker
+          <LcdDevicePicker
             devices={cameras}
             disabled={Boolean(sourceSwitchReason('camera'))}
             discoveryPending={discoveryPending}
@@ -572,7 +570,6 @@ export function RetroQuickSettings(): ReactElement {
             noneLabel="Off"
             selectedDevice={selectedCamera}
             selectedName={captureConfig.sources.cameraName}
-            trigger="lcd"
             value={captureConfig.sources.cameraId}
             onChange={(cameraId) =>
               void switchSourceDeviceLive(

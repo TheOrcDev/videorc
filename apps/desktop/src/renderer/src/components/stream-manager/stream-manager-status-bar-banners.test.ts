@@ -47,7 +47,7 @@ async function open(label: string): Promise<HTMLElement> {
   const trigger = container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!
   expect(trigger, label).not.toBeNull()
   await act(async () => {
-    trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+    trigger.click()
   })
   const menu = document.querySelector<HTMLElement>('[role=menu]')
   expect(menu).not.toBeNull()
