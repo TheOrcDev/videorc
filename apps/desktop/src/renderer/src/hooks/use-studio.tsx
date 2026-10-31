@@ -238,7 +238,6 @@ import {
   isShippedDefaultOutput,
   isUntrustedPerformanceCheckResult,
   performanceCheckCeiling,
-  performanceCheckMayAutoRun,
   performanceCheckTooHeavyToast
 } from '@/lib/performance-check'
 import type * as GoLiveOutput from '@/lib/go-live-output'
@@ -742,8 +741,6 @@ const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
 const SCENE_TRANSITION_MS = 320
 
 const SESSION_LIST_PAGE_LIMIT = 50
-// Long enough for first paint, preview warm-up and the bootstrap burst.
-const PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS = 8_000
 
 function outputChosenByUser(): boolean {
   try {
@@ -16923,7 +16920,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const [performanceCheckProgress, setPerformanceCheckProgress] =
     useState<PerformanceCheckProgress | null>(null)
-  const performanceCheckAutoRunRef = useRef(false)
 
   const commitPerformanceCheck = useCallback((next: PerformanceCheckState) => {
     setPerformanceCheck(next)
@@ -16966,6 +16962,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     scheduleReplayReconcile()
   }, [scheduleReplayReconcile])
 
+  // The only way a check starts (plan 212 D1): first-run setup as it opens,
+  // or "Check this computer" in Recording → Output, both through
+  // `runPerformanceCheck`. Nothing starts one at launch or after an update;
+  // a verdict is stale only when the machine or the measuring pipeline
+  // changed (`stored_result_is_stale` in performance_check.rs).
   const requestPerformanceCheck = useCallback(async () => {
     if (!client || performanceCheckHoldRef.current) {
       return
@@ -17066,26 +17067,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client, commitPerformanceCheck, refreshStreamOutputTopology]
   )
-
-  // Measure once per machine, after the app has settled. Packaged builds only:
-  // dev sessions and smokes start captures immediately and use the button.
-  // The Clips ring counts as idle; capture must be ready (a Linux portal
-  // screen chosen), or the run measures nothing.
-  const performanceCheckMayRun = performanceCheckMayAutoRun(
-    performanceCheck,
-    recording,
-    !replayGrantWait
-  )
-  useEffect(() => {
-    if (performanceCheckAutoRunRef.current || !runtimeInfo?.isPackaged || !performanceCheckMayRun) {
-      return
-    }
-    const timer = window.setTimeout(() => {
-      performanceCheckAutoRunRef.current = true
-      void requestPerformanceCheck().catch(() => undefined)
-    }, PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS)
-    return () => window.clearTimeout(timer)
-  }, [performanceCheckMayRun, requestPerformanceCheck, runtimeInfo?.isPackaged])
 
   const patchStreamingTarget = useCallback(
     (targetId: string, patch: Partial<StreamTargetSettings>) => {

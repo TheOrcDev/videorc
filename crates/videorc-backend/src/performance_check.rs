@@ -391,7 +391,17 @@ pub(crate) fn is_protected_rung(video: &VideoSettings, is_floor: bool) -> bool {
 }
 
 const RESULT_SETTING_KEY: &str = "performance_check_result";
-const CAPABILITY_KEY_VERSION: &str = "performance-check-v2";
+const CAPABILITY_KEY_VERSION: &str = "performance-check-v3";
+/// The key shape before plan 212. It hashed the desktop app version and the
+/// crate version, so every update made the verdict stale and re-ran the
+/// check (noise in the Preview, 8 s after launch). Kept only to recognise a
+/// stored v2 row written by this same machine.
+const CAPABILITY_KEY_V2_VERSION: &str = "performance-check-v2";
+/// What a rung measures, as a version. An app update never re-measures a
+/// machine (plan 212 D1). Bump this constant only when an encode change
+/// alters what a rung measures (a new encoder path, a different ladder,
+/// another frame budget), and every stored verdict re-measures once.
+pub const PERFORMANCE_CHECK_PIPELINE_VERSION: u32 = 1;
 const DESKTOP_APP_VERSION_ENV: &str = "VIDEORC_APP_VERSION";
 const RUNG_WARMUP: Duration = Duration::from_millis(1_500);
 const RUNG_MEASURE: Duration = Duration::from_secs(4);
@@ -448,8 +458,9 @@ impl Drop for RunningGuard<'_> {
 }
 
 /// Desktop version when Electron set it; otherwise the backend crate version.
-/// The crate stays at 0.9.0 across desktop releases, so hashing only that
-/// left Linux `belowFloor` poison sticky (ogre, 2026-09-28).
+/// Recorded on every verdict (`app_version`) and sent as the User-Agent. The
+/// v2 key hashed it too, which is why a v2 row is re-hashed with its own
+/// `app_version` in `stored_result_is_stale`.
 pub(crate) fn desktop_app_version() -> String {
     app_version_or_crate(std::env::var(DESKTOP_APP_VERSION_ENV).ok().as_deref())
 }
@@ -473,18 +484,23 @@ fn app_version_or_crate(app_version: Option<&str>) -> String {
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
-/// Names the machine a verdict belongs to. A new GPU, driver or app version
-/// makes the stored result stale instead of silently trusting it.
+/// Names the machine a verdict belongs to: the OS, the architecture, the
+/// graphics identity and the measuring pipeline's version. A new GPU, driver
+/// or OS makes the stored result stale instead of silently trusting it. An
+/// app update does not (plan 212 D1): the check runs once per machine.
 pub(crate) fn capability_key() -> String {
     capability_key_from(
         std::env::consts::OS,
         std::env::consts::ARCH,
-        &graphics_identity_for_encoder_preference(
-            &crate::recording::graphics_adapter_driver_identity(),
-            crate::recording::windows_h264_encoder_preference().0,
-        ),
-        &desktop_app_version(),
-        env!("CARGO_PKG_VERSION"),
+        &current_graphics_identity(),
+        PERFORMANCE_CHECK_PIPELINE_VERSION,
+    )
+}
+
+fn current_graphics_identity() -> String {
+    graphics_identity_for_encoder_preference(
+        &crate::recording::graphics_adapter_driver_identity(),
+        crate::recording::windows_h264_encoder_preference().0,
     )
 }
 
@@ -509,25 +525,86 @@ pub(crate) fn capability_key_from(
     os: &str,
     arch: &str,
     graphics_identity: &str,
-    app_version: &str,
-    backend_crate_version: &str,
+    pipeline_version: u32,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CAPABILITY_KEY_VERSION);
     hasher.update(os);
     hasher.update(arch);
     hasher.update(graphics_identity);
-    hasher.update(app_version);
-    hasher.update(backend_crate_version);
+    hasher.update(pipeline_version.to_string());
     format!("{CAPABILITY_KEY_VERSION}:{:x}", hasher.finalize())
 }
 
-/// v1 keys never match the v2 hasher, and Linux `belowFloor` rows whose
-/// every measured rung is `did-not-start` are a failed ladder, not a
-/// machine class. `run_ladder` no longer saves a ladder where nothing
-/// started, so only rows written before that rule can match.
+/// The v2 hasher, byte for byte, so a row written before plan 212 can be
+/// recognised as this machine's own. Never used to write a new key.
+fn capability_key_v2_from(
+    os: &str,
+    arch: &str,
+    graphics_identity: &str,
+    app_version: &str,
+    backend_crate_version: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(CAPABILITY_KEY_V2_VERSION);
+    hasher.update(os);
+    hasher.update(arch);
+    hasher.update(graphics_identity);
+    hasher.update(app_version);
+    hasher.update(backend_crate_version);
+    format!("{CAPABILITY_KEY_V2_VERSION}:{:x}", hasher.finalize())
+}
+
+/// A stored verdict is stale when it was measured on another machine, by
+/// another pipeline, or never really measured at all:
+///
+/// - A v3 row is stale when its key differs from today's v3 key (a new GPU,
+///   driver or OS, or a `PERFORMANCE_CHECK_PIPELINE_VERSION` bump).
+/// - A v2 row (written before plan 212) is NOT stale when re-hashing it the
+///   v2 way, with the row's own `app_version` and today's OS, arch and
+///   graphics identity, reproduces its key: the same machine, so an update
+///   keeps its verdict. The crate version in that hash is today's
+///   `CARGO_PKG_VERSION`; it rarely moves, and when it does, every v2 row
+///   re-measures once, which is acceptable.
+/// - v1 keys match neither hasher, and Linux `belowFloor` rows whose every
+///   measured rung is `did-not-start` are a failed ladder, not a machine
+///   class. `run_ladder` no longer saves a ladder where nothing started, so
+///   only rows written before that rule can match.
 pub(crate) fn stored_result_is_stale(result: &PerformanceCheckResult) -> bool {
-    result.capability_key != capability_key() || linux_did_not_start_below_floor(result)
+    stored_result_is_stale_for(
+        result,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &current_graphics_identity(),
+        PERFORMANCE_CHECK_PIPELINE_VERSION,
+    )
+}
+
+fn stored_result_is_stale_for(
+    result: &PerformanceCheckResult,
+    os: &str,
+    arch: &str,
+    graphics_identity: &str,
+    pipeline_version: u32,
+) -> bool {
+    if linux_did_not_start_below_floor(result) {
+        return true;
+    }
+    let expected = if result
+        .capability_key
+        .starts_with(&format!("{CAPABILITY_KEY_V2_VERSION}:"))
+    {
+        capability_key_v2_from(
+            os,
+            arch,
+            graphics_identity,
+            &result.app_version,
+            env!("CARGO_PKG_VERSION"),
+        )
+    } else {
+        capability_key_from(os, arch, graphics_identity, pipeline_version)
+    };
+    result.capability_key != expected
 }
 
 pub(crate) fn linux_did_not_start_below_floor(result: &PerformanceCheckResult) -> bool {
@@ -1385,60 +1462,129 @@ mod tests {
                 "windows",
                 "x86_64",
                 &graphics_identity_for_encoder_preference(identity, preference),
-                "0.9.126",
-                "0.9.0",
+                PERFORMANCE_CHECK_PIPELINE_VERSION,
             )
         };
         assert_eq!(
             key(Preference::Auto),
-            capability_key_from("windows", "x86_64", identity, "0.9.126", "0.9.0")
+            capability_key_from(
+                "windows",
+                "x86_64",
+                identity,
+                PERFORMANCE_CHECK_PIPELINE_VERSION
+            )
         );
         assert_ne!(key(Preference::Auto), key(Preference::QuickSync));
         assert_ne!(key(Preference::QuickSync), key(Preference::Software));
     }
 
     #[test]
-    fn capability_key_changes_with_gpu_identity_and_app_version() {
-        let a = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.119",
-            "0.9.0",
-        );
-        let same = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.119",
-            "0.9.0",
-        );
-        let gpu = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD129=amdgpu",
-            "0.9.119",
-            "0.9.0",
-        );
-        let app = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.120",
-            "0.9.0",
-        );
-        let crate_version = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.119",
-            "0.9.1",
-        );
-        assert!(a.starts_with("performance-check-v2:"));
+    fn capability_key_changes_with_gpu_identity_and_pipeline_version_only() {
+        let a = capability_key_from("linux", "x86_64", "linux-render-nodes=renderD128=i915", 1);
+        let same = capability_key_from("linux", "x86_64", "linux-render-nodes=renderD128=i915", 1);
+        let gpu = capability_key_from("linux", "x86_64", "linux-render-nodes=renderD129=amdgpu", 1);
+        let pipeline =
+            capability_key_from("linux", "x86_64", "linux-render-nodes=renderD128=i915", 2);
+        assert!(a.starts_with("performance-check-v3:"));
         assert_eq!(a, same);
         assert_ne!(a, gpu);
-        assert_ne!(a, app);
-        assert_ne!(a, crate_version);
+        assert_ne!(a, pipeline);
+    }
+
+    const THIS_GPU: &str = "apple-silicon;metal=Apple M2 Pro";
+    const OTHER_GPU: &str = "apple-silicon;metal=Apple M4 Max";
+
+    fn verdict_with_key(capability_key: &str, app_version: &str) -> PerformanceCheckResult {
+        let floor = full_ladder().last().cloned().expect("floor");
+        PerformanceCheckResult {
+            app_version: app_version.to_string(),
+            ..sample_result(
+                capability_key,
+                false,
+                vec![rung(floor, PerformanceCheckRungVerdict::Passed)],
+            )
+        }
+    }
+
+    #[test]
+    fn a_v2_row_from_the_same_machine_survives_an_app_update() {
+        // Written by 0.17.2 before plan 212; the app is now newer, the Mac is not.
+        let key = capability_key_v2_from(
+            "macos",
+            "aarch64",
+            THIS_GPU,
+            "0.17.2",
+            env!("CARGO_PKG_VERSION"),
+        );
+        let row = verdict_with_key(&key, "0.17.2");
+        assert!(!stored_result_is_stale_for(
+            &row,
+            "macos",
+            "aarch64",
+            THIS_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+        // A new GPU, or another OS, is another machine.
+        assert!(stored_result_is_stale_for(
+            &row,
+            "macos",
+            "aarch64",
+            OTHER_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+        assert!(stored_result_is_stale_for(
+            &row,
+            "linux",
+            "aarch64",
+            THIS_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+        // A v2 row that claims another app version than the one it was hashed
+        // with is not this machine's row either.
+        let tampered = verdict_with_key(&key, "0.17.3");
+        assert!(stored_result_is_stale_for(
+            &tampered,
+            "macos",
+            "aarch64",
+            THIS_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+    }
+
+    #[test]
+    fn a_v3_row_is_stale_on_a_new_gpu_or_a_pipeline_bump_never_on_an_update() {
+        let key = capability_key_from("macos", "aarch64", THIS_GPU, 1);
+        // Two app versions write the same v3 key; both rows stand.
+        for app_version in ["0.17.2", "0.18.0"] {
+            let row = verdict_with_key(&key, app_version);
+            assert!(!stored_result_is_stale_for(
+                &row, "macos", "aarch64", THIS_GPU, 1
+            ));
+            assert!(stored_result_is_stale_for(
+                &row, "macos", "aarch64", OTHER_GPU, 1
+            ));
+            assert!(stored_result_is_stale_for(
+                &row, "macos", "aarch64", THIS_GPU, 2
+            ));
+        }
+    }
+
+    #[test]
+    fn a_v1_row_is_always_stale_and_linux_poison_stays_stale() {
+        let floor = did_not_start(full_ladder().last().cloned().expect("floor"));
+        let poison = sample_result("performance-check-v1:deadbeef", true, vec![floor]);
+        let passed = verdict_with_key("performance-check-v1:deadbeef", "0.9.0");
+        // Neither hasher reproduces a v1 key, so both re-measure once; on
+        // Linux the poison row is also caught by its own rule.
+        assert!(stored_result_is_stale_for(
+            &poison, "linux", "x86_64", THIS_GPU, 1
+        ));
+        assert!(stored_result_is_stale_for(
+            &passed, "linux", "x86_64", THIS_GPU, 1
+        ));
+        if cfg!(target_os = "linux") {
+            assert!(linux_did_not_start_below_floor(&poison));
+        }
     }
 
     fn sample_result(

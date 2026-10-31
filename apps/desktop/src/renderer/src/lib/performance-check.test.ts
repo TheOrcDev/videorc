@@ -13,7 +13,7 @@ import {
   outputLabel,
   outputVerdict,
   performanceCheckCeiling,
-  performanceCheckMayAutoRun,
+  firstRunSetupStartsPerformanceCheck,
   performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from './performance-check'
@@ -642,40 +642,55 @@ describe('Go Live headroom on a CPU compositor (retest 153)', () => {
   })
 })
 
-describe('performanceCheckMayAutoRun', () => {
+describe('firstRunSetupStartsPerformanceCheck (plan 212 D1)', () => {
+  const firstRun = { kind: 'first-run' }
+  const replay = { kind: 'replay' }
   const nothingMeasured = { running: false, stale: false }
-  const idle = { state: 'idle' }
+  const measured = {
+    running: false,
+    stale: false,
+    result: result([['tutorial-1080p30', 'passed']], 'tutorial-1080p30')
+  }
 
-  it('runs on an idle launch with nothing measured and capture ready', () => {
-    expect(performanceCheckMayAutoRun(nothingMeasured, idle, true)).toBe(true)
-    expect(performanceCheckMayAutoRun(undefined, idle, true)).toBe(false)
-    expect(performanceCheckMayAutoRun({ running: true, stale: false }, idle, true)).toBe(false)
+  it('starts one when this machine has no verdict', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, nothingMeasured, false)).toBe(true)
   })
 
-  it('counts the replay-only Clips ring as idle', () => {
-    for (const state of ['starting', 'recording', 'stopping']) {
-      expect(performanceCheckMayAutoRun(nothingMeasured, { state, replayOnly: true }, true)).toBe(
-        true
+  it('starts nothing when a verdict from this machine exists', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, measured, false)).toBe(false)
+  })
+
+  it('re-measures a verdict from another machine, or one that never measured', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, { ...measured, stale: true }, false)).toBe(
+      true
+    )
+    const poison = {
+      ...result([['tutorial-540p30', 'failed']], 'tutorial-540p30', true),
+      rungs: [
+        { video: videoPresets['tutorial-540p30'], verdict: 'failed', reasons: ['did-not-start'] }
+      ]
+    } satisfies PerformanceCheckResult
+    expect(
+      firstRunSetupStartsPerformanceCheck(
+        firstRun,
+        { running: false, stale: false, result: poison },
+        false
       )
-    }
+    ).toBe(true)
   })
 
-  it('never runs over a real recording or livestream', () => {
-    for (const state of ['starting', 'recording', 'streaming', 'stopping']) {
-      expect(performanceCheckMayAutoRun(nothingMeasured, { state }, true)).toBe(false)
-    }
+  it('waits for the backend to answer, and never doubles a running check', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, undefined, false)).toBe(false)
+    expect(
+      firstRunSetupStartsPerformanceCheck(firstRun, { running: true, stale: false }, false)
+    ).toBe(false)
   })
 
-  it('waits for capture (a Linux portal screen not chosen yet measures nothing)', () => {
-    expect(performanceCheckMayAutoRun(nothingMeasured, idle, false)).toBe(false)
+  it('never takes the studio from a running take', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, nothingMeasured, true)).toBe(false)
   })
 
-  it('does not run once a verdict was recorded', () => {
-    const measured = {
-      running: false,
-      stale: false,
-      result: result([['tutorial-1080p30', 'passed']], 'tutorial-1080p30')
-    }
-    expect(performanceCheckMayAutoRun(measured, idle, true)).toBe(false)
+  it('a replay of setup from Settings is not a first run', () => {
+    expect(firstRunSetupStartsPerformanceCheck(replay, nothingMeasured, false)).toBe(false)
   })
 })
