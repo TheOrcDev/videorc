@@ -88,6 +88,15 @@ pnpm check:packaged-app --app /path/to/Videorc.app
 
 A harness that needs CDP in a packaged app (the live lab, `smoke:windows-main-window-recovery`, perf probes against a packaged build) needs a **packaged test build**: set `VIDEORC_PACKAGED_TEST_HOOKS=1` when `electron-vite build` runs (`pnpm --filter @videorc/desktop package:linux:test-hooks`, `VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop`, or `$env:VIDEORC_PACKAGED_TEST_HOOKS='1'` before `pnpm package:desktop:windows`). The fuses stay flipped. `pnpm check:packaged-app` refuses such a build unless you pass `--allow-test-hooks`; it must never ship. The packaged smoke command server (`VIDEORC_PACKAGED_SMOKE_TEST`, used by `smoke:packaged*` against the exact release payload) is unchanged.
 
+`pnpm smoke:windows-main-window-recovery` prepares that separate test package
+automatically from the current source and existing compiled backend/FFmpeg.
+Set `VIDEORC_PERF_APP_EXECUTABLE` to the original production executable. The
+runner checks its hardening, builds a temporary directory with CDP enabled,
+checks the test package's fuses, runs recovery there, and verifies that the
+original executable and app.asar hashes did not change. Its report identifies
+the result as test-build evidence. The original installer and its recording
+checks remain production-build evidence; the recovery test package never ships.
+
 For development acceptance, run the same backend recording smoke through `pnpm dev`:
 
 ```sh

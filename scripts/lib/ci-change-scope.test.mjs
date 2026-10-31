@@ -7,7 +7,9 @@ import {
   HEAVY_CODE_SCOPE,
   classifyChangeScope,
   isBlankGitSha,
+  isDocsPath,
   isDocsRecordPath,
+  isJsTestPath,
   isVersionOnlyPackageJson,
   isVersionReleasePath,
   scopeToActionOutputs
@@ -123,6 +125,51 @@ describe('ci-change-scope', () => {
       macos_rust: 'true',
       js: 'true'
     })
+  })
+
+  it('lets docs-only and JS-test-only change sets skip every heavy job but keep JS', () => {
+    assert.equal(isDocsPath('docs/distribution.md'), true)
+    assert.equal(isDocsPath('plans/212-linux-beta-readiness.md'), true)
+    assert.equal(isDocsPath('README.md'), true)
+    assert.equal(isDocsPath('apps/desktop/README.md'), false)
+    assert.equal(isDocsPath('crates/videorc-backend/notes.md'), false)
+    assert.equal(isJsTestPath('apps/desktop/src/renderer/src/components/tabs/settings-layout.test.ts'), true)
+    assert.equal(isJsTestPath('scripts/lib/ci-change-scope.test.mjs'), true)
+    assert.equal(isJsTestPath('apps/desktop/src/main/index.ts'), false)
+    assert.equal(isJsTestPath('crates/videorc-backend/tests/fixture.test.js'), false)
+    assert.equal(isJsTestPath('.github/workflows/x.test.mjs'), false)
+
+    const light = { windowsHeavy: false, linuxHeavy: false, macosRust: false, js: true }
+    assert.deepEqual(
+      classifyChangeScope({ eventName: 'pull_request', files: ['docs/distribution.md', 'README.md'] }),
+      { kind: CI_SCOPE_KINDS.DOCS, ...light }
+    )
+    assert.deepEqual(
+      classifyChangeScope({
+        eventName: 'pull_request',
+        files: ['apps/desktop/src/renderer/src/app-shell.test.tsx', 'plans/210-x.md']
+      }),
+      { kind: CI_SCOPE_KINDS.JS_TEST, ...light }
+    )
+    // Any app, script, workflow or Rust path keeps the full gates.
+    for (const extra of [
+      'apps/desktop/src/renderer/src/app-shell.tsx',
+      'scripts/lib/ci-change-scope.mjs',
+      '.github/workflows/ci.yml',
+      'crates/videorc-backend/src/main.rs',
+      'package.json',
+      'pnpm-lock.yaml'
+    ]) {
+      assert.deepEqual(
+        classifyChangeScope({ eventName: 'pull_request', files: ['docs/a.md', 'scripts/a.test.mjs', extra] }),
+        { ...HEAVY_CODE_SCOPE },
+        extra
+      )
+    }
+    assert.deepEqual(
+      classifyChangeScope({ eventName: 'workflow_dispatch', files: ['docs/a.md'] }),
+      { ...HEAVY_CODE_SCOPE }
+    )
   })
 
   it('reads the repository diff fail-closed and uses two-dot ranges on push', () => {
