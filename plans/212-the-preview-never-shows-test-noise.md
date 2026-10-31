@@ -15,8 +15,9 @@
 
 ## Status
 
-- **Status:** PLANNED 2026-10-31. Nothing built. Owner decisions D1 to D3
-  are open; the slices below follow the recommendations.
+- **Status:** Phase 1 BUILT 2026-10-31 (see "As built"). The owner said
+  "execute the entire plan"; D1 to D3 were taken as recommended, so D2
+  means Phase 1 only and Phase 2 is not built.
 - **Priority:** P0 for Phase 1. Every packaged user sees about 18 seconds
   of coloured noise in the Preview on the first launch after each update.
   On this Mac that happened three times in 21 hours.
@@ -597,4 +598,121 @@ against Phase 1.
 
 ## As built
 
-(empty)
+Phase 1, 2026-10-31, branch `plan-212-preview-never-shows-test-noise` on
+`origin/main` `0b238af0` (one commit after the planned `b465b071`; the
+drift was plan 205's cold-launch fix and changed no behaviour here).
+D1 to D3 as recommended; Phase 2 not built.
+
+- **S1** `60d31d0c`. The `gpt-6.1-sol` pass changed nothing, so the slice
+  was escalated to `fable-5.1`.
+  - The oracle is the lease-free dev RPC `preview.debug.sample`
+    (`cfg!(debug_assertions)`), which reads `presented_frame_store`, the
+    frame main is handed. The strip decoder is
+    `scripts/lib/synthetic-frame-strip.mjs`.
+  - The check starts through the renderer's `requestPerformanceCheck`
+    (DEV-only `__videorcSmokeScenePresets.checkComputer`).
+  - No grant-free program that is not synthetic exists (every landscape
+    preset needs a screen or camera), so the program is the real screen
+    under four known banners. Without the Screen Recording grant the
+    smoke SKIPs and names the grant. The separate screen pass folded into
+    this, so there are three passes.
+  - Red on `origin/main`:
+    - Clips on: `synthetic-frame-presented` 533 of 769 frames,
+      `test-pattern-scene-source` 136 of 170 polls.
+    - Clips off: `synthetic-frame-presented` 531 of 761,
+      `test-pattern-scene-source` 167 of 167, `scene-changed` (sources
+      Screen capture → test pattern), `preview-not-back`.
+    - Record in rung 2: `synthetic-frame-presented` 277 of 512,
+      `test-pattern-scene-source` 71 of 105.
+  - That confirms "Why" items 2 to 4. Item 4 is real: with Clips off the
+    test pattern stays in the user's scene after the check. Items 5 and 6
+    (the renderer adopting the pattern, the watchdog healing) did not
+    reproduce in a 12 s check on this host; their fixes are defensive.
+- **S3** `3023e1e4` (escalated to `fable-5.1` the same way).
+  - The v3 key hashes os, arch, graphics identity and
+    `PERFORMANCE_CHECK_PIPELINE_VERSION` (1).
+  - A v2 row is re-hashed with its own `appVersion` and today's crate
+    version. A match is the same machine and stays fresh. The crate
+    (`0.9.0`) and the app (`0.17.2`) versions differ, so both are hashed
+    as v2 did.
+  - The launch auto-run is gone. First-run setup starts the check (first
+    run only, no take running). No setup step mounts the native Preview,
+    because setup replaces the Studio shell.
+- **S2** `be2a5da0`, plus review fixes `02a40b64` (`fable-5.1`).
+  - `benchmark` rides on the arm, lease and start params. A run-scoped
+    `benchmark_scene` feeds the primary leg only: `compositor.scene`, its
+    revisions and `scene.get` stay the user's, and the program leg never
+    composes it.
+  - The noise is a flag on the benchmark's scene
+    (`synthetic_hard_content`). `SyntheticHardContentGuard` is deleted.
+  - `PreviewHoldGuard` pins the presented `FrameHandle` from before rung 1
+    until the first program frame after the last release. That tick hands
+    the frame back together with the status. Benchmark ticks send no
+    `preview.frameReady`.
+  - `compositor.status.previewHold` is `performance-check` or
+    `synthetic-refused` (in the strict contract). Main's assessors never
+    heal under a hold. The pump-retire gate respects it on macOS and
+    Windows, and the held → unheld transition resets the first-frame
+    clock and the present heartbeat.
+  - Backstop: release builds (`!cfg!(debug_assertions)`) refuse
+    test-pattern frames, count `framePipeline.previewSyntheticRefused`,
+    and say so as a `synthetic-refused` hold. In packaged builds the
+    renderer ignores a `test-pattern` source.
+  - Windows: a benchmark never gets a D3D11 session (the D3D11 plan does
+    not support a test pattern), so it composes on the CPU compositor and
+    takes the same path. The proof surface draws the user's unchanged
+    scene. Not run on Windows.
+- **S4** `d36da0db` and `8cfdf83d`.
+  - Busy means a load of at least 2.0 per core (`host_pressure`).
+  - Sampled before the hold (a busy computer runs nothing and holds
+    nothing) and at each rung's start and end.
+  - A measured failure under load ends the ladder with no verdict. A pass
+    stands. The test seam's forced failure is never judged.
+  - `lastRunNotRecorded: "host-busy"` (in memory) lasts until the next
+    run. Windows has no load average and never reads busy.
+- **S5** `9f49bd59` (`opus-5.5`).
+  - The docked Preview's row reads "Checking this computer · 2 of 3", and
+    the floating Preview's strip reads "Preview · Checking this computer".
+  - Output: "Not checked on this Mac yet.", "Your Mac changed since the
+    last check." and "Your Mac was busy, so the check stopped. Try again
+    when it's quieter." The noun comes from `platformCopy`.
+  - The check button's tooltip: "Takes about 20 seconds. Clips pauses
+    while it runs."
+- **Independent review** (`fable-5.1`): 2 must-fix and 2 should-fix
+  findings (the hold's hand-back to main, the Windows pump gate, the busy
+  sample before the hold, a silent backstop), all fixed in `02a40b64`.
+- **S6 gates** (this Mac, a loaded host: load 3 to 19 on 10 cores, about
+  17 GB of swap):
+  - `cargo fmt --check`, clippy `-D warnings`, `pnpm typecheck`, `pnpm
+lint` and `pnpm format:check` are clean. `pnpm test:scripts`: 2810
+    pass.
+  - Targeted Rust filters: 459 pass, and 33 in `performance_check`.
+  - `pnpm --filter @videorc/desktop test`: 6639 pass, 1 fails. The
+    failure is `settings-layout.test.ts` (`<PaneBody>`/`<PageTabs>` in
+    `app-shell.tsx`), and it fails the same way on `origin/main`.
+  - `smoke:preview-check-invisible`: 3 of 3 PASS.
+  - `smoke:performance-check`: the same verdict as the base (1080p30,
+    speed 1.012, 30.0 fps, both runs). `:step-down` passes.
+  - `smoke:recording-studio`: every member up to `smoke:scene-switch-pixels`,
+    `smoke:smart-scenes`, `separate-source-fixture` and `soundboard-fixture`
+    passed. `smoke:separate-source-runtime` is red at 4K30 (audio edge
+    confidence), the known red-by-design 3×4K30 overload on this Mac.
+    The members after it, run one by one: 24 PASS,
+    including `probe:preview-lifecycle`, `probe:preview-window`,
+    `smoke:preview-surface`, `smoke:preview-overlay-presentation`,
+    `smoke:preview-check-invisible`, `smoke:preview-pump-diagnostics`,
+    `smoke:live-layout-switch-recording`, `smoke:record-latency:gate` and
+    `smoke:system-audio`. Five are red, none from this branch: four stop
+    at "No camera device available to select" (no camera on this host:
+    `smoke:freeform-editor`, `smoke:layout-source-loop`,
+    `smoke:preview-scene-commit`, `smoke:preview-interaction-stress`),
+    and `smoke:live-background` misses its hot-GPU p95 budget (Silk
+    1080p30 1.95 ms over 1.5 ms, the known idle-clock red).
+- **Owed:**
+  - The owner's by-eye pass in both themes.
+  - Packaged acceptance: install over 0.17.2 and launch, then Output →
+    "Check this computer".
+  - A Windows tester pass.
+  - The owner runs "Check this computer" once on a quiet Mac. The stored
+    1080p30 verdict from 10:40 on 10-31 is wrong, and under D1 nothing
+    re-measures it automatically.

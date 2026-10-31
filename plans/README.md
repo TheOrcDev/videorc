@@ -17,7 +17,9 @@
     (first-run setup or the Output button only), and no verdict from a
     busy Mac.
   - Phase 2 (optional, D2): the Preview stays live during a check.
-    **PLANNED** 2026-10-31; owner decisions D1 to D3 open.
+    **Phase 1 BUILT** 2026-10-31 (D1 to D3 as recommended; Phase 2 not
+    built). Owed: by-eye in both themes, packaged acceptance, Windows
+    tester, and the owner's "Check this computer" on a quiet Mac.
 - 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
   Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
   needs to be much smarter", quoting a user who switches between T3 Code and
