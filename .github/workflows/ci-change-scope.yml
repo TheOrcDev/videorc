@@ -9,7 +9,7 @@ on:
   workflow_call:
     outputs:
       kind:
-        description: code, version-release, or docs-record
+        description: code, version-release, docs-record, docs, or js-test
         value: ${{ jobs.scope.outputs.kind }}
       windows_heavy:
         description: Whether Windows source gates and the installer must run
