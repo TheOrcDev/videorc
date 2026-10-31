@@ -66,7 +66,10 @@ const studio = vi.hoisted(() => ({
     // Your look (plan 207 S5): the committed scene and the look hold.
     scene: null as unknown,
     firstRunLookHold: null,
-    applyFirstRunLook: vi.fn()
+    applyFirstRunLook: vi.fn(),
+    // The performance check (plan 212 D1) starts here, once, as setup opens.
+    performanceCheck: undefined,
+    runPerformanceCheck: vi.fn(async () => undefined)
   },
   rows: [] as SystemAccessRow[],
   registry: null as unknown
@@ -435,5 +438,45 @@ describe('FirstRunSetup', () => {
     expect(markup).toContain('Allow Screen Recording first.')
     expect(markup).toMatch(/data-first-run-look-option="screen-only"[\s\S]*?disabled=""/)
     expect(markup).not.toContain('aria-label="Camera shape"')
+  })
+})
+
+// Plan 212 D1: the check runs once per machine, started by setup as it opens
+// or by Recording → Output, never by the Studio at launch. Effects do not run
+// in a static render, so the wiring is read from the sources.
+describe('the performance check starts in setup or from Output, never at launch (plan 212 D1)', () => {
+  const read = (path: string): string => readFileSync(new URL(path, import.meta.url), 'utf8')
+
+  it('setup decides once, as soon as the backend has answered, through the helper', () => {
+    const setup = read('./first-run-setup.tsx')
+    expect(setup).toContain(
+      "import { firstRunSetupStartsPerformanceCheck } from '@/lib/performance-check'"
+    )
+    expect(setup).toContain(
+      'if (performanceCheckDecided.current || performanceCheck === undefined) return'
+    )
+    expect(setup).toContain(
+      'if (firstRunSetupStartsPerformanceCheck(mode, performanceCheck, isSessionActive)) {'
+    )
+    expect(setup).toContain('void runPerformanceCheck()')
+    // Leaving setup does not cancel it: no cleanup touches the check.
+    expect(setup).not.toContain('performance.check.cancel')
+  })
+
+  it('the Studio has no launch auto-run left, and only runPerformanceCheck reaches the backend', () => {
+    const studio = read('../../hooks/use-studio.tsx')
+    expect(studio).not.toContain('PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS')
+    expect(studio).not.toContain('performanceCheckMayAutoRun')
+    expect(studio).not.toContain('performanceCheckAutoRunRef')
+    // The definition and the one call inside runPerformanceCheck.
+    expect(studio.match(/requestPerformanceCheck\(\)/g)).toHaveLength(1)
+    expect(studio.match(/'performance\.check\.run'/g)).toHaveLength(1)
+  })
+
+  it('runPerformanceCheck has two callers: the Output button and setup', () => {
+    const output = read('../tabs/recording-tab.tsx')
+    expect(output).toContain('onClick={() => void runPerformanceCheck()}')
+    const setup = read('./first-run-setup.tsx')
+    expect(setup.match(/runPerformanceCheck\(\)/g)).toHaveLength(1)
   })
 })

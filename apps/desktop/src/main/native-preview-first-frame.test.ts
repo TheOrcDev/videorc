@@ -15,6 +15,9 @@ import {
   firstFrameBlockedReason,
   firstFrameContractMet,
   nativePreviewFirstFrameWatchdogEnabled,
+  PREVIEW_HOLD_REASON,
+  PREVIEW_SYNTHETIC_REFUSED_REASON,
+  previewHoldHandback,
   nativePreviewProofWatchdogEnabled,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
@@ -35,6 +38,7 @@ function snapshot(overrides: Partial<FirstFrameSnapshot> = {}): FirstFrameSnapsh
     compositorSceneRevision: 42,
     compositorFrameSceneRevision: 42,
     metalTargetPresent: true,
+    previewHold: null,
     ...overrides
   }
 }
@@ -606,6 +610,73 @@ describe('assessFirstFrame', () => {
 // ladder; exhaustion declares a truthful stall but KEEPS watching so a revival
 // (the reporter's "click brings it back") re-arms a fresh ladder instead of
 // leaving the placeholder forever.
+describe('a Preview hold (plan 212)', () => {
+  const held = snapshot({
+    elapsedMs: 20_000,
+    nativePresenting: true,
+    framesAdvancing: true,
+    presentationAdvancing: false,
+    compositorFrameSceneRevision: 41,
+    previewHold: 'performance-check'
+  })
+
+  it('is pending for the first-frame contract: no heal, no fallback, the ledger untouched', () => {
+    const ledger = emptyFirstFrameLedger()
+    const { assessment, ledger: next } = assessFirstFrame(held, ledger)
+    expect(assessment).toEqual({ kind: 'pending', reason: PREVIEW_HOLD_REASON })
+    expect(next).toBe(ledger)
+    expect(
+      assessFirstFrame(snapshot({ ...held, surfaceLive: false, metalTargetPresent: false }), ledger)
+        .assessment
+    ).toEqual({ kind: 'pending', reason: PREVIEW_HOLD_REASON })
+  })
+
+  it('is observed by the presenting watch without charging the stall ladder', () => {
+    let watch = emptyPresentingWatch()
+    for (let tick = 0; tick < 200; tick += 1) {
+      const next = assessPresenting(held, watch, 250)
+      expect(next.assessment).toEqual({ kind: 'observing', reason: PREVIEW_HOLD_REASON })
+      watch = next.watch
+    }
+    expect(watch).toEqual(emptyPresentingWatch())
+    // The hold ends: a presenting frame is presenting at once.
+    const after = assessPresenting(snapshot(), watch, 250)
+    expect(after.assessment).toEqual({ kind: 'presenting' })
+  })
+
+  it("names the packaged backstop without the check's words", () => {
+    const refused = snapshot({ ...held, previewHold: 'synthetic-refused' })
+    expect(assessFirstFrame(refused, emptyFirstFrameLedger()).assessment).toEqual({
+      kind: 'pending',
+      reason: PREVIEW_SYNTHETIC_REFUSED_REASON
+    })
+    expect(assessPresenting(refused, emptyPresentingWatch(), 250).assessment).toEqual({
+      kind: 'observing',
+      reason: PREVIEW_SYNTHETIC_REFUSED_REASON
+    })
+  })
+
+  it('hands back with a fresh first-frame clock and heartbeat when the hold ends', () => {
+    expect(
+      previewHoldHandback({ previousHold: 'performance-check', hold: null, nowMs: 5_000 })
+    ).toEqual({ startedAtMs: 5_000, heartbeatAtMs: 5_000 })
+    expect(
+      previewHoldHandback({ previousHold: 'synthetic-refused', hold: null, nowMs: 6_000 })
+    ).toEqual({ startedAtMs: 6_000, heartbeatAtMs: 6_000 })
+    expect(previewHoldHandback({ previousHold: null, hold: null, nowMs: 7_000 })).toBeNull()
+    expect(
+      previewHoldHandback({ previousHold: null, hold: 'performance-check', nowMs: 7_000 })
+    ).toBeNull()
+    expect(
+      previewHoldHandback({
+        previousHold: 'performance-check',
+        hold: 'performance-check',
+        nowMs: 8_000
+      })
+    ).toBeNull()
+  })
+})
+
 describe('assessPresenting', () => {
   const TICK_MS = 750
 

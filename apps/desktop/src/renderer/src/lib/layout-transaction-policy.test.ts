@@ -7,6 +7,7 @@ import {
   layoutTransactionFailureReconciliation,
   layoutTransactionFailureDisposition,
   layoutTransactionProofDisposition,
+  layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   liveBackgroundCommitDecision,
   NativePreviewPresentationProofError,
@@ -303,5 +304,48 @@ describe('layout transaction policy', () => {
         stopRequestPending: false
       })
     ).toBe(false)
+  })
+})
+
+describe('layoutTransactionSourcesFromScene (plan 212)', () => {
+  const current = {
+    cameraId: 'cam-1',
+    cameraName: 'FaceTime',
+    screenId: 'screen-1',
+    screenName: 'Display 1',
+    testPattern: false
+  }
+  const scene = [
+    { kind: 'camera', deviceId: 'cam-1', name: 'FaceTime' },
+    { kind: 'test-pattern', name: 'Test pattern' }
+  ]
+
+  it('adopts a test-pattern source in the dev app', () => {
+    expect(layoutTransactionSourcesFromScene(current, scene, { packaged: false })).toEqual({
+      cameraId: 'cam-1',
+      cameraName: 'FaceTime',
+      screenId: undefined,
+      screenName: 'Display 1',
+      windowId: undefined,
+      testPattern: true
+    })
+  })
+
+  it('ignores a test-pattern source in the packaged app and keeps the screen', () => {
+    expect(layoutTransactionSourcesFromScene(current, scene, { packaged: true })).toEqual(current)
+    expect(
+      layoutTransactionSourcesFromScene(
+        current,
+        [{ kind: 'screen', deviceId: 'screen-2', name: 'Display 2' }],
+        { packaged: true }
+      )
+    ).toEqual({
+      ...current,
+      screenId: 'screen-2',
+      screenName: 'Display 2',
+      windowId: undefined,
+      windowName: undefined,
+      testPattern: false
+    })
   })
 })

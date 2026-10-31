@@ -274,6 +274,7 @@
     "smoke:oauth": "node scripts/smoke-oauth-app.mjs",
     "smoke:screens": "node scripts/smoke-screens-app.mjs",
     "smoke:preview-truth": "env -u ELECTRON_RUN_AS_NODE node scripts/smoke-preview-truth-app.mjs",
+    "smoke:preview-check-invisible": "node scripts/with-build-slot.mjs cargo build -p videorc-backend && node scripts/smoke-preview-check-invisible-app.mjs",
     "smoke:banners": "node scripts/smoke-banners-app.mjs",
     "smoke:live-background": "node scripts/smoke-live-background-app.mjs",
     "smoke:live-background-off-ab": "node scripts/smoke-live-background-off-ab.mjs",

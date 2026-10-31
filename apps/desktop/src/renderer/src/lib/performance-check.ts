@@ -1,4 +1,5 @@
 import type {
+  PerformanceCheckProgress,
   PerformanceCheckResult,
   PerformanceCheckRunParams,
   PerformanceCheckState,
@@ -63,7 +64,7 @@ export function performanceCheckCeiling(
 /**
  * Linux v1 `belowFloor` + every measured rung `did-not-start` is a failed
  * ladder, not a machine class (ogre / Omarchy 2026-09-28). Do not apply it
- * or show "too heavy" from it. Packaged auto-run still fires once.
+ * or show "too heavy" from it; `shouldRunPerformanceCheck` asks for a new one.
  */
 export function isUntrustedPerformanceCheckResult(
   result: PerformanceCheckResult | undefined
@@ -138,20 +139,36 @@ export function shouldRunPerformanceCheck(state: PerformanceCheckState | undefin
 }
 
 /**
- * Whether the packaged launch may measure now: nothing measured (or stale),
- * capture ready, and no take running. The default Clips ring is a
- * replay-only session, not a take: it steps aside for the check.
+ * Plan 212 D1: the check runs once per machine, never at launch and never
+ * after an update. First-run setup starts it as it opens, behind the setup
+ * card, so the Studio's Preview never shows the measurement; otherwise only
+ * Recording → Output's "Check this computer" does. A replay of setup (from
+ * Settings) is not a first run. A take that is running keeps its studio: the
+ * default Clips ring is replay-only and not a take, so it does not count.
  */
-export function performanceCheckMayAutoRun(
+export function firstRunSetupStartsPerformanceCheck(
+  mode: { kind: string },
   state: PerformanceCheckState | undefined,
-  recording: { state: string; replayOnly?: boolean },
-  captureReady: boolean
+  sessionActive: boolean
 ): boolean {
-  return (
-    captureReady &&
-    (recording.state === 'idle' || recording.replayOnly === true) &&
-    shouldRunPerformanceCheck(state)
-  )
+  return mode.kind === 'first-run' && !sessionActive && shouldRunPerformanceCheck(state)
+}
+
+/**
+ * Plan 212 S5: the words under the Preview while a check runs. The backend
+ * holds the Preview's last picture for the whole check, so this says why it
+ * stopped moving: "Checking this computer · 2 of 3", then nothing.
+ */
+export function previewHoldLabel(
+  state: PerformanceCheckState | undefined,
+  progress: PerformanceCheckProgress | null
+): string | null {
+  if (!state?.running) {
+    return null
+  }
+  return progress && progress.rungCount > 0
+    ? `Checking this computer · ${progress.rungIndex + 1} of ${progress.rungCount}`
+    : 'Checking this computer'
 }
 
 /** "1080p · 30 fps": the one video spelling (plan 174 S1.4). */

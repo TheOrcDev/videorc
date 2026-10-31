@@ -1,5 +1,25 @@
 # Implementation Plans
 
+- 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
+  Preview never shows test noise. Owner report: on the first launch after
+  0.17.2 the Preview showed coloured noise for about 18 s before the
+  camera. Cause: the performance check re-runs after every update, 8 s
+  after launch. Each rung borrows the Preview's compositor, replaces the
+  user's scene with a test pattern, and turns on a process-wide noise
+  switch. Nothing gives the scene back except a Clips re-arm. Its smoke
+  never looked at the Preview, and this run's verdict came from an
+  overloaded Mac (1080p30 on a 4K30 machine).
+  - Phase 1: a gate that reads the Preview (red first). The benchmark
+    draws only into its encoder, the user's scene stays, the noise
+    belongs to the benchmark, the Preview holds the program across the
+    ladder, main's watchdog leaves a hold alone, and packaged builds
+    never present a test-pattern frame. No launch or post-update check
+    (first-run setup or the Output button only), and no verdict from a
+    busy Mac.
+  - Phase 2 (optional, D2): the Preview stays live during a check.
+    **Phase 1 BUILT** 2026-10-31 (D1 to D3 as recommended; Phase 2 not
+    built). Owed: by-eye in both themes, packaged acceptance, Windows
+    tester, and the owner's "Check this computer" on a quiet Mac.
 - 2026-10-29: [Plan 212](212-linux-beta-readiness.md), Linux Beta on Ubuntu
   24.04 GNOME/Wayland and Omarchy/Hyprland, x64 AppImage. **IN PROGRESS**:
   trustworthy gates, exact-artifact validation, channel identity and complete

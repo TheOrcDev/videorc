@@ -16222,6 +16222,10 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => []
     })
+    // A packaged launch: before plan 212 D1 only packaged builds measured on
+    // their own, 8 s after launch.
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), isPackaged: true })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
     if (chosen) {
@@ -16250,7 +16254,11 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.performanceCheck?.result !== undefined)
     await waitForObservation(() => latest()?.core.captureConfig.video.height === expectedHeight)
-    // Dev/test builds are not packaged: the provider never starts a check itself.
+    // Plan 212 D1: the provider never starts a check itself, packaged or not.
+    // Only first-run setup and Recording → Output do.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
     expect(backend.commands.some((command) => command.method === 'performance.check.run')).toBe(
       false
     )
