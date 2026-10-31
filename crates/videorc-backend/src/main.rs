@@ -21299,7 +21299,7 @@ mod tests {
     async fn recording_status_rpc_hides_benchmark_rungs_and_finalization_on_reload() {
         let mut state = test_state();
         state.performance_check =
-            Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
+            std::sync::Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
         let finalizing = state.ffmpeg_work.begin_finalizing();
         let query = r#"{"id":"reloaded-renderer","method":"recording.status","params":{}}"#;
         for stopping in [false, true] {
@@ -21338,7 +21338,7 @@ mod tests {
             serde_json::to_value(idle_status()).unwrap()
         );
 
-        state.performance_check = Arc::default();
+        state.performance_check = std::sync::Arc::default();
         assert!(matches!(
             current_recording_status(&state).await.state,
             RecordingState::Stopping
@@ -21354,7 +21354,7 @@ mod tests {
     async fn recording_status_keeps_real_sessions_authoritative_during_benchmark_takeover() {
         let mut state = test_state();
         state.performance_check =
-            Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
+            std::sync::Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
         for (mode, replay_only) in [("record", false), ("stream", false), ("record", true)] {
             for stopping in [false, true] {
                 let mut active = recording::test_active_recording_stub("user-session");
