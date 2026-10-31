@@ -21708,6 +21708,7 @@ mod tests {
         let status = compositor::start_synthetic_compositor(
             state.clone(),
             compositor::CompositorStartParams {
+                benchmark: false,
                 target_fps: 60,
                 width: 64,
                 height: 36,
@@ -21720,6 +21721,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;

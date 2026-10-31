@@ -98,6 +98,7 @@ import {
   evaluateStaticScreenEpoch,
   parseRecordingEpochLine,
   mixSourcesIncludeSystemAudio,
+  startedSessionStatus,
   parseSystemAudioMixCutover,
   reportDbfs,
   toneWavArgs,
@@ -603,12 +604,12 @@ async function recordRendererSession(ctx, { name, systemAudioAtStart, timeline }
       `static screen ready: content age ${ready.previewScreenFrameAgeMs}ms, callback age ${ready.previewScreenCaptureCallbackAgeMs}ms`
     )
   }
+  // Only the session this Record starts: the Clips ring re-arms after the
+  // last Stop and can publish its buffer-only `recording` status (marked
+  // `replayOnly`) right here, before the Record hands over from it.
   const recordingPromise = recorder.waitFor(
     `${name} recording.status(recording)`,
-    (record) =>
-      record.event === 'recording.status' &&
-      (record.payload?.state === 'recording' || record.payload?.state === 'streaming') &&
-      typeof record.payload?.sessionId === 'string'
+    (record) => record.event === 'recording.status' && startedSessionStatus(record.payload)
   )
   const clickAt = performance.now()
   const startTicket = await remoteRequest(

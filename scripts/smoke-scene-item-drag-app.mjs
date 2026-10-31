@@ -482,6 +482,12 @@ async function ensureLiveSurface() {
     await command('preview-window-set-mode', { mode: 'docked' })
     await command('preview-window-open')
   }
+  // Plan 210 put Scenes and Layouts above the canvas, so on a laptop-height
+  // window it starts below the fold. The docked surface hides while its slot is
+  // scrolled away, and the stage never reads live until the canvas is in view.
+  await cdp.eval(
+    `document.querySelector('[data-videorc-stage-phase]')?.scrollIntoView({block:'center',behavior:'instant'})`
+  )
   await waitUntil(`document.querySelector('[data-videorc-stage-live="true"]') !== null`)
   const deadline = performance.now() + 10000
   let readiness

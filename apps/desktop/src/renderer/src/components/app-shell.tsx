@@ -579,8 +579,10 @@ function AppShellContent(): ReactElement {
               <Toolbar title={workspaceTabLabel(active)} />
               {/* A page that owns its scroll says so on its root (pinned tab
                   strips, Library's pinned header): PaneBody stops scrolling
-                  for it. Every other page scrolls as one. */}
-              <PaneBody>
+                  for it. Every other page scrolls as one. Keyed, so every page
+                  opens at its top: a Scene page scrolled to its canvas left
+                  Studio clipped, and the docked preview hid as scrolled away. */}
+              <PaneBody key={active}>
                 {/* A page crash, or a page chunk that failed to load, stays
                   inside the page (plan 174 A-7); keyed, so the next page
                   starts clean. */}
