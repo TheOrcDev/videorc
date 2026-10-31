@@ -8706,8 +8706,10 @@ async fn read_active_screen_transition(state: &AppState) -> Result<Option<protoc
 }
 
 #[cfg(test)]
-async fn handle_text_message(state: &AppState, text: &str) -> ServerResponse {
-    handle_text_message_with_role(state, text, BackendRole::Admin).await
+fn handle_text_message(state: &AppState, text: &str) -> WebSocketCommandFuture {
+    // Match the production socket's boxed router future. Keeping the entire
+    // router inline in each test call can overflow the default test stack.
+    production_websocket_command_handler(BackendRole::Admin)(state.clone(), text.to_owned())
 }
 
 fn consume_resource_field(
