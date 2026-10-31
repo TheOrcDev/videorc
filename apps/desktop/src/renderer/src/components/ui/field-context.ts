@@ -1,28 +1,38 @@
-import * as React from 'react'
+'use client'
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useState
+} from 'react'
 
 /**
- * A Field names its control (plan 174 S0.5, J1-1). The FieldLabel and each
- * control keep their own id (an explicit one always wins) and register it with
- * the Field once they mount. The label then points `htmlFor` at the first
- * control a label can name (an input, textarea, select trigger, switch or
- * checkbox), and a control a label element cannot point at (a ToggleGroup, a
- * TabsList, a SegmentedControl, a Slider thumb) takes `aria-labelledby` from
- * the label instead, unless it names itself. Nothing points at an id that is not on the page, and
- * two controls in one Field never share an id.
+ * A Field names its control. The FieldLabel and each control keep their own
+ * id (an explicit one always wins) and register it with the Field once they
+ * mount. The label then points `htmlFor` at the first control a label can name
+ * (an input, a textarea, a select trigger, a switch or a checkbox), and a
+ * control a label element cannot point at (a ToggleGroup, a TabsList, a
+ * SegmentedControl, a Slider thumb) takes `aria-labelledby` from the label
+ * instead, unless it names itself. Nothing points at an id that is not on the
+ * page, and two controls in one Field never share an id.
  *
  * Its own module, not field.tsx: every input primitive reads it, and none of
  * them should pull the Field's styles into its chunk.
  */
 type Register = (id: string) => () => void
 
-type FieldIds = {
+interface FieldIds {
   /** The first registered control: FieldLabel's default `htmlFor`. */
   controlId?: string
   /** The FieldLabel: the default `aria-labelledby` of a group or a slider. */
   labelId?: string
   /**
    * Every FieldDescription in the Field, space-separated: the controls'
-   * default `aria-describedby` (plan 174 S1.6a, I-7).
+   * default `aria-describedby`.
    */
   describedBy?: string
   registerControl: Register
@@ -30,16 +40,16 @@ type FieldIds = {
   registerDescription: Register
 }
 
-const FieldIdsContext = React.createContext<FieldIds | null>(null)
+const FieldIdsContext = createContext<FieldIds | null>(null)
 
 function useRegistry(): [readonly string[], Register] {
-  const [ids, setIds] = React.useState<readonly string[]>([])
-  const register = React.useCallback<Register>((id) => {
+  const [ids, setIds] = useState<readonly string[]>([])
+  const register = useCallback<Register>((id) => {
     setIds((current) => [...current, id])
     return () =>
       setIds((current) => {
         const index = current.indexOf(id)
-        return index < 0 ? current : [...current.slice(0, index), ...current.slice(index + 1)]
+        return index === -1 ? current : [...current.slice(0, index), ...current.slice(index + 1)]
       })
   }, [])
   return [ids, register]
@@ -50,17 +60,17 @@ function useFieldIds(): FieldIds {
   const [controlIds, registerControl] = useRegistry()
   const [labelIds, registerLabel] = useRegistry()
   const [descriptionIds, registerDescription] = useRegistry()
-  const controlId = controlIds[0]
-  const labelId = labelIds[0]
+  const [controlId] = controlIds
+  const [labelId] = labelIds
   const describedBy = descriptionIds.length > 0 ? descriptionIds.join(' ') : undefined
-  return React.useMemo(
+  return useMemo(
     () => ({
       controlId,
-      labelId,
       describedBy,
+      labelId,
       registerControl,
-      registerLabel,
-      registerDescription
+      registerDescription,
+      registerLabel
     }),
     [controlId, labelId, describedBy, registerControl, registerLabel, registerDescription]
   )
@@ -71,37 +81,44 @@ function useRegisteredId(
   id: string | undefined,
   register: Register | undefined
 ): string | undefined {
-  const made = React.useId()
+  const made = useId()
   const resolved = id ?? (register ? made : undefined)
-  React.useLayoutEffect(() => {
-    if (register && resolved) return register(resolved)
-    return undefined
+  useLayoutEffect(() => {
+    if (register && resolved) {
+      return register(resolved)
+    }
   }, [register, resolved])
   return resolved
 }
 
 /** The id of a control a label can name, so its FieldLabel points at it. */
 function useFieldControlId(id: string | undefined): string | undefined {
-  return useRegisteredId(id, React.useContext(FieldIdsContext)?.registerControl)
+  return useRegisteredId(id, useContext(FieldIdsContext)?.registerControl)
 }
 
 /** A FieldLabel's id, and the control it names when it has no `htmlFor` of its own. */
-function useFieldLabelIds(id: string | undefined): { id?: string; htmlFor?: string } {
-  const field = React.useContext(FieldIdsContext)
-  return { id: useRegisteredId(id, field?.registerLabel), htmlFor: field?.controlId }
+function useFieldLabelIds(id: string | undefined): {
+  id?: string
+  htmlFor?: string
+} {
+  const field = useContext(FieldIdsContext)
+  return {
+    htmlFor: field?.controlId,
+    id: useRegisteredId(id, field?.registerLabel)
+  }
 }
 
 /** A FieldDescription's id, registered so the Field's controls are described by it. */
 function useFieldDescriptionId(id: string | undefined): string | undefined {
-  return useRegisteredId(id, React.useContext(FieldIdsContext)?.registerDescription)
+  return useRegisteredId(id, useContext(FieldIdsContext)?.registerDescription)
 }
 
 /**
  * `aria-describedby` for a control: its own when it has one, else its Field's
- * descriptions (plan 174 S1.6a). Outside a Field, its own or nothing.
+ * descriptions. Outside a Field, its own or nothing.
  */
 function useFieldDescribedBy(describedBy: string | undefined): string | undefined {
-  const field = React.useContext(FieldIdsContext)
+  const field = useContext(FieldIdsContext)
   return describedBy || field?.describedBy
 }
 
@@ -113,10 +130,11 @@ function useFieldLabelledBy(
   labelledBy: string | undefined,
   label: string | undefined
 ): string | undefined {
-  const field = React.useContext(FieldIdsContext)
+  const field = useContext(FieldIdsContext)
   return labelledBy || (label ? undefined : field?.labelId)
 }
 
+export type { FieldIds }
 export {
   FieldIdsContext,
   useFieldControlId,

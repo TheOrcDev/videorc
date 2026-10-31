@@ -297,14 +297,10 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
     ).toEqual([])
   })
 
-  it('paints the chrome ground from one component: nothing else imports its stills (plan 208)', () => {
-    // The only image under the UI is ChromeGround's (the design skill's new
-    // rule 2). A second import would be a second ground, or a wallpaper.
-    const owner = 'src/components/chrome-ground.tsx'
-    expect(offenders(/chrome-ground-(?:dark|light)\.webp/, (path) => path !== owner)).toEqual([])
-    const source = files.find(({ path }) => path === owner)?.code ?? ''
-    expect(source).toMatch(/chrome-ground-dark\.webp\?no-inline/)
-    expect(source).toMatch(/chrome-ground-light\.webp\?no-inline/)
+  it('paints no chrome ground under the windows: nothing imports its stills (owner, 2026-10-29)', () => {
+    // The owner took the Liquid Chrome still out from under every window. Only
+    // the phone remote serves it now, from the backend.
+    expect(offenders(/chrome-ground-(?:dark|light)\.webp/)).toEqual([])
   })
 
   it('keeps hand-rolled gradients out of the screens: the shine is the primitives (plan 208 S4)', () => {
@@ -343,7 +339,6 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
         path
       ).not.toEqual([])
     }
-    expect(CHROME_MATERIAL.test('data-chrome-ground')).toBe(false)
     // The chrome rows (plan 0011) are materials too: screens take them from
     // components/ui/chrome-row.ts.
     expect(CHROME_MATERIAL.test("'chrome-row-member'")).toBe(true)
@@ -391,10 +386,13 @@ describe('renderer style guards (plan 050)', SOURCE_SCAN_TIMEOUT, () => {
   })
 
   it('never passes data-slot to a component: hooks on components are data-testid', () => {
-    // components/ui is shadcn's own: its primitives name their Radix parts.
+    // components/ui is shadcn's own: its primitives name their own parts.
+    // SectionLabel's `Element` is the tag name it renders ('span', 'h3'…), so
+    // its slot lands on the element, never on a component.
+    const slotOnIntrinsicTag = new Set(['src/components/section-label.tsx'])
     const offending = files
       .filter(({ path, code }) => path.endsWith('.tsx') && code.includes('data-slot'))
-      .filter(({ path }) => !path.startsWith('src/components/ui/'))
+      .filter(({ path }) => !path.startsWith('src/components/ui/') && !slotOnIntrinsicTag.has(path))
       .flatMap(({ path }) => passedSlots(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))
     expect(offending).toEqual([])
   })

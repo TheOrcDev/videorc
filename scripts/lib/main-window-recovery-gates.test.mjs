@@ -12,8 +12,8 @@ import {
 } from './main-window-recovery-gates.mjs'
 
 const mica = { kind: 'mica', reason: null, paintCheck: 'painted' }
-const ground = { kind: 'ground', reason: null, paintCheck: 'skipped' }
 const solid = (reason, paintCheck = 'skipped') => ({ kind: 'solid', reason, paintCheck })
+const solidDefault = solid('default')
 const recoveryLog = [
   'Renderer process gone (crashed, exit 1) for index.html.',
   'Reloading the main window: its renderer process is gone (crashed, exit 1) (capture state: idle).'
@@ -24,12 +24,20 @@ test('reads the Windows build', () => {
   assert.equal(windowsBuildFromRelease('nope'), undefined)
 })
 
-test('default launch passes on the chrome ground on every Windows build (plan 208)', () => {
-  assert.deepEqual(evaluateDefaultLaunch({ mounted: true, glass: ground }), [])
+test('default launch passes on the solid palette on every Windows build', () => {
+  assert.deepEqual(evaluateDefaultLaunch({ mounted: true, glass: solidDefault }), [])
 })
 
 test('default launch fails on an unmounted page, a missing verdict, or any other material', () => {
-  assert.equal(evaluateDefaultLaunch({ mounted: false, glass: ground }).length, 1)
+  assert.equal(evaluateDefaultLaunch({ mounted: false, glass: solidDefault }).length, 1)
+  // The chrome ground is gone (2026-10-29).
+  assert.equal(
+    evaluateDefaultLaunch({
+      mounted: true,
+      glass: { kind: 'ground', reason: null, paintCheck: 'skipped' }
+    }).length,
+    1
+  )
   assert.equal(evaluateDefaultLaunch({ mounted: true, glass: mica }).length, 1)
   assert.equal(evaluateDefaultLaunch({ mounted: true, glass: solid('platform') }).length, 1)
   assert.equal(evaluateDefaultLaunch({ mounted: true, glass: undefined }).length, 1)

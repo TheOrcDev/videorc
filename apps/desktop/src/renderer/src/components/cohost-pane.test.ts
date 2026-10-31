@@ -395,7 +395,7 @@ describe('CohostPane', () => {
     // The whole sentence is the line's tooltip, never a native title (S1.10).
     expect(markup).not.toContain('title="Buddy never posts')
     expect(markup).toMatch(
-      /<span(?=[^>]*data-slot="cohost-acts-on-ask")(?=[^>]*data-state="closed")/
+      /<span(?=[^>]*data-slot="cohost-acts-on-ask")(?=[^>]*data-base-ui-tooltip-trigger)/
     )
   })
 
@@ -415,7 +415,9 @@ describe('CohostPane', () => {
       ['Dismiss', 'Backspace']
     ]) {
       expect(markup).toMatch(
-        new RegExp(`<span[^>]*data-state="closed"[^>]*><button[^>]*>${label}<kbd[^>]*>${key}</kbd>`)
+        new RegExp(
+          `<span[^>]*data-base-ui-tooltip-trigger[^>]*><button[^>]*>${label}<kbd[^>]*>${key}</kbd>`
+        )
       )
     }
     expect(markup).not.toContain('title="Reply')

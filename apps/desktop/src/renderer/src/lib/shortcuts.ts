@@ -5,7 +5,7 @@
 // string hardcoded elsewhere is a bug. Plan 174 S1.2: bindings are Electron
 // accelerators, printed per platform by ShortcutKeys.
 
-import { parseAccelerator } from '../../../shared/accelerator-format'
+import { parseAccelerator } from '@/lib/accelerator'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import { RECORD_SHORTCUT_LABEL } from './go-live-copy'
 

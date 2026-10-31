@@ -138,9 +138,9 @@ describe('the stage toolbar chips carry the state word (plan 205 S3)', () => {
       'Select Highlight'
     )
     // The selected hidden banner's chip is the pressed one.
-    expect(chip(`[data-videorc-stage-banner-chip="${owner.id}"]`).getAttribute('data-state')).toBe(
-      'on'
-    )
+    expect(
+      chip(`[data-videorc-stage-banner-chip="${owner.id}"]`).hasAttribute('data-pressed')
+    ).toBe(true)
   })
 
   it('says Off for an item neither output shows, on the schematic too', async () => {

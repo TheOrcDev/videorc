@@ -7,7 +7,7 @@ import {
   stepValue,
   valuePercent,
   type SliderRange
-} from './power-slider'
+} from './power-slider-math'
 
 const linear: SliderRange = { min: 0, max: 100, step: 5 }
 const bipolar: SliderRange = { min: -100, max: 100, step: 1 }

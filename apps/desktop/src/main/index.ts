@@ -990,9 +990,9 @@ nativeTheme.on('updated', () => {
   repinDarkAlwaysWindows()
   restyleGlassWindows()
 })
-// The window material (window-glass.ts): the opaque chrome ground by default
-// (plan 208). VIDEORC_GLASS=clear is the plan 091 vibrancy for one release (a
-// material name picks its material), and VIDEORC_GLASS=0 the solid palette.
+// The window material (window-glass.ts): the opaque solid palette by default.
+// VIDEORC_GLASS=clear is the plan 091 vibrancy (a material name picks its
+// material), and VIDEORC_GLASS=0 asks for the solid palette by name.
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
@@ -2077,18 +2077,13 @@ function applyNativeTheme(theme: string): void {
   // AppKit rebuilds each material for the new appearance; the clear glass
   // strips it again (plan 091).
   restyleGlassWindows()
-  // An opaque window (the chrome ground, plan 208; or the solid palette)
-  // repaints its base with the theme, so the backing under the renderer's
-  // ground never shows the other theme's tone; the glass windows' material
-  // follows nativeTheme itself, and every window's page follows it through
+  // A solid window repaints its base with the theme, so its backing never
+  // shows the other theme's tone; the glass windows' material follows
+  // nativeTheme itself, and every window's page follows it through
   // prefers-color-scheme.
   for (const window of [mainWindow, commentsWindow, captionsWindow, notesWindow]) {
     const applied = appliedGlass(window)
-    if (
-      window &&
-      !window.isDestroyed() &&
-      (applied?.mode.kind === 'solid' || applied?.mode.kind === 'ground')
-    ) {
+    if (window && !window.isDestroyed() && applied?.mode.kind === 'solid') {
       window.setBackgroundColor(solidWindowBase(applied.role, theme !== 'light'))
     }
   }
@@ -12398,7 +12393,8 @@ async function runSmokePreviewMotionCommand(
         if (${JSON.stringify(openMoreMenu)}) {
           const trigger = document.querySelector('button[aria-label="More Stream Manager actions"]');
           if (visible(trigger) && !openMenu()) {
-            trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
+            // A plain click opens the menu (Base UI opens on mousedown or click).
+            trigger.click();
             if (await settle(() => openMenu()?.querySelector('[role^="menuitem"]'))) {
               moreMenuItems = Array.from(openMenu().querySelectorAll('[role^="menuitem"]')).map(
                 (item) => (item.textContent ?? '').trim()
@@ -13616,7 +13612,7 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
           await sleep(Number(params.settleMs ?? 600));
           return { enabled: true, alreadyEnabled: true };
         }
-        if (toggle.disabled) {
+        if (toggle.hasAttribute('data-disabled')) {
           throw new Error('Synthetic source toggle is disabled.');
         }
         toggle.click();
@@ -13752,11 +13748,11 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
         if (!button) {
           throw new Error('Could not find camera shape ' + shape + '.');
         }
-        if (button.getAttribute('data-state') !== 'on') {
+        if (!button.hasAttribute('data-checked')) {
           button.click();
         }
         while (Date.now() < deadline) {
-          if (button.getAttribute('data-state') === 'on') {
+          if (button.hasAttribute('data-checked')) {
             await sleep(Number(params.settleMs ?? 600));
             return {
               shape,

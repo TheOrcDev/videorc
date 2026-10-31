@@ -189,8 +189,10 @@ function rowButton(title: string): HTMLButtonElement {
   return row!.querySelector('button[data-slot="list-row"]') as HTMLButtonElement
 }
 
-function autoSwitch(): HTMLButtonElement {
-  return document.getElementById('clean-cut-auto-switch') as HTMLButtonElement
+/** The id is on Base UI's hidden input, which the label points at; the label names the switch. */
+function autoSwitch(): HTMLElement {
+  const label = document.querySelector('label[for="clean-cut-auto-switch"]')
+  return document.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label?.id}"]`)!
 }
 
 /** Kind of cut is a segmented control (plan 174 S1.7): a radio per kind. */
@@ -231,7 +233,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(document.querySelector('[data-testid="clean-cut-minutes"]')?.textContent).toBe(
       '1,066 min left this month'
     )
-    expect(autoSwitch().getAttribute('data-state')).toBe('unchecked')
+    expect(autoSwitch().hasAttribute('data-unchecked')).toBe(true)
     expect(
       document.querySelector('[data-slot="clean-cut-auto-status"]')?.getAttribute('data-status')
     ).toBe('off')
@@ -241,7 +243,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     await render()
     await act(async () => autoSwitch().click())
     expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
-    expect(autoSwitch().getAttribute('data-state')).toBe('checked')
+    expect(autoSwitch().hasAttribute('data-checked')).toBe(true)
     expect(document.querySelector('[data-slot="clean-cut-auto-status"]')?.textContent).toContain(
       'On, cuts every recording when you stop'
     )
@@ -300,7 +302,7 @@ describe('Clean cut card (plan 119 S14)', () => {
       strip!.compareDocumentPosition(document.querySelector('[data-slot="config-grid"]')!) &
         Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
-    expect(autoSwitch().disabled).toBe(true)
+    expect(autoSwitch().hasAttribute('data-disabled')).toBe(true)
     expect(button('Make a clean cut').disabled).toBe(true)
     await act(async () => button('Sign in').click())
     expect(signIn).toHaveBeenCalledTimes(1)
@@ -428,7 +430,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     )
     expect(lengths).toEqual(['10 min', '15 min', '20 min', '30 min'])
     expect(
-      document.querySelector('[data-slot="clean-cut-target"] [data-state="on"]')?.textContent
+      document.querySelector('[data-slot="clean-cut-target"] [data-checked]')?.textContent
     ).toBe('15 min')
     await act(async () => button('20 min').click())
     await act(async () => button('Make a condensed cut').click())
@@ -592,7 +594,7 @@ describe('Clean cut tab layout (plan 150 S7)', () => {
     expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       "Clean cut isn't set up on Videorc's side yet."
     )
-    expect(autoSwitch().disabled).toBe(true)
+    expect(autoSwitch().hasAttribute('data-disabled')).toBe(true)
     expect(button('Make a clean cut').disabled).toBe(true)
   })
 })

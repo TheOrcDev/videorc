@@ -1,7 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 
-import { AppErrorBoundary } from '@/components/error-boundary'
+import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { NotesWindow } from '@/components/notes-window'
 import { WindowFrame } from '@/components/window-frame'
 import { WindowProviders } from '@/components/window-providers'

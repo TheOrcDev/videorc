@@ -16941,7 +16941,8 @@ function installProviderTestEnvironment(api: VideorcApi): {
     nodeType: 9,
     activeElement: null,
     defaultView: fakeWindow,
-    documentElement: {},
+    // Every element has a dataset: lib/platform reads data-platform from it.
+    documentElement: { dataset: {} },
     body: {},
     hidden: false,
     visibilityState: 'visible',

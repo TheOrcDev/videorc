@@ -455,7 +455,7 @@ function TechnicalDetails({ children }: { children: ReactNode }): ReactElement {
     <Collapsible className="border-b border-border" data-testid="health-technical-details">
       <h2>
         <CollapsibleTrigger className="group flex w-full items-center gap-2 px-gutter py-3 text-left text-section font-semibold text-foreground hover:bg-accent">
-          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-panel-open:rotate-180" />
           Technical details
         </CollapsibleTrigger>
       </h2>
@@ -490,7 +490,7 @@ function MetricGroup({
     >
       <h3>
         <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 rounded-row px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-          <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+          <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-panel-open:rotate-180" />
           <span className="shrink-0">{title}</span>
           {attention ? (
             <>

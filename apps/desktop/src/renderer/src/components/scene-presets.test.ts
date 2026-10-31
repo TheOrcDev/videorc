@@ -85,10 +85,10 @@ function saved() {
   }
 }
 async function menu(action: string): Promise<void> {
-  const trigger = document.querySelector('button[aria-label="Actions for Presentation"]')!
-  await act(async () =>
-    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  )
+  const trigger = document.querySelector<HTMLButtonElement>(
+    'button[aria-label="Actions for Presentation"]'
+  )!
+  await act(async () => trigger.click())
   const item = [...document.querySelectorAll('[role="menuitem"]')].find((entry) =>
     entry.textContent?.includes(action)
   )!

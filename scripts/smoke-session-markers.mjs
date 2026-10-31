@@ -328,7 +328,7 @@ try {
       const until = async (read) => { const deadline = Date.now() + 8000; while (Date.now() < deadline) { const value = read(); if (value) return value; await sleep(50); } throw new Error('Marker viewer did not reach the expected state'); };
       await openTab('library');
       const row = await until(() => document.querySelector('[data-videorc-library-row="${sessionId}"]'));
-      row.querySelector('button[aria-label="Session actions"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      row.querySelector('button[aria-label="Session actions"]').click();
       const action = await until(() => [...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent.trim() === 'Markers'));
       action.click();
       const dialog = await until(() => document.querySelector('[data-testid="session-markers-dialog"]'));

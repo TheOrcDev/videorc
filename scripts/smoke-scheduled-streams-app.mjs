@@ -41,7 +41,7 @@ const openUpcoming = async () => {
   await waitFor(
     () =>
       evaluate(
-        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.dispatchEvent(new MouseEvent('mousedown',{button:0,bubbles:true})); return Boolean(tab)`
+        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(tab)`
       ),
     'Upcoming tab mounted'
   )
@@ -199,7 +199,7 @@ try {
       )
     )
     const scrolling = await evaluate(
-      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-radix-scroll-area-viewport]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail…');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
+      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-slot="scroll-area-viewport"]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail…');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
     )
     assert.ok(scrolling.viewportHeight >= 64, '200% form must retain a usable scroll viewport')
     assert.ok(scrolling.after > scrolling.initial, '200% form must actually scroll')

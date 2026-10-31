@@ -311,7 +311,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
       const persona = [...document.querySelectorAll('button')].find(
         (button) => button.textContent === "My Buddy's picture"
       )
-      expect(persona?.getAttribute('data-state')).toBe('on')
+      expect(persona?.hasAttribute('data-checked')).toBe(true)
       // No Generate source any more: the look panel makes the character.
       expect(document.body.textContent).not.toContain('Generate')
       expect(byTestId('buddy-pet-look-notes')?.textContent).toBe(

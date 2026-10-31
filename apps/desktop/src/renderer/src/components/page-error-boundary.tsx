@@ -1,5 +1,6 @@
 import { Suspense, lazy, type ReactElement, type ReactNode } from 'react'
 
+import { logRenderCrash } from '@/components/app-error-boundary'
 import { ErrorBoundary } from '@/components/error-boundary'
 
 const PageErrorPanel = lazy(async () => ({
@@ -22,6 +23,7 @@ export function PageErrorBoundary({ children }: { children: ReactNode }): ReactE
           <PageErrorPanel {...caught} onReset={reset} />
         </Suspense>
       )}
+      onError={logRenderCrash}
     >
       {children}
     </ErrorBoundary>

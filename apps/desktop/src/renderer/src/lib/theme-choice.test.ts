@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { nextToggledTheme } from './theme-toggle'
+import { nextToggledTheme } from './theme-choice'
 
 describe('nextToggledTheme (plan 174 I-30)', () => {
   it('flips the look away from the computer as an explicit choice', () => {

@@ -1,18 +1,18 @@
 ---
 name: videorc-design
-description: Videorc's UI design language — a desktop app on its own opaque Liquid Chrome ground, built exclusively from shadcn/ui components and Videorc's shared primitives: flush panes, toolbars, grouped lists, glass chips, polished chrome controls, and a Raycast-style ⌘K palette. Use whenever building, styling, reviewing, or planning ANY Videorc UI (new components, screens, dialogs, lists, toolbars, badges, confirmations, empty or locked states), when the user mentions "our design", "the design skill", "glass", "chrome", "Liquid Chrome", "native look", or asks how something should look.
+description: Videorc's UI design language — a desktop app on opaque solid windows with Liquid Chrome controls, built exclusively from shadcn/ui components and Videorc's shared primitives: flush panes, toolbars, grouped lists, glass chips, polished chrome controls, and a Raycast-style ⌘K palette. Use whenever building, styling, reviewing, or planning ANY Videorc UI (new components, screens, dialogs, lists, toolbars, badges, confirmations, empty or locked states), when the user mentions "our design", "the design skill", "glass", "chrome", "Liquid Chrome", "native look", or asks how something should look.
 ---
 
 # Videorc Design Language (v2: the window family)
 
 The single source of truth for how Videorc looks and feels. Every UI task
 follows this skill. Videorc is a desktop app, not a web page: every window
-sits on Videorc's own Liquid Chrome ground, panes are flush and split by
-hairlines, controls are desktop-sized, and colour is information. The
-reference is the Welcome screen's Liquid Chrome and the Videorc logo: black
-metal with soft silver streaks, polished chrome on the controls you touch,
-and one LED-red accent. Light mode is the same chrome turned the other way
-around: porcelain with graphite streaks and black-chrome controls.
+is an opaque, plain solid (chrome black in dark, porcelain in light), panes
+are flush and split by hairlines, controls are desktop-sized, and colour is
+information. The reference is the Welcome screen's Liquid Chrome and the
+Videorc logo: polished chrome on the controls you touch, and one LED-red
+accent. Light mode turns the chrome the other way around: black-chrome
+controls on porcelain.
 
 The words on these surfaces are not in this file. How to write them is
 [`docs/ui-copy.md`](../../../docs/ui-copy.md) (voice, casing, ellipsis,
@@ -22,8 +22,7 @@ the glossary in [`CONTEXT.md`](../../../CONTEXT.md).
 **Status: shipped in plan 050 (2026-09-23); Liquid Chrome since plan 208
 (2026-10-27).** `styles.css` implements the tokens below.
 `src/main/window-glass.ts` gives every window (main, Stream Manager,
-Captions, Notes, Preview) its material and title bar, and
-`components/chrome-ground.tsx` paints the ground under it. The Preview
+Captions, Notes, Preview) its material and title bar. The Preview
 frame's data-URL document and every window's opaque base mirror the solids
 through `src/main/window-palette.ts`, and a parity test fails when they
 drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
@@ -32,18 +31,20 @@ drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
 
 ## Hard rules
 
-1. **shadcn/ui only.** Every element is a shadcn/ui component or a composition
-   of them, installed and customized per the `shadcn` skill. No other
-   component libraries and no hand-rolled widgets when a primitive exists.
-   audiocn (the owner's shadcn audio registry, `@audiocn`) counts as shadcn:
-   its meters draw audio, fed by Videorc adapters, never by its
-   Web Audio hooks or blocks. Base UI enters only inside its files
-   (`docs/audiocn.md`).
-2. **Videorc's own ground, never the desktop and never fake blur.** Every
-   window is opaque and sits on the chrome ground, and the only image under
-   the UI is `ChromeGround`'s (a guard fails if anything else imports its
-   stills). The frost is baked into that still, so there is no CSS
-   `backdrop-filter` / `backdrop-blur` anywhere in the renderer: it wedged
+1. **shadcn/ui only, from the registries.** Every element is a shadcn/ui
+   component or a composition of them, on Base UI. Videorc's own components
+   come from its registry, `@videorc` ([Where components come
+   from](#where-components-come-from)); audio comes from audiocn (the owner's
+   shadcn audio registry, `@audiocn`), whose meters draw audio fed by Videorc
+   adapters, never by its Web Audio hooks or blocks (`docs/audiocn.md`). No
+   Radix (`radix-ui` and `@radix-ui/*` imports fail lint), no other component
+   libraries, and no hand-rolled widgets when a primitive exists.
+2. **A plain solid ground, never the desktop and never fake blur.** Every
+   window is opaque on the theme's solid, and there is no image under the
+   UI (owner, 2026-10-29: the Liquid Chrome still that plan 208 put behind
+   every window is gone, and a guard fails if anything imports it again).
+   There is no CSS `backdrop-filter` / `backdrop-blur` anywhere in the
+   renderer: it wedged
    the compositor in June, and on a vibrancy window it never reaches the
    screen (Chromium's own capture shows the blur, the display does not; plan
    072). A guard test fails on it. No wallpaper underlays, no desktop showing
@@ -65,6 +66,35 @@ drift. Fix tokens and primitives, never restyle a screen ad hoc. Plan 174
    shared primitive or helper ([Primitives](#primitives)). Use it. If it
    lacks something, extend it minimally; never hand-roll a competing one.
 
+## Where components come from
+
+videorc-ui (`TheOrcDev/videorc-ui`, served at https://ui.videorc.com) is the
+source of Videorc's components: `components/ui/*`, the primitives
+(`components/pane.tsx`, `list-row.tsx`, `status-bar.tsx`, `kebab-menu.tsx`,
+`device-picker.tsx` and the rest) and their hooks and libs. Each is a shadcn
+registry item on Base UI, with its docs and examples there.
+
+- **Synced, never edited here.** `apps/desktop/ui-registry.json` lists the
+  synced items. `pnpm ui:sync <item…>` installs them with the shadcn CLI,
+  formats them and prints the diff; `pnpm ui:check` (an AGENTS.md gate)
+  fails when a synced file differs from the registry. Its `keepLocal` lists the files an
+  item would write that Videorc keeps as its own: `styles.css` (the tokens
+  start here) and `icons.tsx` (it adds the brand slots).
+- **Changing a synced component:** change it in videorc-ui with its docs and
+  example, let it deploy, then `pnpm ui:sync <item>` here and run the gates.
+  For a tight loop, run videorc-ui's `pnpm dev` and
+  `pnpm ui:sync --local <item>`. A token or utility a component needs goes in
+  `styles.css` here and in videorc-ui's theme.
+- **Videorc's own compositions stay here,** built from synced parts: the
+  root boundary (`components/app-error-boundary.tsx`), the Retro LCD Studio's
+  kit (`components/lcd-panel.tsx`, `components/lcd-device-picker.tsx`), and
+  every screen.
+- **Base UI's API, not Radix's:** `render={<X />}` instead of `asChild`
+  (`nativeButton={false}` when X isn't a button); menu items take
+  `onClick`; ToggleGroup and Accordion values are arrays (`multiple`), a
+  one-thumb Slider's a number; selectors read `data-open`, `data-checked`,
+  `data-pressed`, `data-active` and `data-panel-open`, never `data-state`.
+
 ## Owner calls
 
 Binding. Follow them as written; a change that would undo one is a question
@@ -73,10 +103,12 @@ for the owner, not a design choice.
 - **Videorc is Liquid Chrome** (2026-10-27, plan 208). The owner asked for
   the Welcome screen's colours everywhere: metallic black with its shine,
   and the other way around in light mode.
-  - **An opaque chrome ground behind every window** (D1): a frosted still of
-    Liquid Chrome under the coats, the same on macOS, Windows and Linux. The
-    desktop never shows through: asked whether it should stay a little
-    transparent, the owner chose solid.
+  - **Every window is opaque** (D1), the same on macOS, Windows and Linux.
+    The desktop never shows through: asked whether it should stay a little
+    transparent, the owner chose solid. Plan 208 put a frosted still of
+    Liquid Chrome under the coats; the owner disliked it moving (2026-10-29)
+    and then had it removed entirely the same day. Windows are the plain
+    solid; never bring the still back.
   - **Shine on the controls and edges only** (D2): primary buttons, switch
     and slider beads, selected plates, chips and keys. Panels, menus,
     dialogs, toasts and text stay flat. No gradient text, no sheen on the
@@ -85,8 +117,7 @@ for the owner, not a design choice.
     around, white liquid with black reflections and black-chrome controls.
     No separate light look.
   - **Nothing moves outside the Welcome screen** (D5; the owner tried a
-    drifting ground on 2026-10-28 and took it back on 2026-10-29): the ground
-    is a still, so it costs nothing while you record or stream.
+    drifting ground on 2026-10-28 and took it back on 2026-10-29).
   - **Stream Manager's highlights and members are chrome** (2026-10-28,
     plan 0011). The owner asked for the highlights and every member's entry
     to look much stronger, in the Welcome screen's Liquid Chrome.
@@ -98,8 +129,7 @@ for the owner, not a design choice.
       as its 2px edge. Its Member chip is the `plate` Badge.
     - One background per row: on stream, then paid, then the Buddy
       pull-up, then member. A member's Super Chat still reads as paid.
-    - Static plates on the theme's solid, never on the bare ground: no
-      motion, no blur. Screens take the class from
+    - Static plates on the theme's solid: no motion, no blur. Screens take the class from
       `components/ui/chrome-row.ts`.
   - **Record and Stop are a red LED** (D8): the `record` Button, unlit at
     idle and lit while a recording or livestream runs. Go Live… is the
@@ -115,8 +145,7 @@ for the owner, not a design choice.
   Contrast. Setup sits in one centred card on the dialog tier, and Your
   look's scene picture plays the chosen live background inside the card,
   never inverted: it is the scene's own picture. The backdrop is opaque and
-  covers the chrome ground, which is not drawn while setup is open; it is
-  decoration and never carries text. Every other window rule stands.
+  covers the window; it is decoration and never carries text. Every other window rule stands.
 - **The toolbar holds only the page title** (2026-09-23). Record and Go
   Live… sit at the top of the Studio inspector, and a page's own actions sit
   in its body.
@@ -162,29 +191,17 @@ for the owner, not a design choice.
 
 Every window uses one material and one title-bar recipe (`window-glass.ts`):
 
-- **Material: the chrome ground** (plan 208, D1). Every window is opaque on
-  every platform: no vibrancy, no Mica, and a `backgroundColor` of the
-  theme's solid base, so the first paint is already the theme's tone.
+- **Material: the solid palette** (plan 208, D1; the chrome ground removed
+  2026-10-29). Every window is opaque on every platform: no vibrancy, no
+  Mica, no image, and a `backgroundColor` of the theme's solid base, so the
+  first paint is already the theme's tone.
   - Main hands each window its ground on its argv
     (`shared/window-ground.ts`), and the theme bootstrap writes
-    `data-ground="chrome|glass|solid"` on the root before the first paint.
-  - `ChromeGround` (mounted once per window by `WindowProviders`;
-    `aria-hidden`, no pointer events, `position: fixed`, the lowest layer)
-    paints the theme's still: Liquid Chrome Polished at 1280 × 720 under a
-    σ 24 blur, black with silver streaks in dark and its invert in light
-    (`assets/backgrounds/chrome-ground-{dark,light}.webp`, imported with
-    `?no-inline`). Nothing else draws it.
-  - It is sized to the display and centred on it (D11): a resize shows more
-    or less chrome and never rescales it.
-  - Both stills stay mounted and the `.dark` class picks one, so a theme
-    toggle never shows a frame of the other theme's ground.
-  - No CSS filter, transition or animation on it, and it is not drawn while
-    first-run setup is open.
-  - `VIDEORC_GLASS=0` paints the plain solid palette with no ground.
+    `data-ground="solid|glass"` on the root before the first paint.
+  - `VIDEORC_GLASS=0` asks for the solid palette by name.
     `VIDEORC_GLASS=clear` brings back plan 091's clear glass (macOS
-    vibrancy stripped by the native addon) and Windows Mica, without the
-    ground, as the A/B control and escape hatch for one release (D9). A
-    follow-up deletes it.
+    vibrancy stripped by the native addon) and Windows Mica as the A/B
+    control and escape hatch (D9). A follow-up deletes it.
 - **Title bar.** `titleBarStyle: 'hiddenInset'`. Traffic lights are centred
   in the header row, which is 40 px (28 px for Preview). A header row shares
   its line with the lights: on macOS it pads `pl-[88px]`
@@ -200,40 +217,34 @@ Every window uses one material and one title-bar recipe (`window-glass.ts`):
   the window's `h1` (14 px / 600), an optional quiet `meta` fact after it,
   and the window's few controls trailing. Stream Manager keeps its row to the
   title.
-- **One dark-always window.** The Preview frames video, and a pattern
-  around a picture competes with it, so it takes no ground: it paints the
+- **One dark-always window.** The Preview frames video, so it paints the
   solid dark base whatever the app theme (D7), and a light main window never
   lightens it. Under the clear glass, main pins its NSWindow appearance to
   `darkAqua` through the native addon and falls back to solid dark without
-  the pin. Stream Manager, Captions and Notes get the ground and follow the
-  app theme like main (#412). The docked preview's slot keeps its solid
+  the pin. Stream Manager, Captions and Notes follow the app theme like main
+  (#412). The docked preview's slot keeps its solid
   `--video-ground`.
 - **Covers.** One cover per region (plan 208, D10; the derivation is plan
-  091's): how much of the solid tone a region paints over the ground. The
-  sidebar covers 88% (dark) · 92% (light), the work area 82% · 86%, the
-  same on every platform: the sidebar is the heavier, more covered region,
-  and the work area shows more chrome.
+  091's): how much of the solid tone a region paints over what sits behind.
+  The sidebar covers 88% (dark) · 92% (light), the work area 82% · 86%. On
+  the solid window every region composites to the solid; the covers only
+  show under `VIDEORC_GLASS=clear`.
   - The coats are derived from the covers (D4), never set by hand: `body`
-    paints the lighter cover (`--glass-window`, and `ChromeGround` repeats
-    it over the still), the sidebar `<aside>` adds its delta
+    paints the lighter cover (`--glass-window`), the sidebar `<aside>` adds its delta
     (`bg-glass-sidebar`), content panes add theirs (`bg-glass-content`, 0),
     so each region composites to exactly its cover.
   - Single-pane windows wrap their body in `WindowFrame`.
   - Never stack a third coat.
-  - Contrast is a test, not a by-eye call: `chrome-ground-contrast.test.ts`
-    composites each coat over the ground's extreme pixels
-    (`chrome-ground.stats.json`) the way Chromium blends, and fails if
-    `--foreground` drops under 7:1, `--muted-foreground` under 4.5:1 or
-    `--subtle` under 3:1. The floors it derives are about 0.78 (dark) and
-    0.83 (light). The owner's by-eye may lower a cover toward its floor to
-    show more chrome, never past it; past that, the lever is the still's
-    tone.
+  - Contrast is a test, not a by-eye call: `window-contrast.test.ts` fails
+    if `--foreground` drops under 7:1, `--muted-foreground` under 4.5:1 or
+    `--subtle` under 3:1 over the solid (and over the chrome rows' plates),
+    also at Increase Contrast.
 - **Providers.** Each window is its own React root and wraps its tree in
-  `<WindowProviders window="main|stream-manager|captions|notes">`: the
-  `ChromeGround` under everything, one TooltipProvider (600 ms, the desktop
-  delay) and one Toaster, inset above that window's status bar.
-- **Accessibility** (D12). `prefers-reduced-transparency` hides the ground,
-  swaps the window coat for `--glass-solid` and drops the region coats; a
+  `<WindowProviders window="main|stream-manager|captions|notes">`: one
+  TooltipProvider (600 ms, the desktop delay) and one Toaster, inset above
+  that window's status bar.
+- **Accessibility** (D12). `prefers-reduced-transparency` swaps the window
+  coat for `--glass-solid` and drops the region coats; a
   media query, so a runtime change applies at once. `prefers-contrast: more`
   puts both covers at 95% and strengthens hairlines, chip rims, the chrome
   controls' edge, and the secondary and tertiary text tiers. Under both, the
@@ -243,9 +254,8 @@ Every window uses one material and one title-bar recipe (`window-glass.ts`):
   desktops (plan 208 S3):
   - the window is opaque: no vibrancy effect view, and changing the desktop
     behind it changes no pixel of its text-free samples;
-  - `ChromeGround` is mounted and showing the theme's still;
-  - the captured text tiers meet the contrast test's ratios over the
-    worst ground pixel;
+  - the window is the solid palette and no ground image is mounted;
+  - the captured text tiers meet the contrast test's ratios;
   - the Preview stays solid dark;
   - each float tier reads its own token;
   - under `VIDEORC_GLASS=clear` only, plan 091's checks instead:
@@ -268,8 +278,8 @@ Coats and surfaces
   0.92 / 0.86, the same on every platform (0.95 / 0.95 under Increase
   Contrast). The coats `--glass-window`, `--glass-sidebar` and
   `--glass-content` are derived from them in `styles.css`.
-- The ground is `ChromeGround`'s still, never a token and never used
-  anywhere else ([The window family](#the-window-family)).
+- There is no ground image: the window is the solid
+  ([The window family](#the-window-family)).
 - Floating glass, three flat opaque tiers of the solid (plan 091, D6,
   Ghostex's web-modal recipe; kept flat by plan 208, D2), each a 1 px rim
   (white 10% · black 10%) and a drop shadow, no sheen and no highlight:
@@ -303,8 +313,7 @@ Text (three tiers, nothing else)
   reason, a limit, a status, a value or a rule a streamer needs is secondary
   or primary. `--subtle` passes AA on the solid (0.62 `#868686` dark · 0.54
   `#6F6F6F` light) and rises under `prefers-contrast: more` (0.68 · 0.45).
-  Over the ground's worst pixel it holds only 3:1 (the contrast test): it is
-  still the faintest tier.
+  It is still the faintest tier.
 - Sizes are tokens: `text-label` 11 px / 600 (section labels,
   `SectionLabel`), `text-section` 13 px / 600 (section headers), `text-meta`
   12 px (descriptions and metadata). **No text below 11 px** (a guard fails
@@ -429,7 +438,7 @@ Everything except ⌘K uses the desktop scale.
     `rounded-[Npx]` in chrome (a guard checks).
   - Window corners belong to the OS.
 - **Controls.** The default height is 28 px for Button, Toggle, Select
-  trigger, and Input. Retune it once in `components/ui`, never per screen: no
+  trigger, and Input. Retune it once in the registry, never per screen: no
   `h-*` or `size-*` on a control at its call site (a guard checks).
   - **One compact size** (plan 174 S4.1, J1-11): `xs`, 24 px. Button `xs`
     and `icon-xs`, Toggle and ToggleGroup `xs`, SelectTrigger `xs`
@@ -447,8 +456,8 @@ Everything except ⌘K uses the desktop scale.
 - **One control per kind of choice** (plan 174 S1.7, D13). Each wears one
   look:
   - Choosing one of 2–4 exclusive values: `SegmentedControl`
-    (`ui/segmented-control.tsx`), the glass Tabs track with no Radix, a
-    radio group with arrow keys. Its Field label names it; disabled, it says
+    (`ui/segmented-control.tsx`), the glass Tabs track with no Tabs
+    primitive, a radio group with arrow keys. Its Field label names it; disabled, it says
     why (`disabledReason`).
   - Switching a view (a page or a pane): `Tabs`.
   - Filter chips (several on at once, or a filter row): `ToggleGroup`, only
@@ -639,9 +648,10 @@ made it chat first: one thin stats bar and fewer words.
   and Stickers) chat's paid fill `bg-warning/10` without its ring (the rows
   are flush, split by hairlines); on stream, `bg-accent` wins, and hover
   paints over either. A long fact truncates and every ⋯ stays in the pane.
-- **ScrollArea content is a block** (plan 177): `ui/scroll-area.tsx`
-  overrides Radix's `display: table` wrapper, which let one long unbreakable
-  row widen every row past the pane. Never reintroduce it per call site.
+- **ScrollArea content is a block** (plan 177): the viewport of
+  `ui/scroll-area.tsx` holds the rows itself, with no `display: table`
+  wrapper (one let a long unbreakable row widen every row past the pane).
+  Never reintroduce one per call site.
 - **The Buddy pane** has one header: Buddy's identity (the living preview at
   32 px, the name, the bubble while one is up), the Alpha tag, listening,
   the status and the **Buddy Live** switch. Under it, "{name} talks" is a
@@ -772,8 +782,8 @@ over the chrome): `border glass-float` for the popup tier,
 `Command` inside a Dialog or Popover stays transparent. Every toast is the
 same neutral popup glass: a type (success, warning, error, info) colours its
 16 px icon only, never the panel or its rim, and the text stays monochrome.
-Never `bg-popover`: a guard test fails on it, so a fresh shadcn add must be
-moved onto the utility.
+Never `bg-popover`: a guard test fails on it, so a component new to the
+registry is moved onto the utility there.
 
 - **Dialogs**: 12 px radius, `p-5`, the dialog tier with its own drop
   (deeper in light). `DialogContent` and `AlertDialogContent` take
@@ -816,14 +826,14 @@ moved onto the utility.
 - Editable fields get the native context menu (Cut, Copy, Paste, Select All,
   spelling), which main builds on `context-menu` (`main/context-menu.ts`).
   Notes has none: a popup menu is not capture-protected.
-- macOS overlay scrollbars: no custom scrollbar recipe. Radix `ScrollArea`
-  uses `type="scroll"`.
+- macOS overlay scrollbars: no custom scrollbar recipe. `ScrollArea`
+  uses `type="scroll"` (its default).
 - Rows highlight instantly. No `cursor-pointer`: desktop controls use the
   arrow.
 - Copying: `copyText(text, failure?)` or `useCopyText() → { copied, copy }`.
   A copy is quiet on success ("Copied" on the control) and loud on failure.
 - The guards (`renderer-style-guards.test.ts`) fail on: any CSS backdrop
-  blur or filter, a second import of the chrome ground's stills, a
+  blur or filter, any import of the removed chrome ground's stills, a
   hand-rolled gradient on a screen, a chrome material outside the
   primitives, `bg-popover`, a tinted toast, `cursor-pointer`, a colour
   literal outside its short content allowlist, a coloured status word, text
@@ -836,10 +846,10 @@ moved onto the utility.
 
 ## Windows
 
-- Windows gets the chrome ground like macOS and Linux (plan 208): an opaque
-  main window, Stream Manager, Captions and Notes on the solid base, with
-  `ChromeGround` under the same coats and covers. Every build looks the
-  same, and nothing depends on the wallpaper, Mica or the compositor.
+- Windows gets the solid palette like macOS and Linux: an opaque main
+  window, Stream Manager, Captions and Notes on the solid base, under the
+  same coats. Every build looks the same, and nothing depends on the
+  wallpaper, Mica or the compositor.
 - `VIDEORC_GLASS=clear` brings back plan 050's Mica for one release (D9):
   Windows 11 22H2+ (build ≥ 22621) only, with its paint check
   (`micaFoundBlank`, plan 082); older builds and software rendering stay
@@ -885,9 +895,9 @@ moved onto the utility.
 ## Motion
 
 Fast and subtle: 100–150 ms ease-out. Floating surfaces fade and scale from
-0.98. Rows highlight instantly. Nothing bounces, and chips never move. The
-chrome ground is a still: only the Welcome screen's backdrop moves (owner
-call). `prefers-reduced-motion` collapses motion.
+0.98. Rows highlight instantly. Nothing bounces, and chips never move. Only
+the Welcome screen's backdrop moves (owner call). `prefers-reduced-motion`
+collapses motion.
 
 ## Toast discipline
 
@@ -938,7 +948,8 @@ these are the props that matter. Paths are under
 Asking, locking and explaining
 
 - `AlertDialog` (`ui/alert-dialog.tsx`): shadcn's, on the dialog tier with no
-  close button; Radix focuses Cancel and Escape closes. Use it through
+  close button; it focuses Cancel and Escape closes, and its Action never
+  closes it (the owner does). Use it through
   `ConfirmDialog` unless the question is not a delete (End livestream has
   its own, `components/end-livestream-dialog.tsx`).
 - `ConfirmDialog` (`components/confirm-dialog.tsx`), the recipe in
@@ -949,13 +960,16 @@ Asking, locking and explaining
   `<DisabledReason reason id? label? focusable? tabIndex?>{control}</DisabledReason>`.
   A focusable wrapper with a Tooltip and `aria-describedby`, because a
   disabled control takes no hover. Pass `reason` only while the control is
-  disabled; `focusable={false}` only for Radix select or menu items.
-- `LockAlert` (`components/lock-alert.tsx`): `reason action?`, where
-  `action` is `{ kind: 'sign-in' }` or `{ kind: 'view-premium', url }`
-  (`unlockActionForGate`, `unlockActionForReason` in `lib/lock-view.ts`).
+  disabled; `focusable={false}` only for select or menu items.
+- `LockAlert` (`components/lock-alert.tsx`): `reason action?`. Pass the
+  action through `lockAlertAction(…)` (`lib/lock-view.ts`), which gives
+  sign-in Videorc's sign-in and View Premium the system browser, from
+  `unlockActionForGate` or `unlockActionForReason`.
   `SessionLockAlert locks?` says "Locked while you're recording or live.
   Changes apply the next time you record or go live."; `OfflineAlert` says
-  Videorc is reconnecting.
+  Videorc is reconnecting. The wording is `SESSION_LOCK_REASON`,
+  `sessionLockReason(locks)` and `OFFLINE_LOCK_REASON` in `lib/lock-reason.ts`
+  (strings only, so code that isn't UI imports them without a component).
 
 Rows, forms and choices
 
@@ -970,13 +984,16 @@ Rows, forms and choices
 - `DevicePicker` (`components/device-picker.tsx`):
   `kind label devices value onChange noneLabel? discoveryPending? searchable? groupByKind? trigger? description? statusInTrigger? disabled? labelHidden?`.
   `trigger="field"` is a labelled form control, `"inline"` a row's
-  right-aligned value.
+  right-aligned value. On a Retro LCD screen it is `LcdDevicePicker`
+  (`components/lcd-device-picker.tsx`, `rowLabel?`): the same words and list
+  on the screen.
 - `ListRow`, `GroupedList` and `ListRowButton` (`components/list-row.tsx`),
   `NavigableRow` (`components/navigable-row.tsx`), `SectionLabel`
   (`components/section-label.tsx`) and `PanelSection`
   (`components/panel-section.tsx`, `title description? action? headingLevel?`).
-- `MediaCard` (`components/media-card.tsx`): `selected? interactive? asChild?`
-  on a div, for an object with a picture.
+- `MediaCard` (`components/media-card.tsx`): `selected? interactive? render?`
+  on a div, for an object with a picture. `render={<button … />}` makes the
+  card a button.
 - `KebabMenu` (`components/kebab-menu.tsx`): `items label? busy? disabled? reveal? tabIndex?`,
   each item `id label icon? destructive? disabled? disabledReason? group? shortcut? onSelect`.
 - `BroadcastInfoFields` (`components/streaming/broadcast-info-fields.tsx`):
@@ -987,16 +1004,16 @@ Rows, forms and choices
 
 Windows, bars and pages
 
-- `WindowHeader` (`components/window-frame.tsx`): `title meta? className?`,
+- `WindowHeader` (`components/window-frame.tsx`): `title meta? platform? className?`,
   with the window's controls as children.
 - `PageTabs` (`components/page-tabs.tsx`):
   `tabs value onValueChange label triggerAttribute? testId?`, with the
   `TabsContent` panels as children. `PaneStrip` (`components/pane.tsx`) is
   the strip on its own; `PANE_OWNS_SCROLL` goes on a page that owns its
   scroll.
-- `StatusBarAction` (`components/status-bar.tsx`):
-  `icon? label text? hint? accelerator? pressed?`, plus button props, so it
-  can be a menu trigger. `label` is the name a screen reader says; `text`
+- `StatusBarAction` (`components/status-bar-action.tsx`):
+  `icon? label text? hint? accelerator? platform? pressed?`, plus button
+  props, so it can be a menu trigger's `render`. `label` is the name a screen reader says; `text`
   the visible word when there is room. `StatusBarHint`
   (`accelerator label pressed? onClick`) is a clickable shortcut hint.
 - `PinWindowButton` (`components/pin-window-button.tsx`):
@@ -1042,7 +1059,6 @@ Words, numbers and navigation
 
 | Need                         | Use                                                                         |
 | ---------------------------- | --------------------------------------------------------------------------- |
-| A window's ground            | `ChromeGround`, mounted by `WindowProviders`; nothing else                  |
 | Page chrome                  | `Pane` + `Toolbar` (title only) + `PaneBody`                                |
 | Page tabs or a pinned filter | `PageTabs` / `PaneStrip`                                                    |
 | Single-pane window header    | `WindowHeader` in a `WindowFrame`                                           |
@@ -1060,7 +1076,7 @@ Words, numbers and navigation
 | Views and page tabs          | `Tabs`                                                                      |
 | Filter chips (multi-select)  | `ToggleGroup`                                                               |
 | A boolean                    | `Switch`                                                                    |
-| A screen, camera, microphone | `DevicePicker` (`trigger="lcd"` on a Retro LCD screen)                      |
+| A screen, camera, microphone | `DevicePicker` (`LcdDevicePicker` on a Retro LCD screen)                    |
 | Buttons                      | `Button` ghost/outline/secondary; `default` chrome primary; 28 px default   |
 | Record and its stop button   | `Button` `variant="record"`, `data-lit` while running (never Delete)        |
 | Why a control is disabled    | `DisabledReason`, or `SegmentedControl`'s `disabledReason`                  |
@@ -1082,8 +1098,10 @@ pages, `components/audio/gain-faders.tsx`. Retro LCD skins them from outside
 with `LCD_FADER` in `components/lcd-panel.tsx`, inside the Audio screen
 (plan 201 D5).
 
-Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
-do not hand-roll it.
+Missing a primitive? Add it to videorc-ui (a stock shadcn component is
+ported there onto Base UI and Videorc's tokens), then `pnpm ui:sync <item>`
+here. Do not hand-roll it, and never `shadcn add` stock components into
+Videorc.
 
 ## Do / Don't
 
@@ -1096,8 +1114,8 @@ do not hand-roll it.
   before changing it.
 - DON'T put cards on cards, shadows inside a window, or `rounded-panel`
   boxes around page content.
-- DON'T put an image, a wallpaper or the desktop under the UI: the ground
-  is `ChromeGround`'s alone.
+- DON'T put an image, a wallpaper or the desktop under the UI: windows are
+  the plain solid (the chrome ground was removed on 2026-10-29).
 - DON'T put shine on a screen: no hand-rolled gradient and no chrome
   material outside the primitives, and no sheen on panes, menus, dialogs,
   toasts or text.

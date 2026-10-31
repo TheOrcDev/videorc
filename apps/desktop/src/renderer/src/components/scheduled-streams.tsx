@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { lastCheckedLabel } from '@/hooks/use-scheduled-streams'
 import { openLivestreamView } from '@/lib/livestream-tabs'
-import { SESSION_LOCK_REASON } from '@/lib/lock-view'
+import { SESSION_LOCK_REASON } from '@/lib/lock-reason'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Spinner } from '@/components/ui/spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -129,6 +129,14 @@ export function ScheduledStreams(): ReactElement {
       target.authMode === 'oauth' &&
       target.accountId === starting?.accountId
   )
+  const candidateItems = candidates.map((candidate) => ({
+    value: candidate.id,
+    label: `${candidate.snippet.title} · ${
+      candidate.candidateKind === 'ingest'
+        ? `${candidate.profile.resolution} / ${candidate.profile.frameRate}`
+        : (candidate.snippet.scheduledStartTime ?? '')
+    } · ${candidate.id}`
+  }))
   const checked = lastCheckedLabel(state.lastCheckedAt, Date.now())
   const body = (
     <div className="flex flex-col gap-6 p-gutter">
@@ -282,8 +290,11 @@ export function ScheduledStreams(): ReactElement {
           </DialogHeader>
           <Select
             disabled={candidates.length === 0}
+            items={candidateItems}
             value={candidateId}
-            onValueChange={setCandidateId}
+            onValueChange={(value) => {
+              if (value !== null) setCandidateId(value)
+            }}
           >
             <SelectTrigger
               aria-label={
@@ -298,13 +309,9 @@ export function ScheduledStreams(): ReactElement {
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {candidates.map((candidate) => (
-                  <SelectItem key={candidate.id} value={candidate.id}>
-                    {candidate.snippet.title} ·{' '}
-                    {candidate.candidateKind === 'ingest'
-                      ? `${candidate.profile.resolution} / ${candidate.profile.frameRate}`
-                      : candidate.snippet.scheduledStartTime}{' '}
-                    · {candidate.id}
+                {candidateItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
                   </SelectItem>
                 ))}
               </SelectGroup>
@@ -351,7 +358,13 @@ export function ScheduledStreams(): ReactElement {
             </DialogDescription>
           </DialogHeader>
           {startTargets.length ? (
-            <Select value={targetId} onValueChange={setTargetId}>
+            <Select
+              items={startTargets.map((target) => ({ value: target.id, label: target.label }))}
+              value={targetId}
+              onValueChange={(value) => {
+                if (value !== null) setTargetId(value)
+              }}
+            >
               <SelectTrigger aria-label="Livestream destination">
                 <SelectValue
                   placeholder={`Choose ${scheduledProviderLabel(starting?.provider ?? 'youtube')} destination`}
@@ -661,7 +674,7 @@ function ScheduledMetaLine({
   if (!lastSyncedAt) return line
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{line}</TooltipTrigger>
+      <TooltipTrigger render={line} />
       <TooltipContent align="start">
         Last checked {new Date(lastSyncedAt).toLocaleString()}
       </TooltipContent>

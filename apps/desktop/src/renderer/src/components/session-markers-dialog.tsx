@@ -254,20 +254,17 @@ export function SessionMarkersDialog({
   return (
     <Dialog
       open
-      onOpenChange={(open) => {
-        if (!open) onClose()
+      onOpenChange={(open, { reason }) => {
+        if (open) return
+        // Escape leaves a rename first, then the dialog.
+        if (reason === 'escape-key' && editing !== null) {
+          setEditing(null)
+          return
+        }
+        onClose()
       }}
     >
-      <DialogContent
-        data-testid="session-markers-dialog"
-        size="xl"
-        onEscapeKeyDown={(event) => {
-          // Escape leaves a rename first, then the dialog.
-          if (editing === null) return
-          event.preventDefault()
-          setEditing(null)
-        }}
-      >
+      <DialogContent data-testid="session-markers-dialog" size="xl">
         <DialogHeader>
           <DialogTitle>Markers · {title}</DialogTitle>
           <DialogDescription>
@@ -353,32 +350,36 @@ export function SessionMarkersDialog({
                     }
                   >
                     <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          aria-label={`Rename ${marker.label ?? 'marker'}`}
-                          className="relative"
-                          disabled={pending || !client}
-                          size="icon-xs"
-                          variant="ghost"
-                          onClick={() => startRename(marker)}
-                        >
-                          <EditIcon />
-                        </Button>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            aria-label={`Rename ${marker.label ?? 'marker'}`}
+                            className="relative"
+                            disabled={pending || !client}
+                            size="icon-xs"
+                            variant="ghost"
+                            onClick={() => startRename(marker)}
+                          />
+                        }
+                      >
+                        <EditIcon />
                       </TooltipTrigger>
                       <TooltipContent>Rename…</TooltipContent>
                     </Tooltip>
                     <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          aria-label={`Delete ${marker.label ?? 'marker'}`}
-                          className="relative"
-                          disabled={pending || !client}
-                          size="icon-xs"
-                          variant="ghost"
-                          onClick={() => remove(marker)}
-                        >
-                          <DeleteIcon />
-                        </Button>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            aria-label={`Delete ${marker.label ?? 'marker'}`}
+                            className="relative"
+                            disabled={pending || !client}
+                            size="icon-xs"
+                            variant="ghost"
+                            onClick={() => remove(marker)}
+                          />
+                        }
+                      >
+                        <DeleteIcon />
                       </TooltipTrigger>
                       <TooltipContent>Delete</TooltipContent>
                     </Tooltip>

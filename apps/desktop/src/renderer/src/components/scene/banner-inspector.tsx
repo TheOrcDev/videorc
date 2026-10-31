@@ -422,6 +422,16 @@ function BannerTimingFold({
 }): ReactElement {
   const hideAfter = banner.hideAfterSec ?? 0
   const repeat = banner.repeatEveryMin ?? 0
+  const hideAfterItems = bannerTimingChoices(BANNER_HIDE_AFTER_CHOICES, hideAfter).map(
+    (seconds) => ({
+      value: String(seconds),
+      label: seconds === 0 ? 'Off' : bannerSecondsLabel(seconds)
+    })
+  )
+  const repeatItems = bannerTimingChoices(BANNER_REPEAT_CHOICES, repeat).map((minutes) => ({
+    value: String(minutes),
+    label: minutes === 0 ? 'Off' : bannerMinutesLabel(minutes)
+  }))
   const summary = bannerTimingSummary(banner)
   return (
     <Collapsible className="group/timing flex flex-col" data-videorc-banner-timing-fold="">
@@ -441,7 +451,7 @@ function BannerTimingFold({
           <ChevronDownIcon
             aria-hidden
             className={cn(
-              'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-[state=open]/timing:rotate-180',
+              'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-open/timing:rotate-180',
               summary ? null : 'ml-auto'
             )}
           />
@@ -454,8 +464,10 @@ function BannerTimingFold({
           </FieldContent>
           <Select
             disabled={disabled}
+            items={hideAfterItems}
             value={String(hideAfter)}
             onValueChange={(next) => {
+              if (next === null) return
               const seconds = Number(next)
               if (Number.isFinite(seconds) && seconds !== hideAfter)
                 void onPatch({ hideAfterSec: seconds })
@@ -466,9 +478,9 @@ function BannerTimingFold({
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {bannerTimingChoices(BANNER_HIDE_AFTER_CHOICES, hideAfter).map((seconds) => (
-                  <SelectItem key={seconds} value={String(seconds)}>
-                    {seconds === 0 ? 'Off' : bannerSecondsLabel(seconds)}
+                {hideAfterItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
                   </SelectItem>
                 ))}
               </SelectGroup>
@@ -482,8 +494,10 @@ function BannerTimingFold({
           </FieldContent>
           <Select
             disabled={disabled}
+            items={repeatItems}
             value={String(repeat)}
             onValueChange={(next) => {
+              if (next === null) return
               const minutes = Number(next)
               if (Number.isFinite(minutes) && minutes !== repeat)
                 void onPatch({ repeatEveryMin: minutes })
@@ -494,9 +508,9 @@ function BannerTimingFold({
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {bannerTimingChoices(BANNER_REPEAT_CHOICES, repeat).map((minutes) => (
-                  <SelectItem key={minutes} value={String(minutes)}>
-                    {minutes === 0 ? 'Off' : bannerMinutesLabel(minutes)}
+                {repeatItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
                   </SelectItem>
                 ))}
               </SelectGroup>

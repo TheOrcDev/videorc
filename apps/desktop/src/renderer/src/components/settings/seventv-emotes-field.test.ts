@@ -30,7 +30,7 @@ describe('Settings → General → Show 7TV emotes in chat', () => {
   it('waits for the backend with the switch disabled', () => {
     const markup = render(null)
     expect(markup).toContain('Show 7TV emotes in chat')
-    expect(markup).toMatch(/<button[^>]*disabled=""/)
+    expect(markup).toMatch(/<span(?=[^>]*role="switch")[^>]*aria-disabled="true"/)
     expect(markup).not.toContain('data-slot="seventv-status"')
   })
 
@@ -68,7 +68,8 @@ describe('Settings → General → Stream Manager chat rows (plan 174 I-8)', () 
     expect(alert).toBeLessThan(markup.indexOf('Show 7TV emotes in chat'))
     expect(alert).toBeLessThan(markup.indexOf('GIFs in Twitch chat'))
     // Both controls are off while the reason stands.
-    expect(markup.match(/<button[^>]*disabled=""/g)).toHaveLength(2)
+    expect(markup).toMatch(/<span(?=[^>]*role="switch")[^>]*aria-disabled="true"/)
+    expect(markup).toMatch(/<button[^>]*disabled=""/)
   })
 
   it('shows no alert while the settings work', () => {
@@ -77,6 +78,7 @@ describe('Settings → General → Stream Manager chat rows (plan 174 I-8)', () 
       null
     )
     expect(markup).not.toContain('chat-emote-error')
+    expect(markup).not.toMatch(/<span(?=[^>]*role="switch")[^>]*aria-disabled="true"/)
     expect(markup).not.toMatch(/<button[^>]*disabled=""/)
   })
 })

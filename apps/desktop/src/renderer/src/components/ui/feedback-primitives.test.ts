@@ -143,17 +143,17 @@ describe('Progress (J1-21)', () => {
     expect(root).toContain('aria-valuenow="3"')
     expect(root).toContain('aria-valuemax="4"')
     expect(root).toContain('aria-label="Build progress"')
-    expect(root).toContain('rounded-full')
-    expect(openingTag(markup, 'progress-indicator')).toContain('translateX(-25%)')
+    expect(openingTag(markup, 'progress-track')).toContain('rounded-full')
+    expect(openingTag(markup, 'progress-indicator')).toContain('width:75%')
   })
 
   it('clamps the fill and defaults to percent', () => {
-    expect(openingTag(render(h(Progress, { value: 40 })), 'progress-indicator')).toContain(
-      'translateX(-60%)'
-    )
-    expect(openingTag(render(h(Progress, { value: 0, max: 0 })), 'progress-indicator')).toContain(
-      'translateX(-100%)'
-    )
+    const fill = (props: Parameters<typeof Progress>[0]): string =>
+      openingTag(render(h(Progress, props)), 'progress-indicator')
+    expect(fill({ value: 40 })).toContain('width:40%')
+    expect(fill({ value: 150 })).toContain('width:100%')
+    // A total not known yet (max 0) reads as 100.
+    expect(fill({ value: 0, max: 0 })).toContain('width:0%')
   })
 })
 

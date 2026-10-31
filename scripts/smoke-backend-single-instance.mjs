@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -13,11 +14,21 @@ const ledgerPath = join(appDataDir, 'Videorc', 'owned-processes', 'global.json')
 
 let first
 let second
+let frozenMainPid = null
 
 try {
   first = await launchIsolatedApp('a')
   const firstPid = onlyBackendPid()
   assert.equal(processExists(firstPid), true, 'first backend should be alive after first launch')
+
+  // Production never runs two apps on one app-data dir (the single-instance
+  // lock); here each has its own user data, so the first app's crash recovery
+  // restarted the backend the second launch reaped and raced it for the ledger.
+  // Freeze the first app's main for the takeover: its backend stays up to be
+  // reaped, and nothing restarts it.
+  frozenMainPid = first.connections['backend-ready']?.parentPid ?? null
+  assert.ok(processExists(frozenMainPid), 'first app main pid should be known and alive')
+  process.kill(frozenMainPid, 'SIGSTOP')
 
   let sawReapLog = false
   second = await launchIsolatedApp('b', (line) => {
@@ -54,6 +65,7 @@ try {
   if (second) {
     await second.stop()
   }
+  if (frozenMainPid && processExists(frozenMainPid)) process.kill(frozenMainPid, 'SIGCONT')
   if (first) {
     await first.stop()
   }
@@ -76,13 +88,34 @@ function launchIsolatedApp(name, onLine) {
 
 function onlyBackendPid() {
   const records = readLedger()
-  assert.equal(records.length, 1, `expected exactly one backend record, got ${records.length}`)
+  assert.equal(
+    records.length,
+    1,
+    `expected exactly one backend record, got ${records.length}: ${JSON.stringify(
+      records.map(({ pid, label }) => ({
+        pid,
+        label,
+        alive: processExists(pid),
+        parent: parentOf(pid)
+      }))
+    )}`
+  )
   return records[0].pid
 }
 
 function readLedger() {
   assert.equal(existsSync(ledgerPath), true, `expected global backend ledger at ${ledgerPath}`)
   return JSON.parse(readFileSync(ledgerPath, 'utf8'))
+}
+
+function parentOf(pid) {
+  try {
+    return Number(
+      execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).trim()
+    )
+  } catch {
+    return null
+  }
 }
 
 function processExists(pid) {
@@ -101,6 +134,18 @@ function processExists(pid) {
         .trim()
         .split(/\s+/)[0]
       if (state === 'Z' || state === 'X') {
+        return false
+      }
+    } catch {
+      return false
+    }
+  }
+  if (process.platform === 'darwin') {
+    // The same on macOS: a backend reaped while the frozen first app cannot
+    // wait on it stays a zombie until that app runs again.
+    try {
+      const state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' })
+      if (state.trim().startsWith('Z')) {
         return false
       }
     } catch {

@@ -1,6 +1,9 @@
 // Plan 205 S4 and S7: compare the Preview's actual frame with every local
 // output, including the two rows where the Preview composes its own picture
-// (Clips at idle, and a split record + stream).
+// (Clips at idle, and a split record + stream). Case 10 relaunches the app
+// cold with the Buddy already saved and Clips on: the ring then starts
+// before the Preview's run exists and runs a compositor of its own, which
+// must still show the program.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -9,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 import { launchDevApp } from './lib/app-launcher.mjs'
-import { writeBuddyPetFixturePack, classifyBuddyPetTag } from './lib/buddy-pet-fixture.mjs'
+import { classifyBuddyPetTag, writeBuddyPetFixturePack } from './lib/buddy-pet-fixture.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
@@ -60,7 +63,15 @@ const rpc = (method, params = {}) => request(ws, timeoutMs, method, params)
 const command = (name, params = {}) =>
   requestSmokeCommand(launch.connections['preview-motion-ready'], name, params, { timeoutMs })
 const near = (rgb, target) => rgb.every((v, i) => Math.abs(v - target[i]) < 65)
-const present = (rgb, i) => (i === 3 ? classifyBuddyPetTag(rgb) !== null : near(rgb, colours[i]))
+// The pet's tag is any gaze or reaction frame, but a close one: a drawn tag
+// samples within a few units of its colour, while the nearest-tag classifier
+// once took the test pattern's ramp under an absent pet (132,138,80) for the
+// look-43 tag at a gap of 50.
+const petTag = (rgb) => {
+  const frame = classifyBuddyPetTag(rgb)
+  return frame && Math.hypot(...rgb.map((v, i) => v - frame.tag[i])) < 25 ? frame : null
+}
+const present = (rgb, i) => (i === 3 ? petTag(rgb) !== null : near(rgb, colours[i]))
 function check(samples, expected, label) {
   evidence.push({ label, samples, expected })
   for (let i = 0; i < 4; i++)
@@ -234,7 +245,8 @@ async function session({ label, record, stream, video, preview, recording, onAir
     await artifact(receiver.path, onAir, `${label} local RTMP`)
   }
 }
-try {
+/** Launch the dev app on this smoke's profile (again, for a cold relaunch). */
+async function launchApp() {
   launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -254,6 +266,17 @@ try {
     }
   })
   ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+}
+/** The ring's start path since `logMark`: armed in place, or a run of its own. */
+function ringStartPath(logMark) {
+  const line = logs
+    .slice(logMark)
+    .find((entry) => /Armed the live preview compositor in place|no-live-run/.test(entry))
+  if (!line) return null
+  return /no-live-run/.test(line) ? 'own-run' : 'armed-in-place'
+}
+try {
+  await launchApp()
   // Seed the renderer's own capture configuration too: its Clips reconciler
   // owns buffer-only starts/stops and must agree with the backend scene.
   await command('eval-js', {
@@ -442,6 +465,50 @@ try {
       await sleep(10)
     } while (Date.now() < until)
     assert.fail(`Imported green banner absent within 300ms: ${JSON.stringify(sample)}`)
+  })
+  await runCase('10 Cold launch: Buddy saved, Clips on', async () => {
+    // The owner's report: Buddy on (stream only) and saved, the app opened
+    // cold, and the Preview without the pet until the first Record. At
+    // launch the renderer arms the ring before the Preview's run exists, so
+    // the buffer-only session runs a compositor of its own instead of
+    // arming the idle run in place. That run must show the program too: B
+    // (recording only), C (stream only) and the Buddy; A stays hidden.
+    const program = [false, true, true, true]
+    await layout()
+    await setReplay(true)
+    await oracle(program, 'Clips on before the relaunch')
+    await launch.stop()
+    ws = null
+    const logMark = logs.length
+    await launchApp()
+    const until = Date.now() + 30000
+    let ring
+    do {
+      ring = await rpc('replay.status')
+      if (ring.state === 'on' && ring.replayOnly) break
+      assert(Date.now() < until, `Clips did not come back on at launch: ${JSON.stringify(ring)}`)
+      await sleep(200)
+    } while (true)
+    await command('preview-window-open')
+    // Nothing touches the layout: the Preview shows the program from launch.
+    await oracle(program, 'cold launch, Clips on, untouched layout', 8000)
+    const path = ringStartPath(logMark)
+    evidence.push({ label: 'cold launch ring start path', path })
+    assert(path, 'the backend log must say how the ring started')
+    console.log(
+      `Cold launch: the ring ${path === 'own-run' ? 'ran a compositor of its own' : 'armed the Preview in place'}`
+    )
+    await expectProgramLeg('cold launch', logMark)
+    // Record only: the pet and C leave (the recording has neither); after
+    // Stop the ring re-arms and the program is back.
+    const cap = await command('authorize-smoke-resource', {
+      path: outputDirectory,
+      kind: 'output-directory'
+    })
+    await rpc('session.start', sessionParams(cap.capabilityId))
+    await oracle(RECORDING, 'cold launch, record only')
+    await rpc('session.stop')
+    await oracle(program, 'cold launch, after Stop', 15000)
   })
 } catch (error) {
   console.error(error.stack)

@@ -68,7 +68,7 @@ import type {
 import { streamingDestinationCap, streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { smoothScrollBehavior } from '@/hooks/use-reduced-motion'
-import { unlockActionForReason } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForReason } from '@/lib/lock-view'
 import { destinationSetup } from '@/lib/destination-readiness'
 import { destinationLabel } from '@/lib/platform-copy'
 import { otherDestinationsLine } from '@/lib/stream-target-notices'
@@ -246,7 +246,7 @@ function StreamingSetup(): ReactElement {
           <div className="flex flex-col gap-2 border-b border-border p-gutter">
             {livestreamingEntitlementReason && !isSessionActive ? (
               <LockAlert
-                action={unlockActionForReason(livestreamingEntitlementReason)}
+                action={lockAlertAction(unlockActionForReason(livestreamingEntitlementReason))}
                 reason={livestreamingEntitlementReason}
               />
             ) : null}
@@ -603,7 +603,7 @@ export function MetadataEditor({
           {visibleOverrides.length ? (
             <Accordion
               aria-label="Details for each destination"
-              type="multiple"
+              multiple
               value={accordionValue}
               onValueChange={setOpenPlatforms}
             >
@@ -689,6 +689,7 @@ function MetadataOverride({
   const twitch = override.platform === 'twitch'
   const youtube = override.platform === 'youtube'
   const x = override.platform === 'x'
+  const languageOptions = streamLanguageOptions(override.twitchLanguage)
 
   // The switch gates custom TEXT only. Platform settings below it (made for
   // kids, category, language, announce) always apply, on or off.
@@ -810,14 +811,17 @@ function MetadataOverride({
             <FieldLabel htmlFor="twitch-language">Language</FieldLabel>
             <Select
               disabled={disabled}
+              items={languageOptions}
               value={override.twitchLanguage?.trim().toLowerCase() ?? ''}
-              onValueChange={(twitchLanguage) => onPatch({ twitchLanguage })}
+              onValueChange={(twitchLanguage) => {
+                if (twitchLanguage !== null) onPatch({ twitchLanguage })
+              }}
             >
               <SelectTrigger className="w-full" id="twitch-language">
                 <SelectValue placeholder="Choose a language" />
               </SelectTrigger>
               <SelectContent>
-                {streamLanguageOptions(override.twitchLanguage).map((option) => (
+                {languageOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>

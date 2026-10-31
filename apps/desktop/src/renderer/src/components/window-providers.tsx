@@ -1,6 +1,5 @@
 import type { ReactElement, ReactNode } from 'react'
 
-import { ChromeGround } from '@/components/chrome-ground'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 
@@ -39,10 +38,8 @@ export function windowToasterOffset(window: VideorcWindow): { bottom: number; ri
 }
 
 /**
- * Every window entry wraps its tree in this: the chrome ground under
- * everything (plan 208; it mounts only while the root says
- * `data-ground="chrome"`), tooltips (600 ms, the desktop delay) and the
- * window's toast host. Toasts are never tinted (owner call, 2026-09-29): the
+ * Every window entry wraps its tree in this: tooltips (600 ms, the desktop
+ * delay) and the window's toast host. Toasts are never tinted (owner call, 2026-09-29): the
  * type colours the icon only, so there is no `richColors`.
  */
 export function WindowProviders({
@@ -54,7 +51,6 @@ export function WindowProviders({
 }): ReactElement {
   return (
     <TooltipProvider>
-      <ChromeGround />
       {children}
       <Toaster
         closeButton={WINDOW_TOAST_POLICY.closeButton}

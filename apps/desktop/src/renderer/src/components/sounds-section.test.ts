@@ -112,16 +112,23 @@ describe('Assets → Sounds (plan 189 S7)', () => {
     expect(row('airhorn').textContent).toContain('Airhorn')
     expect(row('airhorn').textContent).toContain('1.6 s')
     expect(row('gong').textContent).toContain('2.9 s')
-    expect(row('airhorn').querySelector('[aria-label="How Airhorn plays"]')?.textContent).toBe(
-      'Play once'
-    )
-    expect(row('gong').querySelector('[aria-label="How Gong plays"]')?.textContent).toBe(
-      'Play/stop'
-    )
+    expect(
+      row('airhorn').querySelector('[aria-label="How Airhorn plays"] [data-slot="select-value"]')
+        ?.textContent
+    ).toBe('Play once')
+    expect(
+      row('gong').querySelector('[aria-label="How Gong plays"] [data-slot="select-value"]')
+        ?.textContent
+    ).toBe('Play/stop')
     expect(row('airhorn').querySelector('[aria-label="Airhorn volume"]')).not.toBeNull()
     expect(row('airhorn').textContent).toContain('−3.0 dB')
-    expect(row('airhorn').querySelector('[aria-label="Airhorn key"]')?.textContent).toBe('1')
-    expect(row('gong').querySelector('[aria-label="Gong key"]')?.textContent).toBe('None')
+    expect(
+      row('airhorn').querySelector('[aria-label="Airhorn key"] [data-slot="select-value"]')
+        ?.textContent
+    ).toBe('1')
+    expect(
+      row('gong').querySelector('[aria-label="Gong key"] [data-slot="select-value"]')?.textContent
+    ).toBe('None')
     expect(row('airhorn').querySelector('[aria-label="Actions for Airhorn"]')).not.toBeNull()
   })
 

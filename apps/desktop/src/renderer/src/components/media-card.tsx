@@ -1,39 +1,51 @@
-import { Slot } from 'radix-ui'
-import type { ComponentProps, ReactElement } from 'react'
+'use client'
+
+import { mergeProps } from '@base-ui/react/merge-props'
+import { useRender } from '@base-ui/react/use-render'
+import type { ReactElement } from 'react'
 
 import { cn } from '@/lib/utils'
 
+type MediaCardProps = useRender.ComponentProps<'div'> & {
+  /** The one in use: a brighter rim on the chrome plate, never a color. */
+  selected?: boolean
+  /** Takes the hover block, for a card that is a button or a link. */
+  interactive?: boolean
+}
+
 /**
- * A card for an object with a picture (plan 174 S1.6b, J1-19): a scene
- * thumbnail, a takeover screen, a Buddy. Lists of like things stay rows
- * (`GroupedList`); only a picture earns a card. The skill's one recipe: the
- * row radius (8 px), a 4% fill, a 1 px hairline and no shadow. `selected`
- * is the one in use (a brighter rim on the chrome plate, plan 208 S4, never
- * a colour); `interactive` gives the hover block. `asChild` puts the look on
- * the child, so a card can be a button.
+ * A card for an object with a picture: a scene thumbnail, a background, a
+ * takeover screen. Lists of like things stay rows; only a picture earns a
+ * card. One recipe: the row radius (8 px), a 4% fill, a 1 px hairline and no
+ * shadow. `render` puts the look on another element, so a card can be a
+ * button.
  */
-export function MediaCard({
+function MediaCard({
   selected = false,
   interactive = false,
-  asChild = false,
   className,
+  render,
   ...props
-}: ComponentProps<'div'> & {
-  selected?: boolean
-  interactive?: boolean
-  asChild?: boolean
-}): ReactElement {
-  const card = {
-    className: cn(
-      'flex min-w-0 flex-col rounded-row border border-border bg-foreground/[0.04]',
-      interactive && 'transition-colors duration-100 hover:bg-accent',
-      selected && 'border-foreground/25 chrome-plate',
-      className
+}: MediaCardProps): ReactElement {
+  return useRender({
+    defaultTagName: 'div',
+    props: mergeProps<'div'>(
+      {
+        className: cn(
+          'rounded-row border-border bg-foreground/4 flex min-w-0 flex-col border',
+          interactive && 'hover:bg-accent transition-colors duration-100',
+          selected && 'chrome-plate border-foreground/25',
+          className
+        ),
+        // The card's own slot, on whichever element carries the look.
+        'data-selected': selected || undefined,
+        'data-slot': 'media-card'
+      } as useRender.ElementProps<'div'>,
+      props
     ),
-    'data-selected': selected || undefined,
-    // The card's own slot, on whichever element carries the look.
-    'data-slot': 'media-card',
-    ...props
-  }
-  return asChild ? <Slot.Root {...card} /> : <div {...card} />
+    render
+  })
 }
+
+export { MediaCard }
+export type { MediaCardProps }

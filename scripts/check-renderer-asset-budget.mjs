@@ -85,9 +85,31 @@ const htmlPath = resolve(
 // 2,053,284 raw / 415,618 gzip. Raise raw to 2,060,000 (~1.5%) and gzip to
 // 420,000 (~2.4%, two of the usual steps); keep re-splitting the answer for
 // net-new UI.
+// Recalibrated 2026-10-30 (videorc-ui plan 001, Phase 7, the leaf family):
+// main measured 2,055,020 raw / 416,191 gzip. Button and Badge now come from
+// the @videorc registry on Base UI, and Button is in the eager shell, so
+// Base UI's button, render and merge-props core joins it: 19,200 raw (the
+// renderer is not minified) and ~4.9 KB gzip, with no new UI. Radix stayed
+// eager beside it until the migration removed radix-ui (the next note).
+// Measured 2,076,549 raw / 421,102 gzip. Raise raw to 2,082,000 and gzip to
+// 425,000, keeping the headroom main had (~5 KB raw, ~3.9 KB gzip); keep
+// re-splitting the answer for net-new UI.
+// Recalibrated 2026-10-30 (videorc-ui plan 001, Phase 7, the last family;
+// owner-approved): every component now comes from the @videorc registry on
+// Base UI, and radix-ui is gone. Main (7820df4a) measured 2,052,742 raw /
+// 415,570 gzip; the migration measures 2,252,658 raw / 458,936 gzip
+// (+199,916 raw, +43,366 gzip) with the same eager UI. The eager dropdown
+// menu and tooltip are the two Radix had there, and Base UI's are heavier:
+// ~341 KB raw of Base UI, ~149 KB of it its floating-ui layer. Removing
+// radix-ui changed nothing eager (2,252,133 raw / 458,729 gzip before and
+// after): its last import had already gone. Button's solid, chromatic and
+// glitch variants add 617 raw / 230 gzip. The renderer is still
+// unminified. Raise raw to 2,310,000 (~2.5%) and gzip to 470,000 (~2.4%),
+// the usual challenge margin; the entry ceilings hold (946,770 raw /
+// 196,998 gzip). Keep re-splitting the answer for net-new UI.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_060_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 420_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_310_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 470_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

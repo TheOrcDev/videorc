@@ -1,7 +1,14 @@
 type FrameListener = (nowMs: number) => void
+type FramePhase = 'update' | 'paint'
 
-const listeners = new Set<FrameListener>()
+const listeners = {
+  paint: new Set<FrameListener>(),
+  update: new Set<FrameListener>()
+}
 let handle: number | null = null
+let ticking = false
+
+const hasListeners = () => listeners.update.size + listeners.paint.size > 0
 
 const reportError = (error: unknown) => {
   queueMicrotask(() => {
@@ -11,31 +18,38 @@ const reportError = (error: unknown) => {
 
 const tick = (nowMs: number) => {
   handle = null
-  for (const listener of listeners) {
-    try {
-      listener(nowMs)
-    } catch (error) {
-      reportError(error)
+  ticking = true
+  for (const phase of [listeners.update, listeners.paint]) {
+    for (const listener of phase) {
+      try {
+        listener(nowMs)
+      } catch (error) {
+        reportError(error)
+      }
     }
   }
-  if (listeners.size > 0) {
+  ticking = false
+  if (hasListeners() && handle === null) {
     handle = requestAnimationFrame(tick)
   }
 }
 
 /**
- * Runs `listener` on every animation frame, on one loop shared by the whole
- * page. The loop stops when nothing is subscribed, and the browser pauses it
- * while the tab is hidden. Returns an unsubscribe function.
+ * Runs sources in the update phase, then renderers in the default paint phase.
+ * One loop serves the whole page and stops when nothing is subscribed.
+ * The browser pauses it while the tab is hidden.
  */
-export const subscribeFrame = (listener: FrameListener): (() => void) => {
-  listeners.add(listener)
-  if (handle === null && typeof requestAnimationFrame === 'function') {
+export const subscribeFrame = (
+  listener: FrameListener,
+  phase: FramePhase = 'paint'
+): (() => void) => {
+  listeners[phase].add(listener)
+  if (handle === null && !ticking && typeof requestAnimationFrame === 'function') {
     handle = requestAnimationFrame(tick)
   }
   return () => {
-    listeners.delete(listener)
-    if (listeners.size === 0 && handle !== null) {
+    listeners[phase].delete(listener)
+    if (!hasListeners() && handle !== null) {
       cancelAnimationFrame(handle)
       handle = null
     }

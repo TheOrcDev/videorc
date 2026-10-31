@@ -4,7 +4,7 @@ import { toast } from '@/lib/toast'
 import { toastUserError, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 
 import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
-import { AppErrorBoundary } from '@/components/error-boundary'
+import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
 import { WindowFrame } from '@/components/window-frame'
@@ -764,8 +764,8 @@ function CommentsWindowApp(): ReactElement {
     live && cohost.enabled && cohost.entitled && cohost.consented && cohost.state.status === 'off'
 
   return (
-    // The chrome ground under the body's window coat (plan 208), and the
-    // frame's content coat on top (plan 050), like every other window.
+    // The body's window coat under the frame's content coat (plan 050), like
+    // every other window.
     <WindowFrame>
       <ChatGifModeProvider mode={gifMode}>
         <StreamManager

@@ -325,13 +325,20 @@ export function buddyPetMedianBox(samples) {
 }
 
 /** Whether the talk frames alternate: the talk ids in order (neutral and
- * repeats dropped) go a, b, a, b ... at least `minSteps` long. */
-export function buddyPetTalkAlternates(timeline, minSteps = 4) {
-  const talk = buddyPetRuns(timeline)
-    .map((run) => run.id)
-    .filter((id) => id === 'talk-a' || id === 'talk-b')
-  const steps = talk.filter((id, index) => index === 0 || id !== talk[index - 1])
-  return steps.length >= minSteps && steps.length === talk.length
+ * repeats dropped) go a, b, a, b ... at least `minSteps` long. A rest of
+ * `pauseFrames` or more is the gap between two lines, not a step of the cycle
+ * (one step is 110 to 150 ms), and each line starts its cycle on talk-a again,
+ * so the order is checked within each line. */
+export function buddyPetTalkAlternates(timeline, minSteps = 4, pauseFrames = 8) {
+  const lines = [[]]
+  for (const run of buddyPetRuns(timeline)) {
+    if (run.id === 'talk-a' || run.id === 'talk-b') lines.at(-1).push(run.id)
+    else if (run.frames >= pauseFrames && lines.at(-1).length > 0) lines.push([])
+  }
+  const alternates = lines.every((talk) =>
+    talk.every((id, index) => index === 0 || id !== talk[index - 1])
+  )
+  return lines.flat().length >= minSteps && alternates
 }
 
 function clamp(value, min, max) {
