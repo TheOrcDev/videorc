@@ -1779,6 +1779,29 @@ Clippy and optimized build will run before the maintained first-run,
 record-latency runs. No first-run deadline, quality budget or capture policy
 was relaxed; this is not yet a verified runtime repair.
 
+The native run on `3192134b` compiled in 6 minutes 31 seconds but then aborted
+in the benchmark reload RPC regression with a stack overflow. Both real-session
+and user-finalization takeover tests passed before the abort; the entire
+filter is still a failure, and the runtime dispatcher did not launch any app.
+The native supervisor reports no orphan cleanup. GDB reproduces the fault in
+`handle_text_message_with_role` called directly by the test, with no recursive
+call chain in the captured trace; no saved core or contemporaneous OOM event
+was found. A one-off 8 MiB test-stack diagnostic passes the assertions, but
+that is not gate evidence and the larger stack is not retained.
+
+Test-only follow-up `2679ed95` uses the existing production boxed RPC dispatcher
+instead of retaining multiple inline router futures in the test. The current
+native queue explicitly unsets `RUST_MIN_STACK`, so the regression must pass
+with the original default stack. Production status/finalization behavior and
+all timing/artifact limits are unchanged. Diagnostic receipt:
+`/tmp/videorc-beta-status-stack-classification.json`. All 56 actual backend tests selected by the four status, performance-check
+and finalization filters now pass at the default stack size, with zero failures
+or ignored cases. Receipt:
+`/tmp/videorc-beta-status-rpc-stack-focused-summary.json`. Rust formatting also
+passes, as does Clippy with the existing four Linux allowances. The optimized
+backend/MCP build also passes; the runtime queue is superseded by the main
+integration below.
+
 The Windows diagnostic on `c8685c4d` passes all 48 controlled-audio cases and
 fails 36 of the 48 independent FFmpeg control cases. Tails are 117–234 ms;
 four cases also fail frame count. The failure remains in the documented
@@ -1790,3 +1813,20 @@ The full macOS recording-studio/device suite and main's new
 here. The Linux probes above are scoped development evidence. Combined-output,
 latency, physical AppImage, endurance, pilot, update/rollback and publication
 gates remain open; there is no accepted or published Linux Beta.
+
+### CI and smoke-process integration, 2026-10-31
+
+Main `e66c5cd4` is merged. The two conflicts overlap test corrections already
+on this branch: retain the Settings tag parser that rejects scroll overrides
+regardless of prop order, and the reviewed Plan 210 remote-command pin with
+its explicit leak argument. Main contributes its CI build-profile and Windows
+recovery-package fixes, plus owned cargo process-group cleanup. Native source
+and Cargo inputs are byte-identical to `2679ed95` after this merge.
+
+That source now passes all 56 focused backend tests with the original stack,
+Rust formatting, Clippy with the four existing Linux allowances, and the
+optimized backend/MCP build. The native supervisor reports no forced orphan
+cleanup. Receipt: `/tmp/videorc-beta-status-rpc-stack-native-wtwbZP/report.json`.
+The old runtime dispatcher was held before launch because main changes the
+smoke harness. Source and runtime verification of this integration is pending;
+these build results are not a first-run or Beta acceptance pass.
