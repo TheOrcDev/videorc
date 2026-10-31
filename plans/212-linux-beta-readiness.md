@@ -1498,3 +1498,154 @@ unchanged two-second delivery limit. This isolates command/content handling
 from the app's frame production and scheduling; it does not prove that the
 full app or a candidate sustains combined output. Receipt:
 `/tmp/videorc-beta-raw-real-content-yi2xm_hl/report.json`.
+
+### Powered combined output and CPU composition, 2026-10-31
+
+The fresh powered baseline at `bef7d50` still fails combined recording and
+local RTMP. OpenH264 loses its writers during the session and recovers only
+6.833 seconds of recording and 5.154 seconds at the receiver. VAAPI keeps the
+receiver running for 31.154 seconds but recovers only 4.267 seconds of recording
+after Stop. Both combined cases fail the strict motion gate. AC remains online;
+CPU clock snapshots remain near 800 MHz, which does not establish why clocks
+are low. The baseline also has different Clips settings between encoders, so
+it is not a matched encoder comparison. Receipts:
+`/tmp/videorc-beta-powered-combined-Ij3vjS/report.json` and its
+`artifact-analysis.json`. No runtime repair or candidate pass follows from
+these results.
+
+The branch includes main through `0b238af0` (0.17.2). A local Linux CPU experiment
+copies the primary picture into the auxiliary output's own recycled buffer
+when both raw-output roles have identical scene and source references, tick,
+canvas and timestamps. Cameras, overlays, banners, live backgrounds, editor
+chrome, simulcast, native export handles, incomplete frames and aliased stores
+keep the existing separate-render path. An invisible Buddy anchor alone adds
+no pixels and does not prevent reuse. Each role retains its own store, queue
+and encoder. Eight focused tests cover pixel equality, moving content,
+retained-buffer ownership, timestamps and refusal cases. The experiment remains
+uncommitted: the native logic checks below pass, but no runtime reliability or
+performance improvement is established. Fresh runtime checks must use
+the current source and rebuilt binary hashes, with identical Clips settings
+for the combined encoder cases. Previous-main results cannot establish the
+optimization's isolated effect.
+
+The merged web companion is now partially observable in production: a read-only
+request to `https://www.videorc.com/linux-beta` returns 200, names Ubuntu 24.04
+and Omarchy, and says Beta is being prepared. The Beta pilot feed without a
+token returns 401 with the expected authorization error. The public
+`/api/updates/latest-linux.yml` request redirects to storage and returns 404
+`NoSuchKey`; public updater publication is not verified or ready. This check
+does not establish the production commit, signed-in download behavior, pilot
+access with a token, or any Beta candidate acceptance. No configuration or
+storage objects were changed. Receipt:
+`/tmp/videorc-beta-public-readonly-37ehqacm/report.json`.
+
+The current-main verification completed: 605 desktop files pass (6,647 tests
+pass, one skipped), all 2,994 Node tests pass with zero skips, and typecheck,
+lint, format, dependency audits and the desktop build pass. The native queue
+passes Rust format, eight focused CPU reuse tests, Clippy with the existing
+four Linux allowances, and the normal optimized development build. A broader
+compositor logic run passes 223 tests; it is not physical GPU/device evidence.
+The backend SHA-256 is
+`4bbdd97316ef94ca765bcda89a13d83011204ae849b96cddfb898889f2673f7f`.
+Receipts: `/tmp/videorc-beta-cpu-auxiliary-native-skzdUj/report.json`,
+`/tmp/videorc-beta-cpu-auxiliary-source-otUDxt/report.json` and
+`/tmp/videorc-beta-cpu-auxiliary-runtime-sR9kj7/report.json`.
+
+Runtime remains failing. OpenH264 combined output recovers an interrupted
+recording; VAAPI combined output finalizes normally but its recording has a
+167 ms freeze and four repeated frames. Its receiver passes the scoped strict
+artifact check, without controlled-audio proof. OpenH264 latency fails startup
+motion; VAAPI completes five takes but cold start is 1,811 ms, warm start p95
+986 ms and Stop-to-idle p95 737 ms, beyond the unchanged budgets. Preview
+lifecycle fails at cycle 34 with a closed surface and an undrained compositor
+mutation. None of these results establishes a repair or candidate readiness.
+
+The scratch Linux process supervisor also caused false teardown failures:
+adopted zombies were not reaped until the smoke command itself exited, while
+that command waited for its process group to disappear. A controlled regression
+fails with the old supervisor and passes after reaping adopted children while
+the command runs; the command keeps its own wait status and unrelated processes
+remain outside the supervisor's ownership. The corrected direct 1080p30 matrix
+passes both encoders, including teardown, without any supervisor-forced cleanup.
+Receipts: `/tmp/videorc-beta-live-reap-controls-cq_bttrp/report.json` and
+`/tmp/videorc-beta-live-reap-matrix-ac9ica/report.json`. The earlier media and
+preview failures remain failures.
+
+A matched OpenH264 comparison uses the same source, binary, Clips-off fixture
+and corrected supervisor with 12 and four Rayon workers. AC remains connected
+and sampled clocks near 800 MHz throughout both. Both combined cases fail the
+strict motion limits; the 12-worker receiver also fails take coverage. This
+does not select a production worker count. Receipt:
+`/tmp/videorc-beta-matched-cpu-workers-70Vxzj/comparison.json`.
+
+A separate preview lifetime change releases pending proof-surface JavaScript
+waits when their WebContents is destroyed, so an unresolved call cannot hold
+the mutation queue after that renderer retires. Live errors still propagate;
+late answers cannot replace the next renderer's state. Six new lifetime tests
+and 29 related queue/host tests pass. The full source run passes typecheck, lint,
+format, build and 606 desktop files (6,653 tests pass, one skipped). Receipt:
+`/tmp/videorc-beta-proof-script-source-aLu29N/report.json`. Runtime results below
+remain development evidence; no exact-candidate repair is established.
+
+The Windows diagnostic job on `22ebe0b1` has the same independent FFmpeg control
+failure family: 48 controlled-audio cases pass; the independent control has
+12 passes and 36 streaming failures, with 114–267 ms tails and seven cases
+also failing frame count. No new failure category, threshold change, waiver or
+unchanged retry. This remains a failed diagnostic under its existing runbook
+classification, not a source-gate or Linux acceptance pass. Receipt:
+`/tmp/videorc-beta-windows-diagnostics-124619026380-classification.json`.
+
+### Preview renderer lifetime verification, 2026-10-31
+
+The first 100-cycle run after the proof-script change completed every lifecycle
+operation and teardown, but failed the overall process gate because one census
+reported two Electron main processes. Raw process rows were not retained, so
+that extra row cannot be classified retrospectively. Receipt:
+`/tmp/videorc-beta-proof-script-runtime-yroPpP/report.json`. The failure remains
+recorded; the process-count limit and classification are unchanged.
+
+The maintained lifecycle probe now saves the original owned process rows at
+each checkpoint in an exclusively created, mode-0600 private JSONL sidecar.
+The public performance report still contains aggregates. Existing process
+census, memory and lifecycle-evidence tests pass all 43 cases; focused script
+lint and format pass. Do not commit the private rows, which can contain argv
+and local app paths.
+
+A diagnostic repeat passed its 100-cycle probe and process budgets, but the
+scratch supervisor failed when writing a receipt inside the probe's already
+removed success directory. This is not an overall verification pass. A
+controlled reproduction confirms that failure and that an external receipt
+survives. The following verification retains scratch with
+`VIDEORC_PERF_RETAIN_ARTIFACTS=1` and writes supervisor receipts outside the
+app directories. Receipts: `/tmp/videorc-beta-preview-census-runtime-gwaonc/report.json`
+and `/tmp/videorc-beta-supervisor-receipt-controls-jvr7ma1g/report.json`.
+
+The retained verification queue passes end to end: two further 100-cycle
+Linux proof-preview runs and direct strict 1080p30 recordings with OpenH264
+and VAAPI on `/dev/dri/renderD128`. Each preview run has 13 retained censuses
+with exactly one Electron main process, zero budget failures and clean
+teardown. All four supervisor receipts report command exit zero and no forced
+orphan cleanup. OpenH264 records 188 frames over 6.267 seconds with a 16 ms
+A/V tail; VAAPI records 186 frames over 6.2 seconds with an 8 ms tail. Both
+artifacts have zero corroborated freezes, at most two repeated frames and no
+analyzer failures. Silence warnings remain: these synthetic recordings do not
+prove microphone or system audio. Receipts and hashes:
+`/tmp/videorc-beta-preview-retained-regressions-kjFqKT/report.json` and
+`/tmp/videorc-beta-preview-retained-regressions-kjFqKT/summary.json`.
+
+These runs preserve the checked application patch and exact development
+backend hash above, which includes the uncommitted CPU experiment. They are
+scoped regression evidence, not an isolated CPU comparison, acceptance of a
+clean release build or proof that the intermittent combined-output failures
+are fixed. The original process-count failure remains unexplained. The full
+macOS recording-studio and real-device suite cannot run on Ogre: it requires
+ScreenCaptureKit, Metal and macOS device grants. The Linux lifecycle and
+artifact probes cover the touched path here; shared-platform runtime and both
+physical AppImage acceptance passes remain required. No process, motion,
+latency or acceptance threshold changed.
+
+The latest macOS Rust CI job (`124618986046`) passed advisory audit, format and
+Clippy, then exceeded GitHub's 75-minute limit while compiling tests. No tests
+executed and no performance sentinel ran. It remains in the existing runbook's
+hosted-macOS timeout category, not a pass or a new waiver. Receipt:
+`/tmp/videorc-beta-macos-rust-124618986046-classification.json`.

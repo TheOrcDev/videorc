@@ -5,7 +5,7 @@
 // this probe proves the lifecycle does not get stuck after repeated close/reopen
 // cycles and that close fully suppresses detached-preview presentation work.
 
-import { mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -78,6 +78,11 @@ const outputDirectory =
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
   join(tmpdir(), `videorc-preview-lifecycle-probe-${Date.now()}`)
 mkdirSync(outputDirectory, { recursive: true })
+// Keep the owned rows behind each process-count verdict. The public report
+// contains only aggregates; argv and private app paths stay in this run's
+// mode-0600 sidecar so a transient count can be investigated without guessing.
+const processCheckpointEvidencePath = join(outputDirectory, 'process-checkpoints.jsonl')
+writeFileSync(processCheckpointEvidencePath, '', { flag: 'wx', mode: 0o600 })
 const ledgerPaths = ownedProcessLedgerPaths({
   appDataDir: join(outputDirectory, 'app-data'),
   userDataDir: join(outputDirectory, 'user-data'),
@@ -802,6 +807,7 @@ async function captureMemoryCheckpoint(label) {
   })
   census.sampledAtMs = Date.now()
   census.checkpoint = label
+  appendFileSync(processCheckpointEvidencePath, `${JSON.stringify(census)}\n`)
   memoryCheckpoints.push(census)
 }
 

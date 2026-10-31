@@ -397,6 +397,7 @@ import {
   type PreviewWindowMode
 } from './preview-dock'
 import { InWindowProofSurface, type ProofSurfaceHost } from './in-window-proof-surface'
+import { executeProofSurfaceScript } from './proof-surface-script'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_FETCH_TIMEOUT_MS,
@@ -6639,7 +6640,8 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       if (proofPollingSuppressed) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
         if (!surfaceWindow.isDestroyed() && previewWindowSurfaceGenerationIsCurrent(generation)) {
-          await surfaceWindow.webContents.executeJavaScript(
+          await executeProofSurfaceScript(
+            surfaceWindow.webContents,
             'window.__videorcSetFramePollingSuppressed?.(true)',
             true
           )
@@ -6649,7 +6651,8 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       if (nativePreviewSurfaceScene) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
         if (!surfaceWindow.isDestroyed() && previewWindowSurfaceGenerationIsCurrent(generation)) {
-          await surfaceWindow.webContents.executeJavaScript(
+          await executeProofSurfaceScript(
+            surfaceWindow.webContents,
             `window.__videorcSetPreviewScene?.(${jsonForInlineScript(nativePreviewSurfaceScene)})`,
             true
           )
@@ -7168,7 +7171,8 @@ async function applyNativePreviewSurfaceScene(
     }
     const sceneJson = jsonForInlineScript(nativePreviewSurfaceScene)
     if (nativePreviewSurfaceWindow === surfaceWindow && !surfaceWindow.isDestroyed()) {
-      await surfaceWindow.webContents.executeJavaScript(
+      await executeProofSurfaceScript(
+        surfaceWindow.webContents,
         `window.__videorcSetPreviewScene?.(${sceneJson})`,
         true
       )
@@ -7271,7 +7275,8 @@ async function applyNativePreviewSurfaceBanners(generation: number): Promise<Pre
   }
   // The latest scene: a compositor present may have replaced it meanwhile,
   // and every builder already reads the new list.
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow.webContents,
     `window.__videorcSetPreviewScene?.(${jsonForInlineScript(nativePreviewSurfaceScene)})`,
     true
   )
@@ -7512,11 +7517,13 @@ async function presentNativePreviewSurfaceCompositor(
     // status channel. Present + metrics happen in ONE script round trip.
     const statusJson = jsonForInlineScript(nativePreviewProofPresentStatus(effectiveStatus))
     if (nativePreviewSurfaceWindow === surfaceWindow && !surfaceWindow.isDestroyed()) {
-      metrics = await surfaceWindow.webContents.executeJavaScript(
-        `${sceneScript}window.__videorcSetCompositorStatus?.(${statusJson});` +
-          `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
-        true
-      )
+      metrics =
+        (await executeProofSurfaceScript<Record<string, unknown>>(
+          surfaceWindow.webContents,
+          `${sceneScript}window.__videorcSetCompositorStatus?.(${statusJson});` +
+            `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
+          true
+        )) ?? null
     }
   }
   if (!nativePreviewPresentationAllowedForGeneration(generation)) {
@@ -8267,7 +8274,8 @@ async function syncNativePreviewProofPollingProfile(): Promise<void> {
     nativePreviewAppliedProofPollingProfile = null
     return
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow.webContents,
     `window.__videorcSetFramePollingProfile?.(${jsonForInlineScript(profile)})`,
     true
   )
@@ -8354,7 +8362,8 @@ async function setNativePreviewProofAnimationSuspended(suspended: boolean): Prom
     nativePreviewProofAnimationSuspended = null
     return
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow.webContents,
     `window.__videorcSetProofSurfaceSuspended?.(${suspended ? 'true' : 'false'})`,
     true
   )
@@ -8383,7 +8392,8 @@ async function syncNativePreviewProofPollingSuppression(): Promise<boolean> {
   ) {
     return nativePreviewProofPollingIsSuppressed()
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow.webContents,
     `window.__videorcSetFramePollingSuppressed?.(${desired ? 'true' : 'false'})`,
     true
   )
@@ -8409,9 +8419,12 @@ async function readNativePreviewSurfaceMetricsAfterPaint(
   ) {
     return null
   }
-  return surfaceWindow.webContents.executeJavaScript(
-    `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
-    true
+  return (
+    (await executeProofSurfaceScript<Record<string, unknown> | null>(
+      surfaceWindow.webContents,
+      `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
+      true
+    )) ?? null
   )
 }
 
@@ -8715,7 +8728,8 @@ async function waitForNativePreviewSurfaceScript(
       if (surfaceWindow.isDestroyed()) {
         return
       }
-      lastState = await surfaceWindow.webContents.executeJavaScript(
+      lastState = await executeProofSurfaceScript(
+        surfaceWindow.webContents,
         'typeof window.__videorcSetPreviewScene',
         true
       )
