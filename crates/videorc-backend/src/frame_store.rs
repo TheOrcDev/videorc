@@ -602,6 +602,15 @@ impl<P, M> FrameStore<P, M> {
         self.latest.clone()
     }
 
+    /// Make an already published frame this store's latest (plan 212 S2):
+    /// the Preview hold pins the frame presented when a performance check
+    /// began into a store of its own, so the lease and the pixel oracle keep
+    /// reading it while the run composes the benchmark. The handle keeps the
+    /// storage alive; nothing is copied.
+    pub fn pin_latest(&mut self, frame: FrameHandle<P, M>) {
+        self.latest = Some(frame);
+    }
+
     /// Forget the latest frame so readers see no frame at all. Plan 210 S7
     /// uses it as the last resort when a hidden screen's still cannot be
     /// built in a store's format: no frame beats a live one.

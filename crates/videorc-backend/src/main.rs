@@ -21708,6 +21708,7 @@ mod tests {
         let status = compositor::start_synthetic_compositor(
             state.clone(),
             compositor::CompositorStartParams {
+                benchmark: false,
                 target_fps: 60,
                 width: 64,
                 height: 36,

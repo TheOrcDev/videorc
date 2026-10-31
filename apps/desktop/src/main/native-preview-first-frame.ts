@@ -27,7 +27,17 @@ export interface FirstFrameSnapshot {
   compositorSceneRevision: number | null
   compositorFrameSceneRevision: number | null
   metalTargetPresent: boolean
+  /**
+   * Plan 212 S2: `compositor.status.previewHold` is set. The Preview holds
+   * its last program frame for a performance check: frames advance on the
+   * benchmark's canvas while nothing new is presented and the frame scene
+   * revision stays. That is not a broken Preview, and no heal may fire.
+   */
+  previewHeld: boolean
 }
+
+/** The waiting reason shown while the Preview holds (plan 212 S2). */
+export const PREVIEW_HOLD_REASON = 'Checking this computer'
 
 export type FirstFrameHealingAction = 'present-kick' | 'resync-scene' | 'reset-native-path'
 
@@ -515,6 +525,11 @@ export function assessPresenting(
   tickMs: number,
   budgets: PresentingWatchBudgets = DEFAULT_PRESENTING_WATCH_BUDGETS
 ): { assessment: PresentingAssessment; watch: PresentingWatchState } {
+  if (snapshot.previewHeld) {
+    // Plan 212 S2: the hold is observed, never charged against the stall
+    // ladder; the watch resumes where it was when the hold ends.
+    return { assessment: { kind: 'observing', reason: PREVIEW_HOLD_REASON }, watch }
+  }
   if (firstFrameContractMet(snapshot) && snapshot.presentationAdvancing) {
     // Recovery resets everything, so the next stall gets a fresh ladder.
     return { assessment: { kind: 'presenting' }, watch: emptyPresentingWatch() }
@@ -567,6 +582,11 @@ export function assessFirstFrame(
   budgets: FirstFrameBudgets = DEFAULT_FIRST_FRAME_BUDGETS,
   { requirePresentationAdvancing = false }: { requirePresentationAdvancing?: boolean } = {}
 ): { assessment: FirstFrameAssessment; ledger: FirstFrameLedger } {
+  if (snapshot.previewHeld) {
+    // Plan 212 S2: pending for the hold's length, with the ledger and the
+    // clock untouched; no action, no fallback.
+    return { assessment: { kind: 'pending', reason: PREVIEW_HOLD_REASON }, ledger }
+  }
   if (
     firstFrameContractMet(snapshot) &&
     (!requirePresentationAdvancing || snapshot.presentationAdvancing)

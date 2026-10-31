@@ -696,7 +696,22 @@ pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result
     Ok(())
 }
 
+/// Plan 212 S4: the Preview holds its last program frame from before rung
+/// 1 until the first program frame after the last rung's session left the
+/// slot, so no rung and no hand-over between rungs ever reaches it. The
+/// benchmark's noise is its own scene's (plan 212 S3), committed by its
+/// session beside the user's scene.
 async fn run_ladder(
+    state: &AppState,
+    params: &PerformanceCheckRunParams,
+) -> Result<PerformanceCheckResult> {
+    let hold = crate::compositor::PreviewHoldGuard::engage(state).await;
+    let result = run_ladder_under_hold(state, params).await;
+    hold.release().await;
+    result
+}
+
+async fn run_ladder_under_hold(
     state: &AppState,
     params: &PerformanceCheckRunParams,
 ) -> Result<PerformanceCheckResult> {
@@ -704,7 +719,6 @@ async fn run_ladder(
     let directory = benchmark_directory();
     tokio::fs::create_dir_all(&directory).await?;
     discard_benchmark_sessions(state, &directory).await;
-    let _hard_content = crate::compositor::SyntheticHardContentGuard::engage();
 
     let ladder = ladder_under_ceiling(
         params.ceiling_width,

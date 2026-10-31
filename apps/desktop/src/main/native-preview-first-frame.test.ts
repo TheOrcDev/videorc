@@ -15,6 +15,7 @@ import {
   firstFrameBlockedReason,
   firstFrameContractMet,
   nativePreviewFirstFrameWatchdogEnabled,
+  PREVIEW_HOLD_REASON,
   nativePreviewProofWatchdogEnabled,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
@@ -35,6 +36,7 @@ function snapshot(overrides: Partial<FirstFrameSnapshot> = {}): FirstFrameSnapsh
     compositorSceneRevision: 42,
     compositorFrameSceneRevision: 42,
     metalTargetPresent: true,
+    previewHeld: false,
     ...overrides
   }
 }
@@ -606,6 +608,41 @@ describe('assessFirstFrame', () => {
 // ladder; exhaustion declares a truthful stall but KEEPS watching so a revival
 // (the reporter's "click brings it back") re-arms a fresh ladder instead of
 // leaving the placeholder forever.
+describe('a Preview hold (plan 212)', () => {
+  const held = snapshot({
+    elapsedMs: 20_000,
+    nativePresenting: true,
+    framesAdvancing: true,
+    presentationAdvancing: false,
+    compositorFrameSceneRevision: 41,
+    previewHeld: true
+  })
+
+  it('is pending for the first-frame contract: no heal, no fallback, the ledger untouched', () => {
+    const ledger = emptyFirstFrameLedger()
+    const { assessment, ledger: next } = assessFirstFrame(held, ledger)
+    expect(assessment).toEqual({ kind: 'pending', reason: PREVIEW_HOLD_REASON })
+    expect(next).toBe(ledger)
+    expect(
+      assessFirstFrame(snapshot({ ...held, surfaceLive: false, metalTargetPresent: false }), ledger)
+        .assessment
+    ).toEqual({ kind: 'pending', reason: PREVIEW_HOLD_REASON })
+  })
+
+  it('is observed by the presenting watch without charging the stall ladder', () => {
+    let watch = emptyPresentingWatch()
+    for (let tick = 0; tick < 200; tick += 1) {
+      const next = assessPresenting(held, watch, 250)
+      expect(next.assessment).toEqual({ kind: 'observing', reason: PREVIEW_HOLD_REASON })
+      watch = next.watch
+    }
+    expect(watch).toEqual(emptyPresentingWatch())
+    // The hold ends: a presenting frame is presenting at once.
+    const after = assessPresenting(snapshot(), watch, 250)
+    expect(after.assessment).toEqual({ kind: 'presenting' })
+  })
+})
+
 describe('assessPresenting', () => {
   const TICK_MS = 750
 

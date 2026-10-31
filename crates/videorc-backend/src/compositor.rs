@@ -32,6 +32,7 @@ use crate::overlay_layout::{OverlayOrientation, OverlayRect, OverlaySessionShape
 
 #[path = "compositor_preview_frame_lease.rs"]
 pub(crate) mod preview_frame_lease;
+use preview_frame_lease::presented_frame_store_unguarded;
 #[cfg(test)]
 #[path = "compositor_scene_switch_tests.rs"]
 mod scene_switch_tests;
@@ -120,6 +121,13 @@ type ProgramPictureWaiters =
 pub struct CompositorFrameExportHandle {
     // Output tick time, independent of how long the source pixels have been held.
     presentation_at: Option<Instant>,
+    /// Plan 212 S2: composed from a performance check's benchmark scene.
+    /// The lease never hands such a frame to the Preview.
+    benchmark: bool,
+    /// Plan 212 S6: composed from a scene with a visible test-pattern source
+    /// (the benchmark's, or a dev/smoke scene). The packaged backstop
+    /// refuses it to the Preview.
+    test_pattern_scene: bool,
     #[cfg(target_os = "macos")]
     pub(crate) metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
     d3d11_texture: Option<WindowsD3d11TextureLeaseTicket>,
@@ -129,6 +137,21 @@ impl CompositorFrameExportHandle {
     pub(crate) fn with_presentation_time(mut self, at: Instant) -> Self {
         self.presentation_at = Some(at);
         self
+    }
+
+    /// Plan 212: what the frame was composed from (see the fields).
+    pub(crate) fn with_scene_flags(mut self, benchmark: bool, test_pattern_scene: bool) -> Self {
+        self.benchmark = benchmark;
+        self.test_pattern_scene = test_pattern_scene;
+        self
+    }
+
+    pub(crate) fn is_benchmark(&self) -> bool {
+        self.benchmark
+    }
+
+    pub(crate) fn has_test_pattern_scene(&self) -> bool {
+        self.test_pattern_scene
     }
 
     pub(crate) fn presentation_at(&self) -> Option<Instant> {
@@ -143,6 +166,8 @@ impl CompositorFrameExportHandle {
             presentation_at: None,
             metal_target: Some(Arc::new(target)),
             d3d11_texture: None,
+            benchmark: false,
+            test_pattern_scene: false,
         }
     }
 
@@ -153,6 +178,8 @@ impl CompositorFrameExportHandle {
             metal_target: None,
             presentation_at: None,
             d3d11_texture: Some(ticket),
+            benchmark: false,
+            test_pattern_scene: false,
         }
     }
 
@@ -496,6 +523,81 @@ pub struct CompositorRuntime {
     live_background: Option<crate::live_background::LiveBackgroundRuntime>,
     /// Plan 190: where the live background renderers report how they draw.
     live_background_board: Arc<crate::live_background::LiveBackgroundBoard>,
+    /// Plan 212 S2: a performance check's own scene, committed by its
+    /// benchmark session and drawn by the primary (encoder) leg only.
+    /// `scene`, `status.scene_*`, `scene.get` and the scene revisions keep
+    /// the user's scene; a scene edit during the check lands there and shows
+    /// when the hold ends. Cleared with the benchmark lease or the run.
+    benchmark_scene: Option<CompositorSceneSnapshot>,
+    /// The run was started fresh for a benchmark session (no preview run to
+    /// arm in place): the rule above holds on that path too. Reset with the run.
+    benchmark_run: bool,
+    /// Plan 212 S4: the Preview holds the frame presented when a performance
+    /// check began, across every rung and release, until the first program
+    /// frame composed after the check. The lease and the pixel oracle read
+    /// it through `presented_frame_store`.
+    preview_hold: Option<PreviewHold>,
+    /// Plan 212 S6: the packaged backstop's bookkeeping (test-pattern frames
+    /// refused to the Preview, and whether this run logged it).
+    preview_backstop: PreviewBackstop,
+}
+
+/// Plan 212 S4: what the Preview shows while a performance check runs.
+#[derive(Debug)]
+pub(crate) struct PreviewHold {
+    /// A store of its own whose latest is the frame presented when the hold
+    /// began, kept alive by that handle, so the arm's ring resize cannot
+    /// recycle its IOSurface. Empty when nothing was ever presented (the
+    /// Preview keeps its starting placeholder), never the benchmark's.
+    store: CompositorFrameStore,
+    /// The frame's evidence, so the lease can still prove its scene revision
+    /// after the evidence ring moved on.
+    evidence: Option<CompositorFrameEvidence>,
+    /// The run the held frame came from: the run main knows.
+    run_id: Option<String>,
+    /// The guard dropped: the hold ends on the next program frame the run
+    /// composes (never between rungs, never on a benchmark frame), or with
+    /// the run when no frame comes.
+    releasing: bool,
+}
+
+impl PreviewHold {
+    pub(crate) fn store(&self) -> CompositorFrameStore {
+        self.store.clone()
+    }
+}
+
+/// Plan 212 S6: in packaged builds `presented_frame_store` never hands main
+/// a frame composed from a scene with a test-pattern source. The count goes
+/// to `framePipeline.previewSyntheticRefused`; the log line is once per run.
+#[derive(Debug, Default)]
+pub(crate) struct PreviewBackstop {
+    refused: AtomicU64,
+    logged: std::sync::atomic::AtomicBool,
+}
+
+impl PreviewBackstop {
+    fn reset_run(&self) {
+        self.refused.store(0, Ordering::Relaxed);
+        self.logged.store(false, Ordering::Relaxed);
+    }
+
+    pub(crate) fn refused(&self) -> u64 {
+        self.refused.load(Ordering::Relaxed)
+    }
+
+    /// Counts one refusal; true the first time this run.
+    pub(crate) fn note_refusal(&self) -> bool {
+        self.refused.fetch_add(1, Ordering::Relaxed);
+        !self.logged.swap(true, Ordering::Relaxed)
+    }
+}
+
+/// Packaged build: a release backend. The dev backend (any build with debug
+/// assertions, which also enables the `preview.debug.sample` oracle and the
+/// smoke RPCs) keeps presenting test patterns, because the smokes rely on it.
+pub(crate) fn packaged_build() -> bool {
+    !cfg!(debug_assertions)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,6 +690,11 @@ pub struct CompositorStartParams {
     /// picture for the rest.
     pub highlight_overlay_on_program: bool,
     pub buddy_overlay_on_program: bool,
+    /// Plan 212 S1: the run is a performance check's benchmark session's own
+    /// (no preview run could be armed in place): its startup scene goes to
+    /// `benchmark_scene`, the user's scene stays, and the Preview hold
+    /// applies as on the in-place path.
+    pub benchmark: bool,
 }
 
 /// Plan 157: the separate-source (ISO) legs. The Screen leg renders at the
@@ -672,6 +779,9 @@ struct CompositorCaptureLease {
     /// Loop configuration to restore (fps is refreshed from the live
     /// preview surface at release time).
     preview_config: CompositorLoopConfig,
+    /// Plan 212 S1: the lease belongs to a performance check's benchmark
+    /// session; its scene lives in `benchmark_scene` and leaves with the lease.
+    benchmark: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -680,6 +790,9 @@ pub struct CompositorArmParams {
     pub width: u32,
     pub height: u32,
     pub frame_consumer: CompositorFrameConsumer,
+    /// Plan 212 S1: the session is a performance check's benchmark
+    /// (`SessionPurpose::PerformanceCheck`). See `CompositorCaptureLease`.
+    pub benchmark: bool,
     /// The lease belongs to a buffer-only session (plan 181): scene editor
     /// drafts stay allowed and follow the run, since the ring is a buffer and
     /// never a recording or a stream.
@@ -1353,6 +1466,11 @@ struct CompositorRenderCache {
     /// The run is leased by a buffer-only session (plan 181): drafts apply
     /// to it whatever its frame consumer, the ring being a buffer only.
     drafts_follow_capture: bool,
+    /// Plan 212 S2: `snapshot` is the benchmark scene of a performance
+    /// check: the primary leg composes it for the encoder, the program leg
+    /// is off, no scene motion, no draft, no live background, and no
+    /// `preview.frameReady` goes out for the tick.
+    benchmark: bool,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
     /// The banner set and the session shape it is planned against (plan 186
@@ -1404,15 +1522,18 @@ impl CompositorRenderCache {
     }
 
     fn from_runtime(compositor: &CompositorRuntime) -> Self {
-        let active_image_source = compositor
-            .scene
+        // Plan 212 S2: while a benchmark scene is committed the primary leg
+        // composes it; the user's scene stays in `compositor.scene`.
+        let benchmark = compositor.benchmark_scene.is_some();
+        let snapshot = compositor
+            .benchmark_scene
             .as_ref()
+            .or(compositor.scene.as_ref());
+        let active_image_source = snapshot
             .and_then(|snapshot| snapshot.active_screen.as_ref())
             .and_then(|screen| compositor.image_sources.get(&screen.id))
             .cloned();
-        let background_image_source = compositor
-            .scene
-            .as_ref()
+        let background_image_source = snapshot
             .and_then(|snapshot| snapshot.scene.as_ref())
             .and_then(|scene| scene.background.as_ref())
             .and_then(|background| {
@@ -1427,28 +1548,28 @@ impl CompositorRenderCache {
             program_frame_store: compositor.program_frame_store.clone(),
             program_picture_waiters: compositor.program_picture_waiters.clone(),
             source_iso_frame_stores: compositor.source_iso_frame_stores.clone(),
-            snapshot: compositor.scene.clone(),
+            snapshot: snapshot.cloned(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
-            transition: compositor.scene_transition.clone(),
+            transition: compositor.scene_transition.clone().filter(|_| !benchmark),
             editor_draft: compositor.editor_draft.clone().filter(|_| {
-                compositor
-                    .capture_lease
-                    .as_ref()
-                    .is_none_or(|lease| lease.replay_only)
+                !benchmark
+                    && compositor
+                        .capture_lease
+                        .as_ref()
+                        .is_none_or(|lease| lease.replay_only)
             }),
             drafts_follow_capture: compositor.buffer_only_run
                 || compositor
                     .capture_lease
                     .as_ref()
                     .is_some_and(|lease| lease.replay_only),
+            benchmark,
             active_image_source,
             background_image_source,
             banners: Arc::clone(&compositor.banners),
             banner_session_shape: compositor.banner_session_shape,
             live_background: compositor.live_background.as_ref().and_then(|runtime| {
-                compositor
-                    .scene
-                    .as_ref()
+                snapshot
                     .and_then(|snapshot| snapshot.scene.as_ref())
                     .and_then(|scene| scene.background.as_ref())
                     .map(|background| {
@@ -1847,6 +1968,19 @@ fn scene_shows_screen_source(snapshot: Option<&CompositorSceneSnapshot>) -> bool
     scene_needs_live_screen_frame(snapshot, None)
 }
 
+/// Plan 212 S6: the scene has a visible test-pattern source, so a frame
+/// composed from it carries the pattern (plain or benchmark noise).
+fn scene_shows_test_pattern_source(snapshot: Option<&CompositorSceneSnapshot>) -> bool {
+    snapshot
+        .and_then(|snapshot| snapshot.scene.as_ref())
+        .is_some_and(|scene| {
+            scene
+                .sources
+                .iter()
+                .any(|source| source.visible && source.kind == SceneSourceKind::TestPattern)
+        })
+}
+
 /// Plan 210 S3: the screen frame each scene slot drew last tick. The
 /// program's hold also serves the legs that follow its scene (the classic
 /// aux, the Screen file); the vertical leg composes its own scene and holds
@@ -2201,6 +2335,11 @@ struct CompositorSceneSnapshot {
     scene: Option<Scene>,
     layout: LayoutSettings,
     active_screen: Option<StreamScreen>,
+    /// Plan 212 S3: this scene's test-pattern source draws per-frame noise
+    /// (real encoder work). Only a performance check's benchmark scene sets
+    /// it; the user's own test pattern stays the plain pattern. The smokes'
+    /// `VIDEORC_SYNTHETIC_HARD_CONTENT` is read beside it at draw time.
+    synthetic_hard_content: bool,
 }
 
 /// A draft expires this long after its last `scene.editor.draft.set`; the
@@ -2496,6 +2635,7 @@ mod editor_draft_tests {
 
     fn snapshot(revision: u64) -> CompositorSceneSnapshot {
         CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision,
             scene: Some(Scene {
@@ -2897,6 +3037,7 @@ mod editor_draft_tests {
             session_id: "session".to_string(),
             run_id: "run".to_string(),
             replay_only,
+            benchmark: false,
             render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(1280, 720))),
             preview_config: CompositorLoopConfig {
                 target_fps: 30,
@@ -3444,6 +3585,10 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         stream_output: None,
         live_background: None,
         live_background_board: Arc::default(),
+        benchmark_scene: None,
+        benchmark_run: false,
+        preview_hold: None,
+        preview_backstop: PreviewBackstop::default(),
     }
 }
 
@@ -3488,6 +3633,7 @@ async fn start_synthetic_compositor_with_lifecycle(
             compositor.image_sources.status(),
             compositor.worker_activity.clone(),
             compositor.status.screen_switch.clone(),
+            compositor.status.preview_hold,
         )
     };
     let run_id = Uuid::new_v4().to_string();
@@ -3525,6 +3671,9 @@ async fn start_synthetic_compositor_with_lifecycle(
         editor_draft: None,
         live_background: None,
         screen_switch: previous_scene_status.7,
+        // Plan 212 S4: a hold outlives a run replaced under it (the fresh
+        // benchmark run stops the Preview's run), so the status keeps it.
+        preview_hold: previous_scene_status.8,
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Synthetic compositor running.".to_string()),
     };
@@ -3581,6 +3730,12 @@ async fn start_synthetic_compositor_with_lifecycle(
         compositor.loop_config_tx = Some(loop_config_tx);
         compositor.capture_lease = None;
         compositor.buffer_only_run = params.replay_only;
+        // Plan 212: a benchmark's own run commits its scene beside the
+        // user's; any other new run starts without one. The backstop count
+        // is per run.
+        compositor.benchmark_run = params.benchmark;
+        compositor.benchmark_scene = None;
+        compositor.preview_backstop.reset_run();
         // A new run is a new world: a drag from the previous run re-drafts.
         compositor.editor_draft = None;
         // Banners stay (they are not run state); the session that owns this
@@ -3850,6 +4005,13 @@ async fn stop_compositor_if_run_id_with_lifecycle(
             compositor.loop_config_tx = None;
             compositor.capture_lease = None;
             compositor.buffer_only_run = false;
+            compositor.benchmark_run = false;
+            compositor.benchmark_scene = None;
+            // Plan 212 S4: no program frame comes from a stopped run; a hold
+            // whose check ended ends here. A hold whose check is still
+            // running outlives the run (the fresh-run path stops the
+            // Preview's run to start the benchmark's).
+            end_preview_hold_if_releasing(&mut compositor);
         }
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
@@ -3859,6 +4021,10 @@ async fn stop_compositor_if_run_id_with_lifecycle(
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
         status.screen_switch = compositor.status.screen_switch.take();
+        status.preview_hold = compositor
+            .preview_hold
+            .as_ref()
+            .map(|_| crate::protocol::PreviewHoldReason::PerformanceCheck);
         compositor.status = status.clone();
         status
     };
@@ -3945,6 +4111,7 @@ pub async fn arm_compositor_for_capture(
             replay_only: params.replay_only,
             render_dimensions,
             preview_config,
+            benchmark: params.benchmark,
         });
         if !params.replay_only {
             // Decision 4 (plan 058): a draft never reaches a recording or a
@@ -4016,6 +4183,11 @@ pub async fn release_compositor_capture_lease(
         let lease = compositor.capture_lease.take()?;
         // Back to the idle plan: every shown banner with a switch on draws.
         compositor.banner_session_shape = None;
+        // Plan 212 S2: the benchmark's scene leaves with its lease; the
+        // user's scene was never replaced, so the next tick draws it.
+        if lease.benchmark {
+            compositor.benchmark_scene = None;
+        }
         let surface_live = surface.state == PreviewSurfaceState::Live
             && compositor.render_task.is_some()
             && compositor.stop_tx.is_some();
@@ -4081,6 +4253,172 @@ pub async fn release_compositor_capture_lease(
             stop_compositor_if_run_id_with_lifecycle(state, &run_id).await
         }
     }
+}
+
+/// Plan 212 S2: commits a performance check's benchmark scene beside the
+/// user's scene. Only the primary (encoder) leg draws it; `scene`,
+/// `status.scene_*`, `scene.get` and the scene revisions keep the user's
+/// scene, and the program leg never composes it. Refused (false) unless the
+/// run belongs to a benchmark: a benchmark lease, or a run started fresh for
+/// one; the session start reports that refusal rather than falling back to
+/// the user's scene.
+pub async fn commit_benchmark_scene(
+    state: &AppState,
+    revision: u64,
+    scene: Scene,
+    layout: LayoutSettings,
+    selected_sources: crate::protocol::SourceSelection,
+) -> bool {
+    let mut compositor = state.compositor.lock().await;
+    let benchmark_run = compositor.benchmark_run
+        || compositor
+            .capture_lease
+            .as_ref()
+            .is_some_and(|lease| lease.benchmark);
+    if !benchmark_run || compositor.run_id.is_none() {
+        return false;
+    }
+    compositor.benchmark_scene = Some(CompositorSceneSnapshot {
+        selected_sources: Some(selected_sources),
+        revision,
+        scene: Some(scene),
+        layout,
+        active_screen: None,
+        synthetic_hard_content: true,
+    });
+    true
+}
+
+/// The benchmark scene's revision, if one is committed (tests).
+#[cfg(test)]
+pub(crate) async fn compositor_benchmark_scene_revision(state: &AppState) -> Option<u64> {
+    state
+        .compositor
+        .lock()
+        .await
+        .benchmark_scene
+        .as_ref()
+        .map(|snapshot| snapshot.revision)
+}
+
+/// Plan 212 S4: holds the Preview on the frame it presents now, for a
+/// performance check. Engaged before rung 1; `release` after the last rung's
+/// session left the slot. The hold itself ends on the first program frame
+/// composed after that (never between rungs), or with the run when no frame
+/// comes. Dropping the guard without `release` releases it on the runtime
+/// (a cancelled ladder, a panic): the Preview must never stay held.
+#[must_use = "the hold ends only through release or drop"]
+pub(crate) struct PreviewHoldGuard {
+    state: Option<AppState>,
+}
+
+impl PreviewHoldGuard {
+    pub(crate) async fn engage(state: &AppState) -> Self {
+        let status = {
+            let mut compositor = state.compositor.lock().await;
+            if compositor.preview_hold.is_none() {
+                let presented = presented_frame_store_unguarded(&compositor)
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .latest()
+                    // Never hold a benchmark's or a test pattern's frame.
+                    .filter(|frame| {
+                        !frame.metadata.is_benchmark()
+                            && !(packaged_build() && frame.metadata.has_test_pattern_scene())
+                    });
+                let evidence = presented.as_ref().and_then(|frame| {
+                    compositor
+                        .frame_evidence
+                        .iter()
+                        .find(|evidence| evidence.sequence == frame.sequence)
+                        .copied()
+                });
+                let mut store = FrameStore::new(0);
+                if let Some(frame) = presented {
+                    store.pin_latest(frame);
+                }
+                compositor.preview_hold = Some(PreviewHold {
+                    store: Arc::new(StdMutex::new(store)),
+                    evidence,
+                    run_id: compositor.run_id.clone(),
+                    releasing: false,
+                });
+                compositor.status.preview_hold =
+                    Some(crate::protocol::PreviewHoldReason::PerformanceCheck);
+                compositor.status.updated_at = Utc::now().to_rfc3339();
+            } else if let Some(hold) = compositor.preview_hold.as_mut() {
+                // A second check before the first's hold ended keeps the
+                // same frame and simply holds again.
+                hold.releasing = false;
+            }
+            compositor.status.clone()
+        };
+        tracing::info!(
+            "preview hold engaged for a performance check on run {}",
+            status.run_id.as_deref().unwrap_or("none")
+        );
+        state.emit_event("compositor.status", status);
+        Self {
+            state: Some(state.clone()),
+        }
+    }
+
+    /// Lets the hold end on the next program frame.
+    pub(crate) async fn release(mut self) {
+        if let Some(state) = self.state.take() {
+            release_preview_hold(&state).await;
+        }
+    }
+}
+
+impl Drop for PreviewHoldGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn(async move { release_preview_hold(&state).await });
+        }
+    }
+}
+
+async fn release_preview_hold(state: &AppState) {
+    let status = {
+        let mut compositor = state.compositor.lock().await;
+        let Some(hold) = compositor.preview_hold.as_mut() else {
+            return;
+        };
+        hold.releasing = true;
+        // No live run composes a program frame: end it now.
+        let run_live = compositor.run_id.is_some() && compositor.render_task.is_some();
+        if !run_live {
+            end_preview_hold_if_releasing(&mut compositor);
+        }
+        compositor.status.clone()
+    };
+    tracing::info!("preview hold releasing: the next program frame ends it");
+    state.emit_event("compositor.status", status);
+}
+
+/// Ends a releasing hold (plan 212 S4). True when it ended.
+fn end_preview_hold_if_releasing(compositor: &mut CompositorRuntime) -> bool {
+    if !compositor
+        .preview_hold
+        .as_ref()
+        .is_some_and(|hold| hold.releasing)
+    {
+        return false;
+    }
+    compositor.preview_hold = None;
+    compositor.status.preview_hold = None;
+    compositor.status.updated_at = Utc::now().to_rfc3339();
+    tracing::info!("preview hold ended: the Preview presents the program again");
+    true
+}
+
+/// Whether the Preview holds (tests).
+#[cfg(test)]
+pub(crate) async fn compositor_preview_hold_active(state: &AppState) -> bool {
+    state.compositor.lock().await.preview_hold.is_some()
 }
 
 /// Run id currently leased to a capture, if any.
@@ -5074,6 +5412,7 @@ async fn update_compositor_scene_with_selection_and_prepare_hook(
             .revalidate_stream_screen_for_compositor(screen)
     });
     let mut snapshot = CompositorSceneSnapshot {
+        synthetic_hard_content: false,
         selected_sources,
         revision,
         scene,
@@ -5206,6 +5545,7 @@ impl CompositorSourceEdit {
         selected_sources: crate::protocol::SourceSelection,
     ) -> Self {
         let snapshot = |scene| CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: Some(selected_sources.clone()),
             revision: 1,
             scene: Some(scene),
@@ -5690,6 +6030,7 @@ pub async fn update_compositor_simulcast_scene(
         return;
     }
     let snapshot = CompositorSceneSnapshot {
+        synthetic_hard_content: false,
         selected_sources: compositor
             .scene
             .as_ref()
@@ -6009,6 +6350,9 @@ async fn stop_current_compositor(state: &AppState) -> bool {
         compositor.loop_config_tx = None;
         compositor.capture_lease = None;
         compositor.buffer_only_run = false;
+        compositor.benchmark_run = false;
+        compositor.benchmark_scene = None;
+        end_preview_hold_if_releasing(&mut compositor);
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
         compositor.source_iso_frame_stores = None;
@@ -6515,6 +6859,12 @@ async fn run_synthetic_compositor_loop(
                 preview_surface_progress_times_ms
                     .push(surface_progress_started_at.elapsed().as_secs_f64() * 1000.0);
 
+                // Plan 212 S4: a benchmark tick (the primary composed a
+                // performance check's scene) and a tick under the Preview
+                // hold send no `preview.frameReady`; main keeps what it
+                // presents. The first program tick after the check ends the
+                // hold and presents as before.
+                let benchmark_tick = render_cache.benchmark;
                 if published.primary_published && preview_surface_active
                     && should_emit_preview_surface_compositor_progress(latest_surface_status.as_ref())
                 {
@@ -6525,18 +6875,32 @@ async fn run_synthetic_compositor_loop(
                         frames_rendered,
                         fallback_frame_age_ms,
                         published.metal_target_handoff,
+                        benchmark_tick,
                     ) {
-                        Ok(Some(frame_ready)) => {
+                        CompositorFrameProgress::Ready(frame_ready) => {
                             state.emit_event("preview.frameReady", frame_ready);
                         }
-                        Ok(None) => break,
-                        Err(()) => {
+                        CompositorFrameProgress::Held => {}
+                        CompositorFrameProgress::RunRetired => break,
+                        CompositorFrameProgress::Contended => {
                             compositor_status_lock_contentions =
                                 compositor_status_lock_contentions.saturating_add(1);
                         }
                     }
                     compositor_status_progress_times_ms
                         .push(status_progress_started_at.elapsed().as_secs_f64() * 1000.0);
+                } else if published.primary_published && !benchmark_tick {
+                    // No surface to present to: a hold whose check ended
+                    // still ends on this program frame, so the oracle and the
+                    // next surface read the live run again.
+                    if let Ok(mut compositor) = state.compositor.try_lock()
+                        && compositor.run_id.as_deref() == Some(run_id.as_str())
+                        && end_preview_hold_if_releasing(&mut compositor)
+                    {
+                        let status = compositor.status.clone();
+                        drop(compositor);
+                        state.emit_event("compositor.status", status);
+                    }
                 }
 
                 if window_started_at.elapsed() >= COMPOSITOR_DIAGNOSTIC_WINDOW {
@@ -8044,6 +8408,7 @@ fn try_gpu_compose_with_chrome(
     })?;
     let prepare_started_at = Instant::now();
     let empty_snapshot = CompositorSceneSnapshot {
+        synthetic_hard_content: false,
         selected_sources: None,
         revision: 0,
         scene: None,
@@ -8547,8 +8912,12 @@ fn try_gpu_compose_with_chrome(
                 }
             }
             SceneSourceKind::TestPattern => {
-                let pattern =
-                    synthetic_test_pattern_bgra(inputs.sequence, inputs.width, inputs.height);
+                let pattern = synthetic_test_pattern_bgra(
+                    inputs.sequence,
+                    inputs.width,
+                    inputs.height,
+                    snapshot.synthetic_hard_content,
+                );
                 let (dest, crop) = gpu_source_placement(
                     pattern.width as u32,
                     pattern.height as u32,
@@ -8801,35 +9170,11 @@ fn missing_source_black_bgra() -> MissingSourcePlaceholderBgra {
 /// encoder does real-content work.
 fn synthetic_hard_content_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    SYNTHETIC_HARD_CONTENT_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed)
-        || *ENABLED.get_or_init(|| {
-            std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT")
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        })
-}
-
-/// Runtime switch for hard synthetic content. The performance check turns it
-/// on for the lifetime of its benchmark sessions: the cheap pattern encodes
-/// faster than realtime on any machine, so it would recommend 4K to a Celeron.
-/// Only one capture session exists at a time, so a process-wide flag is exact.
-static SYNTHETIC_HARD_CONTENT_OVERRIDE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Holds hard synthetic content on until dropped.
-pub(crate) struct SyntheticHardContentGuard(());
-
-impl SyntheticHardContentGuard {
-    pub(crate) fn engage() -> Self {
-        SYNTHETIC_HARD_CONTENT_OVERRIDE.store(true, std::sync::atomic::Ordering::Relaxed);
-        Self(())
-    }
-}
-
-impl Drop for SyntheticHardContentGuard {
-    fn drop(&mut self) {
-        SYNTHETIC_HARD_CONTENT_OVERRIDE.store(false, std::sync::atomic::Ordering::Relaxed);
-    }
+    *ENABLED.get_or_init(|| {
+        std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
 }
 
 fn xorshift64(state: &mut u64) -> u64 {
@@ -8872,12 +9217,19 @@ fn synthetic_hard_content_bgra(
     }
 }
 
+/// The test-pattern source's pixels for one frame. `hard_content` is the
+/// scene's own flag (plan 212 S3: a performance check's benchmark scene, so
+/// the noise belongs to the benchmark and never to a user's test pattern);
+/// the cheap pattern encodes faster than realtime on any machine, so a
+/// benchmark on it would recommend 4K to a Celeron. The smokes turn the
+/// noise on for every scene with `VIDEORC_SYNTHETIC_HARD_CONTENT`.
 fn synthetic_test_pattern_bgra(
     sequence: u64,
     canvas_width: u32,
     canvas_height: u32,
+    hard_content: bool,
 ) -> SyntheticTestPatternBgra {
-    if synthetic_hard_content_enabled() {
+    if hard_content || synthetic_hard_content_enabled() {
         return synthetic_hard_content_bgra(sequence, canvas_width, canvas_height);
     }
     let width = SYNTHETIC_TEST_PATTERN_WIDTH;
@@ -9500,7 +9852,10 @@ async fn publish_compositor_frame(
     // surface is live to show it. Decided from the same cache the legs
     // read, so a re-plan (a layout save, a banner change, the Clips arm, a
     // lease release) takes effect on the next tick.
+    // Plan 212 S2: never while the primary composes a benchmark scene; the
+    // Preview holds its last program frame for the check's length instead.
     let program_leg_wanted = program_leg.presenting
+        && !render_cache.benchmark
         && !preview_program_leg_disabled()
         && preview_needs_program_leg(
             render_cache.banner_session_shape,
@@ -9706,7 +10061,12 @@ async fn publish_compositor_frame(
                 width,
                 height,
                 pixel_format,
-                export_handle.with_presentation_time(published_at),
+                export_handle
+                    .with_presentation_time(published_at)
+                    .with_scene_flags(
+                        render_cache.benchmark,
+                        scene_shows_test_pattern_source(snapshot.as_ref()),
+                    ),
                 captured_at,
                 bytes,
             );
@@ -10328,7 +10688,14 @@ fn publish_auxiliary_compositor_frame(
         width,
         height,
         pixel_format,
-        export_handle.with_presentation_time(published_at),
+        export_handle
+            .with_presentation_time(published_at)
+            .with_scene_flags(
+                inputs
+                    .snapshot
+                    .is_some_and(|snapshot| snapshot.synthetic_hard_content),
+                scene_shows_test_pattern_source(inputs.snapshot),
+            ),
         captured_at,
         bytes,
     );
@@ -10827,7 +11194,14 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         };
         let rendered = match source.kind {
             SceneSourceKind::TestPattern => {
-                render_synthetic_source_rect(sequence, width, height, rect, bytes);
+                render_synthetic_source_rect(
+                    sequence,
+                    width,
+                    height,
+                    rect,
+                    bytes,
+                    snapshot.synthetic_hard_content,
+                );
                 true
             }
             SceneSourceKind::Screen | SceneSourceKind::Window => {
@@ -10984,30 +11358,71 @@ fn try_update_preview_surface_frames(
     Ok(Some(surface.status.clone()))
 }
 
+/// What one tick's status update means for the Preview (plan 212 S4).
+enum CompositorFrameProgress {
+    /// Present this frame.
+    Ready(CompositorFrameReady),
+    /// A benchmark tick, or the Preview holds: nothing to present.
+    Held,
+    /// The run was replaced.
+    RunRetired,
+    /// The runtime lock was busy; try again next tick.
+    Contended,
+}
+
 fn try_update_compositor_frame_progress(
     state: &AppState,
     run_id: &str,
     frames_rendered: u64,
     frame_age_ms: u64,
     metal_target_handoff: Option<CompositorMetalTargetHandoff>,
-) -> Result<Option<CompositorFrameReady>, ()> {
+    benchmark_tick: bool,
+) -> CompositorFrameProgress {
     let Ok(mut compositor) = state.compositor.try_lock() else {
-        return Err(());
+        return CompositorFrameProgress::Contended;
     };
     if compositor.run_id.as_deref() != Some(run_id) {
-        return Ok(None);
+        return CompositorFrameProgress::RunRetired;
     }
     compositor.status.state = CompositorState::Live;
     compositor.status.frames_rendered = frames_rendered;
-    compositor.status.frame_scene_revision = compositor
-        .frame_evidence
-        .back()
-        .filter(|evidence| evidence.sequence == frames_rendered)
-        .and_then(|evidence| evidence.scene_revision);
+    if !benchmark_tick {
+        // Plan 212 S2: a benchmark frame's revision is the benchmark
+        // scene's; the status keeps the user's last program frame.
+        compositor.status.frame_scene_revision = compositor
+            .frame_evidence
+            .back()
+            .filter(|evidence| evidence.sequence == frames_rendered)
+            .and_then(|evidence| evidence.scene_revision);
+    }
     compositor.status.frame_age_ms = Some(frame_age_ms);
     apply_compositor_status_metal_target_handoff(&mut compositor.status, metal_target_handoff);
     compositor.status.updated_at = Utc::now().to_rfc3339();
-    Ok(Some(CompositorFrameReady {
+    if benchmark_tick {
+        return CompositorFrameProgress::Held;
+    }
+    if end_preview_hold_if_releasing(&mut compositor) {
+        let status = compositor.status.clone();
+        drop(compositor);
+        state.emit_event("compositor.status", status);
+        return CompositorFrameProgress::Held;
+    }
+    if compositor.preview_hold.is_some() {
+        return CompositorFrameProgress::Held;
+    }
+    // Plan 212 S6: a packaged backend never offers a frame composed from a
+    // scene with a test-pattern source. The lease refuses it too; this
+    // saves main the round trip.
+    if packaged_build()
+        && presented_frame_store_unguarded(&compositor)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()
+            .is_some_and(|frame| frame.metadata.has_test_pattern_scene())
+    {
+        return CompositorFrameProgress::Held;
+    }
+    CompositorFrameProgress::Ready(CompositorFrameReady {
         target_fps: compositor.status.target_fps,
         width: compositor.status.width,
         height: compositor.status.height,
@@ -11020,7 +11435,7 @@ fn try_update_compositor_frame_progress(
         metal_target_width: compositor.status.metal_target_width,
         metal_target_height: compositor.status.metal_target_height,
         updated_at: compositor.status.updated_at.clone(),
-    }))
+    })
 }
 
 fn try_update_compositor_status(
@@ -11037,11 +11452,14 @@ fn try_update_compositor_status(
     compositor.status.state = CompositorState::Live;
     compositor.status.render_fps = Some(metrics.render_fps);
     compositor.status.frames_rendered = metrics.frames_rendered;
-    compositor.status.frame_scene_revision = compositor
-        .frame_evidence
-        .back()
-        .filter(|evidence| evidence.sequence == metrics.frames_rendered)
-        .and_then(|evidence| evidence.scene_revision);
+    if compositor.benchmark_scene.is_none() {
+        // Plan 212 S2: see `try_update_compositor_frame_progress`.
+        compositor.status.frame_scene_revision = compositor
+            .frame_evidence
+            .back()
+            .filter(|evidence| evidence.sequence == metrics.frames_rendered)
+            .and_then(|evidence| evidence.scene_revision);
+    }
     compositor.status.repeated_frames = metrics.repeated_frames;
     compositor.status.dropped_frames = metrics.dropped_frames;
     compositor.status.frame_age_ms = Some(metrics.frame_age_ms);
@@ -11051,7 +11469,10 @@ fn try_update_compositor_status(
         metrics.metal_target_handoff,
     );
     compositor.status.sources = metrics.sources;
-    compositor.status.frame_pipeline = metrics.frame_pipeline;
+    compositor.status.frame_pipeline = CompositorFramePipelineStatus {
+        preview_synthetic_refused: compositor.preview_backstop.refused(),
+        ..metrics.frame_pipeline
+    };
     // Plan 190: how the live background draws, and what it holds (0 while off).
     let budget_notice = compositor.publish_live_background_status();
 
@@ -11527,8 +11948,9 @@ fn render_synthetic_source_rect(
     canvas_height: u32,
     rect: PixelRect,
     bytes: &mut [u8],
+    hard_content: bool,
 ) {
-    let pattern = synthetic_test_pattern_bgra(sequence, canvas_width, canvas_height);
+    let pattern = synthetic_test_pattern_bgra(sequence, canvas_width, canvas_height, hard_content);
     let source = RgbaSource {
         bytes: &pattern.bytes,
         width: pattern.width as u32,
@@ -12567,6 +12989,7 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
         editor_draft: None,
         live_background: None,
         screen_switch: None,
+        preview_hold: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
     }
@@ -12865,6 +13288,7 @@ fn source_iso_snapshot(
     layout.camera_chroma_key_enabled = false;
     layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::default();
     Some(CompositorSceneSnapshot {
+        synthetic_hard_content: false,
         selected_sources: snapshot.selected_sources.clone(),
         revision: snapshot.revision,
         scene: Some(Scene {
@@ -13139,6 +13563,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: Some(sources),
             revision: 1,
             scene: Some(scene),
@@ -13159,6 +13584,7 @@ mod tests {
             };
             let mut cache = CompositorRenderCache {
                 drafts_follow_capture: false,
+                benchmark: false,
                 frame_store: stores.screen.clone(),
                 stream_frame_store: None,
                 program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
@@ -14421,8 +14847,8 @@ mod tests {
 
     #[test]
     fn synthetic_test_pattern_bgra_has_spatial_and_temporal_motion() {
-        let first = synthetic_test_pattern_bgra(7, 1920, 1080);
-        let next = synthetic_test_pattern_bgra(8, 1920, 1080);
+        let first = synthetic_test_pattern_bgra(7, 1920, 1080, false);
+        let next = synthetic_test_pattern_bgra(8, 1920, 1080, false);
 
         assert_eq!(first.width, SYNTHETIC_TEST_PATTERN_WIDTH);
         assert_eq!(first.height, SYNTHETIC_TEST_PATTERN_HEIGHT);
@@ -14437,18 +14863,19 @@ mod tests {
             "pattern should have spatial contrast"
         );
 
-        // Same test on purpose: the override is process-wide, so flipping it
-        // from a parallel test would race the size assertions above.
-        {
-            let _hard = SyntheticHardContentGuard::engage();
-            let hard = synthetic_test_pattern_bgra(7, 1920, 1080);
-            assert_eq!((hard.width, hard.height), (480, 270));
-            assert_ne!(hard.bytes, synthetic_test_pattern_bgra(8, 1920, 1080).bytes);
-        }
+        // Plan 212 S3: the noise is the scene's own flag (a performance
+        // check's benchmark scene), never a process-wide switch, so a user's
+        // test pattern drawn beside it stays the plain pattern.
+        let hard = synthetic_test_pattern_bgra(7, 1920, 1080, true);
+        assert_eq!((hard.width, hard.height), (480, 270));
+        assert_ne!(
+            hard.bytes,
+            synthetic_test_pattern_bgra(8, 1920, 1080, true).bytes
+        );
         assert_eq!(
-            synthetic_test_pattern_bgra(7, 1920, 1080).width,
+            synthetic_test_pattern_bgra(7, 1920, 1080, false).width,
             SYNTHETIC_TEST_PATTERN_WIDTH,
-            "dropping the guard restores the cheap pattern"
+            "a plain scene keeps the cheap pattern"
         );
     }
 
@@ -14481,6 +14908,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -14599,6 +15027,7 @@ mod tests {
         overlay.default_transform = overlay.transform.clone();
         scene.sources.push(overlay);
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -14704,6 +15133,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -14814,6 +15244,7 @@ mod tests {
             live: None,
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -15163,6 +15594,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                synthetic_hard_content: false,
                 selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
@@ -15260,6 +15692,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                synthetic_hard_content: false,
                 selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
@@ -15526,6 +15959,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                synthetic_hard_content: false,
                 selected_sources: None,
                 revision: 7,
                 scene: Some(scene),
@@ -15626,6 +16060,7 @@ mod tests {
         camera.transform = full_frame_transform();
         camera.default_transform = full_frame_transform();
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -15672,6 +16107,7 @@ mod tests {
             return;
         };
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: None,
@@ -16472,7 +16908,7 @@ mod tests {
             compositor.run_id = Some("run".to_string());
         }
 
-        let frame_ready = try_update_compositor_frame_progress(
+        let CompositorFrameProgress::Ready(frame_ready) = try_update_compositor_frame_progress(
             &state,
             "run",
             42,
@@ -16482,9 +16918,10 @@ mod tests {
                 width: 640,
                 height: 360,
             }),
-        )
-        .expect("progress lock")
-        .expect("progress status");
+            false,
+        ) else {
+            panic!("progress status");
+        };
 
         assert_eq!(frame_ready.frames_rendered, 42);
         assert_eq!(frame_ready.frame_scene_revision, Some(12));
@@ -16502,11 +16939,10 @@ mod tests {
         assert_eq!(status.frame_scene_revision, Some(12));
         assert_eq!(status.frame_age_ms, Some(4));
         assert_eq!(status.frame_time_p95_ms, Some(12.5));
-        assert!(
-            try_update_compositor_frame_progress(&state, "stale-run", 43, 5, None)
-                .expect("progress lock")
-                .is_none()
-        );
+        assert!(matches!(
+            try_update_compositor_frame_progress(&state, "stale-run", 43, 5, None, false),
+            CompositorFrameProgress::RunRetired
+        ));
     }
 
     #[tokio::test]
@@ -16717,6 +17153,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 60,
                 width: 640,
                 height: 360,
@@ -16773,6 +17210,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -16868,6 +17306,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -17075,6 +17514,7 @@ mod tests {
             let mut compositor = state.compositor.lock().await;
             compositor.stream_frame_store = Some(stream_store.clone());
             compositor.scene = Some(CompositorSceneSnapshot {
+                synthetic_hard_content: false,
                 selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
@@ -17908,6 +18348,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 1920,
                 height: 1080,
@@ -17936,6 +18377,7 @@ mod tests {
     async fn rapid_compositor_replacement_awaits_the_previous_blocking_worker() {
         let state = test_state();
         let params = |width| CompositorStartParams {
+            benchmark: false,
             target_fps: 60,
             width,
             height: 36,
@@ -17969,6 +18411,7 @@ mod tests {
 
     fn preview_params(width: u32, height: u32) -> CompositorStartParams {
         CompositorStartParams {
+            benchmark: false,
             target_fps: 60,
             width,
             height,
@@ -17989,6 +18432,7 @@ mod tests {
 
     fn arm_params(width: u32, height: u32) -> CompositorArmParams {
         CompositorArmParams {
+            benchmark: false,
             target_fps: 30,
             width,
             height,
@@ -18131,6 +18575,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 highlight_overlay_on_primary: idle.highlight_on_primary,
                 buddy_overlay_on_primary: idle.buddy_on_primary,
                 highlight_overlay_on_program: idle.highlight_on_program,
@@ -18157,6 +18602,7 @@ mod tests {
             &state,
             "clips",
             CompositorArmParams {
+                benchmark: false,
                 replay_only: true,
                 highlight_overlay_on_primary: ring.highlight.primary,
                 buddy_overlay_on_primary: ring.buddy.primary,
@@ -18237,6 +18683,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 replay_only: true,
                 highlight_overlay_on_primary: flags.highlight_on_primary,
@@ -18287,6 +18734,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 buddy_overlay_on_primary: record.buddy_on_primary,
                 buddy_overlay_on_program: record.buddy_on_program,
@@ -18313,6 +18761,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 highlight_overlay_on_primary: idle.highlight_on_primary,
                 buddy_overlay_on_primary: idle.buddy_on_primary,
                 highlight_overlay_on_program: idle.highlight_on_program,
@@ -18355,6 +18804,244 @@ mod tests {
         stop_compositor(&state).await;
     }
 
+    fn test_pattern_scene(width: u32, height: u32) -> (Scene, crate::protocol::SourceSelection) {
+        let sources = crate::protocol::SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: true,
+        };
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: sources.clone(),
+            layout: crate::protocol::default_layout_settings(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width,
+                height,
+                fps: 30,
+                bitrate_kbps: 1000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        (scene, sources)
+    }
+
+    /// Plan 212 S2: a benchmark's scene is committed beside the user's. On
+    /// the in-place path the status keeps the user's scene (revision, id,
+    /// sources), the frames carry the benchmark's revision and flags for
+    /// the barrier and the lease, the program leg is off, and the release
+    /// takes the benchmark scene away. On the fresh-run path the same holds
+    /// for a run started with `benchmark: true`. A run that is neither
+    /// refuses the commit.
+    #[tokio::test]
+    async fn a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths() {
+        let state = test_state();
+        start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        // The user's scene: one plain test pattern (the only source a test
+        // can draw), committed the way the idle Preview commits it.
+        let (user_scene, user_sources) = test_pattern_scene(64, 36);
+        update_compositor_scene_with_selected_sources(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 10,
+                scene: Some(user_scene.clone()),
+                layout: crate::protocol::default_layout_settings(),
+                active_screen: None,
+                transition_ms: None,
+            },
+            &user_sources,
+        )
+        .await;
+        let before = wait_for_frame_at_revision(&state, Some(10)).await;
+        let user_status = compositor_status(&state).await;
+        assert_eq!(user_status.scene_revision, Some(10));
+        assert_eq!(
+            user_status.scene_id.as_deref(),
+            Some(user_scene.id.as_str())
+        );
+        {
+            let frame = compositor_frame_store(&state)
+                .await
+                .lock()
+                .unwrap()
+                .latest()
+                .unwrap();
+            assert!(!frame.metadata.is_benchmark());
+            assert!(
+                frame.metadata.has_test_pattern_scene(),
+                "the user's own test pattern is flagged for the packaged backstop"
+            );
+        }
+
+        // Not a benchmark run: refused.
+        let (benchmark_scene, benchmark_sources) = test_pattern_scene(128, 72);
+        assert!(
+            !commit_benchmark_scene(
+                &state,
+                11,
+                benchmark_scene.clone(),
+                crate::protocol::default_layout_settings(),
+                benchmark_sources.clone(),
+            )
+            .await
+        );
+
+        // In place: the benchmark arms the Preview's run.
+        arm_compositor_for_capture(
+            &state,
+            "benchmark",
+            CompositorArmParams {
+                benchmark: true,
+                ..arm_params(128, 72)
+            },
+        )
+        .await
+        .expect("arms in place");
+        assert!(
+            commit_benchmark_scene(
+                &state,
+                11,
+                benchmark_scene.clone(),
+                crate::protocol::default_layout_settings(),
+                benchmark_sources.clone(),
+            )
+            .await
+        );
+        let benchmark_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
+        assert_eq!(
+            benchmark_frame.scene_revision,
+            Some(11),
+            "the barrier reads the benchmark scene's revision"
+        );
+        {
+            let compositor = state.compositor.lock().await;
+            assert_eq!(compositor.status.scene_revision, Some(10));
+            assert_eq!(
+                compositor.status.scene_id.as_deref(),
+                Some(user_scene.id.as_str())
+            );
+            assert_eq!(compositor.scene.as_ref().map(|s| s.revision), Some(10));
+            assert_eq!(
+                compositor.benchmark_scene.as_ref().map(|s| s.revision),
+                Some(11)
+            );
+            let cache = CompositorRenderCache::from_runtime(&compositor);
+            assert!(cache.benchmark);
+            assert!(
+                cache
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.synthetic_hard_content),
+                "the primary leg draws the benchmark's noise"
+            );
+            assert!(
+                !compositor
+                    .scene
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.synthetic_hard_content),
+                "the user's test pattern stays the plain pattern"
+            );
+            let frame = compositor.frame_store.lock().unwrap().latest().unwrap();
+            assert!(frame.metadata.is_benchmark());
+            assert_eq!(
+                compositor_scene_sources(compositor.scene.as_ref().unwrap(), None, None).len(),
+                compositor.status.scene_sources.len()
+            );
+        }
+        assert!(
+            !try_lock_frame_pipeline_program_leg(&state),
+            "the program leg never composes the benchmark scene"
+        );
+
+        // The release takes the benchmark scene with it; the next frame is
+        // the user's scene at its own revision (no surface: the run stops).
+        release_compositor_capture_lease(&state, "benchmark").await;
+        {
+            let compositor = state.compositor.lock().await;
+            assert!(compositor.benchmark_scene.is_none());
+            assert_eq!(
+                compositor.scene.as_ref().map(|s| s.revision),
+                Some(10),
+                "the user's scene survives the benchmark"
+            );
+        }
+
+        // Fresh run: the benchmark starts its own run.
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                benchmark: true,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                ..preview_params(128, 72)
+            },
+        )
+        .await;
+        assert!(
+            commit_benchmark_scene(
+                &state,
+                12,
+                benchmark_scene,
+                crate::protocol::default_layout_settings(),
+                benchmark_sources,
+            )
+            .await
+        );
+        let fresh_frame = wait_for_frame_dimensions(&state, 128, 72, 0).await;
+        assert_eq!(fresh_frame.scene_revision, Some(12));
+        {
+            let compositor = state.compositor.lock().await;
+            assert_ne!(
+                compositor.status.scene_revision,
+                Some(12),
+                "the status never takes the benchmark scene"
+            );
+            assert_eq!(compositor.scene.as_ref().map(|s| s.revision), Some(10));
+            assert!(
+                compositor
+                    .frame_store
+                    .lock()
+                    .unwrap()
+                    .latest()
+                    .unwrap()
+                    .metadata
+                    .is_benchmark()
+            );
+        }
+        stop_compositor(&state).await;
+        assert!(state.compositor.lock().await.benchmark_scene.is_none());
+    }
+
+    async fn wait_for_frame_at_revision(
+        state: &AppState,
+        revision: Option<u64>,
+    ) -> CompositorFrameEvidence {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let latest = compositor_latest_frame_evidence(state).await;
+            if let Some(evidence) = latest
+                && evidence.scene_revision == revision
+            {
+                return evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "compositor never published a frame at revision {revision:?} (latest {latest:?})"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn try_lock_frame_pipeline_program_leg(state: &AppState) -> bool {
+        state
+            .compositor
+            .try_lock()
+            .map(|compositor| compositor.status.frame_pipeline.preview_program_leg)
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn arm_compositor_for_capture_refuses_non_preview_runs() {
         let state = test_state();
@@ -18366,6 +19053,7 @@ mod tests {
         let recording = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 ..preview_params(64, 36)
             },
@@ -18380,6 +19068,7 @@ mod tests {
         let split = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 stream_output: Some(CompositorAuxiliaryOutput {
                     width: 32,
                     height: 18,
@@ -18423,6 +19112,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 60,
                 width: 64,
                 height: 36,
@@ -18461,6 +19151,7 @@ mod tests {
     async fn concurrent_compositor_starts_serialize_the_full_worker_handoff() {
         let state = test_state();
         let params = |width| CompositorStartParams {
+            benchmark: false,
             target_fps: 60,
             width,
             height: 36,
@@ -18499,6 +19190,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 703,
                 height: 395,
@@ -18539,6 +19231,7 @@ mod tests {
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 1920,
                 height: 1080,
@@ -19020,6 +19713,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -19577,6 +20271,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -20037,6 +20732,7 @@ mod tests {
             live: None,
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -20133,6 +20829,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -20262,6 +20959,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -20521,6 +21219,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -20716,6 +21415,7 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.scene = Some(CompositorSceneSnapshot {
+                synthetic_hard_content: false,
                 selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
@@ -20818,6 +21518,7 @@ mod tests {
             let mut compositor = state.compositor.lock().await;
             compositor.run_id = Some("camera-publication-run".into());
             compositor.scene = Some(CompositorSceneSnapshot {
+                synthetic_hard_content: false,
                 selected_sources: None,
                 revision: 1,
                 scene: Some(scene),
@@ -21203,6 +21904,7 @@ mod tests {
             protected_overlay_window_ids: Vec::new(),
         });
         state.compositor.lock().await.scene = Some(CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -22443,6 +23145,7 @@ mod banner_tests {
             protected_overlay_window_ids: Vec::new(),
         });
         let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -23344,6 +24047,7 @@ mod program_leg_tests {
         let mut compositor = state.compositor.try_lock().expect("unlocked");
         compositor.run_id = Some("test-run".to_string());
         compositor.scene = Some(CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),
@@ -23508,6 +24212,7 @@ mod program_leg_tests {
                 session_id: "clips".to_string(),
                 run_id: "test-run".to_string(),
                 replay_only: true,
+                benchmark: false,
                 render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(WIDTH, HEIGHT))),
                 preview_config: idle_config(),
             });
@@ -23836,6 +24541,7 @@ mod live_background_metal_tests {
         });
         scene.background = Some(background(live));
         CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             selected_sources: None,
             revision: 1,
             scene: Some(scene),

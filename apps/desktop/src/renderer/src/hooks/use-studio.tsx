@@ -333,6 +333,7 @@ import {
   layoutTransactionFailureDisposition,
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
+  layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
@@ -9817,35 +9818,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
 
-    const sources = { ...captureConfigRef.current.sources }
-    for (const source of sceneAfter.sources) {
-      if (source.kind === 'camera') {
-        sources.cameraName =
-          sources.cameraId === source.deviceId ? (sources.cameraName ?? source.name) : source.name
-        sources.cameraId = source.deviceId
-      }
-      if (source.kind === 'screen') {
-        sources.screenName =
-          sources.screenId === source.deviceId ? (sources.screenName ?? source.name) : source.name
-        sources.screenId = source.deviceId
-        sources.windowId = undefined
-        sources.windowName = undefined
-        sources.testPattern = false
-      }
-      if (source.kind === 'window') {
-        sources.windowName =
-          sources.windowId === source.deviceId ? (sources.windowName ?? source.name) : source.name
-        sources.windowId = source.deviceId
-        sources.screenId = undefined
-        sources.screenName = undefined
-        sources.testPattern = false
-      }
-      if (source.kind === 'test-pattern') {
-        sources.screenId = undefined
-        sources.windowId = undefined
-        sources.testPattern = true
-      }
-    }
+    // Plan 212 S2: the packaged app never adopts a test-pattern source.
+    const sources = layoutTransactionSourcesFromScene(
+      captureConfigRef.current.sources,
+      sceneAfter.sources,
+      { packaged: !import.meta.env.DEV }
+    )
     const visual = normalizeSceneVisual({
       layout: compositorStatus.sceneLayout,
       sources: visualSources({ ...sources, app: workingAppRef.current }),

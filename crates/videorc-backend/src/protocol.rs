@@ -3826,6 +3826,11 @@ pub struct CompositorFramePipelineStatus {
     /// the wire, so a run without one sends exactly what it sent before.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preview_program_leg: bool,
+    /// Plan 212 S2: frames composed from a scene with a test-pattern source
+    /// that the packaged backstop refused to hand the Preview. 0 is left off
+    /// the wire, so a run without one sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub preview_synthetic_refused: u64,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -3930,9 +3935,22 @@ pub struct CompositorStatus {
     /// capture, and why the in-place change was not used when it wasn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_switch: Option<ScreenSwitchStatus>,
+    /// Plan 212 S2: the Preview is holding its last program frame while a
+    /// performance check runs; not a broken Preview. Left off the wire when
+    /// there is no hold, so the strict renderer contract sees exactly what it
+    /// saw before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_hold: Option<PreviewHoldReason>,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Why the Preview holds its picture (plan 212 S2).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewHoldReason {
+    PerformanceCheck,
 }
 
 /// Plan 210 S3: how the last screen or window switch changed the capture.

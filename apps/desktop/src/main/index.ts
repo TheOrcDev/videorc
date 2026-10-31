@@ -1748,7 +1748,11 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
     if (presentedFrameId != null) {
       firstFrameLastPresentedFrameId = presentedFrameId
     }
-    retireStalledNativePreviewMainPump(framesAdvancing)
+    // Plan 212 S2: under a Preview hold the compositor's frames advance on
+    // the benchmark's canvas while no present-driving event is due, so the
+    // quiet socket is not a stalled pump.
+    const previewHeld = Boolean(compositor?.previewHold)
+    retireStalledNativePreviewMainPump(framesAdvancing && !previewHeld)
 
     const snapshot: FirstFrameSnapshot = {
       elapsedMs: Date.now() - firstFrameWatchdogStartedAtMs,
@@ -1759,7 +1763,8 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       rendererSceneRevision: nativePreviewSurfaceScene?.revision ?? null,
       compositorSceneRevision: compositor?.sceneRevision ?? null,
       compositorFrameSceneRevision: compositor?.frameSceneRevision ?? null,
-      metalTargetPresent: Boolean(compositor?.metalTargetIosurfaceId)
+      metalTargetPresent: Boolean(compositor?.metalTargetIosurfaceId),
+      previewHeld
     }
 
     if (firstFrameWatchdogMode === 'presenting-watch') {

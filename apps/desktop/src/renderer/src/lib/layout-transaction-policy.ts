@@ -144,6 +144,61 @@ export function latestLayoutTransactionCommit<T extends { sceneRevision: number 
   return current && current.sceneRevision > candidate.sceneRevision ? current : candidate
 }
 
+/**
+ * The capture selection a layout transaction adopts from the backend's scene
+ * (plan 212 S2, change 8). A `test-pattern` source is adopted in the dev app
+ * only: the packaged app has no test pattern of its own (a performance
+ * check's benchmark scene never reaches `scene.get` since plan 212, and
+ * nothing else makes one), so one there is never the user's look and is
+ * ignored rather than persisted into the working visual.
+ */
+export function layoutTransactionSourcesFromScene<
+  S extends {
+    cameraId?: string
+    cameraName?: string
+    screenId?: string
+    screenName?: string
+    windowId?: string
+    windowName?: string
+    testPattern?: boolean
+  }
+>(
+  current: S,
+  sceneSources: ReadonlyArray<{ kind: string; deviceId?: string; name: string }>,
+  { packaged }: { packaged: boolean }
+): S {
+  const sources = { ...current }
+  for (const source of sceneSources) {
+    if (source.kind === 'camera') {
+      sources.cameraName =
+        sources.cameraId === source.deviceId ? (sources.cameraName ?? source.name) : source.name
+      sources.cameraId = source.deviceId
+    }
+    if (source.kind === 'screen') {
+      sources.screenName =
+        sources.screenId === source.deviceId ? (sources.screenName ?? source.name) : source.name
+      sources.screenId = source.deviceId
+      sources.windowId = undefined
+      sources.windowName = undefined
+      sources.testPattern = false
+    }
+    if (source.kind === 'window') {
+      sources.windowName =
+        sources.windowId === source.deviceId ? (sources.windowName ?? source.name) : source.name
+      sources.windowId = source.deviceId
+      sources.screenId = undefined
+      sources.screenName = undefined
+      sources.testPattern = false
+    }
+    if (source.kind === 'test-pattern' && !packaged) {
+      sources.screenId = undefined
+      sources.windowId = undefined
+      sources.testPattern = true
+    }
+  }
+  return sources
+}
+
 export function layoutTransactionBackendSnapshotIsStable<T extends { id: string }>(input: {
   sceneBefore: T
   compositorSceneId?: string
