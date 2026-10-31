@@ -27,6 +27,7 @@ fn snapshot(kind: SceneSourceKind) -> CompositorSceneSnapshot {
     let mut layout = crate::protocol::default_layout_settings();
     layout.layout_preset = crate::protocol::LayoutPreset::ScreenOnly;
     CompositorSceneSnapshot {
+        synthetic_hard_content: false,
         selected_sources: None,
         revision: 1,
         scene: Some(scene),
@@ -84,6 +85,7 @@ fn unavailable_scene_is_black_on_cpu() {
     for scene in [
         None,
         Some(CompositorSceneSnapshot {
+            synthetic_hard_content: false,
             scene: None,
             ..snapshot(SceneSourceKind::Screen)
         }),
@@ -141,6 +143,7 @@ fn empty_scene_clears_previous_frame_on_metal_without_cpu_fallback() {
     let mut empty = snapshot(SceneSourceKind::TestPattern);
     empty.scene.as_mut().unwrap().sources.clear();
     let absent = CompositorSceneSnapshot {
+        synthetic_hard_content: false,
         scene: None,
         ..snapshot(SceneSourceKind::TestPattern)
     };

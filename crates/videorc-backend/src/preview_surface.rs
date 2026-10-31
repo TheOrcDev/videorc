@@ -1903,6 +1903,7 @@ fn idle_preview_start_params(
     let overlays = crate::compositor::idle_overlay_flags(state);
     crate::compositor::prepare_idle_buddy(state, overlays, (width, height));
     CompositorStartParams {
+        benchmark: false,
         target_fps,
         width,
         height,
@@ -3482,6 +3483,7 @@ mod tests {
         let newer = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -3928,6 +3930,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4073,6 +4076,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 160,
                 height: 90,
@@ -4162,6 +4166,7 @@ mod tests {
             &state,
             "session-lease",
             CompositorArmParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4332,6 +4337,7 @@ mod tests {
             &state,
             "session-layout",
             CompositorArmParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4412,6 +4418,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,

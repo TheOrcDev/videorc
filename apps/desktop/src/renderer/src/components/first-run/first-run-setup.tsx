@@ -23,6 +23,7 @@ import {
   type FirstRunSetupMode,
   type FirstRunStep
 } from '@/lib/first-run'
+import { firstRunSetupStartsPerformanceCheck } from '@/lib/performance-check'
 import { cn } from '@/lib/utils'
 
 /** The fade of the card and the backdrop on leaving setup (the skill's motion scale). */
@@ -65,7 +66,8 @@ export function FirstRunSetup({
   /** After the fade: write the record (first run) or return (replay). */
   onLeave: (leave: FirstRunLeave) => void
 }): ReactElement {
-  const { runtimeInfo, refreshBackend } = useStudioCore()
+  const { runtimeInfo, refreshBackend, performanceCheck, isSessionActive, runPerformanceCheck } =
+    useStudioCore()
   const trafficLightGutter = useTrafficLightGutter()
   const [leaving, setLeaving] = useState<FirstRunLeave | null>(null)
   const [savedStep, setSavedStep] = useState<FirstRunStep>(initialStep ?? 'permissions')
@@ -132,6 +134,20 @@ export function FirstRunSetup({
     const timer = window.setTimeout(() => onLeave(leaving), FIRST_RUN_LEAVE_MS)
     return () => window.clearTimeout(timer)
   }, [leaving, onLeave])
+
+  // The performance check runs once per machine, here, as setup opens (plan
+  // 212 D1): no step shows the Studio's Preview, so the measurement is never
+  // seen. Decided once, as soon as the backend has said whether a verdict
+  // exists; a verdict from this machine means nothing runs. Leaving setup
+  // early does not cancel it: the Studio takes over its hold and its result.
+  const performanceCheckDecided = useRef(false)
+  useEffect(() => {
+    if (performanceCheckDecided.current || performanceCheck === undefined) return
+    performanceCheckDecided.current = true
+    if (firstRunSetupStartsPerformanceCheck(mode, performanceCheck, isSessionActive)) {
+      void runPerformanceCheck()
+    }
+  }, [isSessionActive, mode, performanceCheck, runPerformanceCheck])
 
   // A new step takes the keyboard: its marked control, else its first
   // button, else the primary. Permissions places its own focus once its

@@ -3718,6 +3718,36 @@ async fn commit_recording_startup_scene_at_time(
     }
 }
 
+/// Plan 212 S2: a performance check's benchmark scene is committed beside
+/// the user's scene (`commit_benchmark_scene`): `state.scene`, the
+/// compositor's scene and its status keep the user's. The returned lease
+/// carries the benchmark revision the startup barrier waits for, and holds
+/// the scene-commit edge like a recording's, so an idle reload cannot race
+/// the barrier. `None` when the run is not the benchmark's.
+async fn commit_benchmark_startup_scene_at_time(
+    state: &AppState,
+    scene: &Scene,
+    layout: LayoutSettings,
+    now_millis: u64,
+    selected_sources: &crate::protocol::SourceSelection,
+) -> Option<RecordingStartupSceneLease> {
+    let scene_commit = state.scene_commit.clone().lock_owned().await;
+    let current_revision = state.compositor.lock().await.status.scene_revision;
+    let scene_revision = crate::live_layout::next_scene_revision(current_revision, now_millis);
+    crate::compositor::commit_benchmark_scene(
+        state,
+        scene_revision,
+        scene.clone(),
+        layout,
+        selected_sources.clone(),
+    )
+    .await
+    .then_some(RecordingStartupSceneLease {
+        scene_revision,
+        _scene_commit: scene_commit,
+    })
+}
+
 pub async fn start_session(state: AppState, params: StartSessionParams) -> Result<RecordingStatus> {
     if !params.purpose.is_performance_check() {
         // The user's Record always wins over a background benchmark.
@@ -5379,6 +5409,10 @@ async fn start_session_with_timeline(
                     &state,
                     &session_id,
                     CompositorArmParams {
+                        // Plan 212 S1: a benchmark session's lease is marked;
+                        // its scene goes beside the user's (change 2) and
+                        // the Preview holds (change 4).
+                        benchmark: params.purpose.is_performance_check(),
                         target_fps,
                         width: params.output.video.width,
                         height: params.output.video.height,
@@ -5447,6 +5481,8 @@ async fn start_session_with_timeline(
                 let started = start_synthetic_compositor(
                     state.clone(),
                     CompositorStartParams {
+                        // Plan 212 S1: the rule holds on the fresh-run path too.
+                        benchmark: params.purpose.is_performance_check(),
                         target_fps,
                         width: params.output.video.width,
                         height: params.output.video.height,
@@ -5547,15 +5583,54 @@ async fn start_session_with_timeline(
                 return Err(error);
             }
             timeline.mark(RecordingStartPhase::CameraCadence);
-            let startup_scene = commit_recording_startup_scene_at_time(
-                &state,
-                &scene,
-                params.layout.clone(),
-                active_screen.clone(),
-                u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
-                Some(&params.sources),
-            )
-            .await;
+            let startup_scene = if params.purpose.is_performance_check() {
+                // Plan 212 S2: a benchmark's startup scene goes beside the
+                // user's scene, which stays what `scene.get`, the status
+                // and the Preview show. The barrier below waits for frames
+                // at the benchmark scene's revision.
+                match commit_benchmark_startup_scene_at_time(
+                    &state,
+                    &scene,
+                    params.layout.clone(),
+                    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+                    &params.sources,
+                )
+                .await
+                {
+                    Some(lease) => lease,
+                    None => {
+                        let error = anyhow::anyhow!(
+                            "the benchmark scene was refused: the compositor run is not the benchmark's"
+                        );
+                        emit_preflight_failure_report(
+                            &state,
+                            &session_id,
+                            "benchmark scene commit",
+                            &error.to_string(),
+                            &params,
+                            &startup_source_requirements,
+                        )
+                        .await;
+                        if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(fifo_path);
+                        }
+                        if let Some(fifo_path) = encoder_bridge_stream_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(fifo_path);
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                commit_recording_startup_scene_at_time(
+                    &state,
+                    &scene,
+                    params.layout.clone(),
+                    active_screen.clone(),
+                    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+                    Some(&params.sources),
+                )
+                .await
+            };
             // Dual-orientation: seed the vertical leg's scene from the simulcast
             // params (same sources, its own vertical geometry). Non-dual sessions
             // clear any stale leftover so the aux can never compose a dead scene.
@@ -38667,6 +38742,102 @@ mod tests {
         }
     }
 
+    /// Plan 212 S2: a benchmark session's startup scene never reaches
+    /// `state.scene` (what `scene.get` answers) nor the compositor's scene;
+    /// it is refused outright when the run is not the benchmark's, and
+    /// committed beside the user's scene when it is, at the revision the
+    /// startup barrier then waits for.
+    #[tokio::test]
+    async fn a_benchmark_startup_scene_never_replaces_the_users_scene() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let user_scene = state.scene.lock().await.clone();
+        let params = benchmark_like_params();
+        let scene = scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: params.sources.clone(),
+            layout: params.layout.clone(),
+            video: Some(params.output.video.clone()),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        assert!(
+            commit_benchmark_startup_scene_at_time(
+                &state,
+                &scene,
+                params.layout.clone(),
+                1_000,
+                &params.sources,
+            )
+            .await
+            .is_none(),
+            "no run, or a run that is not the benchmark's: refused"
+        );
+        crate::compositor::start_synthetic_compositor(
+            state.clone(),
+            crate::compositor::CompositorStartParams {
+                benchmark: true,
+                target_fps: 30,
+                width: 64,
+                height: 36,
+                frame_consumer: crate::compositor::CompositorFrameConsumer::RawYuvEncoder,
+                stream_output: None,
+                source_iso_output: None,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
+            },
+        )
+        .await;
+        let lease = commit_benchmark_startup_scene_at_time(
+            &state,
+            &scene,
+            params.layout.clone(),
+            1_000,
+            &params.sources,
+        )
+        .await
+        .expect("a benchmark run takes the benchmark scene");
+        assert_eq!(
+            crate::compositor::compositor_benchmark_scene_revision(&state).await,
+            Some(lease.scene_revision)
+        );
+        assert_eq!(
+            *state.scene.lock().await,
+            user_scene,
+            "scene.get keeps the user's scene"
+        );
+        let status = crate::compositor::compositor_status(&state).await;
+        assert_ne!(status.scene_revision, Some(lease.scene_revision));
+        assert!(status.scene_sources.is_empty());
+        drop(lease);
+        crate::compositor::stop_compositor(&state).await;
+    }
+
+    fn benchmark_like_params() -> StartSessionParams {
+        let mut params = base_params(true, false);
+        params.sources = SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: true,
+        };
+        params.purpose = crate::protocol::SessionPurpose::PerformanceCheck;
+        params
+    }
+
     #[test]
     fn recording_startup_barrier_requires_visible_real_scene_sources() {
         let test_pattern = scene_with_sources(vec![scene_source(
@@ -47365,6 +47536,7 @@ mod low_end_windows_recording_tests {
             rungs,
         };
         let state = |result: Option<PerformanceCheckResult>, stale: bool| PerformanceCheckState {
+            last_run_not_recorded: None,
             running: false,
             result,
             stale,
