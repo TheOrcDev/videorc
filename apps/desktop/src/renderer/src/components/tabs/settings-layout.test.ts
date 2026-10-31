@@ -200,8 +200,9 @@ describe('Settings layout', () => {
 
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
     // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
-    // (PageTabs), so the shell keeps no list of such pages.
-    expect(appShellSource).toContain('<PaneBody>')
+    // (PageTabs), so the shell keeps no list of such pages. The key remounts
+    // the scroll container per page so each opens at its top (#956).
+    expect(appShellSource).toMatch(/<PaneBody(\s+key=\{active\})?>/)
     expect(appShellSource).not.toMatch(/<PaneBody scroll=/)
     expect(shellSource).toContain('<PageTabs')
     expect(pageTabsSource).toContain('{...PANE_OWNS_SCROLL}')
