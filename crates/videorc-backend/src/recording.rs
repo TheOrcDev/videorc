@@ -5474,6 +5474,15 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        // Plan 205 S6: the same program verdict the in-place
+                        // arm carries. A buffer-only session lands here on a
+                        // cold launch (the ring starts before the Preview's
+                        // run exists), and its program is idle (D2): a
+                        // stream-only Buddy the ring leaves out is still in
+                        // the Preview.
+                        replay_only,
+                        highlight_overlay_on_program: overlay_flags.highlight_on_program,
+                        buddy_overlay_on_program: overlay_flags.buddy_on_program,
                     },
                 )
                 .await;
