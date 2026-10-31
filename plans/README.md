@@ -1,5 +1,23 @@
 # Implementation Plans
 
+- 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
+  Preview never shows test noise. Owner report: on the first launch after
+  0.17.2 the Preview showed coloured noise for about 18 s before the
+  camera. Cause: the performance check re-runs after every update, 8 s
+  after launch. Each rung borrows the Preview's compositor, replaces the
+  user's scene with a test pattern, and turns on a process-wide noise
+  switch. Nothing gives the scene back except a Clips re-arm. Its smoke
+  never looked at the Preview, and this run's verdict came from an
+  overloaded Mac (1080p30 on a 4K30 machine).
+  - Phase 1: a gate that reads the Preview (red first). The benchmark
+    draws only into its encoder, the user's scene stays, the noise
+    belongs to the benchmark, the Preview holds the program across the
+    ladder, main's watchdog leaves a hold alone, and packaged builds
+    never present a test-pattern frame. No launch or post-update check
+    (first-run setup or the Output button only), and no verdict from a
+    busy Mac.
+  - Phase 2 (optional, D2): the Preview stays live during a check.
+    **PLANNED** 2026-10-31; owner decisions D1 to D3 open.
 - 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
   Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
   needs to be much smarter", quoting a user who switches between T3 Code and
