@@ -706,10 +706,10 @@ pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result
     Ok(())
 }
 
-/// Plan 212 S4: the Preview holds its last program frame from before rung
+/// Plan 212 S2: the Preview holds its last program frame from before rung
 /// 1 until the first program frame after the last rung's session left the
 /// slot, so no rung and no hand-over between rungs ever reaches it. The
-/// benchmark's noise is its own scene's (plan 212 S3), committed by its
+/// benchmark's noise is its own scene's (plan 212 S2), committed by its
 /// session beside the user's scene.
 async fn run_ladder(
     state: &AppState,
@@ -726,6 +726,25 @@ fn overloaded_pressure(
     sample: Option<crate::host_pressure::HostPressureSample>,
 ) -> Option<crate::host_pressure::HostPressureSample> {
     sample.filter(|sample| sample.is_overloaded())
+}
+
+/// Plan 212 D3: a rung that failed while the computer was overloaded (at its
+/// start or its end) says nothing about what this computer can hold, so the
+/// ladder records no verdict. A pass stands under load: it held anyway. The
+/// 1-minute load average barely moves during a ~6 s encode, so the check's
+/// own work does not make a weak machine read busy. A failure forced by the
+/// test seam is not a measurement, so it never reads busy either. Windows
+/// has no load average and never reads busy.
+fn busy_failure(
+    reasons: &[String],
+    start: Option<crate::host_pressure::HostPressureSample>,
+    end: Option<crate::host_pressure::HostPressureSample>,
+) -> Option<crate::host_pressure::HostPressureSample> {
+    let measured_failure = reasons.iter().any(|reason| reason != FORCED_FAILURE_REASON);
+    if !measured_failure {
+        return None;
+    }
+    overloaded_pressure(start).or_else(|| overloaded_pressure(end))
 }
 
 fn reject_host_pressure(
@@ -829,7 +848,7 @@ async fn run_ladder_under_hold(
         let encode_backend = stats.as_ref().and_then(|stats| stats.encode_backend);
         let mut reasons = score_rung_for_backend(&measurement, encode_backend);
         if forced_failure_above_height().is_some_and(|height| video.height > height) {
-            reasons.push("forced-by-test-seam".to_string());
+            reasons.push(FORCED_FAILURE_REASON.to_string());
         }
         if reasons.is_empty() {
             let rate = pixel_rate(&video);
@@ -841,13 +860,7 @@ async fn run_ladder_under_hold(
         {
             reasons.push(SEPARATE_FILES_OVER_BUDGET.to_string());
         }
-        // A pass stands under load. A failure under external load proves nothing.
-        // The 1-minute average barely moves during a ~6 s encode, so the check
-        // itself does not brand a weak machine busy. Windows has no load average.
-        if !reasons.is_empty() {
-            reject_host_pressure(state, pressure_start)?;
-            reject_host_pressure(state, pressure_end)?;
-        }
+        reject_host_pressure(state, busy_failure(&reasons, pressure_start, pressure_end))?;
         skip_next = !reasons.is_empty() && should_fast_skip_next(&measurement);
         passed = reasons.is_empty();
         // One line per rung in the backend log: the support bundle then shows
@@ -934,6 +947,9 @@ async fn run_ladder_under_hold(
         .store(false, Ordering::Release);
     Ok(result)
 }
+
+/// The reason a rung failed only because the test seam below said so.
+const FORCED_FAILURE_REASON: &str = "forced-by-test-seam";
 
 /// Test seam for `smoke:performance-check`: fail every rung taller than this
 /// so the step-down path runs on hardware that would pass the top rung.
@@ -1138,6 +1154,88 @@ async fn discard_benchmark_sessions(state: &AppState, directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pressure(load_average: f64) -> Option<crate::host_pressure::HostPressureSample> {
+        Some(crate::host_pressure::HostPressureSample {
+            load_average,
+            logical_cores: 10,
+            swap_used_mb: Some(17_000),
+        })
+    }
+
+    /// Plan 212 D3: only a measured failure under load is "busy". A pass
+    /// stands, a quiet failure is a verdict, and the test seam's forced
+    /// failure is never judged by the host.
+    #[test]
+    fn a_failed_rung_on_a_busy_computer_is_no_verdict_and_a_pass_still_stands() {
+        let failed = vec!["delivered-fps".to_string()];
+        let forced = vec![FORCED_FAILURE_REASON.to_string()];
+        assert!(busy_failure(&failed, pressure(27.0), pressure(3.0)).is_some());
+        assert!(busy_failure(&failed, pressure(3.0), pressure(27.0)).is_some());
+        assert!(busy_failure(&failed, pressure(3.0), pressure(3.0)).is_none());
+        assert!(
+            busy_failure(&failed, None, None).is_none(),
+            "no load average (Windows)"
+        );
+        assert!(
+            busy_failure(&[], pressure(27.0), pressure(27.0)).is_none(),
+            "a pass stands"
+        );
+        assert!(busy_failure(&forced, pressure(27.0), pressure(27.0)).is_none());
+        let both = vec![
+            FORCED_FAILURE_REASON.to_string(),
+            "delivered-fps".to_string(),
+        ];
+        assert!(busy_failure(&both, pressure(27.0), None).is_some());
+    }
+
+    /// The owner's Mac on 2026-10-31 (a load of 27 on 10 cores): a check on
+    /// an overloaded computer measures nothing, keeps the previous verdict,
+    /// and says why; a quiet `get` afterwards no longer carries the reason
+    /// once a new run starts.
+    #[tokio::test]
+    async fn a_busy_computer_records_no_verdict_and_keeps_the_previous_one() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let previous = sample_result(&capability_key(), false, Vec::new());
+        state
+            .database
+            .save_setting(RESULT_SETTING_KEY, &previous)
+            .expect("save");
+        let mut progress = state.events.subscribe();
+
+        let outcome = run_ladder_under_hold(
+            &state,
+            &PerformanceCheckRunParams {
+                ceiling_width: 1920,
+                ceiling_height: 1080,
+                ceiling_fps: 30,
+                separate_source_recordings: false,
+            },
+            || pressure(27.0),
+        )
+        .await;
+
+        assert!(outcome.is_err(), "no verdict on a busy computer");
+        let after = current_state(&state).await;
+        assert_eq!(
+            after.result.map(|result| result.checked_at),
+            Some(previous.checked_at),
+            "the previous verdict stays"
+        );
+        assert_eq!(
+            after.last_run_not_recorded,
+            Some(crate::protocol::PerformanceCheckNotRecorded::HostBusy)
+        );
+        while let Ok(event) = progress.try_recv() {
+            assert_ne!(event.event, "performance.check.progress", "no rung ran");
+        }
+    }
 
     #[test]
     fn performance_check_pressure_and_wire_reason() {
