@@ -10,9 +10,111 @@ import {
   parseTimelineMessage,
   percentileNearestRank,
   readBudgetOverrides,
+  recordLatencyRendererReady,
+  recordLatencySceneReady,
+  recordLatencyTakeDurationMs,
   summarizeRecordCycles,
   timelinePhaseDeltas
 } from './record-latency-gate.mjs'
+import { evaluateRecordingWallDuration } from './recording-duration-gate.mjs'
+
+describe('record latency take coverage', () => {
+  it('rejects a truncated take hidden by a delayed Record acknowledgement', () => {
+    const expectedDurationMs = recordLatencyTakeDurationMs({
+      recordingAtMs: 1000,
+      stopClickAtMs: 6000,
+      recordingMs: 4000
+    })
+    assert.equal(expectedDurationMs, 5000)
+    assert.equal(
+      evaluateRecordingWallDuration({
+        expectedDurationMs,
+        actualDurationSeconds: 4.1,
+        minRatio: 0.98
+      }).length,
+      1
+    )
+    assert.deepEqual(
+      evaluateRecordingWallDuration({
+        expectedDurationMs,
+        actualDurationSeconds: 4.9,
+        minRatio: 0.98
+      }),
+      []
+    )
+  })
+
+  it('keeps the configured hold as a floor even if the observed interval is shorter', () => {
+    assert.equal(
+      recordLatencyTakeDurationMs({ recordingAtMs: 0, stopClickAtMs: 3000, recordingMs: 4000 }),
+      4000
+    )
+  })
+
+  it('refuses missing, non-finite or reversed timing evidence', () => {
+    const valid = { recordingAtMs: 1000, stopClickAtMs: 5000, recordingMs: 4000 }
+    for (const patch of [
+      { recordingAtMs: undefined },
+      { recordingAtMs: NaN },
+      { recordingAtMs: -1 },
+      { stopClickAtMs: Infinity },
+      { stopClickAtMs: 1000 },
+      { stopClickAtMs: 999 },
+      { recordingMs: 0 },
+      { recordingMs: NaN }
+    ]) {
+      assert.throws(() => recordLatencyTakeDurationMs({ ...valid, ...patch }), /coverage needs/)
+    }
+  })
+})
+
+describe('record latency scene fixture', () => {
+  const pattern = { kind: 'test-pattern', visible: true }
+
+  it('waits for the renderer to confirm the layout instead of starting on a trial backend scene', () => {
+    const committed = {
+      wsStatus: 'connected',
+      layoutPreset: 'screen-only',
+      committedLayoutPreset: 'screen-only',
+      visualTransactionPending: false,
+      layoutSwitchPending: null
+    }
+    assert.equal(recordLatencyRendererReady(committed), true)
+    for (const patch of [
+      { wsStatus: 'connecting' },
+      { layoutPreset: 'screen-camera' },
+      { committedLayoutPreset: 'screen-camera' },
+      { visualTransactionPending: true },
+      { layoutSwitchPending: 'screen-only' }
+    ])
+      assert.equal(recordLatencyRendererReady({ ...committed, ...patch }), false)
+    assert.equal(recordLatencyRendererReady(null), false)
+  })
+
+  it('rejects a restored screen-plus-camera scene even when its test pattern is live', () => {
+    assert.equal(
+      recordLatencySceneReady({ sources: [pattern, { kind: 'camera', visible: true }] }),
+      false
+    )
+    assert.equal(recordLatencySceneReady({ sources: [pattern] }), true)
+  })
+
+  it('requires visible synthetic pixels and excludes any other visible source', () => {
+    for (const scene of [
+      null,
+      {},
+      { sources: [] },
+      { sources: [{ ...pattern, visible: false }] },
+      { sources: [{ kind: 'screen', visible: true }] },
+      { sources: [pattern, { kind: 'window', visible: true }] }
+    ])
+      assert.equal(recordLatencySceneReady(scene), false)
+    assert.equal(
+      recordLatencySceneReady({ sources: [pattern, { kind: 'camera', visible: false }] }),
+      true
+    )
+  })
+})
 
 describe('record latency percentiles', () => {
   it('handles single and two-sample inputs with nearest-rank semantics', () => {

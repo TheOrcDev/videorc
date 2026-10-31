@@ -102,6 +102,31 @@ Make sure `WAYLAND_DISPLAY`, `DISPLAY`, and `DBUS_SESSION_BUS_ADDRESS` are set
 when launching from a service or over SSH: `systemctl --user
 show-environment` prints the session's values.
 
+Keep the desktop display awake for first-run animation and presented-preview
+checks. On Hyprland, `hyprctl -j monitors` must report `dpmsStatus: true` for the
+output showing the app. With the panel asleep, Electron can report a visible,
+focused window while Chromium's animation clock and frame callbacks stop.
+That run cannot prove animation timing or presented pixels. The first-run
+smoke retains animation-clock/frame counters to distinguish this from a
+shader or setup failure; waking the display does not change any gate budget.
+
+The latency smoke uses a moving, screen-only synthetic scene. It applies that
+layout through the Studio action and waits for the renderer's confirmed
+transaction and backend scene before arming Clips. A localStorage seed alone
+can be overwritten by initial working-scene persistence. Startup and whole-file
+motion checks both apply, with at least 98% requested duration coverage; the
+synthetic run does not replace real camera/microphone acceptance.
+
+The full recording matrix also selects the synthetic source in the renderer
+and confirms its screen-only scene before sending the original output profiles
+to the backend. Backend-only test-pattern params leave the renderer's automatic
+Clips re-arm using its previous source, which can open an unexpected portal
+picker between profiles. Ordinary profiles and the 1080p60 hard-content case
+require moving pixels as well as correct container timing. Repeated frames and
+corroborated freezes fail, even when FFmpeg fills a CFR container. The existing
+4K noise survival and deliberate FIFO-pressure cases retain their specialized
+contracts; they do not establish normal moving-content acceptance.
+
 ### Where things are
 
 - App data (owned-process ledger, `linux-vaapi/` probe files, settings):

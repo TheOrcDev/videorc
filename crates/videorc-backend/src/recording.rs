@@ -439,6 +439,23 @@ fn linux_pulse_worker_device(
     }
 }
 
+/// Replacement keeps the session's existing PCM bus and output process. A
+/// direct FFmpeg microphone input cannot be replaced. Linux uses the same
+/// timestamped Pulse worker for initial acquisition and replacement; Windows
+/// additionally requires its separately bundled capture worker.
+fn session_microphone_replaceable(
+    has_audio_bus: bool,
+    platform: &str,
+    windows_worker_available: bool,
+) -> bool {
+    has_audio_bus
+        && match platform {
+            "macos" | "linux" => true,
+            "windows" => windows_worker_available,
+            _ => false,
+        }
+}
+
 fn worker_microphone_fallback(
     resolved: Option<&MicrophoneInput>,
     error: &anyhow::Error,
@@ -5745,17 +5762,30 @@ async fn start_session_with_timeline(
             encoder_bridge_stream_output,
             encoder_bridge_stream_fifo.as_deref(),
         ) {
-            bridge_compositor_split_output_ffmpeg_args_with_replay(
-                &capture,
-                &params,
-                output_path.as_deref(),
-                &stream_targets,
-                fifo_path,
-                stream_fifo_path,
-                encoder_bridge_video_output,
-                stream_output,
-                replay_output.as_ref(),
-            )?
+            if encoder_bridge_video_output == EncoderBridgeVideoOutput::RawYuv420p {
+                bridge_raw_caption_split_ffmpeg_args(
+                    &capture,
+                    &params,
+                    output_path.as_deref(),
+                    &stream_targets,
+                    fifo_path,
+                    stream_fifo_path,
+                    &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
+                    replay_output.as_ref(),
+                )?
+            } else {
+                bridge_compositor_split_output_ffmpeg_args_with_replay(
+                    &capture,
+                    &params,
+                    output_path.as_deref(),
+                    &stream_targets,
+                    fifo_path,
+                    stream_fifo_path,
+                    encoder_bridge_video_output,
+                    stream_output,
+                    replay_output.as_ref(),
+                )?
+            }
         } else {
             bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &capture,
@@ -6847,11 +6877,12 @@ async fn start_session_with_timeline(
         if replaceable_video {
             sources.enable_video();
         }
-        if pending_active.native_audio.is_some()
-            && (cfg!(target_os = "macos")
-                || (cfg!(target_os = "windows")
-                    && crate::audio_capture_adapter::windows_worker_path(&ffmpeg_path).is_file()))
-        {
+        if session_microphone_replaceable(
+            pending_active.native_audio.is_some(),
+            std::env::consts::OS,
+            cfg!(target_os = "windows")
+                && crate::audio_capture_adapter::windows_worker_path(&ffmpeg_path).is_file(),
+        ) {
             sources.enable_microphone();
         } else if let Some(reason) = worker_fallback_reason.as_deref() {
             sources.microphone_unavailable(&format!(
@@ -6866,9 +6897,9 @@ async fn start_session_with_timeline(
             )
             && params.sources.microphone_id.is_some()
         {
-            // Release test 147, plan 0001: a Linux microphone on the session
-            // bus still can't be swapped mid-session; nothing has proved it.
-            sources.microphone_unavailable("Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input.");
+            sources.microphone_unavailable(
+                "The microphone is on a direct input and can't be changed until this session ends.",
+            );
         }
         // Linux plan 0024: no Linux adapter swaps a screen or camera mid-
         // session yet; say so instead of the internal adapter text.
@@ -17858,6 +17889,18 @@ async fn resolve_windows_recordable_video(
         return None;
     }
     let requested = params.output.video.clone();
+    // A unit test may supply this app state's hardware verdict without
+    // querying a physical adapter. This branch does not exist in app builds.
+    #[cfg(test)]
+    if state
+        .test_windows_recordable_video_accepts_requested
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Some(WindowsRecordableVideo {
+            video: requested,
+            reason: None,
+        });
+    }
     let identity = graphics_adapter_driver_identity();
     // Plan 195 S5: this machine's own measured verdict, when it has one.
     let verdict_cap =
@@ -20609,6 +20652,165 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
     Ok(args)
 }
 
+fn validate_raw_caption_split(params: &StartSessionParams) -> Result<()> {
+    if !params.output.record_enabled
+        || !params.output.stream_enabled
+        || params.simulcast.is_some()
+        || !caption_leg_plan(params).force_same_profile_split
+    {
+        bail!(
+            "The raw caption split requires a clean recording and a captioned horizontal stream."
+        );
+    }
+    if !caption_live_burn_output_eligible(params)
+        || resolved_enabled_stream_output_videos(params)?
+            .iter()
+            .any(|video| !same_video_profile(video, &params.output.video))
+    {
+        bail!(
+            "Live captions with a clean recording on Linux require matching recording and stream profiles up to 30fps."
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bridge_raw_caption_split_ffmpeg_args(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    targets: &[StreamTarget],
+    recording_fifo: &Path,
+    stream_fifo: &Path,
+    encoder: &ResolvedFfmpegH264Encoder,
+    replay: Option<&ReplayOutput>,
+) -> Result<Vec<String>> {
+    validate_raw_caption_split(params)?;
+    validate_stream_targets_for_ffmpeg(targets)?;
+    let output_path =
+        output_path.context("A clean recording path is required for the caption split")?;
+    if targets.is_empty() {
+        bail!("A caption split requires a stream target");
+    }
+    if targets.iter().any(|target| {
+        target.output_orientation != crate::streaming::StreamOutputOrientation::Horizontal
+            || target
+                .output_video
+                .as_ref()
+                .is_some_and(|video| !same_video_profile(video, &params.output.video))
+    }) {
+        bail!("Raw caption stream targets must share the recording profile and orientation.");
+    }
+    let session_params = ffmpeg_session_params(
+        capture,
+        params,
+        crate::system_audio_session::system_audio_capable(),
+    );
+    let params = session_params.as_ref();
+    let mut args = bridge_ffmpeg_base_args();
+    append_h264_device_args(&mut args, encoder)?;
+    let layout = append_bridge_recording_input_args(
+        &mut args,
+        capture,
+        params,
+        recording_fifo,
+        EncoderBridgeVideoOutput::RawYuv420p,
+    );
+    let stream_index = args.windows(2).filter(|pair| pair[0] == "-i").count();
+    append_bridge_raw_video_input_args(&mut args, stream_fifo, &params.output.video);
+    let clean_filter = bridge_recording_video_filter_for_encoder(
+        layout.video_input_index,
+        &params.output.video,
+        encoder,
+    );
+    let clean_filter = if replay.is_some() {
+        crate::replay_buffer::split_video_filter_for_replay(&clean_filter)
+            .context("The clean caption split could not prepare Clips")?
+    } else {
+        clean_filter
+    };
+    let stream_filter =
+        bridge_recording_video_filter_for_encoder(stream_index, &params.output.video, encoder)
+            .replace("[v_main]", "[v_stream]");
+    args.extend([
+        "-filter_complex".to_string(),
+        format!("{clean_filter};{stream_filter}"),
+    ]);
+    for (label, streaming) in [("[v_main]", false), ("[v_stream]", true)] {
+        args.extend(["-map".to_string(), label.to_string()]);
+        append_audio_output_args(&mut args, &layout);
+        append_h264_encoding_args_for_platform_preserving_input_timestamps(
+            &mut args,
+            &params.output.video,
+            encoder.platform,
+            streaming,
+            encoder.vaapi_arg_profile,
+            params.purpose.is_performance_check(),
+        );
+        // Both raw legs use the shared PCM bus with the same clock. The
+        // encoded bridge's stream latency advance does not apply here.
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &layout,
+            &params.audio,
+            OutputAudioCodec::StreamAac,
+            true,
+        );
+        if streaming {
+            args.extend(tee_output_args(
+                targets
+                    .iter()
+                    .map(|target| rtmp_tee_leg(&target.url))
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            ));
+        } else {
+            args.push(ffmpeg_file_path(output_path));
+        }
+    }
+    if let Some(replay) = replay {
+        let mut encoder_args = Vec::new();
+        append_h264_encoding_args_for_platform_preserving_input_timestamps(
+            &mut encoder_args,
+            &params.output.video,
+            encoder.platform,
+            false,
+            encoder.vaapi_arg_profile,
+            params.purpose.is_performance_check(),
+        );
+        append_replay_segment_output(
+            &mut args,
+            &layout,
+            &params.audio,
+            ReplayVideoCodec::Encode {
+                label: "[v_replay]",
+                encoder_args,
+            },
+            replay,
+        );
+    }
+    Ok(args)
+}
+
+fn append_bridge_raw_video_input_args(args: &mut Vec<String>, fifo: &Path, video: &VideoSettings) {
+    args.extend([
+        "-thread_queue_size".to_string(),
+        ENCODER_BRIDGE_RAW_VIDEO_INPUT_QUEUE_FRAMES.to_string(),
+        "-use_wallclock_as_timestamps".to_string(),
+        "1".to_string(),
+        "-f".to_string(),
+        "rawvideo".to_string(),
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+        "-video_size".to_string(),
+        format!("{}x{}", video.width, video.height),
+        "-framerate".to_string(),
+        video.fps.to_string(),
+        "-i".to_string(),
+        fifo.display().to_string(),
+    ]);
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 fn bridge_compositor_split_output_ffmpeg_args(
@@ -20908,22 +21110,7 @@ fn append_bridge_recording_input_args(
             // fewer than `fps` frames reach FFmpeg. Stamp frames when FFmpeg
             // receives them; the output filter normalizes that epoch and fills
             // the CFR timeline without manufacturing a catch-up burst upstream.
-            args.extend([
-                "-thread_queue_size".to_string(),
-                ENCODER_BRIDGE_RAW_VIDEO_INPUT_QUEUE_FRAMES.to_string(),
-                "-use_wallclock_as_timestamps".to_string(),
-                "1".to_string(),
-                "-f".to_string(),
-                "rawvideo".to_string(),
-                "-pix_fmt".to_string(),
-                "yuv420p".to_string(),
-                "-video_size".to_string(),
-                format!("{}x{}", video.width, video.height),
-                "-framerate".to_string(),
-                video.fps.to_string(),
-                "-i".to_string(),
-                fifo_path.display().to_string(),
-            ]);
+            append_bridge_raw_video_input_args(args, fifo_path, video);
         }
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB => {
             args.extend([
@@ -21993,7 +22180,8 @@ struct SourceSwitchOutputAudioTiming {
 /// offset-clamping decision. Destination strings are used transiently only to
 /// locate standalone output boundaries; none survive in the reduced result.
 /// This intentionally supports only an unambiguous native-bus map and its
-/// maintained time-filter chain. Tee/unknown graphs and timestamp options are
+/// maintained time-filter chain. Only the exact generated shared tee is
+/// recognized; unknown graphs and timestamp options are
 /// unavailable evidence, never a reason to change or reject session startup.
 #[cfg(debug_assertions)]
 fn inspect_source_switch_output_audio_timing(
@@ -22076,14 +22264,41 @@ fn inspect_source_switch_output_audio_timing(
         if *position < output_start {
             return None;
         }
-        outputs.push((*position, role));
+        outputs.push((*position, vec![role]));
         Some(())
     };
-    if let Some(path) = output_path {
-        locate_output(&ffmpeg_file_path(path), "local")?;
-    }
-    for target in targets {
-        locate_output(&target.url, "stream")?;
+    // A raw combined session encodes once and fans out through a tee. Match
+    // the complete generated destination string: never parse arbitrary muxer
+    // options as proof that every requested output shares the PCM timeline.
+    let shared_tee = if targets.is_empty() {
+        None
+    } else {
+        let mut legs = output_path
+            .map(|path| {
+                format!(
+                    "[f=matroska:onfail=abort]{}",
+                    escape_tee_target(&ffmpeg_file_path(path))
+                )
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        legs.extend(targets.iter().map(|target| rtmp_tee_leg(&target.url)));
+        Some(tee_output_args(legs.join("|")))
+    };
+    if shared_tee.is_some_and(|tee| args.ends_with(&tee)) {
+        let mut roles = Vec::new();
+        if output_path.is_some() {
+            roles.push("local");
+        }
+        roles.extend(targets.iter().map(|_| "stream"));
+        outputs.push((args.len() - 1, roles));
+    } else {
+        if let Some(path) = output_path {
+            locate_output(&ffmpeg_file_path(path), "local")?;
+        }
+        for target in targets {
+            locate_output(&target.url, "stream")?;
+        }
     }
     outputs.sort_unstable_by_key(|(position, _)| *position);
     if outputs.is_empty()
@@ -22094,7 +22309,7 @@ fn inspect_source_switch_output_audio_timing(
     }
     let mut timing = Vec::with_capacity(outputs.len());
     let mut start = output_start;
-    for (output_index, (end, role)) in outputs.into_iter().enumerate() {
+    for (output_index, (end, roles)) in outputs.into_iter().enumerate() {
         let options = &args[start..end];
         if !source_switch_output_options_are_known(options) {
             return None;
@@ -22123,12 +22338,15 @@ fn inspect_source_switch_output_audio_timing(
         {
             return None;
         }
-        timing.push(SourceSwitchOutputAudioTiming {
-            role,
-            output_index,
-            input_offset_ms,
-            filter_shift_ms: source_switch_filter_shift_ms(unique_arg_value(options, "-af")?)?,
-        });
+        let filter_shift_ms = source_switch_filter_shift_ms(unique_arg_value(options, "-af")?)?;
+        for role in roles {
+            timing.push(SourceSwitchOutputAudioTiming {
+                role,
+                output_index,
+                input_offset_ms,
+                filter_shift_ms,
+            });
+        }
         start = end + 1;
     }
     Some(timing)
@@ -22170,6 +22388,26 @@ fn source_switch_output_options_are_known(options: &[String]) -> bool {
             "-bsf:v",
             // Media Foundation copies declare their video rate; audio is untouched.
             "-r",
+            // Raw Linux bridge video encoders and the bounded muxer queue.
+            // None of these options changes the separately mapped PCM clock.
+            "-pix_fmt",
+            "-rc_mode",
+            "-allow_skip_frames",
+            "-threads",
+            "-slices",
+            "-profile:v",
+            "-level",
+            "-b:v",
+            "-maxrate",
+            "-bufsize",
+            "-g",
+            "-force_key_frames",
+            "-flags",
+            "-fps_mode",
+            "-bf",
+            "-shortest_buf_duration",
+            "-use_fifo",
+            "-fifo_options",
         ]
         .contains(&option.as_str())
             || option.starts_with("-metadata:s:a:")
@@ -24013,6 +24251,9 @@ fn recording_compositor_stream_output(
     params: &StartSessionParams,
     video_output: EncoderBridgeVideoOutput,
 ) -> Result<Option<CompositorAuxiliaryOutput>> {
+    if video_output == EncoderBridgeVideoOutput::RawYuv420p {
+        return recording_compositor_stream_output_with_plan(params, video_output, None);
+    }
     // The caption/profile split needs a local recording; the dual-orientation
     // simulcast leg does not (a stream-only dual session still owns the aux).
     if !params.output.stream_enabled
@@ -24046,13 +24287,30 @@ fn recording_compositor_stream_output_with_plan(
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
-        // The raw path has no auxiliary encoder. Dropping the vertical leg
+        // The raw path still cannot encode a separate vertical scene. Dropping it
         // silently sent the landscape program to every vertical destination
         // (Linux, ogre 2026-10-12: a 720x1280 destination received 1280x720).
         if params.simulcast.is_some() && params.output.stream_enabled {
             bail!(
                 "This computer can't encode a separate vertical stream yet, so vertical destinations would receive the landscape video. Turn off the vertical destinations to go live."
             );
+        }
+        // Linux captions require distinct pictures even with matching output
+        // profiles. Feed two CPU YUV stores into FFmpeg and encode each once;
+        // the primary stays clean for the recording and Clips. Do not grant
+        // unrelated mixed-profile/dual-orientation support through this path.
+        if cfg!(target_os = "linux")
+            && params.output.record_enabled
+            && params.output.stream_enabled
+            && caption_leg_plan(params).force_same_profile_split
+        {
+            validate_raw_caption_split(params)?;
+            return Ok(Some(CompositorAuxiliaryOutput {
+                width: params.output.video.width,
+                height: params.output.video.height,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                composes_simulcast_scene: false,
+            }));
         }
         return Ok(None);
     }
@@ -27908,11 +28166,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn live_control_windows_recordable_canvas_decides_whether_hide_needs_legacy_refusal() {
+        let mut params = base_params(true, false);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        let requested = params.output.video.clone();
+        let hardware = select_windows_recordable_video(&requested, 4, None, |_| true);
+        assert_eq!(hardware.video, requested);
+        assert!(compositor_encoder_bridge_ruled_out(&params));
+        let software = select_windows_recordable_video(&requested, 4, None, |_| false);
+        assert_eq!(
+            software.reason,
+            Some(WindowsRecordableVideoReason::SoftwareCap)
+        );
+        params.output.video = software.video;
+        assert!(
+            !compositor_encoder_bridge_ruled_out(&params),
+            "the stepped-down canvas takes the bridge, which can carry the hidden still"
+        );
+    }
+
     /// The same refusal through the real start path: a 4K60 recording
     /// (legacy FFmpeg) requested while hidden fails with the exact copy and
-    /// leaves no session, before any capture or encoder process spawns.
+    /// leaves no session, before any capture or encoder process spawns. The
+    /// live_control_ prefix includes this in Windows' 25-pass stability gate.
     #[tokio::test]
-    async fn a_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
+    async fn live_control_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
         let state = test_state();
         let output_dir = std::env::temp_dir().join(format!(
             "videorc-hidden-legacy-start-{}",
@@ -27933,6 +28218,33 @@ mod tests {
             fps: 60,
             bitrate_kbps: 50_000,
         };
+        // A Windows runner without a suitable GPU legitimately steps a
+        // record-only request down to a bridge-supported canvas. Its unknown
+        // adapter identity is deliberately non-cacheable. Inject the hardware
+        // acceptance into this app state so the real start stays at 4K60.
+        #[cfg(target_os = "windows")]
+        {
+            let ffmpeg_path = output_dir
+                .join("fixture-ffmpeg.exe")
+                .to_string_lossy()
+                .into_owned();
+            params.output.ffmpeg_path = Some(ffmpeg_path.clone());
+            state
+                .test_windows_recordable_video_accepts_requested
+                .store(true, std::sync::atomic::Ordering::Release);
+            let selected = resolve_windows_recordable_video(&state, &ffmpeg_path, &params)
+                .await
+                .expect("the fixture supplies a recordable canvas");
+            assert_eq!(selected.video, params.output.video);
+            assert_eq!(selected.reason, None);
+            assert!(
+                !test_state()
+                    .test_windows_recordable_video_accepts_requested
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "the capability fixture belongs only to this app state"
+            );
+        }
+        assert!(compositor_encoder_bridge_ruled_out(&params));
         let result = tokio::time::timeout(
             Duration::from_secs(20),
             start_session(state.clone(), params),
@@ -35054,6 +35366,25 @@ mod tests {
         }
         let linux = linux_direct_microphone_message("pulse refused");
         assert!(linux.contains("soundboard") && linux.contains("pulse refused"));
+    }
+
+    #[test]
+    fn live_microphone_replacement_requires_a_bus_and_a_supported_adapter() {
+        for platform in ["macos", "linux", "windows", "unknown"] {
+            for worker_available in [false, true] {
+                assert!(
+                    !session_microphone_replaceable(false, platform, worker_available),
+                    "A direct input on {platform} must keep its initial microphone"
+                );
+            }
+        }
+        // A Linux bus includes the None/silence slot: the first microphone can
+        // be added without restarting FFmpeg, then removed or replaced.
+        assert!(session_microphone_replaceable(true, "linux", false));
+        assert!(session_microphone_replaceable(true, "macos", false));
+        assert!(session_microphone_replaceable(true, "windows", true));
+        assert!(!session_microphone_replaceable(true, "windows", false));
+        assert!(!session_microphone_replaceable(true, "unknown", true));
     }
 
     #[test]
@@ -45038,6 +45369,118 @@ mod tests {
     }
 
     #[test]
+    fn raw_caption_split_keeps_clean_recording_and_replay_separate_from_stream_pixels() {
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        params.streaming = None;
+        params.captions = Some(crate::protocol::CaptionsSessionParams {
+            enabled: true,
+            burn_target: crate::captions::CaptionBurnTarget::Both,
+            ..Default::default()
+        });
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: Some(MicrophoneInput::SessionPcm {
+                fifo_path: PathBuf::from("/tmp/caption-bus.f32le"),
+            }),
+        };
+        let target = build_stream_url(&params.output.rtmp).unwrap();
+        let replay = ReplayOutput {
+            dir: PathBuf::from("/tmp/caption-ring"),
+            seconds: 30,
+        };
+        for platform in [
+            FfmpegH264Platform::LinuxSoftware,
+            FfmpegH264Platform::LinuxVaapi,
+        ] {
+            let mut encoder = ResolvedFfmpegH264Encoder::for_platform(platform);
+            encoder.vaapi_device = Some(PathBuf::from("/dev/dri/renderD128"));
+            for ring in [None, Some(&replay)] {
+                let args = bridge_raw_caption_split_ffmpeg_args(
+                    &capture,
+                    &params,
+                    Some(Path::new("/tmp/clean.mkv")),
+                    std::slice::from_ref(&target),
+                    Path::new("/tmp/clean.yuv"),
+                    Path::new("/tmp/captioned.yuv"),
+                    &encoder,
+                    ring,
+                )
+                .unwrap();
+                assert_eq!(
+                    input_arg_value(&args, "/tmp/clean.yuv", "-f"),
+                    Some("rawvideo")
+                );
+                assert_eq!(
+                    input_arg_value(&args, "/tmp/captioned.yuv", "-f"),
+                    Some("rawvideo")
+                );
+                let filter = args
+                    .windows(2)
+                    .find(|pair| pair[0] == "-filter_complex")
+                    .unwrap()[1]
+                    .as_str();
+                assert!(filter.contains("[0:v]setpts=PTS-STARTPTS,fps=30"));
+                assert!(filter.contains("[2:v]setpts=PTS-STARTPTS,fps=30"));
+                assert!(filter.ends_with("[v_stream]"));
+                let file = args
+                    .iter()
+                    .position(|arg| arg.ends_with("/tmp/clean.mkv"))
+                    .unwrap();
+                assert!(
+                    args[..file]
+                        .windows(2)
+                        .any(|pair| pair == ["-map", "[v_main]"])
+                );
+                assert!(!args[..file].iter().any(|arg| arg == "[v_stream]"));
+                assert!(
+                    args[file..]
+                        .windows(2)
+                        .any(|pair| pair == ["-map", "[v_stream]"])
+                );
+                assert_eq!(filter.contains("[v_replay]"), ring.is_some());
+                assert_eq!(
+                    args.iter().filter(|arg| *arg == "[v_replay]").count(),
+                    usize::from(ring.is_some())
+                );
+                assert_eq!(
+                    filter.contains("hwupload"),
+                    platform == FfmpegH264Platform::LinuxVaapi
+                );
+            }
+        }
+        let output =
+            recording_compositor_stream_output(&params, EncoderBridgeVideoOutput::RawYuv420p)
+                .unwrap();
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                output.unwrap().frame_consumer,
+                CompositorFrameConsumer::RawYuvEncoder
+            );
+        } else {
+            assert!(output.is_none());
+        }
+        params.captions.as_mut().unwrap().burn_target =
+            crate::captions::CaptionBurnTarget::Recording;
+        assert!(
+            recording_compositor_stream_output(&params, EncoderBridgeVideoOutput::RawYuv420p)
+                .unwrap()
+                .is_none()
+        );
+        assert!(validate_raw_caption_split(&params).is_err());
+        params.captions.as_mut().unwrap().burn_target = crate::captions::CaptionBurnTarget::Both;
+        params.output.video.fps = 60;
+        assert!(validate_raw_caption_split(&params).is_err());
+        params.output.video.fps = 30;
+        params.output.record_enabled = false;
+        assert!(validate_raw_caption_split(&params).is_err());
+        let (mut vertical, _) = simulcast_split_params(true);
+        vertical.captions = params.captions;
+        assert!(validate_raw_caption_split(&vertical).is_err());
+    }
+
+    #[test]
     fn live_caption_burn_preflight_rejects_over_30fps_but_copy_only_is_allowed() {
         for burn_target in [
             crate::captions::CaptionBurnTarget::Stream,
@@ -45912,6 +46355,82 @@ mod tests {
             let mut params = base_params(record_enabled, stream_enabled);
             params.audio.microphone_sync_offset_ms = offset_ms;
             params
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn source_switch_timing_inspects_raw_linux_outputs_and_exact_shared_tee() {
+            let capture = bus_capture(VideoInput::TestPattern);
+            let file = Path::new("/tmp/raw-timing.mkv");
+            let fifo = Path::new("/tmp/raw-timing.yuv");
+            let target = build_stream_url(&base_params(false, true).output.rtmp).unwrap();
+            for platform in [
+                FfmpegH264Platform::LinuxSoftware,
+                FfmpegH264Platform::LinuxVaapi,
+            ] {
+                let mut encoder = ResolvedFfmpegH264Encoder::for_platform(platform);
+                encoder.vaapi_device = Some(PathBuf::from("/dev/dri/renderD128"));
+                for (record, stream) in [(true, false), (false, true), (true, true)] {
+                    let params = params_with_offset(record, stream, -80);
+                    let targets = if stream { vec![target.clone()] } else { vec![] };
+                    let output = record.then_some(file);
+                    let args = bridge_compositor_ffmpeg_args_with_encoder(
+                        &capture,
+                        &params,
+                        output,
+                        &targets,
+                        fifo,
+                        EncoderBridgeVideoOutput::RawYuv420p,
+                        &encoder,
+                    )
+                    .unwrap();
+                    let timing = inspect_source_switch_output_audio_timing(
+                        &args, &capture, output, &targets,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing {platform:?} record={record} stream={stream} timing: {args:?}"
+                        )
+                    });
+                    assert_eq!(timing.len(), usize::from(record) + usize::from(stream));
+                    assert!(
+                        timing
+                            .iter()
+                            .all(|leg| leg.output_index == 0 && leg.filter_shift_ms == -80)
+                    );
+                    if record {
+                        assert_eq!(timing[0].role, "local");
+                    }
+                    if stream {
+                        assert_eq!(timing.last().unwrap().role, "stream");
+                    }
+                    if record && stream {
+                        let mut altered = args.clone();
+                        altered
+                            .last_mut()
+                            .unwrap()
+                            .push_str("|[f=matroska]/tmp/unknown.mkv");
+                        assert!(
+                            inspect_source_switch_output_audio_timing(
+                                &altered, &capture, output, &targets
+                            )
+                            .is_none()
+                        );
+                        let mut altered = args.clone();
+                        let fifo_options = altered
+                            .iter()
+                            .position(|arg| arg == "-fifo_options")
+                            .unwrap();
+                        altered[fifo_options + 1] = "queue_size=1".into();
+                        assert!(
+                            inspect_source_switch_output_audio_timing(
+                                &altered, &capture, output, &targets
+                            )
+                            .is_none()
+                        );
+                    }
+                }
+            }
         }
 
         #[cfg(debug_assertions)]

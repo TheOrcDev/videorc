@@ -2,6 +2,24 @@
 // (scripts/smoke-record-latency-app.mjs). Kept free of I/O so `pnpm test:scripts`
 // covers the arithmetic and the budget evaluation.
 
+/** A persisted camera scene must not become part of the screen-only fixture. */
+export function recordLatencySceneReady(scene) {
+  if (!Array.isArray(scene?.sources)) return false
+  const visible = scene.sources.filter((source) => source?.visible === true)
+  return visible.length === 1 && visible[0].kind === 'test-pattern'
+}
+
+/** The backend may publish a trial scene while its layout transaction is pending. */
+export function recordLatencyRendererReady(state) {
+  return Boolean(
+    state?.wsStatus === 'connected' &&
+    state.layoutPreset === 'screen-only' &&
+    state.committedLayoutPreset === 'screen-only' &&
+    state.visualTransactionPending === false &&
+    state.layoutSwitchPending === null
+  )
+}
+
 /**
  * OBS-parity budgets (milliseconds), ENFORCED by `pnpm smoke:record-latency:gate`.
  * `calibratedFrom` names the reviewed docs/acceptance note built from three
@@ -27,6 +45,26 @@ export const RECORD_LATENCY_BUDGETS = Object.freeze({
 // Same-kind remote intents are debounced per family (remote_control.rs); start
 // and stop share the `record` family.
 export const REMOTE_RECORD_INTENT_DEBOUNCE_MS = 150
+
+/**
+ * Recording is already running while the renderer acknowledges Record. Count
+ * that interval too: a slow acknowledgement must not hide a truncated take.
+ * Both timestamps come from the smoke's monotonic clock; the configured hold
+ * remains a floor if an early stop or invalid fixture shortens the interval.
+ */
+export function recordLatencyTakeDurationMs({ recordingAtMs, stopClickAtMs, recordingMs }) {
+  if (
+    !Number.isFinite(recordingAtMs) ||
+    recordingAtMs < 0 ||
+    !Number.isFinite(stopClickAtMs) ||
+    stopClickAtMs <= recordingAtMs ||
+    !Number.isFinite(recordingMs) ||
+    recordingMs <= 0
+  ) {
+    throw new Error('Recording coverage needs ordered monotonic timestamps and a positive hold.')
+  }
+  return Math.max(recordingMs, stopClickAtMs - recordingAtMs)
+}
 
 export const RECORD_LATENCY_METRICS = Object.freeze([
   'clickToStartingMs',

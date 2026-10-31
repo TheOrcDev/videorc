@@ -138,7 +138,7 @@ describe('first-run step logic', () => {
       it.each(goals)(`${mode.kind} on ${platform} walks the applicable steps for %s`, (goal) => {
         const context = { goal, platform, mode }
         const expected = [
-          ...(platform === 'linux' ? [] : ['permissions']),
+          'permissions',
           'goal',
           'look',
           'sound',
@@ -167,14 +167,14 @@ describe('first-run step logic', () => {
     expect(nextFirstRunStep('sound', { ...context, goal: 'record' })).toBeNull()
   })
 
-  it('handles saved steps excluded by the current platform or goal', () => {
+  it('keeps Linux sharing guidance and handles saved steps excluded by the goal', () => {
     const context = { goal: 'record', platform: 'linux', mode: modes[1] } as const
     expect(nextFirstRunStep('permissions', context)).toBe('goal')
     expect(previousFirstRunStep('permissions', context)).toBeNull()
-    expect(firstRunStepPosition('permissions', context)).toEqual({ index: 1, count: 3 })
+    expect(firstRunStepPosition('permissions', context)).toEqual({ index: 1, count: 4 })
     expect(nextFirstRunStep('destinations', context)).toBeNull()
     expect(previousFirstRunStep('destinations', context)).toBe('sound')
-    expect(firstRunStepPosition('destinations', context)).toEqual({ index: 3, count: 3 })
+    expect(firstRunStepPosition('destinations', context)).toEqual({ index: 4, count: 4 })
   })
 })
 
@@ -186,13 +186,18 @@ describe('firstRunDecision', () => {
     suppressed: false
   }
 
-  it.each(['darwin', 'win32'])('shows every fresh %s install regardless of grants', (platform) => {
-    expect(firstRunDecision({ ...fresh, platform })).toBe('show')
-  })
+  it.each(['darwin', 'win32', 'linux'])(
+    'shows every fresh %s install regardless of grants',
+    (platform) => {
+      expect(firstRunDecision({ ...fresh, platform })).toBe('show')
+    }
+  )
 
-  it.each(['linux', undefined])('waits or hides on %s', (platform) => {
-    expect(firstRunDecision({ ...fresh, platform })).toBe('hide')
-    expect(firstRunDecision({ ...fresh, record: record('in-progress'), platform })).toBe('hide')
+  it('waits until the platform is known', () => {
+    expect(firstRunDecision({ ...fresh, platform: undefined })).toBe('hide')
+    expect(firstRunDecision({ ...fresh, record: record('in-progress'), platform: undefined })).toBe(
+      'hide'
+    )
   })
 
   it.each(['creator-ux-v1', ONBOARDING_DISMISSED_VALUE, ''])(
@@ -410,10 +415,29 @@ describe('first-run startup ordering', () => {
     }
   )
 
-  it('does not start setup on a fresh Linux profile', () => {
+  it('starts and resumes Linux setup without reopening a completed or suppressed setup', () => {
     const store = storage()
-    expect(createFirstRunStartup(store).finalize({ ...runtime, platform: 'linux' })).toBe('hide')
-    expect(store.setItem).not.toHaveBeenCalled()
+    const linux = { ...runtime, platform: 'linux' }
+    const startup = createFirstRunStartup(store)
+    expect(startup.finalize(linux)).toBe('show')
+    startup.setGoal('record')
+    startup.enterStep('sound')
+    const resumed = createFirstRunStartup(store)
+    expect(resumed.finalize(linux)).toBe('show')
+    expect(resumed.step).toBe('sound')
+    expect(resumed.goal).toBe('record')
+    resumed.complete('done')
+    expect(createFirstRunStartup(store).finalize(linux)).toBe('hide')
+    const suppressed = storage()
+    expect(createFirstRunStartup(suppressed).finalize({ ...linux, firstRunSuppressed: true })).toBe(
+      'hide'
+    )
+    expect(suppressed.setItem).not.toHaveBeenCalled()
+    const existing = storage({ [WHATS_NEW_STORAGE_KEY]: '0.14.0' })
+    expect(createFirstRunStartup(existing).finalize(linux)).toBe('hide')
+    expect(parseFirstRunRecord(existing.getItem(STORAGE_KEYS.firstRun))?.status).toBe(
+      'existing-install'
+    )
   })
 
   it('treats a corrupt record as fresh', () => {

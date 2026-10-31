@@ -234,16 +234,29 @@ describe('FirstRunSetup', () => {
     expect(skip).not.toContain('data-icon="inline-end"')
   })
 
-  it('starts the Linux replay at the goal: Linux has nothing to grant', () => {
-    studio.core.runtimeInfo = { platform: 'linux', hardwareAccelerationDisabled: true }
-    studio.rows = []
-    const markup = render({ kind: 'replay', returnTo: 'settings' })
-    expect(markup).toContain('data-first-run-mode="replay"')
-    expect(markup).toContain('data-first-run-step="goal"')
-    expect(markup).toMatch(/<h1[^>]*>What are you making\?<\/h1>/)
-    expect(markup).not.toContain('data-slot="system-access-row"')
-    expect(markup).not.toContain('data-first-run-back=""')
-  })
+  it.each(['first-run', 'replay'] as const)(
+    'starts Linux %s with sharing guidance, without claiming grants',
+    (kind) => {
+      studio.core.runtimeInfo = { platform: 'linux', hardwareAccelerationDisabled: true }
+      studio.core.wsStatus = 'disconnected'
+      studio.core.mediaAccess = { camera: 'unknown', microphone: 'unknown', screen: 'unknown' }
+      studio.rows = []
+      const markup = render(kind === 'replay' ? { kind, returnTo: 'settings' } : { kind })
+      expect(markup).toContain(`data-first-run-mode="${kind}"`)
+      expect(markup).toContain('data-first-run-step="permissions"')
+      expect(markup).toContain('Screen sharing on Linux')
+      expect(markup).toContain('your desktop asks what to share')
+      expect(markup).toContain(
+        'Camera and microphone access depends on your desktop and device permissions.'
+      )
+      expect(markup).toMatch(/data-first-run-primary=""[^>]*>Continue</)
+      expect(markup).not.toContain('data-slot="system-access-row"')
+      expect(markup).not.toContain('Checking permissions')
+      expect(markup).not.toContain('Nothing to grant')
+      expect(markup).not.toContain('Allow…')
+      expect(markup).not.toContain('data-first-run-back=""')
+    }
+  )
 
   it('frames each step: the count and Skip setup on top, no Back on the first step (plan 207 D3)', () => {
     const markup = render()

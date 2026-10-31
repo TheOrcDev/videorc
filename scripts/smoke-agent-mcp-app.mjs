@@ -79,6 +79,7 @@ import {
 } from './lib/agent-mcp-client.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
+import { assessAgentRecordingCompletion } from './lib/agent-recording-completion.mjs'
 import { connectRemote, remoteRequest } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
@@ -400,6 +401,27 @@ try {
     }
   })
   const noticeSeen = (text) => activity.some((entry) => entry?.notice === text)
+
+  const completedRecordingPath = async (sessionId) => {
+    const item = await waitUntil(
+      'the normally finalized MP4',
+      async () => {
+        const page = await request(renderer, timeoutMs, 'sessions.list', { limit: 20 })
+        const item = page?.items?.find((entry) => entry.id === sessionId)
+        if (item?.interruptionRecovery != null || item?.finalizationState === 'failed') {
+          fail(assessAgentRecordingCompletion(item, sessionId).failures.join('; '))
+        }
+        return {
+          done: Boolean(item?.mp4Path) && item.finalizationState !== 'finalizing',
+          value: item
+        }
+      },
+      { everyMs: 300 }
+    )
+    const completion = assessAgentRecordingCompletion(item, sessionId)
+    if (!completion.pass) fail(completion.failures.join('; '))
+    return item.mp4Path
+  }
 
   const health = await request(renderer, timeoutMs, 'health.ping', { ffmpegPath })
   if (!health?.ffmpeg?.available) fail(health?.ffmpeg?.message ?? 'FFmpeg is unavailable')
@@ -795,20 +817,7 @@ try {
   await sleep(3500)
   const stopped = await callOk(bridge, 'stop', {}, { timeoutMs })
   if (stopped.structuredContent?.stopped !== 'recording') fail(`stop: ${JSON.stringify(stopped)}`)
-  const mp4Path = await waitUntil(
-    'the published MP4',
-    async () => {
-      const page = await request(renderer, timeoutMs, 'sessions.list', { limit: 20 })
-      const item = page?.items?.find((entry) => entry.id === sessionId)
-      if (item?.finalizationState === 'failed')
-        fail(`finalization failed: ${item.finalizationError}`)
-      return {
-        done: Boolean(item?.mp4Path) && item.finalizationState !== 'finalizing',
-        value: item?.mp4Path
-      }
-    },
-    { everyMs: 300 }
-  )
+  const mp4Path = await completedRecordingPath(sessionId)
   const report = await analyzeRecording(mp4Path, {
     ffmpegPath,
     ffprobePath,
@@ -958,7 +967,6 @@ try {
   sink = spawnSink(`${sinkServer}/${SINK_KEY}`, sinkRecvPath)
   await sleep(1500) // Deliberate: FFmpeg must be listening before the session dials (smoke:multistream).
   if (sink.child.exitCode !== null) fail(`the local RTMP sink exited: ${sink.stderr.join('')}`)
-  const goLiveAt = Date.now()
   const live = await callOk(
     bridge,
     'go_live',
@@ -972,6 +980,15 @@ try {
   ) {
     fail(`go_live with allowPartial: ${JSON.stringify(live)}`)
   }
+  const liveRecording = await request(renderer, timeoutMs, 'recording.status')
+  if (
+    liveRecording?.state !== 'recording' ||
+    !liveRecording.sessionId ||
+    liveRecording.replayOnly
+  ) {
+    fail('the combined session ended before go_live confirmed it')
+  }
+  const liveConfirmedAt = performance.now()
   await waitUntil('bytes at the local RTMP sink', async () => ({
     done: fileSize(sinkRecvPath) > 0,
     value: fileSize(sinkRecvPath)
@@ -1004,7 +1021,12 @@ try {
     fail(`the livestream's title is ${JSON.stringify(liveDraft?.title)}, not go_live's title`)
   }
   await waitForNotice('Smoke agent started the livestream.')
-  await sleep(Math.max(0, goLiveAt + 5000 - Date.now())) // a few seconds on air
+  await sleep(Math.max(0, liveConfirmedAt + 5000 - performance.now()))
+  const beforeStop = await request(renderer, timeoutMs, 'recording.status')
+  if (beforeStop?.state !== 'recording' || beforeStop.sessionId !== liveRecording.sessionId) {
+    fail('the combined session ended before the requested Stop')
+  }
+  const observedLiveSeconds = (performance.now() - liveConfirmedAt) / 1000
   const stoppedLive = await callOk(bridge, 'stop', {}, { timeoutMs })
   if (stoppedLive.structuredContent?.stopped !== 'livestream') {
     fail(`stop while live: ${JSON.stringify(stoppedLive)}`)
@@ -1022,23 +1044,28 @@ try {
     { timeout: 15000 }
   ).catch(() => undefined)
   await stopChild(sink.child)
-  const sinkProbe = spawnSync(
-    ffprobePath,
-    [
-      '-v',
-      'error',
-      '-select_streams',
-      'v:0',
-      '-show_entries',
-      'stream=codec_type',
-      '-of',
-      'csv=p=0',
-      sinkRecvPath
-    ],
-    { encoding: 'utf8' }
-  )
-  if (sinkProbe.status !== 0 || !sinkProbe.stdout.includes('video')) {
-    fail(`the sink's FLV has no video: ${sinkProbe.stderr || sinkProbe.stdout}`)
+  const liveMp4Path = await completedRecordingPath(liveRecording.sessionId)
+  for (const [role, path] of [
+    ['recording', liveMp4Path],
+    ['receiver', sinkRecvPath]
+  ]) {
+    const artifact = await analyzeRecording(path, {
+      ffmpegPath,
+      ffprobePath,
+      intendedFps: 30,
+      expectAudio: false,
+      // This smoke has no controlled audible input or moving capture target.
+      // Quality/physical gates prove those separately; neither output may
+      // truncate the interval we actually observed live before requesting Stop.
+      gates: { requireMotion: false, minDurationSeconds: observedLiveSeconds * 0.98 }
+    })
+    writeFileSync(
+      join(outputDirectory, `agent-live-${role}-analysis.json`),
+      JSON.stringify(artifact, null, 2)
+    )
+    if (!artifact.verdict.pass) {
+      fail(`combined ${role} failed the analyzer: ${artifact.verdict.failures.join('; ')}`)
+    }
   }
   const kickAfter = (await destinationsNow()).find((entry) => entry.id === 'kick')
   if (kickAfter?.on !== true) fail('go_live with allowPartial turned Kick off for good')

@@ -1,3 +1,6 @@
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import { smokeTrashDirectory, smokeTrashItem, trashPaths } from './trash-paths'
@@ -48,11 +51,13 @@ describe('trashPaths', () => {
 
 describe('the smoke Trash stand-in (plan 209 S16)', () => {
   const dev = { packaged: false, smokeCommandServer: true }
+  const run = join(tmpdir(), 'videorc-smoke-trash-test')
+  const trash = join(run, 'trash')
 
   it('is only for a dev build running the smoke command server, with an absolute folder', () => {
-    expect(smokeTrashDirectory('/tmp/run/trash', dev)).toBe('/tmp/run/trash')
-    expect(smokeTrashDirectory('/tmp/run/trash', { ...dev, packaged: true })).toBeNull()
-    expect(smokeTrashDirectory('/tmp/run/trash', { ...dev, smokeCommandServer: false })).toBeNull()
+    expect(smokeTrashDirectory(trash, dev)).toBe(trash)
+    expect(smokeTrashDirectory(trash, { ...dev, packaged: true })).toBeNull()
+    expect(smokeTrashDirectory(trash, { ...dev, smokeCommandServer: false })).toBeNull()
     expect(smokeTrashDirectory('run/trash', dev)).toBeNull()
     expect(smokeTrashDirectory('  ', dev)).toBeNull()
     expect(smokeTrashDirectory(undefined, dev)).toBeNull()
@@ -61,15 +66,15 @@ describe('the smoke Trash stand-in (plan 209 S16)', () => {
   it('moves each file into the folder under a name of its own', async () => {
     const mkdir = vi.fn().mockResolvedValue(undefined)
     const rename = vi.fn<(from: string, to: string) => Promise<void>>().mockResolvedValue()
-    const trashItem = smokeTrashItem('/tmp/run/trash', { mkdir, rename, now: () => 42 })
+    const trashItem = smokeTrashItem(trash, { mkdir, rename, now: () => 42 })
 
-    await trashItem('/tmp/run/recordings/take.mp4')
-    await trashItem('/tmp/run/other/take.mp4')
+    await trashItem(join(run, 'recordings', 'take.mp4'))
+    await trashItem(join(run, 'other', 'take.mp4'))
 
-    expect(mkdir).toHaveBeenCalledWith('/tmp/run/trash')
+    expect(mkdir).toHaveBeenCalledWith(trash)
     expect(rename.mock.calls).toEqual([
-      ['/tmp/run/recordings/take.mp4', '/tmp/run/trash/42-1-take.mp4'],
-      ['/tmp/run/other/take.mp4', '/tmp/run/trash/42-2-take.mp4']
+      [join(run, 'recordings', 'take.mp4'), join(trash, '42-1-take.mp4')],
+      [join(run, 'other', 'take.mp4'), join(trash, '42-2-take.mp4')]
     ])
   })
 })

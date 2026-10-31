@@ -26,8 +26,13 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
+import { linuxHostPerformanceSnapshot } from './lib/linux-host-performance.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
-import { analyzeRecording, DEFAULT_GATES, writeReports } from './lib/recording-analyzer.mjs'
+import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import {
+  prepareRecordingMatrixFixture,
+  recordingMatrixGates
+} from './lib/recording-matrix-fixture.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
@@ -76,20 +81,7 @@ const EXPECTED_RESULT_LABELS = [
     : [])
 ]
 
-// The strict quality-law gates. requireMotion stays off: the test pattern is
-// deliberately reused from the layout smoke and can be near-static.
-const MATRIX_GATES = Object.freeze({
-  requireMotion: false,
-  requireColorTags: true,
-  requireValidLevel: true,
-  // The test tone is never silent, so any mid-take digital-zero run is a
-  // dropped audio packet (plan 056).
-  requireNoDigitalZeroRuns: true,
-  minDurationSeconds: (recordingMs / 1000) * (1 - DEFAULT_GATES.frameCountTolerance),
-  requireKeyframeEvidence: true,
-  keyframeMaxIntervalSeconds: 2.5,
-  maxTailMismatchMs: 100
-})
+const MATRIX_GATES = Object.freeze(recordingMatrixGates(recordingMs))
 
 function sessionParams({ outputDirectoryCapability, combo, streamTarget = null }) {
   return {
@@ -137,6 +129,8 @@ function sessionParams({ outputDirectoryCapability, combo, streamTarget = null }
 // the 0.9.44 bug.
 const STRESS_GATES = Object.freeze({
   ...MATRIX_GATES,
+  // This existing 4K noise case proves survival, not moving-content acceptance.
+  requireMotion: false,
   frameCountTolerance: Number.POSITIVE_INFINITY,
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY,
   maxDurationStretchRatio: Number.POSITIVE_INFINITY,
@@ -150,6 +144,8 @@ const STRESS_GATES = Object.freeze({
 // is exactly accounted for by bounded pre-encode skips (never lost H.264 AUs).
 const TRANSIENT_FIFO_GATES = Object.freeze({
   ...MATRIX_GATES,
+  // Deliberate FIFO stalls have their own accounted-loss gate below.
+  requireMotion: false,
   frameCountTolerance: Number.POSITIVE_INFINITY,
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
@@ -166,7 +162,31 @@ async function waitForStableRing(ws, label) {
   throw new Error(`${label}: the ring never settled before the combo: ${JSON.stringify(last)}`)
 }
 
-async function recordCombo({
+async function recordCombo(options) {
+  const before = await linuxHostPerformanceSnapshot()
+  if (!before) return recordComboWithArtifactGates(options)
+  const path = join(mkdtempSync(join(outputDirectory, 'linux-host-')), 'performance.json')
+  const evidence = { combo: options.combo.label, before, beforeStop: null, after: null }
+  const save = () => writeFileSync(path, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 })
+  save()
+  console.log(`[matrix:${options.combo.label}] Linux host snapshots: ${path}`)
+  try {
+    const result = await recordComboWithArtifactGates({
+      ...options,
+      captureHostPerformance: async () => {
+        evidence.beforeStop = await linuxHostPerformanceSnapshot()
+        save()
+      }
+    })
+    return { ...result, hostPerformancePath: path }
+  } finally {
+    // Retain the host context even when start, encoding or finalization fails.
+    evidence.after = await linuxHostPerformanceSnapshot()
+    save()
+  }
+}
+
+async function recordComboWithArtifactGates({
   ws,
   smoke,
   combo,
@@ -174,7 +194,8 @@ async function recordCombo({
   assertPreviewLiveness = false,
   stress = false,
   requireTransientFifoPressure = false,
-  getTransientFifoPauseFiredCount = () => 0
+  getTransientFifoPauseFiredCount = () => 0,
+  captureHostPerformance = async () => {}
 }) {
   // The output-directory capability is single-use: one grant per session.start.
   const { capabilityId } = await requestSmokeCommand(
@@ -216,6 +237,7 @@ async function recordCombo({
   } else {
     await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
   }
+  await captureHostPerformance()
   const activeStatus = await request(ws, timeoutMs, 'recording.status')
   const streamTargetsSnapshot = streamTarget
     ? await request(ws, timeoutMs, 'stream.targets.snapshot')
@@ -407,6 +429,15 @@ async function runPass({
     stopApp = launch.stop
     const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
     const smoke = launch.connections['preview-motion-ready']
+
+    const fixture = await prepareRecordingMatrixFixture({
+      command: (name, params, waitMs) =>
+        requestSmokeCommand(smoke, name, params, { timeoutMs: waitMs }),
+      request: (method, waitMs) => request(ws, waitMs, method),
+      timeoutMs,
+      onProgress: (step) => console.log(`[matrix:fixture] ${JSON.stringify(step)}`)
+    })
+    console.log(`Recording matrix synthetic fixture committed: ${JSON.stringify(fixture)}`)
 
     if (streamTarget) {
       listener = spawnLocalRtmpListener(streamTarget)

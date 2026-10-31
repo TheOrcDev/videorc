@@ -6,14 +6,14 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
-  buildLinuxAlphaReleaseManifest,
+  buildLinuxReleaseManifest,
   buildLinuxUpdateFeedYml,
   findLatestLinuxAppImage,
   formatSha256File,
-  LINUX_ALPHA_UPDATE_FEED_NAME,
+  LINUX_UPDATE_FEED_NAME,
   sha256File,
   sha512File
-} from './lib/linux-alpha-release.mjs'
+} from './lib/linux-release.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const releaseDir = join(repoRoot, 'apps', 'desktop', 'release')
@@ -28,7 +28,7 @@ async function main() {
   const info = await stat(artifactPath)
   const sha256 = await sha256File(artifactPath)
   const sha512 = await sha512File(artifactPath)
-  const manifest = buildLinuxAlphaReleaseManifest({
+  const manifest = buildLinuxReleaseManifest({
     artifactPath,
     packageVersion,
     sha256,
@@ -40,7 +40,7 @@ async function main() {
   await mkdir(outputDir, { recursive: true })
   const manifestPath = join(outputDir, 'release.json')
   const shaPath = join(outputDir, `${manifest.filename}.sha256`)
-  const feedPath = join(outputDir, LINUX_ALPHA_UPDATE_FEED_NAME)
+  const feedPath = join(outputDir, LINUX_UPDATE_FEED_NAME)
   const feedYml = buildLinuxUpdateFeedYml({
     filename: manifest.filename,
     releaseDate: manifest.releasedAt,

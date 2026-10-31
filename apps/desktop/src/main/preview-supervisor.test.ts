@@ -24,6 +24,40 @@ function metalLive(generation: number) {
 }
 
 describe('PreviewSupervisorModel', () => {
+  it.each(['darwin', 'win32', 'linux'] as const)(
+    'timestamps lifecycle changes, not repeated surface observations on %s',
+    (platform) => {
+      let tick = 0
+      const model = new PreviewSupervisorModel({ now: () => String(tick++), platform })
+      model.openWindow()
+      model.windowOpened()
+      model.requestSurface()
+      const event =
+        platform === 'darwin'
+          ? metalLive(1)
+          : {
+              generation: 1,
+              transport: 'electron-proof-surface' as const,
+              backing: 'electron-browser-window' as const,
+              nativePreviewHostKind: 'proof-surface' as const
+            }
+      const live = model.surfaceLive(event)
+      for (let frame = 0; frame < 60; frame += 1) {
+        expect(model.surfaceLive(event)).toEqual(live)
+        expect(model.setWindowVisible(true)).toEqual(live)
+      }
+      const failed = model.surfaceFailed({ generation: 1, message: 'Source stalled.' })
+      expect(failed.updatedAt).not.toBe(live.updatedAt)
+      expect(model.surfaceFailed({ generation: 1, message: 'Source stalled.' })).toEqual(failed)
+      expect(model.surfaceLive(event)).toEqual(failed)
+      model.requestSurface()
+      const recovered = model.surfaceLive(event)
+      expect(recovered.updatedAt).not.toBe(failed.updatedAt)
+      expect(recovered.lastError).toBeUndefined()
+      expect(model.surfaceLive(event)).toEqual(recovered)
+    }
+  )
+
   it('tracks the happy path from closed window to live native surface', () => {
     const model = supervisor()
 
