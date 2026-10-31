@@ -14433,7 +14433,7 @@ async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus
     if let Some(status) = active_status {
         return status;
     }
-    if !state.performance_check.is_running() && state.ffmpeg_work.snapshot().finalizing_active {
+    if state.ffmpeg_work.user_finalizing_active() {
         return protocol::RecordingStatus {
             state: RecordingState::Stopping,
             session_id: None,
@@ -21300,7 +21300,7 @@ mod tests {
         let mut state = test_state();
         state.performance_check =
             std::sync::Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
-        let finalizing = state.ffmpeg_work.begin_finalizing();
+        let finalizing = state.ffmpeg_work.begin_performance_check_finalizing();
         let query = r#"{"id":"reloaded-renderer","method":"recording.status","params":{}}"#;
         for stopping in [false, true] {
             let mut benchmark = recording::test_performance_check_recording_stub("benchmark");
@@ -21341,7 +21341,7 @@ mod tests {
         state.performance_check = std::sync::Arc::default();
         assert!(matches!(
             current_recording_status(&state).await.state,
-            RecordingState::Stopping
+            RecordingState::Idle
         ));
         drop(finalizing);
         assert!(matches!(
@@ -21376,6 +21376,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn recording_status_keeps_user_finalization_visible_during_benchmark_takeover() {
+        let mut state = test_state();
+        state.performance_check =
+            std::sync::Arc::new(performance_check::PerformanceCheckRuntime::running_for_test());
+        let benchmark = state.ffmpeg_work.begin_performance_check_finalizing();
+        let user = state.ffmpeg_work.begin_finalizing();
+        let query = r#"{"id":"takeover","method":"recording.status","params":{}}"#;
+        let response = handle_text_message_with_role(&state, query, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.payload.unwrap()["state"], "stopping");
+
+        drop(benchmark);
+        assert!(matches!(
+            current_recording_status(&state).await.state,
+            RecordingState::Stopping
+        ));
+        drop(user);
+        assert!(matches!(
+            current_recording_status(&state).await.state,
+            RecordingState::Idle
+        ));
     }
 
     #[tokio::test]

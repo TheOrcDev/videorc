@@ -83,7 +83,7 @@ file size or successful build is not a pass.
 | Separate source recordings         | macOS-only                                                                                        | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
 | Preview                            | CPU/BMP proof presenter                                                                           | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
 | Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix                           | Prove shared-bus mix and fallback warning.                                                                  |
-| First run                          | Linux setup enabled with sharing guidance; full development smoke passes                          | Packaged physical proof and real OAuth still required.                                                      |
+| First run                          | Linux sharing guidance enabled; reload passes after icon fix, full smoke fails at look commit     | Packaged physical proof and real OAuth still required.                                                      |
 | Notes protection                   | Capture exclusion unsupported                                                                     | Tell users Notes may be captured; prove behavior.                                                           |
 | Split profiles / dual orientation  | Restricted encoded paths                                                                          | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
 
@@ -117,6 +117,27 @@ Receipts: `/tmp/videorc-beta-pipewire-peer-identity-kUCPWP/report.json` and
 owned tones/null sinks and close their own fixtures; no default routing changes
 or production capture occur. The production design must account for this
 Pulse-server indirection rather than trusting the advertised process ID.
+
+A silent standalone Electron probe preserves a per-instance property set via
+`PULSE_PROP` in both the Pulse stream and its PipeWire node. Setting the
+property in Electron's main JavaScript before `app.whenReady()` also works
+with the normal out-of-process audio service. The probe matches only the
+owned Electron process metrics, routes only that owned silent stream to an
+owned null sink, and removes its processes/module afterwards. Receipts:
+`/tmp/videorc-beta-electron-audio-marker-izZNmX/report.json` and
+`/tmp/videorc-beta-electron-audio-marker-late-env-z15cQa/report.json`.
+Both owned cleanup receipts report no forced orphan cleanup. An earlier
+probe observed its stream before the requested sink route settled and failed
+that check; it is not evidence that `PULSE_SINK` is ignored.
+
+This narrows the self-audio identification design, not the support status.
+The marker is an app-owned exclusion tag, not an authenticated process ID.
+Production must set it before any playback helper starts, preserve it through
+backend/worker environment overrides and audio-service restarts, and verify
+both included external audio and excluded Videorc playback in actual capture.
+Native PipeWire clients still need server-authenticated ownership checks;
+Pulse-server indirection and unknown/transient ownership must be handled
+explicitly. No production system-audio capture or desktop routing changed.
 
 The microphone artifact analyzer now accepts one exact backend-reported FFmpeg
 tee output shared by recording and stream only when their applied offsets agree.
@@ -1649,3 +1670,123 @@ Clippy, then exceeded GitHub's 75-minute limit while compiling tests. No tests
 executed and no performance sentinel ran. It remains in the existing runbook's
 hosted-macOS timeout category, not a pass or a new waiver. Receipt:
 `/tmp/videorc-beta-macos-rust-124618986046-classification.json`.
+
+### Main preview-isolation integration, 2026-10-31
+
+Main `53049b68` is merged and pushed as `c8685c4d`. The only textual conflict
+was the plan index; both entries are retained. The unpublished CPU experiment
+and workflow-exit patch/test are preserved in stash
+`8ddda55d9b0054b765371c40a49d177b1d092446` and a byte-verified backup at
+`/tmp/videorc-beta-before-main-53049b68-lmipn0ow`. The merged compositor matches
+main exactly; the CPU experiment is not present in the checked source or
+rebuilt binary. The workflow correction still must land before a candidate.
+
+Merged-source verification passes typecheck, lint, format, desktop build,
+442 focused desktop tests, all 606 desktop test files (6,669 pass, one
+skipped) and all 2,990 Node tests without skips. This Node run excludes the
+stashed workflow regression test. Rust format, Clippy with the existing four
+Linux allowances and the normal optimized backend/MCP build pass. The focused
+native filters plus the corrected frame-lease module run pass 34 unique tests.
+The original `compositor_preview_frame_lease::tests::` filter matched zero
+cases and supplies no evidence; its replacement runs all four Linux frame-store
+cases. The macOS native-surface case remains unavailable on Ogre. Receipts:
+`/tmp/videorc-beta-main53049-source-2mQrbm/report.json`,
+`/tmp/videorc-beta-main53049-native-sFuiNM/report.json` and
+`/tmp/videorc-beta-main53049-frame-lease-ffsbuja9/report.json`.
+
+The fresh backend SHA-256 is
+`056f6d148c0e00129a571d070c63664454c9b799e95cafe572febfd833422f77`.
+Runtime verification on that exact merged build is **FAIL**, with individual
+results retained in `/tmp/videorc-beta-main53049-runtime-v5dwWB/summary.json`:
+100 Linux proof-preview cycles pass, with 13 censuses showing one Electron
+main, zero budget failures and clean teardown. VAAPI 1080p30 passes its
+artifact gates (186 frames, 6.2 seconds, 13 ms A/V tail). OpenH264 writes a
+normally finalized 186-frame, 6.2-second artifact with a 13 ms tail, but fails
+because three consecutive frames are identical at 4.133 seconds. A separate
+full-resolution decode confirms that burst. Neither encoder case supplies
+controlled microphone/system-audio proof. All four commands finished without
+supervisor-forced cleanup.
+
+First-run setup passes the initial Linux guidance check, then fails with a
+CDP evaluation timeout during renderer reload. The guarded navigation trace
+shows a request waiting 16.581 seconds in the new document's default context;
+it is not a stale-context failure. A matched diagnostic fails with the first-run
+performance check active and passes when that check is cancelled before reload.
+Both CPU profiles are dominated by React element creation during evaluation of
+the entire Phosphor icon barrel: 14,988 ms self time with the check active and
+7,542 ms with it cancelled. These are development reload diagnostics, not
+packaged startup measurements. The original deadlines remain unchanged.
+Receipts: `/tmp/videorc-beta-first-run-reload-guarded-YtIWyJ/report.json` and
+`/tmp/videorc-beta-first-run-reload-profile-Sjksgp/report.json`. Both comparison
+cases shut down without supervisor-forced cleanup. The initial trace launch
+with missing Cargo profile settings was cancelled and supplies no app evidence.
+
+Commit `97b739cf` changes the two icon registries to the package's published
+per-icon exports. All 88 semantic slots, seven activity glyphs, icon weights,
+SVG props and custom marks are preserved; production lazy chunk ownership
+remains tested. A real Vite development optimizer regression fails against the
+old barrel and passes after this change. Lint rejects both root and deep package
+imports outside the two registries. Source verification passes 78 focused tests,
+typecheck, lint, format, the production desktop build and all 606 desktop files
+(6,670 passing tests, one existing skip). Receipt:
+`/tmp/videorc-beta-icon-startup-source-0gsoFR/report.json`. The matched reload
+now passes with the performance check confirmed active and original deadlines:
+React element-creation self time is 40.498 ms in the retained profile. This
+comparison preserves the native source and optimized backend bytes. Receipt:
+`/tmp/videorc-beta-icon-startup-runtime-UorTPA/summary.json`.
+
+The full maintained first-run smoke still **fails**, now at the later look
+commit. Fresh setup, reload, motion, reduced motion and theme checks pass;
+selecting Silk changes the card but not the registry or committed scene.
+A targeted trace confirms a second defect: before reload the backend reports
+a benchmark recording while the renderer is idle; after reload the renderer
+believes a session is running. Before the look choice, the backend is idle and
+the check finished, but the renderer remains blocked by the stale recording
+state. The event relay suppresses benchmark lifecycle events, including Idle,
+while the bootstrap `recording.status` query previously exposed that internal
+session. Both verification queues close without forced orphan cleanup.
+Diagnostic receipt:
+`/tmp/videorc-beta-first-run-benchmark-state-CfN3s3/report.json`.
+
+Commit `b687c8d3` excludes benchmark sessions from client recording-status
+queries while leaving their internal status and owner intact. Real recording,
+streaming and replay-only sessions retain their authoritative status, including
+Stopping. A performance check is refused while a user's finalization lease is
+active. The first native check failed compilation because the test module
+lacked `Arc` qualification; pushed follow-up `6212803e` corrects those three
+test references. Its runtime dispatcher refused the failed prerequisite.
+
+Review found that a global benchmark-running flag could also hide a user's
+finalization during takeover. The follow-up binds visibility to each
+finalization lease instead. The monitor marks its lease from the session's
+purpose before removing that session; a user's finalization stays visible
+even while a benchmark flag remains set, and benchmark finalization stays
+hidden after that flag clears. Counted leases keep capture, maintenance and
+shutdown fenced until every owner releases its permit. The RPC regressions
+cover both visibility directions; a synchronous coordinator regression polls
+the actual admission and shutdown futures for all four user/benchmark owner
+pairs, with no sleeps or child-process handshakes.
+
+All 21 maintained `ffmpeg_work` tests pass in an isolated Rust harness that
+imports the exact production module and cached project dependencies. A separate
+ownership regression fails against `6212803e` and passes with the follow-up.
+Receipt: `/tmp/videorc-beta-finalization-coordinator-gbanl11_/report.json`.
+This does not replace full backend tests. The earlier native queue was stopped
+before changing source; its runtime dispatcher again refused to launch. The
+owned compiler PIDs were confirmed gone. The coordinator and RPC filters,
+Clippy and optimized build will run before the maintained first-run,
+100-cycle Linux preview, both direct 1080p30 matrices and both enforced
+record-latency runs. No first-run deadline, quality budget or capture policy
+was relaxed; this is not yet a verified runtime repair.
+
+The Windows diagnostic on `c8685c4d` passes all 48 controlled-audio cases and
+fails 36 of the 48 independent FFmpeg control cases. Tails are 117–234 ms;
+four cases also fail frame count. The failure remains in the documented
+independent-control category, without a waiver, threshold change or retry.
+Receipt: `/tmp/videorc-beta-windows-diagnostics-124647562663-classification.json`.
+
+The full macOS recording-studio/device suite and main's new
+`smoke:preview-check-invisible` require macOS/ScreenCaptureKit and cannot run
+here. The Linux probes above are scoped development evidence. Combined-output,
+latency, physical AppImage, endurance, pilot, update/rollback and publication
+gates remain open; there is no accepted or published Linux Beta.

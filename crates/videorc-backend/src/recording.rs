@@ -11060,8 +11060,19 @@ async fn monitor_session(
             None,
         );
     }
-    let finalizing_permit = state.ffmpeg_work.begin_finalizing();
     let mut guard = state.recording.lock().await;
+    // Acquire the lease before retiring the session/capture permit. Its
+    // visibility belongs to this session even if the benchmark's running
+    // flag changes while finalization finishes.
+    let finalizing_permit = if guard
+        .as_ref()
+        .filter(|active| active.session_id == session_id)
+        .is_some_and(ActiveRecording::is_performance_check)
+    {
+        state.ffmpeg_work.begin_performance_check_finalizing()
+    } else {
+        state.ffmpeg_work.begin_finalizing()
+    };
     let monitored_recording = guard
         .as_ref()
         .filter(|active| active.session_id == session_id)
