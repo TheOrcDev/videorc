@@ -201,8 +201,11 @@ describe('Settings layout', () => {
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
     // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
     // (PageTabs), so the shell keeps no list of such pages.
-    expect(appShellSource).toContain('<PaneBody>')
-    expect(appShellSource).not.toMatch(/<PaneBody scroll=/)
+    // PaneBody may be keyed to reset each page to its top. Check scroll
+    // ownership regardless of the presence or order of other props.
+    const paneBodies = openingTags(appShellSource, 'PaneBody')
+    expect(paneBodies).toHaveLength(1)
+    expect(paneBodies[0]).not.toMatch(/\bscroll\s*=/)
     expect(shellSource).toContain('<PageTabs')
     expect(pageTabsSource).toContain('{...PANE_OWNS_SCROLL}')
     const strip = pageTabsSource.indexOf('<TabsList')
