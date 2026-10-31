@@ -123,7 +123,9 @@ function classifySource(raw: RawObsSource): ObsSource | null {
   // Windows (monitor_capture, game_capture), Linux (PipeWire, X11) and the
   // older mac display_capture all land on the same Videorc kinds. OBS's
   // PipeWire plugin registers hyphenated ids: screen capture (current),
-  // desktop capture (older) and window capture.
+  // desktop capture (older) and window capture. The current screen capture
+  // can pick a monitor or a window and saves only a portal token, so it lands
+  // on display and the import report says the target is unknown.
   if (
     obsKind === 'display_capture' ||
     obsKind === 'monitor_capture' ||

@@ -256,6 +256,36 @@ test('without clips the same run is needs-eyes, never a failure', async () => {
   }
 })
 
+test('a reconnect gap ends a slow or low-bitrate run instead of counting toward it', async () => {
+  const dir = await fixtureCopy('clean')
+  try {
+    const run = await readRunFolder(dir)
+    const thresholds = await loadThresholds()
+    const T0 = Date.parse('2026-10-12T06:00:00.000Z')
+    const leg = (state, speed, bitrateKbps) => ({ targetId: 'yt', state, speed, bitrateKbps })
+    const good = { kind: 'sample', tsMs: T0, legs: [leg('live', 1, 6000)] }
+    const bad = { kind: 'sample', tsMs: T0 + 65_000, legs: [leg('live', 0.5, 100)] }
+    const reconnecting = Array.from({ length: 12 }, (_, i) => ({
+      kind: 'sample',
+      tsMs: T0 + (i + 1) * 5000,
+      legs: [leg('reconnecting', undefined, 0)]
+    }))
+    const verdictFor = async (journal) =>
+      (await computeVerdict({ ...run, journal }, thresholds, { runFrames: false })).verdict
+    // One bad live sample after a minute of reconnecting is not a minute of
+    // slow encoding or low bitrate.
+    const gapped = await verdictFor([good, ...reconnecting, bad])
+    assert.equal(byId(gapped, 'stream:encoder-speed').status, 'pass')
+    assert.equal(byId(gapped, 'stream:bitrate').status, 'pass')
+    // Control: with no samples between them, the same two samples are a run.
+    const unbroken = await verdictFor([good, bad])
+    assert.equal(byId(unbroken, 'stream:encoder-speed').status, 'warn')
+    assert.equal(byId(unbroken, 'stream:bitrate').status, 'warn')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a synthetic renderer leak over a long run warns in report mode and fails in gate mode', async () => {
   const dir = await fixtureCopy('clean')
   try {

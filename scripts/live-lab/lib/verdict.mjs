@@ -454,17 +454,23 @@ export async function computeVerdict(
 
   // --- journal: dropped frames, encoder speed, bitrate --------------------------
   const samples = journal.filter((line) => line.kind === 'sample')
-  const liveSamples = samples.filter((line) =>
-    (line.legs ?? []).some((leg) => leg.state === 'live')
-  )
-  series.bitrate = liveSamples.map((line) => ({
+  const isLive = (line) => (line.legs ?? []).some((leg) => leg.state === 'live')
+  const liveSamples = samples.filter(isLive)
+  // The run measures keep every sample: one with no live leg (a reconnect)
+  // or no speed is a gap that ends a run, so a bad sample after it is not
+  // counted from a good one before it. The charts, the minimum and the
+  // median read only measured ones.
+  const bitrateSamples = samples.map((line) => ({
     atMs: line.tsMs,
-    value: (line.legs ?? []).reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0)
+    value: isLive(line)
+      ? (line.legs ?? []).reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0)
+      : null
   }))
-  // The slow-run measure keeps the samples without a speed as gaps; the
-  // chart and the minimum read only measured ones.
-  const speedSamples = liveSamples.map((line) => {
-    const speeds = (line.legs ?? []).map((leg) => leg.speed).filter(Number.isFinite)
+  series.bitrate = bitrateSamples.filter((p) => p.value !== null)
+  const speedSamples = samples.map((line) => {
+    const speeds = isLive(line)
+      ? (line.legs ?? []).map((leg) => leg.speed).filter(Number.isFinite)
+      : []
     return { atMs: line.tsMs, value: speeds.length ? Math.min(...speeds) : null }
   })
   series.speed = speedSamples.filter((p) => p.value !== null)
@@ -543,7 +549,11 @@ export async function computeVerdict(
       6000
     const fraction = thresholds.bitrate?.minFractionOfTarget ?? 0.7
     const bitrateFor = (thresholds.bitrate?.forSeconds ?? 60) * 1000
-    const low = longestBadRunMs(series.bitrate, (p) => p.value < target * fraction)
+    const low = longestBadRunMs(
+      bitrateSamples,
+      (p) => p.value < target * fraction,
+      (p) => p.value !== null
+    )
     const bitrateBreach = low >= bitrateFor
     const bitrateJudge = judge(bitrateBreach, 'P1')
     const medianBitrate = series.bitrate.map((p) => p.value).sort((a, b) => a - b)[

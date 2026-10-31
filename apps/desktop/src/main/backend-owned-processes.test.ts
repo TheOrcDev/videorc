@@ -774,6 +774,7 @@ describe('owned process startup lock', () => {
 
   const LOCK = '/locks/startup.lock'
   const GUARD = '/locks/startup.lock.reclaim'
+  const GUARD2 = '/locks/startup.lock.reclaim.reclaim'
   type FakeFile = { contents: string; ageMs: number }
 
   function lockHarness(
@@ -785,13 +786,15 @@ describe('owned process startup lock', () => {
       dangling?: boolean
       /** Runs when the reclaim guard is taken (another contender's moves). */
       onGuard?: (files: Map<string, FakeFile>) => void
+      /** Runs when the guard's own reclaim guard is taken. */
+      onGuard2?: (files: Map<string, FakeFile>) => void
     } = {}
   ) {
     const files = new Map<string, FakeFile>()
     if (initial) files.set(LOCK, initial)
     if (hooks.guard) files.set(GUARD, hooks.guard)
     const events: string[] = []
-    const name = (path: string) => (path === GUARD ? 'guard' : 'lock')
+    const name = (path: string) => (path === GUARD ? 'guard' : path === GUARD2 ? 'guard2' : 'lock')
     const release = acquireOwnedProcessStartupLock({
       lockPath: LOCK,
       timeoutMs: 200,
@@ -811,6 +814,7 @@ describe('owned process startup lock', () => {
         files.set(path, { contents: '', ageMs: 0 })
         events.push(`open ${name(path)}`)
         if (path === GUARD) hooks.onGuard?.(files)
+        if (path === GUARD2) hooks.onGuard2?.(files)
         return 7
       },
       closeFile: () => {},
@@ -883,7 +887,9 @@ describe('owned process startup lock', () => {
       guard: { contents: JSON.stringify({ pid: 9999 }), ageMs: 5 }
     })
     expect(harness.events).toEqual([
+      'open guard2',
       'remove guard',
+      'remove guard2',
       'open guard',
       'remove lock',
       'remove guard',
@@ -891,11 +897,41 @@ describe('owned process startup lock', () => {
     ])
   })
 
+  it('never removes a replacement guard another contender took after it cleared a crashed one', () => {
+    // Both judged the crashed reclaimer's guard stale; the other one cleared
+    // it and took a new guard before this contender got the guard's guard.
+    const replacement = JSON.stringify({ pid: 4242, token: 'b' })
+    let files: Map<string, FakeFile> | undefined
+    expect(() =>
+      lockHarness(
+        { contents: JSON.stringify({ pid: 9999 }), ageMs: 5 },
+        {
+          guard: { contents: JSON.stringify({ pid: 9999 }), ageMs: 5 },
+          onGuard2: (current) => {
+            files = current
+            current.set(GUARD, { contents: replacement, ageMs: 0 })
+          }
+        }
+      )
+    ).toThrow('slept')
+    expect(files?.get(GUARD)?.contents).toBe(replacement)
+    expect(files?.has(LOCK)).toBe(true)
+  })
+
   it('releases only its own lock', () => {
     const harness = lockHarness(null)
     harness.files.set(LOCK, { contents: JSON.stringify({ pid: 4242, token: 'b' }), ageMs: 0 })
     harness.release()
     expect(harness.current()?.contents).toContain('4242')
+  })
+
+  it('leaves its lock in place when release cannot read the token back', () => {
+    for (const readError of ['EACCES', 'EPERM', 'EBUSY', 'EIO']) {
+      const harness = lockHarness(null, { readError })
+      harness.release()
+      expect(harness.events).not.toContain('remove lock')
+      expect(harness.current()).not.toBeNull()
+    }
   })
 
   it('waits for a lock whose holder is still alive', () => {

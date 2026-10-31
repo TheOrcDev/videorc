@@ -190,13 +190,14 @@ export function acquireOwnedProcessStartupLock(
         } catch {
           // The descriptor may already be closed; releasing the lock should be best-effort.
         }
-        let current: string | null
+        let current: string
         try {
           current = readFile(options.lockPath)
-        } catch (readError) {
-          // Gone already; any other read error falls back to removing it.
-          if (errorCode(readError) === 'ENOENT') return
-          current = ownedContents
+        } catch {
+          // Gone already, or unreadable: without our token there is no proof
+          // the path still holds our lock. One left behind names this pid,
+          // so the next launch reclaims it once this process is gone.
+          return
         }
         if (current !== ownedContents) {
           // Not ours any more: another process holds this path now.
@@ -821,44 +822,46 @@ function inspectStartupLock(
   return { contents, ageMs }
 }
 
+/** Guards of guards: each level only exists when a reclaimer crashed. */
+const MAX_RECLAIM_DEPTH = 3
+
 /**
- * Takes the reclaim guard beside the lock. Only the guard holder removes a
+ * Takes the reclaim guard beside a lock. Only the guard holder removes a
  * stale lock, and it re-reads the lock under the guard, so two contenders
  * that both judged the same lock stale cannot remove the replacement the
  * first one created. A guard left by a reclaimer that crashed inside this
- * window is judged like a lock (dead pid, or no pid and old) and cleared.
+ * window is judged like a lock (dead pid, or no pid and old) and reclaimed
+ * the same way, under its own guard, so two contenders that both judged the
+ * same crashed guard cannot remove the replacement guard either.
  */
-function takeReclaimGuard(guardPath: string, io: StartupLockIo): number | null {
+function takeReclaimGuard(guardPath: string, io: StartupLockIo, depth: number): number | null {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const fileDescriptor = io.openFileExclusive(guardPath)
       try {
-        io.writeFile(guardPath, `${JSON.stringify({ pid: io.currentPid })}\n`)
+        io.writeFile(guardPath, `${JSON.stringify({ pid: io.currentPid, token: randomUUID() })}\n`)
       } catch {
         // The guard still excludes others without its pid; it ages out.
       }
       return fileDescriptor
     } catch (error) {
       if (errorCode(error) !== 'EEXIST' || attempt > 0) return null
-      const guard = inspectStartupLock(guardPath, io)
-      if (!guard || !startupLockIsStale(guard.contents, guard.ageMs, io)) return null
-      try {
-        io.removeFile(guardPath)
-      } catch {
-        return null
-      }
+      if (!reclaimStaleStartupLock(guardPath, io, depth + 1)) return null
     }
   }
   return null
 }
 
-function reclaimStaleStartupLock(lockPath: string, io: StartupLockIo): boolean {
+function reclaimStaleStartupLock(lockPath: string, io: StartupLockIo, depth = 0): boolean {
+  if (depth >= MAX_RECLAIM_DEPTH) {
+    return false
+  }
   const observed = inspectStartupLock(lockPath, io)
   if (!observed || !startupLockIsStale(observed.contents, observed.ageMs, io)) {
     return false
   }
   const guardPath = `${lockPath}.reclaim`
-  const guard = takeReclaimGuard(guardPath, io)
+  const guard = takeReclaimGuard(guardPath, io, depth)
   if (guard === null) {
     return false
   }
@@ -886,7 +889,7 @@ function reclaimStaleStartupLock(lockPath: string, io: StartupLockIo): boolean {
     try {
       io.removeFile(guardPath)
     } catch {
-      // A guard left behind ages out (see takeReclaimGuard).
+      // A guard left behind is reclaimed like a lock (see takeReclaimGuard).
     }
   }
 }
