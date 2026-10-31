@@ -605,9 +605,9 @@ async function main() {
  * Plan 210 put Scenes and Layouts above the canvas, so on a laptop-height
  * window the canvas starts below the fold. A docked surface over a slot out of
  * view hides as 'scrolled-away' (the edge-scroll case above proves that), so
- * the Scene scenarios bring the canvas into view first. Only its own scroll
- * pane moves: scrollIntoView also shifts overflow-hidden shell ancestors, and
- * that offset followed the surface back into the Studio slot.
+ * the Scene scenarios bring the canvas into view first, scrolling only its own
+ * pane. That pane is shared by every page and resets per page since #956, so
+ * Studio opens at its top again.
  */
 async function revealSceneSlot() {
   await smokeCommand('eval-js', {
