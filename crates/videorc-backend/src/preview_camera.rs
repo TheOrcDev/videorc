@@ -45,7 +45,33 @@ const CAMERA_REFERENCE_WIDTH: u32 = 1280;
 #[cfg(any(target_os = "windows", test))]
 const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
-const WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
+/// Must stay inside the 10 s mutation contract together with the up-to-2 s
+/// device inventory that precedes it: past that contract the whole backend
+/// restarts (UHD 620 field log: two restarts, preview never came up). The
+/// native thread bounds itself to `WINDOWS_CAMERA_START_BUDGET`; this is only
+/// the backstop.
+const WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT: Duration = Duration::from_secs(7);
+#[cfg(target_os = "windows")]
+const WINDOWS_CAMERA_START_BUDGET: Duration = Duration::from_secs(6);
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(4);
+/// Kept free for the `-framerate`/default-format attempts so a stalled MJPEG
+/// mode cannot spend them; the HP HD Camera's default format delivered its
+/// first frame in ~1.0-1.3 s.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE: Duration = Duration::from_millis(2500);
+/// Kept free by the `-framerate` attempt for the final negotiated-default
+/// attempt, so a stalled exact rate cannot leave it no time. The reserve must
+/// cover the stalled attempt's own teardown (kill, wait, killer join) and
+/// still leave the ~1.0-1.3 s the HP HD Camera's default format needs for
+/// its first frame.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE: Duration = Duration::from_millis(1500);
+/// An attempt that still has a fallback after it is skipped below this: it
+/// cannot realistically go live, and the fallback gets the time instead.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_MIN_EARLY_ATTEMPT: Duration = Duration::from_secs(1);
+const LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 /// One DirectShow inventory or mode probe (`-list_devices` / `-list_options`).
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_INVENTORY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -67,8 +93,10 @@ const WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS: f64 = 0.000_001;
 fn native_camera_preview_thread_startup_timeout() -> Duration {
     // FFmpeg-fed cameras (DirectShow, V4L2) pay a child spawn plus device
     // negotiation per attempt before the first frame.
-    if cfg!(any(target_os = "windows", target_os = "linux")) {
+    if cfg!(target_os = "windows") {
         WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT
+    } else if cfg!(target_os = "linux") {
+        LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT
     } else {
         Duration::from_secs(4)
     }
@@ -594,6 +622,17 @@ impl PreviewCameraShared {
             frame_store: FrameStore::new_with_surface_backing_tracker(1, tracker),
             ..Self::default()
         }
+    }
+
+    /// A frame read from the capture process pipe (Windows dshow, Linux v4l2)
+    /// is that platform's capture callback. Count it like the AVFoundation
+    /// sample-buffer callback: capture recovery verifies a restarted camera by
+    /// this counter, and a pipe camera that never advanced it was restarted
+    /// while live and latched Failed.
+    #[cfg(any(not(target_os = "macos"), test))]
+    fn record_pipe_frame_callback(&mut self, at: Instant) {
+        self.capture_timings.record_callback_at(at);
+        self.capture_callback_count = self.capture_callback_count.saturating_add(1);
     }
 }
 
@@ -4395,6 +4434,94 @@ fn windows_camera_capture_attempts(
     attempts
 }
 
+/// What the DirectShow `-list_options true` probe learned about a camera.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum WindowsDshowModeProbe {
+    /// The camera listed its modes, possibly without any MJPEG.
+    Modes(DshowAdvertisedVideoModes),
+    /// No modes and no known cause: the ladder keeps every common mode.
+    Unreadable,
+    /// A failure no capture mode can fix; no attempt should be spawned.
+    ModeIndependentError(String),
+}
+
+/// Classifies `-list_options true` output. A camera that lists only raw modes
+/// (the UHD 620 field laptop's YUY2-only "HP HD Camera", the frame-server
+/// C920) gets no MJPEG rung; a busy, missing or refused one gets no rung.
+#[cfg(any(target_os = "windows", test))]
+fn classify_windows_dshow_mode_probe(stderr: &str) -> WindowsDshowModeProbe {
+    let modes = parse_dshow_advertised_video_modes(stderr);
+    if !modes.is_empty() {
+        return WindowsDshowModeProbe::Modes(modes);
+    }
+    match stderr
+        .lines()
+        .find(|line| windows_dshow_error_is_mode_independent(line))
+    {
+        Some(line) => WindowsDshowModeProbe::ModeIndependentError(line.trim().to_string()),
+        None => WindowsDshowModeProbe::Unreadable,
+    }
+}
+
+/// DirectShow failures no other capture mode can fix: retrying them only
+/// burns the start budget.
+#[cfg(any(target_os = "windows", test))]
+fn windows_dshow_error_is_mode_independent(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("already in use")
+        || stderr.contains("access is denied")
+        || stderr.contains("permission denied")
+        || stderr.contains("could not find video device")
+}
+
+/// The Windows camera start ladder: MJPEG modes, then the exact rate in the
+/// default format, then whatever the driver negotiates.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowsCameraAttemptKind {
+    Mjpeg,
+    ExactRate,
+    NegotiatedDefault,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsCameraAttemptKind {
+    fn of(request_fps: Option<u32>, mjpeg_capture_size: Option<(u32, u32)>) -> Self {
+        match (request_fps, mjpeg_capture_size) {
+            (_, Some(_)) => Self::Mjpeg,
+            (Some(_), None) => Self::ExactRate,
+            (None, None) => Self::NegotiatedDefault,
+        }
+    }
+
+    /// Start budget this attempt must leave for the attempts after it.
+    fn reserve(self) -> Duration {
+        match self {
+            Self::Mjpeg => WINDOWS_CAMERA_DEFAULT_FORMAT_RESERVE,
+            Self::ExactRate => WINDOWS_CAMERA_NEGOTIATED_DEFAULT_RESERVE,
+            Self::NegotiatedDefault => Duration::ZERO,
+        }
+    }
+}
+
+/// First-frame deadline for one attempt, or `None` to skip it. Every attempt
+/// but the last leaves its kind's reserve of the start budget unspent.
+#[cfg(any(target_os = "windows", test))]
+fn windows_camera_attempt_first_frame_timeout(
+    remaining: Duration,
+    kind: WindowsCameraAttemptKind,
+) -> Option<Duration> {
+    let timeout = remaining
+        .saturating_sub(kind.reserve())
+        .min(WINDOWS_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT);
+    let has_fallback = kind != WindowsCameraAttemptKind::NegotiatedDefault;
+    if timeout.is_zero() || (has_fallback && timeout < WINDOWS_CAMERA_MIN_EARLY_ATTEMPT) {
+        return None;
+    }
+    Some(timeout)
+}
+
 fn camera_capture_target_dimensions(_layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
     // Capture geometry is LAYOUT-INVARIANT on purpose: always the full output
     // canvas, for every preset. The inset scenes used to capture a small
@@ -4769,9 +4896,7 @@ mod linux {
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard
-            .capture_timings
-            .record_callback_at(callback_started_at);
+        guard.record_pipe_frame_callback(callback_started_at);
         let now = Instant::now();
         guard.frames_captured = guard.frames_captured.saturating_add(1);
         guard.frames_in_window = guard.frames_in_window.saturating_add(1);
@@ -4837,22 +4962,61 @@ mod windows {
             });
         }
 
+        // The whole start, mode probe included, must finish inside the
+        // command contract; see WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT.
+        let started_at = Instant::now();
+        let start_deadline = started_at + WINDOWS_CAMERA_START_BUDGET;
+
         // Prefer an explicit MJPEG mode. Consumer webcams commonly reserve
         // 720p30 for MJPEG while their uncompressed DirectShow mode tops out
         // at 5-10 fps. Retain the exact-rate and negotiated-default fallbacks
         // for cameras that do not expose MJPEG.
-        let advertised = probe_dshow_advertised_video_modes(&config);
+        let probe = probe_dshow_advertised_video_modes(&config);
         if stop_flag.load(Ordering::Acquire) {
             return;
         }
+        let advertised = match probe {
+            WindowsDshowModeProbe::Modes(modes) => Some(modes),
+            WindowsDshowModeProbe::Unreadable => None,
+            WindowsDshowModeProbe::ModeIndependentError(reason) => {
+                // Busy, missing or refused: every capture mode would fail the
+                // same way, so spend none of the start budget on them.
+                tracing::warn!(
+                    camera = %config.unique_id,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "Windows camera preview mode probe hit an error no capture mode can fix: {reason}"
+                );
+                let _ = startup_tx.send(NativeCameraStartup::Failed(format!(
+                    "Windows camera preview could not open the device in {} ms: {reason}",
+                    started_at.elapsed().as_millis()
+                )));
+                return;
+            }
+        };
         let attempts = windows_camera_capture_attempts(width, height, fps, advertised.as_ref());
         let attempt_count = attempts.len();
+        let mut failures = Vec::new();
         for (attempt_index, (request_fps, mjpeg_capture_size)) in attempts.into_iter().enumerate() {
             if stop_flag.load(Ordering::Acquire) {
                 return;
             }
-            let last_attempt = attempt_index + 1 == attempt_count;
-            match run_windows_camera_preview_attempt(
+            let remaining = start_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                failures.push(format!(
+                    "start budget of {} s spent after {attempt_index} of {attempt_count} attempts",
+                    WINDOWS_CAMERA_START_BUDGET.as_secs()
+                ));
+                break;
+            }
+            let kind = WindowsCameraAttemptKind::of(request_fps, mjpeg_capture_size);
+            let Some(first_frame_timeout) =
+                windows_camera_attempt_first_frame_timeout(remaining, kind)
+            else {
+                // An early attempt may not eat the time its fallbacks need.
+                continue;
+            };
+            let attempt_started_at = Instant::now();
+            let outcome = run_windows_camera_preview_attempt(
                 &config,
                 &shared,
                 &startup_tx,
@@ -4863,22 +5027,65 @@ mod windows {
                 frame_len,
                 request_fps,
                 mjpeg_capture_size,
-                last_attempt,
-            ) {
-                CameraPreviewAttempt::ProducedFrames | CameraPreviewAttempt::Stopped => return,
-                CameraPreviewAttempt::FailedBeforeFirstFrame => {
-                    // Retry the next attempt (or, if this was the last, the
-                    // Failed status was already sent by the attempt).
+                first_frame_timeout,
+            );
+            let mode = windows_camera_attempt_label(request_fps, mjpeg_capture_size);
+            let attempt_ms = attempt_started_at.elapsed().as_millis() as u64;
+            match outcome {
+                CameraPreviewAttempt::ProducedFrames => {
+                    tracing::info!(
+                        camera = %config.unique_id,
+                        attempt = attempt_index + 1,
+                        ran_ms = attempt_ms,
+                        "Windows camera preview with {mode} ended after running live"
+                    );
+                    return;
+                }
+                CameraPreviewAttempt::Stopped => return,
+                CameraPreviewAttempt::FailedBeforeFirstFrame(reason) => {
+                    tracing::warn!(
+                        camera = %config.unique_id,
+                        attempt = attempt_index + 1,
+                        attempts = attempt_count,
+                        attempt_ms,
+                        "Windows camera preview attempt {mode} produced no frame: {reason}"
+                    );
+                    let mode_independent = windows_dshow_error_is_mode_independent(&reason);
+                    failures.push(format!("{mode}: {reason}"));
+                    if mode_independent {
+                        break;
+                    }
                 }
             }
         }
+        let summary = failures
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "no capture mode was attempted".to_string());
+        let _ = startup_tx.send(NativeCameraStartup::Failed(format!(
+            "Windows camera preview found no working capture mode after {} attempt(s) in {} ms; last: {summary}",
+            failures.len(),
+            started_at.elapsed().as_millis()
+        )));
     }
 
-    /// One bounded `-list_options` probe. None when it fails or reports no
-    /// modes; the ladder then keeps every common MJPEG mode.
+    fn windows_camera_attempt_label(
+        request_fps: Option<u32>,
+        mjpeg_capture_size: Option<(u32, u32)>,
+    ) -> String {
+        match (mjpeg_capture_size, request_fps) {
+            (Some((width, height)), Some(fps)) => format!("MJPEG {width}x{height}@{fps}"),
+            (Some((width, height)), None) => format!("MJPEG {width}x{height}"),
+            (None, Some(fps)) => format!("default format @{fps}"),
+            (None, None) => "negotiated default format".to_string(),
+        }
+    }
+
+    /// One bounded `-list_options` probe. Unreadable when it fails or reports
+    /// no modes; the ladder then keeps every common MJPEG mode.
     fn probe_dshow_advertised_video_modes(
         config: &NativeCameraPreviewConfig,
-    ) -> Option<DshowAdvertisedVideoModes> {
+    ) -> WindowsDshowModeProbe {
         let started_at = Instant::now();
         let output = crate::process_job::output_owned_std_with_timeout(
             Command::new(&config.ffmpeg_path).args([
@@ -4892,28 +5099,30 @@ mod windows {
             ]),
             WINDOWS_CAMERA_INVENTORY_TIMEOUT,
         );
-        let modes = match output {
+        let probe = match output {
             Ok(output) => {
-                parse_dshow_advertised_video_modes(&String::from_utf8_lossy(&output.stderr))
+                classify_windows_dshow_mode_probe(&String::from_utf8_lossy(&output.stderr))
             }
             Err(error) => {
                 tracing::warn!("[camera-modes] DirectShow mode probe failed: {error}");
-                return None;
+                return WindowsDshowModeProbe::Unreadable;
             }
         };
-        tracing::info!(
-            "[camera-modes] DirectShow advertises {} MJPEG size(s) and {} other mode(s) in {}ms",
-            modes.mjpeg_sizes.len(),
-            modes.other_mode_count,
-            started_at.elapsed().as_millis()
-        );
-        (!modes.is_empty()).then_some(modes)
+        if let WindowsDshowModeProbe::Modes(modes) = &probe {
+            tracing::info!(
+                "[camera-modes] DirectShow advertises {} MJPEG size(s) and {} other mode(s) in {}ms",
+                modes.mjpeg_sizes.len(),
+                modes.other_mode_count,
+                started_at.elapsed().as_millis()
+            );
+        }
+        probe
     }
 
     enum CameraPreviewAttempt {
         ProducedFrames,
         Stopped,
-        FailedBeforeFirstFrame,
+        FailedBeforeFirstFrame(String),
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4928,8 +5137,12 @@ mod windows {
         frame_len: usize,
         request_fps: Option<u32>,
         mjpeg_capture_size: Option<(u32, u32)>,
-        last_attempt: bool,
+        first_frame_timeout: Duration,
     ) -> CameraPreviewAttempt {
+        let attempt_started_at = Instant::now();
+        // Fixed before the spawn: a slow spawn spends this attempt's budget,
+        // never the startup receiver's.
+        let first_frame_deadline = attempt_started_at + first_frame_timeout;
         let args = windows_camera_preview_ffmpeg_args_mode(
             config,
             width,
@@ -4948,29 +5161,40 @@ mod windows {
         let mut child = match spawn_owned_std(&mut command) {
             Ok(child) => child,
             Err(error) => {
-                if last_attempt {
-                    let _ = startup_tx.send(NativeCameraStartup::Failed(format!(
-                        "Could not start {} for Windows camera preview: {error}",
-                        config.ffmpeg_path
-                    )));
-                }
-                return CameraPreviewAttempt::FailedBeforeFirstFrame;
-            }
-        };
-        let Some(mut stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            if last_attempt {
-                let _ = startup_tx.send(NativeCameraStartup::Failed(
-                    "Windows camera preview did not expose FFmpeg stdout.".to_string(),
+                return CameraPreviewAttempt::FailedBeforeFirstFrame(format!(
+                    "could not start {}: {error}",
+                    config.ffmpeg_path
                 ));
             }
-            return CameraPreviewAttempt::FailedBeforeFirstFrame;
+        };
+        if Instant::now() >= first_frame_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return CameraPreviewAttempt::FailedBeforeFirstFrame(format!(
+                "FFmpeg took longer than {} ms to start",
+                first_frame_timeout.as_millis()
+            ));
+        }
+        let Some(mut stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return CameraPreviewAttempt::FailedBeforeFirstFrame(
+                "FFmpeg exposed no stdout".to_string(),
+            );
         };
         let stderr = collect_stderr(child.stderr.take());
         let child = Arc::new(StdMutex::new(child));
         let done = Arc::new(AtomicBool::new(false));
-        let killer =
-            spawn_stop_flag_killer(Arc::clone(&child), Arc::clone(&done), Arc::clone(stop_flag));
+        let race = Arc::new(FirstFrameRace::default());
+        let killer = spawn_stop_flag_killer(
+            Arc::clone(&child),
+            Arc::clone(&done),
+            Arc::clone(stop_flag),
+            FirstFrameDeadline {
+                at: first_frame_deadline,
+                race: Arc::clone(&race),
+            },
+        );
 
         let mut startup_sent = false;
         let mut buffer = shared
@@ -4978,10 +5202,18 @@ mod windows {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frame_store
             .checkout_overwrite_buffer(frame_len);
-        let mut outcome = CameraPreviewAttempt::FailedBeforeFirstFrame;
+        let mut outcome = None;
+        let mut read_error = None;
         loop {
             match stdout.read_exact(&mut buffer) {
                 Ok(()) => {
+                    if !startup_sent && !race.claim_live() {
+                        // The deadline passed while this frame was still in
+                        // the pipe: the killer owns the attempt and has ended
+                        // FFmpeg. Reporting Live now would hand the ladder a
+                        // preview that is already dead and never retried.
+                        break;
+                    }
                     buffer = publish_bgra_frame(shared, width, height, buffer);
                     if !startup_sent {
                         let _ = startup_tx.send(NativeCameraStartup::Live {
@@ -5011,21 +5243,24 @@ mod windows {
                             }),
                         });
                         startup_sent = true;
-                        outcome = CameraPreviewAttempt::ProducedFrames;
+                        outcome = Some(CameraPreviewAttempt::ProducedFrames);
+                        tracing::info!(
+                            camera = %config.unique_id,
+                            first_frame_ms = attempt_started_at.elapsed().as_millis() as u64,
+                            "Windows camera preview went live with {}",
+                            windows_camera_attempt_label(request_fps, mjpeg_capture_size)
+                        );
                     }
                 }
                 Err(error) => {
                     if startup_sent {
                         // Ran and then ended (stop, unplug, or EOF); the caller
                         // must not retry a preview that already went live.
-                        outcome = CameraPreviewAttempt::ProducedFrames;
+                        outcome = Some(CameraPreviewAttempt::ProducedFrames);
                     } else if stop_flag.load(Ordering::Acquire) {
-                        outcome = CameraPreviewAttempt::Stopped;
-                    } else if last_attempt {
-                        let _ = startup_tx.send(NativeCameraStartup::Failed(format!(
-                            "Windows FFmpeg camera preview ended before the first frame: {error}{}",
-                            stderr_suffix(&stderr)
-                        )));
+                        outcome = Some(CameraPreviewAttempt::Stopped);
+                    } else {
+                        read_error = Some(error);
                     }
                     break;
                 }
@@ -5038,7 +5273,74 @@ mod windows {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .wait();
         let _ = killer.join();
-        outcome
+        outcome.unwrap_or_else(|| {
+            let timed_out = race.timed_out();
+            let cause = if timed_out {
+                format!("no frame within {} ms", first_frame_timeout.as_millis())
+            } else {
+                read_error.map_or_else(
+                    || "ended before the first frame".to_string(),
+                    |error| format!("ended before the first frame ({error})"),
+                )
+            };
+            // A killed attempt has nothing more to say; waiting for its
+            // stderr would spend the time the next attempt was reserved.
+            let stderr_wait = if timed_out {
+                Duration::ZERO
+            } else {
+                STDERR_TAIL_WAIT
+            };
+            CameraPreviewAttempt::FailedBeforeFirstFrame(format!(
+                "{cause}{}",
+                stderr_tail(&stderr, stderr_wait)
+            ))
+        })
+    }
+
+    struct FirstFrameDeadline {
+        at: Instant,
+        race: Arc<FirstFrameRace>,
+    }
+
+    const FIRST_FRAME_IDLE: u8 = 0;
+    const FIRST_FRAME_LIVE: u8 = 1;
+    const FIRST_FRAME_TIMED_OUT: u8 = 2;
+
+    /// The attempt's first-frame race, settled exactly once. The reader claims
+    /// Live the moment `read_exact` hands it a frame; the killer claims
+    /// TimedOut when the deadline passes with no claim; only the winner acts.
+    /// Two separate flags let a deadline landing between the frame's arrival
+    /// and the Live flag kill a preview that had just gone live, which the
+    /// ladder then treated as "ran live, do not retry".
+    #[derive(Debug, Default)]
+    pub(super) struct FirstFrameRace(std::sync::atomic::AtomicU8);
+
+    impl FirstFrameRace {
+        pub(super) fn claim_live(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_LIVE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn claim_timed_out(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_TIMED_OUT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn timed_out(&self) -> bool {
+            self.0.load(Ordering::Acquire) == FIRST_FRAME_TIMED_OUT
+        }
     }
 
     fn bgra_frame_len(width: u32, height: u32) -> Option<usize> {
@@ -5062,14 +5364,22 @@ mod windows {
         bytes
     }
 
+    /// Kills the attempt's FFmpeg on Stop, or when it has produced no frame by
+    /// the deadline: a dshow graph that opens but never delivers would
+    /// otherwise block `read_exact` past the whole start budget.
     fn spawn_stop_flag_killer(
         child: Arc<StdMutex<Child>>,
         done: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
+        first_frame: FirstFrameDeadline,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while !done.load(Ordering::Acquire) {
-                if stop_flag.load(Ordering::Acquire) {
+                // Past the deadline the killer may act only if it wins the
+                // race; a reader that already claimed Live keeps its child.
+                let stalled =
+                    Instant::now() >= first_frame.at && first_frame.race.claim_timed_out();
+                if stop_flag.load(Ordering::Acquire) || stalled {
                     let _ = child
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5094,9 +5404,7 @@ mod windows {
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard
-            .capture_timings
-            .record_callback_at(callback_started_at);
+        guard.record_pipe_frame_callback(callback_started_at);
         let now = Instant::now();
         guard.frames_captured = guard.frames_captured.saturating_add(1);
         guard.frames_in_window = guard.frames_in_window.saturating_add(1);
@@ -5126,15 +5434,33 @@ mod windows {
         next_buffer
     }
 
-    fn stderr_suffix(stderr: &Arc<StdMutex<Vec<u8>>>) -> String {
-        let bytes = stderr
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let message = String::from_utf8_lossy(&bytes).trim().to_string();
-        if message.is_empty() {
-            String::new()
-        } else {
-            format!(": {message}")
+    /// How long a failed attempt waits for FFmpeg's last stderr lines.
+    const STDERR_TAIL_WAIT: Duration = Duration::from_millis(300);
+
+    /// The last FFmpeg lines of a reaped attempt. The reader thread publishes
+    /// only at EOF, which can trail the child's exit by a few milliseconds.
+    fn stderr_tail(stderr: &Arc<StdMutex<Vec<u8>>>, wait: Duration) -> String {
+        let deadline = Instant::now() + wait;
+        loop {
+            let message = {
+                let bytes = stderr
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                String::from_utf8_lossy(&bytes).trim().to_string()
+            };
+            if !message.is_empty() {
+                let lines = message
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>();
+                let tail = &lines[lines.len().saturating_sub(2)..];
+                return format!(": {}", tail.join(" | "));
+            }
+            if Instant::now() >= deadline {
+                return String::new();
+            }
+            thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -8738,6 +9064,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipe_camera_frames_advance_recovery_callback_evidence() {
+        let state = test_state();
+        let video = test_video();
+        let (_, shared) = install_restartable_camera(&state, 22, &test_layout(false), &video).await;
+        let snapshot = preview_camera_restart_snapshot(&state)
+            .await
+            .expect("restart snapshot");
+        let baseline = preview_camera_recovery_evidence(&state, &snapshot)
+            .await
+            .expect("baseline evidence");
+        assert_eq!(baseline.capture_callback_count, 0);
+
+        let started = Instant::now();
+        {
+            let mut shared = shared.lock().unwrap();
+            for frame in 0..3u64 {
+                shared.record_pipe_frame_callback(started + Duration::from_millis(33 * frame));
+            }
+        }
+        let evidence = preview_camera_recovery_evidence(&state, &snapshot)
+            .await
+            .expect("current evidence");
+        assert_eq!(
+            evidence.capture_callback_count, 3,
+            "a pipe camera's frames are its capture callbacks"
+        );
+        assert_eq!(shared.lock().unwrap().capture_timings.gap_sample_count(), 2);
+    }
+
+    #[tokio::test]
     async fn camera_recovery_evidence_is_bound_to_exact_active_generation() {
         let state = test_state();
         let video = test_video();
@@ -9158,6 +9514,157 @@ mod tests {
         let modes = windows_camera_mjpeg_capture_modes(360, 203);
 
         assert_eq!(modes.first().copied(), Some((640, 360)));
+    }
+
+    /// Verbatim `-list_options` answer from the UHD 620 field laptop's
+    /// YUY2-only "HP HD Camera".
+    const HP_HD_CAMERA_LIST_OPTIONS: &str = r#"[in#0 @ 000001f58116f6c0] DirectShow video device options (from video devices)
+[in#0 @ 000001f58116f6c0]  Pin "Capture" (alternative pin name "Capture")
+[in#0 @ 000001f58116f6c0]   pixel_format=yuyv422  min s=1280x720 fps=15 max s=1280x720 fps=30
+[in#0 @ 000001f58116f6c0]   pixel_format=yuyv422  min s=320x180 fps=15 max s=320x180 fps=30
+[in#0 @ 000001f58116f6c0]   pixel_format=yuyv422  min s=640x480 fps=15 max s=640x480 fps=30
+Error opening input file video=HP HD Camera."#;
+
+    #[test]
+    fn windows_dshow_mode_probe_skips_mjpeg_on_a_yuy2_only_camera() {
+        let WindowsDshowModeProbe::Modes(modes) =
+            classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS)
+        else {
+            panic!("the HP HD Camera listed its modes");
+        };
+        assert_eq!(
+            windows_camera_capture_attempts(1920, 1080, 30, Some(&modes)),
+            vec![(Some(30), None), (None, None)],
+            "a device that answered without MJPEG must not get a single MJPEG spawn"
+        );
+    }
+
+    #[test]
+    fn windows_dshow_mode_probe_without_a_listing_or_known_cause_falls_back() {
+        assert_eq!(
+            classify_windows_dshow_mode_probe(""),
+            WindowsDshowModeProbe::Unreadable
+        );
+        assert_eq!(
+            classify_windows_dshow_mode_probe("[in#0 @ 0] Error opening input: I/O error"),
+            WindowsDshowModeProbe::Unreadable
+        );
+    }
+
+    #[test]
+    fn windows_dshow_mode_probe_stops_on_a_mode_independent_error() {
+        assert_eq!(
+            classify_windows_dshow_mode_probe(
+                "[dshow @ 0] Could not find video device with name [Gone] among source devices of type video.\n\
+                 Error opening input file video=Gone."
+            ),
+            WindowsDshowModeProbe::ModeIndependentError(
+                "[dshow @ 0] Could not find video device with name [Gone] among source devices of type video."
+                    .to_string()
+            )
+        );
+        // A listing wins over an error line: the device did answer.
+        assert!(matches!(
+            classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS),
+            WindowsDshowModeProbe::Modes(_)
+        ));
+    }
+
+    #[test]
+    fn windows_dshow_mode_independent_errors_stop_the_ladder() {
+        assert!(windows_dshow_error_is_mode_independent(
+            "ended before the first frame: Could not run graph (sometimes caused by a device already in use by other application)"
+        ));
+        assert!(windows_dshow_error_is_mode_independent(
+            "Could not find video device with name [HP HD Camera] among source devices of type video."
+        ));
+        assert!(!windows_dshow_error_is_mode_independent(
+            "ended before the first frame: Could not set video options | Error opening input: I/O error"
+        ));
+    }
+
+    #[test]
+    fn windows_camera_early_attempts_leave_time_for_their_fallbacks() {
+        use WindowsCameraAttemptKind::{ExactRate, Mjpeg, NegotiatedDefault};
+        let secs = Duration::from_secs_f64;
+        assert_eq!(
+            WindowsCameraAttemptKind::of(Some(30), Some((1280, 720))),
+            Mjpeg
+        );
+        assert_eq!(WindowsCameraAttemptKind::of(Some(30), None), ExactRate);
+        assert_eq!(WindowsCameraAttemptKind::of(None, None), NegotiatedDefault);
+
+        // Fresh budget: MJPEG gets its full deadline.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(6.0), Mjpeg),
+            Some(secs(3.5))
+        );
+        // A 2 s mode probe: MJPEG is cut short so the reserve survives.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(4.0), Mjpeg),
+            Some(secs(1.5))
+        );
+        // Too little left for MJPEG: skip it, but the fallbacks still run.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(3.0), Mjpeg),
+            None
+        );
+
+        // The exact rate keeps its full deadline while the budget is fresh...
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(5.5), ExactRate),
+            Some(secs(4.0))
+        );
+        // ...but after a 2 s probe it leaves the negotiated default its share.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(4.0), ExactRate),
+            Some(secs(2.5))
+        );
+        // What MJPEG left behind still fits both fallbacks.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(2.5), ExactRate),
+            Some(secs(1.0))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(2.0), ExactRate),
+            None
+        );
+
+        // The last attempt takes whatever is left, capped at the deadline.
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(1.25), NegotiatedDefault),
+            Some(secs(1.25))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(0.5), NegotiatedDefault),
+            Some(secs(0.5))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(secs(9.0), NegotiatedDefault),
+            Some(secs(4.0))
+        );
+        assert_eq!(
+            windows_camera_attempt_first_frame_timeout(Duration::ZERO, NegotiatedDefault),
+            None
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_camera_first_frame_race_has_exactly_one_winner() {
+        use super::windows::FirstFrameRace;
+        // The reader's frame arrives first: the killer may not kill.
+        let reader_first = FirstFrameRace::default();
+        assert!(reader_first.claim_live());
+        assert!(!reader_first.claim_timed_out());
+        assert!(!reader_first.timed_out());
+        // The deadline passes first: the frame in the pipe is not Live.
+        let killer_first = FirstFrameRace::default();
+        assert!(killer_first.claim_timed_out());
+        assert!(!killer_first.claim_live());
+        assert!(killer_first.timed_out());
+        // A second claim by the same side changes nothing.
+        assert!(!killer_first.claim_timed_out());
     }
 
     #[test]
