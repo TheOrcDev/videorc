@@ -4399,6 +4399,27 @@ async fn release_preview_hold(state: &AppState) {
     state.emit_event("compositor.status", status);
 }
 
+/// Plan 212 S6: the status carries the packaged backstop's refusal as a
+/// hold of its own (`synthetic-refused`) while it lasts, and drops it on the
+/// next frame offered. Never touches the performance check's hold. True on
+/// a change.
+fn set_synthetic_refusal_status(compositor: &mut CompositorRuntime, refused: bool) -> bool {
+    use crate::protocol::PreviewHoldReason;
+    match (compositor.status.preview_hold, refused) {
+        (None, true) => {
+            compositor.status.preview_hold = Some(PreviewHoldReason::SyntheticRefused);
+            compositor.status.updated_at = Utc::now().to_rfc3339();
+            true
+        }
+        (Some(PreviewHoldReason::SyntheticRefused), false) => {
+            compositor.status.preview_hold = None;
+            compositor.status.updated_at = Utc::now().to_rfc3339();
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Ends a releasing hold (plan 212 S4). True when it ended.
 fn end_preview_hold_if_releasing(compositor: &mut CompositorRuntime) -> bool {
     if !compositor
@@ -11401,26 +11422,35 @@ fn try_update_compositor_frame_progress(
     if benchmark_tick {
         return CompositorFrameProgress::Held;
     }
-    if end_preview_hold_if_releasing(&mut compositor) {
-        let status = compositor.status.clone();
-        drop(compositor);
-        state.emit_event("compositor.status", status);
-        return CompositorFrameProgress::Held;
-    }
+    // The tick that ends the hold hands the frame back with the status
+    // (review of S2): main's present pump sees `previewHold` go and the
+    // `preview.frameReady` for this very frame together, never a status
+    // without a frame.
+    let hold_ended = end_preview_hold_if_releasing(&mut compositor);
     if compositor.preview_hold.is_some() {
         return CompositorFrameProgress::Held;
     }
     // Plan 212 S6: a packaged backend never offers a frame composed from a
     // scene with a test-pattern source. The lease refuses it too; this
-    // saves main the round trip.
-    if packaged_build()
+    // saves main the round trip. The status says so (`synthetic-refused`),
+    // so main treats the quiet pump as a held Preview, not a broken one.
+    let synthetic_refused = packaged_build()
         && presented_frame_store_unguarded(&compositor)
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .latest()
-            .is_some_and(|frame| frame.metadata.has_test_pattern_scene())
-    {
+            .is_some_and(|frame| frame.metadata.has_test_pattern_scene());
+    let refusal_changed = set_synthetic_refusal_status(&mut compositor, synthetic_refused);
+    if synthetic_refused {
+        if refusal_changed {
+            let status = compositor.status.clone();
+            drop(compositor);
+            state.emit_event("compositor.status", status);
+        }
         return CompositorFrameProgress::Held;
+    }
+    if hold_ended || refusal_changed {
+        state.emit_event("compositor.status", compositor.status.clone());
     }
     CompositorFrameProgress::Ready(CompositorFrameReady {
         target_fps: compositor.status.target_fps,
@@ -16943,6 +16973,73 @@ mod tests {
             try_update_compositor_frame_progress(&state, "stale-run", 43, 5, None, false),
             CompositorFrameProgress::RunRetired
         ));
+    }
+
+    /// Review of S2: the tick that ends a Preview hold hands its frame back
+    /// with the status (`Ready`, `previewHold` gone), never a status alone;
+    /// and the packaged backstop's refusal is a `synthetic-refused` hold in
+    /// the status while it lasts, dropped by the next frame offered.
+    #[tokio::test]
+    async fn the_hold_ending_tick_hands_the_frame_back_with_the_status() {
+        let state = test_state();
+        let run_task = tokio::spawn(std::future::pending::<()>());
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some("run".to_string());
+            compositor.render_task = Some(run_task);
+            compositor.status.scene_revision = Some(3);
+        }
+        let hold = PreviewHoldGuard::engage(&state).await;
+        assert!(matches!(
+            try_update_compositor_frame_progress(&state, "run", 1, 0, None, false),
+            CompositorFrameProgress::Held
+        ));
+        hold.release().await;
+        let mut events = state.events.subscribe();
+        assert!(matches!(
+            try_update_compositor_frame_progress(&state, "run", 2, 0, None, false),
+            CompositorFrameProgress::Ready(frame) if frame.frames_rendered == 2
+        ));
+        let status = state.compositor.lock().await.status.clone();
+        assert_eq!(status.preview_hold, None);
+        let mut saw_status = false;
+        while let Ok(event) = events.try_recv() {
+            saw_status |= event.event == "compositor.status";
+        }
+        assert!(
+            saw_status,
+            "the status without the hold travels with the frame"
+        );
+        assert!(matches!(
+            try_update_compositor_frame_progress(&state, "run", 3, 0, None, false),
+            CompositorFrameProgress::Ready(_)
+        ));
+
+        // The backstop's status: set on a refusal, dropped on the next offer.
+        {
+            let mut compositor = state.compositor.lock().await;
+            assert!(set_synthetic_refusal_status(&mut compositor, true));
+            assert_eq!(
+                compositor.status.preview_hold,
+                Some(crate::protocol::PreviewHoldReason::SyntheticRefused)
+            );
+            assert!(!set_synthetic_refusal_status(&mut compositor, true));
+            assert!(set_synthetic_refusal_status(&mut compositor, false));
+            assert_eq!(compositor.status.preview_hold, None);
+            // Never the check's hold.
+            compositor.status.preview_hold =
+                Some(crate::protocol::PreviewHoldReason::PerformanceCheck);
+            assert!(!set_synthetic_refusal_status(&mut compositor, false));
+            assert!(!set_synthetic_refusal_status(&mut compositor, true));
+            assert_eq!(
+                compositor.status.preview_hold,
+                Some(crate::protocol::PreviewHoldReason::PerformanceCheck)
+            );
+            compositor.status.preview_hold = None;
+            if let Some(task) = compositor.render_task.take() {
+                task.abort();
+            }
+        }
     }
 
     #[tokio::test]

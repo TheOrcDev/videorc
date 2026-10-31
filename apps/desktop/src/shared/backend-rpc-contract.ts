@@ -1826,7 +1826,7 @@ const compositorStatusSchema = objectSchema(
     liveBackground: optionalSchema(liveBackgroundStatusSchema),
     screenSwitch: optionalSchema(screenSwitchStatusSchema),
     // Plan 212 S2: left off the wire when there is no hold.
-    previewHold: optionalSchema(enumSchema(['performance-check'])),
+    previewHold: optionalSchema(enumSchema(['performance-check', 'synthetic-refused'])),
     updatedAt: timestamp,
     message: optionalText
   },

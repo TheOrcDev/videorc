@@ -487,6 +487,7 @@ import {
   nativePreviewFirstFrameWatchdogEnabled,
   nativePreviewProofWatchdogEnabled,
   PREVIEW_HOLD_REASON,
+  previewHoldHandback,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
   proofWatchdogRendererReadAllowed,
@@ -637,6 +638,7 @@ import type {
   PreviewSurfaceSceneState,
   PreviewSurfaceSceneUpdateParams,
   PreviewSurfaceStatus,
+  PreviewHoldReason,
   MediaAccessSnapshot,
   MediaAccessStatus,
   PermissionRecheckResult,
@@ -1427,6 +1429,8 @@ let firstFrameLastHint: string | null | undefined
 // Plan 212 S5: whether the floating Preview's strip says a check holds the
 // picture. `undefined`: nothing published to this window's document yet.
 let previewWindowStripHeld: boolean | undefined
+/** Plan 212 S2: the hold the last watchdog tick saw, for the hand-back. */
+let firstFrameLastPreviewHold: PreviewHoldReason | null = null
 const firstFrameTickOwnership = new WatchdogTickOwnership()
 const firstFrameProofRendererReads = new ProofWatchdogRendererReadSingleFlight<Record<
   string,
@@ -1451,6 +1455,7 @@ function startFirstFrameWatchdog(): void {
   firstFrameLastPresentedFrameId = null
   firstFrameLastHint = undefined
   previewWindowStripHeld = undefined
+  firstFrameLastPreviewHold = null
   firstFrameWatchdogMode = 'first-frame'
   presentingWatch = emptyPresentingWatch()
   presentingWatchLastKind = 'presenting'
@@ -1677,7 +1682,11 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       return
     }
 
-    retireStalledNativePreviewMainPump(observeFirstFrameCompositorProgress(compositor))
+    // Plan 212 S2: a held Preview (a performance check, or the packaged
+    // backstop) is not a stalled pump on Windows either.
+    retireStalledNativePreviewMainPump(
+      observeFirstFrameCompositorProgress(compositor) && compositor?.previewHold == null
+    )
     if (framePollingSuppressed || intentionallyHidden) {
       nativePreviewProofPendingStartedAtMs = null
       return
@@ -1781,10 +1790,23 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
     }
     // Plan 212 S2: under a Preview hold the compositor's frames advance on
     // the benchmark's canvas while no present-driving event is due, so the
-    // quiet socket is not a stalled pump.
-    const previewHeld = Boolean(compositor?.previewHold)
-    retireStalledNativePreviewMainPump(framesAdvancing && !previewHeld)
-    updatePreviewWindowStripLabel(previewHeld)
+    // quiet socket is not a stalled pump. When the hold ends, the clock and
+    // the heartbeat start fresh before anything is judged.
+    const previewHold = compositor?.previewHold ?? null
+    const handback = previewHoldHandback({
+      previousHold: firstFrameLastPreviewHold,
+      hold: previewHold,
+      nowMs: Date.now()
+    })
+    firstFrameLastPreviewHold = previewHold
+    if (handback) {
+      firstFrameWatchdogStartedAtMs = handback.startedAtMs
+      firstFrameLedger = emptyFirstFrameLedger()
+      presentingWatch = emptyPresentingWatch()
+      nativePreviewMainLastPresentDrivingEventAtMs = handback.heartbeatAtMs
+    }
+    retireStalledNativePreviewMainPump(framesAdvancing && previewHold == null)
+    updatePreviewWindowStripLabel(previewHold === 'performance-check')
 
     const snapshot: FirstFrameSnapshot = {
       elapsedMs: Date.now() - firstFrameWatchdogStartedAtMs,
@@ -1796,7 +1818,7 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       compositorSceneRevision: compositor?.sceneRevision ?? null,
       compositorFrameSceneRevision: compositor?.frameSceneRevision ?? null,
       metalTargetPresent: Boolean(compositor?.metalTargetIosurfaceId),
-      previewHeld
+      previewHold
     }
 
     if (firstFrameWatchdogMode === 'presenting-watch') {

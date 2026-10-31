@@ -3954,11 +3954,15 @@ pub struct CompositorStatus {
     pub message: Option<String>,
 }
 
-/// Why the Preview holds its picture (plan 212 S2).
+/// Why the Preview holds its picture (plan 212 S2). `PerformanceCheck` is
+/// the check's hold, with its words in the Preview; `SyntheticRefused` is
+/// the packaged backstop keeping the last program frame instead of a frame
+/// composed from a test-pattern scene, with no words of its own.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewHoldReason {
     PerformanceCheck,
+    SyntheticRefused,
 }
 
 /// Plan 210 S3: how the last screen or window switch changed the capture.

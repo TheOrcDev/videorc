@@ -10,7 +10,7 @@
 // healing action to fire next, and the truthful reason string for the preview
 // window's waiting hint. index.ts owns the timers and executes the actions.
 
-import type { PreviewSurfaceStatus } from '../shared/backend'
+import type { PreviewHoldReason, PreviewSurfaceStatus } from '../shared/backend'
 import { isWindowsD3d11PreviewCapability } from '../shared/native-preview-capability'
 
 export interface FirstFrameSnapshot {
@@ -28,16 +28,41 @@ export interface FirstFrameSnapshot {
   compositorFrameSceneRevision: number | null
   metalTargetPresent: boolean
   /**
-   * Plan 212 S2: `compositor.status.previewHold` is set. The Preview holds
-   * its last program frame for a performance check: frames advance on the
+   * Plan 212 S2: `compositor.status.previewHold`. The Preview holds its
+   * last program frame: for a performance check (frames advance on the
    * benchmark's canvas while nothing new is presented and the frame scene
-   * revision stays. That is not a broken Preview, and no heal may fire.
+   * revision stays), or because the packaged backstop refused a
+   * test-pattern frame. Neither is a broken Preview, and no heal may fire.
    */
-  previewHeld: boolean
+  previewHold: PreviewHoldReason | null
 }
 
-/** The waiting reason shown while the Preview holds (plan 212 S2). */
+/** The waiting reason shown while the Preview holds for a check (plan 212 S2). */
 export const PREVIEW_HOLD_REASON = 'Checking this computer'
+/** The waiting reason while the packaged backstop keeps the last frame. */
+export const PREVIEW_SYNTHETIC_REFUSED_REASON = 'Preview keeps its last frame.'
+
+export function previewHoldReasonText(hold: PreviewHoldReason): string {
+  return hold === 'performance-check' ? PREVIEW_HOLD_REASON : PREVIEW_SYNTHETIC_REFUSED_REASON
+}
+
+/**
+ * What main resets when a Preview hold ends (review of S2): the first-frame
+ * clock and ledger start over, so the budget never counts the held seconds
+ * against the contract, and the present-driving heartbeat is fresh, so the
+ * quiet socket of the hold never reads as a stalled pump on the first tick
+ * after it. Pure; `null` when nothing changed.
+ */
+export function previewHoldHandback(input: {
+  previousHold: PreviewHoldReason | null
+  hold: PreviewHoldReason | null
+  nowMs: number
+}): { startedAtMs: number; heartbeatAtMs: number } | null {
+  if (input.previousHold == null || input.hold != null) {
+    return null
+  }
+  return { startedAtMs: input.nowMs, heartbeatAtMs: input.nowMs }
+}
 
 export type FirstFrameHealingAction = 'present-kick' | 'resync-scene' | 'reset-native-path'
 
@@ -525,10 +550,13 @@ export function assessPresenting(
   tickMs: number,
   budgets: PresentingWatchBudgets = DEFAULT_PRESENTING_WATCH_BUDGETS
 ): { assessment: PresentingAssessment; watch: PresentingWatchState } {
-  if (snapshot.previewHeld) {
+  if (snapshot.previewHold) {
     // Plan 212 S2: the hold is observed, never charged against the stall
     // ladder; the watch resumes where it was when the hold ends.
-    return { assessment: { kind: 'observing', reason: PREVIEW_HOLD_REASON }, watch }
+    return {
+      assessment: { kind: 'observing', reason: previewHoldReasonText(snapshot.previewHold) },
+      watch
+    }
   }
   if (firstFrameContractMet(snapshot) && snapshot.presentationAdvancing) {
     // Recovery resets everything, so the next stall gets a fresh ladder.
@@ -582,10 +610,13 @@ export function assessFirstFrame(
   budgets: FirstFrameBudgets = DEFAULT_FIRST_FRAME_BUDGETS,
   { requirePresentationAdvancing = false }: { requirePresentationAdvancing?: boolean } = {}
 ): { assessment: FirstFrameAssessment; ledger: FirstFrameLedger } {
-  if (snapshot.previewHeld) {
+  if (snapshot.previewHold) {
     // Plan 212 S2: pending for the hold's length, with the ledger and the
     // clock untouched; no action, no fallback.
-    return { assessment: { kind: 'pending', reason: PREVIEW_HOLD_REASON }, ledger }
+    return {
+      assessment: { kind: 'pending', reason: previewHoldReasonText(snapshot.previewHold) },
+      ledger
+    }
   }
   if (
     firstFrameContractMet(snapshot) &&

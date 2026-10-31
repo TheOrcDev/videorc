@@ -715,9 +715,19 @@ async fn run_ladder(
     state: &AppState,
     params: &PerformanceCheckRunParams,
 ) -> Result<PerformanceCheckResult> {
+    run_ladder_with(state, params, crate::host_pressure::sample_host_pressure).await
+}
+
+/// A busy computer is turned away before the Preview holds (review of S2):
+/// the hold would otherwise flash on and off for a check that never ran.
+async fn run_ladder_with(
+    state: &AppState,
+    params: &PerformanceCheckRunParams,
+    sample_pressure: impl Fn() -> Option<crate::host_pressure::HostPressureSample>,
+) -> Result<PerformanceCheckResult> {
+    reject_host_pressure(state, sample_pressure())?;
     let hold = crate::compositor::PreviewHoldGuard::engage(state).await;
-    let result =
-        run_ladder_under_hold(state, params, crate::host_pressure::sample_host_pressure).await;
+    let result = run_ladder_under_hold(state, params, sample_pressure).await;
     hold.release().await;
     result
 }
@@ -773,7 +783,6 @@ async fn run_ladder_under_hold(
     params: &PerformanceCheckRunParams,
     sample_pressure: impl Fn() -> Option<crate::host_pressure::HostPressureSample>,
 ) -> Result<PerformanceCheckResult> {
-    reject_host_pressure(state, sample_pressure())?;
     let started = Instant::now();
     let directory = benchmark_directory();
     tokio::fs::create_dir_all(&directory).await?;
@@ -1209,7 +1218,7 @@ mod tests {
             .expect("save");
         let mut progress = state.events.subscribe();
 
-        let outcome = run_ladder_under_hold(
+        let outcome = run_ladder_with(
             &state,
             &PerformanceCheckRunParams {
                 ceiling_width: 1920,
@@ -1222,6 +1231,10 @@ mod tests {
         .await;
 
         assert!(outcome.is_err(), "no verdict on a busy computer");
+        assert!(
+            !crate::compositor::compositor_preview_hold_active(&state).await,
+            "a busy computer is turned away before the Preview holds"
+        );
         let after = current_state(&state).await;
         assert_eq!(
             after.result.map(|result| result.checked_at),
@@ -1234,6 +1247,10 @@ mod tests {
         );
         while let Ok(event) = progress.try_recv() {
             assert_ne!(event.event, "performance.check.progress", "no rung ran");
+            assert_ne!(
+                event.event, "compositor.status",
+                "the Preview never held for a check that did not run"
+            );
         }
     }
 

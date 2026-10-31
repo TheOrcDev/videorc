@@ -2492,8 +2492,13 @@ export interface CompositorStatus {
   message?: string
 }
 
-/** Plan 212 S2: why the Preview holds its picture. */
-export type PreviewHoldReason = 'performance-check'
+/**
+ * Plan 212 S2: why the Preview holds its picture. `performance-check` is the
+ * check's hold (with its words in the Preview); `synthetic-refused` is the
+ * packaged backstop keeping the last program frame instead of a frame
+ * composed from a test-pattern scene (no words of its own).
+ */
+export type PreviewHoldReason = 'performance-check' | 'synthetic-refused'
 
 /**
  * Plan 210 S3: how the last screen or window switch changed the capture:

@@ -1187,6 +1187,9 @@ describe('backend RPC contract', () => {
         previewHold: 'performance-check'
       })
     ).toEqual({ ...status, previewHold: 'performance-check' })
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'synthetic-refused' })
+    ).toEqual({ ...status, previewHold: 'synthetic-refused' })
     expect(() =>
       validateBackendRpcResult('compositor.status', { ...status, previewHold: 'recording' })
     ).toThrow()
