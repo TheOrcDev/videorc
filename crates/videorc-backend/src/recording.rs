@@ -47536,6 +47536,7 @@ mod low_end_windows_recording_tests {
             rungs,
         };
         let state = |result: Option<PerformanceCheckResult>, stale: bool| PerformanceCheckState {
+            last_run_not_recorded: None,
             running: false,
             result,
             stale,

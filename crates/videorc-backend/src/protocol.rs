@@ -2166,10 +2166,18 @@ pub struct PerformanceCheckProgress {
     pub video: VideoSettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerformanceCheckNotRecorded {
+    HostBusy,
+}
+
 /// `performance.check.get` result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceCheckState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_not_recorded: Option<PerformanceCheckNotRecorded>,
     pub running: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<PerformanceCheckResult>,
@@ -8742,6 +8750,7 @@ mod tests {
             }],
         };
         let state = PerformanceCheckState {
+            last_run_not_recorded: None,
             running: false,
             result: Some(result.clone()),
             stale: false,
@@ -8755,6 +8764,7 @@ mod tests {
         let decoded: PerformanceCheckState = serde_json::from_str(&text).unwrap();
         assert_eq!(decoded.result, Some(result));
         let idle = serde_json::to_string(&PerformanceCheckState {
+            last_run_not_recorded: None,
             running: true,
             result: None,
             stale: false,

@@ -3579,3 +3579,22 @@ describe('Hide screen wire contract (plan 210 S7)', () => {
     )
   })
 })
+
+describe('performance check non-recorded reason', () => {
+  it('accepts host-busy and rejects unknown reasons', () => {
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'host-busy'
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'unknown'
+      })
+    ).toThrow()
+  })
+})

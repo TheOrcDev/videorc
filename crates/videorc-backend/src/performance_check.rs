@@ -426,6 +426,7 @@ const SUPPRESSED_EVENTS: [&str; 6] = [
 
 #[derive(Debug, Default)]
 pub struct PerformanceCheckRuntime {
+    host_busy: AtomicBool,
     running: AtomicBool,
     cancel: AtomicBool,
 }
@@ -657,6 +658,11 @@ pub async fn current_state(state: &AppState) -> PerformanceCheckState {
         .flatten();
     let stale = result.as_ref().is_some_and(stored_result_is_stale);
     PerformanceCheckState {
+        last_run_not_recorded: state
+            .performance_check
+            .host_busy
+            .load(Ordering::Acquire)
+            .then_some(crate::protocol::PerformanceCheckNotRecorded::HostBusy),
         running: state.performance_check.is_running(),
         result,
         stale,
@@ -677,6 +683,10 @@ pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result
     {
         bail!("A performance check is already running");
     }
+    state
+        .performance_check
+        .host_busy
+        .store(false, Ordering::Release);
     tokio::spawn(async move {
         let outcome = {
             let _running = RunningGuard(&state.performance_check);
@@ -706,15 +716,45 @@ async fn run_ladder(
     params: &PerformanceCheckRunParams,
 ) -> Result<PerformanceCheckResult> {
     let hold = crate::compositor::PreviewHoldGuard::engage(state).await;
-    let result = run_ladder_under_hold(state, params).await;
+    let result =
+        run_ladder_under_hold(state, params, crate::host_pressure::sample_host_pressure).await;
     hold.release().await;
     result
+}
+
+fn overloaded_pressure(
+    sample: Option<crate::host_pressure::HostPressureSample>,
+) -> Option<crate::host_pressure::HostPressureSample> {
+    sample.filter(|sample| sample.is_overloaded())
+}
+
+fn reject_host_pressure(
+    state: &AppState,
+    sample: Option<crate::host_pressure::HostPressureSample>,
+) -> Result<()> {
+    if let Some(sample) = overloaded_pressure(sample) {
+        state
+            .performance_check
+            .host_busy
+            .store(true, Ordering::Release);
+        state.emit_log(
+            "info",
+            format!(
+                "Performance check stopped: {}; no verdict recorded",
+                sample.diagnostics_fields()
+            ),
+        );
+        bail!("the computer was busy; no verdict recorded");
+    }
+    Ok(())
 }
 
 async fn run_ladder_under_hold(
     state: &AppState,
     params: &PerformanceCheckRunParams,
+    sample_pressure: impl Fn() -> Option<crate::host_pressure::HostPressureSample>,
 ) -> Result<PerformanceCheckResult> {
+    reject_host_pressure(state, sample_pressure())?;
     let started = Instant::now();
     let directory = benchmark_directory();
     tokio::fs::create_dir_all(&directory).await?;
@@ -768,7 +808,9 @@ async fn run_ladder_under_hold(
                 video: video.clone(),
             },
         );
+        let pressure_start = sample_pressure();
         let (measurement, stats) = measure_rung(state, &video, &directory).await;
+        let pressure_end = sample_pressure();
         discard_benchmark_sessions(state, &directory).await;
         if measurement.studio_busy {
             // ogre 2026-09-30: the check ran while a session was starting,
@@ -798,6 +840,13 @@ async fn run_ladder_under_hold(
             && separate_files_over_encoder_budget(&video, best_single_rate)
         {
             reasons.push(SEPARATE_FILES_OVER_BUDGET.to_string());
+        }
+        // A pass stands under load. A failure under external load proves nothing.
+        // The 1-minute average barely moves during a ~6 s encode, so the check
+        // itself does not brand a weak machine busy. Windows has no load average.
+        if !reasons.is_empty() {
+            reject_host_pressure(state, pressure_start)?;
+            reject_host_pressure(state, pressure_end)?;
         }
         skip_next = !reasons.is_empty() && should_fast_skip_next(&measurement);
         passed = reasons.is_empty();
@@ -879,6 +928,10 @@ async fn run_ladder_under_hold(
         rungs,
     };
     state.database.save_setting(RESULT_SETTING_KEY, &result)?;
+    state
+        .performance_check
+        .host_busy
+        .store(false, Ordering::Release);
     Ok(result)
 }
 
@@ -1085,6 +1138,38 @@ async fn discard_benchmark_sessions(state: &AppState, directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn performance_check_pressure_and_wire_reason() {
+        use crate::host_pressure::HostPressureSample;
+        let sample = |load_average| {
+            Some(HostPressureSample {
+                load_average,
+                logical_cores: 10,
+                swap_used_mb: None,
+            })
+        };
+        assert!(overloaded_pressure(sample(20.0)).is_some());
+        assert!(overloaded_pressure(sample(19.9)).is_none());
+        assert!(overloaded_pressure(None).is_none());
+        let mut state = PerformanceCheckState {
+            running: false,
+            result: None,
+            stale: false,
+            last_run_not_recorded: None,
+        };
+        assert!(
+            serde_json::to_value(&state)
+                .unwrap()
+                .get("lastRunNotRecorded")
+                .is_none()
+        );
+        state.last_run_not_recorded = Some(crate::protocol::PerformanceCheckNotRecorded::HostBusy);
+        assert_eq!(
+            serde_json::to_value(&state).unwrap()["lastRunNotRecorded"],
+            "host-busy"
+        );
+    }
 
     #[test]
     fn the_user_agent_names_the_desktop_app_version_not_the_crate() {

@@ -2202,6 +2202,7 @@ export interface PerformanceCheckResult {
 }
 
 export interface PerformanceCheckState {
+  lastRunNotRecorded?: 'host-busy'
   running: boolean
   result?: PerformanceCheckResult
   /** Measured on a different GPU, driver or app version. */

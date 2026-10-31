@@ -1076,6 +1076,7 @@ const performanceCheckRungSchema = objectSchema({
 })
 
 const performanceCheckStateSchema = objectSchema({
+  lastRunNotRecorded: optionalSchema(enumSchema(['host-busy'])),
   running: booleanSchema,
   result: optionalSchema(
     objectSchema({
