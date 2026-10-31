@@ -602,6 +602,31 @@ async function main() {
 }
 
 /**
+ * Plan 210 put Scenes and Layouts above the canvas, so on a laptop-height
+ * window the canvas starts below the fold. A docked surface over a slot out of
+ * view hides as 'scrolled-away' (the edge-scroll case above proves that), so
+ * the Scene scenarios bring the canvas into view first. Only its own scroll
+ * pane moves: scrollIntoView also shifts overflow-hidden shell ancestors, and
+ * that offset followed the surface back into the Studio slot.
+ */
+async function revealSceneSlot() {
+  await smokeCommand('eval-js', {
+    code: `
+      const slot = document.querySelector(${JSON.stringify(SCENE_SLOT)})
+      if (!slot) return false
+      let pane = slot.parentElement
+      while (pane && !/(auto|scroll)/.test(getComputedStyle(pane).overflowY)) pane = pane.parentElement
+      if (!pane) return false
+      const slotRect = slot.getBoundingClientRect()
+      const paneRect = pane.getBoundingClientRect()
+      pane.scrollTop += slotRect.top - paneRect.top - Math.max(0, (paneRect.height - slotRect.height) / 2)
+      await sleep(150)
+      return true
+    `
+  })
+}
+
+/**
  * Plan 058: the Scene tab's canvas is a second dock slot. Runs while the
  * preview is already docked (the Studio scenarios above) and leaves it docked
  * in the Studio slot again.
@@ -609,6 +634,7 @@ async function main() {
 async function runSceneSlotScenarios() {
   // --- Scene slot: the surface re-docks into the canvas rect --------------------
   await smokeCommand('open-tab', { tab: 'layout', waitFor: SCENE_SLOT })
+  await revealSceneSlot()
   const sceneDocked = await waitForDockedSurfaceAtSlot(
     'scene-dock: surface covers the Scene canvas rect',
     { selector: SCENE_SLOT }
@@ -761,6 +787,7 @@ async function runSceneSlotScenarios() {
     JSON.stringify({ dockSlot: studioAgain?.dockSlot })
   )
   await smokeCommand('open-tab', { tab: 'layout', waitFor: SCENE_SLOT })
+  await revealSceneSlot()
   const sceneAgain = await waitForDockedSurfaceAtSlot(
     'studio-to-scene: surface re-docks into the Scene canvas',
     { selector: SCENE_SLOT }
