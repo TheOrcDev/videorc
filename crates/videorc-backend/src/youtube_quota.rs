@@ -845,11 +845,32 @@ pub fn record_quota_exhausted(state: &AppState, source: &str) -> DateTime<Utc> {
 }
 
 fn record_quota_exhausted_at(state: &AppState, source: &str, now: DateTime<Utc>) -> DateTime<Utc> {
-    if let Some(until) = paused_until_at(state, now) {
+    if let Some(current) = paused_until_at(state, now) {
+        // A request admitted before a remote pause can answer quotaExceeded
+        // during it. The quota then owns a deadline of its own: recorded, so
+        // the flag's withdrawal restores it, and extending a shorter pause.
+        let (until, extended) = {
+            let mut inner = state.youtube_quota.lock();
+            if inner.quota_pause.is_some() {
+                (current, false)
+            } else {
+                let quota_until = pause_target(now, inner.last_expiry);
+                inner.quota_pause = Some(quota_until);
+                if quota_until > current {
+                    state.youtube_quota.paused.send_replace(Some(quota_until));
+                    (quota_until, true)
+                } else {
+                    (current, false)
+                }
+            }
+        };
         tracing::info!(
             "[youtube-quota] {source}: quota still exhausted; paused until {}",
             until.to_rfc3339()
         );
+        if extended {
+            emit_status(state);
+        }
         return until;
     }
     let (until, arm_probe) = {
@@ -2347,6 +2368,26 @@ mod tests {
         apply_remote_pause(&state, None);
         assert_eq!(paused_until(&state), Some(quota_until));
         assert!(refuse_if_paused(&state).is_err());
+        // A quota error that lands during a remote pause (its request was
+        // admitted before the flag) records the quota's own deadline, so the
+        // flag's withdrawal leaves YouTube paused.
+        clear_for_tests(&state);
+        let remote_until = Utc::now() + chrono::Duration::minutes(1);
+        apply_remote_pause(&state, Some(remote_until));
+        let during = record_quota_exhausted(&state, "test");
+        assert!(during > remote_until, "the quota extends a shorter flag");
+        assert_eq!(paused_until(&state), Some(during));
+        apply_remote_pause(&state, None);
+        assert_eq!(paused_until(&state), Some(during));
+        assert!(refuse_if_paused(&state).is_err());
+        // ... and a longer flag keeps the quota deadline for its withdrawal.
+        clear_for_tests(&state);
+        let long_remote = Utc::now() + chrono::Duration::days(2);
+        apply_remote_pause(&state, Some(long_remote));
+        assert_eq!(record_quota_exhausted(&state, "test"), long_remote);
+        apply_remote_pause(&state, None);
+        let restored = paused_until(&state).expect("the quota pause stands");
+        assert!(restored < long_remote);
         // A past pause is a no-op.
         clear_for_tests(&state);
         apply_remote_pause(&state, Some(Utc::now() - chrono::Duration::minutes(5)));

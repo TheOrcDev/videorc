@@ -67,7 +67,9 @@ describe('scene collection parsing', () => {
             settings: { video_device_id: 'HP HD Camera:\\\\?\\usb#vid_04f2&pid_b6c2' }
           },
           { id: 'wasapi_input_capture', name: 'Mic', settings: { device_id: 'default' } },
-          { id: 'pipewire_screen_capture', name: 'Portal', settings: {} },
+          { id: 'pipewire-screen-capture-source', name: 'Portal', settings: {} },
+          { id: 'pipewire-desktop-capture-source', name: 'Old portal', settings: {} },
+          { id: 'pipewire-window-capture-source', name: 'Portal window', settings: {} },
           { id: 'v4l2_input', name: 'USB cam', settings: { device_id: '/dev/video0' } },
           { id: 'scene', name: 'Main', settings: { items: [] } }
         ]
@@ -79,6 +81,8 @@ describe('scene collection parsing', () => {
       ['Webcam', 'camera'],
       ['Mic', 'microphone'],
       ['Portal', 'display'],
+      ['Old portal', 'display'],
+      ['Portal window', 'window'],
       ['USB cam', 'camera']
     ])
     expect(parsed.sources.find((source) => source.name === 'Webcam')?.deviceName).toBe(

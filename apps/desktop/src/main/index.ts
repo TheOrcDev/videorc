@@ -3216,6 +3216,26 @@ function requestNotesWindowCloseFlush(window: BrowserWindow): void {
   }, 1_500)
 }
 
+/**
+ * Asks Notes to flush and settles once the window has closed: after its save
+ * acknowledgement, or after the 1.5 s flush timeout closes it with the last
+ * acknowledged save. The cap only covers a window that never closes.
+ */
+function flushNotesWindowBeforeQuit(capMs = 2_000): Promise<void> {
+  const window = notesWindow
+  if (!window || window.isDestroyed()) {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, capMs)
+    window.once('closed', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    requestNotesWindowCloseFlush(window)
+  })
+}
+
 function closeNotesWindow(message?: string): NotesWindowState {
   if (notesWindow && !notesWindow.isDestroyed()) {
     notesWindow.close()
@@ -16993,13 +17013,15 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
     cancelBackendRestart()
     // Notes flushes its unsaved text before it closes. Ask now, while the
     // backend shuts down, so the window closes itself ahead of the final
-    // quit instead of prevent-defaulting that quit away.
-    if (notesWindow && !notesWindow.isDestroyed()) {
-      requestNotesWindowCloseFlush(notesWindow)
-    }
+    // quit instead of prevent-defaulting that quit away. The final quit also
+    // waits for that close: a backend that stops at once would otherwise
+    // close Notes before its save is acknowledged.
+    const notesFlushed = flushNotesWindowBeforeQuit()
     handleBackendBeforeQuit(event, backendQuitState, {
       stopBackend,
-      quit: () => app.quit(),
+      quit: () => {
+        void notesFlushed.then(() => app.quit())
+      },
       onFailure: (error) => {
         logBackend(
           'error',

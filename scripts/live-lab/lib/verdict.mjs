@@ -172,14 +172,19 @@ function round(value, digits = 1) {
  * A run is measured from the last good sample before it (the moment the
  * stream was last known healthy) to its last bad sample, so N bad samples at
  * a cadence of c count N·c, not (N−1)·c. A run that opens the series starts
- * at its first bad sample.
+ * at its first bad sample. A sample without a measurement (`measured` false)
+ * ends the run and forgets the last good sample: nothing is known about the
+ * gap, so a bad sample after it starts a run of its own.
  */
-export function longestBadRunMs(samples, bad) {
+export function longestBadRunMs(samples, bad, measured = () => true) {
   let longest = 0
   let runStart = null
   let lastGoodAtMs = null
   for (const sample of samples) {
-    if (bad(sample)) {
+    if (!measured(sample)) {
+      runStart = null
+      lastGoodAtMs = null
+    } else if (bad(sample)) {
       if (runStart === null) runStart = lastGoodAtMs ?? sample.atMs
       longest = Math.max(longest, sample.atMs - runStart)
     } else {
@@ -456,12 +461,13 @@ export async function computeVerdict(
     atMs: line.tsMs,
     value: (line.legs ?? []).reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0)
   }))
-  series.speed = liveSamples
-    .map((line) => {
-      const speeds = (line.legs ?? []).map((leg) => leg.speed).filter(Number.isFinite)
-      return { atMs: line.tsMs, value: speeds.length ? Math.min(...speeds) : null }
-    })
-    .filter((p) => p.value !== null)
+  // The slow-run measure keeps the samples without a speed as gaps; the
+  // chart and the minimum read only measured ones.
+  const speedSamples = liveSamples.map((line) => {
+    const speeds = (line.legs ?? []).map((leg) => leg.speed).filter(Number.isFinite)
+    return { atMs: line.tsMs, value: speeds.length ? Math.min(...speeds) : null }
+  })
+  series.speed = speedSamples.filter((p) => p.value !== null)
   const dropWindows = droppedFrameWindows(
     journal,
     (thresholds.droppedFrames?.windowMinutes ?? 5) * 60000
@@ -505,7 +511,11 @@ export async function computeVerdict(
     }
     const speedMin = thresholds.encoderSpeed?.min ?? 0.97
     const speedFor = (thresholds.encoderSpeed?.forSeconds ?? 60) * 1000
-    const slow = longestBadRunMs(series.speed, (p) => p.value < speedMin)
+    const slow = longestBadRunMs(
+      speedSamples,
+      (p) => p.value < speedMin,
+      (p) => p.value !== null
+    )
     const minSpeed = series.speed.length ? Math.min(...series.speed.map((p) => p.value)) : null
     const speedBreach = slow >= speedFor
     const speedJudge = judge(speedBreach, 'P1')

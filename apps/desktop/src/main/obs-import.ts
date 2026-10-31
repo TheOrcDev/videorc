@@ -121,11 +121,14 @@ function classifySource(raw: RawObsSource): ObsSource | null {
     }
   }
   // Windows (monitor_capture, game_capture), Linux (PipeWire, X11) and the
-  // older mac display_capture all land on the same Videorc kinds.
+  // older mac display_capture all land on the same Videorc kinds. OBS's
+  // PipeWire plugin registers hyphenated ids: screen capture (current),
+  // desktop capture (older) and window capture.
   if (
     obsKind === 'display_capture' ||
     obsKind === 'monitor_capture' ||
-    obsKind === 'pipewire_screen_capture' ||
+    obsKind === 'pipewire-screen-capture-source' ||
+    obsKind === 'pipewire-desktop-capture-source' ||
     obsKind === 'xshm_input'
   ) {
     return { name, kind: 'display', obsKind }
@@ -133,6 +136,7 @@ function classifySource(raw: RawObsSource): ObsSource | null {
   if (
     obsKind === 'window_capture' ||
     obsKind === 'game_capture' ||
+    obsKind === 'pipewire-window-capture-source' ||
     obsKind === 'xcomposite_input'
   ) {
     return {

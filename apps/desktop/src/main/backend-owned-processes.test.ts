@@ -772,11 +772,28 @@ describe('owned process startup lock', () => {
     expect(startupLockIsStale(null, null, options)).toBe(false)
   })
 
-  function lockHarness(initial: { contents: string; ageMs: number } | null) {
-    let file = initial
+  const LOCK = '/locks/startup.lock'
+  const GUARD = '/locks/startup.lock.reclaim'
+  type FakeFile = { contents: string; ageMs: number }
+
+  function lockHarness(
+    initial: FakeFile | null,
+    hooks: {
+      guard?: FakeFile
+      readError?: string
+      /** A path that opens as existing but neither reads nor stats. */
+      dangling?: boolean
+      /** Runs when the reclaim guard is taken (another contender's moves). */
+      onGuard?: (files: Map<string, FakeFile>) => void
+    } = {}
+  ) {
+    const files = new Map<string, FakeFile>()
+    if (initial) files.set(LOCK, initial)
+    if (hooks.guard) files.set(GUARD, hooks.guard)
     const events: string[] = []
+    const name = (path: string) => (path === GUARD ? 'guard' : 'lock')
     const release = acquireOwnedProcessStartupLock({
-      lockPath: '/locks/startup.lock',
+      lockPath: LOCK,
       timeoutMs: 200,
       retryMs: 50,
       currentPid: 1000,
@@ -787,38 +804,98 @@ describe('owned process startup lock', () => {
         throw new Error('slept')
       },
       makeDir: () => {},
-      openFileExclusive: () => {
-        if (file) {
+      openFileExclusive: (path) => {
+        if (files.has(path) || (hooks.dangling && path === LOCK)) {
           throw Object.assign(new Error('exists'), { code: 'EEXIST' })
         }
-        file = { contents: '', ageMs: 0 }
-        events.push('open')
+        files.set(path, { contents: '', ageMs: 0 })
+        events.push(`open ${name(path)}`)
+        if (path === GUARD) hooks.onGuard?.(files)
         return 7
       },
-      closeFile: () => events.push('close'),
-      removeFile: () => {
-        events.push('remove')
-        file = null
+      closeFile: () => {},
+      removeFile: (path) => {
+        events.push(`remove ${name(path)}`)
+        files.delete(path)
       },
-      writeFile: (_path, contents) => {
-        file = { contents, ageMs: 0 }
+      writeFile: (path, contents) => {
+        files.set(path, { contents, ageMs: 0 })
       },
-      readFile: () => {
+      readFile: (path) => {
+        if (hooks.readError && path === LOCK && files.has(LOCK)) {
+          throw Object.assign(new Error('unreadable'), { code: hooks.readError })
+        }
+        const file = files.get(path)
         if (!file) throw Object.assign(new Error('gone'), { code: 'ENOENT' })
         return file.contents
       },
-      fileAgeMs: () => (file ? file.ageMs : null),
+      fileAgeMs: (path) => files.get(path)?.ageMs ?? null,
       processAlive
     })
-    return { release, events, current: () => file }
+    return { release, events, files, current: () => files.get(LOCK) ?? null }
   }
 
   it('reclaims a lock left by a crashed holder instead of waiting for a timeout', () => {
     const harness = lockHarness({ contents: JSON.stringify({ pid: 9999 }), ageMs: 5 })
-    expect(harness.events).toEqual(['remove', 'open'])
+    expect(harness.events).toEqual(['open guard', 'remove lock', 'remove guard', 'open lock'])
     expect(JSON.parse(harness.current()?.contents ?? '{}').pid).toBe(1000)
     harness.release()
     expect(harness.current()).toBeNull()
+    expect(harness.files.size).toBe(0)
+  })
+
+  it('never removes a replacement lock another contender took after it reclaimed', () => {
+    // Both judged the crashed holder's lock stale; the other one reclaimed it
+    // and took a new lock before this contender got the guard.
+    expect(() =>
+      lockHarness(
+        { contents: JSON.stringify({ pid: 9999 }), ageMs: 5 },
+        {
+          onGuard: (files) =>
+            files.set(LOCK, { contents: JSON.stringify({ pid: 4242, token: 'b' }), ageMs: 0 })
+        }
+      )
+    ).toThrow('slept')
+    // A replacement still between its open and its write is fresh, not stale.
+    expect(() =>
+      lockHarness(
+        { contents: '', ageMs: 120_000 },
+        { onGuard: (files) => files.set(LOCK, { contents: '', ageMs: 0 }) }
+      )
+    ).toThrow('slept')
+  })
+
+  it('treats a lock it cannot read, or a path that neither reads nor stats, as held', () => {
+    for (const readError of ['EACCES', 'EPERM', 'EBUSY', 'EIO']) {
+      expect(() => lockHarness({ contents: '', ageMs: 120_000 }, { readError })).toThrow('slept')
+    }
+    // A dangling link: open says it exists, read and stat say it does not.
+    // The bounded wait applies instead of an immediate retry loop.
+    expect(() => lockHarness(null, { dangling: true })).toThrow('slept')
+  })
+
+  it('waits behind a live reclaimer and clears a guard its crashed reclaimer left', () => {
+    const stale = { contents: JSON.stringify({ pid: 9999 }), ageMs: 5 }
+    expect(() =>
+      lockHarness(stale, { guard: { contents: JSON.stringify({ pid: 4242 }), ageMs: 5 } })
+    ).toThrow('slept')
+    const harness = lockHarness(stale, {
+      guard: { contents: JSON.stringify({ pid: 9999 }), ageMs: 5 }
+    })
+    expect(harness.events).toEqual([
+      'remove guard',
+      'open guard',
+      'remove lock',
+      'remove guard',
+      'open lock'
+    ])
+  })
+
+  it('releases only its own lock', () => {
+    const harness = lockHarness(null)
+    harness.files.set(LOCK, { contents: JSON.stringify({ pid: 4242, token: 'b' }), ageMs: 0 })
+    harness.release()
+    expect(harness.current()?.contents).toContain('4242')
   })
 
   it('waits for a lock whose holder is still alive', () => {
@@ -830,7 +907,7 @@ describe('owned process startup lock', () => {
   it('leaves a fresh lock with no pid alone and reclaims an old one', () => {
     expect(() => lockHarness({ contents: '', ageMs: 100 })).toThrow('slept')
     const harness = lockHarness({ contents: '', ageMs: 120_000 })
-    expect(harness.events).toEqual(['remove', 'open'])
+    expect(harness.events).toEqual(['open guard', 'remove lock', 'remove guard', 'open lock'])
     harness.release()
   })
 })

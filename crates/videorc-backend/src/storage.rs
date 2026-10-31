@@ -8844,10 +8844,12 @@ impl Database {
         // of the process (chat persistence terminal, session rows unwritable).
         // rusqlite rolls an open transaction back when its guard drops, so the
         // connection behind a poisoned lock is still consistent.
+        // Clearing the flag makes one panic one warning, not one per query.
         Ok(self.conn.lock().unwrap_or_else(|poisoned| {
             tracing::warn!(
                 "[storage] SQLite connection lock was poisoned by a panic; recovering the connection"
             );
+            self.conn.clear_poison();
             poisoned.into_inner()
         }))
     }
@@ -11212,6 +11214,8 @@ mod tests {
         let one: i64 = guard.query_row("SELECT 1", [], |row| row.get(0)).unwrap();
         assert_eq!(one, 1);
         drop(guard);
+        // Recovered once: later callers neither see the poison nor warn again.
+        assert!(!database.conn.is_poisoned());
         database
             .create_session(&sample_session("after-panic"))
             .unwrap();
