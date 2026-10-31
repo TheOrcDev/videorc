@@ -50,7 +50,8 @@ export function isMp4FinalizationExport(args) {
     !/^\.videorc-export-.+\.partial$/.test(basename(dirname(outputPath))) ||
     !args.includes('-n') ||
     !hasArgumentPair(args, '-c:v', 'copy') ||
-    !hasArgumentPair(args, '-c:a', 'aac')
+    // Plan 200 C2: a take that already holds AAC copies it; the rest encode.
+    !(hasArgumentPair(args, '-c:a', 'aac') || hasArgumentPair(args, '-c:a', 'copy'))
   ) {
     return false
   }
