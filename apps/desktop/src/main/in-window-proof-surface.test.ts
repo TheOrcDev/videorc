@@ -300,6 +300,18 @@ describe('InWindowProofSurface', () => {
     expect(view.bounds).toBeNull()
   })
 
+  it('retains its identity when Electron releases a destroyed view webContents', () => {
+    const { surface, view } = harness()
+    const id = surface.id
+    surface.destroy()
+    // Electron's WebContentsView clears this after destruction. Async profile
+    // completions and diagnostics can still hold the retired surface host.
+    Object.defineProperty(view, 'webContents', { get: () => undefined })
+
+    expect(surface.isDestroyed()).toBe(true)
+    expect(surface.id).toBe(id)
+  })
+
   it('destroys once: detaches, closes its web contents, emits closed', () => {
     const { surface, view, main } = harness()
     const closed: string[] = []

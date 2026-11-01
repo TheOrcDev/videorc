@@ -122,6 +122,22 @@ Make sure `WAYLAND_DISPLAY`, `DISPLAY`, and `DBUS_SESSION_BUS_ADDRESS` are set
 when launching from a service or over SSH: `systemctl --user
 show-environment` prints the session's values.
 
+When moving temporary files off a quota-limited `/tmp`, use a short disk-backed
+path, separate from the evidence directory:
+
+```bash
+export TMPDIR="$(mktemp -d "$HOME/.cache/vrc-XXXXXX")"
+export VIDEORC_PERF_RETAIN_ARTIFACTS=1
+```
+
+Keep reports under `VIDEORC_SMOKE_OUTPUT_DIR`. Chromium adds its own directory
+and `SingletonSocket` below `TMPDIR`; a deeply nested temporary path can exceed
+Linux's Unix-socket path limit and trap in `ProcessSingleton::Create()` before
+app readiness. A longer startup timeout does not repair that failure. The
+retention flag keeps performance-probe scratch after a passing run. Store an
+outer supervisor's logs and cleanup receipts outside the probe's scratch
+directory, since the probe otherwise deletes that directory on success.
+
 Keep the desktop display awake for first-run animation and presented-preview
 checks. On Hyprland, `hyprctl -j monitors` must report `dpmsStatus: true` for the
 output showing the app. With the panel asleep, Electron can report a visible,

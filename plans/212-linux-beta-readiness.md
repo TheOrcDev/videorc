@@ -83,7 +83,7 @@ file size or successful build is not a pass.
 | Separate source recordings         | macOS-only                                                                                        | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
 | Preview                            | CPU/BMP proof presenter                                                                           | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
 | Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix                           | Prove shared-bus mix and fallback warning.                                                                  |
-| First run                          | Linux sharing guidance enabled; reload passes after icon fix, full smoke fails at look commit     | Packaged physical proof and real OAuth still required.                                                      |
+| First run                          | Linux sharing guidance enabled; reload passes; full smoke fails light-theme motion budget     | Packaged physical proof and real OAuth still required.                                                      |
 | Notes protection                   | Capture exclusion unsupported                                                                     | Tell users Notes may be captured; prove behavior.                                                           |
 | Split profiles / dual orientation  | Restricted encoded paths                                                                          | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
 
@@ -2417,3 +2417,71 @@ Ogre is on battery at approximately 800 MHz with about 2 GiB available memory.
 Fresh binaries, recording-studio/Linux equivalents, both encoder matrices,
 latency and physical AppImage acceptance remain required. Classification and
 focused logs are under `~/.cache/videorc-linux-beta-evidence/`.
+
+### Preview lifetime, setup loading and process evidence, 2026-11-01
+
+The optimized backend build for `f3b80c7c` completed. Its SHA-256 is
+`cf2348a89bb61b584d8455df254ebf3f722f6051268c1b9d726b542b24e25b0c`.
+The current frontend and probe edits leave all Rust inputs unchanged. Matching
+Linux CI actually executed Clippy and 4,194 backend tests (19 ignored), plus
+24/1/1 tests in the other suites; the successful skip job is excluded.
+
+Electron releases a destroyed WebContentsView's webContents. A late polling
+profile completion read the retired view's identity through that released
+object and threw. The host now captures its ID at creation, and both awaited
+polling-profile completions check lifetime and ownership before reading the
+profile. The new regression fails on the original getter and passes with the
+fix. First-run setup now uses the shell's existing pageChunk completion hook,
+which renders a loaded page through an ordinary update during shell traffic.
+
+Fresh local typecheck, lint, format and production build pass. All 613 desktop
+test files pass: 6,737 tests pass and one is skipped. The initial full Node run
+passes all 3,043 tests with zero skips. After the process-census correction
+below, all 3,045 Node tests pass with zero skips, along with 61 focused
+process/lifecycle tests and explicit changed-script formatting. Hashes bind
+these results to the tested modifications; no skipped test is runtime proof.
+
+The first-run app now reopens setup after reload in 7,446 ms, within the unchanged
+15-second wait. Initial motion, reduced-motion recovery and theme/tone checks
+pass. The full smoke still fails at light-theme motion: the existing animation
+budget guard chooses a still (`gpu-budget`). Normal quit passes with empty
+owned-process ledgers and no forced orphan cleanup. Ogre stays on AC with the
+display awake, but all sampled CPU clocks remain near 800 MHz and other work
+uses the host. Neither the guard nor the smoke limits are weakened.
+
+The first preview rerun completes all 100 cycles without the destroyed-view
+exception, then fails because the census counts exited renderers as extra main
+processes. Linux replaces their argv with `[electron]`, sometimes followed by `<defunct>`; their known
+zygote ancestry still identifies them. The classifier now preserves that role
+until they are reaped. Every process row and zero-RSS child remains counted;
+actual main processes and unknown ancestry are not hidden. Replaying the 13
+saved checkpoints changes only those misclassified rows. Process limits and
+teardown requirements are unchanged.
+
+A fresh corrected-classifier report passes all 100 cycles, process/memory
+limits and exact teardown. Its outer collector then loses its separate receipt
+because the probe deletes scratch on success. That collector failure remains
+recorded. A repeat with retained artifacts and external log/receipt paths fails
+at cycle 23 on the unchanged 2-second toggle deadline. Its four memory samples
+are incomplete relative to the required 13, and an exited renderer with bare
+`[electron]` argv is counted as a second main. The classifier now covers that
+second form too, with focused and full Node tests plus replay of the retained
+checkpoint rows. The intermittent toggle timeout remains unresolved. Both the
+passing report and the failed repeat are retained; no stable lifecycle or
+candidate acceptance is claimed. The repeat's owned cleanup completes without
+forced orphan signals or leaked processes.
+
+A long temporary directory also caused a confirmed Chromium singleton startup
+trap. The Linux loop now documents a short disk-backed TMPDIR, separate from
+the evidence directory. No desktop configuration or lock policy was changed.
+The macOS ScreenCaptureKit/Metal recording-studio gates cannot run on Ogre;
+the Linux proof-surface probe is the focused local substitute, not macOS proof.
+
+Evidence is private under `~/.cache/videorc-linux-beta-evidence/`: the
+`proof-setup-source-*`, `proof-setup-runtime-*`, `defunct-census-source-*` and
+`defunct-census-retained-*` reports retain source hashes, native hashes,
+commands, host samples and owned cleanup. The original failed reports remain.
+No Linux Beta candidate has been accepted or published. The first-run motion
+failure, remaining runtime/features, cross-platform failures, physical
+AppImage acceptance, endurance, pilot, workflow correction and protected
+publication remain open.

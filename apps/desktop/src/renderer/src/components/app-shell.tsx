@@ -124,9 +124,10 @@ const SourcesTab = sourcesPage.Page
 const StreamingTab = streamingPage.Page
 // First-run setup (plan 203): its backdrop, player and card load only when
 // setup opens, never in the eager bundle.
-const FirstRunSetup = lazy(async () => ({
-  default: (await import('@/components/first-run/first-run-setup')).FirstRunSetup
-}))
+const firstRunSetupPage = pageChunk(
+  async () => (await import('@/components/first-run/first-run-setup')).FirstRunSetup
+)
+const FirstRunSetup = firstRunSetupPage.Page
 const WhatsNewDialog = lazy(async () => ({
   default: (await import('@/components/whats-new-dialog')).WhatsNewDialog
 }))
@@ -306,7 +307,9 @@ function AppShellContent(): ReactElement {
   })
   // Load the visible page, not a workspace hidden behind setup. Once its
   // chunk is in, render before shell updates can starve React's retry.
-  useRenderPageWhenLoaded(surface === 'workspace' ? PAGE_CHUNKS[active] : null)
+  useRenderPageWhenLoaded(
+    surface === 'workspace' ? PAGE_CHUNKS[active] : surface === 'setup' ? firstRunSetupPage : null
+  )
   useEffect(() => {
     setFirstRunSetupOpen(setupOpen)
   }, [setFirstRunSetupOpen, setupOpen])

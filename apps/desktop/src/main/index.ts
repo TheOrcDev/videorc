@@ -8421,10 +8421,10 @@ async function syncNativePreviewProofPollingProfile(): Promise<void> {
   const requestSerial = ++nativePreviewProofPollingProfileSerial
   await waitForNativePreviewSurfaceScript(surfaceWindow)
   if (
-    requestSerial !== nativePreviewProofPollingProfileSerial ||
-    profileKey !== nativePreviewProofPollingProfileKey(surfaceWindow.id, currentProfile()) ||
     surfaceWindow.isDestroyed() ||
-    nativePreviewSurfaceWindow !== surfaceWindow
+    nativePreviewSurfaceWindow !== surfaceWindow ||
+    requestSerial !== nativePreviewProofPollingProfileSerial ||
+    profileKey !== nativePreviewProofPollingProfileKey(surfaceWindow.id, currentProfile())
   ) {
     nativePreviewAppliedProofPollingProfile = null
     return
@@ -8435,10 +8435,10 @@ async function syncNativePreviewProofPollingProfile(): Promise<void> {
     true
   )
   if (
-    requestSerial === nativePreviewProofPollingProfileSerial &&
-    profileKey === nativePreviewProofPollingProfileKey(surfaceWindow.id, currentProfile()) &&
     !surfaceWindow.isDestroyed() &&
-    nativePreviewSurfaceWindow === surfaceWindow
+    nativePreviewSurfaceWindow === surfaceWindow &&
+    requestSerial === nativePreviewProofPollingProfileSerial &&
+    profileKey === nativePreviewProofPollingProfileKey(surfaceWindow.id, currentProfile())
   ) {
     nativePreviewAppliedProofPollingProfile = profileKey
   }
