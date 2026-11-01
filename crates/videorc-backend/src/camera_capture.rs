@@ -602,6 +602,11 @@ fn utf16_z(value: &[u16]) -> Option<String> {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn camera_default_priority(is_system_preferred: bool, is_builtin: bool) -> u8 {
+    if is_system_preferred { 0 } else if is_builtin { 1 } else { 2 }
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn camera_device_type_label(device_type: &str) -> &str {
     match device_type {
         "AVCaptureDeviceTypeContinuityCamera" => "iPhone camera",
@@ -617,7 +622,7 @@ mod macos {
     use objc2_av_foundation::{
         AVAuthorizationStatus, AVCaptureDevice, AVCaptureDeviceDiscoverySession,
         AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
-        AVCaptureDeviceTypeExternalUnknown, AVMediaTypeVideo,
+        AVMediaTypeVideo,
     };
     use objc2_core_media::CMVideoFormatDescriptionGetDimensions;
     use objc2_foundation::{NSArray, NSString};
@@ -636,14 +641,17 @@ mod macos {
         let permission = native_camera_permission();
         let status = camera_permission_status(permission);
         // External and Continuity are distinct opt-in types starting with Sonoma.
-        let external = NSString::from_str("AVCaptureDeviceTypeExternal");
+        let external = NSString::from_str(if objc2::available!(macos = 14.0) {
+            "AVCaptureDeviceTypeExternal"
+        } else {
+            "AVCaptureDeviceTypeExternalUnknown"
+        });
         let continuity = NSString::from_str("AVCaptureDeviceTypeContinuityCamera");
         let mut types = vec![unsafe { AVCaptureDeviceTypeBuiltInWideAngleCamera }];
         if objc2::available!(macos = 14.0) {
             types.extend([&*external, &*continuity]);
         } else {
-            #[allow(deprecated)]
-            types.push(unsafe { AVCaptureDeviceTypeExternalUnknown });
+            types.push(&external);
         }
         let discovery = unsafe {
             AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
@@ -653,6 +661,13 @@ mod macos {
             )
         };
         let devices = unsafe { discovery.devices() };
+        let preferred_id = if objc2::available!(macos = 14.0) {
+            unsafe { AVCaptureDevice::systemPreferredCamera() }
+                .map(|camera| unsafe { camera.uniqueID() }.to_string())
+        } else {
+            None
+        };
+        let mut priorities = std::collections::HashMap::new();
         let mut camera_devices = Vec::new();
 
         for index in 0..devices.count() {
@@ -664,7 +679,16 @@ mod macos {
             let name =
                 ns_string_to_string(&name).unwrap_or_else(|| format!("Camera {}", index + 1));
             let device_type = unsafe { camera.deviceType() }.to_string();
+            priorities.insert(native_camera_device_id(&unique_id), camera_default_priority(
+                preferred_id.as_deref() == Some(unique_id.as_str()),
+                device_type == "AVCaptureDeviceTypeBuiltInWideAngleCamera",
+            ));
             let transport = unsafe { camera.transportType() };
+            let name = if device_type == "AVCaptureDeviceTypeContinuityCamera" {
+                format!("{name} · iPhone camera")
+            } else {
+                name
+            };
             let type_detail = format!(
                 "{} · device type: {device_type} · transport: 0x{transport:08x}.",
                 camera_device_type_label(&device_type)
@@ -704,6 +728,9 @@ mod macos {
             });
         }
 
+        // Discovery order is the default order consumed by Studio and first run.
+        // A saved selection is resolved before this default in the renderer.
+        camera_devices.sort_by_key(|camera| priorities.get(&camera.id).copied().unwrap_or(2));
         if camera_devices.is_empty() {
             camera_devices.push(unavailable_camera(
                 "camera:avfoundation-native-missing",
@@ -877,6 +904,17 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_defaults_prefer_the_system_then_builtin_then_discovery_order() {
+        let mut cameras = [("iPhone", false, false), ("USB", false, false), ("Built-in", false, true)];
+        cameras.sort_by_key(|(_, preferred, builtin)| camera_default_priority(*preferred, *builtin));
+        assert_eq!(cameras[0].0, "Built-in");
+        cameras[2].1 = true;
+        cameras.sort_by_key(|(_, preferred, builtin)| camera_default_priority(*preferred, *builtin));
+        assert_eq!(cameras[0].0, "USB");
+        assert_eq!(cameras[1].0, "Built-in");
+    }
 
     #[test]
     fn camera_device_types_have_plain_labels() {

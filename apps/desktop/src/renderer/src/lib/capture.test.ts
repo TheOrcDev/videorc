@@ -82,6 +82,16 @@ function captureConfigFixture(): CaptureConfig {
 }
 
 describe('reconcileSourceSelection', () => {
+  it('uses native preference order for a fresh profile and preserves an explicit camera', () => {
+    const cameras: Device[] = [
+      { id: 'builtin', name: 'Built-in', kind: 'camera', status: 'available' },
+      { id: 'iphone', name: 'iPhone', kind: 'camera', status: 'available' }
+    ]
+    expect(reconcileSourceSelection({}, cameras).cameraId).toBe('builtin')
+    expect(reconcileSourceSelection({ cameraId: 'iphone' }, cameras).cameraId).toBe('iphone')
+    expect(reconcileSourceSelection({}, [...cameras].reverse()).cameraId).toBe('iphone')
+  })
+
   describe('screen None (release test 146, plan 0002)', () => {
     // Linux: the only screen rows are the portal entries, and selecting one
     // asks the compositor for a share, so None must survive reconcile.
