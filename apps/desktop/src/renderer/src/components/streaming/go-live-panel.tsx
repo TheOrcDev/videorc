@@ -44,6 +44,7 @@ import {
 } from '@/lib/captions-preflight'
 import { destinationSetup, destinationSetupHint } from '@/lib/destination-readiness'
 import { NO_VALUE } from '@/lib/format'
+import { PAGE_TRAIL_COLUMN } from '@/lib/page-layout'
 import { destinationLabel } from '@/lib/platform-copy'
 import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
@@ -129,7 +130,7 @@ export function GoLivePanel({
       : null
 
   return (
-    <div className="flex min-w-0 flex-col border-t lg:border-t-0">
+    <div className={cn('flex flex-col', PAGE_TRAIL_COLUMN)}>
       {compatibilityMessage ? (
         <div className="border-b border-border p-gutter">
           <Alert variant="warning">

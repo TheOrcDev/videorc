@@ -39,6 +39,7 @@ import {
 } from '@/lib/clean-cut-events'
 import { isModalOpen } from '@/lib/modal-open'
 import { pageChunk, useRenderPageWhenLoaded, type PageLoad } from '@/lib/page-chunk'
+import { PAGE_CONTAINER } from '@/lib/page-layout'
 import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
@@ -379,6 +380,10 @@ function AppShellContent(): ReactElement {
     setLivestreamView(view)
     writeLastLivestreamView(view)
   }, [])
+  // Plan 213 J1: a destination the Stream Manager asked to open ("Use Sign
+  // in"); Livestream → Setup opens its card, then clears it.
+  const [destinationToOpen, setDestinationToOpen] = useState<string | null>(null)
+  const clearDestinationToOpen = useCallback(() => setDestinationToOpen(null), [])
   const openLivestream = useCallback(
     (view?: LivestreamViewId) => {
       if (view) {
@@ -502,6 +507,16 @@ function AppShellContent(): ReactElement {
     return off
   }, [openBuddy])
 
+  // Plan 213 J1: "Use Sign in" in the Stream Manager opens that destination's
+  // connection in Livestream → Setup (main has shown the window).
+  useEffect(() => {
+    const off = window.videorc?.onOpenDestination?.(({ targetId }) => {
+      openLivestream('setup')
+      setDestinationToOpen(targetId)
+    })
+    return off
+  }, [openLivestream])
+
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
       const request = readCleanCutOpenRequest((event as CustomEvent<unknown>).detail)
@@ -581,8 +596,10 @@ function AppShellContent(): ReactElement {
                   strips, Library's pinned header): PaneBody stops scrolling
                   for it. Every other page scrolls as one. Keyed, so every page
                   opens at its top: a Scene page scrolled to its canvas left
-                  Studio clipped, and the docked preview hid as scrolled away. */}
-              <PaneBody key={active}>
+                  Studio clipped, and the docked preview hid as scrolled away.
+                  A container, so a page's columns follow its own width, never
+                  the window's (plan 213 C3, lib/page-layout.ts). */}
+              <PaneBody className={PAGE_CONTAINER} key={active}>
                 {/* A page crash, or a page chunk that failed to load, stays
                   inside the page (plan 174 A-7); keyed, so the next page
                   starts clean. */}
@@ -594,7 +611,12 @@ function AppShellContent(): ReactElement {
                       {active === 'layouts' ? <LayoutTab /> : null}
                       {active === 'assets' ? <AssetsTab /> : null}
                       {active === 'live' ? (
-                        <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
+                        <StreamingTab
+                          destinationToOpen={destinationToOpen}
+                          view={livestreamView}
+                          onDestinationOpened={clearDestinationToOpen}
+                          onViewChange={selectLivestreamView}
+                        />
                       ) : null}
                       {active === 'captions' ? <CaptionsTab /> : null}
                       {active === 'recording' ? <RecordingTab /> : null}

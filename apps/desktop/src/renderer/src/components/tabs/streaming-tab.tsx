@@ -3,6 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactEl
 import { PageTabs } from '@/components/page-tabs'
 import { TabsContent } from '@/components/ui/tabs'
 import { LIVESTREAM_VIEWS, type LivestreamViewId } from '@/lib/livestream-tabs'
+import { LIVESTREAM_SETUP_GRID, PAGE_LEAD_COLUMN } from '@/lib/page-layout'
 const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
@@ -84,10 +85,15 @@ import { streamLanguageOptions } from '@/lib/stream-languages'
  */
 export function StreamingTab({
   view,
-  onViewChange
+  onViewChange,
+  destinationToOpen = null,
+  onDestinationOpened
 }: {
   view: LivestreamViewId
   onViewChange: (view: LivestreamViewId) => void
+  /** A destination to open once Setup shows (plan 213 J1: "Use Sign in"). */
+  destinationToOpen?: string | null
+  onDestinationOpened?: () => void
 }): ReactElement {
   return (
     <PageTabs
@@ -97,7 +103,10 @@ export function StreamingTab({
       onValueChange={onViewChange}
     >
       <TabsContent value="setup">
-        <StreamingSetup />
+        <StreamingSetup
+          destinationToOpen={destinationToOpen}
+          onDestinationOpened={onDestinationOpened}
+        />
       </TabsContent>
       <TabsContent value="upcoming">
         <Suspense fallback={<p role="status">Loading upcoming streams…</p>}>
@@ -108,7 +117,13 @@ export function StreamingTab({
   )
 }
 
-function StreamingSetup(): ReactElement {
+function StreamingSetup({
+  destinationToOpen,
+  onDestinationOpened
+}: {
+  destinationToOpen: string | null
+  onDestinationOpened?: () => void
+}): ReactElement {
   const {
     captureConfig,
     connectPlatformAccount,
@@ -209,7 +224,7 @@ function StreamingSetup(): ReactElement {
   // The list moves focus to the destination's row too (plan 174 S3.5a,
   // D-24), so the keyboard lands where the eye goes.
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
-  const openDestination = (targetId: string): void => {
+  const openDestination = useCallback((targetId: string): void => {
     setExpandedOverrides((current) => ({ ...current, [targetId]: true }))
     requestAnimationFrame(() => {
       const card = document.getElementById(`destination-${targetId}`)
@@ -218,7 +233,16 @@ function StreamingSetup(): ReactElement {
         ?.querySelector<HTMLElement>('[data-slot="list-row-button"]')
         ?.focus({ preventScroll: true })
     })
-  }
+  }, [])
+  // Plan 213 J1: the Stream Manager's "Use Sign in" names a destination; open
+  // its card once, and drop an id that is not a saved destination.
+  useEffect(() => {
+    if (!destinationToOpen) return
+    if (streaming.targets.some((target) => target.id === destinationToOpen)) {
+      openDestination(destinationToOpen)
+    }
+    onDestinationOpened?.()
+  }, [destinationToOpen, onDestinationOpened, openDestination, streaming.targets])
   // Only the first destination that needs setup opens on its own (D-14).
   const firstNeedsSetupId = streaming.targets.find(
     (target) =>
@@ -240,8 +264,8 @@ function StreamingSetup(): ReactElement {
     scheduledTargets.length > 0
 
   return (
-    <div className="grid lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
-      <div className="flex min-w-0 flex-col lg:border-r">
+    <div className={LIVESTREAM_SETUP_GRID}>
+      <div className={PAGE_LEAD_COLUMN}>
         {showNotices ? (
           <div className="flex flex-col gap-2 border-b border-border p-gutter">
             {livestreamingEntitlementReason && !isSessionActive ? (

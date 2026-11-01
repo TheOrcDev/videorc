@@ -455,7 +455,14 @@ function WebhookRow({
 
 function ViewInDiscord({ url }: { url: string }): ReactElement {
   return (
-    <Button size="xs" variant="ghost" onClick={() => void window.videorc.openOAuthUrl(url)}>
+    // Its lines stack with no gap: no compact-button spill (plan 213 A4), or
+    // it would reach the line above.
+    <Button
+      className="before:hidden"
+      size="xs"
+      variant="ghost"
+      onClick={() => void window.videorc.openOAuthUrl(url)}
+    >
       View in Discord
       <ExternalLinkIcon data-icon="inline-end" />
     </Button>
@@ -559,10 +566,13 @@ function DiscordLinkRow({
   onRemoveTyped: () => void
 }): ReactElement {
   const linkable = row.linkKind !== 'none'
+  // Its hit area spills only 4 px toward the edit and remove buttons 8 px
+  // before it, never over them (plan 213 A4).
   const toggle = (
     <Switch
       aria-label={`Link ${row.label} in the post`}
       checked={row.included}
+      className="after:-left-1"
       disabled={!linkable}
       onCheckedChange={onToggle}
     />

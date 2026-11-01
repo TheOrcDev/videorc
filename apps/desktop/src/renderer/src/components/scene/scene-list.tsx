@@ -35,7 +35,7 @@ import {
 import {
   sceneGalleryReason,
   sceneSourceGaps,
-  visualSources,
+  usingVisualSources,
   type SavedScene
 } from '@/lib/scene-presets'
 import { shortcutAriaKeys } from '@/lib/platform'
@@ -141,7 +141,7 @@ export function SceneList(): ReactElement {
     gaps: sceneSourceGaps(
       {
         layout: { ...captureConfig.layout, layoutPreset: id, arrangementMode: 'preset' },
-        sources: visualSources(captureConfig.sources),
+        sources: usingVisualSources(captureConfig.sources),
         background: null
       },
       deviceList.devices

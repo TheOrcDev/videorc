@@ -476,6 +476,26 @@ fn linux_direct_microphone_message(reason: &str) -> String {
     )
 }
 
+/// Why a Linux session's microphone can't change. Release test 147, plan
+/// 0001: a microphone on the session bus still can't be swapped mid-session;
+/// nothing has proved it. Retest 153: with none (Off, or one that never
+/// opened) none can be added either, and the Studio said so with the
+/// internal adapter text.
+fn linux_microphone_switch_reason(
+    microphone: Option<&MicrophoneInput>,
+    microphone_id: Option<&String>,
+) -> &'static str {
+    if matches!(
+        microphone,
+        Some(MicrophoneInput::LinuxPulse { .. } | MicrophoneInput::SessionPcm { .. })
+    ) && microphone_id.is_some()
+    {
+        "Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input."
+    } else {
+        "Changing the microphone during a session isn't available on Linux yet. Stop, change it, then start again."
+    }
+}
+
 fn live_captions_requested(params: &StartSessionParams) -> bool {
     params
         .captions
@@ -7002,16 +7022,11 @@ async fn start_session_with_timeline(
             ));
         } else if cfg!(target_os = "windows") {
             sources.microphone_unavailable("Live microphone replacement requires the verified capture worker. This session keeps its initial microphone input.");
-        } else if cfg!(target_os = "linux")
-            && matches!(
+        } else if cfg!(target_os = "linux") {
+            sources.microphone_unavailable(linux_microphone_switch_reason(
                 capture.microphone.as_ref(),
-                Some(MicrophoneInput::LinuxPulse { .. } | MicrophoneInput::SessionPcm { .. })
-            )
-            && params.sources.microphone_id.is_some()
-        {
-            // Release test 147, plan 0001: a Linux microphone on the session
-            // bus still can't be swapped mid-session; nothing has proved it.
-            sources.microphone_unavailable("Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input.");
+                params.sources.microphone_id.as_ref(),
+            ));
         }
         // Linux plan 0024: no Linux adapter swaps a screen or camera mid-
         // session yet; say so instead of the internal adapter text.
@@ -35483,6 +35498,50 @@ mod tests {
             linux_pulse_worker_device(Some(&dshow), Some(&id), true, false),
             None
         );
+    }
+
+    #[test]
+    fn a_linux_session_says_why_its_microphone_cannot_change() {
+        // Retest 153: with the microphone Off, the Studio's microphone line
+        // read "The running capture adapter does not support session source
+        // transactions." for the whole recording.
+        let pulse = MicrophoneInput::LinuxPulse {
+            source_name: "videorc_test_tone".to_string(),
+        };
+        let bus = MicrophoneInput::SessionPcm {
+            fifo_path: PathBuf::from("/tmp/videorc-mic.pcm"),
+        };
+        let id = crate::linux_pulse_audio::linux_pulse_microphone_id("videorc_test_tone");
+        let keeps = "Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input.";
+        let add = "Changing the microphone during a session isn't available on Linux yet. Stop, change it, then start again.";
+        assert_eq!(linux_microphone_switch_reason(Some(&bus), Some(&id)), keeps);
+        assert_eq!(
+            linux_microphone_switch_reason(Some(&pulse), Some(&id)),
+            keeps
+        );
+        // Off, and a chosen microphone that never opened.
+        assert_eq!(linux_microphone_switch_reason(None, None), add);
+        assert_eq!(linux_microphone_switch_reason(None, Some(&id)), add);
+
+        let mut sources = crate::live_source_switch::SourceSwitchCoordinator::default();
+        sources.start(
+            "session".into(),
+            crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+        );
+        sources.microphone_unavailable(linux_microphone_switch_reason(None, None));
+        let snapshot = sources.snapshot("session").unwrap();
+        let microphone = snapshot
+            .capabilities
+            .iter()
+            .find(|capability| capability.kind == crate::live_source_switch::SourceKind::Microphone)
+            .unwrap();
+        assert_eq!(microphone.reason.as_deref(), Some(add));
     }
 
     #[tokio::test]

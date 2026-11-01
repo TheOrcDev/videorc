@@ -153,6 +153,9 @@ describe('DestinationCard header', () => {
     expect(markup).not.toContain('role="button"')
     expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="Enable kick"/)
     expect(markup).toContain('>Stream key<')
+    // The chevron is the button's picture, never a control of its own: a
+    // click on it opens the row (plan 213 A1).
+    expect(markup).toMatch(/<svg[^>]*aria-hidden="true"[^>]*data-testid="destination-chevron"/)
   })
 
   it('stays quiet when a destination is ready, and says Needs setup when it is not', () => {
@@ -186,6 +189,23 @@ describe('DestinationCard connection mode', () => {
     expect(markup).not.toContain('Auth mode')
     expect(markup).not.toContain('OAuth')
     expect(markup).not.toContain('Manual RTMP')
+  })
+
+  // Plan 213 J2: X shares chat only with apps you sign in to, so the choice
+  // says so where it is made: Sign in first, the key without chat.
+  it('says on the X choice that Sign in brings chat and a stream key does not', () => {
+    const markup = render({
+      target: target('x', { authMode: 'manual-rtmp' }),
+      account: account('x')
+    })
+    const signIn = markup.indexOf('>Sign in · Chat works<')
+    const streamKey = markup.indexOf('>Stream key · No chat<')
+    expect(signIn).toBeGreaterThan(-1)
+    expect(streamKey).toBeGreaterThan(signIn)
+    // Other platforms keep the plain words.
+    const twitch = render({ target: target('twitch'), account: account('twitch') })
+    expect(twitch).not.toContain('Chat works')
+    expect(twitch).not.toContain('No chat')
   })
 
   it('shows no switch for a key-only platform, just one line and where to find the key', () => {

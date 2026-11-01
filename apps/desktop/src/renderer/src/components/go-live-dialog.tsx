@@ -809,7 +809,8 @@ const READ_TONE: Record<CommentsReadState, StatusTone> = {
   'waiting-for-broadcast-context': 'neutral',
   ended: 'neutral',
   failed: 'error',
-  unavailable: 'neutral'
+  unavailable: 'neutral',
+  'needs-sign-in': 'neutral'
 }
 
 const WRITE_TONE: Record<CommentsWriteState, StatusTone> = {
@@ -855,6 +856,8 @@ function commentsReadLabel(state: CommentsReadState): string {
       return 'Failed'
     case 'unavailable':
       return 'Unavailable'
+    case 'needs-sign-in':
+      return 'Needs Sign in'
   }
 }
 

@@ -147,8 +147,8 @@ describe('flush sections', () => {
 
   it('splits the two ConfigGrid columns with a hairline', () => {
     const markup = renderToStaticMarkup(createElement(ConfigGrid, null, 'a'))
-    expect(markup).toContain('lg:grid-cols-2')
-    expect(markup).toContain('lg:[&amp;&gt;*:nth-child(odd)]:border-r')
+    expect(markup).toContain('@min-[940px]/page:grid-cols-2')
+    expect(markup).toContain('@min-[940px]/page:[&amp;&gt;*:nth-child(odd)]:border-r')
   })
 
   it('keeps the PageHeader title for assistive tech and its action in its own row', () => {

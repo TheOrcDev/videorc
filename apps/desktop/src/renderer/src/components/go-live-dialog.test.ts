@@ -37,6 +37,26 @@ describe('Go Live comments status', () => {
     expect(markup).not.toContain('Receive only')
   })
 
+  // Plan 213 J1 and J3: a stream-key X destination reads as the choice it is,
+  // in the Stream Manager's words, never Failed and never Authorize X Live.
+  it('says X chat needs Sign in for a stream key, as the Stream Manager does', () => {
+    const words =
+      'X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.'
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveCommentsStatus, {
+        read: 'needs-sign-in',
+        write: 'unavailable',
+        message: words
+      })
+    )
+
+    expect(markup).toMatch(/>Read<\/span><span[^>]*>Needs Sign in</)
+    expect(markup).toMatch(/>Send<\/span><span[^>]*>Unavailable</)
+    expect(markup).toContain(words)
+    expect(markup).not.toContain('Failed')
+    expect(markup).not.toContain('Authorize X Live')
+  })
+
   it('shows Twitch read and write scope state independently', () => {
     const markup = renderToStaticMarkup(
       createElement(GoLiveCommentsStatus, {

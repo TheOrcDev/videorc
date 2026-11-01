@@ -114,6 +114,7 @@ import {
   type ChatPaneFilter
 } from '@/lib/stream-manager-chat'
 import { liveChatEmptyMessage } from '@/lib/live-chat-view'
+import { ChatSignInRows } from '@/components/stream-manager/chat-sign-in-rows'
 import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { cn } from '@/lib/utils'
 
@@ -168,7 +169,8 @@ export function ChatPane({
   onCohostNudgeDismiss,
   jumpTo = null,
   searchFocusSignal = 0,
-  composerFocusSignal = 0
+  composerFocusSignal = 0,
+  onUseSignIn
 }: {
   delivery?: ChatDelivery
   arrivalKey?: string
@@ -227,6 +229,9 @@ export function ChatPane({
   searchFocusSignal?: number
   /** Bumped by ⌘L in the window (plan 174 S3.16a). */
   composerFocusSignal?: number
+  /** "Use Sign in" on a stream-key destination's chat row (plan 213 J1):
+   * opens that destination in the main window. Absent in History. */
+  onUseSignIn?: (targetId: string) => void
 }): ReactElement {
   const [filter, setFilter] = useState<ChatPaneFilter>({
     platform: 'all',
@@ -507,6 +512,9 @@ export function ChatPane({
         </InputGroup>
       </div>
 
+      {/* Plan 213 J1: a stream-key X destination says chat needs Sign in,
+          above the list so it stays while other chat arrives. */}
+      {onUseSignIn ? <ChatSignInRows providers={providers} onUseSignIn={onUseSignIn} /> : null}
       <div className="relative flex min-h-0 flex-1 flex-col">
         {/* The follow owns this scroll position, so the browser's own scroll
             anchoring stays out of it. */}
@@ -523,7 +531,15 @@ export function ChatPane({
                 </EmptyHeader>
               </Empty>
             ) : (
-              <OffAir live={live} providers={providers} />
+              <OffAir
+                live={live}
+                providers={
+                  // The row above already says what a stream key needs.
+                  onUseSignIn
+                    ? providers.filter((provider) => provider.read !== 'needs-sign-in')
+                    : providers
+                }
+              />
             )
           ) : (
             <ol
