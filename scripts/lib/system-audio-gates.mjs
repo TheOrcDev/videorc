@@ -321,6 +321,23 @@ export function mixSourcesIncludeSystemAudio(status) {
   )
 }
 
+/**
+ * The `recording.status` that starts the session a case drives (Record or
+ * Go Live). With Clips on (plan 181) the ring's buffer-only session re-arms
+ * right after every Stop and publishes its own `recording` status, marked
+ * `replayOnly`; the Record that follows hands over from it and runs under a
+ * new session id. A waiter that accepts the ring's status latches onto a
+ * session that ends at the handover, so it never sees the mix or the terminal
+ * status it then waits for.
+ */
+export function startedSessionStatus(status) {
+  return (
+    (status?.state === 'recording' || status?.state === 'streaming') &&
+    typeof status?.sessionId === 'string' &&
+    status.replayOnly !== true
+  )
+}
+
 function describeRegions(regions) {
   if (regions.length === 0) return 'none'
   return regions

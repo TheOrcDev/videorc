@@ -21708,6 +21708,7 @@ mod tests {
         let status = compositor::start_synthetic_compositor(
             state.clone(),
             compositor::CompositorStartParams {
+                benchmark: false,
                 target_fps: 60,
                 width: 64,
                 height: 36,
@@ -21720,6 +21721,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -23498,8 +23502,12 @@ mod agent_role_tests {
     use crate::agent_mcp::test_support;
 
     /// D19: Phone remote's event list and the remote intent surface are
-    /// byte-identical to `dc1309cb`. A change here needs its own plan and a
-    /// leak argument, never a ride on the Agents work.
+    /// pinned. A change here needs its own plan and a leak argument, never a
+    /// ride on the Agents work. The event list is still `dc1309cb`'s; the
+    /// RemoteIntent enum was re-pinned at `9028bec9` (#935), where plan 210 S6
+    /// and S7 added `sceneApply.sceneId` and ScreenHide / ScreenShow /
+    /// ScreenHideToggle with their own leak argument
+    /// (plans/210-scenes-for-your-apps-and-hide-screen.md).
     #[test]
     fn remote_surface_is_pinned_to_dc1309cb() {
         assert_eq!(
@@ -23528,8 +23536,8 @@ mod agent_role_tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            hash, "4858a6c539c15f41af2682f40b038cbf53d89f8d2897a6db4a089c4f9d45f466",
-            "RemoteIntent is not byte-identical to dc1309cb"
+            hash, "b68d8ae70b3a142f2b45be1ed66959360bd9104a78048461c280dfcfca605fa8",
+            "RemoteIntent is not byte-identical to its plan 210 pin (9028bec9)"
         );
     }
 

@@ -63,7 +63,11 @@ runs on the GPU. `compositor.status.framePipeline.previewProgramLeg` says
 when the program leg is on; `VIDEORC_PREVIEW_PROGRAM_LEG=0` keeps the
 Preview on the primary leg (a measurement and support switch, said in
 the log). The pure trigger is `preview_needs_program_leg` in
-`compositor.rs`.
+`compositor.rs`. The verdict travels with the run: a Clips arm in place
+carries it on `CompositorArmParams`, and a run the ring starts for itself
+(a cold launch arms the ring before the Preview's run exists, logged as
+`recording-compositor-restarted`) carries it on `CompositorStartParams`
+with `replay_only`, so that run plans the program idle too.
 
 ## Placing them: the Live Scene canvas
 

@@ -21,8 +21,7 @@ describe('SessionPlayer (plan 119, S11)', () => {
     expect(markup).not.toMatch(/<video[^>]*\ssrc=/)
     expect(markup).toContain('Loading recording…')
     expect(markup).toMatch(/aria-label="Play"[^>]*disabled|disabled[^>]*aria-label="Play"/)
-    expect(markup).toContain('role="slider"')
-    expect(markup).toContain('aria-label="Playhead"')
+    expect(markup).toMatch(/<input[^>]*aria-label="Playhead"[^>]*type="range"/)
     expect(markup).toContain('tabindex="0"')
     expect(markup.toLowerCase()).not.toContain('fullscreen')
   })
@@ -180,7 +179,7 @@ describe('SessionPlayerControls', () => {
       revision: 1
     }
     const markup = controls({ markers: [marker], onSelectMarker: noop })
-    const scrubber = markup.indexOf('role="slider"')
+    const scrubber = markup.indexOf('type="range"')
     const pins = markup.indexOf('data-slot="marker-timeline"')
     expect(pins).toBeGreaterThan(scrubber)
     expect(markup).toContain('data-variant="overlay"')
@@ -193,18 +192,21 @@ describe('SessionPlayerControls', () => {
   })
 
   it('bounds the scrubber by the recording and disables it until playback is ready', () => {
-    // Radix writes aria-valuenow after mount, so server markup carries the bounds only.
+    // The thumb's range input carries the bounds and the clamped position.
     const markup = controls({ positionMs: 5_000_000, durationMs: 1_800_000 })
-    expect(markup).toContain('aria-valuemin="0"')
-    expect(markup).toContain('aria-valuemax="1800000"')
+    expect(markup).toMatch(/<input[^>]*min="0"[^>]*type="range"/)
+    expect(markup).toMatch(/<input[^>]*max="1800000"[^>]*type="range"/)
+    expect(markup).toMatch(/<input[^>]*type="range"[^>]*value="1800000"/)
     // An unknown duration still leaves a valid, non-empty track.
-    expect(controls({ positionMs: 0, durationMs: 0 })).toContain('aria-valuemax="100"')
+    expect(controls({ positionMs: 0, durationMs: 0 })).toMatch(
+      /<input[^>]*max="100"[^>]*type="range"/
+    )
     expect(controls({ disabled: true })).toMatch(/data-disabled/)
   })
 
   it('names the scrubber thumb and speaks its time, never raw milliseconds (plan 174 S0.5)', () => {
     const markup = controls({ positionMs: 125_000, durationMs: 2_470_000 })
-    expect(markup).toMatch(/<span[^>]*role="slider"[^>]*aria-label="Playhead"/)
-    expect(markup).toMatch(/<span[^>]*role="slider"[^>]*aria-valuetext="2:05 of 41:10"/)
+    expect(markup).toMatch(/<input[^>]*aria-label="Playhead"[^>]*type="range"/)
+    expect(markup).toMatch(/<input[^>]*aria-valuetext="2:05 of 41:10"[^>]*type="range"/)
   })
 })

@@ -96,8 +96,8 @@ describe('Settings layout', () => {
     // Plan 050, D4: sections are flush, so the columns stretch (the hairline
     // runs the full height) and no gap separates them.
     const configGrid = pageSource.slice(
-      pageSource.indexOf('export function ConfigGrid'),
-      pageSource.indexOf('export function Gallery')
+      pageSource.indexOf('function ConfigGrid'),
+      pageSource.indexOf('const CONFIG_GRID_PAIR')
     )
     expect(configGrid).toContain("'grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r'")
     expect(configGrid).not.toMatch(/\bgap-\d/)
@@ -200,8 +200,10 @@ describe('Settings layout', () => {
 
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
     // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
-    // (PageTabs), so the shell keeps no list of such pages.
-    expect(appShellSource).toContain('<PaneBody>')
+    // (PageTabs), so the shell keeps no list of such pages. #956 keys the
+    // body by the active page so each page opens at its own scroll top; that
+    // key is allowed, but no scroll prop or other per-page list is.
+    expect(appShellSource).toMatch(/<PaneBody(\s+key=\{active\})?>/)
     expect(appShellSource).not.toMatch(/<PaneBody scroll=/)
     expect(shellSource).toContain('<PageTabs')
     expect(pageTabsSource).toContain('{...PANE_OWNS_SCROLL}')
@@ -209,7 +211,10 @@ describe('Settings layout', () => {
     const scroll = pageTabsSource.indexOf('data-slot="page-tabs-scroll"')
     expect(strip).toBeGreaterThan(-1)
     expect(scroll).toBeGreaterThan(strip)
-    const scrollRegion = pageTabsSource.slice(pageTabsSource.lastIndexOf('<div', scroll), scroll)
+    const scrollRegion = pageTabsSource.slice(
+      pageTabsSource.lastIndexOf('<div', scroll),
+      pageTabsSource.indexOf('>', scroll)
+    )
     expect(scrollRegion).toContain('key={value}')
     expect(scrollRegion).toContain('overflow-y-auto')
     expect(pageTabsSource.indexOf('{children}')).toBeGreaterThan(scroll)

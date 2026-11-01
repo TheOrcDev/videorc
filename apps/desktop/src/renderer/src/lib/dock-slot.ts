@@ -129,7 +129,7 @@ export const DOCK_NON_BLOCKING_SLOTS: Readonly<Record<string, string>> = {
 }
 
 function openSlotSelector(slots: readonly string[]): string {
-  return slots.map((slot) => `[data-slot="${slot}"][data-state="open"]`).join(', ')
+  return slots.map((slot) => `[data-slot="${slot}"][data-open]`).join(', ')
 }
 
 export const DOCK_BLOCKING_SCRIM_SELECTOR = openSlotSelector(DOCK_BLOCKING_SCRIM_SLOTS)

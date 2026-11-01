@@ -151,7 +151,7 @@ describe('DestinationCard header', () => {
       /<button[^>]*data-slot="list-row-button"[^>]*aria-expanded="false"[^>]*>kick</
     )
     expect(markup).not.toContain('role="button"')
-    expect(markup).toMatch(/<button[^>]*role="switch"[^>]*aria-label="Enable kick"/)
+    expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="Enable kick"/)
     expect(markup).toContain('>Stream key<')
   })
 

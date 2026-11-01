@@ -477,14 +477,16 @@ export function BuddyPetPreview({
         // Why the pack did not load, on hover and read aloud: the tile is too
         // small for the sentence (plan 174 S1.10).
         <Tooltip>
-          <TooltipTrigger asChild>
-            <span
-              aria-label={error}
-              className="absolute inset-0"
-              data-slot="buddy-pet-preview-error"
-              role="img"
-            />
-          </TooltipTrigger>
+          <TooltipTrigger
+            render={
+              <span
+                aria-label={error}
+                className="absolute inset-0"
+                data-slot="buddy-pet-preview-error"
+                role="img"
+              />
+            }
+          />
           <TooltipContent>{error}</TooltipContent>
         </Tooltip>
       ) : null}

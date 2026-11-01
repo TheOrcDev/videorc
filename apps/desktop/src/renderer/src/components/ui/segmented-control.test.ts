@@ -111,8 +111,8 @@ describe('SegmentedControl', () => {
     expect(group().getAttribute('data-slot')).toBe('segmented-control')
     expect(radios()).toHaveLength(3)
     expect(checkedLabels()).toEqual(['Dark'])
-    expect(radio('Dark').getAttribute('data-state')).toBe('on')
-    expect(radio('Light').getAttribute('data-state')).toBe('off')
+    expect(radio('Dark').hasAttribute('data-checked')).toBe(true)
+    expect(radio('Light').hasAttribute('data-unchecked')).toBe(true)
     expect(tabStops()).toEqual(['Dark'])
     for (const candidate of radios()) expect(candidate.type).toBe('button')
   })
@@ -284,8 +284,8 @@ describe('SegmentedControl', () => {
     )
     const radios = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
     expect(radios).toHaveLength(2)
-    // The segment keeps its own on/off state under the tooltip trigger.
-    expect(radios.map((radio) => radio.dataset.state)).toEqual(['off', 'on'])
+    // The segment keeps its own checked state under the tooltip trigger.
+    expect(radios.map((radio) => radio.hasAttribute('data-checked'))).toEqual([false, true])
     expect(radios.some((radio) => radio.hasAttribute('title'))).toBe(false)
     expect(radios[0].hasAttribute('tooltip')).toBe(false)
     await act(async () => radios[1].focus())

@@ -799,9 +799,8 @@ export function SceneStage({
           disabled={phase !== 'idle'}
           aria-label="Scene sources"
           className="min-w-0 flex-wrap"
-          type="single"
-          value={selectedStageId ?? ''}
-          onValueChange={(value) => {
+          value={selectedStageId ? [selectedStageId] : []}
+          onValueChange={([value]) => {
             if (!value) return
             cancelGesture()
             const overlay = overlayItems.find((entry) => entry.stageId === value)

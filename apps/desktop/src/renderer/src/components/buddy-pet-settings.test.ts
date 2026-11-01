@@ -182,7 +182,7 @@ function button(testId: string): HTMLButtonElement {
 describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
   it('shows Still with the four state tiles and the Still preview at 160 px', async () => {
     await render()
-    expect(kindButton('Still').getAttribute('data-state')).toBe('on')
+    expect(kindButton('Still').hasAttribute('data-checked')).toBe(true)
     expect(document.querySelectorAll('[data-testid="buddy-look-tile"]')).toHaveLength(4)
     expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160, paused: false })
   })
@@ -427,6 +427,13 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
   })
 })
 
+/** The open select's options: a closed one may still be animating out. */
+const openOptions = (): HTMLElement[] => [
+  ...document.querySelectorAll<HTMLElement>(
+    '[data-slot="select-content"][data-open] [role="option"]'
+  )
+]
+
 describe('BuddyPetSettings: Reactions and Motion (plan 168 S-D2)', () => {
   function reactionRow(trigger: string): HTMLElement {
     return document.querySelector(`[data-testid="buddy-reaction-row"][data-trigger="${trigger}"]`)!
@@ -440,9 +447,11 @@ describe('BuddyPetSettings: Reactions and Motion (plan 168 S-D2)', () => {
     expect(document.querySelectorAll('[data-testid="buddy-reaction-row"]')).toHaveLength(8)
     // Follow's default chain is wave, then proud: this pack has proud.
     const follow = reactionRow('follow')
-    expect(follow.querySelector('[role="combobox"]')?.textContent).toBe('Default: Proud')
+    expect(follow.querySelector('[role="combobox"] [data-slot="select-value"]')?.textContent).toBe(
+      'Default: Proud'
+    )
     await act(async () => (follow.querySelector('[role="combobox"]') as HTMLElement).click())
-    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    const options = openOptions()
     expect(options.map((option) => option.textContent)).toEqual([
       'Default: Proud',
       'Laugh',
@@ -465,15 +474,17 @@ describe('BuddyPetSettings: Reactions and Motion (plan 168 S-D2)', () => {
       list: pets([PACK_A])
     })
     const follow = reactionRow('follow')
-    expect(follow.querySelector('[role="combobox"]')?.textContent).toBe('Wave (not in these moves)')
+    expect(follow.querySelector('[role="combobox"] [data-slot="select-value"]')?.textContent).toBe(
+      'Wave (not in these moves)'
+    )
     await act(async () => (follow.querySelector('[role="combobox"]') as HTMLElement).click())
-    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    const options = openOptions()
     await act(async () => options.find((option) => option.textContent === 'None')!.click())
     expect(lastPersona().reactions).toEqual({ follow: 'none', raid: 'laugh' })
 
     const raid = reactionRow('raid')
     await act(async () => (raid.querySelector('[role="combobox"]') as HTMLElement).click())
-    const raidOptions = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    const raidOptions = openOptions()
     await act(async () => raidOptions[0]!.click())
     expect(lastPersona().reactions).toEqual({ follow: 'wave' })
   })
@@ -497,9 +508,9 @@ describe('BuddyPetSettings: Reactions and Motion (plan 168 S-D2)', () => {
   it('saves Sleep after and Breathing into persona.motion', async () => {
     await render()
     const sleep = document.querySelector('[aria-label="Sleep after"]') as HTMLElement
-    expect(sleep.textContent).toBe('3 min')
+    expect(sleep.querySelector('[data-slot="select-value"]')?.textContent).toBe('3 min')
     await act(async () => sleep.click())
-    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    const options = openOptions()
     expect(options.map((option) => option.textContent)).toEqual([
       'Never',
       '1 min',

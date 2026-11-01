@@ -91,7 +91,7 @@ describe('KebabMenu', () => {
       'group-hover/kebab-host:opacity-100',
       'group-focus-within/kebab-host:opacity-100',
       'focus-visible:opacity-100',
-      'data-[state=open]:opacity-100'
+      'data-popup-open:opacity-100'
     ]) {
       expect(className).toContain(token)
     }
@@ -109,7 +109,7 @@ describe('KebabMenu', () => {
     ]
     act(() => root.render(createElement(KebabMenu, { items, label: 'Session actions' })))
     act(() => {
-      trigger()?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+      trigger()?.click()
     })
     const menu = document.querySelector('[role=menu]')
     expect(menu).not.toBeNull()

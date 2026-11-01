@@ -40,7 +40,7 @@ describe('soundKeyBlocked', () => {
       const target = document.body.querySelector('span, [role="menuitem"], input, textarea')!
       expect(soundKeyBlocked(press({ target }), document), markup).toBe(true)
     }
-    document.body.innerHTML = '<div role="dialog" data-state="open"></div>'
+    document.body.innerHTML = '<div role="dialog" data-open></div>'
     expect(soundKeyBlocked(press(), document)).toBe(true)
     document.body.innerHTML = ''
   })

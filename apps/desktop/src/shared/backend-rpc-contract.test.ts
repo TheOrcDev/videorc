@@ -1164,6 +1164,40 @@ describe('backend RPC contract', () => {
     ).toThrow('pixels must be a known field')
   })
 
+  it('carries the Preview hold of a performance check and nothing else (plan 212)', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      updatedAt: '2026-10-31T00:00:00Z'
+    } satisfies CompositorStatus
+    expect(validateBackendRpcResult('compositor.status', status)).toEqual(status)
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'performance-check' })
+    ).toEqual({ ...status, previewHold: 'performance-check' })
+    expect(
+      validateBackendEventPayload('compositor.status', {
+        ...status,
+        previewHold: 'performance-check'
+      })
+    ).toEqual({ ...status, previewHold: 'performance-check' })
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'synthetic-refused' })
+    ).toEqual({ ...status, previewHold: 'synthetic-refused' })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'recording' })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: null })
+    ).toThrow()
+  })
+
   it('reports the effective editor draft on compositor status and never a forged one', () => {
     const status = {
       state: 'live',
@@ -3546,5 +3580,24 @@ describe('Hide screen wire contract (plan 210 S7)', () => {
     expect(runtimeValidatedBackendRpcMethods).toEqual(
       expect.arrayContaining(['screen.hide', 'screen.show', 'screen.privacy.get'])
     )
+  })
+})
+
+describe('performance check non-recorded reason', () => {
+  it('accepts host-busy and rejects unknown reasons', () => {
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'host-busy'
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'unknown'
+      })
+    ).toThrow()
   })
 })

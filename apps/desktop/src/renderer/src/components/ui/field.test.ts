@@ -70,15 +70,26 @@ describe('Field names its control (plan 174 S0.5)', () => {
       'SelectTrigger',
       () => h(Select, null, h(SelectTrigger, null, h(SelectValue))),
       '[data-slot="select-trigger"]'
-    ],
-    ['Switch', () => h(Switch), '[role="switch"]'],
-    ['Checkbox', () => h(Checkbox), '[role="checkbox"]']
+    ]
   ])('points its FieldLabel at a %s', async (_name, control, selector) => {
     await render(h(Field, null, h(FieldLabel, null, 'Default privacy'), control()))
     const element = find(selector)
     expect(element.id).not.toBe('')
     expect(fieldLabel().htmlFor).toBe(element.id)
     expect(nameOf(element)).toBe('Default privacy')
+  })
+
+  it.each([
+    ['Switch', () => h(Switch), '[role="switch"]'],
+    ['Checkbox', () => h(Checkbox), '[role="checkbox"]']
+  ])("names a %s through Base UI's hidden input", async (_name, control, selector) => {
+    await render(h(Field, null, h(FieldLabel, null, 'Made for kids'), control()))
+    const input = find('input[type="checkbox"]')
+    // The label points at the hidden input, so a click on it toggles…
+    expect(input.id).not.toBe('')
+    expect(fieldLabel().htmlFor).toBe(input.id)
+    // …and Base UI names the visible control by that label.
+    expect(nameOf(find(selector))).toBe('Made for kids')
   })
 
   it('keeps an explicit id and htmlFor, and follows an explicit id', async () => {
@@ -122,7 +133,7 @@ describe('Field names its control (plan 174 S0.5)', () => {
         h(FieldLabel, null, 'Theme'),
         h(
           ToggleGroup,
-          { type: 'single', value: 'dark' },
+          { value: ['dark'] },
           h(ToggleGroupItem, { value: 'light' }, 'Light'),
           h(ToggleGroupItem, { value: 'dark' }, 'Dark')
         )
@@ -156,7 +167,7 @@ describe('Field names its control (plan 174 S0.5)', () => {
         h(FieldLabel, null, 'Snap (landscape)'),
         h(
           ToggleGroup,
-          { type: 'single', 'aria-label': 'Snap overlay' },
+          { 'aria-label': 'Snap overlay' },
           h(ToggleGroupItem, { value: 'top-left' }, 'Top left')
         )
       )
@@ -177,7 +188,8 @@ describe('Field names its control (plan 174 S0.5)', () => {
     await render(h('div', null, h(FieldLabel, null, 'Loose'), h(Input), h(Switch)))
     expect(fieldLabel().hasAttribute('for')).toBe(false)
     expect(fieldLabel().hasAttribute('id')).toBe(false)
-    expect(find('input').hasAttribute('id')).toBe(false)
-    expect(find('[role="switch"]').hasAttribute('id')).toBe(false)
+    // Base UI's Input and Switch carry ids of their own; the Field wiring adds none.
+    expect(find('input').id).toMatch(/^base-ui-/)
+    expect(find('[role="switch"]').id).toMatch(/^base-ui-/)
   })
 })

@@ -47,7 +47,6 @@ import {
   SOUND_VOLUME_DB_MIN,
   type Sound,
   type SoundHotkey,
-  type SoundMode,
   type SoundUpdateParams
 } from '@/lib/backend'
 import {
@@ -62,8 +61,9 @@ import { OFFLINE_REASON } from '@/lib/user-error'
 
 /** Videorc's slider knob on audiocn's thumb, like the Sources faders. */
 const FADER_THUMB = 'bg-knob ring-knob-ring'
-/** The Key menu's "no key" choice: Radix Select needs a non-empty value. */
+/** The Key menu's "no key" choice, a value of its own (an empty one reads as no selection). */
 const NO_KEY = 'none'
+const NO_KEY_ITEM = { [NO_KEY]: 'None' }
 
 /**
  * Assets → Sounds (plan 189 S7): the one home that imports, renames, orders,
@@ -254,8 +254,11 @@ export function SoundRow({
     >
       <Select
         disabled={disabled}
+        items={SOUND_MODE_LABELS}
         value={sound.mode}
-        onValueChange={(mode) => onChange({ mode: mode as SoundMode })}
+        onValueChange={(mode) => {
+          if (mode !== null) onChange({ mode })
+        }}
       >
         <SelectTrigger aria-label={`How ${sound.name} plays`} className="w-28" size="xs">
           <SelectValue />
@@ -302,15 +305,19 @@ export function SoundRow({
       {/* Picking a key another sound has moves it here (the backend's rule). */}
       <Select
         disabled={disabled}
+        // A key is its own label; only "no key" needs words.
+        items={NO_KEY_ITEM}
         value={sound.hotkey ?? NO_KEY}
-        onValueChange={(key) => onChange({ hotkey: key === NO_KEY ? '' : (key as SoundHotkey) })}
+        onValueChange={(key) => {
+          if (key !== null) onChange({ hotkey: key === NO_KEY ? '' : (key as SoundHotkey) })
+        }}
       >
         <SelectTrigger aria-label={`${sound.name} key`} className="w-20" size="xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
           <SelectGroup>
-            <SelectItem value={NO_KEY}>None</SelectItem>
+            <SelectItem value={NO_KEY}>{NO_KEY_ITEM[NO_KEY]}</SelectItem>
             {SOUND_HOTKEYS.map((key) => (
               <SelectItem key={key} value={key}>
                 {key}

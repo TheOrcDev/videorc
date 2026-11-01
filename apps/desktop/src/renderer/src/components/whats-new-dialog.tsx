@@ -58,12 +58,7 @@ export function WhatsNewDialog({
     >
       {/* Continue takes the focus (plan 174 S3.21, A-19): Return closes the
           dialog instead of sending the first button's link to the browser. */}
-      <DialogContent
-        onOpenAutoFocus={(event) => {
-          event.preventDefault()
-          continueRef.current?.focus()
-        }}
-      >
+      <DialogContent initialFocus={continueRef}>
         <DialogHeader>
           <DialogTitle>
             What&apos;s new in Videorc {formatChangelogVersion(entry.version)}

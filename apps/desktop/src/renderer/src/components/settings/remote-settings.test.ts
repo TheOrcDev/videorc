@@ -100,7 +100,7 @@ async function openPhoneMenu(name: string): Promise<void> {
     `[aria-label="More actions for ${name}"]`
   )!
   await act(async () => {
-    trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+    trigger.click()
   })
 }
 const menuItem = (text: string): HTMLElement => {

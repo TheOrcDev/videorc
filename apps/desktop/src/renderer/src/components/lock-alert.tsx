@@ -1,45 +1,88 @@
 import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
-import {
-  OFFLINE_LOCK_REASON,
-  sessionLockReason,
-  unlockActionLabel,
-  type UnlockAction
-} from '@/lib/lock-view'
-import { beginVideorcSignIn, openVideorcWebLink } from '@/lib/videorc-web-links'
+import { Button, buttonVariants } from '@/components/ui/button'
+import { OFFLINE_LOCK_REASON, sessionLockReason } from '@/lib/lock-reason'
+
+/**
+ * What unlocks a locked feature: its one action. Your app resolves it (is
+ * this a Premium gate? is anyone signed in?) and says how to run it.
+ * - `sign-in` runs `onClick`: start your app's sign-in.
+ * - `view-premium` opens `url`. With `onClick` it calls that instead (an
+ *   Electron app hands the link to the system browser); without one the
+ *   button is a link that opens in a new tab.
+ */
+type LockAlertAction =
+  | { kind: 'sign-in'; label?: string; onClick: () => void }
+  | {
+      kind: 'view-premium'
+      url: string
+      label?: string
+      onClick?: (url: string) => void
+    }
 
 type LockAlertProps = Omit<ComponentProps<typeof Alert>, 'variant' | 'icon' | 'children'>
 
-function runUnlockAction(action: UnlockAction): void {
-  if (action.kind === 'sign-in') beginVideorcSignIn()
-  else openVideorcWebLink(action.url)
+/** The action's words: "Sign in" or "View Premium", unless it brings its own. */
+function unlockActionLabel(action: LockAlertAction): string {
+  if (action.label) {
+    return action.label
+  }
+  return action.kind === 'sign-in' ? 'Sign in' : 'View Premium'
+}
+
+function LockAlertButton({ action }: { action: LockAlertAction }): ReactElement {
+  const label = unlockActionLabel(action)
+  if (action.kind === 'view-premium' && !action.onClick) {
+    // A real link, styled as the button: Base UI's Button would give it
+    // role="button" and hide that it navigates.
+    return (
+      <a
+        className={buttonVariants({ size: 'xs', variant: 'outline' })}
+        data-slot="button"
+        href={action.url}
+        rel="noopener noreferrer"
+        target="_blank"
+      >
+        {label}
+      </a>
+    )
+  }
+  const handleClick = (): void => {
+    if (action.kind === 'sign-in') {
+      action.onClick()
+    } else {
+      action.onClick?.(action.url)
+    }
+  }
+  return (
+    <Button onClick={handleClick} size="xs" type="button" variant="outline">
+      {label}
+    </Button>
+  )
 }
 
 /**
- * Why the controls under it are off (plan 174 S1.5, D-13): a lock, the reason
- * as its one line, and at most one action ("Sign in", "View Premium"). It
- * leads the tab or section it locks, and everything under it is disabled.
- * A Premium feature stays on screen behind this lock, never hidden: the
- * locked page is what sells it (owner call 2026-10-10).
+ * Why the controls under it are off: a lock, the reason as its one line, and
+ * at most one action ("Sign in", "View Premium"). It leads the tab or section
+ * it locks, and everything under it is disabled. A Premium feature stays on
+ * screen behind this lock, never hidden: the locked page is what sells it.
  */
-export function LockAlert({
+function LockAlert({
   reason,
   action = null,
   ...props
 }: LockAlertProps & {
+  /** One line: "Live captions are part of Videorc Premium." */
   reason: ReactNode
-  action?: UnlockAction | null
+  action?: LockAlertAction | null
 }): ReactElement {
   return (
     <Alert variant="locked" {...props}>
       <AlertTitle>{reason}</AlertTitle>
       {action ? (
         <AlertAction>
-          <Button size="xs" type="button" variant="outline" onClick={() => runUnlockAction(action)}>
-            {unlockActionLabel(action)}
-          </Button>
+          <LockAlertButton action={action} />
         </AlertAction>
       ) : null}
     </Alert>
@@ -47,18 +90,32 @@ export function LockAlert({
 }
 
 /**
- * The one notice for controls a running recording or livestream locks (J2-9).
+ * The one notice for controls a running recording or livestream locks.
  * `locks` names what it locks, as a plural subject ("Destinations and stream
  * details"), when the page holds more than one kind of control.
  */
-export function SessionLockAlert({
+function SessionLockAlert({
   locks,
+  reason,
   ...props
-}: LockAlertProps & { locks?: string }): ReactElement {
-  return <LockAlert reason={sessionLockReason(locks)} {...props} />
+}: LockAlertProps & {
+  locks?: string
+  /** Replaces the wording. */
+  reason?: ReactNode
+}): ReactElement {
+  return <LockAlert reason={reason ?? sessionLockReason(locks)} {...props} />
 }
 
-/** The one notice for controls that wait for the backend to reconnect. */
-export function OfflineAlert(props: LockAlertProps): ReactElement {
-  return <LockAlert reason={OFFLINE_LOCK_REASON} {...props} />
+/** The one notice for controls that wait for the app to reconnect. */
+function OfflineAlert({
+  reason = OFFLINE_LOCK_REASON,
+  ...props
+}: LockAlertProps & {
+  /** Replaces the wording. */
+  reason?: ReactNode
+}): ReactElement {
+  return <LockAlert reason={reason} {...props} />
 }
+
+export { LockAlert, OfflineAlert, SessionLockAlert, unlockActionLabel }
+export type { LockAlertAction, LockAlertProps }

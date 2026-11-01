@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { once } from 'node:events'
 import { mkdirSync } from 'node:fs'
+import { spawnProcessGroup } from './lib/process-group.mjs'
+import './lib/smoke-env.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { summarizeRecordCycles, evaluateRecordLatencyBudget } from './lib/record-latency-gate.mjs'
 import { evaluateRoleAudioSources, takeSiblingPaths } from './lib/separate-source-take-gates.mjs'
@@ -919,74 +921,46 @@ console.log(
 if (cases.failures.length) process.exitCode = 1
 else if (skip4K || lifecycleOnly) process.exitCode = 3
 
-function run(command, args, env = process.env, capture = false, timeoutMs) {
-  return new Promise((resolveRun, reject) => {
-    const ownsBackendGroup = args[0] === 'recording::tests::source_iso_runtime_artifacts'
-    const child = spawn(command, args, {
-      cwd: root,
-      env,
-      detached: ownsBackendGroup,
-      stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit'
-    })
-    const signalChild = (signal) => {
-      if (ownsBackendGroup) signalOwnedProcessGroup(child.pid, signal)
-      else child.kill(signal)
+async function run(command, args, env = process.env, capture = false, timeoutMs) {
+  const ownsBackendGroup = args[0] === 'recording::tests::source_iso_runtime_artifacts'
+  let failure
+  const { child, result } = spawnProcessGroup(command, args, {
+    cwd: root,
+    env,
+    stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    timeoutMs: timeoutMs ?? (command === 'cargo' ? 600_000 : 120_000),
+    onTimeout: () => {
+      failure = new Error(`${command} exceeded its execution deadline`)
+    },
+    onInterrupt: () => {
+      failure = new Error(`${command} interrupted`)
+      failure.name = 'AbortError'
     }
-    const output = []
-    let stderr = ''
-    if (capture) {
-      child.stdout.on('data', (chunk) => output.push(chunk))
-      child.stderr.on('data', (chunk) => {
-        stderr += chunk
-      })
-    }
-    let failure
-    let forceKill
-    const cancel = (reason, interrupted = false) => {
-      clearTimeout(deadline)
-      if (!failure || interrupted) {
-        failure = new Error(reason)
-        if (interrupted) failure.name = 'AbortError'
-      }
-      signalChild('SIGTERM')
-      forceKill ??= setTimeout(() => signalChild('SIGKILL'), 2000)
-    }
-    const deadline = setTimeout(
-      () => cancel(`${command} exceeded its execution deadline`),
-      timeoutMs ?? (command === 'cargo' ? 600_000 : 120_000)
-    )
-    const interrupt = () => cancel(`${command} interrupted`, true)
-    process.once('SIGINT', interrupt)
-    process.once('SIGTERM', interrupt)
-    const cleanup = () => {
-      clearTimeout(deadline)
-      clearTimeout(forceKill)
-      process.off('SIGINT', interrupt)
-      process.off('SIGTERM', interrupt)
-    }
-    child.on('error', (error) => {
-      cleanup()
-      reject(error)
-    })
-    child.on('close', async (code, signal) => {
-      if (ownsBackendGroup) {
-        try {
-          await retireOwnedProcessGroup(child.pid)
-        } catch (error) {
-          failure ??= error
-        }
-      }
-      cleanup()
-      if (failure) reject(failure)
-      else if (code !== 0)
-        reject(
-          new Error(
-            `${command} failed (${code ?? signal}): ${stderr}\n${command === 'cargo' ? Buffer.concat(output).toString() : ''}`
-          )
-        )
-      else resolveRun(Buffer.concat(output))
-    })
   })
+  const output = []
+  let stderr = ''
+  if (capture) {
+    child.stdout.on('data', (chunk) => output.push(chunk))
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+  }
+  const { status, signal, error } = await result
+  if (ownsBackendGroup) {
+    try {
+      await retireOwnedProcessGroup(child.pid)
+    } catch (error) {
+      failure ??= error
+    }
+  }
+  if (error) throw error
+  if (failure) throw failure
+  if (status !== 0) {
+    throw new Error(
+      `${command} failed (${status ?? signal}): ${stderr}\n${command === 'cargo' ? Buffer.concat(output).toString() : ''}`
+    )
+  }
+  return Buffer.concat(output)
 }
 
 function signalOwnedProcessGroup(pid, signal) {

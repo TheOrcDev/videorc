@@ -358,7 +358,7 @@ try {
   }
 
   // Dismiss onboarding for clean captures (fresh profiles always show it).
-  // The radix Dialog unmounts on Escape/Skip; mutating localStorage alone is
+  // The Dialog unmounts on Escape/Skip; mutating localStorage alone is
   // not enough, but a reload after setting the flag never shows it again.
   if (process.env.VIDEORC_SHOTS_NO_RELOAD !== '1') {
     await cdpEvaluate(

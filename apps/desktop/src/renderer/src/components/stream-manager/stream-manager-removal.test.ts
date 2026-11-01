@@ -84,7 +84,7 @@ async function render(patch: Partial<StreamManagerProps>): Promise<void> {
 
 function activeTab(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
   const tab = container.querySelector<HTMLElement>(
-    `[data-slot="${slot}"] [role="tab"][data-state="active"]`
+    `[data-slot="${slot}"] [role="tab"][data-active]`
   )
   return tab?.textContent?.trim().toLowerCase() ?? null
 }

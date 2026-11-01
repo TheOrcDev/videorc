@@ -161,13 +161,14 @@ function pressCommandEnter(target: Element = dialog()): void {
   })
 }
 
+// Base UI moves a dialog's first focus on the next animation frame.
 describe('Go Live dialog focus (B-14)', () => {
-  it('starts on the title field when the dialog carries stream details', () => {
+  it('starts on the title field when the dialog carries stream details', async () => {
     render()
-    expect(document.activeElement?.id).toBe('go-live-title')
+    await vi.waitFor(() => expect(document.activeElement?.id).toBe('go-live-title'))
   })
 
-  it('starts on the primary when every destination is a scheduled event', () => {
+  it('starts on the primary when every destination is a scheduled event', async () => {
     mocked.captureConfig = withTargets((target) =>
       target.platform === 'twitch'
         ? { ...target, enabled: true, scheduledEventId: 'event-1', scheduledEventTitle: 'Saved' }
@@ -175,10 +176,10 @@ describe('Go Live dialog focus (B-14)', () => {
     )
     render()
     expect(dialog().querySelector('#go-live-title')).toBeNull()
-    expect(document.activeElement).toBe(primary())
+    await vi.waitFor(() => expect(document.activeElement).toBe(primary()))
   })
 
-  it('never starts on a button that changes a destination', () => {
+  it('never starts on a button that changes a destination', async () => {
     render({
       preflight: {
         valid: false,
@@ -186,7 +187,7 @@ describe('Go Live dialog focus (B-14)', () => {
         destinations: [destination({ ready: false, message: 'Reconnect.' })]
       }
     })
-    expect(document.activeElement?.id).toBe('go-live-title')
+    await vi.waitFor(() => expect(document.activeElement?.id).toBe('go-live-title'))
   })
 })
 

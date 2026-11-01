@@ -1,15 +1,13 @@
-// PowerSlider value math (Assets Tab plan, slice A3).
-//
-// Pure and framework-free so the exact clamping / stepping / formatting the UI
-// relies on is unit-tested directly — the component never re-implements value
-// logic, and "all values clamp through the same helpers used by tests" holds.
-// No DOM, no React here.
-
-export type SliderRange = {
+export interface SliderRange {
   min: number
   max: number
   step: number
 }
+
+// PowerSlider's value math. Pure and framework-free, so the exact clamping,
+// stepping and formatting the slider relies on is tested directly: the
+// component never re-implements value logic, and every value clamps through
+// the same helpers the tests use. No DOM and no React here.
 
 function stepDecimals(step: number): number {
   if (!Number.isFinite(step) || step <= 0) {
@@ -25,9 +23,12 @@ function roundTo(value: number, decimals: number): number {
   return Math.round(value * factor) / factor
 }
 
-// Clamp into [min,max] and snap to the step grid (anchored at min), fixing the
-// floating-point drift that 0.1-style steps produce. NaN falls back to min so a
-// bad numeric entry can never escape the range; ±Infinity clamps to its bound.
+/**
+ * Clamps into [min, max] and snaps to the step grid (anchored at min), fixing
+ * the floating-point drift that 0.1-style steps produce. NaN falls back to min
+ * so a bad numeric entry can never escape the range; ±Infinity clamps to its
+ * bound.
+ */
 export function clampToRange(value: number, range: SliderRange): number {
   const { min, max, step } = range
   if (Number.isNaN(value)) {
@@ -41,8 +42,10 @@ export function clampToRange(value: number, range: SliderRange): number {
   return roundTo(Math.min(max, Math.max(min, snapped)), stepDecimals(step))
 }
 
-// One keyboard/arrow move. `large` (Shift+arrow) uses largeStep, defaulting to
-// 10× step. `direction` is the sign of the move.
+/**
+ * One keyboard move. `large` (Shift+arrow) uses `largeStep`, 10× the step by
+ * default. `direction` is the sign of the move.
+ */
 export function stepValue(
   value: number,
   range: SliderRange,
@@ -54,8 +57,10 @@ export function stepValue(
   return clampToRange(value + base * sign, range)
 }
 
-// Parse a typed numeric field. Returns null (= no commit) for blank or
-// non-numeric input; otherwise clamps/snaps into range.
+/**
+ * Parses a typed number. Blank or non-numeric input returns null (nothing to
+ * commit); anything else clamps and snaps into the range.
+ */
 export function parseNumericInput(raw: string, range: SliderRange): number | null {
   const trimmed = raw.trim()
   if (trimmed === '') {
@@ -68,12 +73,19 @@ export function parseNumericInput(raw: string, range: SliderRange): number | nul
   return clampToRange(parsed, range)
 }
 
-// Display string: fixed decimals (derived from step unless overridden), an
-// optional unit suffix, and a leading '+' for positive bipolar values so
-// pan/offset controls read signed.
+/**
+ * The readout: fixed decimals (from the step unless overridden), an optional
+ * unit suffix, and a leading "+" on a positive bipolar value so offsets read
+ * signed.
+ */
 export function formatValue(
   value: number,
-  options: { suffix?: string; decimals?: number; bipolar?: boolean; step?: number } = {}
+  options: {
+    suffix?: string
+    decimals?: number
+    bipolar?: boolean
+    step?: number
+  } = {}
 ): string {
   const decimals = options.decimals ?? stepDecimals(options.step ?? 1)
   const rounded = roundTo(value, decimals)
@@ -81,8 +93,10 @@ export function formatValue(
   return `${sign}${rounded.toFixed(decimals)}${options.suffix ?? ''}`
 }
 
-// Position of a value along the track as a 0–100 percentage — used to place snap
-// ticks and the bipolar midpoint marker.
+/**
+ * A value's place along the track, 0 to 100: where a mark or the bipolar
+ * midpoint sits.
+ */
 export function valuePercent(value: number, range: SliderRange): number {
   const { min, max } = range
   if (max <= min) {

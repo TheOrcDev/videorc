@@ -13,8 +13,8 @@ import { cn } from '@/lib/utils'
 // entire studio in this style"). Each inspector section is one screen built
 // from these parts. Labels are dim and values lit, as on the screen; the words
 // stay sentence case in the DOM (the smokes read them) and the screen prints
-// them in capitals. Device dropdowns are `DevicePicker trigger="lcd"`, which
-// draws its value and its list with the classes below.
+// them in capitals. Device dropdowns are `LcdDevicePicker`, which draws its
+// value and its list with the classes below.
 
 /**
  * How the Studio inspector draws (plan 197): `default` is the inspector's
@@ -292,7 +292,7 @@ export function LcdPanelNavRow({
   if (!hint) return button
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipTrigger render={button} />
       <TooltipContent align="start">{hint}</TooltipContent>
     </Tooltip>
   )

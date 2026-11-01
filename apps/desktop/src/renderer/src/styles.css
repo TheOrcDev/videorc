@@ -1,15 +1,15 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+/* shadcn's variants (data-open, data-closed, data-checked, data-active,
+   data-disabled, data-horizontal, data-vertical, …) and accordion keyframes.
+   Each variant matches the Base UI attribute and Radix's data-state, so the
+   @videorc components and the Radix ones not yet replaced both style by it. */
+@import 'shadcn/tailwind.css';
 
 @custom-variant dark (&:is(.dark *));
 /* Windows-only chrome. theme-bootstrap.js sets data-platform before the
    first paint, so this never waits for runtime info. */
 @custom-variant win32 (&:is([data-platform='win32'] *));
-/* The radix-rhea registry components style by orientation through these
-   variants; without them Tailwind matches a literal data-horizontal
-   attribute that radix never sets, and e.g. slider tracks get zero height. */
-@custom-variant data-horizontal (&[data-orientation='horizontal']);
-@custom-variant data-vertical (&[data-orientation='vertical']);
 
 /*
  * Videorc design tokens (.claude/skills/videorc-design, v2: the window family).
@@ -216,6 +216,17 @@
   --chrome-led-glow: color-mix(in oklch, var(--live) 30%, transparent);
   /* The edge a fill or LED gains under Increase Contrast (D12). */
   --chrome-edge: transparent;
+  /* The chromatic ring (Button's `chromatic`): a porcelain face in a ring of
+     liquid chrome. Three bands of metal, each a trough, a slope and a hot
+     highlight, a shade darker than dark's so the ring still frames a white
+     face. */
+  --chrome-chromatic-face-stops: oklch(1 0 0) 0%, oklch(0.985 0 0) 60%, oklch(0.95 0 0) 100%;
+  --chrome-chromatic-bands:
+    oklch(0.27 0 0) 0deg, oklch(0.63 0 0) 34deg, oklch(0.92 0 0) 46deg, oklch(0.74 0 0) 54deg,
+    oklch(0.45 0 0) 74deg, oklch(0.14 0 0) 96deg, oklch(0.27 0 0) 120deg;
+  --chrome-chromatic-recess: oklch(0 0 0 / 28%);
+  --chrome-chromatic-rim: oklch(0 0 0 / 18%);
+  --chrome-chromatic-lift: oklch(0 0 0 / 3%);
   /* Chrome rows (plan 0011): the Stream Manager's on-stream row is a plate
      with a black-chrome edge down its left side; a member's row is a quieter
      plate whose edge keeps the member hue, the one place colour says who
@@ -379,6 +390,15 @@
   --chrome-led-lift: oklch(1 0 0 / 10%);
   --chrome-led-glow: color-mix(in oklch, var(--live) 40%, transparent);
   --chrome-edge: transparent;
+  /* The chromatic ring: a black face, the solid's, in a ring of liquid
+     chrome, the same three bands of metal at full brightness. */
+  --chrome-chromatic-face-stops: oklch(0.22 0 0) 0%, oklch(0.16 0 0) 60%, oklch(0.13 0 0) 100%;
+  --chrome-chromatic-bands:
+    oklch(0.3 0 0) 0deg, oklch(0.7 0 0) 34deg, oklch(1 0 0) 46deg, oklch(0.82 0 0) 54deg,
+    oklch(0.5 0 0) 74deg, oklch(0.16 0 0) 96deg, oklch(0.3 0 0) 120deg;
+  --chrome-chromatic-recess: oklch(0 0 0 / 90%);
+  --chrome-chromatic-rim: oklch(0 0 0 / 70%);
+  --chrome-chromatic-lift: oklch(1 0 0 / 6%);
   /* Chrome rows (plan 0011): a silver plate on the black solid with a
      polished bead edge for the on-stream row, half its strength for a
      member's row. */
@@ -434,6 +454,22 @@
     inset 0 1px 0 var(--chrome-led-hi), inset 0 -1px 0 var(--chrome-led-lo),
     0 1px 3px var(--chrome-led-drop), 0 0 0 1px var(--chrome-edge);
   --chrome-pressed-shadow: inset 0 1px 2px var(--chrome-press), 0 0 0 1px var(--chrome-edge);
+
+  /* The chromatic ring's light and shade: glints that run against the bands,
+     a tube's lit top and shaded underside, the ring's shade on the face, and
+     a rim and drop around it. Pressed sinks the face deeper and drops no
+     shadow. */
+  --chrome-chromatic-glints:
+    transparent 0deg, oklch(1 0 0 / 65%) 8deg, transparent 18deg, transparent 50deg,
+    oklch(0 0 0 / 40%) 62deg, transparent 74deg, transparent 90deg;
+  --chrome-chromatic-sheen:
+    oklch(1 0 0 / 35%) 0%, transparent 30%, transparent 70%, oklch(0 0 0 / 35%) 100%;
+  --chrome-chromatic-shadow:
+    inset 0 1px 3px var(--chrome-chromatic-recess), 0 0 0 1px var(--chrome-edge),
+    0 0 0 1px var(--chrome-chromatic-rim), 0 1px 3px var(--chrome-fill-drop);
+  --chrome-chromatic-pressed-shadow:
+    inset 0 2px 5px var(--chrome-chromatic-recess), 0 0 0 1px var(--chrome-edge),
+    0 0 0 1px var(--chrome-chromatic-rim);
 }
 
 /* Increase Contrast: hairlines strong enough to read on any backing, the
@@ -797,6 +833,81 @@
   &:disabled {
     background-image: none;
     --tw-shadow: 0 0 0 1px var(--chrome-edge);
+  }
+}
+
+/* The chromatic ring (Button's `chromatic`): a face of the theme's solid set
+   in a 2px ring of liquid chrome. Three bands of silver flow around the ring
+   while glints run against them, so the metal seems to slosh; hover surges
+   the flow and lifts the face, and easing off picks up where the surge left
+   it, without a jump. Pressed sinks the face. The ring is the border box,
+   and reduced motion holds the metal still. */
+@property --chrome-chromatic-flow {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@property --chrome-chromatic-surge {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@utility chrome-chromatic {
+  color: var(--foreground);
+  border: 2px solid transparent;
+  /* Each loop turns the bands and glints by whole periods, so it never
+     seams: 360deg is three bands, and 1.5 turns are six glints. */
+  background-image:
+    linear-gradient(to bottom, var(--chrome-chromatic-face-stops)),
+    linear-gradient(to bottom, var(--chrome-chromatic-sheen)),
+    repeating-conic-gradient(
+      from calc(var(--chrome-chromatic-flow) * -1.5 - var(--chrome-chromatic-surge)),
+      var(--chrome-chromatic-glints)
+    ),
+    repeating-conic-gradient(
+      from calc(var(--chrome-chromatic-flow) + var(--chrome-chromatic-surge)),
+      var(--chrome-chromatic-bands)
+    );
+  background-clip: padding-box, border-box, border-box, border-box;
+  background-origin: border-box;
+  --tw-shadow: var(--chrome-chromatic-shadow);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  animation:
+    chrome-chromatic-flow 9s linear infinite,
+    chrome-chromatic-surge 4.5s linear infinite paused;
+  /* As specific as Button's own border, clip and focus border, and later,
+     so the ring shows in any class order. */
+  &:is(button, a),
+  &:is(button, a):focus-visible {
+    border-color: transparent;
+    border-width: 2px;
+    background-clip: padding-box, border-box, border-box, border-box;
+  }
+  &:is(button, a):hover:not(:disabled) {
+    animation-play-state: running;
+    --tw-shadow: var(--chrome-chromatic-shadow), inset 0 0 0 100vmax var(--chrome-chromatic-lift);
+  }
+  &:is(button, a):active:not(:disabled) {
+    --tw-shadow: var(--chrome-chromatic-pressed-shadow);
+  }
+  &:disabled {
+    animation: none;
+  }
+}
+
+@keyframes chrome-chromatic-flow {
+  to {
+    --chrome-chromatic-flow: 360deg;
+  }
+}
+
+@keyframes chrome-chromatic-surge {
+  to {
+    --chrome-chromatic-surge: 360deg;
   }
 }
 

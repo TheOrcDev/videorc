@@ -1,13 +1,15 @@
+'use client'
+
 import { useTheme } from 'next-themes'
 import { useCallback, useEffect } from 'react'
 
 import { isModalOpen } from '@/lib/modal-open'
-import { nextToggledTheme } from '@/lib/theme-toggle'
+import { nextToggledTheme } from '@/lib/theme-choice'
 
 /**
- * Shadcn mode-switcher hook: toggle dark/light and listen for D (outside
- * editable fields, and never from under a dialog or a menu: plan 174 A-2). A
- * flip back to the computer's own look returns to System (plan 174 I-30).
+ * The mode switcher: toggle dark/light and listen for D (outside editable
+ * fields, and never from under a dialog or a menu). A flip back to the
+ * computer's own look returns to System.
  */
 export function useThemeToggle(): { toggleTheme: () => void } {
   const { setTheme, resolvedTheme, systemTheme } = useTheme()
@@ -26,7 +28,8 @@ export function useThemeToggle(): { toggleTheme: () => void } {
         return
       }
 
-      if (event.key.toLowerCase() !== 'd') {
+      // Autofill fires keydown events with no key.
+      if (event.key?.toLowerCase() !== 'd') {
         return
       }
 

@@ -154,17 +154,19 @@ export function BuddyPersonaSection(): ReactElement | null {
                 <BuddyBubbleSample persona={persona} style={persona.bubbleStyle} />
               </Button>
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    aria-label="Zoom in on the bubble"
-                    data-testid="buddy-bubble-zoom"
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                    onClick={() => setBubbleZoomOpen(true)}
-                  >
-                    <ZoomInIcon />
-                  </Button>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      aria-label="Zoom in on the bubble"
+                      data-testid="buddy-bubble-zoom"
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                      onClick={() => setBubbleZoomOpen(true)}
+                    />
+                  }
+                >
+                  <ZoomInIcon />
                 </TooltipTrigger>
                 <TooltipContent>Zoom in</TooltipContent>
               </Tooltip>
