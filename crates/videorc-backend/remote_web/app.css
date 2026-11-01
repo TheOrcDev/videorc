@@ -45,17 +45,19 @@
   --chrome-plate-bottom: oklch(1 0 0 / 4%);
   --chrome-plate-hi: oklch(1 0 0 / 16%);
   --chrome-plate-rim: oklch(1 0 0 / 5%);
-  --chrome-led-stops: oklch(0.7 0.21 27) 0%, oklch(0.56 0.23 27) 55%, oklch(0.5 0.21 27) 100%;
-  --chrome-led-flat: oklch(0.56 0.23 27);
+  --chrome-led-stops:
+    oklch(0.58 0.23 27) 0%, oklch(0.52 0.23 27) 40%, oklch(0.36 0.17 27) 53%,
+    oklch(0.45 0.21 27) 80%, oklch(0.56 0.22 27) 100%;
+  --chrome-led-flat: oklch(0.5 0.22 27);
   /* The LED's ink: the desktop's --live-foreground, both themes. */
   --live-foreground: oklch(0.985 0 0);
-  --chrome-led-hi: oklch(1 0 0 / 38%);
+  --chrome-led-hi: oklch(1 0 0 / 45%);
   --chrome-led-lo: oklch(0 0 0 / 30%);
   --chrome-led-drop: oklch(0 0 0 / 50%);
   --chrome-led-lift: oklch(1 0 0 / 10%);
-  /* The desktop's color-mix(in oklch, var(--live) 40%, transparent), spelled
+  /* The desktop's color-mix(in oklch, var(--live) 60%, transparent), spelled
      out so a phone without color-mix still draws the LED. */
-  --chrome-led-glow: oklch(0.62 0.24 27 / 40%);
+  --chrome-led-glow: oklch(0.62 0.24 27 / 60%);
   /* The edge a fill or LED gains under Increase Contrast. */
   --chrome-edge: transparent;
   --radius-panel: 18px;
@@ -95,13 +97,15 @@
     --chrome-plate-bottom: oklch(0 0 0 / 3%);
     --chrome-plate-hi: oklch(1 0 0 / 90%);
     --chrome-plate-rim: oklch(0 0 0 / 7%);
-    --chrome-led-stops: oklch(0.64 0.22 27) 0%, oklch(0.52 0.24 27) 55%, oklch(0.46 0.22 27) 100%;
-    --chrome-led-flat: oklch(0.52 0.24 27);
-    --chrome-led-hi: oklch(1 0 0 / 38%);
+    --chrome-led-stops:
+      oklch(0.58 0.23 27) 0%, oklch(0.52 0.23 27) 40%, oklch(0.36 0.17 27) 53%,
+      oklch(0.45 0.21 27) 80%, oklch(0.56 0.22 27) 100%;
+    --chrome-led-flat: oklch(0.5 0.22 27);
+    --chrome-led-hi: oklch(1 0 0 / 45%);
     --chrome-led-lo: oklch(0 0 0 / 25%);
     --chrome-led-drop: oklch(0 0 0 / 30%);
     --chrome-led-lift: oklch(1 0 0 / 10%);
-    --chrome-led-glow: oklch(0.55 0.24 27 / 30%);
+    --chrome-led-glow: oklch(0.55 0.24 27 / 45%);
     color-scheme: light;
   }
 }
