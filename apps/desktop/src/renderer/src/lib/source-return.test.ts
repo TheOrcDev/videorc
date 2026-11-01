@@ -141,3 +141,41 @@ it('records the wanted camera separately from the camera the backend holds', () 
   })
   expect(cameraSelectionDiagnostics({ cameraId: 'builtin' }, status).wantedCameraId).toBe('builtin')
 })
+
+describe('a disconnected camera standing in for another camera', () => {
+  const standIn = reconcileSourceSelection({ cameraId: camera.id, cameraName: camera.name }, [
+    screen,
+    substitute
+  ])
+
+  it('retains the last frame without saving the substitute as the wanted camera', () => {
+    const next = reconcileSourceSelection(standIn, [screen], {
+      disconnectedCameraId: substitute.id
+    })
+    expect(next.cameraId).toBe(substitute.id)
+    expect(next.wantedCameraId).toBe(camera.id)
+    expect(
+      persistableCaptureConfig({ ...defaultCaptureConfig, sources: next }).sources.cameraId
+    ).toBe(camera.id)
+  })
+
+  it('holds that frame during a session when the original camera returns', () => {
+    const next = reconcileSourceSelection(standIn, [screen, camera], {
+      holdStandIns: true,
+      disconnectedCameraId: substitute.id
+    })
+    expect(next.cameraId).toBe(substitute.id)
+    expect(next.wantedCameraId).toBe(camera.id)
+    expect(returningSourceChoices(next, [screen, camera])).toEqual([
+      { kind: 'camera', device: camera }
+    ])
+  })
+
+  it('restores the original camera when it returns while idle', () => {
+    const next = reconcileSourceSelection(standIn, [screen, camera], {
+      disconnectedCameraId: substitute.id
+    })
+    expect(next.cameraId).toBe(camera.id)
+    expect(next.wantedCameraId).toBeUndefined()
+  })
+})

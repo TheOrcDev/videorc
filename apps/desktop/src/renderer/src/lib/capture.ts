@@ -2961,7 +2961,9 @@ export function reconcileSourceSelection(
     : (heldCamera ?? findRememberedSource(cameraPick.id, cameraPick.name, cameras))
   const holdingCamera = options.holdStandIns && cameraPick.standIn && !cameraOff
   const disconnectedCamera =
-    options.disconnectedCameraId === nextSources.cameraId && nextSources.cameraId
+    options.disconnectedCameraId === nextSources.cameraId &&
+    nextSources.cameraId &&
+    (holdingCamera || !cameraPick.standIn || !rememberedCamera)
       ? {
           id: nextSources.cameraId,
           name: nextSources.cameraName ?? 'Camera',
@@ -2971,13 +2973,16 @@ export function reconcileSourceSelection(
       : undefined
   const selectedCamera = cameraOff
     ? undefined
-    : holdingCamera
-      ? cameras.find((device) => device.id === nextSources.cameraId)
-      : (disconnectedCamera ?? rememberedCamera ?? cameras[0])
+    : (disconnectedCamera ??
+      (holdingCamera
+        ? cameras.find((device) => device.id === nextSources.cameraId)
+        : (rememberedCamera ?? cameras[0])))
   const cameraStandIn =
     !cameraOff &&
     (holdingCamera ||
-      (!disconnectedCamera && !rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
+      (disconnectedCamera
+        ? cameraPick.standIn
+        : !rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
   nextSources.cameraOff = cameraOff ? true : undefined
   nextSources.wantedCameraId = cameraStandIn ? cameraPick.id : undefined
   nextSources.wantedCameraName = cameraStandIn ? cameraPick.name : undefined
