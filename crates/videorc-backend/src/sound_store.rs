@@ -898,7 +898,11 @@ mod tests {
         );
 
         // Reorder must name every sound once.
-        assert!(database.reorder_sounds(&[first.id.clone()]).is_err());
+        assert!(
+            database
+                .reorder_sounds(std::slice::from_ref(&first.id))
+                .is_err()
+        );
         let reordered = database
             .reorder_sounds(&[tada.id.clone(), first.id.clone(), airhorn.id.clone()])
             .unwrap();

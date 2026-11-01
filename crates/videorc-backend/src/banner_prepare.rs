@@ -29,6 +29,7 @@ use crate::protocol::Banner;
 pub(crate) const BANNER_BITMAP_BUDGET_BYTES: u64 = 160 * 1024 * 1024;
 /// The key-addressed Metal namespace banners draw from (`metal_compositor`
 /// asserts it is keyed, with four slots).
+#[cfg(target_os = "macos")]
 pub(crate) const BANNER_METAL_NAMESPACE: u64 = 9;
 /// An entry a tick touched this recently is in use.
 const BITMAP_HOT_FOR: Duration = Duration::from_secs(1);
@@ -119,6 +120,8 @@ pub(crate) struct BannerBitmap {
     pub width: u32,
     pub height: u32,
     pub bgra: Arc<Vec<u8>>,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    // the Metal and D3D11 content key
     pub revision: u64,
 }
 

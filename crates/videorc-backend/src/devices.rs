@@ -260,6 +260,7 @@ fn unsupported_device_list() -> DeviceList {
     DeviceList { devices, warnings }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
     devices
         .into_iter()
@@ -284,6 +285,7 @@ fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
         .collect()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn avfoundation_screen_devices(
     av_devices: &[AvFoundationDevice],
     screen_capture_permission_required: bool,
@@ -318,6 +320,7 @@ fn avfoundation_screen_devices(
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn missing_avfoundation_screen_device() -> Device {
     Device {
         app: None,
@@ -335,6 +338,7 @@ fn missing_avfoundation_screen_device() -> Device {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn avfoundation_probe_failed_screen_device() -> Device {
     Device {
         app: None,
@@ -843,6 +847,7 @@ impl AvFoundationProbeCache {
         });
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn invalidate(&mut self) {
         self.entry = None;
     }
@@ -855,6 +860,7 @@ fn avfoundation_probe_cache() -> &'static Mutex<AvFoundationProbeCache> {
 
 /// Drops the cached device probe so the next lookup spawns FFmpeg again. Called
 /// whenever the device inventory is known to have changed.
+#[cfg(target_os = "macos")]
 pub fn invalidate_avfoundation_probe_cache() {
     avfoundation_probe_cache()
         .lock()
@@ -947,6 +953,7 @@ fn db_to_level(db: f64) -> f64 {
 // available doubled every microphone in the picker and made a broken
 // "Fallback - X" row the fresh-profile default, so they are listed only when
 // no native CoreAudio input can be selected at all.
+#[cfg(any(target_os = "macos", test))]
 fn avfoundation_microphone_picker_devices(
     av_devices: &[AvFoundationDevice],
     native_microphone_available: bool,
@@ -961,6 +968,7 @@ fn avfoundation_microphone_picker_devices(
         .collect()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     // The capture worker and meter only open stable UID identities. An
     // index-only row (FFmpeg without the Videorc AVF identity patch) can never

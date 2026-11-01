@@ -98,7 +98,7 @@ thread_local! {
 
 /// Tests force (or un-force) the still on their own thread instead of the
 /// process-wide environment, which other tests in the same process read.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub fn set_forced_still_for_test(forced: Option<bool>) {
     FORCED_STILL_OVERRIDE.with(|cell| cell.set(forced));
 }

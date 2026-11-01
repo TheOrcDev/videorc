@@ -514,7 +514,7 @@ impl BuddyMotion {
         self.idle = idle;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // the TS twin's API; tests read it
+    #[allow(dead_code)] // the TS twin's API
     pub fn is_idle(&self) -> bool {
         self.idle
     }

@@ -269,6 +269,7 @@ pub(crate) enum PreviewCompositorRestoreSkip {
     NoRunId,
     /// The surface changed while the compositor was starting; the new run
     /// was stopped again rather than adopted.
+    #[cfg_attr(not(test), allow(dead_code))] // only the restore-race tests construct it today
     SurfaceChangedDuringStart,
 }
 

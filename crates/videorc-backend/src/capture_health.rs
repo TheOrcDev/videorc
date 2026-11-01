@@ -1652,11 +1652,8 @@ mod tests {
         monitor.observe(healthy_sample(1000, 1000));
         monitor.observe(healthy_sample(1060, 1060));
         // Reset to a small value: window skipped, no verdict accumulates.
-        for _ in 0..5 {
-            assert_eq!(monitor.observe(healthy_sample(3, 3)), None);
-            assert_eq!(monitor.degraded_stage(), None);
-            break;
-        }
+        assert_eq!(monitor.observe(healthy_sample(3, 3)), None);
+        assert_eq!(monitor.degraded_stage(), None);
         // The window after the reset has a valid baseline again.
         assert_eq!(monitor.observe(healthy_sample(63, 63)), None);
     }

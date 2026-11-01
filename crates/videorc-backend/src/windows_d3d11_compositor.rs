@@ -2906,8 +2906,6 @@ mod runtime {
     }
 }
 
-#[cfg(all(test, target_os = "windows"))]
-pub(crate) use runtime::WindowsD3d11ParityReadback;
 #[cfg(target_os = "windows")]
 pub(crate) use runtime::{
     WindowsD3d11BgraUpload, WindowsD3d11ComposedFrame, WindowsD3d11Compositor,

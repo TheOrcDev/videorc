@@ -897,8 +897,10 @@ mod tests {
         });
         let state = test_state();
         let mut events = state.events.subscribe();
-        let mut flags = crate::service_flags::YouTubeServiceFlags::default();
-        flags.viewer_sample_ms = 110_000;
+        let flags = crate::service_flags::YouTubeServiceFlags {
+            viewer_sample_ms: 110_000,
+            ..Default::default()
+        };
         crate::youtube_quota::apply_service_flags(&state, flags);
         let sampler = tokio::spawn(run_viewer_sampler(
             state.clone(),
@@ -1037,8 +1039,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn changed_youtube_deadline_does_not_change_other_provider_or_double_shed_cadence() {
         let state = test_state();
-        let mut flags = crate::service_flags::YouTubeServiceFlags::default();
-        flags.viewer_sample_ms = 30_000;
+        let mut flags = crate::service_flags::YouTubeServiceFlags {
+            viewer_sample_ms: 30_000,
+            ..Default::default()
+        };
         crate::youtube_quota::apply_service_flags(&state, flags.clone());
         assert_eq!(provider_interval(&state, true), Duration::from_secs(30));
         assert_eq!(provider_interval(&state, false), Duration::from_secs(60));

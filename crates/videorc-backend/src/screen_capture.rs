@@ -1,14 +1,18 @@
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
-use crate::protocol::{
-    AppWindowUnavailableReason, Device, DeviceKind, DeviceStatus, ResolveAppWindowParams,
-    ResolveAppWindowResult,
-};
+use crate::protocol::Device;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use crate::protocol::DeviceKind;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use crate::protocol::DeviceStatus;
+use crate::protocol::{AppWindowUnavailableReason, ResolveAppWindowParams, ResolveAppWindowResult};
 
 const SCREEN_CAPTUREKIT_PREFIX: &str = "screen:screencapturekit:";
 const WINDOW_CAPTUREKIT_PREFIX: &str = "window:screencapturekit:";
 const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const WINDOWS_GDIGRAB_DESKTOP_ID: &str = "screen:gdigrab:desktop";
+#[cfg(target_os = "macos")]
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Whether native capture callbacks provide a continuous cadence signal that
@@ -435,6 +439,7 @@ fn windows_gdigrab_desktop_device() -> Device {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn permission_or_unavailable(error: &str) -> DeviceStatus {
     let normalized = error.to_lowercase();
     if normalized.contains("permission")
@@ -448,6 +453,7 @@ fn permission_or_unavailable(error: &str) -> DeviceStatus {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn should_include_window_metadata(
     is_on_screen: bool,
     layer: isize,
@@ -468,6 +474,7 @@ fn should_include_window_metadata(
             || app_name.is_some_and(|value| !value.is_empty()))
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn is_foreign_session_window_app(app_name: Option<&str>) -> bool {
     app_name.is_some_and(|value| value.eq_ignore_ascii_case("loginwindow"))
 }

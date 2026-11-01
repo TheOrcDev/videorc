@@ -262,6 +262,7 @@ pub struct ResolveAppWindowParams {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ResolveAppWindowResult {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // app scenes are macOS-only
     Found {
         ok: bool,
         #[serde(rename = "windowId")]
@@ -280,7 +281,9 @@ pub enum ResolveAppWindowResult {
 #[serde(rename_all = "kebab-case")]
 pub enum AppWindowUnavailableReason {
     NotRunning,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // app scenes are macOS-only
     NoWindow,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Minimized,
 }
 
@@ -288,6 +291,7 @@ pub enum AppWindowUnavailableReason {
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
     Screen,
+    #[cfg_attr(target_os = "windows", allow(dead_code))] // Windows lists no window sources yet
     Window,
     Camera,
     Microphone,

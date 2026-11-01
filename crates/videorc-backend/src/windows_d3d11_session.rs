@@ -4187,11 +4187,13 @@ mod runtime {
                 ),
             ]
         );
-        assert!(
-            CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
-                && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
-                && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
-        );
+        const {
+            assert!(
+                CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
+                    && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
+                    && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
+            )
+        };
         // Plan 205 S8: both legs burn the Buddy, so the Preview draws it once,
         // from the primary's layer (the Preview's canvas and sources are the
         // primary's); the stream leg's layer is the stream's alone.
@@ -4873,11 +4875,13 @@ mod tests {
         let zs: Vec<i32> = (0..6).map(windows_d3d11_banner_z_index).collect();
         assert_eq!(zs, vec![6, 7, 8, 9, 9, 9]);
         assert!(zs.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
-        assert!(
-            WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
-            "captions draw at z 10"
-        );
+        const {
+            assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
+            assert!(
+                WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
+                "captions draw at z 10"
+            );
+        }
     }
 
     fn draws_on(

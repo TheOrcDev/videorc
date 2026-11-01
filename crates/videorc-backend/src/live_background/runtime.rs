@@ -199,6 +199,7 @@ impl LiveBackgroundBoard {
 
     /// Report only when the status differs from the one on the board (the
     /// CPU fallbacks call this every frame).
+    #[cfg(not(target_os = "linux"))]
     pub fn report_if_changed(&self, status: LiveBackgroundStatus) {
         let mut state = self.lock();
         if state.status.as_ref() != Some(&status) {

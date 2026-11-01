@@ -1157,7 +1157,7 @@ impl CaptureRecoveryCoordinator {
         self.source_failed_after_recovery(source) && self.terminal_incident_epoch() != armed_epoch
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn test_camera_recovery_failed(&mut self, id: &str, exhausted: bool) {
         self.scope = Some(CaptureRecoveryScope::camera(SourceKey::camera(id), 1));
         self.retry_scope = self.scope.clone();
@@ -2753,9 +2753,8 @@ pub(crate) async fn seed_terminal_capture_recovery_failure_for_transport_test(
                 "transport test terminal failure".to_string(),
                 now_timestamp(),
             )
-            .map(|status| {
-                emit_recovery_status_at_commit(state, &status);
-                status
+            .inspect(|status| {
+                emit_recovery_status_at_commit(state, status);
             })
             .expect("transport test failure transition")
     };

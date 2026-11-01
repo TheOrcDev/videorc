@@ -1175,7 +1175,7 @@ mod tests {
             },
             "a highlight that wants the stream only burns the shared leg"
         );
-        assert_eq!(plans.buddy.primary, true);
+        assert!(plans.buddy.primary);
         assert!(overlay_layout_needs_split(shared, &layout));
         assert_eq!(plans.plan(OverlayItem::Captions), None);
 

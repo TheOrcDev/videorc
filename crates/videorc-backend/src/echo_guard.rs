@@ -409,7 +409,7 @@ pub(crate) mod fixtures {
                 let bar_beat = (index / beat) % 4;
                 let t = index as f32 / RATE as f32;
                 let decay = (-(in_beat as f32) / (0.08 * RATE as f32)).exp();
-                let kick = if bar_beat % 2 == 0 {
+                let kick = if bar_beat.is_multiple_of(2) {
                     (std::f32::consts::TAU * 60.0 * t).sin() * decay
                 } else {
                     0.0
