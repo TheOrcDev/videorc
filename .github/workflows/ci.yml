@@ -53,6 +53,12 @@ jobs:
           opt-level = 0
           TOML
           cat "$HOME/.cargo/config.toml"
+          # At opt-level 0 the RPC dispatcher's unoptimized frame alone
+          # outgrows the 2 MiB default thread stack, so every test that calls
+          # it (and the sentinel backend's tokio workers) overflows. Give
+          # those threads the 8 MiB the macOS backend thread already gets
+          # (BACKEND_THREAD_STACK_BYTES); opt-level 2 builds need ~256 KiB.
+          echo "RUST_MIN_STACK=8388608" >> "$GITHUB_ENV"
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
