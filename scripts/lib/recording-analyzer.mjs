@@ -827,22 +827,32 @@ export async function runFreezedetect(
 }
 
 /**
- * Keep only the silence segments that sit inside the take: after the lead-in
- * window and ending before the tail window. `durationSeconds` null keeps every
- * segment past the lead-in.
+ * Keep only the part of each silence segment that sits inside the take: the
+ * lead-in window and the tail window are cut off, and what remains is kept
+ * when it is at least `minMs` long. A run that merely touches a window (a
+ * microphone that is digital zero from the lead-in to the end of the take)
+ * still counts for the part of it that is mid-take. `durationSeconds` null
+ * keeps every segment past the lead-in.
  * @returns {{start:number, end:number|null, duration:number}[]}
  */
-export function interiorSilenceRuns(segments, { leadInMs, tailMs, durationSeconds }) {
+export function interiorSilenceRuns(segments, { leadInMs, tailMs, durationSeconds, minMs = 0 }) {
   const leadIn = leadInMs / 1000
   const tailStart = durationSeconds == null ? null : durationSeconds - tailMs / 1000
-  return segments.filter((segment) => {
-    if (segment.start < leadIn) return false
-    if (tailStart != null) {
-      const end = segment.end ?? segment.start + segment.duration
-      if (end > tailStart) return false
+  const minSeconds = minMs / 1000
+  const runs = []
+  for (const segment of segments) {
+    const rawEnd = segment.end ?? segment.start + segment.duration
+    const start = Math.max(segment.start, leadIn)
+    const end = tailStart == null ? rawEnd : Math.min(rawEnd, tailStart)
+    const duration = end - start
+    if (duration <= 0 || duration < minSeconds) continue
+    if (start === segment.start && end === rawEnd) {
+      runs.push(segment)
+    } else {
+      runs.push({ start, end, duration })
     }
-    return true
-  })
+  }
+  return runs
 }
 
 export async function runSilencedetect(
@@ -1045,7 +1055,8 @@ export async function analyzeRecording(filePath, options = {}) {
   const digitalZeroRuns = interiorSilenceRuns(digitalZeroSegments, {
     leadInMs: gates.digitalZeroLeadInMs,
     tailMs: gates.digitalZeroTailMs,
-    durationSeconds: probe.formatDuration ?? null
+    durationSeconds: probe.formatDuration ?? null,
+    minMs: gates.digitalZeroMinMs
   })
   const longestDigitalZero = digitalZeroRuns.reduce((max, s) => Math.max(max, s.duration), 0)
 

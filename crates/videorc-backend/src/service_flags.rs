@@ -41,6 +41,11 @@ pub const SERVICE_FLAGS_LOG_CODE: &str = "youtube-service-flags";
 /// compiled defaults allow, never faster or bigger.
 pub const MIN_POLL_FLOOR_MS: u64 = crate::youtube_chat::MIN_POLLING_INTERVAL_MS;
 pub const VIEWER_SAMPLE_FLOOR_MS: u64 = 30_000;
+/// The viewer merge keeps a platform's count for `viewer_stats::VIEWER_FRESHNESS`
+/// (150 s). A YouTube sample interval at or past that window would drop
+/// YouTube from the merged total between its own polls, so the flag cannot
+/// stretch the interval beyond the compiled default.
+pub const VIEWER_SAMPLE_CEILING_MS: u64 = DEFAULT_VIEWER_SAMPLE_MS;
 pub const DAILY_BUDGET_UNITS_MAX: u64 = 10_000;
 
 /// Compiled defaults the flags start from.
@@ -356,8 +361,18 @@ pub fn parse_service_flags(body: &str, now: DateTime<Utc>) -> Result<YouTubeServ
     }
     if let Some(value) = youtube.viewer_sample_ms {
         match integer(&value) {
-            Some(ms) if ms >= 0 && ms as u64 >= VIEWER_SAMPLE_FLOOR_MS => {
+            Some(ms)
+                if ms >= 0
+                    && (VIEWER_SAMPLE_FLOOR_MS..=VIEWER_SAMPLE_CEILING_MS)
+                        .contains(&(ms as u64)) =>
+            {
                 flags.viewer_sample_ms = ms as u64
+            }
+            Some(ms) if ms >= 0 && ms as u64 > VIEWER_SAMPLE_CEILING_MS => {
+                flags.viewer_sample_ms = VIEWER_SAMPLE_CEILING_MS;
+                flags.notes.push(format!(
+                    "viewerSampleMs {ms} clamped to the {VIEWER_SAMPLE_CEILING_MS} ms ceiling"
+                ));
             }
             Some(ms) => {
                 flags.viewer_sample_ms = VIEWER_SAMPLE_FLOOR_MS;
@@ -565,6 +580,21 @@ mod tests {
         assert_eq!(negative.min_poll_ms, 5_000);
         assert_eq!(negative.viewer_sample_ms, 30_000);
         assert_eq!(negative.daily_budget_units, Some(0), "clamped to off");
+
+        // A sample interval past the viewer freshness window would drop
+        // YouTube from the merged viewer total between polls.
+        let too_slow = parse_service_flags(
+            r#"{"version":1,"youtube":{"viewerSampleMs":180000}}"#,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(too_slow.viewer_sample_ms, VIEWER_SAMPLE_CEILING_MS);
+        assert_eq!(too_slow.notes.len(), 1, "{:?}", too_slow.notes);
+        assert!(
+            VIEWER_SAMPLE_CEILING_MS + VIEWER_SAMPLE_FLOOR_MS
+                <= crate::viewer_stats::VIEWER_FRESHNESS.as_millis() as u64,
+            "a sample at the ceiling plus one late poll must still be fresh"
+        );
 
         let wrong_types = parse_service_flags(
             r#"{"version":1,"youtube":{"minPollMs":"fast","viewerSampleMs":12.5,"dailyBudgetUnits":true,"chatTransport":7,"pausedUntil":42}}"#,

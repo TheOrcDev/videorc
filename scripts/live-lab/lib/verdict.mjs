@@ -167,18 +167,29 @@ function round(value, digits = 1) {
   return Math.round(value * factor) / factor
 }
 
-/** Pure: longest run (ms) of consecutive samples where `bad(sample)` holds. */
-export function longestBadRunMs(samples, bad) {
+/**
+ * Pure: longest run (ms) of consecutive samples where `bad(sample)` holds.
+ * A run is measured from the last good sample before it (the moment the
+ * stream was last known healthy) to its last bad sample, so N bad samples at
+ * a cadence of c count N·c, not (N−1)·c. A run that opens the series starts
+ * at its first bad sample. A sample without a measurement (`measured` false)
+ * ends the run and forgets the last good sample: nothing is known about the
+ * gap, so a bad sample after it starts a run of its own.
+ */
+export function longestBadRunMs(samples, bad, measured = () => true) {
   let longest = 0
   let runStart = null
-  let last = null
+  let lastGoodAtMs = null
   for (const sample of samples) {
-    if (bad(sample)) {
-      if (runStart === null) runStart = sample.atMs
-      last = sample.atMs
-      longest = Math.max(longest, last - runStart)
+    if (!measured(sample)) {
+      runStart = null
+      lastGoodAtMs = null
+    } else if (bad(sample)) {
+      if (runStart === null) runStart = lastGoodAtMs ?? sample.atMs
+      longest = Math.max(longest, sample.atMs - runStart)
     } else {
       runStart = null
+      lastGoodAtMs = sample.atMs
     }
   }
   return longest
@@ -443,19 +454,26 @@ export async function computeVerdict(
 
   // --- journal: dropped frames, encoder speed, bitrate --------------------------
   const samples = journal.filter((line) => line.kind === 'sample')
-  const liveSamples = samples.filter((line) =>
-    (line.legs ?? []).some((leg) => leg.state === 'live')
-  )
-  series.bitrate = liveSamples.map((line) => ({
+  const isLive = (line) => (line.legs ?? []).some((leg) => leg.state === 'live')
+  const liveSamples = samples.filter(isLive)
+  // The run measures keep every sample: one with no live leg (a reconnect)
+  // or no speed is a gap that ends a run, so a bad sample after it is not
+  // counted from a good one before it. The charts, the minimum and the
+  // median read only measured ones.
+  const bitrateSamples = samples.map((line) => ({
     atMs: line.tsMs,
-    value: (line.legs ?? []).reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0)
+    value: isLive(line)
+      ? (line.legs ?? []).reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0)
+      : null
   }))
-  series.speed = liveSamples
-    .map((line) => {
-      const speeds = (line.legs ?? []).map((leg) => leg.speed).filter(Number.isFinite)
-      return { atMs: line.tsMs, value: speeds.length ? Math.min(...speeds) : null }
-    })
-    .filter((p) => p.value !== null)
+  series.bitrate = bitrateSamples.filter((p) => p.value !== null)
+  const speedSamples = samples.map((line) => {
+    const speeds = isLive(line)
+      ? (line.legs ?? []).map((leg) => leg.speed).filter(Number.isFinite)
+      : []
+    return { atMs: line.tsMs, value: speeds.length ? Math.min(...speeds) : null }
+  })
+  series.speed = speedSamples.filter((p) => p.value !== null)
   const dropWindows = droppedFrameWindows(
     journal,
     (thresholds.droppedFrames?.windowMinutes ?? 5) * 60000
@@ -499,7 +517,11 @@ export async function computeVerdict(
     }
     const speedMin = thresholds.encoderSpeed?.min ?? 0.97
     const speedFor = (thresholds.encoderSpeed?.forSeconds ?? 60) * 1000
-    const slow = longestBadRunMs(series.speed, (p) => p.value < speedMin)
+    const slow = longestBadRunMs(
+      speedSamples,
+      (p) => p.value < speedMin,
+      (p) => p.value !== null
+    )
     const minSpeed = series.speed.length ? Math.min(...series.speed.map((p) => p.value)) : null
     const speedBreach = slow >= speedFor
     const speedJudge = judge(speedBreach, 'P1')
@@ -527,7 +549,11 @@ export async function computeVerdict(
       6000
     const fraction = thresholds.bitrate?.minFractionOfTarget ?? 0.7
     const bitrateFor = (thresholds.bitrate?.forSeconds ?? 60) * 1000
-    const low = longestBadRunMs(series.bitrate, (p) => p.value < target * fraction)
+    const low = longestBadRunMs(
+      bitrateSamples,
+      (p) => p.value < target * fraction,
+      (p) => p.value !== null
+    )
     const bitrateBreach = low >= bitrateFor
     const bitrateJudge = judge(bitrateBreach, 'P1')
     const medianBitrate = series.bitrate.map((p) => p.value).sort((a, b) => a - b)[

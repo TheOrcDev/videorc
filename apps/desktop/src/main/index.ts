@@ -120,6 +120,7 @@ import {
   BackendRuntimeOwner,
   backendRuntimeAcceptsBootstrap,
   claimDurableBackendPid,
+  observedExitedPid,
   requestBackendRuntimeTermination,
   settleBackendRuntimeExit,
   type OwnedBackendRuntime
@@ -3201,7 +3202,11 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   }
   window.on('close', (event) => {
     if (notesWindow === window) {
-      if (!notesWindowCloseFlushReady) {
+      // Electron reads a prevented window close during app.quit() as a
+      // cancelled quit, which on macOS leaves the app running with no
+      // windows and no backend. The quit path asked for the flush already
+      // (before-quit), so a close during the quit never prevents.
+      if (!notesWindowCloseFlushReady && !appIsQuitting) {
         event.preventDefault()
         requestNotesWindowCloseFlush(window)
         return
@@ -3279,6 +3284,26 @@ function requestNotesWindowCloseFlush(window: BrowserWindow): void {
     safeConsole.warn('Notes close flush timed out; closing with the last acknowledged save.')
     finishNotesWindowClose(window)
   }, 1_500)
+}
+
+/**
+ * Asks Notes to flush and settles once the window has closed: after its save
+ * acknowledgement, or after the 1.5 s flush timeout closes it with the last
+ * acknowledged save. The cap only covers a window that never closes.
+ */
+function flushNotesWindowBeforeQuit(capMs = 2_000): Promise<void> {
+  const window = notesWindow
+  if (!window || window.isDestroyed()) {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, capMs)
+    window.once('closed', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    requestNotesWindowCloseFlush(window)
+  })
 }
 
 function closeNotesWindow(message?: string): NotesWindowState {
@@ -9973,10 +9998,17 @@ function finalizeBackendRuntimeExit(
   code: number | null,
   signal: NodeJS.Signals | null
 ): void {
+  // Only an observed exit proves the child pid dead. A stop that timed out
+  // after SIGKILL observed none, so that pid goes through the ledger probe
+  // like every other owned pid instead of losing its record.
   const settlement = settleBackendRuntimeExit(
     backendRuntimeOwner,
     runtime,
-    validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+    observedExitedPid(
+      validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+      code,
+      signal
+    ),
     (pid) => recordedBackendProcessMayStillBeOwned(runtime, pid)
   )
   for (const pid of settlement.confirmedDead) {
@@ -17072,9 +17104,17 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
     accountSignInTransactions?.dispose()
     providerOAuthCallbacks?.dispose()
     cancelBackendRestart()
+    // Notes flushes its unsaved text before it closes. Ask now, while the
+    // backend shuts down, so the window closes itself ahead of the final
+    // quit instead of prevent-defaulting that quit away. The final quit also
+    // waits for that close: a backend that stops at once would otherwise
+    // close Notes before its save is acknowledged.
+    const notesFlushed = flushNotesWindowBeforeQuit()
     handleBackendBeforeQuit(event, backendQuitState, {
       stopBackend,
-      quit: () => app.quit(),
+      quit: () => {
+        void notesFlushed.then(() => app.quit())
+      },
       onFailure: (error) => {
         logBackend(
           'error',

@@ -265,6 +265,9 @@ export function mapObsSetup(
   if (screenPick) {
     const { source, extras } = screenPick
     if (source.kind === 'display') {
+      // OBS's PipeWire screen capture is one source for a monitor or a window,
+      // and its settings keep only a portal token, so which one is unknown.
+      const monitorOrWindow = source.obsKind === 'pipewire-screen-capture-source'
       const firstScreen = devices.find(
         (device) => device.kind === 'screen' && device.status === 'available'
       )
@@ -274,13 +277,17 @@ export function mapObsSetup(
         report.push({
           verdict: 'approximated',
           subject: source.name,
-          note: `Captures ${firstScreen.name}. OBS displays can't be matched exactly, so check it in Sources.`
+          note: monitorOrWindow
+            ? `This OBS source can capture a monitor or a window, so it starts on ${firstScreen.name}. Check it in Sources.`
+            : `Captures ${firstScreen.name}. OBS displays can't be matched exactly, so check it in Sources.`
         })
       } else {
         report.push({
           verdict: 'approximated',
           subject: source.name,
-          note: 'Pick the display in Sources once Screen Recording is allowed.'
+          note: monitorOrWindow
+            ? 'This OBS source can capture a monitor or a window. Pick one in Sources.'
+            : 'Pick the display in Sources once Screen Recording is allowed.'
         })
       }
     } else {

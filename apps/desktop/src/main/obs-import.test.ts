@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   discoverObs,
+  obsRootPath,
   parseIni,
   parseObsFps,
   parseSceneCollection,
@@ -50,6 +51,46 @@ describe('scene collection parsing', () => {
     expect(kinds.has('display') || kinds.has('application') || kinds.has('window')).toBe(true)
     // scene/group pseudo-sources never leak into the source list
     expect(parsed.sources.some((source) => source.obsKind === 'scene')).toBe(false)
+  })
+
+  it('classifies the Windows and Linux source ids too', () => {
+    const parsed = parseSceneCollection(
+      JSON.stringify({
+        name: 'Windows',
+        current_program_scene: 'Main',
+        sources: [
+          { id: 'monitor_capture', name: 'Display', settings: { monitor_id: 'x' } },
+          { id: 'game_capture', name: 'Game', settings: { window: 'Doom:Class:doom.exe' } },
+          {
+            id: 'dshow_input',
+            name: 'Webcam',
+            settings: { video_device_id: 'HP HD Camera:\\\\?\\usb#vid_04f2&pid_b6c2' }
+          },
+          { id: 'wasapi_input_capture', name: 'Mic', settings: { device_id: 'default' } },
+          { id: 'pipewire-screen-capture-source', name: 'Portal', settings: {} },
+          { id: 'pipewire-desktop-capture-source', name: 'Old portal', settings: {} },
+          { id: 'pipewire-window-capture-source', name: 'Portal window', settings: {} },
+          { id: 'v4l2_input', name: 'USB cam', settings: { device_id: '/dev/video0' } },
+          { id: 'scene', name: 'Main', settings: { items: [] } }
+        ]
+      })
+    )
+    expect(parsed.sources.map((source) => [source.name, source.kind])).toEqual([
+      ['Display', 'display'],
+      ['Game', 'window'],
+      ['Webcam', 'camera'],
+      ['Mic', 'microphone'],
+      ['Portal', 'display'],
+      ['Old portal', 'display'],
+      ['Portal window', 'window'],
+      ['USB cam', 'camera']
+    ])
+    expect(parsed.sources.find((source) => source.name === 'Webcam')?.deviceName).toBe(
+      'HP HD Camera'
+    )
+    expect(parsed.sources.find((source) => source.name === 'Game')?.applicationHint).toBe(
+      'Doom:Class:doom.exe'
+    )
   })
 
   it('keeps camera device names for matching', () => {
@@ -104,6 +145,22 @@ describe('filesystem discovery + full read', () => {
       currentCollection: 'Fixture Collection',
       currentProfile: 'Fixture Profile'
     })
+  })
+
+  it('looks for OBS where each platform installs it', () => {
+    expect(
+      obsRootPath('win32', { APPDATA: 'C:\\Users\\pat\\AppData\\Roaming' }, 'C:\\Users\\pat')
+    ).toBe(join('C:\\Users\\pat\\AppData\\Roaming', 'obs-studio'))
+    expect(obsRootPath('win32', {}, 'C:\\Users\\pat')).toBe(
+      join('C:\\Users\\pat', 'AppData', 'Roaming', 'obs-studio')
+    )
+    expect(obsRootPath('linux', {}, '/home/pat')).toBe(join('/home/pat', '.config', 'obs-studio'))
+    expect(obsRootPath('darwin', {}, '/Users/pat')).toBe(
+      join('/Users/pat', 'Library', 'Application Support', 'obs-studio')
+    )
+    expect(obsRootPath('win32', { VIDEORC_OBS_ROOT: '/fixtures/obs' }, 'C:\\Users\\pat')).toBe(
+      '/fixtures/obs'
+    )
   })
 
   it('reports unavailable for a machine without OBS', () => {

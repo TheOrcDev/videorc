@@ -101,17 +101,20 @@ export function formatBytes(bytes?: number | null): string {
     return `${Math.round(bytes)} B`
   }
   const units = ['KB', 'MB', 'GB', 'TB']
+  const shown = (value: number): number =>
+    value >= 100 ? Math.round(value) : Math.round(value * 10) / 10
   let value = bytes
   let unit = 'B'
   for (const candidate of units) {
     value /= 1024
     unit = candidate
-    if (value < 1024) {
+    // Pick the unit by the value as it will be shown: 1023.9 KB rounds to
+    // 1024, which belongs in the next unit as 1 MB, never "1024 KB".
+    if (shown(value) < 1024) {
       break
     }
   }
-  const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10
-  return `${rounded} ${unit}`
+  return `${shown(value)} ${unit}`
 }
 
 /**

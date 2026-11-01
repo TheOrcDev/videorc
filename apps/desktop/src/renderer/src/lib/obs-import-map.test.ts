@@ -166,6 +166,30 @@ describe('mapping table rows', () => {
     expect(result.layout.cameraTransform!.width).toBeCloseTo(0.25, 2)
   })
 
+  it('a PipeWire screen capture never claims to capture a known display', () => {
+    const portal = {
+      name: 'Portal',
+      kind: 'display' as const,
+      obsKind: 'pipewire-screen-capture-source'
+    }
+    const setup = setupFrom({
+      sources: [portal],
+      scenes: [{ name: 'Main', current: true, items: [item('Portal')] }]
+    })
+    const row = mapObsSetup(setup, DEVICES).report.find((entry) => entry.subject === 'Portal')
+    expect(row?.verdict).toBe('approximated')
+    expect(row?.note).toMatch(
+      /^This OBS source can capture a monitor or a window, so it starts on /
+    )
+    const noScreen = mapObsSetup(
+      setup,
+      DEVICES.filter((device) => device.kind !== 'screen')
+    ).report.find((entry) => entry.subject === 'Portal')
+    expect(noScreen?.note).toBe(
+      'This OBS source can capture a monitor or a window. Pick one in Sources.'
+    )
+  })
+
   it('portrait-cropped camera → portrait aspect', () => {
     const result = mapObsSetup(
       setupFrom({
