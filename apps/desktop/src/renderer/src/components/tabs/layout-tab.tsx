@@ -31,6 +31,7 @@ import {
 import { HideScreenSection } from '@/components/scene/hide-screen-section'
 import { SceneList } from '@/components/scene/scene-list'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
+import { ScreenSizeField } from '@/components/scene/screen-size-field'
 import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
 import { SourceCropFields, SourceTransformFields } from '@/components/scene/source-transform-fields'
@@ -955,7 +956,11 @@ export function LayoutTab(): ReactElement {
             // the disabled-arrow grid read as a broken app).
             <PanelSection
               className="min-w-0"
-              description="Fills the whole canvas in this layout. Use Freeform to move, resize or crop it."
+              description={
+                scene?.background
+                  ? 'Fills the canvas inside the background in this layout. Use Freeform to move, resize or crop it.'
+                  : 'Fills the whole canvas in this layout. Use Freeform to move, resize or crop it.'
+              }
               icon={AdjustIcon}
               title={selectedSource.name}
             >
@@ -965,6 +970,13 @@ export function LayoutTab(): ReactElement {
                 source={selectedSource}
                 onVisibilityChange={setSceneSourceVisible}
               />
+              {/* Plan 213 G4: the background's Visibility, where the screen is. */}
+              {scene?.background ? (
+                <ScreenSizeField
+                  background={scene.background}
+                  disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : null}
+                />
+              ) : null}
             </PanelSection>
           ) : (
             <>
@@ -975,6 +987,12 @@ export function LayoutTab(): ReactElement {
                   source={selectedSource}
                   onVisibilityChange={setSceneSourceVisible}
                 />
+                {scene?.background ? (
+                  <ScreenSizeField
+                    background={scene.background}
+                    disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : null}
+                  />
+                ) : null}
               </PanelSection>
               <PanelSection
                 action={
