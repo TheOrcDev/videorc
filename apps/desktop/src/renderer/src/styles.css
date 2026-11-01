@@ -188,7 +188,7 @@
   /* Chrome controls (plan 208 S4, D2): the light column is the crisp invert,
      black chrome on porcelain. A primary fill is polished graphite with white
      ink, a selected plate is a faint dark sheen under a white top line, a
-     knob is a pearl bead, and Record is the same red LED as dark. */
+     knob is a pearl bead, and Record is the same metallic red as dark. */
   --chrome-fill-stops:
     oklch(0.45 0 0) 0%, oklch(0.27 0 0) 40%, oklch(0.13 0 0) 54%, oklch(0.23 0 0) 82%,
     oklch(0.4 0 0) 100%;
@@ -207,14 +207,25 @@
   --chrome-bead-drop: oklch(0 0 0 / 35%);
   --chrome-bead-ink-stops: oklch(1 0 0), oklch(0.95 0 0) 55%, oklch(0.8 0 0);
   --chrome-bead-ink-drop: oklch(0 0 0 / 50%);
-  --chrome-led-stops: oklch(0.64 0.22 27) 0%, oklch(0.52 0.24 27) 55%, oklch(0.46 0.22 27) 100%;
-  --chrome-led-flat: oklch(0.52 0.24 27);
-  --chrome-led-hi: oklch(1 0 0 / 38%);
+  /* Record: metallic red, polished the way the fill is: a bright band, a
+     dark horizon just below the middle and the light coming back at the
+     foot. A deeper red at idle, the brand red while a session runs. Every
+     stop keeps the white label at 4.5:1 or more, so the shine is in the
+     bands, never a brighter face (chrome-led.test.ts). */
+  --chrome-led-off-stops:
+    oklch(0.55 0.2 25) 0%, oklch(0.46 0.19 25) 40%, oklch(0.31 0.13 25) 53%,
+    oklch(0.39 0.16 25) 80%, oklch(0.5 0.19 25) 100%;
+  --chrome-led-off-flat: oklch(0.42 0.17 25);
+  --chrome-led-stops:
+    oklch(0.58 0.23 27) 0%, oklch(0.52 0.23 27) 40%, oklch(0.36 0.17 27) 53%,
+    oklch(0.45 0.21 27) 80%, oklch(0.56 0.22 27) 100%;
+  --chrome-led-flat: oklch(0.5 0.22 27);
+  --chrome-led-hi: oklch(1 0 0 / 45%);
   --chrome-led-lo: oklch(0 0 0 / 25%);
   --chrome-led-drop: oklch(0 0 0 / 30%);
   --chrome-led-lift: oklch(1 0 0 / 10%);
-  --chrome-led-glow: color-mix(in oklch, var(--live) 30%, transparent);
-  /* The edge a fill or LED gains under Increase Contrast (D12). */
+  --chrome-led-glow: color-mix(in oklch, var(--live) 45%, transparent);
+  /* The edge a fill or Record gains under Increase Contrast (D12). */
   --chrome-edge: transparent;
   /* The chromatic ring (Button's `chromatic`): a porcelain face in a ring of
      liquid chrome. Three bands of metal, each a trough, a slope and a hot
@@ -363,7 +374,7 @@
      Welcome screen's Liquid Chrome in the hand. A primary fill is a bright
      band over a darker waist with dark ink, a selected plate is a white sheen
      under a top line, a knob is a silver bead (black on a silver track), and
-     Record is a red LED that glows while a session runs. */
+     Record is metallic red that glows while a session runs. */
   --chrome-fill-stops:
     oklch(1 0 0) 0%, oklch(0.93 0 0) 40%, oklch(0.75 0 0) 52%, oklch(0.88 0 0) 78%,
     oklch(0.97 0 0) 100%;
@@ -382,13 +393,21 @@
   --chrome-bead-drop: oklch(0 0 0 / 70%);
   --chrome-bead-ink-stops: oklch(0.5 0 0), oklch(0.22 0 0) 55%, oklch(0.1 0 0);
   --chrome-bead-ink-drop: oklch(0 0 0 / 50%);
-  --chrome-led-stops: oklch(0.7 0.21 27) 0%, oklch(0.56 0.23 27) 55%, oklch(0.5 0.21 27) 100%;
-  --chrome-led-flat: oklch(0.56 0.23 27);
-  --chrome-led-hi: oklch(1 0 0 / 38%);
+  /* Record: the same metallic red as light, the brand red once a session
+     runs, with a stronger glow on the black solid. */
+  --chrome-led-off-stops:
+    oklch(0.55 0.2 25) 0%, oklch(0.46 0.19 25) 40%, oklch(0.31 0.13 25) 53%,
+    oklch(0.39 0.16 25) 80%, oklch(0.5 0.19 25) 100%;
+  --chrome-led-off-flat: oklch(0.42 0.17 25);
+  --chrome-led-stops:
+    oklch(0.58 0.23 27) 0%, oklch(0.52 0.23 27) 40%, oklch(0.36 0.17 27) 53%,
+    oklch(0.45 0.21 27) 80%, oklch(0.56 0.22 27) 100%;
+  --chrome-led-flat: oklch(0.5 0.22 27);
+  --chrome-led-hi: oklch(1 0 0 / 45%);
   --chrome-led-lo: oklch(0 0 0 / 30%);
   --chrome-led-drop: oklch(0 0 0 / 50%);
   --chrome-led-lift: oklch(1 0 0 / 10%);
-  --chrome-led-glow: color-mix(in oklch, var(--live) 40%, transparent);
+  --chrome-led-glow: color-mix(in oklch, var(--live) 60%, transparent);
   --chrome-edge: transparent;
   /* The chromatic ring: a black face, the solid's, in a ring of liquid
      chrome, the same three bands of metal at full brightness. */
@@ -754,11 +773,12 @@
  *                 sidebar's page, a MediaCard in use). Hover stays bg-accent.
  *   chrome-bead   knobs and thumbs; chrome-bead-ink is the inverse bead for a
  *                 knob on a chrome track.
- *   chrome-led    Record and the stop button: a red LED, glowing with
+ *   chrome-led    Record and the stop button: metallic red, lit with
  *                 data-lit while a recording or livestream runs (D8).
  * Each writes its light and shade into --tw-shadow and repeats Tailwind's
  * shadow stack, so a focus or hover ring (ring-*) still composes with it.
- * Fast and flat: no transition, no motion, no backdrop-filter.
+ * Fast and flat: no transition, no motion, no backdrop-filter. The one
+ * exception is lit Record's glow, which breathes on opacity alone.
  */
 @utility chrome-fill {
   color: var(--chrome-fill-ink);
@@ -809,30 +829,78 @@
     var(--tw-ring-shadow), var(--tw-shadow);
 }
 
+/* Record (Button's `record`): metallic red, polished the way chrome-fill
+   is and cut to its edge, with no border or ring. A deeper red at idle;
+   `data-lit` turns it the brand red and adds a glow that breathes while
+   the session runs, like a camera's tally light. Hover lifts it and pressed
+   turns it concave. A busy button (Base UI's `focusableWhenDisabled`, so
+   `aria-disabled`) stays lit and takes no hover; its glow is off. Disabled
+   is flat. The glow is a ::after layer and breathes on opacity alone, so a
+   session that runs for hours never repaints the button; reduced motion
+   holds it steady. */
 @utility chrome-led {
+  position: relative;
   color: var(--live-foreground);
-  background-color: var(--chrome-led-flat);
-  background-image: linear-gradient(to bottom, var(--chrome-led-stops));
+  --chrome-led-metal: var(--chrome-led-off-stops);
+  background-color: var(--chrome-led-off-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-led-metal));
   background-origin: border-box;
   --tw-shadow: var(--chrome-led-shadow);
   box-shadow:
     var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
     var(--tw-ring-shadow), var(--tw-shadow);
-  &[data-lit] {
-    --tw-shadow: var(--chrome-led-shadow), 0 0 12px var(--chrome-led-glow);
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: 0 0 12px 1px var(--chrome-led-glow);
+    opacity: 0;
+    transition: opacity 150ms ease-out;
   }
-  &:is(button, a):hover:not(:disabled) {
+  &[data-lit] {
+    --chrome-led-metal: var(--chrome-led-stops);
+    background-color: var(--chrome-led-flat);
+  }
+  &[data-lit]:not(:disabled, [aria-disabled='true'])::after {
+    opacity: 0.85;
+    animation: chrome-led-breathe 2.4s ease-in-out infinite;
+  }
+  &:is(button, a):hover:not(:disabled, [aria-disabled='true']) {
     background-image:
       linear-gradient(var(--chrome-led-lift), var(--chrome-led-lift)),
-      linear-gradient(to bottom, var(--chrome-led-stops));
+      linear-gradient(to bottom, var(--chrome-led-metal));
   }
-  &:is(button, a):active:not(:disabled) {
-    background-image: linear-gradient(to top, var(--chrome-led-stops));
+  &:is(button, a):not([data-lit]):hover:not(:disabled, [aria-disabled='true'])::after {
+    opacity: 0.35;
+  }
+  &:is(button, a):active:not(:disabled, [aria-disabled='true']) {
+    background-image: linear-gradient(to top, var(--chrome-led-metal));
     --tw-shadow: var(--chrome-pressed-shadow);
+  }
+  &[data-lit]:is(button, a):active:not(:disabled, [aria-disabled='true'])::after {
+    opacity: 0.5;
+    animation: none;
   }
   &:disabled {
     background-image: none;
     --tw-shadow: 0 0 0 1px var(--chrome-edge);
+    &::after {
+      content: none;
+    }
+  }
+}
+
+/* The tally light's breath: the glow alone, on opacity alone. Under reduced
+   motion the loop collapses and the glow rests at its steady 85%. */
+@keyframes chrome-led-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
   }
 }
 

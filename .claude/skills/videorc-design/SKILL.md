@@ -117,7 +117,11 @@ for the owner, not a design choice.
     around, white liquid with black reflections and black-chrome controls.
     No separate light look.
   - **Nothing moves outside the Welcome screen** (D5; the owner tried a
-    drifting ground on 2026-10-28 and took it back on 2026-10-29).
+    drifting ground on 2026-10-28 and took it back on 2026-10-29). One
+    exception, the owner's call on 2026-11-01 (plan 005 in videorc-ui): lit
+    Record's glow breathes while a session runs, like a camera's tally
+    light, on opacity alone, and reduced motion holds it steady. The metal
+    itself never moves.
   - **Stream Manager's highlights and members are chrome** (2026-10-28,
     plan 0011). The owner asked for the highlights and every member's entry
     to look much stronger, in the Welcome screen's Liquid Chrome.
@@ -131,11 +135,15 @@ for the owner, not a design choice.
       pull-up, then member. A member's Super Chat still reads as paid.
     - Static plates on the theme's solid: no motion, no blur. Screens take the class from
       `components/ui/chrome-row.ts`.
-  - **Record and Stop are a red LED** (D8): the `record` Button, unlit at
-    idle and lit while a recording or livestream runs. Go Live… is the
-    chrome primary. Delete, Remove and every other destructive action keep
-    the quiet `destructive` tint, so a lit LED only ever means record or
-    live.
+  - **Record and Stop are one metallic red button** (D8; redrawn on
+    2026-11-01, plan 005 in videorc-ui): `RecordButton` on the `record`
+    Button, red metal polished like the chrome fill, with no outline. A
+    deeper red at idle; the brand red from the click until the session
+    ends, with its glow breathing while it runs. Starting and stopping stay
+    lit and focusable and take no click; they never dim. It keeps one width
+    through every state's words. Go Live… is the chrome primary. Delete,
+    Remove and every other destructive action keep the quiet `destructive`
+    tint, so lit red only ever means record or live.
 - **First-run setup paints Liquid Chrome** (2026-10-27, plans 203, 207 and 208).
   The Welcome screen is the only place outside a scene where a live
   background runs, and the only place the chrome moves: Liquid Chrome,
@@ -332,7 +340,7 @@ Hairlines and selection
 
 Colour
 
-- `--live` / `--destructive`: the logo's LED red. Record (the LED), on air,
+- `--live` / `--destructive`: the logo's LED red. Record, on air,
   failed, destructive. Never decoration.
 - `--success`: healthy or connected. `--warning`: needs attention.
   `--info`: rare.
@@ -728,21 +736,26 @@ the controls you touch shine, and nothing else does. Four utilities are
 defined once in `styles.css`, each with a dark and a light token column.
 Light is the crisp invert: black chrome on porcelain. Each writes its light
 and shade into Tailwind's shadow stack, so focus and hover rings still draw.
-No transition on the material, no motion, no `backdrop-filter`.
+No transition on the material, no motion, no `backdrop-filter`. The one
+exception is lit Record's glow, which breathes on opacity alone (D5).
 
-| Utility           | For                        | Dark                                   | Light                                      |
-| ----------------- | -------------------------- | -------------------------------------- | ------------------------------------------ |
-| `chrome-fill`     | Primary fills              | Silver over a 0.75 waist, ink 0.13     | Graphite over a 0.13 waist, ink 0.985      |
-| `chrome-plate`    | Selected and active        | White 14% → 4% under a white 16% line  | Black 9% → 3% under a white 90% line       |
-| `chrome-bead`     | Knobs and thumbs           | A silver bead, black 70% drop          | A pearl bead, black 35% drop, 20% hairline |
-| `chrome-bead-ink` | A knob on a chrome track   | A black bead                           | A pearl bead                               |
-| `chrome-led`      | Record and its stop button | Red 0.70 → 0.50 (hue 27), lit glow 40% | Red 0.64 → 0.46, lit glow 30%              |
+| Utility           | For                        | Dark                                  | Light                                      |
+| ----------------- | -------------------------- | ------------------------------------- | ------------------------------------------ |
+| `chrome-fill`     | Primary fills              | Silver over a 0.75 waist, ink 0.13    | Graphite over a 0.13 waist, ink 0.985      |
+| `chrome-plate`    | Selected and active        | White 14% → 4% under a white 16% line | Black 9% → 3% under a white 90% line       |
+| `chrome-bead`     | Knobs and thumbs           | A silver bead, black 70% drop         | A pearl bead, black 35% drop, 20% hairline |
+| `chrome-bead-ink` | A knob on a chrome track   | A black bead                          | A pearl bead                               |
+| `chrome-led`      | Record and its stop button | Metallic red, 0.58 top, lit glow 60%  | The same metallic red, lit glow 45%        |
 
-A fill and the LED carry a top line, a bottom line and a small drop, and
-`data-lit` adds a 12 px `--live` glow to the LED. The exact stops are the
+A fill and Record carry a top line, a bottom line and a small drop. Record's
+metal takes the fill's five bands: a bright band, a dark horizon just below
+the middle and the light coming back at the foot, a deeper red at idle and
+the brand red once `data-lit`. No stop goes above 0.58 lightness, so the
+white label keeps 4.5:1 (`chrome-led.test.ts`). `data-lit` also adds a 12 px
+`--live` glow on a `::after` layer, which breathes. The exact stops are the
 `--chrome-*` tokens in `styles.css`.
 
-- **States.** A fill or LED lifts a little on hover and turns concave when
+- **States.** A fill or Record lifts a little on hover and turns concave when
   pressed (the gradient flips and the drop goes). Disabled is the flat
   colour at the Button's 50%, so a disabled Go Live… is a flat chrome slab.
   Hover on a plated row or segment stays the flat `bg-accent`: the plate
@@ -756,8 +769,8 @@ A fill and the LED carry a top line, a bottom line and a small drop, and
   - `chrome-plate`: the active `SegmentedControl` segment, `Tabs` trigger,
     pressed `Toggle` and `ToggleGroup` item, the sidebar's current page
     row and `MediaCard` `selected`;
-  - `chrome-led`: `Button` `record` only, which the Studio's Record (unlit)
-    and stop button (`data-lit`) use (D8).
+  - `chrome-led`: `Button` `record` only, through `RecordButton`: the
+    Studio's Record (unlit) and stop button (`data-lit`), one control (D8).
 - **Buttons.** `secondary` is the chip recipe; `outline`, `ghost`, `link`
   and `destructive` stay flat. Delete keeps `destructive`, never `record`.
 - **Everything else stays flat.** Panels, sections, rows, menus, dialogs,
@@ -768,7 +781,7 @@ A fill and the LED carry a top line, a bottom line and a small drop, and
   chrome material outside `components/ui/`, `sidebar.tsx` and
   `media-card.tsx` fails. A screen gets the shine through a primitive's
   variant, never a class.
-- **Increase Contrast** gives a fill and the LED a 1 px edge (white 55% ·
+- **Increase Contrast** gives a fill and Record a 1 px edge (white 55% ·
   black 60%) and the plate a stronger rim (30% · 28%).
 
 ## Floating surfaces
@@ -896,8 +909,9 @@ registry is moved onto the utility there.
 
 Fast and subtle: 100–150 ms ease-out. Floating surfaces fade and scale from
 0.98. Rows highlight instantly. Nothing bounces, and chips never move. Only
-the Welcome screen's backdrop moves (owner call). `prefers-reduced-motion`
-collapses motion.
+the Welcome screen's backdrop moves (owner call), and lit Record's glow,
+which breathes on opacity alone while a session runs (D5, 2026-11-01).
+`prefers-reduced-motion` collapses motion.
 
 ## Toast discipline
 
