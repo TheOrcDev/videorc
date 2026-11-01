@@ -2282,3 +2282,49 @@ PCM EOF candidates pass; the earlier 10.219-second encoder-start outlier is
 retained as unresolved. Linux runtime, physical acceptance and publication
 gates remain open. Evidence and hashes are under
 `/home/orcdev/.cache/videorc-linux-beta-evidence/`.
+
+### Preview smoke failure identity, 2026-11-01
+
+Windows installer job `124789364448` on `03a1a479` passes the installer build,
+capture-worker checks, live microphone controls, packaged recording A/V and
+native screen/BMP preview. Preview during recording fails: the first attempt's
+steady p99 is 525 ms against 500 ms. The second direct measurement is within
+budget, but its sampled diagnostics reach p95 452 ms against 350 ms. Recovery
+and installer upload do not run; the recovery upload finds no files. Job:
+<https://github.com/TheOrcDev/videorc/actions/runs/41286687491/job/124789364448>.
+
+The app, native code, preview smoke and workflow inputs are unchanged from the
+prior passing `c335e9ac` job, and both CI merge trees use main `196360f0`. That
+does not establish the cause of the latency. Both failed attempts remain
+evidence; the previous green result does not override them.
+
+The smoke has a confirmed error-handling defect: `assertStatsHealthy` passes
+only `error.message` to the failure policy, replacing `PreviewLatencyGateBreach`
+with a generic `Error`. The existing retry driver checks the original error
+type, so this run exits after attempt two despite four configured attempts.
+The extracted production wrapper reproduces that loss without launching an app.
+
+A shared synchronous failure policy now preserves the original error across
+the statistics wrapper, including its type, stack and cause. Direct-measurement
+and diagnostic latency failures reach the same existing retry policy. Generic
+and combined failures remain fatal; report-only warnings still require explicit
+configuration. The attempt count, latency limits, warmup, artifact analyzers,
+process cleanup and production preview code are unchanged.
+
+All 35 focused failure-policy, preview diagnostics, source and window gate tests
+pass, including six new failure-policy regressions. The actual wrapper
+reproduction preserves the typed error after the fix. The packaged Windows
+smoke cannot run on Ogre; fresh native CI is required to verify the complete
+runner. This correction does not resolve the measured latency or qualify a
+Linux Beta candidate. Classification and wrapper reproduction:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/windows-installer-job-124789364448-classification.json`
+and `preview-failure-policy-wrapper-repro.json` in the same directory.
+
+The initial full Node run passes 3,030 tests and fails one when FFmpeg receives
+`EDQUOT` writing a noise-cleanup fixture on quota-limited `/tmp`. The failure is
+retained. With only `TMPDIR` moved to an isolated disk-backed directory, the
+affected artifact test and all 3,031 Node tests pass with zero skips. Owned
+cleanup completes without supervisor signals or leaked descendants. Full
+formatting, explicit changed-file formatting, syntax and diff checks pass.
+Verification: `preview-failure-policy-fix-classification.json` in the evidence
+directory above.

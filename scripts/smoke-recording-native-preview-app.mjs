@@ -10,6 +10,11 @@ import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import { performanceAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
 import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-source-gates.mjs'
+import {
+  assertPreviewGate,
+  PreviewLatencyGateBreach,
+  reportPreviewGateFailure
+} from './lib/native-preview-failure-policy.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import {
   minimumProofSourceFrameDelta,
@@ -152,19 +157,6 @@ const scenarios = [
       ]
     : [])
 ]
-
-// Source-to-present latency is a tail metric that occasionally spikes on shared
-// CI runners (noisy-neighbor CPU stalls) even though the typical measurement sits
-// well within budget. Tag those breaches so the top-level driver can re-measure on
-// a fresh launch instead of failing on a single unlucky window. A genuine
-// regression still fails, because it breaches on every attempt.
-class PreviewLatencyGateBreach extends Error {
-  constructor(message) {
-    super(message)
-    this.name = 'PreviewLatencyGateBreach'
-    this.retryable = true
-  }
-}
 
 // Number of full launch+measure attempts allowed when the only failure is a
 // source-to-present latency breach. Defaults to 1 (strict, single-shot) so local
@@ -1257,11 +1249,9 @@ function assertRecordingDurationHealthy(scenario, report, expectedDurationMs) {
 }
 
 function assertStatsHealthy(scenario, stats, reports = {}, options = {}) {
-  try {
-    assertStatsHealthyStrict(scenario, stats, reports, options)
-  } catch (error) {
-    failOrWarn(error.message)
-  }
+  assertPreviewGate(() => assertStatsHealthyStrict(scenario, stats, reports, options), {
+    reportOnly
+  })
 }
 
 function assertStatsHealthyStrict(scenario, stats, reports = {}, options = {}) {
@@ -1343,12 +1333,7 @@ function assertStatsHealthyStrict(scenario, stats, reports = {}, options = {}) {
 }
 
 function failOrWarn(problem) {
-  const message = problem instanceof Error ? problem.message : problem
-  if (reportOnly) {
-    console.warn(`[report-only] ${message}`)
-    return
-  }
-  throw problem instanceof Error ? problem : new Error(message)
+  reportPreviewGateFailure(problem, { reportOnly })
 }
 
 function errorMessage(error) {
