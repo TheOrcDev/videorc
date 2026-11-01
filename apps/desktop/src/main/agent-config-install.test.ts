@@ -233,9 +233,12 @@ describe('mergeJsonConfig (plan 209 S22)', () => {
   })
 })
 
+// The host platform: the file paths are real temp paths, so a literal
+// 'darwin' would read a Windows path with posix rules and fail every write
+// on a Windows host. Mode assertions below are guarded by the host too.
+const HOST = process.platform
+
 describe('writeAgentConfig (plan 209 S22)', () => {
-  // These cases use the real filesystem: paths and permission policy must
-  // both belong to the host. Cross-platform path selection is tested above.
   it('keeps the other servers, backs the old file up beside it, and makes both owner-only', async () => {
     const dir = await folder('Claude')
     const file = join(dir, 'claude_desktop_config.json')
@@ -243,14 +246,9 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     await writeFile(file, original)
     await chmod(file, 0o640)
 
-    const write = await writeAgentConfig(
-      target('claude-desktop', file),
-      CONNECTION,
-      process.platform,
-      {
-        now: () => NOW
-      }
-    )
+    const write = await writeAgentConfig(target('claude-desktop', file), CONNECTION, HOST, {
+      now: () => NOW
+    })
 
     expect(write).toEqual({
       outcome: 'added',
@@ -278,7 +276,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
   it('creates a missing file owner-only, with no backup', async () => {
     const dir = await folder('.cursor')
     const file = join(dir, 'mcp.json')
-    const write = await writeAgentConfig(target('cursor', file), CONNECTION, process.platform)
+    const write = await writeAgentConfig(target('cursor', file), CONNECTION, HOST)
     expect(write).toEqual({ outcome: 'added', file, backup: null })
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ mcpServers: { videorc: ENTRY } })
     if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o600)
@@ -287,7 +285,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
 
   it("never creates the app's folder", async () => {
     const file = join(root, 'Code', 'User', 'mcp.json')
-    const write = await writeAgentConfig(target('vs-code', file), CONNECTION, process.platform)
+    const write = await writeAgentConfig(target('vs-code', file), CONNECTION, HOST)
     expect(write).toEqual({ outcome: 'refused', file, reason: 'no-app' })
     await expect(stat(join(root, 'Code'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -297,7 +295,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     const file = join(dir, 'mcp.json')
     const original = '{\n  // my servers\n  "servers": {}\n}\n'
     await writeFile(file, original)
-    const write = await writeAgentConfig(target('vs-code', file), CONNECTION, process.platform)
+    const write = await writeAgentConfig(target('vs-code', file), CONNECTION, HOST)
     expect(write).toEqual({ outcome: 'refused', file, reason: 'not-json' })
     expect(await readFile(file, 'utf8')).toBe(original)
     expect(await readdir(dir)).toEqual(['mcp.json'])
@@ -306,9 +304,9 @@ describe('writeAgentConfig (plan 209 S22)', () => {
   it('writes nothing, and makes no backup, when the entry is already there', async () => {
     const dir = await folder('.cursor')
     const file = join(dir, 'mcp.json')
-    await writeAgentConfig(target('cursor', file), CONNECTION, process.platform, { now: () => NOW })
+    await writeAgentConfig(target('cursor', file), CONNECTION, HOST, { now: () => NOW })
     const first = await readFile(file, 'utf8')
-    const again = await writeAgentConfig(target('cursor', file), CONNECTION, process.platform, {
+    const again = await writeAgentConfig(target('cursor', file), CONNECTION, HOST, {
       now: () => NOW
     })
     expect(again).toEqual({ outcome: 'unchanged', file })
@@ -321,7 +319,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     const file = join(dir, 'mcp.json')
     await writeFile(file, '{}')
     for (const token of ['vrc_agent_one', 'vrc_agent_two']) {
-      await writeAgentConfig(target('cursor', file), { bridgePath: MAC, token }, process.platform, {
+      await writeAgentConfig(target('cursor', file), { bridgePath: MAC, token }, HOST, {
         now: () => NOW
       })
     }
@@ -337,9 +335,9 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     async () => {
       const dir = await folder('.cursor')
       const file = join(dir, 'mcp.json')
-      await writeAgentConfig(target('cursor', file), CONNECTION, process.platform)
+      await writeAgentConfig(target('cursor', file), CONNECTION, HOST)
       await chmod(file, 0o644)
-      const again = await writeAgentConfig(target('cursor', file), CONNECTION, process.platform)
+      const again = await writeAgentConfig(target('cursor', file), CONNECTION, HOST)
       expect(again).toEqual({ outcome: 'unchanged', file })
       expect((await stat(file)).mode & 0o777).toBe(0o600)
     }
@@ -380,7 +378,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
       const write = await writeAgentConfig(
         target('cursor', file),
         { bridgePath: MAC, token: `vrc_agent_${index}` },
-        process.platform,
+        HOST,
         { now: () => new Date(at) }
       )
       expect(write.outcome).toBe('added')
@@ -413,7 +411,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
       const link = join(dir, 'mcp.json')
       await symlink(real, link)
 
-      const write = await writeAgentConfig(target('cursor', link), CONNECTION, process.platform, {
+      const write = await writeAgentConfig(target('cursor', link), CONNECTION, HOST, {
         now: () => NOW
       })
 
@@ -429,21 +427,16 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     const file = join(dir, 'claude_desktop_config.json')
     await writeFile(file, '{"mcpServers": {}}')
     const log = vi.fn()
-    const write = await writeAgentConfig(
-      target('claude-desktop', file),
-      CONNECTION,
-      process.platform,
-      {
-        now: () => NOW,
-        log,
-        fs: {
-          ...nodeAgentConfigFs,
-          rename: async () => {
-            throw Object.assign(new Error('EXDEV: cross-device'), { code: 'EXDEV' })
-          }
+    const write = await writeAgentConfig(target('claude-desktop', file), CONNECTION, HOST, {
+      now: () => NOW,
+      log,
+      fs: {
+        ...nodeAgentConfigFs,
+        rename: async () => {
+          throw Object.assign(new Error('EXDEV: cross-device'), { code: 'EXDEV' })
         }
       }
-    )
+    })
     expect(write).toEqual({ outcome: 'failed', file })
     expect(await readFile(file, 'utf8')).toBe('{"mcpServers": {}}')
     expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([])
@@ -456,7 +449,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     const file = join(dir, 'config.toml')
     const original = 'model = "o4"\n\n[mcp_servers.github]\ncommand = "gh"\n'
     await writeFile(file, original)
-    const write = await writeAgentConfig(target('codex', file), CONNECTION, process.platform, {
+    const write = await writeAgentConfig(target('codex', file), CONNECTION, HOST, {
       now: () => NOW
     })
     expect(write.outcome).toBe('added')
@@ -471,7 +464,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     const file = join(dir, 'config.toml')
     await writeFile(file, '[mcp_servers]\nvideorc = { command = "x" }\n')
     const log = vi.fn()
-    const write = await writeAgentConfig(target('codex', file), CONNECTION, process.platform, {
+    const write = await writeAgentConfig(target('codex', file), CONNECTION, HOST, {
       log
     })
     expect(write).toEqual({ outcome: 'refused', file, reason: 'unsafe-toml' })

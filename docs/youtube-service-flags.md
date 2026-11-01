@@ -36,7 +36,7 @@ document changes nothing.
 | ------------------ | ------------------------------------------------------------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `chatTransport`    | `"list"` \| `"off"` \| `"stream"` (exact lowercase)                      | `list`           | `off` parks the YouTube chat reader as **Waiting** ("YouTube chat is switched off by Videorc for now. Your stream keeps going."). `stream` is read as `list` and logged until S5 (real streamList) ships. Anything else: `list`, logged.            |
 | `minPollMs`        | integer                                                                  | `5000`           | Floor 5,000. The chat reader never polls faster than this; the idle stretch (10 s after six empty pages) never goes below it.                                                                                                                       |
-| `viewerSampleMs`   | integer                                                                  | `120000`          | Floor 30,000. YouTube viewer cadence only; Twitch, Kick and X remain at 60 seconds. Existing clients before Plan 096 may still apply this to the shared loop.                                                                                                                                                                              |
+| `viewerSampleMs`   | integer                                                                  | `120000`         | Clamped to 30,000..=120,000 (the default is also the ceiling). YouTube viewer cadence only; Twitch, Kick and X remain at 60 seconds. Existing clients before Plan 096 may still apply this to the shared loop.                                      |
 | `dailyBudgetUnits` | integer                                                                  | `2500`           | Clamped to 0..=10,000. `0` switches the per-install budget (S6) off. The 80% / 95% / 100% shedding steps follow the limit.                                                                                                                          |
 | `pausedUntil`      | UTC RFC 3339 with seconds and `Z` (fractional allowed; offsets honoured) | none             | In the past: ignored. In the future: every YouTube call pauses until then with the same copy as a quota pause; the expiry probe (one `channels.list`) lifts it. Withdrawing the key lifts a pause this flag set; it never lifts a real quota pause. |
 
@@ -113,7 +113,6 @@ and this doc says so.
 - Breaker and reader behaviour under the flags: `cargo test -p videorc-backend youtube_quota`
   and `cargo test -p videorc-backend youtube_chat`.
 - The outage drill end to end: `pnpm smoke:youtube-quota` (plan 094, S4).
-
 
 Plan 096 candidates use independent bounded provider work: a pending YouTube
 request cannot delay other platforms, and Stop drops all sampler futures.

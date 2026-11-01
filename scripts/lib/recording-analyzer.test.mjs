@@ -89,7 +89,7 @@ describe('interiorSilenceRuns', () => {
     const runs = [
       { start: 0, end: 0.149, duration: 0.149 },
       { start: 1.217, end: 1.2307, duration: 0.0137 },
-      { start: 5.79, end: 6.72, duration: 0.93 }
+      { start: 6.5, end: 6.72, duration: 0.22 }
     ]
     const kept = interiorSilenceRuns(runs, { leadInMs: 500, tailMs: 300, durationSeconds: 6.72 })
     assert.deepEqual(kept, [runs[1]])
@@ -99,6 +99,29 @@ describe('interiorSilenceRuns', () => {
       durationSeconds: null
     })
     assert.deepEqual(noDuration, [runs[1], runs[2]])
+  })
+
+  it('keeps the mid-take part of a run that reaches into a window', () => {
+    // A microphone that is digital zero from the lead-in to the end of the
+    // take is the dead-mic case the gate exists for; it must not vanish just
+    // because the run touches both windows.
+    const wholeTake = [{ start: 0.2, end: 10, duration: 9.8 }]
+    const kept = interiorSilenceRuns(wholeTake, {
+      leadInMs: 500,
+      tailMs: 300,
+      durationSeconds: 10
+    })
+    assert.equal(kept.length, 1)
+    assert.equal(kept[0].start, 0.5)
+    assert.equal(kept[0].end, 9.7)
+    assert.ok(Math.abs(kept[0].duration - 9.2) < 1e-9)
+
+    // A run that pokes 1 ms past the lead-in is shorter than the gate minimum.
+    const sliver = [{ start: 0.1, end: 0.501, duration: 0.401 }]
+    assert.deepEqual(
+      interiorSilenceRuns(sliver, { leadInMs: 500, tailMs: 300, durationSeconds: 10, minMs: 2 }),
+      []
+    )
   })
 })
 
