@@ -2200,6 +2200,7 @@ pub struct ActiveRecording {
     pub pipeline: RecordingPipeline,
     /// Keep only timed silence alive until video-owned FFmpeg exits.
     native_audio_silent_drain: bool,
+    capture_notice: Option<String>,
     pub native_audio: Option<NativeAudioCaptureSession>,
     /// Reduced evidence from this process's final arguments, never an argv or
     /// destination cache. Only the authenticated debug disconnect can read it.
@@ -2372,6 +2373,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         audio_tracks: Vec::new(),
         pipeline: RecordingPipeline::new(false, true, &[]),
         native_audio_silent_drain: false,
+        capture_notice: None,
         native_audio: None,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing: None,
@@ -2981,6 +2983,11 @@ impl ActiveRecording {
     }
 
     pub fn status(&self, state: RecordingState, message: Option<String>) -> RecordingStatus {
+        let message = if matches!(state, RecordingState::Starting | RecordingState::Recording | RecordingState::Streaming) {
+            self.capture_notice.clone().or(message)
+        } else {
+            message
+        };
         RecordingStatus {
             state,
             session_id: Some(self.session_id.clone()),
@@ -5138,8 +5145,9 @@ async fn start_session_with_timeline(
     let duplicate_capture_sources = if use_encoder_bridge {
         Vec::new()
     } else {
-        duplicate_capture_sources_for_capture(&state, &capture).await
+        duplicate_capture_sources_for_capture(&state, &capture, params.sources.camera_id.as_deref()).await
     };
+    let capture_notice = legacy_camera_capture_notice(&duplicate_capture_sources);
     let mut initial_diagnostics = apply_duplicate_capture_sources(
         starting_diagnostics(&session_id, params.output.video.fps, mode),
         duplicate_capture_sources,
@@ -6876,6 +6884,7 @@ async fn start_session_with_timeline(
         mode: mode.to_string(),
         audio_tracks,
         pipeline,
+        capture_notice,
         native_audio_silent_drain: owned_pcm_silent_drain_policy(
             cfg!(target_os = "windows"),
             windows_encoded_bridge_decision.effective,
@@ -14234,20 +14243,29 @@ async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) 
     }
 }
 
+fn legacy_camera_capture_notice(duplicate_sources: &[String]) -> Option<String> {
+    duplicate_sources.iter().any(|source| source.starts_with("camera:")).then(||
+        "This recording opens the camera again while Preview is using it. Another app may not be able to use it.".to_string()
+    )
+}
+
 async fn duplicate_capture_sources_for_capture(
     state: &AppState,
     capture: &CaptureInputs,
+    selected_camera_id: Option<&str>,
 ) -> Vec<String> {
     let camera_status = state.preview_camera.lock().await.status.clone();
     let screen_status = state.preview_screen.lock().await.status.clone();
-    duplicate_capture_sources_for_statuses(
+    let mut sources = duplicate_capture_sources_for_statuses(
         capture,
         camera_status.state,
         camera_status.camera_id.as_deref(),
         screen_status.state,
         screen_status.source_kind,
         screen_status.source_id.as_deref(),
-    )
+    );
+    sources.retain(|source| !source.starts_with("camera:") || camera_status.camera_id.as_deref() == selected_camera_id);
+    sources
 }
 
 fn duplicate_capture_sources_for_statuses(
@@ -32416,6 +32434,7 @@ mod tests {
             audio_tracks: Vec::new(),
             pipeline: RecordingPipeline::new(false, true, &[]),
             native_audio_silent_drain: false,
+        capture_notice: None,
             native_audio: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
@@ -33432,6 +33451,17 @@ mod tests {
         }));
         drop(state);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_camera_double_open_is_visible_in_session_status() {
+        assert!(legacy_camera_capture_notice(&[]).is_none());
+        assert!(legacy_camera_capture_notice(&["screen:test".to_string()]).is_none());
+        let mut active = test_active_recording_stub("double-open");
+        active.capture_notice = legacy_camera_capture_notice(&["camera:test".to_string()]);
+        let status = active.status(RecordingState::Recording, Some("Running record session.".to_string()));
+        assert!(status.message.unwrap().contains("opens the camera again"));
+        assert_eq!(active.status(RecordingState::Failed, Some("Capture failed".to_string())).message.as_deref(), Some("Capture failed"));
     }
 
     #[test]
@@ -41207,6 +41237,7 @@ mod tests {
             audio_tracks: audio_tracks.clone(),
             pipeline: RecordingPipeline::new(true, false, &audio_tracks),
             native_audio_silent_drain: false,
+        capture_notice: None,
             native_audio: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
