@@ -234,6 +234,8 @@ for (const [step, change] of [
   ['finish', { pressedPrimary: 'Open Studio' }],
   ['reload', { setupEver: true }],
   ['existing-install', { setupEver: true }],
+  ['existing-install', { record: null }],
+  ['existing-install', { record: record('done') }],
   ['replay-open', { recordRaw: 'changed' }],
   ['replay-return', { recordRaw: 'changed' }],
   ['replay-return', { settingsGeneral: false }],

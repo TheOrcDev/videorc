@@ -390,6 +390,28 @@ describe('first-run startup ordering', () => {
     expect(store.setItem).not.toHaveBeenCalled()
   })
 
+  it.each(['darwin', 'linux'])(
+    'shows the %s existing workspace before runtime info but persists migration only afterward',
+    (platform) => {
+      const store = storage({ [WHATS_NEW_STORAGE_KEY]: '999.0.0' })
+      const startup = createFirstRunStartup(store)
+      const decision = startup.finalize(null)
+      expect(firstRunShellSurface({ snapshot: startup.snapshot, decision, setupOpen: false })).toBe(
+        'workspace'
+      )
+      expect(store.getItem(STORAGE_KEYS.firstRun)).toBeNull()
+      expect(store.setItem).not.toHaveBeenCalled()
+
+      expect(startup.finalize({ ...runtime, platform })).toBe('hide')
+      expect(parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))).toMatchObject({
+        version: 2,
+        status: 'existing-install'
+      })
+      startup.finalize({ ...runtime, platform })
+      expect(store.setItem).toHaveBeenCalledTimes(1)
+    }
+  )
+
   it.each([STORAGE_KEYS.onboarding, WHATS_NEW_STORAGE_KEY])(
     'a malformed record still migrates the existing install holding %s',
     (key) => {

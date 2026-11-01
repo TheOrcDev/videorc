@@ -4,6 +4,7 @@ export const LINUX_SOURCE_GATES = [
   ['typecheck', 'pnpm', ['typecheck']],
   ['lint', 'pnpm', ['lint']],
   ['format', 'pnpm', ['format:check']],
+  ['ui-registry', 'pnpm', ['ui:check']],
   ['dependency-audit', 'pnpm', ['audit:deps']],
   ['script-tests', 'pnpm', ['test:scripts']],
   ['desktop-tests', 'pnpm', ['--filter', '@videorc/desktop', 'test']],

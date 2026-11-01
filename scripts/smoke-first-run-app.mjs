@@ -906,7 +906,13 @@ try {
   })
 
   await reloadWith({ 'videorc.whatsNewLastSeenVersion': '999.0.0' })
-  await check('existing-install', await state())
+  // An existing install shows the workspace before runtime info arrives.
+  // Finalization then persists its migration record; the sidebar alone is
+  // not that handshake. Still validate the record after the bounded wait.
+  await check(
+    'existing-install',
+    await waitFor('existing-install migration', (s) => s.recordRaw !== null)
+  )
   const resumeRecord = JSON.stringify({
     version: 1,
     status: 'in-progress',

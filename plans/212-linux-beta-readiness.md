@@ -2035,3 +2035,54 @@ change or acceptance waiver is made. The runbook's existing diagnostic
 exclusion does not waive required Windows source gates or provide Beta
 acceptance. Receipt:
 `/tmp/videorc-beta-windows-diagnostics-124708368797-classification.json`.
+
+### Startup fix runtime and migration handshake, 2026-11-01
+
+On pushed source `90b87533`, the maintained first-run smoke passes its original
+initial readiness check and 31 checkpoints, including recording setup,
+completion, reload, and replay. The backdrop starts moving 448 ms after setup
+mount, within the unchanged 3,000 ms limit. No renderer exception is recorded.
+The run then fails the existing-install migration assertion: the workspace is
+visible, but the persisted record is still absent. Production startup
+intentionally shows an existing workspace immediately and waits for runtime
+information before writing that record. Receipt:
+`/tmp/videorc-beta-setup-loading-runtime-classification.json`.
+
+The smoke now waits for the persisted record within its existing 15-second
+observation timeout before applying the unchanged migration assertions. New
+Linux/macOS tests prove the ordering; negative analyzer cases still reject
+missing and wrong-status records. Focused checks pass 121 desktop and 123 Node
+tests. The complete Node suite passes 3,002 tests with zero failures or skips;
+lint and full formatting pass. Production app and native inputs are unchanged
+by this follow-up. Receipt:
+`/tmp/videorc-beta-migration-source-classification.json`.
+
+The corrected app rerun is **blocked before launch**. Host memory admission
+reports 3–8% available memory, with a subsequent read below 400 MiB while
+unrelated compilers run. The owned attempt is cancelled through its recorded
+parent process handle before Electron launches. No runtime assertion executes;
+cleanup leaves no leaked or force-cleaned orphan processes. This cancellation
+is not a migration or startup result. The full rerun remains owed. Receipt:
+`/tmp/videorc-beta-migration-admission-stop.json`.
+
+The earlier 31-check run explicitly skips real OAuth sign-in. Its owned
+cleanup also records an adopted Electron process ending with SIGTRAP. No saved
+core or matching kernel OOM/trap event is available, so the cause remains
+unresolved. Neither partial checks, the OAuth skip, nor completed process
+reaping establish a healthy full first-run or physical acceptance pass.
+
+The updated instructions' `pnpm ui:check` is now included in the Linux source
+gate manifest. Its actual run fails: the published Record-button variant has
+advanced from `chrome-led border-0` to a chrome-bezel recipe while this checkout
+retains its older theme. Registry CLI documentation, dry-run and file diff are
+inspected; no component, theme, dependency or registry manifest is overwritten.
+A matching registry/theme update and a clean drift check remain required.
+
+CI on `90b87533` reproduces the two existing Metal golden failures after 84
+library and 4,328 backend test passes; audit, format, Clippy and compilation
+pass, and the downstream sentinel does not run. Windows diagnostics pass all
+48 controlled-audio cases and 12 independent record-only cases; 36 independent
+streaming cases fail 117–267 ms tails, with six also failing frame count.
+Limits and release exclusions are unchanged. Receipts:
+`/tmp/videorc-beta-rust-124721181458-classification.json` and
+`/tmp/videorc-beta-windows-diagnostics-124721205478-classification.json`.
