@@ -9371,7 +9371,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [refreshMediaAccess])
 
+  // Plan 212: a performance check's sessions never reach `recording`, and the
+  // backend refuses an idle reload while one runs. The hold covers the run
+  // request; the completed event clears both and re-arms the held reload.
+  const performanceCheckRunning = performanceCheck?.running === true
   useEffect(() => {
+    const checkRunning = (): boolean => performanceCheckHoldRef.current || performanceCheckRunning
     if (
       !client ||
       !shouldReloadSceneFromCaptureConfig({
@@ -9379,7 +9384,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sceneEditMode,
         recordingState: recording.state,
         startRequestPending,
-        stopRequestPending
+        stopRequestPending,
+        performanceCheckRunning: checkRunning()
       })
     ) {
       return
@@ -9396,7 +9402,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sceneEditMode,
           recordingState: recordingRef.current.state,
           startRequestPending,
-          stopRequestPending
+          stopRequestPending,
+          performanceCheckRunning: checkRunning()
         })
       ) {
         return
@@ -9408,7 +9415,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneEditMode,
             recordingState: recordingRef.current.state,
             startRequestPending,
-            stopRequestPending
+            stopRequestPending,
+            performanceCheckRunning: checkRunning()
           })
         ) {
           reportError(error)
@@ -9419,6 +9427,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => window.clearTimeout(timer)
   }, [
     client,
+    performanceCheckRunning,
     recording.state,
     reloadSceneFromCaptureConfig,
     reportError,
