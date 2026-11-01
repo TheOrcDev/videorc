@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  windowsD3d11CommandNotApplied,
   windowsD3d11HarnessScreenNotListed,
   windowsD3d11HarnessStateFailures,
   windowsD3d11MediaReady,
   windowsD3d11ProbeScreenId,
+  windowsD3d11SceneScreenOnlyFailures,
   windowsD3d11ScreenOnlyLayoutIntent
 } from './windows-d3d11-preview-sources.mjs'
 
@@ -83,4 +85,54 @@ test('probes start only from a live D3D11 generation without a fallback', () => 
     false
   )
   assert.equal(windowsD3d11MediaReady(null), false)
+})
+
+test('a command the backend never applied is resent; other failures are not', () => {
+  for (const message of [
+    'The command expired while awaiting its reconciliation fence and was not applied.',
+    'The ordered command expired before dispatch and was not applied.'
+  ]) {
+    assert.equal(windowsD3d11CommandNotApplied(new Error(message)), true)
+  }
+  assert.equal(
+    windowsD3d11CommandNotApplied(new Error('Timed out waiting for scene.layout.apply_preview.')),
+    false
+  )
+  assert.equal(
+    windowsD3d11CommandNotApplied(new Error('Backend did not commit ScreenOnly layout intent 1')),
+    false
+  )
+})
+
+test('the committed scene must be the probe screen alone', () => {
+  const screen = { kind: 'screen', deviceId: SCREEN, visible: true }
+  assert.deepEqual(windowsD3d11SceneScreenOnlyFailures({ sources: [screen] }, SCREEN), [])
+  // The renderer's synthetic-source scene that landed after the ScreenOnly commit.
+  assert.deepEqual(
+    windowsD3d11SceneScreenOnlyFailures(
+      {
+        sources: [
+          { kind: 'test-pattern' },
+          { kind: 'camera', deviceId: 'camera:windows-dshow:c920' }
+        ]
+      },
+      SCREEN
+    ),
+    ['unexpected test-pattern source', 'unexpected camera source', '0 screen sources']
+  )
+  assert.deepEqual(
+    windowsD3d11SceneScreenOnlyFailures(
+      { sources: [screen, { kind: 'camera', deviceId: 'camera:windows-dshow:c920' }] },
+      SCREEN
+    ),
+    ['unexpected camera source']
+  )
+  assert.deepEqual(
+    windowsD3d11SceneScreenOnlyFailures(
+      { sources: [{ ...screen, deviceId: 'screen:dxgi:other:0' }] },
+      SCREEN
+    ),
+    ['screen=screen:dxgi:other:0']
+  )
+  assert.deepEqual(windowsD3d11SceneScreenOnlyFailures(null, SCREEN), ['scene has no sources'])
 })

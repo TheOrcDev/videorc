@@ -90,6 +90,81 @@ export function windowsD3d11HarnessScreenNotListed(error) {
   return /could not select available screen/.test(String(error?.message ?? error))
 }
 
+/**
+ * The backend refused the command before dispatch, so it was never applied
+ * and is safe to resend. A slow real-camera start holds the ordered lane past
+ * the queue deadline.
+ */
+export function windowsD3d11CommandNotApplied(error) {
+  return /\bexpired\b.*\bnot applied\b/.test(String(error?.message ?? error))
+}
+
+/**
+ * The committed scene is the probe screen alone. The renderer's own commits
+ * from before the harness configured it can land after ours; a scene that
+ * still holds a camera marks every preview frame source-stalled.
+ */
+export function windowsD3d11SceneScreenOnlyFailures(scene, screenId) {
+  const sources = Array.isArray(scene?.sources) ? scene.sources : null
+  if (!sources) return ['scene has no sources']
+  const failures = sources
+    .filter((source) => source?.kind !== 'screen')
+    .map((source) => `unexpected ${source?.kind ?? 'unknown'} source`)
+  const screens = sources.filter((source) => source?.kind === 'screen')
+  if (screens.length !== 1) failures.push(`${screens.length} screen sources`)
+  else if (screens[0].deviceId !== undefined && screens[0].deviceId !== screenId) {
+    failures.push(`screen=${screens[0].deviceId}`)
+  }
+  return failures
+}
+
+/** One unanswered stats request must not spend the whole setup budget. */
+const MEDIA_STATS_REQUEST_TIMEOUT_MS = 10_000
+
+async function commitScreenOnlyScene(ws, intent, deadline, timeoutMs) {
+  for (;;) {
+    try {
+      const status = await request(ws, timeoutMs, 'scene.layout.apply_preview', intent)
+      if (
+        status?.intentId !== intent.intentId ||
+        status?.compositorStatus?.sceneLayout?.layoutPreset !== 'screen-only'
+      ) {
+        throw new Error(
+          `Backend did not commit ScreenOnly layout intent ${intent.intentId}: ${JSON.stringify(status)}`
+        )
+      }
+      return
+    } catch (error) {
+      if (!windowsD3d11CommandNotApplied(error) || Date.now() >= deadline) throw error
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  }
+}
+
+async function waitForLiveMedia(ws, deadline) {
+  let media = null
+  let lastError = null
+  while (Date.now() < deadline) {
+    try {
+      const stats = await request(
+        ws,
+        Math.max(1, Math.min(MEDIA_STATS_REQUEST_TIMEOUT_MS, deadline - Date.now())),
+        'diagnostics.stats',
+        {}
+      )
+      media = stats?.windowsD3d11Media ?? null
+      lastError = null
+      if (windowsD3d11MediaReady(media)) return media
+    } catch (error) {
+      lastError = error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error(
+    `Windows D3D11 media did not go live: ${JSON.stringify(media)}${lastError ? ` (last stats request: ${lastError.message})` : ''}`
+  )
+}
+
 /** For probes that hold only the app's backend-ready marker. */
 export async function configureWindowsD3d11ProbeSources({
   backendConnection,
@@ -98,6 +173,7 @@ export async function configureWindowsD3d11ProbeSources({
 }) {
   const ws = await connectBackend(backendConnection, timeoutMs)
   try {
+    const deadline = Date.now() + timeoutMs
     const devices = await request(ws, timeoutMs, 'devices.list', {})
     const screenId = windowsD3d11ProbeScreenId(devices?.devices ?? [])
     if (!screenId) {
@@ -112,16 +188,7 @@ export async function configureWindowsD3d11ProbeSources({
       action: 'state'
     })
     const intent = windowsD3d11ScreenOnlyLayoutIntent({ intentId: Date.now(), screenId, video })
-    const status = await request(ws, timeoutMs, 'scene.layout.apply_preview', intent)
-    if (
-      status?.intentId !== intent.intentId ||
-      status?.compositorStatus?.sceneLayout?.layoutPreset !== 'screen-only'
-    ) {
-      throw new Error(
-        `Backend did not commit ScreenOnly layout intent ${intent.intentId}: ${JSON.stringify(status)}`
-      )
-    }
-    const deadline = Date.now() + timeoutMs
+    await commitScreenOnlyScene(ws, intent, deadline, timeoutMs)
     for (;;) {
       try {
         await configureWindowsD3d11RendererSources(smokeCommand, screenId)
@@ -132,17 +199,20 @@ export async function configureWindowsD3d11ProbeSources({
       }
     }
     // Opening Preview before the generation is live leaves the proof surface
-    // polling until the claim, so the probes start from a live generation.
-    let media = null
-    while (Date.now() < deadline) {
-      media = (await request(ws, timeoutMs, 'diagnostics.stats', {}))?.windowsD3d11Media ?? null
-      if (windowsD3d11MediaReady(media)) break
-      await new Promise((resolve) => setTimeout(resolve, 250))
+    // polling until the claim, so the probes start from a live generation
+    // whose committed scene is still ours.
+    for (;;) {
+      await waitForLiveMedia(ws, deadline)
+      const failures = windowsD3d11SceneScreenOnlyFailures(
+        await request(ws, timeoutMs, 'scene.get', {}),
+        screenId
+      )
+      if (failures.length === 0) return screenId
+      if (Date.now() >= deadline) {
+        throw new Error(`Committed scene is not the probe screen alone: ${failures.join(', ')}`)
+      }
+      await commitScreenOnlyScene(ws, { ...intent, intentId: Date.now() }, deadline, timeoutMs)
     }
-    if (!windowsD3d11MediaReady(media)) {
-      throw new Error(`Windows D3D11 media did not go live: ${JSON.stringify(media)}`)
-    }
-    return screenId
   } finally {
     ws.close()
   }
