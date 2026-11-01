@@ -4808,6 +4808,7 @@ pub async fn compositor_status(state: &AppState) -> CompositorStatus {
 
 /// Plan 210 S3: record how the last screen or window switch changed the
 /// capture (in place, or a restart and why), for `compositor.status`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS swaps or restarts a screen in place
 pub(crate) async fn note_screen_switch(
     state: &AppState,
     switch: crate::protocol::ScreenSwitchStatus,
@@ -4999,6 +5000,7 @@ pub(crate) fn yuv420p_to_rgb(width: u32, height: u32, bytes: &[u8]) -> Option<Ve
 }
 
 /// Packed BGRA to packed RGB (alpha dropped).
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);
     for pixel in bgra.chunks_exact(4) {

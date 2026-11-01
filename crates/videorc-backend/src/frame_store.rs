@@ -173,8 +173,6 @@ impl Drop for SurfaceBackingNode {
 
 #[derive(Debug)]
 pub(crate) struct FrameStorage {
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    // read through storage_identity
     identity: u64,
     surface_backing: Option<SurfaceBackingNode>,
 }
@@ -445,7 +443,6 @@ pub struct StoredFrame<P, M = ()> {
 impl<P, M> StoredFrame<P, M> {
     /// Process-monotonic identity of this published storage allocation.
     /// Unlike a source sequence, this never resets when a capture session restarts.
-    #[cfg(any(target_os = "macos", test))]
     pub fn storage_identity(&self) -> u64 {
         self.storage.identity
     }
@@ -724,7 +721,6 @@ impl<P, M> FrameStore<P, M> {
     }
 
     /// Publish a frame that retains source handles for zero-copy GPU import where supported.
-    #[cfg(target_os = "macos")]
     #[allow(clippy::too_many_arguments)]
     pub fn publish_with_source_handles(
         &mut self,
