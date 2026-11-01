@@ -2328,3 +2328,43 @@ cleanup completes without supervisor signals or leaked descendants. Full
 formatting, explicit changed-file formatting, syntax and diff checks pass.
 Verification: `preview-failure-policy-fix-classification.json` in the evidence
 directory above.
+
+### Benchmark cancellation during process shutdown, 2026-11-01
+
+The shutdown latch was absent from the performance check's cancellation
+predicate. Quitting during setup could therefore leave its private encoder
+flushing while shutdown held the session-publication fence. The runner now
+checks shutdown before and after capture-slot admission, before holding the
+Preview, and at every measurement/drain cancellation boundary. A timed-out
+benchmark start uses the same cancellation-aware stop path. Only the existing
+benchmark-only encoder termination path is used; the production recording
+monitor remains responsible for terminal finalization.
+
+Five regressions cover shutdown before admission, shutdown while admission
+waits, preserving the prior verdict and Preview before a ladder starts,
+interrupting measurement, and drain cancellation while shutdown holds the
+publication fence. The drain test owns a directly spawned stdin sink, bounds
+its wait/kill/reap, and exercises the production monitor's permit handoff.
+Their `ffmpeg_` names put them in the existing Windows 25-pass ownership filter;
+the required three full Windows Rust runs still apply.
+
+Verification is **pending CI**. The local test-only baseline compilation was
+stopped after more than ten minutes on battery with all cores near 800 MHz;
+its compiler used about 6.4 GiB and host available memory fell to about 2.4 GiB.
+The owned supervisor reaped the compiler after termination. No regression test
+executed, and no passing baseline, fixed runtime result, or fresh production
+binary is claimed. Matching first-run, recording-studio/Linux equivalents,
+encoder matrices and enforced latency remain required on a powered host.
+
+The completed preceding source head `8679de73` has Linux, JS, Windows source
+and Windows installer passes. Windows source ran all 38 existing ownership
+groups 25 times and three Rust suites (4,233 passed / 20 ignored each), 6,707
+desktop tests (5 skipped), and 2,929 Node tests (99 skipped). The two macOS Metal
+goldens and 36 Windows independent streaming controls remain failed. Those
+results qualify that preceding tree only. Local evidence classifications are
+in `~/.cache/videorc-linux-beta-evidence/ci-8679de73-classification.json` and
+`windows-source-job-124841524543-classification.json`.
+
+No Linux Beta candidate has been accepted or published. Physical Ubuntu and
+Hyprland AppImage acceptance, endurance, the seven-day pilot, updates/rollback,
+and protected publication remain open alongside the feature/runtime ledger.

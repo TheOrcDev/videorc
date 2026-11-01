@@ -32620,6 +32620,109 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn ffmpeg_benchmark_shutdown_cancels_drain_behind_publication_fence() {
+        let state = test_state();
+        let session_id = "benchmark-shutdown-drain";
+        // Keep this directly spawned child's stdin open: it cannot exit until
+        // cancellation kills it. No shell, timing handshake or host encoder.
+        let (mut child, stdin) = spawn_test_stdin_sink().await;
+        let pid = child.id().expect("owned benchmark sink pid");
+        let (stop_sender, stop_receiver) = oneshot::channel();
+        stop_sender
+            .send(())
+            .expect("model an already requested stop");
+        let mut active = test_performance_check_recording_stub(session_id);
+        active.pid = pid;
+        active.stop_requested = true;
+        active._capture_permit = Some(state.ffmpeg_work.begin_capture_when_available().await);
+        let progress = active.ffmpeg_progress.clone();
+        *state.recording.lock().await = Some(active);
+        let monitor_state = state.clone();
+        let mut monitor = tokio::spawn(async move {
+            // Keep a bounded wait/kill/reap owner even if the cancellation
+            // under test regresses. The production monitor then observes the
+            // cached exit and performs its actual finalization/permit handoff.
+            let cleanup_killed = match timeout(Duration::from_secs(6), child.wait()).await {
+                Ok(exit) => {
+                    exit.expect("owned benchmark sink exit");
+                    false
+                }
+                Err(_) => {
+                    child.start_kill().expect("kill owned benchmark sink");
+                    timeout(Duration::from_secs(3), child.wait())
+                        .await
+                        .expect("reap owned benchmark sink")
+                        .expect("owned benchmark sink exit");
+                    true
+                }
+            };
+            monitor_session(
+                monitor_state,
+                child,
+                stop_receiver,
+                session_id.to_string(),
+                SessionMonitorContext {
+                    ffmpeg_live_audio_session: None,
+                    ffmpeg_stderr_monitor: None,
+                    output_path: None,
+                    post_recording_gate: PostRecordingGate {
+                        intended_fps: None,
+                        expect_audio: false,
+                    },
+                },
+            )
+            .await;
+            cleanup_killed
+        });
+
+        let mut shutdown = Box::pin(crate::prepare_capture_finalization_for_process_shutdown(
+            &state,
+        ));
+        let shutdown_pending = futures_util::poll!(&mut shutdown).is_pending();
+        let shutdown_latched = state.process_shutdown_requested();
+        let publication_held = state.session_start_publication_fence.try_lock().is_err();
+        // The benchmark stop task queues behind shutdown's publication fence.
+        // Its cancellation branch must still kill only its private encoder,
+        // allowing the real monitor to retire the capture/finalization owners.
+        let outcome = timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                shutdown.as_mut(),
+                crate::performance_check::stop_rung_yielding_to_capture(&state)
+            )
+        })
+        .await;
+        drop(shutdown);
+
+        // Even a regression must release the directly owned child and join its
+        // production monitor before failing. EOF is the cleanup fallback, not
+        // the successful path: stdin stayed open for the whole assertion.
+        drop(stdin);
+        let joined = timeout(Duration::from_secs(12), &mut monitor).await;
+        if joined.is_err() {
+            monitor.abort();
+            let _ = timeout(Duration::from_secs(1), &mut monitor).await;
+        }
+        let cleanup_killed = joined
+            .expect("benchmark monitor must reap its child")
+            .expect("benchmark monitor task");
+        assert!(shutdown_pending && shutdown_latched && publication_held);
+        assert!(
+            !cleanup_killed,
+            "cancellation must end the child before its cleanup watchdog"
+        );
+        let (shutdown_result, stop_result) = outcome.expect("shutdown must cancel benchmark drain");
+        shutdown_result.expect("shutdown joins terminal finalization");
+        stop_result.expect("benchmark stop joins shutdown");
+        assert!(
+            progress.stop_escalated(),
+            "benchmark drain was explicitly cancelled"
+        );
+        assert!(state.recording.lock().await.is_none());
+        assert!(!state.ffmpeg_work.snapshot().capture_active);
+        assert!(!state.ffmpeg_work.snapshot().finalizing_active);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn shutdown_joins_an_existing_user_stop_without_escalating_to_force() {
         let state = test_state();
         let mut active = test_active_recording_with_stream_targets(StreamTargetsSnapshot {
