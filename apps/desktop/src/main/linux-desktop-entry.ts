@@ -34,6 +34,15 @@ export function linuxAppImageToRegister(
   return appImage
 }
 
+// The CHROME_DESKTOP value for this run, or null off Linux. Electron derives
+// it from the package name ("@videorc/desktop.desktop") and names the Wayland
+// app_id and the notification desktop-entry hint after it, so on Wayland the
+// window matched no desktop entry: docks showed a generic icon and could not
+// pin Videorc. The entry the AppImage bundles and writes is videorc.desktop.
+export function linuxChromeDesktop(platform: NodeJS.Platform): string | null {
+  return platform === 'linux' ? VIDEORC_DESKTOP_FILE_NAME : null
+}
+
 export interface LinuxDesktopEntryPaths {
   desktopFile: string
   applicationsDir: string

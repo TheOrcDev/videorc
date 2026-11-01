@@ -378,6 +378,7 @@ import {
   buildVideorcDesktopEntry,
   decideVideorcDesktopEntry,
   linuxAppImageToRegister,
+  linuxChromeDesktop,
   linuxDesktopEntryPaths,
   VIDEORC_DESKTOP_FILE_NAME,
   VIDEORC_URL_MIME_TYPE
@@ -993,6 +994,11 @@ const notesWindowSmokeMarkerEnabled =
   Boolean(process.env.VIDEORC_SMOKE_OUTPUT_DIR)
 
 app.setName('Videorc')
+// Before any window: the Wayland app_id is read from it at window creation.
+const chromeDesktop = linuxChromeDesktop(process.platform)
+if (chromeDesktop) {
+  process.env.CHROME_DESKTOP = chromeDesktop
+}
 // Dark glass is the default theme; the renderer re-syncs this on toggle.
 nativeTheme.themeSource = 'dark'
 // An OS appearance change (or any themeSource write) resets per-window
