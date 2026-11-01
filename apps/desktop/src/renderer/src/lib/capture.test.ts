@@ -2151,9 +2151,9 @@ describe('freeform arrangement (plan phase 4)', () => {
 
   it('reads the landscape screen framing, Fit unless Fill was chosen (plan 213 G3)', () => {
     expect(normalizeLayoutSettings({}).horizontalScreenFraming).toBe('fit')
-    expect(normalizeLayoutSettings({ horizontalScreenFraming: 'fill' }).horizontalScreenFraming).toBe(
-      'fill'
-    )
+    expect(
+      normalizeLayoutSettings({ horizontalScreenFraming: 'fill' }).horizontalScreenFraming
+    ).toBe('fill')
     expect(
       normalizeLayoutSettings({ horizontalScreenFraming: 'stretch' } as unknown as Partial<
         CaptureConfig['layout']
