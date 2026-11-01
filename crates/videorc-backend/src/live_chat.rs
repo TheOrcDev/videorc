@@ -624,12 +624,14 @@ pub fn chat_capability(
             capability
         }
         StreamPlatform::X => {
-            let x_live_ready = account.is_some_and(|account| {
+            let signed_in = account.is_some_and(|account| {
                 account.status == crate::streaming::PlatformAccountStatus::Connected
-            }) && crate::x_live::x_livestream_credentials()
-                .ok()
-                .flatten()
-                .is_some();
+            });
+            let x_live_ready = signed_in
+                && crate::x_live::x_livestream_credentials()
+                    .ok()
+                    .flatten()
+                    .is_some();
             ChatCapability {
                 platform,
                 state: if x_live_ready {
@@ -662,7 +664,12 @@ pub fn chat_capability(
                 required_scope: None,
                 account_id: account.map(|account| account.account_id.clone()),
                 account_label: account.map(|account| account.account_label.clone()),
-                message: crate::x_chat::x_chat_message(x_live_ready).to_string(),
+                // Authorize X Live is named only once Sign in is done (plan 213 J3).
+                message: if signed_in && !x_live_ready {
+                    X_AUTHORIZE_LIVE_FOR_CHAT.to_string()
+                } else {
+                    crate::x_chat::x_chat_message(x_live_ready).to_string()
+                },
             }
         }
         // Kick chat is read through the videorc-web relay (webhooks need a
@@ -825,6 +832,13 @@ fn scope_capability(
 /// Facebook's row in a session that streams to it with a key.
 pub const FACEBOOK_COMMENTS_UNAVAILABLE: &str =
     "Facebook comments need Facebook sign-in, which isn't available yet.";
+
+/// X with no account: Sign in comes first, and Authorize X Live is named only
+/// once it is done (plan 213 J3).
+pub const X_SIGN_IN_FOR_CHAT: &str = "Sign in to X to read and send chat.";
+
+/// Signed in to X, without the X Live credentials that read and send chat.
+pub const X_AUTHORIZE_LIVE_FOR_CHAT: &str = "Authorize X Live to read and send chat.";
 
 /// An X destination that streams with a key (plan 213 J1): X chat rides the
 /// native broadcast that only Sign in creates, so the key streams and chat
@@ -7116,6 +7130,8 @@ mod tests {
         let x = chat_capability(StreamPlatform::X, None);
         assert_eq!(x.state, ChatCapabilityState::NotConnected);
         assert_eq!(x.write, CommentsWriteState::ReadOnly);
+        // Plan 213 J3: signed out, Sign in comes first, never Authorize X Live.
+        assert_eq!(x.message, "Sign in to X to read and send chat.");
         assert_eq!(
             chat_capability(StreamPlatform::Custom, None).state,
             ChatCapabilityState::Unsupported
