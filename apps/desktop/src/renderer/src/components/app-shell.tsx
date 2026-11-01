@@ -219,9 +219,6 @@ function AppShellContent(): ReactElement {
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
-  // The page's first open suspends; render it once its chunk is in, before
-  // the shell's steady updates can starve React's retry (retest 152, 0004).
-  useRenderPageWhenLoaded(PAGE_CHUNKS[active])
   // Set by every way to a page except a click on its sidebar row: the page
   // title takes the focus once the page is up (plan 174 A-18).
   const titleFocusPendingRef = useRef(false)
@@ -307,6 +304,9 @@ function AppShellContent(): ReactElement {
     decision: firstRunVisibility,
     setupOpen
   })
+  // Load the visible page, not a workspace hidden behind setup. Once its
+  // chunk is in, render before shell updates can starve React's retry.
+  useRenderPageWhenLoaded(surface === 'workspace' ? PAGE_CHUNKS[active] : null)
   useEffect(() => {
     setFirstRunSetupOpen(setupOpen)
   }, [setFirstRunSetupOpen, setupOpen])
@@ -328,10 +328,11 @@ function AppShellContent(): ReactElement {
     runtimeInfo?.platform
   )
 
-  // Keep first paint Studio-only, then warm the three most common setup pages
-  // from local app assets once Chromium is idle. Navigation stays instant
-  // without putting these modules into the eager entry chunk.
+  // Warm workspace pages only after the workspace is visible. Starting these
+  // imports behind first-run setup competes with its own chunk and can leave
+  // the fresh window blank while unrelated pages load.
   useEffect(() => {
+    if (surface !== 'workspace') return
     const prefetch = (): void => {
       void Promise.allSettled([sourcesPage.preload(), layoutPage.preload(), settingsPage.preload()])
     }
@@ -341,7 +342,7 @@ function AppShellContent(): ReactElement {
     }
     const timer = window.setTimeout(prefetch, 2000)
     return () => window.clearTimeout(timer)
-  }, [])
+  }, [surface])
 
   // The Setup pages are ordinary tabs, listed under "Setup" in the sidebar.
   const openStudioPanel = useCallback(

@@ -1945,3 +1945,93 @@ supervisor reports no interruption or forced child cleanup.
 Receipt: `/tmp/videorc-beta-rpc-dispatch-native-2wqVBG/report.json`. The subsequent OAuth fixture change alters
 no native input or production app code. Its source verification and the app
 runtime gates remain separate prerequisites, not Beta acceptance.
+
+### Fresh runtime classification, 2026-11-01
+
+The checked-in OAuth fixture correction on `b3352a61` passes all 12 Linux
+cases and all 12 Windows-branch simulations. The complete Node suite passes
+3,000 tests with zero failures/skips; full lint and formatting pass. The source
+supervisor exits successfully without forced cleanup. This closes the pending
+source verification above, but does not supply native Windows stability evidence.
+Receipt: `/tmp/videorc-beta-oauth-fixture-source-84BucV/report.json`.
+
+The subsequent isolated development runtime queue completes all eight steps:
+
+| Gate                         | Result and evidence                                                                                                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First-run setup              | FAIL before its first acceptance step: the initial setup UI does not mount within the unchanged 15-second readiness deadline.                                         |
+| Linux preview lifecycle      | PASS, 100 cycles and clean owned teardown.                                                                                                                            |
+| Remote control               | PASS.                                                                                                                                                                 |
+| Agents MCP                   | FAIL after local Go Live confirmation: the combined session's recording encoder FIFO exceeds its complete-frame delivery budget, and confirmed state returns to idle. |
+| OpenH264 1080p30 matrix      | FAIL: exact-repeat-correlated freeze up to 1,133 ms and repeated-frame run 33, against 100 ms and two frames.                                                         |
+| Intel VAAPI 1080p30 matrix   | FAIL: exact-repeat-correlated freeze up to 600 ms and repeated-frame run nine.                                                                                        |
+| OpenH264 enforced latency    | FAIL: the first recording needs forced FFmpeg shutdown after Stop. No complete passing latency sample set.                                                            |
+| Intel VAAPI enforced latency | FAIL: the first-cycle startup artifact repeats nine frames against the two-frame limit.                                                                               |
+
+Both matrix artifacts retain the expected dimensions, 30 fps timestamps,
+BT.709/video-range tags and H.264 level; their stop tails are 21 ms and 4 ms.
+Those passing properties do not override the motion failures. Host receipts
+show AC online with CPU-policy readings still near 800 MHz; the cause remains
+unresolved, and the host observation is not a waiver. Only `renderD128` was
+probed. Every owned supervisor completed without leaked or force-cleaned
+orphans. Queue receipt:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/oauth-fixture-runtime-4qSAtG/report.json`.
+Sanitized classification: `/tmp/videorc-beta-b3352a61-runtime-classification.json`.
+
+A bounded startup trace reproduces the first-run failure and then observes the
+Permissions screen about 15 seconds after the failed deadline. The blank
+window is the shell's setup-loading placeholder, with no renderer exception.
+The trace captures 340 module requests, including background Sources, Layout
+and Settings imports while setup itself is still loading. The renderer remains
+responsive. The trace's extra observation period is diagnostic only and does
+not change the failed gate. Owned cleanup is complete. Receipt:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/first-run-import-trace-5jnn26m4/dispatch.json`.
+
+A focused shell correction defers workspace prefetch and the active-page
+loader until the workspace is visible, cancelling a pending prefetch when
+setup replaces it. The existing page-loading hook otherwise preloads Studio
+even though setup hides the workspace. The initial setup deadline and all
+artifact/performance limits stay unchanged. The exact updated source passes
+typecheck, lint and formatting. Its full desktop suite reaches 460 passing
+file results, including all 142 first-run tests, before the scratch runner's
+20-minute deadline expires (exit 143). No assertion failure is logged, but this
+is an incomplete suite, not a pass; the subsequent production build does not
+run. Owned cleanup completes without leaked or force-cleaned orphans. The
+separate page-loading filter passes all three tests, bringing focused setup
+and page-loading coverage to 145 passing tests. Receipt:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/setup-loading-source-CO6YLT/report.json`.
+Classification: `/tmp/videorc-beta-setup-loading-source-classification.json`.
+
+The matched startup recheck never launches an app: its 15-minute admission
+wait expires while two compiler processes from a different checkout remain
+active. No runtime assertion runs and no startup deadline is extended.
+That checkout and its processes remain untouched. The full desktop suite and
+production build remain required in CI; the maintained first-run app gate
+remains owed when the shared host can admit it. No fresh full runtime or
+candidate acceptance pass is claimed. Admission receipt:
+`/tmp/videorc-beta-prefetch-host-block-classification.json`.
+
+### Current macOS and Windows CI evidence, 2026-11-01
+
+Hosted macOS job `124708363101` on `b3352a61` passes the Rust advisory audit,
+format, Clippy and test compilation. All 84 library tests pass; the backend
+suite completes with 4,328 passed, two failed and 22 ignored. Both reproduced
+stack regressions, all 72 live-chat tests, the benchmark-status reload test
+and the macOS-only Admin/frame-lease/disconnect test pass. The latter supplies
+separate macOS execution evidence; it does not change the earlier Linux
+zero-test classification. The two existing Beams/Ghost Fibers Metal golden
+comparisons still fail. Their shader and reference inputs are unchanged from
+integrated main, and pixel limits remain unchanged. The downstream
+process/memory sentinel does not execute. This is not a complete macOS gate
+or physical-device acceptance pass. Receipt:
+`/tmp/videorc-beta-rust-124708363101-classification.json`.
+
+Windows diagnostic job `124708368797` on the same source passes all 48
+controlled-audio cases. Its independent FFmpeg controls pass 12 record-only
+cases and fail 36 streaming cases: packet A/V tails span 117–267 ms against
+100 ms, and five cases also exceed the 2% frame-count tolerance. These are the
+existing independent-control failure categories. No unchanged rerun, limit
+change or acceptance waiver is made. The runbook's existing diagnostic
+exclusion does not waive required Windows source gates or provide Beta
+acceptance. Receipt:
+`/tmp/videorc-beta-windows-diagnostics-124708368797-classification.json`.
