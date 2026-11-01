@@ -106,6 +106,20 @@ const AUTH_MODE_OPTIONS: SegmentedControlOption<StreamAuthMode>[] = [
   { value: 'manual-rtmp', label: 'Stream key' }
 ]
 
+// X shares chat only with apps you sign in to, so the choice says so where it
+// is made (plan 213 J2): Sign in first, the key without chat.
+const X_AUTH_MODE_OPTIONS: SegmentedControlOption<StreamAuthMode>[] = [
+  { value: 'oauth', label: 'Sign in · Chat works' },
+  { value: 'manual-rtmp', label: 'Stream key · No chat' }
+]
+
+/** How a native destination connects, in the words its choice needs. */
+export function authModeOptions(
+  platform: StreamPlatform
+): SegmentedControlOption<StreamAuthMode>[] {
+  return platform === 'x' ? X_AUTH_MODE_OPTIONS : AUTH_MODE_OPTIONS
+}
+
 const RUNTIME_BADGE_TONES: Record<StreamTargetRuntime['state'], BadgeTone> = {
   live: 'live',
   connecting: 'warning',
@@ -449,7 +463,7 @@ export function DestinationCard({
                 <SegmentedControl
                   className="w-full"
                   disabled={disabled}
-                  options={AUTH_MODE_OPTIONS}
+                  options={authModeOptions(target.platform)}
                   value={target.authMode}
                   onValueChange={(authMode) => onPatch(target.id, { authMode })}
                 />
