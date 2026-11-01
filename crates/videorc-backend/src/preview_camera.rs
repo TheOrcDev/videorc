@@ -4468,9 +4468,11 @@ fn classify_windows_dshow_mode_probe(stderr: &str) -> WindowsDshowModeProbe {
 /// burns the start budget.
 #[cfg(any(target_os = "windows", test))]
 fn windows_dshow_error_is_mode_independent(stderr: &str) -> bool {
+    // Not "already in use": FFmpeg's dshow appends that hint to every
+    // `Could not run graph`, whatever the cause, and a later rung can still
+    // run.
     let stderr = stderr.to_ascii_lowercase();
-    stderr.contains("already in use")
-        || stderr.contains("access is denied")
+    stderr.contains("access is denied")
         || stderr.contains("permission denied")
         || stderr.contains("could not find video device")
 }
@@ -5209,9 +5211,16 @@ mod windows {
                 Ok(()) => {
                     if !startup_sent && !race.claim_live() {
                         // The deadline passed while this frame was still in
-                        // the pipe: the killer owns the attempt and has ended
-                        // FFmpeg. Reporting Live now would hand the ladder a
-                        // preview that is already dead and never retried.
+                        // the pipe: the killer owns the attempt. Reporting
+                        // Live now would hand the ladder a preview that is
+                        // already dead and never retried. The killer may not
+                        // have taken the child yet, so end FFmpeg here too:
+                        // otherwise it blocks on the unread pipe and the
+                        // `wait` below never returns.
+                        let _ = child
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .kill();
                         break;
                     }
                     buffer = publish_bgra_frame(shared, width, height, buffer);
@@ -5268,6 +5277,9 @@ mod windows {
         }
 
         done.store(true, Ordering::Release);
+        // Nothing reads the pipe any more; closing it lets an FFmpeg still
+        // writing exit instead of blocking the `wait`.
+        drop(stdout);
         let _ = child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -9572,7 +9584,8 @@ Error opening input file video=HP HD Camera."#;
 
     #[test]
     fn windows_dshow_mode_independent_errors_stop_the_ladder() {
-        assert!(windows_dshow_error_is_mode_independent(
+        // FFmpeg prints this for every graph Run failure, busy device or not.
+        assert!(!windows_dshow_error_is_mode_independent(
             "ended before the first frame: Could not run graph (sometimes caused by a device already in use by other application)"
         ));
         assert!(windows_dshow_error_is_mode_independent(
