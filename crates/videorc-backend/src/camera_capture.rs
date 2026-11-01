@@ -601,12 +601,26 @@ fn utf16_z(value: &[u16]) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn camera_device_type_label(device_type: &str) -> &str {
+    match device_type {
+        "AVCaptureDeviceTypeContinuityCamera" => "iPhone camera",
+        "AVCaptureDeviceTypeBuiltInWideAngleCamera" => "Built-in camera",
+        "AVCaptureDeviceTypeExternal" | "AVCaptureDeviceTypeExternalUnknown" => "External camera",
+        _ => "Camera",
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeVideo};
+    use objc2_av_foundation::{
+        AVAuthorizationStatus, AVCaptureDevice, AVCaptureDeviceDiscoverySession,
+        AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
+        AVCaptureDeviceTypeExternalUnknown, AVMediaTypeVideo,
+    };
     use objc2_core_media::CMVideoFormatDescriptionGetDimensions;
-    use objc2_foundation::NSString;
+    use objc2_foundation::{NSArray, NSString};
 
     pub fn list_native_cameras() -> NativeCameraDevices {
         let Some(video_media_type) = video_media_type() else {
@@ -621,8 +635,24 @@ mod macos {
 
         let permission = native_camera_permission();
         let status = camera_permission_status(permission);
-        #[allow(deprecated)]
-        let devices = unsafe { AVCaptureDevice::devicesWithMediaType(video_media_type) };
+        // External and Continuity are distinct opt-in types starting with Sonoma.
+        let external = NSString::from_str("AVCaptureDeviceTypeExternal");
+        let continuity = NSString::from_str("AVCaptureDeviceTypeContinuityCamera");
+        let mut types = vec![unsafe { AVCaptureDeviceTypeBuiltInWideAngleCamera }];
+        if objc2::available!(macos = 14.0) {
+            types.extend([&*external, &*continuity]);
+        } else {
+            #[allow(deprecated)]
+            types.push(unsafe { AVCaptureDeviceTypeExternalUnknown });
+        }
+        let discovery = unsafe {
+            AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
+                &NSArray::from_slice(&types),
+                Some(video_media_type),
+                AVCaptureDevicePosition::Unspecified,
+            )
+        };
+        let devices = unsafe { discovery.devices() };
         let mut camera_devices = Vec::new();
 
         for index in 0..devices.count() {
@@ -633,6 +663,12 @@ mod macos {
             let name = unsafe { camera.localizedName() };
             let name =
                 ns_string_to_string(&name).unwrap_or_else(|| format!("Camera {}", index + 1));
+            let device_type = unsafe { camera.deviceType() }.to_string();
+            let transport = unsafe { camera.transportType() };
+            let type_detail = format!(
+                "{} · device type: {device_type} · transport: 0x{transport:08x}.",
+                camera_device_type_label(&device_type)
+            );
             let formats = normalize_camera_formats(camera_formats(&camera));
             let active_format = active_camera_format_detail(&camera);
             let permission_detail = camera_permission_detail(permission);
@@ -662,7 +698,7 @@ mod macos {
                 name,
                 kind: DeviceKind::Camera,
                 status: status.clone(),
-                detail: Some(detail),
+                detail: Some(format!("{type_detail} {detail}")),
                 width: None,
                 height: None,
             });
@@ -841,6 +877,14 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_device_types_have_plain_labels() {
+        assert_eq!(camera_device_type_label("AVCaptureDeviceTypeContinuityCamera"), "iPhone camera");
+        assert_eq!(camera_device_type_label("AVCaptureDeviceTypeBuiltInWideAngleCamera"), "Built-in camera");
+        assert_eq!(camera_device_type_label("AVCaptureDeviceTypeExternal"), "External camera");
+        assert_eq!(camera_device_type_label("future"), "Camera");
+    }
 
     #[test]
     fn native_camera_ids_round_trip_unique_ids() {

@@ -119,6 +119,7 @@ mac:
   # The unsigned `dist`/`package` scripts override this to false.
   notarize: true
   extendInfo:
+    NSCameraUseContinuityCameraDeviceType: true
     NSCameraUsageDescription: Videorc uses the camera for creator overlays when you select a camera source.
     NSMicrophoneUsageDescription: Videorc uses the microphone when you select a microphone for recording or streaming.
     NSScreenCaptureDescription: Videorc captures your screen or selected windows only when you start a recording or stream.
