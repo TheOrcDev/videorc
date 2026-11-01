@@ -102,8 +102,13 @@ export function SourceItem({
         writeMoreOpen(id, open)
       }}
     >
+      {/* With More, the whole header row opens it (plan 213 A3): the
+          chevron's button stretches over the row, so the chevron stays the
+          one labelled trigger. The source's control is positioned above it;
+          the tag and the chip are not, so a click on them opens More too. */}
       <ListRow
-        className="h-auto min-h-10 py-1.5"
+        className={cn('h-auto min-h-10 py-1.5', more && 'relative')}
+        interactive={Boolean(more)}
         icon={
           <Icon
             className="size-4 text-muted-foreground group-data-[disabled]/source-item:text-subtle"
@@ -122,14 +127,20 @@ export function SourceItem({
         alias={tag}
       >
         {status ? <SourceStatusChip status={status} /> : null}
-        {control}
+        {control ? (
+          <span className="relative flex shrink-0 items-center" data-slot="source-item-control">
+            {control}
+          </span>
+        ) : null}
         {more ? (
           <CollapsibleTrigger
             render={
               <Button
                 aria-controls={moreId}
                 aria-label={moreLabel ?? `More ${title} settings`}
-                className="text-muted-foreground"
+                // Not positioned itself, so its ::after spans the header row.
+                // The row's hover is the cue; the chevron doesn't light alone.
+                className="static text-muted-foreground after:absolute after:inset-0 hover:bg-transparent dark:hover:bg-transparent"
                 size="icon-xs"
                 type="button"
                 variant="ghost"

@@ -376,7 +376,10 @@ export function DestinationCard({
           trailing column, so every row's switch lines up (plan 174 S3.5a,
           V-2). The title is the row's button, stretched over the row: a
           click anywhere, or Enter/Space on it, toggles the connection. The
-          switch is its sibling, never inside a button (S0.5, D-12). */}
+          switch is its sibling, never inside a button (S0.5, D-12), and the
+          only thing positioned above the row's button: the tags and the
+          chevron stay under it, so a click on them opens the row too (plan
+          213 A1). */}
       <ListRow
         className="relative"
         context={rowContext}
@@ -395,22 +398,25 @@ export function DestinationCard({
             {qualityTag}
           </Badge>
         ) : null}
-        <span
-          className="relative flex shrink-0 items-center gap-2"
-          data-slot="destination-controls"
-        >
+        <span className="flex shrink-0 items-center gap-3" data-slot="destination-controls">
+          {/* Its hit area spills only 4 px toward the chevron, so a near miss
+              opens the row instead of switching the destination. Disabled, it
+              takes no click: the row opens and says why. */}
           <Switch
             aria-describedby={enableLockGate ? enableLockDescriptionId : undefined}
             aria-label={`Enable ${destinationLabel(target.label)}`}
             checked={target.enabled}
+            className="after:-right-1 data-disabled:pointer-events-none"
             disabled={enableSwitchDisabled}
             onCheckedChange={patchEnabled}
           />
           <ChevronDownIcon
+            aria-hidden
             className={cn(
-              'size-3.5 shrink-0 text-muted-foreground transition-transform',
+              'pointer-events-none size-3.5 shrink-0 text-muted-foreground transition-transform',
               expanded && 'rotate-180'
             )}
+            data-testid="destination-chevron"
           />
         </span>
       </ListRow>
@@ -423,6 +429,11 @@ export function DestinationCard({
 
         {!expanded ? null : (
           <>
+            {enableLockGate ? (
+              <p className="text-xs text-muted-foreground" data-slot="destination-lock-reason">
+                {enableLockGate.reason}
+              </p>
+            ) : null}
             <StreamQualityControl
               value={target.outputPreset ?? 'default'}
               disabled={disabled}
