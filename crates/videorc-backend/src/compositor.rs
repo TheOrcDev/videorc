@@ -13707,6 +13707,11 @@ mod tests {
         snapshot.layout.camera_offset_x = 12;
         snapshot.layout.camera_chroma_key_enabled = true;
         snapshot.layout.camera_mirror = true;
+        snapshot.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
         if let Some(scene) = snapshot.scene.as_mut() {
             for source in scene.sources.iter_mut() {
                 if matches!(source.kind, SceneSourceKind::Camera) {
@@ -13753,6 +13758,7 @@ mod tests {
             camera.layout.camera_mirror,
             "mirror is the camera's own orientation"
         );
+        assert_eq!(camera.layout.camera_look, snapshot.layout.camera_look);
         assert_eq!(camera.revision, snapshot.revision);
     }
 
@@ -14555,6 +14561,90 @@ mod tests {
             render_compositor_yuv420p_frame(inputs, &mut zeroed);
             render_compositor_yuv420p_frame(inputs, &mut dirty);
             assert_eq!(dirty, zeroed, "{width}x{height}");
+        }
+    }
+
+    fn camera_look_reference(rgb: [u8; 3], look: crate::protocol::CameraLook) -> [u8; 3] {
+        let rgb = rgb.map(|v| f64::from(v) / 255.0);
+        let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        rgb.map(|v| {
+            ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5)
+                + look.saturation * (v - y)).clamp(0.0, 1.0) * 255.0).round() as u8
+        })
+    }
+
+    #[test]
+    fn camera_look_cpu_and_metal_agree_with_float_law() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json")).unwrap();
+        let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
+        let (width, height) = (palette.len() as u32 * 4, 4);
+        #[cfg(target_os = "macos")]
+        let gpu = new_gpu_compositor(false);
+        let mut snapshot = test_scene_snapshot(LayoutPreset::CameraOnly, None, Some("camera-look"));
+        snapshot.layout.camera_look = serde_json::from_value(fixture["look"].clone()).unwrap();
+        let mut bgra = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..height {
+            for &rgb in &palette {
+                for _ in 0..4 {
+                    bgra.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+                    expected.push(camera_look_reference(rgb, snapshot.layout.camera_look));
+                }
+            }
+        }
+        let camera = crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+            storage: crate::frame_store::FrameStorage::untracked(), sequence: 1,
+            width, height, pixel_format: PreviewCameraPixelFormat::Bgra8, metadata: (), bytes: bgra,
+            source_iosurface: None, source_pixel_buffer: None, source_d3d11_texture: None,
+            recycle_pool: None, captured_at: Instant::now(),
+        });
+        let inputs = CompositorRenderInputs {
+            sequence: 1, width, height, snapshot: Some(&snapshot), camera_frame: Some(&camera),
+            active_image_source: None, background_image_source: None, screen_frame: None,
+            caption_overlay: None, highlight_overlay: None, buddy_overlay: None, buddy_leg: None,
+            banners: &[], live_background: None, shared_live_frame: None, shared_live_output: None,
+        };
+        let mut cpu = vec![0; raw_yuv420p_len(width, height)];
+        render_compositor_yuv420p_frame(inputs, &mut cpu);
+        let decode_cpu = |pixel: usize| {
+            let uv = (pixel / width as usize / 2) * (width as usize / 2)
+                + (pixel % width as usize / 2);
+            let y_len = (width * height) as usize;
+            let (b, g, r) = crate::color::ycbcr_bt709_video_to_bgr(
+                cpu[pixel], cpu[y_len + uv], cpu[y_len + y_len / 4 + uv]);
+            [r, g, b]
+        };
+        let mut cpu_max = 0;
+        for (pixel, reference) in expected.iter().enumerate() {
+            for (actual, expected) in decode_cpu(pixel).into_iter().zip(reference) {
+                cpu_max = cpu_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+            }
+        }
+        assert!(cpu_max <= 2, "CPU vs float law: {cpu_max}/255");
+        eprintln!("camera look CPU vs float law: {cpu_max}/255");
+        #[cfg(target_os = "macos")]
+        {
+            let Some(mut gpu) = gpu else {
+                eprintln!("skipping Metal: no Metal device");
+                return;
+            };
+            let output = try_gpu_compose(Some(&mut gpu), &inputs, true).expect("camera Metal compose");
+            let pixels = gpu.latest_target_pixel_buffer().and_then(|target| target.copy_bgra())
+                .expect("Metal target readback");
+            let mut metal_max = 0;
+            let mut parity_max = 0;
+            for (pixel, reference) in expected.iter().enumerate() {
+                let offset = pixel * 4;
+                let metal = [pixels[offset + 2], pixels[offset + 1], pixels[offset]];
+                for ((actual, expected), cpu) in metal.into_iter().zip(reference).zip(decode_cpu(pixel)) {
+                    metal_max = metal_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+                    parity_max = parity_max.max(i16::from(actual).abs_diff(i16::from(cpu)));
+                }
+            }
+            assert!(metal_max <= 2, "Metal vs float law: {metal_max}/255");
+            assert!(parity_max <= 2, "CPU vs Metal: {parity_max}/255");
+            assert!(cpu.iter().zip(&output.yuv).all(|(a,b)| a.abs_diff(*b) <= 2));
+            eprintln!("camera look Metal vs float law: {metal_max}/255; CPU vs Metal: {parity_max}/255");
         }
     }
 

@@ -38451,6 +38451,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn camera_look_reaches_every_legacy_camera_graph() {
+        let mut params = base_params(true, false);
+        params.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05, contrast: 1.1, saturation: 0.8,
+        };
+        for preset in [LayoutPreset::ScreenCamera, LayoutPreset::CameraOnly,
+            LayoutPreset::SideBySide, LayoutPreset::VerticalScreenCamera,
+            LayoutPreset::VerticalCameraOnly, LayoutPreset::VerticalCameraTop,
+            LayoutPreset::VerticalCameraBottom, LayoutPreset::VerticalSplit] {
+            params.layout.layout_preset = preset.clone();
+            let filter = video_filter(Some(1), &params, false);
+            assert!(filter.contains("eq=brightness=0.05:contrast=1.1:saturation=0.8"),
+                "{preset:?}: camera grade missing from {filter}");
+        }
+    }
+
+    #[test]
+    fn camera_look_ffmpeg_eq_agrees_with_float_law() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json")).unwrap();
+        let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
+        let look: crate::protocol::CameraLook = serde_json::from_value(fixture["look"].clone()).unwrap();
+        let width = palette.len() * 4;
+        let mut frame = Vec::new();
+        for _ in 0..4 {
+            for rgb in &palette {
+                for _ in 0..4 { frame.extend_from_slice(rgb); }
+            }
+        }
+        let filter = format!(
+            "scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuv444p,eq=brightness={}:contrast={}:saturation={},scale=in_range=full:out_range=full:in_color_matrix=bt709,format=rgb24",
+            look.brightness, look.contrast, look.saturation
+        );
+        let mut child = Command::new(crate::ffmpeg::default_ffmpeg_path())
+            .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &format!("{width}x4"), "-i", "pipe:0", "-vf", &filter,
+                "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("FFmpeg parity fixture requires FFmpeg");
+        child.stdin.take().unwrap().write_all(&frame).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout.len(), frame.len());
+        let mut maximum = 0;
+        for (index, pixel) in frame.chunks_exact(3).enumerate() {
+            let rgb = [pixel[0], pixel[1], pixel[2]].map(|v| f64::from(v) / 255.0);
+            let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+            for (channel, value) in rgb.into_iter().enumerate() {
+                let expected = ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5)
+                    + look.saturation * (value - y)) * 255.0).round() as u8;
+                assert!((1..255).contains(&expected), "fixture must stay away from clipping");
+                maximum = maximum.max(expected.abs_diff(output.stdout[index * 3 + channel]));
+            }
+        }
+        // Orchestrator call, plan 213 I, 2026-11-01: legacy eq gets 8/255.
+        // The measured swscale RGB -> YUV -> RGB identity baseline is 2/255;
+        // eq adds about 4/255. CPU/Metal keep the strict 2/255 bound.
+        assert!(maximum <= 8, "FFmpeg eq vs float law: {maximum}/255");
+        eprintln!("camera look FFmpeg eq vs float law: {maximum}/255 (limit 8)");
+    }
+
     /// The FFmpeg-leg twin of scene_geometry's realistic-palette pin: under
     /// chromakey's absolute-CbCr-distance model, the DEFAULT mapping must key
     /// every real screen tone and keep the subject. (Pure synthetic green
