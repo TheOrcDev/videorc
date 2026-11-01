@@ -2171,3 +2171,35 @@ host memory admission (about 5%, 831 MiB available). The exact recorded owner
 is stopped before launch: it has no children and no app/cleanup report. No
 GPU/app test runs in that attempt, and the memory guard remains enabled.
 Receipt: `/home/orcdev/.cache/videorc-linux-beta-evidence/intel-wrapper-admission-stop.json`.
+
+### Source-request attribution across setup reloads, 2026-11-01
+
+The first-run smoke now records source-affecting WebSocket send attempts with
+their renderer document identity, timestamp and visible setup state. Reload
+receipts retain the previous and next document identity, and each capture guard
+records its opening document. This distinguishes an old workspace request from
+a request made by the newly loaded setup document. The trace retains no RPC
+payloads, credentials, socket URLs or device identifiers. It is diagnostic;
+backend capture-generation and preview-state assertions remain unchanged.
+
+All 3,014 Node script tests pass with zero skips, including four new observer
+tests for document attribution, payload exclusion, transparent forwarding and
+native send errors. Formatting, syntax and diff checks pass. Owned test cleanup
+needs no supervisor signals and leaves no descendants. Logs and cleanup receipt:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/source-request-trace-tests.log`
+and `source-request-trace-tests-cleanup.json` in the same directory.
+
+The maintained Intel-only wrapper launches the instrumented real app on Ogre.
+Fourteen assertions pass before the Welcome backdrop switches to a still with
+reason `gpu-budget` when motion is restored. This is the player's frame-cadence
+guard; the run does not establish whether CPU scheduling or GPU work caused it.
+The motion assertion correctly fails. All 34 GPU observations use only the
+permitted node, renderer exceptions are absent, and normal quit succeeds with
+empty process ledgers and no forced child cleanup. The trace records idle scene
+configuration requests across two documents without retaining their arguments.
+
+The resumed setup/reload scenario and later profiles do not execute, so neither
+the prior camera-start failure nor private-benchmark shutdown overrun is resolved.
+No identical retry or relaxed motion/privacy/shutdown limit is used. This remains
+development evidence, not physical candidate acceptance. Classification:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/source-request-trace-runtime-classification.json`.

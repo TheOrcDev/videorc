@@ -20,6 +20,7 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import { ownedProcessLedgerPaths } from './lib/process-census.mjs'
 import { stopFirstRunApp } from './lib/first-run-smoke-stop.mjs'
+import { FIRST_RUN_SOURCE_TRACE_SCRIPT } from './lib/first-run-source-trace.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import {
   evaluateFirstRunSmokeStep,
@@ -49,6 +50,8 @@ const report = {
   output,
   steps: [],
   teardowns: [],
+  sourceRequests: [],
+  reloads: [],
   rendererErrors: []
 }
 const save = () =>
@@ -168,6 +171,7 @@ const instrument = `(() => {
     workspaceBeforeSetup: false, whatsNewOverSetup: false, draws: [], pictureDraws: [], contexts: [], toasts: [], closedAt: null,
     tones: [], flipMark: null, animationFrames: 0, windowVisible: null
   };
+  ${FIRST_RUN_SOURCE_TRACE_SCRIPT}
   const countFrame = () => { evidence.animationFrames++; requestAnimationFrame(countFrame); };
   requestAnimationFrame(countFrame);
   window.videorc?.onWindowVisible?.(visible => { evidence.windowVisible = visible; });
@@ -329,16 +333,25 @@ async function screenshot(name) {
 
 async function reloadWith(keys) {
   const previousDocument = (await state()).documentId
+  const reload = { profile: profileName, previousDocument, requestedAt: Date.now() }
+  report.reloads.push(reload)
+  save()
   if (keys)
     await evaluate(
       `localStorage.clear(); for (const [key, value] of Object.entries(${JSON.stringify(keys)})) localStorage.setItem(key, value)`
     )
   await cdp.call('Page.reload', { ignoreCache: true })
   // Do not accidentally accept the previous document's state.
-  await waitFor(
+  const next = await waitFor(
     'new document instrument',
     (s) => s.documentId && s.documentId !== previousDocument && (s.setup === 'open' || s.sidebar)
   )
+  Object.assign(reload, {
+    nextDocument: next.documentId,
+    observedAt: Date.now(),
+    setup: next.setup
+  })
+  save()
 }
 
 async function click(selector) {
@@ -457,6 +470,7 @@ async function beginGuard(startMs = Date.now(), allowExistingSources = true) {
   const previewAtOpen = await previewSnapshot()
   guard = {
     startMs,
+    documentAtOpen: (await state()).documentId,
     previewAtOpen,
     allowExistingSources,
     previewIdleAtOpen: previewQuiet(previewAtOpen),
@@ -585,6 +599,13 @@ async function startApp(name) {
     }
     if (
       message.method === 'Runtime.bindingCalled' &&
+      message.params.name === '__firstRunSourceRequest'
+    ) {
+      report.sourceRequests.push({ profile: name, ...JSON.parse(message.params.payload) })
+      save()
+    }
+    if (
+      message.method === 'Runtime.bindingCalled' &&
       message.params.name === '__firstRunSetupClosed' &&
       guard
     ) {
@@ -593,6 +614,7 @@ async function startApp(name) {
   })
   await cdp.call('Runtime.enable')
   await cdp.call('Runtime.addBinding', { name: '__firstRunSetupClosed' })
+  await cdp.call('Runtime.addBinding', { name: '__firstRunSourceRequest' })
   await cdp.call('Page.enable')
   // CDP activates a target but does not necessarily show its Electron window
   // on Wayland. Exercise the foreground first-run UI through the owned window.
