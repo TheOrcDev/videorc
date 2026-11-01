@@ -153,6 +153,9 @@ describe('DestinationCard header', () => {
     expect(markup).not.toContain('role="button"')
     expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="Enable kick"/)
     expect(markup).toContain('>Stream key<')
+    // The chevron is the button's picture, never a control of its own: a
+    // click on it opens the row (plan 213 A1).
+    expect(markup).toMatch(/<svg[^>]*aria-hidden="true"[^>]*data-testid="destination-chevron"/)
   })
 
   it('stays quiet when a destination is ready, and says Needs setup when it is not', () => {
