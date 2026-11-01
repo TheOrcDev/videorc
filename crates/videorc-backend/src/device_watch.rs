@@ -14,31 +14,52 @@ pub struct CameraConnectionEvent {
 }
 
 fn camera_events() -> &'static std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>> {
-    static EVENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>>> = std::sync::OnceLock::new();
+    static EVENTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>>,
+    > = std::sync::OnceLock::new();
     EVENTS.get_or_init(Default::default)
 }
 
-fn camera_history() -> &'static std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>> {
-    static HISTORY: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>>> = std::sync::OnceLock::new();
+fn camera_history() -> &'static std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>>
+{
+    static HISTORY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>>,
+    > = std::sync::OnceLock::new();
     HISTORY.get_or_init(Default::default)
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn remember_camera_event(history: &mut std::collections::VecDeque<CameraConnectionEvent>, event: CameraConnectionEvent) {
+fn remember_camera_event(
+    history: &mut std::collections::VecDeque<CameraConnectionEvent>,
+    event: CameraConnectionEvent,
+) {
     history.push_back(event);
-    while history.len() > 20 { history.pop_front(); }
+    while history.len() > 20 {
+        history.pop_front();
+    }
 }
 
 pub(crate) fn recent_camera_connections() -> Vec<CameraConnectionEvent> {
-    camera_history().lock().unwrap_or_else(|p| p.into_inner()).iter().cloned().collect()
+    camera_history()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .cloned()
+        .collect()
 }
 
 static CAMERA_EVENT_READY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[cfg(target_os = "macos")]
 fn camera_changed(event: CameraConnectionEvent) {
-    remember_camera_event(&mut camera_history().lock().unwrap_or_else(|p| p.into_inner()), event.clone());
-    camera_events().lock().unwrap_or_else(|p| p.into_inner()).push_back(event);
+    remember_camera_event(
+        &mut camera_history().lock().unwrap_or_else(|p| p.into_inner()),
+        event.clone(),
+    );
+    camera_events()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push_back(event);
     CAMERA_EVENT_READY.notify_one();
 }
 
@@ -46,8 +67,13 @@ async fn run_camera_events(state: crate::state::AppState) {
     loop {
         CAMERA_EVENT_READY.notified().await;
         loop {
-            let event = camera_events().lock().unwrap_or_else(|p| p.into_inner()).pop_front();
-            let Some(event) = event else { break; };
+            let event = camera_events()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .pop_front();
+            let Some(event) = event else {
+                break;
+            };
             crate::preview_camera::camera_connection_changed(&state, &event).await;
         }
     }
@@ -152,10 +178,11 @@ mod macos {
                 // AVFoundation supplies the device as the notification object. Copy
                 // identity only; capture teardown and restart run on the backend.
                 if let Some(object) = unsafe { notification.as_ref() }.object() {
-                    let camera: &objc2_av_foundation::AVCaptureDevice = unsafe {
-                        &*objc2::rc::Retained::as_ptr(&object).cast()
-                    };
-                    if unsafe { camera.hasMediaType(objc2_av_foundation::AVMediaTypeVideo.unwrap()) } {
+                    let camera: &objc2_av_foundation::AVCaptureDevice =
+                        unsafe { &*objc2::rc::Retained::as_ptr(&object).cast() };
+                    if unsafe {
+                        camera.hasMediaType(objc2_av_foundation::AVMediaTypeVideo.unwrap())
+                    } {
                         super::camera_changed(super::CameraConnectionEvent {
                             unique_id: unsafe { camera.uniqueID() }.to_string(),
                             name: unsafe { camera.localizedName() }.to_string(),
@@ -218,11 +245,17 @@ mod tests {
     fn camera_history_keeps_the_last_twenty_edges_with_times_and_identity() {
         let mut history = std::collections::VecDeque::new();
         for index in 0..25 {
-            remember_camera_event(&mut history, CameraConnectionEvent {
-                unique_id: "stable-iPhone-id".to_string(), name: "iPhone".to_string(),
-                device_type: "AVCaptureDeviceTypeContinuityCamera".to_string(), transport: 0,
-                connected: index % 2 == 0, timestamp: format!("2026-11-01T12:00:{index:02}Z"),
-            });
+            remember_camera_event(
+                &mut history,
+                CameraConnectionEvent {
+                    unique_id: "stable-iPhone-id".to_string(),
+                    name: "iPhone".to_string(),
+                    device_type: "AVCaptureDeviceTypeContinuityCamera".to_string(),
+                    transport: 0,
+                    connected: index % 2 == 0,
+                    timestamp: format!("2026-11-01T12:00:{index:02}Z"),
+                },
+            );
         }
         assert_eq!(history.len(), 20);
         let json = serde_json::to_value(&history).unwrap();
