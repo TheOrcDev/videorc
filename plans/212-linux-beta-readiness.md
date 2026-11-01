@@ -2581,3 +2581,21 @@ No runtime smoke or exact AppImage acceptance is claimed for this merge.
 Registry publication, the existing runtime and feature gaps, physical passes,
 endurance, pilot, update/rollback, workflow correction and protected release
 remain open. No Linux Beta candidate has been accepted or published.
+
+### Device-watcher dependency lock correction, 2026-11-01
+
+The later main merge `c566dac8` enabled the macOS Foundation notification,
+operation and block features for device watching. Its Rust job
+<https://github.com/TheOrcDev/videorc/actions/runs/41355413431/job/124994383552>
+stopped at `cargo fetch --locked`: the lockfile lacked Foundation's newly
+enabled dependency on the already locked `block2` crate. No advisory scan,
+formatting, compilation, tests or process/memory sentinel ran in that job.
+
+The same locked-resolution failure reproduced locally. Regenerating the
+lockfile offline adds only `block2` to `objc2-foundation`'s dependency list;
+all package versions and checksums remain unchanged. Locked offline metadata
+resolution for `aarch64-apple-darwin` and the CI audit entrypoint
+`node scripts/audit-rust.mjs` now pass. The audit scans 385 dependencies against
+1,395 advisories with the existing policy unchanged. Fresh native CI and runtime
+verification remain required; this fixes dependency resolution and does not
+resolve the earlier Metal image failures or establish Linux Beta acceptance.
