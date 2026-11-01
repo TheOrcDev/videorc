@@ -47,6 +47,9 @@ pub enum CommentsReadState {
     Ended,
     Failed,
     Unavailable,
+    /// The destination streams with a key, and the platform shares chat only
+    /// with apps you sign in to: Sign in brings it (plan 213 J1). Not a failure.
+    NeedsSignIn,
 }
 
 /// Write capability for one concrete stream destination.
@@ -822,6 +825,11 @@ fn scope_capability(
 /// Facebook's row in a session that streams to it with a key.
 pub const FACEBOOK_COMMENTS_UNAVAILABLE: &str =
     "Facebook comments need Facebook sign-in, which isn't available yet.";
+
+/// An X destination that streams with a key (plan 213 J1): X chat rides the
+/// native broadcast that only Sign in creates, so the key streams and chat
+/// needs Sign in. The Stream Manager row and the Go Live check say the same.
+pub const X_STREAM_KEY_CHAT_NEEDS_SIGN_IN: &str = "X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.";
 
 /// Chat capability for every native platform (YouTube, Twitch, X, Kick), preferring a connected
 /// account over stale saved rows. Custom RTMP has no platform comments and is omitted, and so
@@ -1768,6 +1776,12 @@ fn session_provider_rows(
                 if let Some(write) = destination.write {
                     provider.write = write;
                 }
+                // The streamer's choice, not a failure (plan 213 J1): a neutral
+                // row that says what brings chat.
+                if let Some(notice) = destination.notice.as_deref() {
+                    provider.state = LiveChatProviderConnectionState::Unsupported;
+                    provider.message = notice.to_string();
+                }
                 if let Some(error) = destination.preparation_error.as_deref() {
                     provider.state = LiveChatProviderConnectionState::Failed;
                     if destination.read.is_none() && provider.read != CommentsReadState::Unavailable
@@ -1836,6 +1850,10 @@ pub struct LiveChatDestinationStart {
     pub write: Option<CommentsWriteState>,
     #[serde(default)]
     pub preparation_error: Option<String>,
+    /// Why this destination has no chat when that follows from how it
+    /// connects (a stream key), rather than a failure: the row stays neutral.
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2045,7 +2063,11 @@ where
         }
         if provider.platform == StreamPlatform::X
             && params.x.is_none()
-            && provider.state != LiveChatProviderConnectionState::Failed
+            && !matches!(
+                provider.state,
+                LiveChatProviderConnectionState::Failed
+                    | LiveChatProviderConnectionState::Unsupported
+            )
         {
             provider.state = LiveChatProviderConnectionState::Waiting;
             provider.read = CommentsReadState::WaitingForBroadcastContext;
@@ -7251,7 +7273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_x_destination_stays_failed_instead_of_waiting_for_native_context() {
+    async fn stream_key_x_destination_says_chat_needs_sign_in_instead_of_failing_or_waiting() {
         let (events, _) = broadcast::channel(16);
         let state = AppState::new(
             "test-token".to_string(),
@@ -7267,11 +7289,10 @@ mod tests {
                 destinations: vec![LiveChatDestinationStart {
                     target_id: "x-manual".to_string(),
                     platform: StreamPlatform::X,
-                    read: Some(CommentsReadState::Unavailable),
-                    write: Some(CommentsWriteState::ReadOnly),
-                    preparation_error: Some(
-                        "Manual RTMP has no native X broadcast context.".to_string(),
-                    ),
+                    read: Some(CommentsReadState::NeedsSignIn),
+                    write: Some(CommentsWriteState::Unavailable),
+                    preparation_error: None,
+                    notice: Some(X_STREAM_KEY_CHAT_NEEDS_SIGN_IN.to_string()),
                 }],
                 fake: None,
                 fakes: Vec::new(),
@@ -7285,14 +7306,21 @@ mod tests {
         )
         .await;
 
+        // Plan 213 J1: a neutral row in plain words, never Failed (it read as
+        // "X chat isn't supported") and never waiting for a broadcast that a
+        // stream key never has.
         assert_eq!(snapshot.providers.len(), 1);
+        let provider = &snapshot.providers[0];
+        assert_eq!(provider.state, LiveChatProviderConnectionState::Unsupported);
+        assert_eq!(provider.read, CommentsReadState::NeedsSignIn);
+        assert_eq!(provider.write, CommentsWriteState::Unavailable);
+        assert_eq!(provider.target_id.as_deref(), Some("x-manual"));
+        assert_eq!(provider.message, X_STREAM_KEY_CHAT_NEEDS_SIGN_IN);
+        assert_eq!(provider.last_error, None);
         assert_eq!(
-            snapshot.providers[0].state,
-            LiveChatProviderConnectionState::Failed
+            serde_json::to_value(provider.read).unwrap(),
+            serde_json::json!("needs-sign-in")
         );
-        assert_eq!(snapshot.providers[0].read, CommentsReadState::Unavailable);
-        assert_eq!(snapshot.providers[0].write, CommentsWriteState::ReadOnly);
-        assert!(snapshot.providers[0].message.contains("Manual RTMP"));
     }
 
     #[test]
@@ -7309,6 +7337,7 @@ mod tests {
                     "Connect YouTube and select the matching broadcast to attach Comments."
                         .to_string(),
                 ),
+                notice: None,
             }],
         );
 
@@ -7338,6 +7367,7 @@ mod tests {
                 read: None,
                 write: None,
                 preparation_error: None,
+                notice: None,
             }],
         );
         assert_eq!(providers.len(), 1);

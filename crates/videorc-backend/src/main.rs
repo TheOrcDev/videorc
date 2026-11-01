@@ -3522,6 +3522,7 @@ async fn prepare_session_live_chat(
                 read: None,
                 write: None,
                 preparation_error: None,
+                notice: None,
             });
         match target.platform {
             StreamPlatform::Youtube => {
@@ -3569,14 +3570,14 @@ async fn prepare_session_live_chat(
                 }
             },
             StreamPlatform::X => {
+                // A stream key has no X broadcast, and X shares chat only with
+                // apps you sign in to: a neutral row, not a failure (plan 213 J1).
                 if target.auth_mode != crate::streaming::StreamAuthMode::Oauth {
                     if let Some(destination) = params.destinations.last_mut() {
-                        destination.read = Some(live_chat::CommentsReadState::Unavailable);
-                        destination.write = Some(live_chat::CommentsWriteState::ReadOnly);
-                        destination.preparation_error = Some(
-                            "Manual RTMP has no native X broadcast context, so X comments are unavailable for this destination."
-                                .to_string(),
-                        );
+                        destination.read = Some(live_chat::CommentsReadState::NeedsSignIn);
+                        destination.write = Some(live_chat::CommentsWriteState::Unavailable);
+                        destination.notice =
+                            Some(live_chat::X_STREAM_KEY_CHAT_NEEDS_SIGN_IN.to_string());
                     }
                     continue;
                 }

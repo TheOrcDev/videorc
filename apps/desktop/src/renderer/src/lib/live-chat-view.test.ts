@@ -23,6 +23,7 @@ import {
   LiveChatRecoveryOverflowError,
   LiveChatMessageBatcher,
   liveChatEmptyMessage,
+  liveChatProviderNotice,
   nextUnreadCount,
   reconcileLiveChatRecovery,
   reconcileLiveChatSnapshot,
@@ -104,15 +105,24 @@ describe('chat setup warnings', () => {
   it('never warns for healthy or documented receive-only destinations', () => {
     const healthy = provider('twitch', '')
     const xReceiveOnly = provider('x', 'X live chat is receive-only.')
-    const xUnavailable: LiveChatProviderState = {
-      ...provider('x', 'Manual RTMP has no native X broadcast context.', 'x-manual'),
-      read: 'unavailable',
-      write: 'read-only'
+    // Plan 213 J1: a stream-key X destination is the streamer's choice, not a
+    // failure: no warning toast, and its own words in the empty chat.
+    const xStreamKey: LiveChatProviderState = {
+      ...provider(
+        'x',
+        'X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.',
+        'x-manual'
+      ),
+      targetId: 'x-manual',
+      state: 'unsupported',
+      read: 'needs-sign-in',
+      write: 'unavailable'
     }
 
-    expect(chatSetupToastWarnings([healthy, xReceiveOnly, xUnavailable])).toEqual([])
-    // The unavailable state still deserves the Comments empty-state CTA.
-    expect(chatNeedsConnectionAction([xUnavailable])).toBe(true)
+    expect(chatSetupToastWarnings([healthy, xReceiveOnly, xStreamKey])).toEqual([])
+    // The needs-sign-in state still deserves the Comments empty-state CTA.
+    expect(chatNeedsConnectionAction([xStreamKey])).toBe(true)
+    expect(liveChatProviderNotice([healthy, xStreamKey])).toBe(xStreamKey.message)
     expect(chatNeedsConnectionAction([healthy, xReceiveOnly])).toBe(false)
   })
 })

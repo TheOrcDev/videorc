@@ -5178,6 +5178,10 @@ export interface VideorcApi {
    * Buddy → Chat, their one home: main shows the main window and opens the
    * Buddy page on that tab through `buddy:deep-link`. Resolves once sent. */
   openBuddyTabFromCommentsWindow: (command: OpenBuddyTabCommand) => Promise<boolean>
+  /** "Use Sign in" on a stream-key X destination's chat row (plan 213 J1):
+   * main shows the main window and opens that destination in Livestream →
+   * Setup through `livestream:open-destination`. Resolves once sent. */
+  openDestinationFromCommentsWindow: (command: OpenDestinationCommand) => Promise<boolean>
   /** Chat removal relay (plan 140, S6): the Stream Manager's "Remove from
    * chat" and its removal-card answers. The MAIN renderer owns the backend
    * socket and makes the `liveChat.moderation.*` call; the reply is the
@@ -5385,6 +5389,11 @@ export interface VideorcApi {
     callback: (navigation: { openCreator: boolean; tab?: string }) => void
   ) => () => void
   /**
+   * Plan 213 J1: the Stream Manager asked to open a destination's connection.
+   * Main has shown the window; the shell opens Livestream → Setup on it.
+   */
+  onOpenDestination: (callback: (navigation: { targetId: string }) => void) => () => void
+  /**
    * Main was asked to quit (⌘Q, the Dock) or to close the main window (⌘W)
    * while on air (plan 174 S3.1, D2). The shell asks "End livestream and
    * quit?" with "Keep streaming" focused, ends the livestream on a yes and
@@ -5511,6 +5520,9 @@ export type CommentsReadState =
   | 'ended'
   | 'failed'
   | 'unavailable'
+  /** A stream-key destination whose platform shares chat only with apps you
+   * sign in to (X): Sign in brings it. Not a failure (plan 213 J1). */
+  | 'needs-sign-in'
 
 export type CommentsWriteState = 'ready' | 'missing-scope' | 'read-only' | 'failed' | 'unavailable'
 
@@ -7537,6 +7549,12 @@ export interface CohostEnableCommand {
 export interface OpenBuddyTabCommand {
   requestId: string
   tab: string
+}
+
+/** "Use Sign in" from the Stream Manager (plan 213 J1): the destination's id. */
+export interface OpenDestinationCommand {
+  requestId: string
+  targetId: string
 }
 
 /** The part of `autoChat` the Stream Manager may change (plan 164 S-D6,

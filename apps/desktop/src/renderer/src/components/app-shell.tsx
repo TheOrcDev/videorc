@@ -379,6 +379,10 @@ function AppShellContent(): ReactElement {
     setLivestreamView(view)
     writeLastLivestreamView(view)
   }, [])
+  // Plan 213 J1: a destination the Stream Manager asked to open ("Use Sign
+  // in"); Livestream → Setup opens its card, then clears it.
+  const [destinationToOpen, setDestinationToOpen] = useState<string | null>(null)
+  const clearDestinationToOpen = useCallback(() => setDestinationToOpen(null), [])
   const openLivestream = useCallback(
     (view?: LivestreamViewId) => {
       if (view) {
@@ -502,6 +506,16 @@ function AppShellContent(): ReactElement {
     return off
   }, [openBuddy])
 
+  // Plan 213 J1: "Use Sign in" in the Stream Manager opens that destination's
+  // connection in Livestream → Setup (main has shown the window).
+  useEffect(() => {
+    const off = window.videorc?.onOpenDestination?.(({ targetId }) => {
+      openLivestream('setup')
+      setDestinationToOpen(targetId)
+    })
+    return off
+  }, [openLivestream])
+
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
       const request = readCleanCutOpenRequest((event as CustomEvent<unknown>).detail)
@@ -594,7 +608,12 @@ function AppShellContent(): ReactElement {
                       {active === 'layouts' ? <LayoutTab /> : null}
                       {active === 'assets' ? <AssetsTab /> : null}
                       {active === 'live' ? (
-                        <StreamingTab view={livestreamView} onViewChange={selectLivestreamView} />
+                        <StreamingTab
+                          destinationToOpen={destinationToOpen}
+                          view={livestreamView}
+                          onDestinationOpened={clearDestinationToOpen}
+                          onViewChange={selectLivestreamView}
+                        />
                       ) : null}
                       {active === 'captions' ? <CaptionsTab /> : null}
                       {active === 'recording' ? <RecordingTab /> : null}
