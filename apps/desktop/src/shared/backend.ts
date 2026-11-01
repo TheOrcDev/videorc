@@ -443,6 +443,8 @@ export type AutomaticSourceFallbackReason =
   | 'unavailable-selected'
   | 'unavailable-cleared'
   | 'restored-by-name'
+  /** The pick behind a stand-in is connected again and in use (plan 213 E1). */
+  | 'wanted-restored'
 
 export interface AutomaticSourceFallbackEvent {
   kind: 'automatic-source-fallback'
@@ -595,6 +597,20 @@ export interface SourceSelection {
    * `cameraId` is set, and reconcile drops it then.
    */
   cameraOff?: boolean
+  /**
+   * The pick behind a stand-in (plan 213 E1). When the chosen screen, window
+   * or camera is not connected, reconcile uses another one for this session
+   * and keeps the pick here, so the stand-in is never saved as the choice:
+   * `persistableCaptureConfig` and a scene's sources fold the pick back into
+   * the main fields. Absent while the pick itself is in use. Renderer intent
+   * only: the backend ignores these.
+   */
+  wantedScreenId?: string
+  wantedScreenName?: string
+  wantedWindowId?: string
+  wantedWindowName?: string
+  wantedCameraId?: string
+  wantedCameraName?: string
   microphoneId?: string
   microphoneName?: string
   /**

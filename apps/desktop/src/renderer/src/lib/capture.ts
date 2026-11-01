@@ -2373,7 +2373,8 @@ export function applyStoredManualStreamKeyResult(
 }
 
 export function persistableCaptureConfig(config: CaptureConfig): CaptureConfig {
-  const { testPattern: _testPattern, ...sources } = config.sources
+  // Plan 213 E1: a stand-in is for this session; the pick is what persists.
+  const { testPattern: _testPattern, ...sources } = wantedSourceSelection(config.sources)
   const targets = config.streaming.targets.map((item) => {
     const target = removeUnavailableOAuthState(item)
     if (!target.streamKeySecretRef && target.authMode !== 'oauth') {
@@ -2767,6 +2768,11 @@ export function buildCaptureSources(
     // Plan 0002 (release test 146): None is a choice that must outlive
     // reconcile, the way camera Off is (plan 080 S4).
     captureOff: captureId ? undefined : true,
+    // Plan 213 E1: a new pick replaces the one a stand-in was holding for.
+    wantedScreenId: undefined,
+    wantedScreenName: undefined,
+    wantedWindowId: undefined,
+    wantedWindowName: undefined,
     testPattern: false
   }
 }
@@ -2778,9 +2784,11 @@ export function buildCameraSources(
 ): SourceSelection {
   const selected = cameras.find((device) => device.id === cameraId)
   // Plan 080 S4: picking no camera is a choice that must outlive reconcile.
+  // Plan 213 E1: either way it replaces the pick a stand-in was holding for.
+  const wanted = { wantedCameraId: undefined, wantedCameraName: undefined }
   return cameraId
-    ? { ...current, cameraId, cameraName: selected?.name, cameraOff: undefined }
-    : { ...current, cameraId: undefined, cameraName: undefined, cameraOff: true }
+    ? { ...current, ...wanted, cameraId, cameraName: selected?.name, cameraOff: undefined }
+    : { ...current, ...wanted, cameraId: undefined, cameraName: undefined, cameraOff: true }
 }
 
 export function buildMicrophoneSources(
@@ -2796,8 +2804,19 @@ export function buildMicrophoneSources(
 }
 
 const SOURCE_KIND_FIELDS = {
-  capture: ['screenId', 'screenName', 'windowId', 'windowName', 'captureOff', 'testPattern'],
-  camera: ['cameraId', 'cameraName', 'cameraOff'],
+  capture: [
+    'screenId',
+    'screenName',
+    'windowId',
+    'windowName',
+    'captureOff',
+    'testPattern',
+    'wantedScreenId',
+    'wantedScreenName',
+    'wantedWindowId',
+    'wantedWindowName'
+  ],
+  camera: ['cameraId', 'cameraName', 'cameraOff', 'wantedCameraId', 'wantedCameraName'],
   microphone: ['microphoneId', 'microphoneName', 'microphoneOff']
 } as const satisfies Record<string, readonly (keyof SourceSelection)[]>
 
@@ -2821,9 +2840,19 @@ function isAvFoundationScreenCaptureDevice(device: Device): boolean {
   return device.kind === 'screen' && isAvFoundationScreenSourceId(device.id)
 }
 
+export interface ReconcileSourceSelectionOptions {
+  /**
+   * Plan 213 D6: during a recording or stream a stand-in stays until a click,
+   * even when the pick behind it is connected again. A stand-in that vanished
+   * itself is still replaced.
+   */
+  holdStandIns?: boolean
+}
+
 export function reconcileSourceSelection(
   sources: SourceSelection,
-  devices: Device[]
+  devices: Device[],
+  options: ReconcileSourceSelectionOptions = {}
 ): SourceSelection {
   if (devices.length === 0) {
     // No device snapshot yet: the renderer mounts with an empty deviceList
@@ -2890,31 +2919,50 @@ export function reconcileSourceSelection(
     nextSources.screenName = undefined
     nextSources.windowName = undefined
   } else {
-    const selectedCapture = nextSources.windowId
-      ? (findRememberedSource(
-          nextSources.windowId,
-          nextSources.windowName,
-          selectableCaptureDevices
-        ) ?? defaultCaptureDevice)
-      : (findRememberedSource(
-          nextSources.screenId,
-          nextSources.screenName,
-          selectableCaptureDevices
-        ) ?? defaultCaptureDevice)
+    // Plan 213 E1: the pick is what the user chose, which a stand-in may be
+    // holding for; the stand-in is what this session uses. Only the pick is
+    // ever saved (`wantedSourceSelection`).
+    const pick = wantedCapture(nextSources)
+    const usingId = nextSources.windowId ?? nextSources.screenId
+    const heldStandIn =
+      options.holdStandIns && pick.standIn
+        ? selectableCaptureDevices.find((device) => device.id === usingId)
+        : undefined
+    const rememberedCapture =
+      heldStandIn ?? findRememberedSource(pick.id, pick.name, selectableCaptureDevices)
+    const selectedCapture = rememberedCapture ?? defaultCaptureDevice
+    const standIn =
+      heldStandIn !== undefined || (!rememberedCapture && Boolean(pick.id || pick.name))
     nextSources.screenId = selectedCapture?.kind === 'screen' ? selectedCapture.id : undefined
     nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
     nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
     nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
     nextSources.captureOff = undefined
+    nextSources.wantedScreenId = standIn && pick.kind === 'screen' ? pick.id : undefined
+    nextSources.wantedScreenName = standIn && pick.kind === 'screen' ? pick.name : undefined
+    nextSources.wantedWindowId = standIn && pick.kind === 'window' ? pick.id : undefined
+    nextSources.wantedWindowName = standIn && pick.kind === 'window' ? pick.name : undefined
   }
 
   // Plan 080 S4: an explicit Off stays off. Only a camera that was never
-  // chosen (or vanished) falls back to the first available one.
+  // chosen (or vanished) falls back to the first available one; a vanished
+  // pick stays the pick behind that stand-in (plan 213 E1).
   const cameraOff = nextSources.cameraOff === true && !nextSources.cameraId
-  const selectedCamera = cameraOff
+  const cameraPick = wantedCamera(nextSources)
+  const heldCamera =
+    options.holdStandIns && cameraPick.standIn && !cameraOff
+      ? cameras.find((device) => device.id === nextSources.cameraId)
+      : undefined
+  const rememberedCamera = cameraOff
     ? undefined
-    : (findRememberedSource(nextSources.cameraId, nextSources.cameraName, cameras) ?? cameras[0])
+    : (heldCamera ?? findRememberedSource(cameraPick.id, cameraPick.name, cameras))
+  const selectedCamera = cameraOff ? undefined : (rememberedCamera ?? cameras[0])
+  const cameraStandIn =
+    !cameraOff &&
+    (heldCamera !== undefined || (!rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
   nextSources.cameraOff = cameraOff ? true : undefined
+  nextSources.wantedCameraId = cameraStandIn ? cameraPick.id : undefined
+  nextSources.wantedCameraName = cameraStandIn ? cameraPick.name : undefined
   // Migrate selections persisted onto the retired "Fallback - X" avfoundation
   // rows: drop the synthetic id when native rows exist and match the native
   // device by its unprefixed name instead of re-pinning the broken fallback.
@@ -2954,9 +3002,97 @@ export function reconcileSourceSelection(
  */
 export function reconcileSourceSelectionForLayoutTransaction(
   sources: SourceSelection,
-  devices: Device[]
+  devices: Device[],
+  options: ReconcileSourceSelectionOptions = {}
 ): SourceSelection {
-  return reconcileSourceSelection(sources, devices)
+  return reconcileSourceSelection(sources, devices, options)
+}
+
+type WantedSource = {
+  kind: 'screen' | 'window' | 'camera'
+  id?: string
+  name?: string
+  /** A stand-in is in use (or nothing is) for this pick. */
+  standIn: boolean
+}
+
+/** The capture pick: the one a stand-in holds for, else the one in use. */
+function wantedCapture(sources: SourceSelection): WantedSource {
+  if (sources.wantedWindowId || sources.wantedWindowName) {
+    return {
+      kind: 'window',
+      id: sources.wantedWindowId,
+      name: sources.wantedWindowName,
+      standIn: true
+    }
+  }
+  if (sources.wantedScreenId || sources.wantedScreenName) {
+    return {
+      kind: 'screen',
+      id: sources.wantedScreenId,
+      name: sources.wantedScreenName,
+      standIn: true
+    }
+  }
+  return sources.windowId
+    ? { kind: 'window', id: sources.windowId, name: sources.windowName, standIn: false }
+    : { kind: 'screen', id: sources.screenId, name: sources.screenName, standIn: false }
+}
+
+function wantedCamera(sources: SourceSelection): WantedSource {
+  return sources.wantedCameraId || sources.wantedCameraName
+    ? { kind: 'camera', id: sources.wantedCameraId, name: sources.wantedCameraName, standIn: true }
+    : { kind: 'camera', id: sources.cameraId, name: sources.cameraName, standIn: false }
+}
+
+/**
+ * The selection as the user chose it: every stand-in folded back to its pick,
+ * with no `wanted*` field left (plan 213 E1). What persists, and what a saved
+ * scene holds.
+ */
+export function wantedSourceSelection(sources: SourceSelection): SourceSelection {
+  const {
+    wantedScreenId: _screenId,
+    wantedScreenName: _screenName,
+    wantedWindowId: _windowId,
+    wantedWindowName: _windowName,
+    wantedCameraId: _cameraId,
+    wantedCameraName: _cameraName,
+    ...next
+  } = sources
+  const capture = wantedCapture(sources)
+  if (capture.standIn) {
+    next.screenId = capture.kind === 'screen' ? capture.id : undefined
+    next.screenName = capture.kind === 'screen' ? capture.name : undefined
+    next.windowId = capture.kind === 'window' ? capture.id : undefined
+    next.windowName = capture.kind === 'window' ? capture.name : undefined
+  }
+  const camera = wantedCamera(sources)
+  if (camera.standIn) {
+    next.cameraId = camera.id
+    next.cameraName = camera.name
+  }
+  return next
+}
+
+/** What the Sources page and the inspector say about a stand-in (plan 213 E1). */
+export interface SourceStandIn {
+  kind: 'screen' | 'window' | 'camera'
+  /** The pick's name, if it was ever known. */
+  wantedName?: string
+  /** The stand-in's name; absent when nothing stands in (the slot is empty). */
+  usingName?: string
+}
+
+export function sourceStandIn(
+  sources: SourceSelection,
+  sourceKind: 'capture' | 'camera'
+): SourceStandIn | undefined {
+  const pick = sourceKind === 'camera' ? wantedCamera(sources) : wantedCapture(sources)
+  if (!pick.standIn) return undefined
+  const usingName =
+    sourceKind === 'camera' ? sources.cameraName : (sources.screenName ?? sources.windowName)
+  return { kind: pick.kind, wantedName: pick.name, usingName }
 }
 
 export function sourceSelectionChangeEvents(
@@ -2969,21 +3105,24 @@ export function sourceSelectionChangeEvents(
       previous.windowId ?? previous.screenId,
       previous.windowName ?? previous.screenName,
       next.windowId ?? next.screenId,
-      next.windowName ?? next.screenName
+      next.windowName ?? next.screenName,
+      previous.wantedWindowId ?? previous.wantedScreenId
     ),
     sourceChangeEvent(
       'camera',
       previous.cameraId,
       previous.cameraName,
       next.cameraId,
-      next.cameraName
+      next.cameraName,
+      previous.wantedCameraId
     ),
     sourceChangeEvent(
       'microphone',
       previous.microphoneId,
       previous.microphoneName,
       next.microphoneId,
-      next.microphoneName
+      next.microphoneName,
+      undefined
     )
   ]
   return events.filter((event): event is AutomaticSourceFallbackEvent => Boolean(event))
@@ -2994,7 +3133,8 @@ function sourceChangeEvent(
   previousId: string | undefined,
   previousName: string | undefined,
   nextId: string | undefined,
-  nextName: string | undefined
+  nextName: string | undefined,
+  wantedId: string | undefined
 ): AutomaticSourceFallbackEvent | undefined {
   if (!previousId && !previousName) {
     return undefined
@@ -3013,6 +3153,10 @@ function sourceChangeEvent(
   }
   if (!nextId && !nextName) {
     return { ...event, reason: 'unavailable-cleared' }
+  }
+  // Plan 213 E1: the pick behind the stand-in is back and in use again.
+  if (wantedId && nextId === wantedId) {
+    return { ...event, reason: 'wanted-restored' }
   }
 
   if (previousName && previousName === nextName && previousId !== nextId) {

@@ -31,6 +31,16 @@ export function confirmedSourceSelection(
     cameraName: name(selected.cameraId, current.cameraId, current.cameraName),
     // A confirmed camera ends an earlier Off; a confirmed empty slot keeps it.
     cameraOff: selected.cameraId ? undefined : current.cameraOff,
+    // Plan 213 E1: the pick behind a stand-in, confirmed, is no longer a wish.
+    ...(selected.screenId && selected.screenId === current.wantedScreenId
+      ? { wantedScreenId: undefined, wantedScreenName: undefined }
+      : {}),
+    ...(selected.windowId && selected.windowId === current.wantedWindowId
+      ? { wantedWindowId: undefined, wantedWindowName: undefined }
+      : {}),
+    ...(selected.cameraId && selected.cameraId === current.wantedCameraId
+      ? { wantedCameraId: undefined, wantedCameraName: undefined }
+      : {}),
     microphoneName: name(selected.microphoneId, current.microphoneId, current.microphoneName),
     microphoneOff: selected.microphoneId ? undefined : current.microphoneOff,
     testPattern: selected.testPattern

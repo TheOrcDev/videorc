@@ -1,5 +1,6 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { Device, DeviceStatus, PreviewCameraState, PreviewScreenState } from '@/lib/backend'
+import type { SourceStandIn } from '@/lib/capture'
 import { SOURCE_RECEIVING_LABEL, systemAudioIssueLabel } from '@/lib/state-labels'
 import type { SystemAudioSwitchView } from '@/lib/system-audio'
 
@@ -47,6 +48,20 @@ const SWITCHING: SourceStatus = { label: 'Switching', tone: 'warn' }
 export const SCREEN_SHARE_DIALOG_PENDING_MESSAGE =
   'Waiting for you to choose a screen in the share dialog.'
 
+/**
+ * Plan 213 E1: the pick is not connected and another source stands in for
+ * it this session. Said calmly, idle too: it is news, not a fault.
+ */
+export const SOURCE_STAND_IN_LABEL = 'Stand-in'
+
+export function standInLine(standIn: SourceStandIn): string {
+  const noun = standIn.kind === 'camera' ? 'camera' : standIn.kind
+  const wanted = standIn.wantedName?.trim() || `Your ${noun}`
+  const missing = standIn.kind === 'window' ? "isn't open" : "isn't connected"
+  const using = standIn.usingName?.trim()
+  return using ? `${wanted} ${missing} · using ${using}` : `${wanted} ${missing}`
+}
+
 function notFound(kind: 'screen' | 'camera' | 'microphone'): SourceStatus {
   return {
     label: 'Not found',
@@ -75,7 +90,20 @@ export function videoSourceStatus(input: {
     frameAgeMs?: number
     message?: string
   }
+  /** Plan 213 E1: another source stands in for the pick this session. */
+  standIn?: SourceStandIn
 }): SourceStatus | null {
+  const status = pipelineSourceStatus(input)
+  if (!input.standIn || input.switching || !input.selected) return status
+  // The stand-in line rides under the pipeline's chip; a line with a fix to
+  // do (permission, not found, failed) keeps its place.
+  if (!status) return { label: SOURCE_STAND_IN_LABEL, tone: 'neutral', hint: standInLine(input.standIn) }
+  return status.hint ? status : { ...status, hint: standInLine(input.standIn) }
+}
+
+function pipelineSourceStatus(
+  input: Omit<Parameters<typeof videoSourceStatus>[0], 'standIn'>
+): SourceStatus | null {
   if (input.switching) return SWITCHING
   if (!input.selected) return null
   const { state, frameAgeMs } = input.preview ?? {}

@@ -13,13 +13,20 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
-import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
+import {
+  buildCameraSources,
+  buildCaptureSources,
+  capturePickerDevices,
+  sourceStandIn,
+  type SourceStandIn
+} from '@/lib/capture'
 import {
   SCREEN_HIDDEN_LABEL,
   screenHideAccelerator,
   screenPrivacyActionLabel,
   screenPrivacyDisabledReason
 } from '@/lib/screen-privacy-view'
+import { standInLine } from '@/lib/source-status'
 import { captionsStatusLabel } from '@/lib/state-labels'
 import { toastUserError } from '@/lib/user-error'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
@@ -51,6 +58,9 @@ export function QuickSettings(): ReactElement {
     captureDevices,
     cameras,
     selectedCaptureId,
+    selectedCameraId,
+    cameraStandIn,
+    captureStandIn,
     screenPrivacy
   } = useStudioSources()
 
@@ -68,7 +78,12 @@ export function QuickSettings(): ReactElement {
           {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
             searchable picker stays on Sources. */}
           <InspectorRow
-            footer={<ScreenPrivacyLine control={screenPrivacy} />}
+            footer={
+              <>
+                <StandInLine standIn={captureStandIn} />
+                <ScreenPrivacyLine control={screenPrivacy} />
+              </>
+            }
             icon={DisplayIcon}
             label="Screen"
             status={<SourceSwitchStatus kind="capture" />}
@@ -84,7 +99,12 @@ export function QuickSettings(): ReactElement {
               label="Screen"
               noneLabel={allowCaptureNone ? 'None' : undefined}
               selectedDevice={selectedCaptureDevice}
-              selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
+              selectedName={
+                captureConfig.sources.screenName ??
+                captureConfig.sources.windowName ??
+                captureConfig.sources.wantedWindowName ??
+                captureConfig.sources.wantedScreenName
+              }
               selectionLabel={captureConfig.sources.testPattern ? 'Test pattern' : undefined}
               trigger="inline"
               value={selectedCaptureId}
@@ -99,6 +119,7 @@ export function QuickSettings(): ReactElement {
 
           {/* CAMERA: its own row (plan 080 S4). Off is a choice that sticks. */}
           <InspectorRow
+            footer={<StandInLine standIn={cameraStandIn} />}
             icon={CameraIcon}
             label="Camera"
             status={<SourceSwitchStatus kind="camera" />}
@@ -111,9 +132,11 @@ export function QuickSettings(): ReactElement {
               label="Camera"
               noneLabel="Off"
               selectedDevice={selectedCamera}
-              selectedName={captureConfig.sources.cameraName}
+              selectedName={
+                captureConfig.sources.cameraName ?? captureConfig.sources.wantedCameraName
+              }
               trigger="inline"
-              value={captureConfig.sources.cameraId}
+              value={selectedCameraId}
               onChange={(cameraId) =>
                 void switchSourceDeviceLive(
                   'camera',
@@ -175,6 +198,20 @@ function InspectorRow({
       ) : null}
       {footer}
     </div>
+  )
+}
+
+/**
+ * Plan 213 E1: the pick is not connected and another source stands in for it
+ * this session. One calm line under the row, idle too; nothing while the pick
+ * itself is in use.
+ */
+function StandInLine({ standIn }: { standIn: SourceStandIn | undefined }): ReactElement | null {
+  if (!standIn) return null
+  return (
+    <p className="px-3 pb-2 pl-9.5 text-xs text-muted-foreground" data-slot="source-stand-in">
+      {standInLine(standIn)}
+    </p>
   )
 }
 
@@ -279,7 +316,13 @@ export function useStudioSources() {
 
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
+  // Plan 213 E1: what is in use, else the pick itself as the device that is gone.
+  const { sources } = captureConfig
+  const selectedCaptureId =
+    sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId
+  const selectedCameraId = sources.cameraId ?? sources.wantedCameraId
+  const cameraStandIn = sourceStandIn(sources, 'camera')
+  const captureStandIn = sourceStandIn(sources, 'capture')
   // Plan 210 S8b: the one Studio action, by the state it shows. A failure
   // says so; a refused hide is the hook's warning, and success is silent.
   const screenPrivacy: ScreenPrivacyControl = {
@@ -316,6 +359,9 @@ export function useStudioSources() {
     captureDevices,
     cameras,
     selectedCaptureId,
+    selectedCameraId,
+    cameraStandIn,
+    captureStandIn,
     screenPrivacy
   }
 }

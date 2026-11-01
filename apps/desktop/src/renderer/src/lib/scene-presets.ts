@@ -11,7 +11,8 @@ import {
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
   normalizeLayoutSettings,
-  normalizeSourceVisibility
+  normalizeSourceVisibility,
+  wantedSourceSelection
 } from './capture'
 import { BUILTIN_LAYOUTS } from './layout-framing-memory'
 import { BUNDLED_BACKGROUND_MANIFEST } from '../../../shared/background-import'
@@ -86,7 +87,12 @@ export function normalizeSceneApp(raw: unknown): SceneApp | undefined {
   }
 }
 
-export function visualSources(sources: VisualSources): VisualSources {
+export function visualSources(sources: VisualSources & SourceSelection): VisualSources {
+  return usingVisualSources({ ...wantedSourceSelection(sources), app: sources.app })
+}
+
+/** Availability checks judge the sources in use, while saved scenes keep the choice. */
+export function usingVisualSources(sources: VisualSources): VisualSources {
   const app = normalizeSceneApp(sources.app)
   return {
     cameraId: sources.cameraId,

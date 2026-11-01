@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  standInLine,
   microphoneStatus,
   selectedDeviceStatus,
   systemAudioStatus,
@@ -228,5 +229,20 @@ describe('unknownDeviceWarnings', () => {
   it('drops every permission warning: the curated alerts own those (C-8)', () => {
     expect(unknownDeviceWarnings(warnings)).toEqual([warnings[3]])
     expect(unknownDeviceWarnings([])).toEqual([])
+  })
+})
+
+describe('missing choices', () => {
+  it('explains the substitute while idle too', () => {
+    const standIn = {
+      kind: 'camera' as const,
+      wantedName: 'iPhone',
+      usingName: 'FaceTime HD Camera'
+    }
+    expect(standInLine(standIn)).toBe("iPhone isn't connected · using FaceTime HD Camera")
+    expect(
+      videoSourceStatus({ kind: 'camera', selected: true, switching: false, standIn })
+    ).toMatchObject({ hint: standInLine(standIn) })
+    expect(standInLine({ kind: 'window', wantedName: 'Keynote' })).toBe("Keynote isn't open")
   })
 })

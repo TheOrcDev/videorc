@@ -51,6 +51,7 @@ import {
   WORKING_SCENE_KEY,
   normalizeSceneVisual,
   visualSources,
+  usingVisualSources,
   snapshotBackground,
   resolveSavedBackground,
   sameSceneAudio,
@@ -10009,7 +10010,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             options?.sourcesOverride ??
             reconcileSourceSelectionForLayoutTransaction(
               requestedConfig.sources,
-              deviceListRef.current.devices
+              deviceListRef.current.devices,
+              // Plan 213 D6: a stand-in never gives way mid-session without a
+              // click, not even on a scene switch.
+              { holdStandIns: sessionActive }
             )
           const requestedBackground =
             options && 'backgroundOverride' in options
@@ -10023,7 +10027,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ? (savedSceneApplyChunk ?? (await loadSavedSceneApply())).runSavedScenePreflight({
                 visual: {
                   layout,
-                  sources: { ...visualSources(requestedSources), app: undefined },
+                  sources: { ...usingVisualSources(requestedSources), app: undefined },
                   background: snapshotBackground(requestedBackground)
                 },
                 sceneApp: options.sceneApp,
@@ -10389,7 +10393,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const issues = sceneSourceProblems(
           {
             layout: { ...current.layout, layoutPreset: nextPreset, arrangementMode: 'preset' },
-            sources: visualSources(current.sources),
+            sources: usingVisualSources(current.sources),
             background: null
           },
           deviceListRef.current.devices
@@ -11015,18 +11019,43 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Plan 080 S4: the backend confirms only the device; the Off intent
         // is renderer state, so it must be recorded here to outlive the
         // session's end (reconcile would otherwise fill in the first camera).
+        // Plan 213 E1: a pick ends the wish a stand-in was holding, the same way.
         setCaptureConfig((current) =>
-          current.sources.cameraOff === sources.cameraOff
+          current.sources.cameraOff === sources.cameraOff &&
+          current.sources.wantedCameraId === sources.wantedCameraId &&
+          current.sources.wantedCameraName === sources.wantedCameraName
             ? current
-            : { ...current, sources: { ...current.sources, cameraOff: sources.cameraOff } }
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  cameraOff: sources.cameraOff,
+                  wantedCameraId: sources.wantedCameraId,
+                  wantedCameraName: sources.wantedCameraName
+                }
+              }
         )
       }
       if (sourceKind === 'capture') {
         // Plan 0002 (release test 146): the same for a screen set to None.
         setCaptureConfig((current) =>
-          current.sources.captureOff === sources.captureOff
+          current.sources.captureOff === sources.captureOff &&
+          current.sources.wantedScreenId === sources.wantedScreenId &&
+          current.sources.wantedScreenName === sources.wantedScreenName &&
+          current.sources.wantedWindowId === sources.wantedWindowId &&
+          current.sources.wantedWindowName === sources.wantedWindowName
             ? current
-            : { ...current, sources: { ...current.sources, captureOff: sources.captureOff } }
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  captureOff: sources.captureOff,
+                  wantedScreenId: sources.wantedScreenId,
+                  wantedScreenName: sources.wantedScreenName,
+                  wantedWindowId: sources.wantedWindowId,
+                  wantedWindowName: sources.wantedWindowName
+                }
+              }
         )
       }
       if (sourceKind === 'microphone') {
@@ -13902,7 +13931,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
-        { layout: config.layout, sources: visualSources(config.sources), background: null },
+        { layout: config.layout, sources: usingVisualSources(config.sources), background: null },
         deviceList.devices
       )
       // Plan 210 D1: a scene made for an app whose window isn't there holds
@@ -17925,7 +17954,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneSourceProblems(
               {
                 layout: { ...current.layout, layoutPreset: id, arrangementMode: 'preset' },
-                sources: visualSources(current.sources),
+                sources: usingVisualSources(current.sources),
                 background: null
               },
               deviceListRef.current.devices

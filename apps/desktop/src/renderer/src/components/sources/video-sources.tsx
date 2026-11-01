@@ -11,7 +11,12 @@ import { Switch } from '@/components/ui/switch'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
-import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
+import {
+  buildCameraSources,
+  buildCaptureSources,
+  capturePickerDevices,
+  sourceStandIn
+} from '@/lib/capture'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
 import { screenShareLostStatus } from '@/lib/screen-share-recovery'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
@@ -227,7 +232,13 @@ export function VideoSources(): ReactElement {
   const sources = captureConfig.sources
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const selectedCaptureId = sources.screenId ?? sources.windowId
+  // Plan 213 E1: the picker shows what is in use; with nothing standing in,
+  // it shows the pick itself as the device that is gone.
+  const cameraStandIn = sourceStandIn(sources, 'camera')
+  const captureStandIn = sourceStandIn(sources, 'capture')
+  const selectedCameraId = sources.cameraId ?? sources.wantedCameraId
+  const selectedCaptureId =
+    sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId
 
   const { screenLocked, cameraPermissionRequired } = videoPermissionState({
     systemAccessContext,
@@ -250,17 +261,18 @@ export function VideoSources(): ReactElement {
     <VideoSourcesView
       camera={{
         devices: cameras,
-        value: sources.cameraId,
-        selectedName: sources.cameraName,
+        value: selectedCameraId,
+        selectedName: sources.cameraName ?? sources.wantedCameraName,
         disabled: Boolean(sourceSwitchReason('camera') || layoutSwitchPending),
         status: videoSourceStatus({
           kind: 'camera',
-          selected: Boolean(sources.cameraId),
+          selected: Boolean(selectedCameraId),
           switching: sourceDeviceSwitchPending === 'camera',
           device: cameraPermissionRequired
             ? 'permission-required'
-            : selectedDeviceStatus(deviceList.devices, sources.cameraId),
-          preview: previewCameraStatus
+            : selectedDeviceStatus(deviceList.devices, selectedCameraId),
+          preview: previewCameraStatus,
+          standIn: cameraStandIn
         }),
         // Facts describe the selected source only (the synthetic screen and a
         // camera turned Off leave the picker saying None or Off).
@@ -273,7 +285,11 @@ export function VideoSources(): ReactElement {
       screen={{
         devices: captureDevices,
         value: selectedCaptureId,
-        selectedName: sources.screenName ?? sources.windowName,
+        selectedName:
+          sources.screenName ??
+          sources.windowName ??
+          sources.wantedWindowName ??
+          sources.wantedScreenName,
         selectedDevice: deviceList.devices.find((device) => device.id === selectedCaptureId),
         allowNone: allowCaptureNone,
         disabled: screenLocked || Boolean(sourceSwitchReason('capture') || layoutSwitchPending),
@@ -290,7 +306,8 @@ export function VideoSources(): ReactElement {
             // The whole list, not the picker's: a selected legacy capture row the
             // picker hides is still connected.
             device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
-            preview: previewScreenStatus
+            preview: previewScreenStatus,
+            standIn: captureStandIn
           }),
         facts: selectedCaptureId ? screenFacts(previewScreenStatus) : null,
         switchStatus: <SourceSwitchStatus kind="capture" />,
