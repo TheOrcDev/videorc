@@ -1281,19 +1281,19 @@ mod tests {
             (
                 "source:base".to_string(),
                 crate::protocol::SourceTransformOverride::from_box(CameraTransform {
-                        x: 0.05,
-                        y: 0.1,
-                        width: 0.6,
-                        height: 0.6,
+                    x: 0.05,
+                    y: 0.1,
+                    width: 0.6,
+                    height: 0.6,
                 }),
             ),
             (
                 "source:camera".to_string(),
                 crate::protocol::SourceTransformOverride::from_box(CameraTransform {
-                        x: 0.7,
-                        y: 0.2,
-                        width: 0.25,
-                        height: 0.5,
+                    x: 0.7,
+                    y: 0.2,
+                    width: 0.25,
+                    height: 0.5,
                 }),
             ),
         ]);
@@ -1319,8 +1319,8 @@ mod tests {
         // Plan 213 G2: the crop saved beside the screen's box is the screen's
         // crop in the scene; a crop on the camera's entry is ignored, since
         // the camera frames itself with zoom and pan.
-        let cropped = |x: f64, y: f64, width: f64, height: f64| {
-            crate::protocol::SourceTransformOverride {
+        let cropped =
+            |x: f64, y: f64, width: f64, height: f64| crate::protocol::SourceTransformOverride {
                 crop_left: 0.1,
                 crop_top: 0.05,
                 crop_right: 0.2,
@@ -1331,8 +1331,7 @@ mod tests {
                     width,
                     height,
                 })
-            }
-        };
+            };
         let mut params = base_params();
         params.layout.arrangement_mode = ArrangementMode::Freeform;
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([
@@ -1351,7 +1350,11 @@ mod tests {
             ),
             (0.1, 0.05, 0.2, 0.15)
         );
-        assert_eq!(screen.default_transform, full_frame_transform(), "Reset uncrops");
+        assert_eq!(
+            screen.default_transform,
+            full_frame_transform(),
+            "Reset uncrops"
+        );
         let camera = &scene.sources[1];
         assert_eq!(
             (camera.transform.crop_left, camera.transform.crop_right),
@@ -1437,10 +1440,10 @@ mod tests {
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:base".to_string(),
             crate::protocol::SourceTransformOverride::from_box(CameraTransform {
-                    x: 0.25,
-                    y: 0.25,
-                    width: 0.5,
-                    height: 0.5,
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
             }),
         )]);
 
@@ -1458,10 +1461,10 @@ mod tests {
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:camera".to_string(),
             crate::protocol::SourceTransformOverride::from_box(CameraTransform {
-                    x: f64::NAN,
-                    y: 9.0,
-                    width: 0.4,
-                    height: 0.4,
+                x: f64::NAN,
+                y: 9.0,
+                width: 0.4,
+                height: 0.4,
             }),
         )]);
 
@@ -1487,10 +1490,10 @@ mod tests {
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:camera".to_string(),
             crate::protocol::SourceTransformOverride::from_box(CameraTransform {
-                    x: 0.375,
-                    y: 0.375,
-                    width: 0.25,
-                    height: 0.1,
+                x: 0.375,
+                y: 0.375,
+                width: 0.25,
+                height: 0.1,
             }),
         )]);
 
@@ -1531,10 +1534,10 @@ mod tests {
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:camera".to_string(),
             crate::protocol::SourceTransformOverride::from_box(CameraTransform {
-                    x: 0.375,
-                    y: 0.375,
-                    width: 0.25,
-                    height: 0.1,
+                x: 0.375,
+                y: 0.375,
+                width: 0.25,
+                height: 0.1,
             }),
         )]);
 
@@ -2204,10 +2207,10 @@ mod tests {
                     config.layout.source_transform_overrides.insert(
                         source.id.clone(),
                         crate::protocol::SourceTransformOverride::from_box(CameraTransform {
-                                x: transform.x,
-                                y: transform.y,
-                                width: transform.width,
-                                height: transform.height,
+                            x: transform.x,
+                            y: transform.y,
+                            width: transform.width,
+                            height: transform.height,
                         }),
                     );
                 }

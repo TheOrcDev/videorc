@@ -13837,9 +13837,7 @@ mod tests {
         // A scene that crops its screen and fills it in landscape still
         // records the whole screen, uncropped and fitted, on the Screen leg,
         // whether the selection is known or only the scene's own source.
-        use crate::scene_geometry::screen_crop_fixture::{
-            CYAN, MAGENTA, RED, WHITE, sample_pixel,
-        };
+        use crate::scene_geometry::screen_crop_fixture::{CYAN, MAGENTA, RED, WHITE, sample_pixel};
         let mut cropped = screen_crop_fixture_snapshot();
         cropped.layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::Fill;
         cropped.layout.source_transform_overrides.insert(
@@ -14961,7 +14959,11 @@ mod tests {
     /// rounding two linear colour conversions leave.
     fn assert_screen_crop_samples(path: &str, yuv: &[u8], width: u32, height: u32) {
         use crate::scene_geometry::screen_crop_fixture::{expected_samples, sample_pixel};
-        assert_eq!(yuv.len(), raw_yuv420p_len(width, height), "{path}: frame size");
+        assert_eq!(
+            yuv.len(),
+            raw_yuv420p_len(width, height),
+            "{path}: frame size"
+        );
         let (w, h) = (width as usize, height as usize);
         let (chroma_w, chroma_h) = (w.div_ceil(2), h.div_ceil(2));
         for (point, [r, g, b]) in expected_samples() {
@@ -14975,7 +14977,9 @@ mod tests {
             );
             let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 8;
             assert!(
-                close(actual.0, expected.0) && close(actual.1, expected.1) && close(actual.2, expected.2),
+                close(actual.0, expected.0)
+                    && close(actual.1, expected.1)
+                    && close(actual.2, expected.2),
                 "{path}: at {point:?} ({x}, {y}) expected {:?} (YUV {expected:?}), got YUV {actual:?}",
                 [r, g, b]
             );
@@ -14987,10 +14991,7 @@ mod tests {
         let snapshot = screen_crop_fixture_snapshot();
         let frame = screen_crop_fixture_frame();
         let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
-        render_compositor_yuv420p_frame(
-            screen_crop_inputs(&snapshot, &frame, 128, 72),
-            &mut bytes,
-        );
+        render_compositor_yuv420p_frame(screen_crop_inputs(&snapshot, &frame, 128, 72), &mut bytes);
         assert_screen_crop_samples("cpu", &bytes, 128, 72);
     }
 

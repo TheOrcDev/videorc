@@ -781,7 +781,11 @@ mod tests {
                 for kind in [SceneSourceKind::Screen, SceneSourceKind::Window] {
                     assert_eq!(scene_source_fit(&kind, &layout), SceneFit::Contain);
                     layout.horizontal_screen_framing = HorizontalScreenFraming::Fill;
-                    assert_eq!(scene_source_fit(&kind, &layout), SceneFit::Cover, "{preset:?}");
+                    assert_eq!(
+                        scene_source_fit(&kind, &layout),
+                        SceneFit::Cover,
+                        "{preset:?}"
+                    );
                     layout.horizontal_screen_framing = HorizontalScreenFraming::Fit;
                 }
                 // The camera keeps its own Fit choice.

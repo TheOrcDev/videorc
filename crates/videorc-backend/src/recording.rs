@@ -42224,7 +42224,9 @@ mod tests {
             .status()
             .is_ok_and(|status| status.success());
         if !ffmpeg_runs {
-            eprintln!("ffmpeg_legacy_graph_draws_the_screen_crop_fixture: skipped, ffmpeg is not on PATH");
+            eprintln!(
+                "ffmpeg_legacy_graph_draws_the_screen_crop_fixture: skipped, ffmpeg is not on PATH"
+            );
             return;
         }
         let (width, height) = (128_u32, 72_u32);
@@ -42290,7 +42292,9 @@ mod tests {
                 actual
                     .iter()
                     .zip(expected)
-                    .all(|(actual, expected)| (i16::from(*actual) - i16::from(expected)).abs() <= 12),
+                    .all(
+                        |(actual, expected)| (i16::from(*actual) - i16::from(expected)).abs() <= 12
+                    ),
                 "ffmpeg: at {point:?} ({x}, {y}) expected {expected:?}, got {actual:?}"
             );
         }
