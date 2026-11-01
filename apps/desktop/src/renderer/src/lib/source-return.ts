@@ -1,4 +1,10 @@
-import type { Device, RecordingStatus, SourceSelection } from './backend'
+import type {
+  CameraSelectionDiagnostics,
+  Device,
+  PreviewCameraStatus,
+  RecordingStatus,
+  SourceSelection
+} from './backend'
 import { findRememberedSource } from './capture'
 import { sessionOwnsTransport } from '../../../shared/capture-state'
 
@@ -64,4 +70,17 @@ export function sourceReturnAction(
   blocked = false
 ): 'offer' | 'restore' | 'wait' {
   return sessionOwnsTransport(status) ? 'offer' : blocked ? 'wait' : 'restore'
+}
+
+export function cameraSelectionDiagnostics(
+  sources: SourceSelection,
+  status: PreviewCameraStatus
+): CameraSelectionDiagnostics {
+  return {
+    wantedCameraId: sources.wantedCameraId ?? sources.cameraId,
+    wantedCameraName: sources.wantedCameraName ?? sources.cameraName,
+    usedCameraId: status.cameraId,
+    deviceUniqueId: status.deviceUniqueId,
+    state: status.state
+  }
 }
