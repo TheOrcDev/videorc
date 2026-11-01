@@ -691,6 +691,20 @@ function CommentsWindowApp(): ReactElement {
       )
   }
 
+  // Plan 213 J1: "Use Sign in" on a stream-key destination's chat row opens
+  // that destination in Livestream → Setup in the main window.
+  const openDestination = (targetId: string): void => {
+    void window.videorc
+      ?.openDestinationFromCommentsWindow?.({ requestId: crypto.randomUUID(), targetId })
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: 'open', object: 'the destination' },
+          { id: 'open-destination' }
+        )
+      )
+  }
+
   // The behaviour chips (plan 174 S3.14a, D7) link to their one home: main
   // shows the main window and the shell opens Buddy → Chat.
   const openBuddyChatSettings = (): void => {
@@ -882,6 +896,7 @@ function CommentsWindowApp(): ReactElement {
           onSound={runSound}
           onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
+          onUseSignIn={openDestination}
           onShowFollowNames={() => {
             void window.videorc
               ?.showFollowNamesFromCommentsWindow?.({

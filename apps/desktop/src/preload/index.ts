@@ -129,6 +129,8 @@ const api: VideorcApi = {
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),
   openBuddyTabFromCommentsWindow: (command) => invoke('comments-window:open-buddy-tab', command),
+  openDestinationFromCommentsWindow: (command) =>
+    invoke('comments-window:open-destination', command),
   moderateFromCommentsWindow: (command) => invoke('comments-window:moderation', command),
   onModerationRequest: (callback) => subscribe('comments-window:moderation-request', callback),
   pushModerationResult: (resolution) =>
@@ -257,6 +259,7 @@ const api: VideorcApi = {
   onShortcutNavigate: (callback) => subscribe('shortcut:navigate', callback),
   onExitRequest: (callback) => subscribe('app:exit-request', callback),
   onBuddyDeepLink: (callback) => subscribe('buddy:deep-link', callback),
+  onOpenDestination: (callback) => subscribe('livestream:open-destination', callback),
   onShortcutModifier: (callback) => subscribe('shortcut:modifier', callback),
   onWindowVisible: (callback) => subscribe('window:visible', callback),
   onBackendConnection: (callback) => subscribe('backend:connection', callback),

@@ -86,11 +86,12 @@ function providerTone(provider: LiveChatProviderState): StatusDotTone {
  * "read-only", "reconnect to send", "failed". Empty when it reads and sends,
  * so a healthy platform is just its icon and dot. The words are the chat
  * vocabulary every window shares (`chatStateLabel`, plan 174 H-13), set
- * inline after the platform's icon.
+ * inline after the platform's icon. Only the first letter drops its capital,
+ * so "Sign in" keeps the name of the choice ("needs Sign in", plan 213 J1).
  */
 export function providerCapabilityLabel(provider: LiveChatProviderState): string {
   const label = chatStateLabel(provider)
-  return label === 'Connected' ? '' : label.toLowerCase()
+  return label === 'Connected' ? '' : label.charAt(0).toLowerCase() + label.slice(1)
 }
 
 /**

@@ -314,6 +314,9 @@ export interface StreamManagerProps {
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
   onShowFollowNames?: () => void
+  /** "Use Sign in" on a stream-key destination's chat row (plan 213 J1):
+   * the main window opens that destination in Livestream → Setup. */
+  onUseSignIn?: (targetId: string) => void
   /** Auto-show Activity celebrations on stream (plan 156): the one switch,
    * owned by Electron main; the Studio renderer runs the engine. */
   autoShowActivity?: boolean
@@ -429,6 +432,7 @@ export function StreamManager({
   onUndoMarker,
   onOpenPreview,
   onShowFollowNames,
+  onUseSignIn,
   autoShowActivity = false,
   onAutoShowActivityChange,
   onReconnectScopes,
@@ -1265,6 +1269,7 @@ export function StreamManager({
             sounds={sounds}
             onSound={inHistory ? undefined : onSound}
             onBuddy={inHistory ? undefined : onBuddy}
+            onUseSignIn={inHistory ? undefined : onUseSignIn}
             onSend={onSend}
           />
         </div>

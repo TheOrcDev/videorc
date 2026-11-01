@@ -419,6 +419,24 @@ describe('renderer security policy', () => {
     expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
   })
 
+  it('lets only the Chat window open a destination in the main window, checked by sender (plan 213 J1)', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:open-destination')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:open-destination')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:open-destination')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('openDestinationFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('openDestinationFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('openDestinationFromCommentsWindow')
+    // Only the main window hears which destination to open.
+    for (const keys of Object.values(AUXILIARY_API_KEYS)) {
+      expect(keys).not.toContain('onOpenDestination')
+    }
+    const handler = source('./index.ts').split("'comments-window:open-destination',")[1] ?? ''
+    expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    expect(handler.slice(0, 1000)).toContain(
+      "sendElectronEvent(mainWindow.webContents, 'livestream:open-destination'"
+    )
+  })
+
   it('lets only the Chat window ask for a chat removal, checked by sender (plan 140, S6)', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:moderation')).toBe(true)
     expect(roleCanInvokeChannel('notes', 'comments-window:moderation')).toBe(false)

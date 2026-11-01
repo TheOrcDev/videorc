@@ -160,6 +160,13 @@ describe('chatStateLabel (plan 174 S2.3a, H-13)', () => {
     expect(chatStateLabel(chat({ read: 'unavailable' }))).toBe('Unavailable')
   })
 
+  // Plan 213 J1: a stream-key X destination read as "X chat isn't supported".
+  it('says Needs Sign in when a stream key cannot bring chat, never Failed or Unavailable', () => {
+    expect(
+      chatStateLabel(chat({ state: 'unsupported', read: 'needs-sign-in', write: 'unavailable' }))
+    ).toBe('Needs Sign in')
+  })
+
   it('pauses a parked connector that resumes on its own', () => {
     expect(chatStateLabel(chat({ state: 'waiting', retryAt: '2026-10-11T20:00:00Z' }))).toBe(
       'Paused'

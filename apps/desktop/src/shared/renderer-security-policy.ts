@@ -185,6 +185,9 @@ export const IPC_INVOKE_ROLES = {
   // The Buddy pane's behaviour chips open Buddy → Chat (plan 174 S3.14a):
   // the Chat window asks, main shows the main window.
   'comments-window:open-buddy-tab': MAIN_AND_COMMENTS,
+  // "Use Sign in" on an X stream-key destination (plan 213 J1): the Chat
+  // window asks, main shows the main window on that destination.
+  'comments-window:open-destination': MAIN_AND_COMMENTS,
   // Remove from chat and the removal card's answers (plan 140, S6): the Chat
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,
