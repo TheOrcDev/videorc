@@ -219,6 +219,7 @@ export const electronInvokeApiMethods = {
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
+  'comments-window:open-destination': 'openDestinationFromCommentsWindow',
   'comments-window:moderation': 'moderateFromCommentsWindow',
   'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
@@ -298,6 +299,11 @@ export interface BuddyDeepLinkNavigation {
   tab?: string
 }
 
+/** Plan 213 J1: the destination whose connection the main window opens. */
+export interface DestinationNavigation {
+  targetId: string
+}
+
 export interface ElectronIpcEventMap {
   'app:front-changed': FrontAppChanged
   'account:callback': AccountCallbackEnvelope
@@ -337,6 +343,7 @@ export interface ElectronIpcEventMap {
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
   'buddy:deep-link': BuddyDeepLinkNavigation
+  'livestream:open-destination': DestinationNavigation
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
@@ -389,6 +396,7 @@ export const electronEventChannels = [
   'oauth:callback-url',
   'shortcut:navigate',
   'buddy:deep-link',
+  'livestream:open-destination',
   'shortcut:modifier',
   'window:visible',
   'app:front-changed',
@@ -1624,6 +1632,17 @@ const specificRuntimeInvokeContracts = {
     ]),
     booleanSchema
   ),
+  // Plan 213 J1: "Use Sign in" names one destination and nothing else; the
+  // shell opens it only if it is one of the saved destinations.
+  'comments-window:open-destination': invokeContract(
+    tupleSchema([
+      objectSchema(
+        { requestId: boundedIdentifier, targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
   // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
   'comments-window:moderation': invokeContract(
     tupleSchema([commentsModerationCommandSchema]),
@@ -1994,6 +2013,12 @@ const specificRuntimeEventSchemas = {
       openCreator: booleanSchema,
       tab: optionalSchema(stringSchema({ minLength: 1, maxLength: 32 }))
     },
+    { allowUnknown: false }
+  ),
+  // Plan 213 J1: the Stream Manager's "Use Sign in" opens that destination
+  // in Livestream → Setup.
+  'livestream:open-destination': objectSchema(
+    { targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
     { allowUnknown: false }
   ),
   // Whether the command modifier is physically down. Main is the only place

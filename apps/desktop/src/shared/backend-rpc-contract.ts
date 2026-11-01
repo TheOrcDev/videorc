@@ -1606,6 +1606,14 @@ const sourceSelectionSchema = objectSchema(
     cameraId: optionalText,
     cameraName: optionalText,
     cameraOff: optionalSchema(booleanSchema),
+    // Plan 213 E1: the pick behind a stand-in. Renderer intent, like the Off
+    // flags; the backend ignores it.
+    wantedScreenId: optionalText,
+    wantedScreenName: optionalText,
+    wantedWindowId: optionalText,
+    wantedWindowName: optionalText,
+    wantedCameraId: optionalText,
+    wantedCameraName: optionalText,
     microphoneId: optionalText,
     microphoneName: optionalText,
     microphoneOff: optionalSchema(booleanSchema),

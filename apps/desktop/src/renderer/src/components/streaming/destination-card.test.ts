@@ -191,6 +191,23 @@ describe('DestinationCard connection mode', () => {
     expect(markup).not.toContain('Manual RTMP')
   })
 
+  // Plan 213 J2: X shares chat only with apps you sign in to, so the choice
+  // says so where it is made: Sign in first, the key without chat.
+  it('says on the X choice that Sign in brings chat and a stream key does not', () => {
+    const markup = render({
+      target: target('x', { authMode: 'manual-rtmp' }),
+      account: account('x')
+    })
+    const signIn = markup.indexOf('>Sign in · Chat works<')
+    const streamKey = markup.indexOf('>Stream key · No chat<')
+    expect(signIn).toBeGreaterThan(-1)
+    expect(streamKey).toBeGreaterThan(signIn)
+    // Other platforms keep the plain words.
+    const twitch = render({ target: target('twitch'), account: account('twitch') })
+    expect(twitch).not.toContain('Chat works')
+    expect(twitch).not.toContain('No chat')
+  })
+
   it('shows no switch for a key-only platform, just one line and where to find the key', () => {
     const markup = render({ target: target('tiktok', { authMode: 'manual-rtmp' }) })
     expect(markup).not.toContain('Connect with')

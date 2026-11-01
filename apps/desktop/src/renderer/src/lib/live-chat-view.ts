@@ -397,7 +397,7 @@ export const MAX_RENDERED_LIVE_CHAT_MESSAGES = 200
 function providerStatePriority(provider: LiveChatProviderState): number {
   if (provider.state === 'failed' || provider.read === 'failed') return 0
   if (provider.write === 'missing-scope') return 1
-  if (provider.read === 'unavailable') return 2
+  if (provider.read === 'unavailable' || provider.read === 'needs-sign-in') return 2
   if (provider.state === 'unsupported') return 3
   return 4
 }

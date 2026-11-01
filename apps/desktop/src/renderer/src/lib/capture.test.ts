@@ -161,6 +161,186 @@ describe('reconcileSourceSelection', () => {
     })
   })
 
+  // Plan 213 E1: a streamer's Continuity Camera dropped and Videorc kept the
+  // fallback for good, because the substitute was written back into the saved
+  // sources. The pick ("wanted") persists; a stand-in ("using") lives for the
+  // session only.
+  describe('a missing screen or camera never rewrites the pick (plan 213 E1)', () => {
+    const display1: Device = {
+      id: 'screen:screencapturekit:1',
+      name: 'Display 1',
+      kind: 'screen',
+      status: 'available'
+    }
+    const display2: Device = {
+      id: 'screen:screencapturekit:2',
+      name: 'Display 2',
+      kind: 'screen',
+      status: 'available'
+    }
+    const keynote: Device = {
+      id: 'window:screencapturekit:77',
+      name: 'Keynote',
+      kind: 'window',
+      status: 'available'
+    }
+    const facetime: Device = {
+      id: 'camera:1',
+      name: 'FaceTime HD Camera',
+      kind: 'camera',
+      status: 'available'
+    }
+    const iphone: Device = {
+      id: 'camera:iphone',
+      name: 'iPhone',
+      kind: 'camera',
+      status: 'available'
+    }
+
+    function persisted(sources: SourceSelection): SourceSelection {
+      return persistableCaptureConfig({ ...captureConfigFixture(), sources }).sources
+    }
+
+    it('a missing camera gets a stand-in for the session, and the pick is what persists', () => {
+      const pick: SourceSelection = {
+        screenId: display1.id,
+        screenName: display1.name,
+        cameraId: iphone.id,
+        cameraName: iphone.name
+      }
+      const next = reconcileSourceSelection(pick, [display1, facetime])
+
+      // Red on the base: the fallback was saved as the choice.
+      expect(persisted(next)).toMatchObject({ cameraId: iphone.id, cameraName: iphone.name })
+      expect(persisted(next).wantedCameraId).toBeUndefined()
+      expect(next).toMatchObject({
+        cameraId: facetime.id,
+        cameraName: facetime.name,
+        wantedCameraId: iphone.id,
+        wantedCameraName: iphone.name
+      })
+      // A second refresh with the same devices changes nothing.
+      expect(reconcileSourceSelection(next, [display1, facetime])).toEqual(next)
+    })
+
+    it('the same for a screen, and for a window', () => {
+      const screen = reconcileSourceSelection(
+        { screenId: display2.id, screenName: display2.name },
+        [display1, facetime]
+      )
+      expect(screen).toMatchObject({
+        screenId: display1.id,
+        screenName: display1.name,
+        wantedScreenId: display2.id,
+        wantedScreenName: display2.name
+      })
+      expect(persisted(screen)).toMatchObject({ screenId: display2.id, screenName: display2.name })
+
+      const window = reconcileSourceSelection({ windowId: keynote.id, windowName: keynote.name }, [
+        display1,
+        facetime
+      ])
+      expect(window).toMatchObject({
+        screenId: display1.id,
+        windowId: undefined,
+        wantedWindowId: keynote.id,
+        wantedWindowName: keynote.name
+      })
+      expect(persisted(window)).toMatchObject({
+        windowId: keynote.id,
+        windowName: keynote.name,
+        screenId: undefined
+      })
+      expect(persisted(window).wantedWindowId).toBeUndefined()
+    })
+
+    it('a pick with no stand-in at all is still the pick', () => {
+      const next = reconcileSourceSelection({ cameraId: iphone.id, cameraName: iphone.name }, [
+        display1
+      ])
+      expect(next.cameraId).toBeUndefined()
+      expect(next.wantedCameraId).toBe(iphone.id)
+      expect(persisted(next)).toMatchObject({ cameraId: iphone.id, cameraName: iphone.name })
+    })
+
+    it('a pick that is back is used again at once, and the stand-in is forgotten (D6, idle)', () => {
+      const standIn = reconcileSourceSelection({ cameraId: iphone.id, cameraName: iphone.name }, [
+        display1,
+        facetime
+      ])
+      const back = reconcileSourceSelection(standIn, [display1, facetime, iphone])
+      expect(back).toMatchObject({ cameraId: iphone.id, cameraName: iphone.name })
+      expect(back.wantedCameraId).toBeUndefined()
+      expect(back.wantedCameraName).toBeUndefined()
+      expect(sourceSelectionChangeEvents(standIn, back)).toEqual([
+        {
+          kind: 'automatic-source-fallback',
+          sourceKind: 'camera',
+          reason: 'wanted-restored',
+          previousId: facetime.id,
+          previousName: facetime.name,
+          nextId: iphone.id,
+          nextName: iphone.name
+        }
+      ])
+    })
+
+    it('during a session the wanted source waits for a click, even if its stand-in vanished', () => {
+      const standIn = reconcileSourceSelection(
+        {
+          windowId: keynote.id,
+          windowName: keynote.name,
+          cameraId: iphone.id,
+          cameraName: iphone.name
+        },
+        [display1, display2, facetime]
+      )
+      const held = reconcileSourceSelection(
+        standIn,
+        [display1, display2, facetime, iphone, keynote],
+        {
+          holdStandIns: true
+        }
+      )
+      expect(held).toEqual(standIn)
+
+      const replaced = reconcileSourceSelection(standIn, [display2, iphone], { holdStandIns: true })
+      expect(replaced).toMatchObject({
+        screenId: undefined,
+        wantedWindowId: keynote.id,
+        cameraId: undefined,
+        wantedCameraId: iphone.id
+      })
+    })
+
+    it('a new pick replaces the wish, through the builders and the merge', () => {
+      const standIn = reconcileSourceSelection({ cameraId: iphone.id, cameraName: iphone.name }, [
+        display1,
+        facetime
+      ])
+      const picked = buildCameraSources(standIn, [facetime], facetime.id)
+      expect(picked.wantedCameraId).toBeUndefined()
+      expect(picked.wantedCameraName).toBeUndefined()
+      expect(mergeSourceKind(standIn, picked, 'camera').wantedCameraId).toBeUndefined()
+
+      const screenStandIn = reconcileSourceSelection(
+        { windowId: keynote.id, windowName: keynote.name },
+        [display1]
+      )
+      const pickedScreen = buildCaptureSources(screenStandIn, [display1], display1.id)
+      expect(pickedScreen.wantedWindowId).toBeUndefined()
+      expect(mergeSourceKind(screenStandIn, pickedScreen, 'capture').wantedWindowId).toBeUndefined()
+    })
+
+    it('an explicit Off or None is a pick too, with nothing wanted behind it', () => {
+      const off = reconcileSourceSelection(
+        buildCameraSources({ cameraId: iphone.id, cameraName: iphone.name }, [facetime], undefined),
+        [display1, facetime]
+      )
+      expect(off).toMatchObject({ cameraId: undefined, cameraOff: true, wantedCameraId: undefined })
+    })
+  })
+
   describe('microphone None (plan 0027)', () => {
     const devices = [
       { id: 'screen:1', name: 'Display 1', kind: 'screen', status: 'available' },

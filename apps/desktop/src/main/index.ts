@@ -16677,6 +16677,30 @@ app.whenReady().then(async () => {
       return true
     }
   )
+  // Plan 213 J1: "Use Sign in" on a stream-key X destination's chat row opens
+  // that destination in Livestream → Setup. Main shows the window; the shell
+  // opens the card, and drops an id that is not a saved destination.
+  secureIpcHandle(
+    'comments-window:open-destination',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can open a destination.')
+      }
+      commentsCommandRequestId(value)
+      const targetId = (value as { targetId?: unknown }).targetId
+      if (typeof targetId !== 'string' || !targetId.trim()) {
+        throw new Error('Opening a destination requires its id.')
+      }
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return false
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'livestream:open-destination', { targetId })
+      return true
+    }
+  )
   secureIpcHandle(
     'comments-window:cohost-enable-result-push',
     (event, resolution: CommentsCommandResolution<CohostWindowState>) => {
