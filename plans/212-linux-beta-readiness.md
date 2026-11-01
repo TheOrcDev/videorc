@@ -2485,3 +2485,65 @@ No Linux Beta candidate has been accepted or published. The first-run motion
 failure, remaining runtime/features, cross-platform failures, physical
 AppImage acceptance, endurance, pilot, workflow correction and protected
 publication remain open.
+
+### Independent tone EOF diagnosis and rejected pacing, 2026-11-01
+
+Windows job `124932442274` on `f3b80c7c` (tested merge `7d84466`) passes all
+48 controlled-audio cases. The independent FFmpeg-tone matrix passes its 12
+record-only cases and fails all 36 streaming cases: packet tails are
+114–264 ms against the unchanged 100 ms limit, with six cases also exceeding
+the 2% frame-count limit. Every session reaches idle and every receiver is
+reaped. All 32 diagnostic backend groups require forced termination; this is
+not graceful application-quit evidence. The native inputs remain unchanged
+in `c70570f3`. Job:
+<https://github.com/TheOrcDev/videorc/actions/runs/41334827455/job/124932442274>.
+
+A local component probe with finite file input does not reproduce the tail.
+A second probe using paced live raw video and independent infinite lavfi audio
+produces a 151 ms tail. Its FFmpeg debug trace shows the audio running about
+10 seconds ahead and the shortest queue's overflow heartbeat advancing video
+past its actual EOF. Adding `-readrate 1` only to the generated tone gives an
+11 ms tail in the first paired experiment. This identifies a local mechanism;
+it does not establish the cause of every Windows artifact failure.
+
+The proposed runtime change is **rejected and removed**. A subsequent retained
+25-attempt paced-tone cohort has 16 individual passes and nine failures,
+including five bounded timeouts. Completed failed attempts output 154–238
+frames from 120 inputs. First-output p95 is 1,270 ms and EOF-to-exit p95 is
+2,289 ms, exceeding the unchanged 1,000/300 ms component budgets. The cohort's
+unpaced baseline passes with an 11 ms tail, so it is not evidence of a stable
+paired improvement. Ogre has concurrent builds/app activity; host scheduling
+and pacing effects are not separated by this run. Later passing attempts do
+not erase the failed cohort. Every child is reaped and every owned listener
+closes, including the five timeout kills. Existing owned-PCM controls pass one
+immediate and one delayed-start attempt; these two runs are not Windows 25/3
+stability evidence. Compilation of the rejected Rust change is cancelled and
+credited with no tests; its source is restored to the preceding commit.
+
+The maintained OpenH264 probe now offers the **opt-in diagnostic**
+`--tone-eof-stability-passes 25`. It retains an unpaced baseline and every
+paced attempt, requires full frame accounting and bounded owned cleanup,
+and enforces the original tail and startup/stop budgets. Without that option
+it reports the tone comparison as `NOT_REQUESTED`, never a pass, and preserves
+the existing PCM comparison and CI policy. Run it on Linux through the existing
+package command with explicit bundled `--ffmpeg` and `--ffprobe` paths; Windows
+uses the same command with its bundled defaults. An example is:
+
+```sh
+pnpm probe:windows-openh264 -- \
+  --ffmpeg "$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg" \
+  --ffprobe "$PWD/vendor/ffmpeg/linux-x64/bin/ffprobe" \
+  --output /path/to/new/private-evidence \
+  --tone-eof-stability-passes 25
+```
+
+Private evidence is in `~/.cache/videorc-linux-beta-evidence/`:
+`windows-startup-job-124932442274-classification.json`,
+`tone-tail-live-l3CzQQ`, `tone-tail-paced-M2iS7I`,
+`tone-pacing-maintained-MR35oD`, and the rejected patch/owned compiler cleanup
+receipt. No generated media is committed. Windows failure attribution,
+first-run/preview stability and all outstanding Beta acceptance remain open.
+
+Verification for the retained tooling: all 3,047 Node tests pass with zero
+skips; all 12 focused EOF/packet-tail tests pass. Changed-script lint, formatting,
+syntax and diff checks pass. Native runtime code and quality limits are unchanged.
