@@ -1,36 +1,80 @@
-import * as React from 'react'
-import { Progress as ProgressPrimitive } from 'radix-ui'
+'use client'
+
+import { Progress as ProgressPrimitive } from '@base-ui/react/progress'
 
 import { cn } from '@/lib/utils'
 
-// shadcn `progress` (radix-rhea), plan 174 S1.5 (J1-21): one determinate bar,
-// a 6 px round track with the fill in the primary tone. `value` runs from 0 to
-// `max` (100 by default) and reaches the progressbar's aria-valuenow; the
-// caller names the bar with `aria-label` and says the number in words beside
-// it when the streamer needs it.
+const DEFAULT_MAX = 100
+
+// One determinate bar: a 6 px round track with the chrome fill. `value` runs
+// from 0 to `max` (100 by default) and reaches the progressbar's
+// aria-valuenow. Name the bar with `aria-label` (or a ProgressLabel), and say
+// the number in words beside it when the streamer needs it. A non-positive
+// `max` (a total not known yet) reads as 100.
 function Progress({
   className,
+  children,
   value,
-  max = 100,
+  max = DEFAULT_MAX,
   ...props
-}: React.ComponentProps<typeof ProgressPrimitive.Root>) {
-  const safeMax = max > 0 ? max : 100
-  const percent = Math.min(100, Math.max(0, ((value ?? 0) / safeMax) * 100))
+}: ProgressPrimitive.Root.Props) {
   return (
     <ProgressPrimitive.Root
+      className={cn('flex w-full flex-wrap gap-x-3 gap-y-1.5', className)}
       data-slot="progress"
-      className={cn('relative h-1.5 w-full overflow-hidden rounded-full bg-muted', className)}
-      max={safeMax}
+      max={max > 0 ? max : DEFAULT_MAX}
       value={value}
       {...props}
     >
-      <ProgressPrimitive.Indicator
-        data-slot="progress-indicator"
-        className="size-full bg-primary transition-transform duration-150 ease-out"
-        style={{ transform: `translateX(-${100 - percent}%)` }}
-      />
+      {children}
+      <ProgressTrack>
+        <ProgressIndicator />
+      </ProgressTrack>
     </ProgressPrimitive.Root>
   )
 }
 
-export { Progress }
+function ProgressTrack({ className, ...props }: ProgressPrimitive.Track.Props) {
+  return (
+    <ProgressPrimitive.Track
+      className={cn(
+        'bg-muted relative flex h-1.5 w-full items-center overflow-hidden rounded-full',
+        className
+      )}
+      data-slot="progress-track"
+      {...props}
+    />
+  )
+}
+
+function ProgressIndicator({ className, ...props }: ProgressPrimitive.Indicator.Props) {
+  return (
+    <ProgressPrimitive.Indicator
+      className={cn('chrome-fill h-full transition-[width] duration-150 ease-out', className)}
+      data-slot="progress-indicator"
+      {...props}
+    />
+  )
+}
+
+function ProgressLabel({ className, ...props }: ProgressPrimitive.Label.Props) {
+  return (
+    <ProgressPrimitive.Label
+      className={cn('text-sm font-medium', className)}
+      data-slot="progress-label"
+      {...props}
+    />
+  )
+}
+
+function ProgressValue({ className, ...props }: ProgressPrimitive.Value.Props) {
+  return (
+    <ProgressPrimitive.Value
+      className={cn('text-muted-foreground ml-auto text-sm tabular-nums', className)}
+      data-slot="progress-value"
+      {...props}
+    />
+  )
+}
+
+export { Progress, ProgressTrack, ProgressIndicator, ProgressLabel, ProgressValue }

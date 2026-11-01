@@ -85,6 +85,7 @@ export const DEFAULT_STAT_ORDER: readonly StatId[] = [
 ]
 
 const TIP_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube'])
+// Facebook joins with its connected Page (plan 206 S10); a key shares none.
 const VIEWER_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube', 'kick', 'x'])
 
 /** The ON AIR clock: the one timecode (plan 174 S1.4). */
@@ -310,6 +311,50 @@ function followersItem(audience: AudienceSnapshot | null): StatItemModel | null 
   }
 }
 
+/**
+ * The polled follower totals with the follows Activity has shown since each
+ * platform's last read, so the count moves the moment a follow arrives
+ * instead of on the next poll. A follow counts once per message id, and only
+ * while it is newer than the platform's reading: the next read already
+ * includes it and wins. Kick has no total; its follows already reach the
+ * snapshot as a delta.
+ */
+export function withLiveFollows(
+  audience: AudienceSnapshot | null,
+  messages: readonly LiveChatMessage[]
+): AudienceSnapshot | null {
+  if (!audience) return audience
+  const counted = new Set<string>()
+  const pending = new Map<StreamPlatform, number>()
+  for (const message of messages) {
+    if (message.details?.kind !== 'follow' || message.isDeleted || counted.has(message.id)) continue
+    const entry = audience.platforms.find((candidate) => candidate.platform === message.platform)
+    if (
+      !entry ||
+      entry.metric !== 'followers' ||
+      entry.capability !== 'available' ||
+      entry.total === undefined ||
+      !entry.at
+    ) {
+      continue
+    }
+    const received = Date.parse(message.receivedAt)
+    const read = Date.parse(entry.at)
+    if (!Number.isFinite(received) || !Number.isFinite(read) || received <= read) continue
+    counted.add(message.id)
+    pending.set(message.platform, (pending.get(message.platform) ?? 0) + 1)
+  }
+  if (pending.size === 0) return audience
+  return {
+    ...audience,
+    platforms: audience.platforms.map((entry) => {
+      const follows = pending.get(entry.platform)
+      if (!follows || entry.total === undefined) return entry
+      return { ...entry, total: entry.total + follows, delta: (entry.delta ?? 0) + follows }
+    })
+  }
+}
+
 /** Subs on Twitch, members on YouTube, supporters when both are live. */
 export function supportersUnit(platforms: ReadonlySet<StreamPlatform>, count: number): string {
   const twitch = platforms.has('twitch')
@@ -437,7 +482,9 @@ export function statItems(input: StatsInput): StatItemModel[] {
     sessionItem(input),
     viewersItem(input, livePlatforms),
     followersItem(
-      input.history ? (input.history.stats?.audience ?? null) : (dashboard?.audience ?? null)
+      input.history
+        ? (input.history.stats?.audience ?? null)
+        : withLiveFollows(dashboard?.audience ?? null, input.messages)
     )
   ]
   // Subs and tips exist once their total is measured (plan 174 V-8): until

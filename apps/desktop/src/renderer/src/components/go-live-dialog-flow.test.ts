@@ -161,13 +161,14 @@ function pressCommandEnter(target: Element = dialog()): void {
   })
 }
 
+// Base UI moves a dialog's first focus on the next animation frame.
 describe('Go Live dialog focus (B-14)', () => {
-  it('starts on the title field when the dialog carries stream details', () => {
+  it('starts on the title field when the dialog carries stream details', async () => {
     render()
-    expect(document.activeElement?.id).toBe('go-live-title')
+    await vi.waitFor(() => expect(document.activeElement?.id).toBe('go-live-title'))
   })
 
-  it('starts on the primary when every destination is a scheduled event', () => {
+  it('starts on the primary when every destination is a scheduled event', async () => {
     mocked.captureConfig = withTargets((target) =>
       target.platform === 'twitch'
         ? { ...target, enabled: true, scheduledEventId: 'event-1', scheduledEventTitle: 'Saved' }
@@ -175,10 +176,10 @@ describe('Go Live dialog focus (B-14)', () => {
     )
     render()
     expect(dialog().querySelector('#go-live-title')).toBeNull()
-    expect(document.activeElement).toBe(primary())
+    await vi.waitFor(() => expect(document.activeElement).toBe(primary()))
   })
 
-  it('never starts on a button that changes a destination', () => {
+  it('never starts on a button that changes a destination', async () => {
     render({
       preflight: {
         valid: false,
@@ -186,7 +187,7 @@ describe('Go Live dialog focus (B-14)', () => {
         destinations: [destination({ ready: false, message: 'Reconnect.' })]
       }
     })
-    expect(document.activeElement?.id).toBe('go-live-title')
+    await vi.waitFor(() => expect(document.activeElement?.id).toBe('go-live-title'))
   })
 })
 
@@ -293,6 +294,42 @@ describe('Go Live dialog destinations (B-8, B-12, D-7)', () => {
       )
     })
     expect(dialog().textContent).not.toContain('Streaming both orientations')
+  })
+
+  it('reminds a Facebook stream-key session to press Go live in Live Producer, in any orientation', () => {
+    // Plan 206: a horizontal-only session never shows the both-orientations
+    // advice, so the reminder can't live there.
+    mocked.captureConfig = {
+      ...withTargets((target) =>
+        target.platform === 'facebook' ? { ...target, enabled: true } : target
+      ),
+      streamEnabled: true
+    }
+    render()
+    expect(dialog().textContent).not.toContain('Streaming both orientations')
+    const reminder = dialog().querySelector('[data-testid=go-live-producer-reminder]')!
+    expect(reminder.textContent).toContain('press “Go live” in Facebook Live Producer')
+    expect(reminder.textContent).not.toContain('Instagram')
+    // Left out of this livestream: nothing to publish there.
+    render({
+      excludedTargets: defaultCaptureConfig.streaming.targets.filter(
+        (target) => target.platform === 'facebook'
+      )
+    })
+    expect(dialog().querySelector('[data-testid=go-live-producer-reminder]')).toBeNull()
+  })
+
+  it('reminds an Instagram session to press Go live in Live Producer without a second orientation', () => {
+    mocked.captureConfig = {
+      ...withTargets((target) =>
+        target.platform === 'instagram' ? { ...target, enabled: true } : target
+      ),
+      streamEnabled: true
+    }
+    render()
+    expect(
+      dialog().querySelector('[data-testid=go-live-producer-reminder]')?.textContent
+    ).toContain('press “Go live” in Instagram Live Producer')
   })
 
   it('offers Reconnect for a signed-in destination, then Check again', () => {

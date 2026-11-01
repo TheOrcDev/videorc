@@ -10,6 +10,12 @@ import {
 } from '@/components/icons'
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 
+import {
+  FADER_THUMB,
+  gainReset,
+  MicrophoneGainFader,
+  SystemAudioGainFader
+} from '@/components/audio/gain-faders'
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
@@ -50,9 +56,6 @@ import { formatDb } from '@/lib/audio/decibels'
 import {
   SOUNDBOARD_VOLUME_DB_MAX,
   SOUNDBOARD_VOLUME_DB_MIN,
-  SYSTEM_AUDIO_GAIN_DB_DEFAULT,
-  SYSTEM_AUDIO_GAIN_DB_MAX,
-  SYSTEM_AUDIO_GAIN_DB_MIN,
   type AudioSettings
 } from '@/lib/backend'
 import {
@@ -85,7 +88,8 @@ import {
   type SourceStatus
 } from '@/lib/source-status'
 import {
-  systemAudioDevice,
+  SYSTEM_AUDIO_IDLE_LINE,
+  systemAudioRowDevice,
   requestSystemAudioResume,
   systemAudioIssueCopy,
   systemAudioSwitchView,
@@ -100,31 +104,9 @@ import {
 // outside, never by editing them (docs/audiocn.md). The audiocn Mixer stays
 // around the rows for its meter range and its Cmd+Up/Down move between rows.
 
-/** Videorc's slider knob on audiocn's thumbs (they paint the translucent coat). */
-const FADER_THUMB = 'bg-knob ring-knob-ring'
+/** Videorc's slider knob on audiocn's parameter slider thumb (`FADER_THUMB` is the fader's). */
 const PARAMETER_THUMB =
   '[&_[data-slot=parameter-slider-thumb]]:bg-knob [&_[data-slot=parameter-slider-thumb]]:ring-knob-ring'
-
-/** The renderer stores whole numbers (`clampNumber`), so faders step whole dB. */
-const MICROPHONE_GAIN_DETENTS = [0]
-const SYSTEM_AUDIO_GAIN_DETENTS = [SYSTEM_AUDIO_GAIN_DB_DEFAULT, 0]
-
-/** The microphone's Gain default: the readout resets to it (plan 174 C-38). */
-const MICROPHONE_GAIN_DB_DEFAULT = 0
-
-/**
- * The readout's reset while a gain is off its default, or null at the
- * default: "Reset to 0.0 dB".
- */
-export function gainReset(
-  gainDb: number,
-  defaultDb: number,
-  onGainChange: (gainDb: number) => void
-): { label: string; onReset: () => void } | null {
-  return gainDb === defaultDb
-    ? null
-    : { label: `Reset to ${formatDb(defaultDb)}`, onReset: () => onGainChange(defaultDb) }
-}
 
 /**
  * A Sync change from the parameter slider. A reset restores the default
@@ -179,6 +161,7 @@ export function SourcesAudioMixer(): ReactElement {
     setCaptureConfig,
     selectedMicrophone,
     isSessionActive,
+    audioBusActive,
     sourceDeviceSwitchPending,
     sourceSwitchReason,
     switchSourceDeviceLive,
@@ -187,6 +170,7 @@ export function SourcesAudioMixer(): ReactElement {
     runtimeInfo,
     wsStatus,
     systemAudioConfirmed,
+    systemAudioJoining,
     systemAudioIssue
   } = useStudioCore()
   const { openSettings } = useWorkspaceNav()
@@ -201,10 +185,12 @@ export function SourcesAudioMixer(): ReactElement {
   const setAudio = (update: (current: AudioSettings) => AudioSettings): void =>
     setCaptureConfig((current) => ({ ...current, audio: update(current.audio) }))
   const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
+    device: systemAudioRowDevice(deviceList, platform),
     requested: audio.systemAudioEnabled,
     sessionActive: isSessionActive,
+    audioBusActive,
     confirmed: systemAudioConfirmed,
+    joining: systemAudioJoining,
     issue: systemAudioIssue
   })
 
@@ -303,7 +289,7 @@ export function SourcesAudioMixer(): ReactElement {
                     gainDb={audio.systemAudioGainDb}
                     macOS={platform === 'darwin'}
                     meter={systemAudioMeterInput({
-                      sessionActive: isSessionActive,
+                      audioBusActive,
                       mixed: systemAudio.meter,
                       backendLevelsLive,
                       source: backendLevelSources.systemAudio
@@ -471,31 +457,7 @@ export function MicrophoneChannel({
         <div className="flex min-w-0" data-videorc-mic-preview="">
           <MicLevelMeter aria-label="Microphone level" className="min-w-0 flex-1" meter={meter} />
         </div>
-        <SourceControlRow
-          label="Gain"
-          reset={gainReset(gainDb, MICROPHONE_GAIN_DB_DEFAULT, onGainChange)}
-          value={formatDb(gainDb)}
-        >
-          <Fader
-            aria-label="Microphone gain"
-            className="w-full"
-            detents={MICROPHONE_GAIN_DETENTS}
-            fineStep={1}
-            largeStep={6}
-            max={24}
-            min={-24}
-            origin={0}
-            resetValue={MICROPHONE_GAIN_DB_DEFAULT}
-            step={1}
-            value={gainDb}
-            onValueChange={onGainChange}
-          >
-            <FaderTrack>
-              <FaderRange />
-              <FaderThumb className={FADER_THUMB} />
-            </FaderTrack>
-          </Fader>
-        </SourceControlRow>
+        <MicrophoneGainFader gainDb={gainDb} onGainChange={onGainChange} />
         {unavailableReason ? (
           <p
             className="text-xs text-muted-foreground"
@@ -579,14 +541,14 @@ export function SyncCalibrationView({
 
   return (
     <Collapsible className="group/calibrate" defaultOpen={defaultOpen}>
-      <CollapsibleTrigger asChild>
-        <Button className="-ml-2 self-start" size="xs" type="button" variant="ghost">
-          <ChevronRightIcon
-            className="transition-transform duration-150 group-data-[state=open]/calibrate:rotate-90"
-            data-icon="inline-start"
-          />
-          Calibrate
-        </Button>
+      <CollapsibleTrigger
+        render={<Button className="-ml-2 self-start" size="xs" type="button" variant="ghost" />}
+      >
+        <ChevronRightIcon
+          className="transition-transform duration-150 group-data-open/calibrate:rotate-90"
+          data-icon="inline-start"
+        />
+        Calibrate
       </CollapsibleTrigger>
       <CollapsibleContent className="grid gap-2 pt-2" data-videorc-sync-calibration="">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -771,10 +733,10 @@ export function SystemAudioSettings({
         {view.checked ? (
           <>
             {meterHasNoReading(meter) ? (
-              // Plan 173: no dead meter. The level only exists while a session
-              // mixes System audio, so outside one the row says when it moves.
+              // No dead meter. The level exists while a recording, livestream
+              // or Clips ring mixes System audio; otherwise say when it moves.
               <p className="text-xs text-muted-foreground" data-videorc-system-audio-idle="">
-                Level shows while recording or live.
+                {SYSTEM_AUDIO_IDLE_LINE}
               </p>
             ) : (
               <div className="flex min-w-0" data-videorc-system-audio-visualizer="">
@@ -785,35 +747,11 @@ export function SystemAudioSettings({
                 />
               </div>
             )}
-            <SourceControlRow
-              label="Gain"
-              reset={
-                view.permissionRequired
-                  ? null
-                  : gainReset(gainDb, SYSTEM_AUDIO_GAIN_DB_DEFAULT, onGainChange)
-              }
-              value={formatDb(gainDb)}
-            >
-              <Fader
-                aria-label="System audio gain"
-                className="w-full"
-                detents={SYSTEM_AUDIO_GAIN_DETENTS}
-                disabled={view.permissionRequired}
-                fineStep={1}
-                largeStep={6}
-                max={SYSTEM_AUDIO_GAIN_DB_MAX}
-                min={SYSTEM_AUDIO_GAIN_DB_MIN}
-                resetValue={SYSTEM_AUDIO_GAIN_DB_DEFAULT}
-                step={1}
-                value={gainDb}
-                onValueChange={onGainChange}
-              >
-                <FaderTrack>
-                  <FaderRange />
-                  <FaderThumb className={FADER_THUMB} />
-                </FaderTrack>
-              </Fader>
-            </SourceControlRow>
+            <SystemAudioGainFader
+              disabled={view.permissionRequired}
+              gainDb={gainDb}
+              onGainChange={onGainChange}
+            />
           </>
         ) : null}
         {issueCopy ? (

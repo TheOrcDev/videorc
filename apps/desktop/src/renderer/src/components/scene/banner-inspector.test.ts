@@ -6,11 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Banner } from '@/lib/backend'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { BANNER_SHOWN_LIMIT_REASON } from '@/lib/banners'
-import { OFFLINE_LOCK_REASON } from '@/lib/lock-view'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
 
 import {
   BANNER_AT_BACK_REASON,
+  BANNER_HIDDEN_LINE,
+  BANNER_OFF_LINE,
   BANNER_IN_FRONT_REASON,
+  BANNER_SHOWING_LINE,
   BannerInspector,
   SceneBannersSection
 } from './banner-inspector'
@@ -88,11 +91,14 @@ const button = (label: string): HTMLButtonElement => {
   expect(found, label).toBeTruthy()
   return found!
 }
-const switchFor = (label: string): HTMLButtonElement => {
+/** The switch a label names: Base UI points the label at its hidden input. */
+const switchFor = (label: string): HTMLElement => {
   const labelElement = [...document.querySelectorAll('label')].find(
     (candidate) => candidate.textContent === label
   )
-  return document.getElementById(labelElement!.getAttribute('for')!) as HTMLButtonElement
+  return document.querySelector<HTMLElement>(
+    `[role="switch"][aria-labelledby="${labelElement!.id}"]`
+  )!
 }
 
 describe('BannerInspector', () => {
@@ -110,6 +116,44 @@ describe('BannerInspector', () => {
     expect(document.body.textContent).toContain('Hidden')
     await act(async () => button('Show').click())
     expect(hidden.onShowChange).toHaveBeenCalledWith(true)
+  })
+
+  // Plan 205 S3 (D3): a hidden banner is placed but drawn nowhere, the
+  // Preview included, so the first row says so, with Show right beside it.
+  it('says a hidden banner is hidden from viewers, beside Show, on its first row', async () => {
+    const header = (): HTMLElement => document.querySelector('section > header')!
+    const state = (): HTMLElement => header().querySelector('[data-videorc-banner-state]')!
+
+    const hidden = inspectorProps({ banner: banner('logo-color-600', { shown: false }) })
+    await renderInspector(hidden)
+    expect(state().getAttribute('data-videorc-banner-state')).toBe('hidden')
+    expect(state().textContent).toBe(BANNER_HIDDEN_LINE)
+    expect(BANNER_HIDDEN_LINE).toBe("Hidden. Viewers don't see it.")
+    // Secondary text, never the faint tier: it is the banner's state.
+    expect(state().parentElement!.className).toContain('text-muted-foreground')
+    expect(state().closest('[class*="text-subtle"]')).toBeNull()
+    const show = header().querySelector<HTMLButtonElement>('[data-videorc-banner-show-toggle]')!
+    expect(show.textContent).toBe('Show')
+    expect(show.disabled).toBe(false)
+    await act(async () => show.click())
+    expect(hidden.onShowChange).toHaveBeenCalledWith(true)
+
+    const shown = inspectorProps({ banner: banner('logo-color-600') })
+    await renderInspector(shown)
+    expect(state().getAttribute('data-videorc-banner-state')).toBe('shown')
+    expect(state().textContent).toBe(BANNER_SHOWING_LINE)
+    expect(header().textContent).not.toContain("Viewers don't see it.")
+    expect(
+      header().querySelector<HTMLButtonElement>('[data-videorc-banner-show-toggle]')!.textContent
+    ).toBe('Hide')
+
+    // Shown, but no output carries it: the chip says "Off", and so does the row.
+    const off = inspectorProps({
+      banner: banner('logo-color-600', { showOnStream: false, showInRecording: false })
+    })
+    await renderInspector(off)
+    expect(state().getAttribute('data-videorc-banner-state')).toBe('off')
+    expect(state().textContent).toBe(BANNER_OFF_LINE)
   })
 
   it('offers the seven places as one-shot buttons, in order', async () => {
@@ -208,7 +252,7 @@ describe('BannerInspector', () => {
     await renderInspector(inspectorProps())
     const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
     expect(fold.querySelector('h3')?.textContent).toBe('Timing')
-    expect(fold.getAttribute('data-state')).toBe('closed')
+    expect(fold.hasAttribute('data-closed')).toBe(true)
     expect(fold.querySelector('[data-videorc-banner-hide-after]')).toBeNull()
     expect(fold.querySelector('[data-videorc-banner-timing-summary]')).toBeNull()
 
@@ -230,7 +274,7 @@ describe('BannerInspector', () => {
     await renderInspector(props)
     const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
     await act(async () => fold.querySelector<HTMLButtonElement>('h3 button')!.click())
-    expect(fold.getAttribute('data-state')).toBe('open')
+    expect(fold.hasAttribute('data-open')).toBe(true)
     // The helper is essential: secondary text that describes the control.
     const repeat = fold.querySelector<HTMLButtonElement>('[data-videorc-banner-repeat]')!
     const help = [...fold.querySelectorAll('[data-slot="field-description"]')].find(
@@ -241,13 +285,18 @@ describe('BannerInspector', () => {
 
     const choose = async (trigger: string, label: string): Promise<string[]> => {
       await act(async () => fold.querySelector<HTMLButtonElement>(trigger)!.click())
-      const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+      // The open list only: the last one may still be animating out.
+      const options = [
+        ...document.querySelectorAll<HTMLElement>(
+          '[data-slot="select-content"][data-open] [role="option"]'
+        )
+      ]
       const labels = options.map((option) => option.textContent ?? '')
       await act(async () => options.find((option) => option.textContent === label)!.click())
       return labels
     }
     const hideAfter = '[data-videorc-banner-hide-after]'
-    expect(fold.querySelector(hideAfter)?.textContent).toBe('Off')
+    expect(fold.querySelector(`${hideAfter} [data-slot="select-value"]`)?.textContent).toBe('Off')
     expect(await choose(hideAfter, '30 s')).toEqual(['Off', '10 s', '30 s', '1 min', '5 min'])
     expect(props.onPatch).toHaveBeenCalledTimes(1)
     expect(props.onPatch).toHaveBeenLastCalledWith({ hideAfterSec: 30 })
@@ -266,7 +315,7 @@ describe('BannerInspector', () => {
       banner: banner('sponsor', { hideAfterSec: 60, repeatEveryMin: 5 })
     })
     await renderInspector(timed)
-    expect(fold.querySelector(hideAfter)?.textContent).toBe('1 min')
+    expect(fold.querySelector(`${hideAfter} [data-slot="select-value"]`)?.textContent).toBe('1 min')
     await choose(hideAfter, 'Off')
     await choose('[data-videorc-banner-repeat]', 'Off')
     expect(timed.onPatch).toHaveBeenNthCalledWith(1, { hideAfterSec: 0 })
@@ -303,8 +352,8 @@ describe('BannerInspector', () => {
     expect(document.querySelector('[data-variant="locked"]')).not.toBeNull()
     for (const label of ['Hide', 'Top left', 'Full frame', 'Bring to front', 'Send to back'])
       expect(button(label).disabled, label).toBe(true)
-    expect(switchFor('Stream').disabled).toBe(true)
-    expect(switchFor('Recording').disabled).toBe(true)
+    expect(switchFor('Stream').hasAttribute('data-disabled')).toBe(true)
+    expect(switchFor('Recording').hasAttribute('data-disabled')).toBe(true)
     expect(button('Manage in Assets').disabled).toBe(false)
     const fold = document.querySelector('[data-videorc-banner-timing-fold]')!
     await act(async () => fold.querySelector<HTMLButtonElement>('h3 button')!.click())
@@ -344,6 +393,11 @@ describe('SceneBannersSection', () => {
   it('lists every banner as a 32 px row: picture, name, Showing, Show or Hide', async () => {
     const props = sectionProps({ selectedId: 'logo' })
     await renderSection(props)
+    // A banner you add already shows (plan 205 D3): a click only places it.
+    expect(document.querySelector('section > header')?.textContent).toContain(
+      'Your images on the picture. Click one to place it.'
+    )
+    expect(document.body.textContent).not.toContain('on the stage')
     expect(document.querySelector('[data-slot="grouped-list"]')).not.toBeNull()
     expect(row('sponsor').className).toContain('h-row')
     expect(row('sponsor').querySelector('[data-banner-thumbnail]')).not.toBeNull()

@@ -85,6 +85,8 @@ type _RegistryIconProps = _AssertIconProps<
     | 'DotsThree'
     | 'DownloadSimple'
     | 'Eye'
+    | 'EyeSlash'
+    | 'FacebookLogo'
     | 'FileVideo'
     | 'FilmReel'
     | 'FilmSlate'
@@ -232,7 +234,10 @@ export {
   Crosshair as CrosshairIcon,
   // A marker: a point on a recording's timeline its owner wants to find
   // again (CONTEXT.md). Never scissors, which mean a cut (plan 174 S3.12).
-  BookmarkSimple as MarkerIcon
+  BookmarkSimple as MarkerIcon,
+  // Hide screen (plan 210): the screen is hidden from viewers. Never the
+  // Preview's eye, which opens a window.
+  EyeSlash as HiddenIcon
 } from '@phosphor-icons/react'
 /**
  * Files, assets and editing.
@@ -286,7 +291,8 @@ export {
 export {
   TwitchLogo as TwitchIcon,
   TiktokLogo as TiktokIcon,
-  InstagramLogo as InstagramIcon
+  InstagramLogo as InstagramIcon,
+  FacebookLogo as FacebookIcon
 } from '@phosphor-icons/react'
 
 export { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX }

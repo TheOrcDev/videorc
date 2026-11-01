@@ -78,6 +78,7 @@ const RUST_VARIANTS: Record<StreamPlatform, string> = {
   twitch: 'Twitch',
   kick: 'Kick',
   x: 'X',
+  facebook: 'Facebook',
   tiktok: 'Tiktok',
   instagram: 'Instagram',
   custom: 'Custom'

@@ -13,6 +13,7 @@ import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
+import { screenShareLostStatus } from '@/lib/screen-share-recovery'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
 import { systemAccessRows } from '@/lib/system-access'
 
@@ -162,10 +163,12 @@ export function VideoSourcesView({
  * permission. The page's alerts (`source-permission-alerts.tsx`) read it too.
  */
 export function videoPermissionState({
+  systemAccessContext,
   deviceList,
   platform,
   mediaAccess
 }: {
+  systemAccessContext?: import('@/lib/system-access').SystemAccessContext
   deviceList: DeviceList
   platform: Parameters<typeof systemAccessRows>[0]['platform']
   mediaAccess: Parameters<typeof systemAccessRows>[0]['mediaAccess']
@@ -176,6 +179,7 @@ export function videoPermissionState({
 } {
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameraAccess = systemAccessRows({
+    ...systemAccessContext,
     deviceList,
     audioMeter: null,
     platform,
@@ -194,7 +198,10 @@ export function videoPermissionState({
     // one way the system asks, Off must stay reachable, and the alert for a
     // chosen camera carries the fix.
     cameraPermissionRequired:
-      cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
+      !cameraAccess?.checking &&
+      (cameraAccess?.state === 'first-use' ||
+        cameraAccess?.state === 'not-granted' ||
+        cameraAccess?.state === 'waiting')
   }
 }
 
@@ -212,6 +219,7 @@ export function VideoSources(): ReactElement {
     allowCaptureNone,
     runtimeInfo,
     mediaAccess,
+    systemAccessContext,
     wsStatus
   } = useStudioCore()
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
@@ -222,6 +230,7 @@ export function VideoSources(): ReactElement {
   const selectedCaptureId = sources.screenId ?? sources.windowId
 
   const { screenLocked, cameraPermissionRequired } = videoPermissionState({
+    systemAccessContext,
     deviceList,
     platform: runtimeInfo?.platform,
     mediaAccess
@@ -268,15 +277,21 @@ export function VideoSources(): ReactElement {
         selectedDevice: deviceList.devices.find((device) => device.id === selectedCaptureId),
         allowNone: allowCaptureNone,
         disabled: screenLocked || Boolean(sourceSwitchReason('capture') || layoutSwitchPending),
-        status: videoSourceStatus({
-          kind: 'screen',
-          selected: Boolean(selectedCaptureId),
-          switching: sourceDeviceSwitchPending === 'capture',
-          // The whole list, not the picker's: a selected legacy capture row the
-          // picker hides is still connected.
-          device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
-          preview: previewScreenStatus
-        }),
+        status:
+          screenShareLostStatus({
+            selected: Boolean(selectedCaptureId),
+            switching: sourceDeviceSwitchPending === 'capture',
+            preview: previewScreenStatus
+          }) ??
+          videoSourceStatus({
+            kind: 'screen',
+            selected: Boolean(selectedCaptureId),
+            switching: sourceDeviceSwitchPending === 'capture',
+            // The whole list, not the picker's: a selected legacy capture row the
+            // picker hides is still connected.
+            device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
+            preview: previewScreenStatus
+          }),
         facts: selectedCaptureId ? screenFacts(previewScreenStatus) : null,
         switchStatus: <SourceSwitchStatus kind="capture" />,
         onChange: switchCapture

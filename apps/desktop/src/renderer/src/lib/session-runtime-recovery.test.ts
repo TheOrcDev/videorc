@@ -366,6 +366,14 @@ describe('session audio news (plan 076)', () => {
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
   })
 
+  it('says the microphone is back after a stopped input was opened again (retest 151)', () => {
+    showSessionHealthEvent(healthEvent('microphone-input-recovered', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Microphone is back',
+      expect.objectContaining({ description: 'microphone-input-recovered message' })
+    )
+  })
+
   it('says the stream stopped when it stops, and keeps saying it', () => {
     showSessionHealthEvent(healthEvent('stream-output-failed', 'error'), false)
     expect(toastSpies.error).toHaveBeenCalledWith(
@@ -461,6 +469,18 @@ describe('session audio news (plan 076)', () => {
     expect(toastSpies.warning).toHaveBeenCalledWith(
       'This computer is overloaded',
       expect.objectContaining({ id: 'host-overloaded', description: 'host-overloaded message' })
+    )
+  })
+
+  it('warns at Record that little recording space is left', () => {
+    showSessionHealthEvent(healthEvent('disk-space-low'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Recording space is low',
+      expect.objectContaining({
+        id: 'disk-space-low',
+        description: 'disk-space-low message',
+        duration: 20_000
+      })
     )
   })
 })

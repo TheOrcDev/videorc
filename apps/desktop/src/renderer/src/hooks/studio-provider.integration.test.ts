@@ -53,6 +53,7 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
 
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { LayoutTab } from '@/components/tabs/layout-tab'
+import { scenesForApps } from '@/lib/scene-apps'
 import { sourceVisibilityFromScene } from '@/lib/scene-presets'
 import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
 import type {
@@ -105,7 +106,8 @@ import type {
   VideorcApi
 } from '../../../shared/backend'
 import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
-import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
+import { DEFAULT_OVERLAY_LAYOUT, overlaySnapRect } from '@/lib/overlay-layout'
+import { bannerSnapRect } from '@/lib/banner-place'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
 import { useStudioMicVisualSource } from './use-studio-mic-sources'
@@ -134,6 +136,7 @@ import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlement
 import type { SessionStopOrigin } from '../lib/session-stop'
 import {
   buildCameraSources,
+  buildCaptureSources,
   buildMicrophoneSources,
   defaultCaptureConfig,
   STORAGE_KEYS,
@@ -157,6 +160,8 @@ type DeferredBackendResponse = {
 }
 
 const now = '2026-07-12T00:00:00.000Z'
+/** A deferred response that the test backend computes when it is released. */
+const BACKEND_RESPONSE = Symbol('backend response')
 const signedInAccount = {
   status: 'signed-in' as const,
   username: 'provider-test',
@@ -410,6 +415,9 @@ class StudioBackend {
     startUtc: string
   } | null = null
   scheduledConfirmationTargetId = 'youtube'
+  /** Plan 209 S10: answer the Go Live check with a ready row per destination
+   * sent, as the backend does, so a Go Live without the dialog sees rows. */
+  confirmationRowsFromStreaming = false
   sockets: TestWebSocket[] = []
   performanceCheck: PerformanceCheckState = { running: false, stale: false }
   commands: BackendCommand[] = []
@@ -496,6 +504,7 @@ class StudioBackend {
       reactions: {}
     },
     autoChat: {
+      talk: 'off',
       mode: 'off',
       greetings: { enabled: false, templates: [] },
       answers: { enabled: false, cooldownSeconds: 20 },
@@ -711,6 +720,21 @@ class StudioBackend {
           throw new Error('Temporary devices.list failure.')
         }
         return this.deviceList
+      case 'sources.resolve_app_window': {
+        // Plan 210: the app's front window is the listed window the scene
+        // prefers, when the device list has it, else the first listed window
+        // under the app's bundle id (a relaunched app's new window);
+        // otherwise the app is not open.
+        const listed = this.deviceList.devices.filter(
+          (device) => device.kind === 'window' && device.status === 'available'
+        )
+        const preferred =
+          listed.find((device) => device.id === params.preferWindowId) ??
+          listed.find((device) => device.app?.bundleId === params.bundleId)
+        return preferred
+          ? { ok: true, windowId: preferred.id, title: preferred.name, width: 1280, height: 720 }
+          : { ok: false, reason: 'not-running' }
+      }
       case 'audio.meter.sample':
         if (this.audioMeterFailuresRemaining > 0) {
           this.audioMeterFailuresRemaining -= 1
@@ -1124,6 +1148,28 @@ class StudioBackend {
       case 'streamTargets.metadata.validate':
         return { valid: true, issues: [] }
       case 'streamTargets.confirmation.validate':
+        if (this.confirmationRowsFromStreaming) {
+          const sent = (params.streaming as StreamingSettings).targets.filter(
+            (target) => target.enabled
+          )
+          return {
+            valid: true,
+            destinations: sent.map((target) => ({
+              targetId: target.id,
+              platform: target.platform,
+              label: target.label,
+              authMode: target.authMode,
+              ready: true,
+              title: 'Live',
+              description: '',
+              message: 'Ready for Go Live confirmation.',
+              chatRead: 'ready',
+              chatWrite: 'ready',
+              chatMessage: ''
+            })),
+            issues: []
+          }
+        }
         return {
           valid: true,
           destinations: this.scheduledConfirmation
@@ -1647,7 +1693,10 @@ class TestWebSocket {
           data: JSON.stringify({
             id: command.id,
             ok: true,
-            payload: deferredResponse ? payloadOverride : this.backend.response(command)
+            payload:
+              deferredResponse && payloadOverride !== BACKEND_RESPONSE
+                ? payloadOverride
+                : this.backend.response(command)
           })
         })
       } catch (error) {
@@ -2299,6 +2348,75 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().banners.selectedBannerId).toBeNull()
   })
 
+  // Plan 209 S11b (D22): an agent arranges the picture through the Studio's
+  // own saves, landing where the Scene inspector's snaps would.
+  it('moves Buddy and a banner from an agent with the editor snaps, and reads them back', async () => {
+    const { backend, latest } = await mountBannerProvider([testBanner('sponsor', 0)])
+    await waitForObservation(() => latest().core.wsStatus === 'connected')
+    const pushIntent = async (intentId: string, tool: string, args: Record<string, unknown>) => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({
+            event: 'agent.intent',
+            payload: { intentId, agentId: 'agent-1', agentName: 'Claude', tool, args }
+          })
+        })
+        await Promise.resolve()
+      })
+    }
+    const ack = (intentId: string) =>
+      backend.sentCommands
+        .filter((command) => command.method === 'agent.intent.ack')
+        .map((command) => command.params as { intentId: string; ok: boolean; result?: unknown })
+        .find((params) => params.intentId === intentId)
+
+    await pushIntent('move-1', 'move_on_scene', { item: 'buddy', place: 'top-left' })
+    await waitForObservation(() => ack('move-1') !== undefined)
+    expect(ack('move-1')).toMatchObject({ ok: true })
+    expect(backend.overlayLayout.buddy.horizontal).toEqual(
+      overlaySnapRect('buddy', 'horizontal', 'top-left')
+    )
+    expect(backend.overlayLayout.buddy.vertical).toEqual(
+      overlaySnapRect('buddy', 'vertical', 'top-left')
+    )
+
+    const sponsor = testBanner('sponsor', 0)
+    const video = latest().core.captureConfig.video
+    await pushIntent('move-2', 'move_on_scene', { item: 'banner:sponsor', place: 'bottom-left' })
+    await waitForObservation(() => ack('move-2') !== undefined)
+    expect(ack('move-2')).toMatchObject({ ok: true })
+    const update = backend.commands.filter((command) => command.method === 'banners.update').at(-1)
+    expect(update?.params).toEqual({
+      id: 'sponsor',
+      horizontal: bannerSnapRect(
+        sponsor,
+        sponsor.horizontal,
+        'horizontal',
+        video.width / video.height,
+        'bottom-left'
+      ),
+      vertical: bannerSnapRect(sponsor, sponsor.vertical, 'vertical', 9 / 16, 'bottom-left')
+    })
+
+    await pushIntent('set-1', 'set_scene_item', { item: 'buddy', showOnStream: true })
+    await waitForObservation(() => ack('set-1') !== undefined)
+    expect(backend.overlayLayout.buddy.showOnStream).toBe(true)
+
+    await pushIntent('read-1', 'get_scene_layout', {})
+    await waitForObservation(() => ack('read-1') !== undefined)
+    const items = (ack('read-1')?.result as { items: { item: string; rects: unknown }[] }).items
+    expect(items.find((item) => item.item === 'buddy')?.rects).toEqual({
+      horizontal: {
+        x: overlaySnapRect('buddy', 'horizontal', 'top-left').x,
+        y: overlaySnapRect('buddy', 'horizontal', 'top-left').y,
+        width: overlaySnapRect('buddy', 'horizontal', 'top-left').w,
+        height: overlaySnapRect('buddy', 'horizontal', 'top-left').h
+      },
+      vertical: expect.any(Object)
+    })
+    expect(items.map((item) => item.item)).toContain('banner:sponsor')
+  })
+
   it('shows, hides, renames and reorders through the backend without a success toast', async () => {
     const { backend, latest } = await mountBannerProvider([
       testBanner('sponsor', 0),
@@ -2745,10 +2863,12 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.some((command) => command.method === 'scene.source.transform.update')
     )
 
-    // Hold the newer choice at source preflight. Its source/layout identities
-    // and authoritative revision have not changed, so only intent ownership
-    // can reject the older transform acknowledgement at this point.
-    const releaseSelection = backend.deferResponse('devices.list', backend.deviceList)
+    // Hold the newer choice at its layout apply (plan 210 S3: the source
+    // preflight reads the held device list, with no round trip to hold). Its
+    // source/layout identities and authoritative revision have not changed,
+    // so only intent ownership can reject the older transform acknowledgement
+    // at this point.
+    const releaseSelection = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
     let selection!: Promise<boolean>
     act(() => {
       selection = latest().core.applySavedScene(first.id)
@@ -5770,21 +5890,407 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(1)
     expect(latest().captureConfig.layoutFramingMemory.layouts['screen-camera'].cameraZoom).toBe(175)
     await act(async () => latest().applyCameraPreset({ cameraZoom: 160 }))
+    // Plan 210 D3: an edit made while a saved scene is on saves into it.
     await waitForObservation(
       () =>
-        latest().captureConfig.layout.cameraZoom === 160 && latest().layoutSwitchPending === null
+        latest().captureConfig.layout.cameraZoom === 160 &&
+        latest().layoutSwitchPending === null &&
+        latest().savedScenes[0].visual.layout.cameraZoom === 160
     )
-    expect(latest().savedSceneModified).toBe(true)
+    expect(latest().savedSceneModified).toBe(false)
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.cameraZoom).toBe(160)
     expect(
-      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout.cameraZoom
-    ).toBe(150)
+      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes.map(
+        (scene: { visual: { layout: { cameraZoom: number } } }) => scene.visual.layout.cameraZoom
+      )
+    ).toEqual([160, 175])
+    // Undo is one more commit while the scene is on: it keeps the undone look.
+    await act(async () => {
+      expect(await latest().undoLayoutPatch()).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.cameraZoom === 150 &&
+        latest().layoutSwitchPending === null &&
+        latest().savedScenes[0].visual.layout.cameraZoom === 150
+    )
+    expect(latest().activeSavedSceneId).toBe(first.id)
     await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
     await waitForObservation(
       () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
     )
     expect(latest().captureConfig.layout.cameraZoom).toBe(175)
   })
+
+  // Plan 210 D3 on a scene made for an app (S2): the Scene page's Freeform
+  // entry (an arrangement and a placement, no preset) saves into the scene on
+  // stream as it lands, with its app kept and still no audio. The same
+  // placement sent with a layout preset and no `keepScene` is a switch to a
+  // built-in layout and leaves the scene: the two are not the same edit.
+  it('auto-saves a freeform placement into the app scene on stream and keeps its app and silence', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList.devices.push({
+      id: 'window:2',
+      name: 'Presentation',
+      kind: 'window',
+      status: 'available'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    // The mount's own scene load lands first, so the apply below is not
+    // crossed by it (an app scene resolves its window before committing).
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 150 }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.cameraZoom === 150 && latest().layoutSwitchPending === null
+    )
+    const [appScene] = scenesForApps(
+      [
+        {
+          bundleId: 'com.example.presentation',
+          name: 'Presentation',
+          frontWindowId: 'window:2',
+          frontWindowName: 'Presentation'
+        }
+      ],
+      latest().sceneLibraryActions.workingVisual,
+      [],
+      { id: () => 'app-scene-presentation', now: () => '2026-10-29T10:00:00.000Z' }
+    )
+    expect(appScene.audio).toBeUndefined()
+    expect(appScene.visual.layout.arrangementMode).toBe('preset')
+    await act(async () => {
+      expect(latest().sceneLibraryActions.insert([appScene])).toBe(true)
+    })
+    await waitForObservation(() => latest().savedScenes[0]?.id === appScene.id)
+    await act(async () => {
+      expect(await latest().applySavedSceneResult(appScene.id)).toEqual({ ok: true })
+    })
+    await waitForObservation(
+      () =>
+        latest().activeSavedSceneId === appScene.id &&
+        latest().layoutSwitchPending === null &&
+        latest().captureConfig.sources.windowId === 'window:2'
+    )
+    // Putting the scene on stream is a switch, not an edit: nothing written.
+    expect(latest().savedScenes[0].updatedAt).toBe('2026-10-29T10:00:00.000Z')
+
+    const placement = { 'source:base': { x: 0.15, y: 0.15, width: 0.7, height: 0.7 } }
+    await act(async () =>
+      latest().applyCameraPreset({
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: placement
+      })
+    )
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.arrangementMode === 'freeform' &&
+        latest().layoutSwitchPending === null &&
+        latest().savedScenes[0].visual.layout.arrangementMode === 'freeform'
+    )
+    const saved = latest().savedScenes[0]
+    expect(latest().activeSavedSceneId).toBe(appScene.id)
+    // The look is what the scene keeps now, with its own sources
+    // (`savedSceneModified` stays true for every scene made for an app: it
+    // compares audio too, and such a scene keeps none by D4).
+    expect(
+      sameSceneVisual(saved.visual, {
+        ...latest().sceneLibraryActions.workingVisual,
+        sources: saved.visual.sources
+      })
+    ).toBe(true)
+    expect(saved.visual.layout.sourceTransformOverrides).toEqual(placement)
+    expect(saved.visual.sources.app).toEqual(appScene.visual.sources.app)
+    expect(saved.visual.sources.windowId).toBe('window:2')
+    expect(saved.audio).toBeUndefined()
+    expect(saved.updatedAt).not.toBe('2026-10-29T10:00:00.000Z')
+    expect(
+      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout
+        .sourceTransformOverrides
+    ).toEqual(placement)
+
+    // The same placement with a layout preset and no `keepScene` is a switch
+    // to a built-in layout: it leaves the scene and writes nothing into it.
+    await act(async () =>
+      latest().applyCameraPreset({
+        layoutPreset: 'screen-only',
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: { 'source:base': { x: 0.2, y: 0.2, width: 0.6, height: 0.6 } }
+      })
+    )
+    await waitForObservation(
+      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
+    )
+    expect(latest().savedScenes[0].visual.layout.sourceTransformOverrides).toEqual(placement)
+  })
+
+  // Plan 210 D1: quitting and relaunching the app never breaks its scene. At
+  // launch with the app gone, the scene stays on with no screen (never a whole
+  // display under the app's name), Record says why in S2's words, and the
+  // refresh that lists the app's next window applies it.
+  it('holds an app scene at Screen None while its app is gone, and takes its next window', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const app = { bundleId: 'com.example.presentation', name: 'Presentation' }
+    const [appScene] = scenesForApps(
+      [{ ...app, frontWindowId: 'window:2', frontWindowName: 'Presentation' }],
+      {
+        layout: { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' },
+        sources: {},
+        background: null
+      },
+      [],
+      { id: () => 'app-scene-presentation', now: () => '2026-10-29T10:00:00.000Z' }
+    )
+    localStorage.setItem(SCENE_LIBRARY_KEY, JSON.stringify({ version: 1, scenes: [appScene] }))
+    localStorage.setItem(
+      WORKING_SCENE_KEY,
+      JSON.stringify({ version: 1, origin: 'saved', sceneId: appScene.id, visual: appScene.visual })
+    )
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        sources: { windowId: 'window:2', windowName: 'Presentation' }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.core.canSaveScene === true &&
+        observations.at(-1)?.core.captureConfig.sources.captureOff === true
+    )
+    expect(latest().activeSavedSceneId).toBe(appScene.id)
+    expect(latest().captureConfig.sources.screenId).toBeUndefined()
+    expect(latest().captureConfig.sources.windowId).toBeUndefined()
+    expect(latest().savedSceneAppStates[appScene.id]).toBe('not-running')
+    expect(latest().recordBlockedReason).toBe("Presentation isn't open")
+    expect(latest().canStart).toBe(false)
+
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: 'window:2',
+          name: 'Presentation',
+          kind: 'window',
+          status: 'available',
+          width: 1280,
+          height: 720,
+          app: { ...app, pid: 7 }
+        }
+      ]
+    }
+    await act(async () => latest().refreshDevices())
+    await waitForObservation(() => latest().captureConfig.sources.windowId === 'window:2')
+    expect(latest().activeSavedSceneId).toBe(appScene.id)
+    expect(latest().captureConfig.sources.captureOff).toBe(false)
+    expect(latest().captureConfig.sources.screenId).toBeUndefined()
+    expect(latest().savedSceneAppStates[appScene.id]).toBe('ready')
+    expect(latest().recordBlockedReason).not.toBe("Presentation isn't open")
+  })
+
+  // Owner, 2026-10-27: a saved scene keeps its screen, microphone and System
+  // audio, and choosing it brings all three back, idle and while recording.
+  it('saves the screen, microphone and System audio with a scene and restores them', async () => {
+    const screen1 = 'screen:dxgi:0000000000000001:1'
+    const screen2 = 'screen:dxgi:0000000000000001:2'
+    const backend = new StudioBackend()
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: screen2,
+          name: 'Display 2',
+          kind: 'screen',
+          status: 'available',
+          width: 1920,
+          height: 1080
+        },
+        { id: 'mic:2', name: 'Microphone 2', kind: 'microphone', status: 'available' }
+      ]
+    }
+    backend.reportsActiveSceneRevision = true
+    const respond = backend.response.bind(backend)
+    backend.response = (command) => {
+      const result = respond(command)
+      if (command.method === 'scene.layout.apply_live') {
+        // Like the real backend: a live scene commit moves the session's
+        // source revision on, so a switch built before it is refused.
+        backend.confirmedSourceRevision += 1
+        queueMicrotask(() =>
+          backend.sockets[0]?.onmessage?.({
+            data: JSON.stringify({
+              event: 'session.sources.changed',
+              payload: backend.sourceSnapshot(backend.recordingSessionId ?? '')
+            })
+          })
+        )
+      }
+      return result
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest().canSaveScene &&
+        latest().captureConfig.sources.screenId === screen1 &&
+        latest().captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      expect(latest().saveScene('Desk')).toBe(true)
+    })
+    const desk = latest().savedScenes[0]
+    expect(desk.visual.sources.screenId).toBe(screen1)
+    expect(desk.audio).toStrictEqual({
+      microphoneId: 'mic:1',
+      microphoneName: 'Microphone 1',
+      microphoneOff: false,
+      systemAudioEnabled: false
+    })
+    expect(JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].audio).toMatchObject({
+      microphoneId: 'mic:1',
+      systemAudioEnabled: false
+    })
+
+    const devices = latest().deviceList.devices
+    const pickOthers = async (): Promise<void> => {
+      await act(async () =>
+        latest().switchSourceDeviceLive(
+          'microphone',
+          buildMicrophoneSources(
+            latest().captureConfig.sources,
+            devices.filter((device) => device.kind === 'microphone'),
+            'mic:2'
+          )
+        )
+      )
+      await act(async () =>
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, systemAudioEnabled: true }
+        }))
+      )
+    }
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'capture',
+        buildCaptureSources(
+          latest().captureConfig.sources,
+          devices.filter((device) => device.kind === 'screen'),
+          screen2
+        )
+      )
+    )
+    await pickOthers()
+    await waitForObservation(
+      () =>
+        latest().captureConfig.sources.screenId === screen2 &&
+        latest().captureConfig.sources.microphoneId === 'mic:2' &&
+        latest().captureConfig.audio.systemAudioEnabled
+    )
+    // Plan 210 D3: another screen leaves the saved scene instead of
+    // rewriting it, and the scene keeps its own screen and audio.
+    expect(latest().activeSavedSceneId).toBeNull()
+    expect(latest().savedScenes[0].visual.sources.screenId).toBe(screen1)
+    expect(latest().savedScenes[0].audio).toStrictEqual(desk.audio)
+
+    const idleFrom = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(desk.id)).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        latest().layoutSwitchPending === null &&
+        latest().captureConfig.sources.microphoneId === 'mic:1' &&
+        !latest().captureConfig.audio.systemAudioEnabled
+    )
+    expect(latest().captureConfig.sources.screenId).toBe(screen1)
+    expect(latest().savedSceneModified).toBe(false)
+    const idleSent = backend.sentCommands.slice(idleFrom)
+    expect(
+      idleSent.find((command) => command.method.startsWith('scene.layout.apply'))?.params
+    ).toMatchObject({ sources: { screenId: screen1, microphoneId: 'mic:1' } })
+    expect(idleSent.some((command) => command.method === 'session.source.switch')).toBe(false)
+
+    // While recording, the session switches to the scene's microphone.
+    await act(async () => latest().startSession())
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.recording.recording.state === 'recording' &&
+        latest().sourceSelectionState.snapshot !== null
+    )
+    await pickOthers()
+    await waitForObservation(
+      () =>
+        backend.confirmedSources.microphoneId === 'mic:2' &&
+        latest().captureConfig.sources.microphoneId === 'mic:2' &&
+        latest().captureConfig.audio.systemAudioEnabled &&
+        latest().sourceSelectionState.pending === null
+    )
+    const liveFrom = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(desk.id)).toBe(true)
+    })
+    await waitForObservation(
+      () =>
+        backend.confirmedSources.microphoneId === 'mic:1' &&
+        latest().captureConfig.sources.microphoneId === 'mic:1' &&
+        latest().layoutSwitchPending === null
+    )
+    expect(latest().captureConfig.audio.systemAudioEnabled).toBe(false)
+    const switches = backend.sentCommands
+      .slice(liveFrom)
+      .filter((command) => command.method === 'session.source.switch')
+    expect(switches).toHaveLength(1)
+    expect(switches[0].params).toMatchObject({ kind: 'microphone', deviceId: 'mic:1' })
+    expect(latest().savedSceneModified).toBe(false)
+  }, 15_000)
 
   it('refreshes only the device list from Sources, and keeps it when other reads would fail (C-32)', async () => {
     const backend = new StudioBackend()
@@ -5954,10 +6460,15 @@ describe('real StudioProvider lifecycle', () => {
       expect(await latest().applySavedScene(saved.id)).toBe(true)
     })
     await act(async () => latest().applyCameraPreset({ cameraZoom: 135 }))
+    // Plan 210 D3: the edit saves into the scene on stream, Camera Off kept.
     await waitForObservation(
-      () => latest().captureConfig.layout.cameraZoom === 135 && latest().canSaveScene
+      () =>
+        latest().captureConfig.layout.cameraZoom === 135 &&
+        latest().canSaveScene &&
+        latest().savedScenes[0].visual.layout.cameraZoom === 135
     )
-    expect(latest().savedSceneModified).toBe(true)
+    expect(latest().savedScenes[0].visual.sources.cameraOff).toBe(true)
+    expect(latest().savedSceneModified).toBe(false)
     await act(async () => {
       expect(latest().saveScene('Camera Off', saved.id)).toBe(true)
     })
@@ -6009,7 +6520,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().savedSceneModified).toBe(false)
   }, 15_000)
 
-  it('persists acknowledged camera visibility through Modified, Update, Save-as, apply and remount', async () => {
+  it('persists acknowledged camera visibility through auto-save, Update, Save-as, apply and remount', async () => {
     const backend = new StudioBackend()
     backend.deviceList.devices.push({
       id: 'camera:1',
@@ -6045,7 +6556,11 @@ describe('real StudioProvider lifecycle', () => {
     const cameraId = latest().scene!.sources.find((source) => source.kind === 'camera')!.id
     await act(async () => latest().setSceneSourceVisible(cameraId, false))
     expect(latest().scene!.sources.find((source) => source.id === cameraId)!.visible).toBe(false)
-    expect(latest().savedSceneModified).toBe(true)
+    // Plan 210 D3: the scene on stream keeps the edit; there is no Modified.
+    await waitForObservation(
+      () => latest().savedScenes[0].visual.layout.sourceVisibility?.camera === false
+    )
+    expect(latest().savedSceneModified).toBe(false)
     expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
     expect(latest().captureConfig.sources.cameraOff).not.toBe(true)
     expect(latest().canSaveScene).toBe(true)
@@ -6053,6 +6568,7 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().saveScene('Hidden', visible.id)).toBe(true)
     })
     expect(latest().savedSceneModified).toBe(false)
+    expect(latest().savedScenes[0].name).toBe('Hidden')
     expect(latest().savedScenes[0].visual.layout).toHaveProperty('sourceVisibility', {
       camera: false,
       capture: true
@@ -6060,9 +6576,14 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       expect(latest().saveScene('Hidden copy')).toBe(true)
     })
-    const hidden = latest().savedScenes[1]
+    const hidden = latest().savedScenes[0]
     await act(async () => latest().setSceneSourceVisible(cameraId, true))
-    expect(latest().savedSceneModified).toBe(true)
+    // The copy is on stream: it keeps the camera; Hidden doesn't change.
+    await waitForObservation(
+      () => latest().savedScenes[1].visual.layout.sourceVisibility?.camera === true
+    )
+    expect(latest().savedScenes[0].visual.layout.sourceVisibility?.camera).toBe(false)
+    expect(latest().savedSceneModified).toBe(false)
     backend.layoutApplyFailure = 'definite'
     await act(async () => {
       expect(await latest().applySavedScene(hidden.id)).toBe(false)
@@ -6122,6 +6643,14 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().saveScene('Visible')).toBe(true)
     })
     const visible = latest().savedScenes[0]
+    // Plan 210 D3: leave Visible first, so hiding the camera makes a second
+    // scene instead of saving into Visible.
+    await act(async () =>
+      latest().applyCameraPreset({ layoutPreset: latest().captureConfig.layout.layoutPreset })
+    )
+    await waitForObservation(
+      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
+    )
     const cameraId = latest().scene!.sources.find((source) => source.kind === 'camera')!.id
     await act(async () => latest().setSceneSourceVisible(cameraId, false))
     await act(async () => {
@@ -6320,7 +6849,11 @@ describe('real StudioProvider lifecycle', () => {
           await pending
         })
         if (outcome === 'acknowledged' || outcome.startsWith('event-')) {
-          expect(latest().savedSceneModified).toBe(true)
+          // Plan 210 D3: the acknowledged edit saves into the scene on stream.
+          await waitForObservation(
+            () => latest().savedScenes[0].visual.layout.sourceVisibility?.camera === false
+          )
+          expect(latest().savedSceneModified).toBe(false)
           expect(
             JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
               .camera
@@ -6328,6 +6861,7 @@ describe('real StudioProvider lifecycle', () => {
           expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(false)
         } else {
           expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(true)
+          expect(latest().savedScenes[0].visual.layout.sourceVisibility?.camera).not.toBe(false)
           expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(
             true
           )
@@ -6544,6 +7078,13 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().saveScene('A')).toBe(true)
     })
     const first = latest().savedScenes[0]
+    // Plan 210 D3: leave A, so the edits below make B instead of saving into A.
+    await act(async () =>
+      latest().applyCameraPreset({ layoutPreset: latest().captureConfig.layout.layoutPreset })
+    )
+    await waitForObservation(
+      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
+    )
     await act(async () => latest().applyCameraPreset({ cameraZoom: 175 }))
     await waitForObservation(
       () => latest().captureConfig.layout.cameraZoom === 175 && latest().canSaveScene
@@ -6556,7 +7097,9 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().saveScene('B')).toBe(true)
     })
     const second = latest().savedScenes[1]
-    const release = backend.deferResponse('devices.list', backend.deviceList)
+    // Hold the stale pick at its layout apply (plan 210 S3: the source
+    // preflight reads the held device list, with no round trip to hold).
+    const release = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
     let stale: Promise<boolean> | undefined
     await act(async () => {
       stale = latest().applySavedScene(first.id)
@@ -6846,13 +7389,21 @@ describe('real StudioProvider lifecycle', () => {
     })
     const saved = latest().savedScenes[0]
     await act(async () => {
-      emit('onGlobalShortcut', 'layout:screen-camera')
-      await latest().applySavedScene(saved.id)
+      latest().setSettings((current) => ({
+        ...current,
+        globalShortcuts: { scenes: { [saved.id]: 'Control+F13' } }
+      }))
+      latest().renameSavedScene(saved.id, 'Renamed shortcut target')
+      emit('onGlobalShortcut', 'layout:screen-only')
     })
+    await waitForObservation(() => latest().activeSavedSceneId === null && latest().canSaveScene)
+    expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBe('Control+F13')
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 120))
+      emit('onGlobalShortcut', `scene:${saved.id}`)
     })
-    expect(latest().activeSavedSceneId).toBe(saved.id)
+    await waitForObservation(
+      () => latest().activeSavedSceneId === saved.id && latest().canSaveScene
+    )
     let start = backend.sentCommands.length
     await act(async () => {
       emit('onGlobalShortcut', 'layout-next')
@@ -6860,7 +7411,7 @@ describe('real StudioProvider lifecycle', () => {
       emit('onGlobalShortcut', 'layout-next')
     })
     await waitForObservation(
-      () => latest().captureConfig.layout.layoutPreset === 'side-by-side' && latest().canSaveScene
+      () => latest().captureConfig.layout.layoutPreset === 'camera-only' && latest().canSaveScene
     )
     expect(
       backend.sentCommands
@@ -6922,9 +7473,13 @@ describe('real StudioProvider lifecycle', () => {
         .slice(start)
         .filter((entry) => entry.method.startsWith('scene.layout.apply'))
     ).toHaveLength(0)
+    await act(async () => {
+      expect(latest().deleteSavedScene(saved.id)).toBe(true)
+    })
+    expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBeUndefined()
   }, 15000)
 
-  it('restores a modified saved checkpoint and saveability across a renderer remount with synthetic preview mapping', async () => {
+  it('restores an auto-saved checkpoint and saveability across a renderer remount with synthetic preview mapping', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -6985,11 +7540,73 @@ describe('real StudioProvider lifecycle', () => {
     )
     expect(latest().captureConfig.layout.cameraZoom).toBe(145)
     expect(latest().activeSavedSceneId).toBe(saved.id)
-    expect(latest().savedSceneModified).toBe(true)
+    // Plan 210 D3: the edit saved into the scene before the remount.
+    expect(latest().savedScenes[0].visual.layout.cameraZoom).toBe(145)
+    expect(latest().savedSceneModified).toBe(false)
     expect(latest().canSaveScene).toBe(true)
     await act(async () => {
       expect(latest().saveScene('After restart')).toBe(true)
     })
+  })
+
+  // Plan 210 STOP condition: a saved scene is never rewritten without the
+  // streamer's action. A look that drifted before auto-save existed
+  // (Modified, never Updated) stays out of the scene at launch.
+  it('never writes a drifted working look into its saved scene at launch (plan 210 D3)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), previewSmokeMode: true })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest().canSaveScene)
+    await act(async () => {
+      expect(latest().saveScene('Launch')).toBe(true)
+    })
+    const saved = latest().savedScenes[0]
+    await act(async () => root!.unmount())
+    observations.length = 0
+    const working = JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!)
+    localStorage.setItem(
+      WORKING_SCENE_KEY,
+      JSON.stringify({
+        ...working,
+        visual: { ...working.visual, layout: { ...working.visual.layout, cameraZoom: 160 } }
+      })
+    )
+    const start = backend.sentCommands.length
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        backend.sentCommands
+          .slice(start)
+          .some((command) => command.method === 'scene.load_from_capture_config') &&
+        latest().canSaveScene
+    )
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    expect(latest().activeSavedSceneId).toBe(saved.id)
+    expect(latest().captureConfig.layout.cameraZoom).toBe(160)
+    expect(latest().savedScenes[0].visual.layout.cameraZoom).toBe(saved.visual.layout.cameraZoom)
+    expect(
+      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout.cameraZoom
+    ).toBe(saved.visual.layout.cameraZoom)
+    // The streamer's next edit is theirs: it saves.
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 170 }))
+    await waitForObservation(() => latest().savedScenes[0].visual.layout.cameraZoom === 170)
   })
 
   it('keeps named metadata and the committed background when native presentation proof times out', async () => {
@@ -7029,6 +7646,13 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().saveScene('Native A')).toBe(true)
     })
     const saved = latest().savedScenes[0]
+    // Plan 210 D3: leave Native A first, so the new background doesn't save into it.
+    await act(async () =>
+      latest().applyCameraPreset({ layoutPreset: latest().captureConfig.layout.layoutPreset })
+    )
+    await waitForObservation(
+      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
+    )
     await act(async () => latest().applyBackgroundSlot('bg-02'))
     await waitForObservation(
       () => latest().scene?.background?.assetId === 'builtin-bg-02' && latest().canSaveScene
@@ -7283,6 +7907,8 @@ describe('real StudioProvider lifecycle', () => {
     )
     await act(async () => latest()!.replay.setEnabled(true))
     await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+    expect(latest()?.core.audioBusActive).toBe(true)
+    expect(latest()?.core.isSessionActive).toBe(false)
     expect(latest()?.core.sourceSwitchReason('capture')).toBeNull()
     expect(latest()?.core.sourceSwitchReason('camera')).toBeNull()
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
@@ -7316,6 +7942,8 @@ describe('real StudioProvider lifecycle', () => {
       )
     })
     expect(latest()?.recording.recording.replayOnly).toBe(true)
+    expect(latest()?.core.audioBusActive).toBe(true)
+    expect(latest()?.core.isSessionActive).toBe(false)
     expect(latest()?.core.sourceSwitchReason('microphone')).toBeNull()
   }, 15_000)
 
@@ -8636,7 +9264,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'linux',
       getMediaAccessStatus: async () => ({
         camera: 'not-applicable',
-        microphone: 'not-applicable'
+        microphone: 'not-applicable',
+        screen: 'not-applicable'
       })
     })
     const testDom = installProviderTestEnvironment(api)
@@ -8700,7 +9329,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions
@@ -8763,7 +9393,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -9436,7 +10067,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'not-determined',
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess: vi.fn(async () => ({ granted: false, restarted: false })),
       openSystemPermissions: vi.fn(async () => undefined)
@@ -9940,18 +10572,18 @@ describe('real StudioProvider lifecycle', () => {
     const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
       await mountBuddyLiveProvider('1')
 
-    // Buddy on without listening (a mode change the window sent no `listen` for).
+    // Buddy on without listening (a talk change the window sent no `listen` for).
     await act(async () => {
       emitApi('onCohostEnableRequest', {
         requestId: 'mode-1',
         enabled: true,
-        autoChat: { mode: 'suggest' }
+        autoChat: { talk: 'suggest' }
       })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
     expect(settingsWrites().at(-1)).toEqual({
       enabled: true,
-      autoChat: expect.objectContaining({ mode: 'suggest' })
+      autoChat: expect.objectContaining({ talk: 'suggest' })
     })
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
 
@@ -9964,9 +10596,12 @@ describe('real StudioProvider lifecycle', () => {
       })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
+    // Plan 211 D3: `talk` is the mode; the legacy `mode` rides along as
+    // stored and the backend re-projects it.
     expect(settingsWrites().at(-1)).toEqual({
       autoChat: {
-        mode: 'suggest',
+        talk: 'suggest',
+        mode: 'off',
         greetings: { enabled: true, templates: [] },
         answers: { enabled: false, cooldownSeconds: 20 },
         banter: { enabled: false, cooldownSeconds: 240 }
@@ -10328,7 +10963,7 @@ describe('real StudioProvider lifecycle', () => {
         if (!statusReadAvailable) {
           throw new Error('TCC status read failed')
         }
-        return { camera: 'not-determined', microphone: 'granted' }
+        return { camera: 'not-determined', microphone: 'granted', screen: 'granted' }
       },
       requestMediaAccess,
       openSystemPermissions
@@ -10393,7 +11028,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'denied' }),
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'denied',
+        screen: 'granted'
+      }),
       requestMediaAccess,
       openSystemPermissions
     })
@@ -10435,9 +11074,121 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(latest()?.audio.audioMeter).toBeNull()
+    expect(latest()?.core.systemAccessContext.pendingPane).toBe('microphone')
     expect(openSystemPermissions).toHaveBeenCalledWith('microphone')
     expect(requestMediaAccess).not.toHaveBeenCalled()
   })
+
+  it.each(['available', 'permission-required'] as const)(
+    'keeps screen grants checking until a replacement publishes %s devices',
+    async (replacementStatus) => {
+      const initial = new StudioBackend()
+      const screenDevices = (status: Device['status']): DeviceList => ({
+        devices: [{ id: 'screen:screencapturekit:1', kind: 'screen', name: 'Display', status }],
+        warnings: []
+      })
+      initial.deviceList = screenDevices('permission-required')
+      TestWebSocket.backend = initial
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      let screen: 'not-determined' | 'granted' = 'not-determined'
+      let emit: ((name: string, value: unknown) => void) | undefined
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => [],
+        platform: 'darwin',
+        backendConnection: { host: '127.0.0.1', port: 9988, pid: 401, token: 'initial' },
+        getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted', screen }),
+        registerEmitter: (nextEmit) => {
+          emit = nextEmit
+        }
+      })
+      api.requestScreenAccess = vi.fn(async () => {
+        screen = 'granted'
+        return {
+          granted: true,
+          status: screen,
+          restarted: false,
+          staleBackend: { port: 9988, pid: 401 }
+        }
+      })
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = () => observations.at(-1)!
+      const access = () =>
+        systemAccessRows({
+          ...latest().core.systemAccessContext,
+          deviceList: latest().core.deviceList,
+          audioMeter: latest().audio.audioMeter,
+          mediaAccess: latest().core.mediaAccess,
+          platform: 'darwin'
+        })[0]
+      await act(async () => {
+        root = createRoot(testDom.container)
+        root.render(
+          createElement(
+            BackgroundAssetsProvider,
+            null,
+            createElement(
+              StudioProvider,
+              null,
+              createElement(Probe, {
+                observe: (value) => {
+                  observations.push(value)
+                }
+              })
+            )
+          )
+        )
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          latest()?.core.mediaAccess?.screen === 'not-determined'
+      )
+      expect(access().state).toBe('first-use')
+      await act(async () => {
+        await latest().core.handleSystemPermission('screen-recording')
+      })
+      expect(latest().core.systemAccessContext.pendingPane).toBeNull()
+      expect(access()).toMatchObject({ checking: true })
+      expect(access().state).not.toBe('not-granted')
+      expect(access().state).not.toBe('needs-relaunch')
+
+      // A new renderer client on the retired process is not replacement proof.
+      act(() =>
+        emit?.('backend:connection', { host: '127.0.0.1', port: 9988, pid: 401, token: 'retired' })
+      )
+      await waitForObservation(
+        () => initial.commands.filter((command) => command.method === 'devices.list').length > 1
+      )
+      expect(access().checking).toBe(true)
+
+      const replacement = new StudioBackend()
+      replacement.deviceList = screenDevices(replacementStatus)
+      const releaseDevices = replacement.deferResponse('devices.list', replacement.deviceList)
+      TestWebSocket.backend = replacement
+      act(() =>
+        emit?.('backend:connection', {
+          host: '127.0.0.1',
+          port: 9991,
+          pid: 402,
+          token: 'replacement'
+        })
+      )
+      await waitForObservation(() =>
+        replacement.sentCommands.some((command) => command.method === 'devices.list')
+      )
+      expect(access().checking).toBe(true)
+      await act(async () => releaseDevices())
+      await waitForObservation(() => !access().checking)
+      expect(access().state).toBe(replacementStatus === 'available' ? 'granted' : 'needs-relaunch')
+      expect(latest().core.systemAccessContext.captureRestarting).toBe(false)
+      expect(latest().core.systemAccessContext.screenGrantStale).toBe(false)
+    }
+  )
 
   it('refreshes exact permission and devices through the reconnected backend after a grant', async () => {
     const initialBackend = new StudioBackend()
@@ -10468,7 +11219,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       openSystemPermissions,
@@ -10568,7 +11320,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 101 },
       getMediaAccessStatus: async () => ({
         camera: cameraStatus,
-        microphone: 'granted'
+        microphone: 'granted',
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10694,7 +11447,8 @@ describe('real StudioProvider lifecycle', () => {
       platform: 'darwin',
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -10798,7 +11552,8 @@ describe('real StudioProvider lifecycle', () => {
       backendConnection: { host: '127.0.0.1', port: 9988, token: 'initial', pid: 401 },
       getMediaAccessStatus: async () => ({
         camera: 'granted',
-        microphone: microphoneStatus
+        microphone: microphoneStatus,
+        screen: 'granted'
       }),
       requestMediaAccess,
       registerEmitter: (nextEmit) => {
@@ -12455,6 +13210,141 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.goLiveExcludedTargetIds.length === 0
     )
     expect(savedX()?.enabled).toBe(true)
+  })
+
+  // Plan 209 S10 (D13): an agent's go_live runs the dialog's own preflight,
+  // gate and confirm with no dialog, and refuses what the dialog would hold.
+  it('goes live from an agent without the Go Live dialog, through its own checks', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    backend.xPrepareFailuresRemaining = 1
+    backend.confirmationRowsFromStreaming = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      latest()!.core.setCaptureConfig(youtubeAndXOauthStreamCaptureConfig())
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+        latest()?.core.startBlockedReason === null
+    )
+    const pushIntent = async (intentId: string, args: Record<string, unknown>): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({
+            event: 'agent.intent',
+            payload: { intentId, agentId: 'agent-1', agentName: 'Claude', tool: 'go_live', args }
+          })
+        })
+        await Promise.resolve()
+      })
+    }
+    const ack = (intentId: string) =>
+      backend.sentCommands
+        .filter((command) => command.method === 'agent.intent.ack')
+        .map(
+          (command) =>
+            command.params as { intentId: string; ok: boolean; message?: string; result?: unknown }
+        )
+        .find((params) => params.intentId === intentId)
+    const starts = () =>
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+
+    const sentTargets = (index: number): string[] =>
+      (starts()[index]!.params as { streaming: StreamingSettings }).streaming.targets
+        .filter((target) => target.enabled)
+        .map((target) => target.id)
+    const stop = async (): Promise<void> => {
+      await act(async () => {
+        await latest()!.core.stopSession()
+      })
+      await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    }
+
+    // Naming YouTube leaves X out of this livestream only, like the dialog's
+    // "Go live without X": X is never prepared and stays on. The title is
+    // the dialog's Title field, saved before the check.
+    await pushIntent('go-1', { destinations: ['youtube'], title: 'Building an MCP live' })
+    await waitForObservation(() => ack('go-1') !== undefined)
+    expect(ack('go-1')).toMatchObject({
+      ok: true,
+      message: "You're live on YouTube.",
+      result: { live: true, destinations: [{ id: 'youtube', platform: 'youtube' }] }
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(starts()).toHaveLength(1)
+    expect(sentTargets(0)).toEqual(['youtube'])
+    expect(
+      (starts()[0]!.params as { streaming: StreamingSettings }).streaming.enabledTargetIds
+    ).toEqual(['youtube'])
+    expect(backend.xPrepareCount).toBe(0)
+    expect(
+      latest()!.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.enabled
+    ).toBe(true)
+    const savedDraft = backend.sentCommands
+      .filter((command) => command.method === 'streamTargets.metadata.update')
+      .at(-1)?.params as { title?: string } | undefined
+    expect(savedDraft?.title).toBe('Building an MCP live')
+
+    // Already live: the same refusal a deck reads.
+    await pushIntent('go-2', {})
+    await waitForObservation(() => ack('go-2') !== undefined)
+    expect(ack('go-2')).toMatchObject({ ok: false, message: "You're already recording or live." })
+    await stop()
+
+    // X fails its platform setup: without allowPartial the agent is told the
+    // dialog's words and nothing starts...
+    backend.xPrepareFailuresRemaining = 1
+    await pushIntent('go-3', {})
+    await waitForObservation(() => ack('go-3') !== undefined)
+    expect(ack('go-3')).toMatchObject({ ok: false })
+    expect(ack('go-3')?.message).toContain("Some destinations couldn't be set up")
+    expect(ack('go-3')?.message).toContain('Ready: YouTube')
+    expect(ack('go-3')?.message).toContain('allowPartial')
+    expect(starts()).toHaveLength(1)
+
+    // ...and with allowPartial it goes live on the ready one, as "Go live on
+    // YouTube" does.
+    await act(async () => {
+      latest()!.core.setCaptureConfig(youtubeAndXOauthStreamCaptureConfig())
+    })
+    await waitForObservation(() => latest()?.core.startBlockedReason === null)
+    backend.xPrepareFailuresRemaining = 1
+    await pushIntent('go-4', { allowPartial: true })
+    await waitForObservation(() => ack('go-4') !== undefined)
+    expect(ack('go-4')).toMatchObject({
+      ok: true,
+      result: { destinations: [{ id: 'youtube' }] }
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(starts()).toHaveLength(2)
+    expect(sentTargets(1)).toEqual(['youtube'])
+    // Never once through the dialog.
+    expect(observations.some((value) => value.core.goLiveConfirmationOpen)).toBe(false)
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
   })
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {
@@ -15084,6 +15974,10 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => []
     })
+    // A packaged launch: before plan 212 D1 only packaged builds measured on
+    // their own, 8 s after launch.
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), isPackaged: true })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
     if (chosen) {
@@ -15112,7 +16006,11 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.core.performanceCheck?.result !== undefined)
     await waitForObservation(() => latest()?.core.captureConfig.video.height === expectedHeight)
-    // Dev/test builds are not packaged: the provider never starts a check itself.
+    // Plan 212 D1: the provider never starts a check itself, packaged or not.
+    // Only first-run setup and Recording → Output do.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
     expect(backend.commands.some((command) => command.method === 'performance.check.run')).toBe(
       false
     )
@@ -15420,7 +16318,11 @@ describe('real StudioProvider lifecycle', () => {
       acknowledgeProvider: async () => true,
       pendingProvider: async () => [],
       platform: 'darwin',
-      getMediaAccessStatus: async () => ({ camera: 'granted', microphone: 'granted' })
+      getMediaAccessStatus: async () => ({
+        camera: 'granted',
+        microphone: 'granted',
+        screen: 'granted'
+      })
     })
     const testDom = installProviderTestEnvironment(api)
     const audio = installVisualMicAudioEnvironment()
@@ -15662,6 +16564,7 @@ function createVideorcApi(options: {
         gpuDevices: [],
         hardwareAccelerationDisabled: false,
         isPackaged: false,
+        firstRunSuppressed: false,
         permissionTargetName: 'Videorc',
         permissionTargetPath: 'C:\\Videorc.exe',
         capturePermissionTargetName: 'Videorc',
@@ -15696,7 +16599,7 @@ function createVideorcApi(options: {
       getCaptionsWindowState: async () => idleCaptions,
       getMediaAccessStatus:
         options.getMediaAccessStatus ??
-        (async () => ({ camera: 'granted', microphone: 'granted' })),
+        (async () => ({ camera: 'granted', microphone: 'granted', screen: 'granted' })),
       requestMediaAccess: options.requestMediaAccess,
       openSystemPermissions: options.openSystemPermissions,
       getViewerSample: async () => null,
@@ -15795,7 +16698,8 @@ function installProviderTestEnvironment(api: VideorcApi): {
     nodeType: 9,
     activeElement: null,
     defaultView: fakeWindow,
-    documentElement: {},
+    // Every element has a dataset: lib/platform reads data-platform from it.
+    documentElement: { dataset: {} },
     body: {},
     hidden: false,
     visibilityState: 'visible',

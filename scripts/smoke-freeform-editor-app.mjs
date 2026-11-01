@@ -109,7 +109,7 @@ const report = {
     trackingDefinition:
       "matchMs: last trusted mousemove dispatch to the first compositor.status read whose editorDraft equals the DOM ghost within 1e-3 (an upper bound: it includes the smoke's own frame waits and RPC round trips).",
     cadenceDefinition:
-      'compositor.status.framesRendered read ~every 15 ms from the smoke socket during the 20 move + 20 resize matrix, each reading stamped with its request and reply times. Gate: the longest stall between two counter advances, taken as the PROVEN lower bound from the readings around it, must stay within 2 frames at targetFps; the upper bound, slow status round trips (> 30 ms, a backend hitch), and the worst 1 s window (steady under-rate, not gated) are recorded. The presenter counters and present metrics come from native-preview-surface-status and are recorded, not gated. VIDEORC_FREEFORM_LIVE_CONTROL=1 runs the same matrix with the preview floating (no drafts) for an A/B against the same machine.',
+      'compositor.status.framesRendered read ~every 15 ms from the smoke socket during the 20 move + 20 resize matrix, each reading stamped with its request and reply times. Gate: the longest stall between two counter advances, taken as the PROVEN lower bound from the readings around it, must stay within 2 frames at targetFps; the upper bound, slow status round trips (> 30 ms, a backend hitch), and the worst 1 s window (steady under-rate, not gated) are recorded. The presenter counters and present metrics come from native-preview-surface-status and are recorded, not gated. VIDEORC_FREEFORM_LIVE_CONTROL=1 runs the same matrix with the preview floating (gesture drafts still reach it, nothing is held between gestures) for an A/B of the docked surface against the same machine.',
     cadence: {},
     idleHolds: [],
     ttl: null,
@@ -119,7 +119,8 @@ const report = {
   failures: []
 }
 // Control runs keep the preview floating: same gestures and commits, no live
-// surface, so no drafts; the cadence samplers still run for the A/B.
+// surface and no idle hold (the floating preview still follows each drag's
+// drafts, not gated here); the cadence samplers still run for the A/B.
 const liveSupported = report.live.supported && !report.live.control
 const cadenceSupported = report.live.supported
 let devtoolsUrl
@@ -159,7 +160,7 @@ try {
   await command('enable-synthetic-source', { settleMs: 100 })
   await command('select-camera-device', { settleMs: 100 })
   await cdp.eval(
-    `(async () => {const deadline=performance.now()+5000;while(document.querySelector('[data-slot="dialog-overlay"][data-state="open"]')){document.querySelectorAll('[data-slot="dialog-close"]').forEach(button=>button.click());document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(performance.now()>deadline)throw Error('Could not dismiss launch dialog');await new Promise(resolve=>setTimeout(resolve,100))}})()`
+    `(async () => {const deadline=performance.now()+5000;while(document.querySelector('[data-slot="dialog-overlay"][data-open]')){document.querySelectorAll('[data-slot="dialog-close"]').forEach(button=>button.click());document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(performance.now()>deadline)throw Error('Could not dismiss launch dialog');await new Promise(resolve=>setTimeout(resolve,100))}})()`
   )
   await cdp.eval(`(${installObserver.toString()})()`)
   report.display = await cdp.eval(
@@ -810,7 +811,7 @@ async function gatePreviewCadence(orientation, sampled) {
     JSON.stringify({ ...summary, samples: sampled }, null, 2)
   )
   console.log(
-    `Freeform: ${orientation} ${report.live.control ? 'CONTROL (floating, no drafts)' : 'live'} preview cadence ${fps} fps target; compositor longest stall proven ${compositor.provenStallMs?.toFixed(0)}ms = ${compositor.provenStallFrames?.toFixed(2)} frames (at most ${compositor.boundStallMs?.toFixed(0)}ms; budget ${compositor.budgetMs?.toFixed(0)}ms), slow status rtts ${compositor.slowRtts} (max ${compositor.maxRttMs?.toFixed(0)}ms), worst 1 s window ${compositor.worstWindowMissingFrames?.toFixed(2)} frames behind (min ${compositor.minWindowFps?.toFixed(1)} fps), mean ${compositor.meanFps?.toFixed(2)} fps over ${compositor.samples} readings; presenter longest stall proven ${surface.provenStallMs?.toFixed(0)}ms / at most ${surface.boundStallMs?.toFixed(0)}ms (mean ${surface.meanFps?.toFixed(2)} fps); present p95 ${sampled.presentMetrics.intervalP95Ms}ms`
+    `Freeform: ${orientation} ${report.live.control ? 'CONTROL (floating, no hold)' : 'live'} preview cadence ${fps} fps target; compositor longest stall proven ${compositor.provenStallMs?.toFixed(0)}ms = ${compositor.provenStallFrames?.toFixed(2)} frames (at most ${compositor.boundStallMs?.toFixed(0)}ms; budget ${compositor.budgetMs?.toFixed(0)}ms), slow status rtts ${compositor.slowRtts} (max ${compositor.maxRttMs?.toFixed(0)}ms), worst 1 s window ${compositor.worstWindowMissingFrames?.toFixed(2)} frames behind (min ${compositor.minWindowFps?.toFixed(1)} fps), mean ${compositor.meanFps?.toFixed(2)} fps over ${compositor.samples} readings; presenter longest stall proven ${surface.provenStallMs?.toFixed(0)}ms / at most ${surface.boundStallMs?.toFixed(0)}ms (mean ${surface.meanFps?.toFixed(2)} fps); present p95 ${sampled.presentMetrics.intervalP95Ms}ms`
   )
   if (!compositor.ok)
     report.failures.push(`live ${orientation} cadence: ${compositor.failures.join('; ')}`)

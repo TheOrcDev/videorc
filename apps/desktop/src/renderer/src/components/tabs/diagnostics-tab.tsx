@@ -11,7 +11,6 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
-  useStudioAudio,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
@@ -49,7 +48,8 @@ import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/
 import { unknownDeviceWarnings } from '@/lib/source-status'
 import { previewSourceStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { mediaAccessStatusForPane, systemAccessAction } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 
 // Health (plan 174 S3.18, I-4, I-25, V-7, D9): the page answers "is anything
@@ -79,7 +79,6 @@ export function DiagnosticsTab(): ReactElement {
     runtimeInfo,
     health
   } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
   const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, recordLatency, streamHealth } =
@@ -96,15 +95,15 @@ export function DiagnosticsTab(): ReactElement {
     }
   }, [logSessionId, loadSessionDetails])
 
-  const accessRows = systemAccessRows({ deviceList, audioMeter, platform, mediaAccess })
+  const accessRows = useSystemAccessRows()
   const deviceWarnings = unknownDeviceWarnings(deviceList.warnings)
   const permissionAction = (pane: SystemPermissionPane) =>
     systemAccessAction({
       pane,
+      checking: accessRows.find((row) => row.id === pane)?.checking,
       state: accessRows.find((row) => row.id === pane)?.state,
       platform,
-      mediaAccessStatus:
-        pane === 'camera' || pane === 'microphone' ? mediaAccess?.[pane] : undefined
+      mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, pane)
     })
   const warnings = permissionWarnings(
     healthEvents,
@@ -456,7 +455,7 @@ function TechnicalDetails({ children }: { children: ReactNode }): ReactElement {
     <Collapsible className="border-b border-border" data-testid="health-technical-details">
       <h2>
         <CollapsibleTrigger className="group flex w-full items-center gap-2 px-gutter py-3 text-left text-section font-semibold text-foreground hover:bg-accent">
-          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-panel-open:rotate-180" />
           Technical details
         </CollapsibleTrigger>
       </h2>
@@ -491,7 +490,7 @@ function MetricGroup({
     >
       <h3>
         <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 rounded-row px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-          <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+          <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-panel-open:rotate-180" />
           <span className="shrink-0">{title}</span>
           {attention ? (
             <>

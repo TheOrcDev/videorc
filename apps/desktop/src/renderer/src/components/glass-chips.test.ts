@@ -238,11 +238,147 @@ describe('chip tokens', () => {
       expect(light).toContain(`${token}:`)
       expect(dark).toContain(`${token}:`)
     }
-    // The dark values are the D9 spec.
-    expect(dark).toContain('--chip-fill-top: oklch(1 0 0 / 10%);')
-    expect(dark).toContain('--chip-fill-bottom: oklch(1 0 0 / 3.5%);')
-    expect(dark).toContain('--chip-rim: oklch(1 0 0 / 13%);')
-    expect(dark).toContain('--chip-highlight: oklch(1 0 0 / 12%);')
+    // The values are plan 208 S4's crisper highlight (D9's glass, retuned).
+    expect(dark).toContain('--chip-fill-top: oklch(1 0 0 / 13%);')
+    expect(dark).toContain('--chip-fill-bottom: oklch(1 0 0 / 3%);')
+    expect(dark).toContain('--chip-rim: oklch(1 0 0 / 9%);')
+    expect(dark).toContain('--chip-highlight: oklch(1 0 0 / 18%);')
     expect(dark).toContain('--chip-drop: oklch(0 0 0 / 30%);')
+    expect(light).toContain('--chip-fill-top: oklch(1 0 0 / 95%);')
+    expect(light).toContain('--chip-fill-bottom: oklch(1 0 0 / 55%);')
+    expect(light).toContain('--chip-rim: oklch(0 0 0 / 9%);')
+    expect(light).toContain('--chip-highlight: oklch(1 0 0);')
+    expect(light).toContain('--chip-drop: oklch(0 0 0 / 5%);')
+  })
+})
+
+// Plan 208 S4 (D2): the Welcome screen's Liquid Chrome on the controls you
+// touch. Four materials, defined once, with a dark and a light column; red
+// stays the LED's alone (D6, D8).
+describe('chrome materials (plan 208 S4)', () => {
+  const MATERIALS = [
+    'chrome-fill',
+    'chrome-plate',
+    'chrome-bead',
+    'chrome-bead-ink',
+    'chrome-led',
+    'chrome-row-live',
+    'chrome-row-member'
+  ]
+  const body = (name: string): string => {
+    const match = new RegExp(`@utility ${name} \\{([\\s\\S]*?)\\n\\}`).exec(styles)
+    if (!match) throw new Error(`@utility ${name} is missing from styles.css`)
+    return match[1]
+  }
+  const light = /:root \{([\s\S]*?)\n\}/.exec(styles)?.[1] ?? ''
+  const dark = /\n\.dark \{([\s\S]*?)\n\}/.exec(styles)?.[1] ?? ''
+
+  it('defines each material once, flat and still: no transition, motion or backdrop blur', () => {
+    for (const name of MATERIALS) {
+      expect(styles.match(new RegExp(`@utility ${name} \\{`, 'g')), name).toHaveLength(1)
+      expect(body(name), name).not.toMatch(/backdrop-filter|transition|animation/)
+      // Each composes with Tailwind's ring stack, so focus rings still draw.
+      expect(body(name), name).toContain('var(--tw-ring-shadow)')
+    }
+  })
+
+  it('gives both themes the full chrome token set', () => {
+    const tokens = [
+      '--chrome-fill-stops',
+      '--chrome-fill-flat',
+      '--chrome-fill-ink',
+      '--chrome-fill-hi',
+      '--chrome-fill-lo',
+      '--chrome-fill-drop',
+      '--chrome-fill-lift',
+      '--chrome-press',
+      '--chrome-plate-top',
+      '--chrome-plate-bottom',
+      '--chrome-plate-hi',
+      '--chrome-plate-rim',
+      '--chrome-bead-stops',
+      '--chrome-bead-drop',
+      '--chrome-bead-ink-stops',
+      '--chrome-bead-ink-drop',
+      '--chrome-led-stops',
+      '--chrome-led-flat',
+      '--chrome-led-hi',
+      '--chrome-led-lo',
+      '--chrome-led-drop',
+      '--chrome-led-lift',
+      '--chrome-led-glow',
+      '--chrome-edge',
+      '--chrome-row-edge-stops',
+      '--chrome-row-live-top',
+      '--chrome-row-live-bottom',
+      '--chrome-row-live-hi',
+      '--chrome-row-member-top',
+      '--chrome-row-member-bottom',
+      '--chrome-row-member-hi',
+      '--chrome-row-member-edge',
+      '--chrome-row-rim',
+      '--chrome-row-lift'
+    ]
+    for (const token of tokens) {
+      expect(light, token).toContain(`${token}:`)
+      expect(dark, token).toContain(`${token}:`)
+    }
+    // Dark is silver with dark ink; light is the crisp invert, graphite with
+    // white ink (D3).
+    expect(dark).toContain('--chrome-fill-ink: oklch(0.13 0 0);')
+    expect(light).toContain('--chrome-fill-ink: oklch(0.985 0 0);')
+    // The chrome is neutral; only the LED carries a hue, the brand red's.
+    for (const column of [light, dark]) {
+      const chroma = [
+        ...column.matchAll(/--chrome-(?!led)[\w-]+:[^;]*oklch\(\s*[\d.]+\s+(?!0[\s/)])/g)
+      ]
+      expect(chroma.map(([match]) => match)).toEqual([])
+      expect(column).toMatch(
+        /--chrome-led-glow: color-mix\(in oklch, var\(--live\) \d+%, transparent\);/
+      )
+    }
+  })
+
+  it('lights the LED only with data-lit, and gives fill and plate an edge under Increase Contrast', () => {
+    expect(body('chrome-led')).toMatch(
+      /&\[data-lit\] \{\s*--tw-shadow: var\(--chrome-led-shadow\), 0 0 12px var\(--chrome-led-glow\);/
+    )
+    expect(body('chrome-fill')).not.toContain('data-lit')
+    const contrast = /@media \(prefers-contrast: more\) \{([\s\S]*?)\n\}/.exec(styles)?.[1] ?? ''
+    expect(contrast.match(/--chrome-edge: oklch\(/g)).toHaveLength(2)
+    expect(contrast.match(/--chrome-plate-rim: oklch\(/g)).toHaveLength(2)
+    expect(contrast.match(/--chrome-row-rim: oklch\(/g)).toHaveLength(2)
+  })
+
+  // Plan 0011: the chrome rows are cheap on a CPU-only compositor. Static
+  // gradients and inset shadows on the row's own box: no filter, no blur, no
+  // fixed or viewport-sized background, no layer promotion.
+  it('keeps the chrome rows static and paint-cheap', () => {
+    for (const name of ['chrome-row-live', 'chrome-row-member']) {
+      expect(body(name), name).not.toMatch(
+        /filter|blur|will-change|background-attachment|vw|vh|transform|::?(?:before|after)/
+      )
+    }
+    // The member hue is only the member row's edge; the on-stream row is neutral.
+    expect(body('chrome-row-member')).toContain('inset 2px 0 0 var(--chrome-row-member-edge)')
+    for (const column of [light, dark]) {
+      expect(column).toContain(
+        '--chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);'
+      )
+    }
+    expect(body('chrome-row-live')).not.toContain('--member')
+    // Each plate stands on the theme's solid, its last layer, also on hover.
+    for (const name of ['chrome-row-live', 'chrome-row-member']) {
+      const stacks = [...body(name).matchAll(/background-image:([^;]*);/g)].map(([, layers]) =>
+        layers.trim()
+      )
+      expect(stacks, name).toHaveLength(2)
+      for (const layers of stacks) {
+        expect(
+          layers.endsWith('linear-gradient(var(--glass-solid), var(--glass-solid))'),
+          name
+        ).toBe(true)
+      }
+    }
   })
 })

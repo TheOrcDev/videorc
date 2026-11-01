@@ -71,6 +71,25 @@ const OPACITY_MAX_PCT = Math.round(BANNER_OPACITY_MAX * 100)
 export const BANNER_IN_FRONT_REASON = 'This banner is already in front.'
 export const BANNER_AT_BACK_REASON = 'This banner is already at the back.'
 
+/** The selected banner's first row, beside Hide or Show (plan 205 S3, D3).
+ * A hidden banner is never drawn, in the Preview or any output, so the row
+ * says what that means. */
+export const BANNER_SHOWING_LINE = 'Showing'
+export const BANNER_HIDDEN_LINE = "Hidden. Viewers don't see it."
+/** Shown, but both "Appears in" switches are off: no output carries it, so
+ * the Preview draws nothing for it either (its chip says "Off"). */
+export const BANNER_OFF_LINE = "Off. Viewers don't see it."
+
+/** The inspector's first-row words for a banner, and their state attribute. */
+export function bannerStateLine(
+  banner: Pick<Banner, 'shown' | 'showOnStream' | 'showInRecording'>
+): { state: 'shown' | 'hidden' | 'off'; line: string } {
+  if (!banner.shown) return { state: 'hidden', line: BANNER_HIDDEN_LINE }
+  if (!banner.showOnStream && !banner.showInRecording)
+    return { state: 'off', line: BANNER_OFF_LINE }
+  return { state: 'shown', line: BANNER_SHOWING_LINE }
+}
+
 /** The banner's two switches, its opacity and its timer: what the inspector changes in place. */
 export type BannerInspectorPatch = Pick<
   BannerUpdateParams,
@@ -121,7 +140,7 @@ export function SceneBannersSection({
   return (
     <PanelSection
       className="min-w-0"
-      description="Your images on the picture. Click one to place it on the stage."
+      description="Your images on the picture. Click one to place it."
       icon={ImageIcon}
       title="Banners"
     >
@@ -200,7 +219,9 @@ export function SceneBannersSection({
  * The inspector for the banner selected on the stage (plan 186): Show or
  * Hide, the seven places, the size it needs where it is, opacity, where it
  * appears, and its order. A snap keeps the banner's size and only moves it;
- * Full frame fills the canvas. Opacity commits once, on release.
+ * Full frame fills the canvas. Opacity commits once, on release. The first
+ * row says whether it is showing, with the one click that changes it: a
+ * hidden banner is placed but drawn nowhere (plan 205 D3).
  */
 export function BannerInspector({
   banner,
@@ -239,6 +260,7 @@ export function BannerInspector({
 }): ReactElement {
   const blocked = blockedReason !== null
   const showReason = blocked ? null : banner.shown ? null : showLimitReason
+  const stateLine = bannerStateLine(banner)
   const committedOpacity = Math.round(banner.opacity * 100)
   // The slider's value while a drag runs and its one update lands. A newer
   // drag supersedes an older update, which then leaves the value alone.
@@ -275,7 +297,7 @@ export function BannerInspector({
         </DisabledReason>
       }
       className="min-w-0"
-      description={banner.shown ? 'Showing' : 'Hidden'}
+      description={<span data-videorc-banner-state={stateLine.state}>{stateLine.line}</span>}
       icon={ImageIcon}
       title={banner.name}
     >
@@ -400,6 +422,16 @@ function BannerTimingFold({
 }): ReactElement {
   const hideAfter = banner.hideAfterSec ?? 0
   const repeat = banner.repeatEveryMin ?? 0
+  const hideAfterItems = bannerTimingChoices(BANNER_HIDE_AFTER_CHOICES, hideAfter).map(
+    (seconds) => ({
+      value: String(seconds),
+      label: seconds === 0 ? 'Off' : bannerSecondsLabel(seconds)
+    })
+  )
+  const repeatItems = bannerTimingChoices(BANNER_REPEAT_CHOICES, repeat).map((minutes) => ({
+    value: String(minutes),
+    label: minutes === 0 ? 'Off' : bannerMinutesLabel(minutes)
+  }))
   const summary = bannerTimingSummary(banner)
   return (
     <Collapsible className="group/timing flex flex-col" data-videorc-banner-timing-fold="">
@@ -419,7 +451,7 @@ function BannerTimingFold({
           <ChevronDownIcon
             aria-hidden
             className={cn(
-              'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-[state=open]/timing:rotate-180',
+              'size-3.5 shrink-0 text-muted-foreground transition-transform duration-150 group-data-open/timing:rotate-180',
               summary ? null : 'ml-auto'
             )}
           />
@@ -432,8 +464,10 @@ function BannerTimingFold({
           </FieldContent>
           <Select
             disabled={disabled}
+            items={hideAfterItems}
             value={String(hideAfter)}
             onValueChange={(next) => {
+              if (next === null) return
               const seconds = Number(next)
               if (Number.isFinite(seconds) && seconds !== hideAfter)
                 void onPatch({ hideAfterSec: seconds })
@@ -444,9 +478,9 @@ function BannerTimingFold({
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {bannerTimingChoices(BANNER_HIDE_AFTER_CHOICES, hideAfter).map((seconds) => (
-                  <SelectItem key={seconds} value={String(seconds)}>
-                    {seconds === 0 ? 'Off' : bannerSecondsLabel(seconds)}
+                {hideAfterItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
                   </SelectItem>
                 ))}
               </SelectGroup>
@@ -460,8 +494,10 @@ function BannerTimingFold({
           </FieldContent>
           <Select
             disabled={disabled}
+            items={repeatItems}
             value={String(repeat)}
             onValueChange={(next) => {
+              if (next === null) return
               const minutes = Number(next)
               if (Number.isFinite(minutes) && minutes !== repeat)
                 void onPatch({ repeatEveryMin: minutes })
@@ -472,9 +508,9 @@ function BannerTimingFold({
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {bannerTimingChoices(BANNER_REPEAT_CHOICES, repeat).map((minutes) => (
-                  <SelectItem key={minutes} value={String(minutes)}>
-                    {minutes === 0 ? 'Off' : bannerMinutesLabel(minutes)}
+                {repeatItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
                   </SelectItem>
                 ))}
               </SelectGroup>

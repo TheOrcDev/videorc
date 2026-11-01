@@ -28,12 +28,15 @@ const panelSources = Object.fromEntries(
 /** Sections rendered by a component that carries its own title prop. */
 const SECTION_COMPONENTS: Record<string, string> = {
   PhoneRemoteSection: 'Phone remote',
-  AboutAndUpdates: 'About & updates'
+  AgentsSection: 'Agents',
+  AboutAndUpdates: 'About & updates',
+  SetupSection: 'Setup'
 }
 
 /** Files rendered only under Settings that carry their own `PanelSection`. */
 const SECTION_FILES: Record<string, string> = {
-  PhoneRemoteSection: '../phone-remote-section.tsx'
+  PhoneRemoteSection: '../phone-remote-section.tsx',
+  AgentsSection: '../settings/agents-section.tsx'
 }
 
 /**
@@ -93,8 +96,8 @@ describe('Settings layout', () => {
     // Plan 050, D4: sections are flush, so the columns stretch (the hairline
     // runs the full height) and no gap separates them.
     const configGrid = pageSource.slice(
-      pageSource.indexOf('export function ConfigGrid'),
-      pageSource.indexOf('export function Gallery')
+      pageSource.indexOf('function ConfigGrid'),
+      pageSource.indexOf('const CONFIG_GRID_PAIR')
     )
     expect(configGrid).toContain("'grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r'")
     expect(configGrid).not.toMatch(/\bgap-\d/)
@@ -116,10 +119,10 @@ describe('Settings layout', () => {
     expect(
       Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
     ).toEqual({
-      general: ['Appearance', 'Stream Manager', 'Import', 'Elsewhere'],
+      general: ['Appearance', 'Chat', 'Setup', 'Import', 'Elsewhere'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
-      remote: ['Remote control', 'Phone remote'],
+      remote: ['Remote control', 'Phone remote', 'Agents'],
       about: ['About & updates', 'Support']
     })
   })
@@ -197,8 +200,10 @@ describe('Settings layout', () => {
 
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
     // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
-    // (PageTabs), so the shell keeps no list of such pages.
-    expect(appShellSource).toContain('<PaneBody>')
+    // (PageTabs), so the shell keeps no list of such pages. #956 keys the
+    // body by the active page so each page opens at its own scroll top; that
+    // key is allowed, but no scroll prop or other per-page list is.
+    expect(appShellSource).toMatch(/<PaneBody(\s+key=\{active\})?>/)
     expect(appShellSource).not.toMatch(/<PaneBody scroll=/)
     expect(shellSource).toContain('<PageTabs')
     expect(pageTabsSource).toContain('{...PANE_OWNS_SCROLL}')
@@ -206,7 +211,10 @@ describe('Settings layout', () => {
     const scroll = pageTabsSource.indexOf('data-slot="page-tabs-scroll"')
     expect(strip).toBeGreaterThan(-1)
     expect(scroll).toBeGreaterThan(strip)
-    const scrollRegion = pageTabsSource.slice(pageTabsSource.lastIndexOf('<div', scroll), scroll)
+    const scrollRegion = pageTabsSource.slice(
+      pageTabsSource.lastIndexOf('<div', scroll),
+      pageTabsSource.indexOf('>', scroll)
+    )
     expect(scrollRegion).toContain('key={value}')
     expect(scrollRegion).toContain('overflow-y-auto')
     expect(pageTabsSource.indexOf('{children}')).toBeGreaterThan(scroll)
@@ -222,15 +230,24 @@ describe('Settings layout', () => {
     }
   })
 
-  it('splits General into two columns of two sections: the pair holds exactly two children', () => {
-    // Plan 174 S3.17 (I-27): Appearance over Stream Manager, Import over
-    // Elsewhere. Each column is one PageStack, so the pair keeps its two
-    // stretched cells and the column rule runs the full height.
+  it('splits General into two columns: the pair holds exactly two children', () => {
+    // Plan 174 S3.17 (I-27): Appearance over Stream Manager (Chat since plan
+    // 204), Import over Elsewhere; plan 203 S6 puts Setup under it. Each column is
+    // one PageStack, so the pair keeps its two stretched cells and the column
+    // rule runs the full height.
     const general = exportedBody(panelSources.GeneralSettings as string, 'GeneralSettings')
     expect(general.match(/<PageStack\b/g)).toHaveLength(2)
     const [first, second] = general.split(/<PageStack\b/).slice(1)
-    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Stream Manager'])
+    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Chat', 'Setup'])
     expect(sectionTitles(second as string)).toEqual(['Import', 'Elsewhere'])
+  })
+
+  it('splits Remote into two columns: remotes, then Agents (plan 209 S7)', () => {
+    const remote = exportedBody(panelSources.RemoteSettings as string, 'RemoteSettings')
+    expect(remote.match(/<PageStack\b/g)).toHaveLength(2)
+    const [first, second] = remote.split(/<PageStack\b/).slice(1)
+    expect(sectionTitles(first as string)).toEqual(['Remote control', 'Phone remote'])
+    expect(sectionTitles(second as string)).toEqual(['Agents'])
   })
 
   it('points to the pages that own the rest, with the typed navigation', () => {
@@ -246,7 +263,7 @@ describe('Settings layout', () => {
     expect(shellSource).not.toContain('onOpenPermissionsSetup')
     expect(panelSources.PermissionsSettings).toContain('<SystemAccessList')
     expect(panelSources.PermissionsSettings).not.toContain('Set up permissions')
-    expect(read('../permissions-onboarding-dialog.tsx')).toContain('<SystemAccessList')
+    expect(read('../first-run/permissions-step.tsx')).toContain('<SystemAccessList')
   })
 
   it('gives Remote control a one-line body when it is off, so it is never header-only', () => {

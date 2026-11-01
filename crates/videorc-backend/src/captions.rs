@@ -3734,6 +3734,8 @@ fn publish_marker_outcome(
     outcome: crate::marker_voice::UtteranceOutcome,
 ) -> bool {
     if let Some(message) = outcome.refusal {
+        // Plan 209 S18: a refused voice marker is Buddy's refused add_marker.
+        crate::buddy_act::note_voice_marker(&session.state, None, Err(&message));
         session.state.emit_event(
             "session.marker.voice.refused",
             serde_json::json!({"message":message}),
@@ -3741,7 +3743,8 @@ fn publish_marker_outcome(
     }
     if let Some(target) = target {
         for marker in outcome.markers {
-            if let Err(error) = crate::session_markers::commit_voice(
+            let label = marker.label.clone();
+            match crate::session_markers::commit_voice(
                 &session.state,
                 crate::session_markers::CreateMarkerParams {
                     operation_id: uuid::Uuid::new_v4().to_string(),
@@ -3750,10 +3753,25 @@ fn publish_marker_outcome(
                 },
                 marker.at_seconds,
             ) {
-                session.state.emit_event(
-                    "session.marker.voice.refused",
-                    serde_json::json!({"message":error.to_string()}),
-                );
+                // Plan 209 S18: the marker keeps its spoken time and its
+                // `voice` source; Activity shows it as Buddy's add_marker.
+                Ok(saved) => crate::buddy_act::note_voice_marker(
+                    &session.state,
+                    saved.label.as_deref(),
+                    Ok(saved.at_seconds),
+                ),
+                Err(error) => {
+                    let message = error.to_string();
+                    crate::buddy_act::note_voice_marker(
+                        &session.state,
+                        label.as_deref(),
+                        Err(&message),
+                    );
+                    session.state.emit_event(
+                        "session.marker.voice.refused",
+                        serde_json::json!({"message":message}),
+                    );
+                }
             }
         }
     }

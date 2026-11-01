@@ -80,7 +80,12 @@ export function BuddyReportCard({
   const session = payload
     ? (sessions.find((entry) => entry.id === payload.sessionId) ?? null)
     : null
-  const view = buddyReportView({ payload, session, buddyOn: cohostSettings?.enabled === true })
+  const view = buddyReportView({
+    payload,
+    session,
+    buddyOn: cohostSettings?.enabled === true,
+    name: cohostSettings?.persona.name
+  })
   const shown = view.kind === 'empty' ? null : view
   const options = reportSessionOptions(
     sessions,
@@ -180,13 +185,18 @@ function ReportSwitcher({
 }): ReactElement {
   const selected = options.find((option) => option.id === selectedId)
   return (
-    <Select value={selectedId} onValueChange={onSelect}>
+    <Select
+      value={selectedId}
+      onValueChange={(value) => {
+        if (value !== null) onSelect(value)
+      }}
+    >
       <SelectTrigger aria-label="Stream" className="max-w-56" size="xs">
         <SelectValue>
           <span className="truncate">{selected?.date || selected?.title || 'Stream'}</span>
         </SelectValue>
       </SelectTrigger>
-      <SelectContent align="end" position="popper">
+      <SelectContent align="end" alignItemWithTrigger={false}>
         <SelectGroup>
           {options.map((option) => (
             <SelectItem key={option.id} value={option.id}>
@@ -213,6 +223,30 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
         <ReportStats stats={view.stats} />
       )}
       <ReportCommands commands={view.commands} />
+      {/* Plan 211 D11: what the Buddy said in its bubble, every line, in the
+          posts' row: when, why and the words. Nothing went to chat, so no
+          platforms and no result. */}
+      <ReportList
+        id="said"
+        items={view.said}
+        label="Said on stream"
+        render={(line) => (
+          <ListRow
+            key={line.id}
+            className="select-text"
+            context={<span title={line.text}>{line.text}</span>}
+            meta={line.at ? <span className="tabular-nums">{line.at}</span> : undefined}
+            alias={
+              line.source ? (
+                <Badge data-testid="buddy-report-said-source" variant="outline">
+                  {line.source}
+                </Badge>
+              ) : undefined
+            }
+            title={line.trigger}
+          />
+        )}
+      />
       {/* Plan 164 D10: what the Buddy posted as you, every line. */}
       <ReportList
         id="posts"
@@ -370,16 +404,18 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
           >
             {view.chat.platforms.map((entry) => (
               <Tooltip key={entry.platform}>
-                <TooltipTrigger asChild>
-                  <span
-                    aria-label={entry.label}
-                    className="inline-flex items-center gap-1 tabular-nums"
-                    role="img"
-                  >
-                    <ChatPlatformIcon decorative platform={entry.platform} />
-                    {/* One platform's count is the total already said. */}
-                    {view.chat.platforms.length > 1 ? formatReportCount(entry.messages) : null}
-                  </span>
+                <TooltipTrigger
+                  render={
+                    <span
+                      aria-label={entry.label}
+                      className="inline-flex items-center gap-1 tabular-nums"
+                      role="img"
+                    />
+                  }
+                >
+                  <ChatPlatformIcon decorative platform={entry.platform} />
+                  {/* One platform's count is the total already said. */}
+                  {view.chat.platforms.length > 1 ? formatReportCount(entry.messages) : null}
                 </TooltipTrigger>
                 <TooltipContent>{entry.label}</TooltipContent>
               </Tooltip>
@@ -417,9 +453,9 @@ function ReportCommands({ commands }: { commands: ShownReport['commands'] }): Re
 }
 
 /**
- * The greetings Buddy didn't post this stream, and why (plan 192 D7): one
- * plain line under what it posted, only when it skipped any. A line, not a
- * row, so no reason is ever cut off.
+ * The greetings Buddy skipped this stream, and why (plan 192 D7, plan 211
+ * D9): one plain line under what it said and posted, only when it skipped
+ * any. A line, not a row, so no reason is ever cut off.
  */
 function ReportGreetingSkips({
   skips

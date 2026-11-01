@@ -36,6 +36,7 @@ import {
   layoutPresetOrientation,
   studioModeTogglePreset,
   verticalOrientationVideoPatch,
+  verticalTwinVideo,
   layoutPresetNeedsScreen,
   loadCaptureConfig,
   normalizeLayoutSettings,
@@ -2202,18 +2203,83 @@ describe('camera shape and aspect (2026-07-06)', () => {
   })
 })
 
+describe('verticalTwinVideo', () => {
+  it('maps 1080p30 to the named vertical profile', () => {
+    expect(verticalTwinVideo(videoPresets['tutorial-1080p30'])).toBe(
+      videoPresets['vertical-1080x1920']
+    )
+    expect(verticalTwinVideo(videoPresets['stream-safe-1080p30'])).toBe(
+      videoPresets['vertical-1080x1920']
+    )
+  })
+
+  it('keeps every other chosen size and fps, turned on its side', () => {
+    const twin = (preset: keyof typeof videoPresets) => {
+      const { width, height, fps, bitrateKbps } = verticalTwinVideo(videoPresets[preset])
+      return { width, height, fps, bitrateKbps }
+    }
+    expect(twin('tutorial-540p30')).toEqual({ width: 540, height: 960, fps: 30, bitrateKbps: 2500 })
+    expect(twin('tutorial-720p30')).toEqual({
+      width: 720,
+      height: 1280,
+      fps: 30,
+      bitrateKbps: 4000
+    })
+    expect(twin('tutorial-1440p30')).toEqual({
+      width: 1440,
+      height: 2560,
+      fps: 30,
+      bitrateKbps: 8000
+    })
+    expect(twin('record-4k30')).toEqual({ width: 2160, height: 3840, fps: 30, bitrateKbps: 30000 })
+    expect(twin('stream-safe-1080p60')).toEqual({
+      width: 1080,
+      height: 1920,
+      fps: 60,
+      bitrateKbps: 6000
+    })
+    const floor = { ...videoPresets.custom, width: 640, height: 360, fps: 24 }
+    expect(verticalTwinVideo(floor)).toEqual({ ...floor, width: 360, height: 640 })
+    expect(verticalTwinVideo(videoPresets['tutorial-720p30']).preset).toBe('custom')
+  })
+})
+
 describe('vertical orientation video coupling', () => {
   const landscape = videoPresets['record-4k30']
   const vertical = videoPresets['vertical-1080x1920']
 
-  it('entering vertical mode applies the portrait profile and remembers the landscape canvas', () => {
+  it('entering vertical mode applies the portrait twin and remembers the landscape canvas', () => {
     const patch = verticalOrientationVideoPatch(
       'screen-camera',
       'vertical-camera-top',
       landscape,
       null
     )
-    expect(patch).toEqual({ video: vertical, verticalRestoreVideo: landscape })
+    expect(patch).toEqual({
+      video: { ...landscape, preset: 'custom', width: 2160, height: 3840 },
+      verticalRestoreVideo: landscape
+    })
+  })
+
+  it('720p30 enters vertical mode at 720x1280 and comes back at 1280x720 (retest 152)', () => {
+    const chosen = videoPresets['tutorial-720p30']
+    const entered = verticalOrientationVideoPatch(
+      'screen-camera',
+      'vertical-camera-top',
+      chosen,
+      null
+    )
+    expect(entered).toEqual({
+      video: { ...chosen, preset: 'custom', width: 720, height: 1280 },
+      verticalRestoreVideo: chosen
+    })
+    const left = verticalOrientationVideoPatch(
+      'vertical-camera-top',
+      'screen-camera',
+      entered!.video,
+      entered!.verticalRestoreVideo
+    )
+    expect(left).toEqual({ video: chosen, verticalRestoreVideo: null })
   })
 
   it('entering vertical mode keeps a canvas the user already made portrait', () => {

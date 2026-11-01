@@ -25,6 +25,11 @@ const inputs = [
     remedy: 'pnpm package:backend:macos'
   },
   {
+    // Plan 209 S4: the stdio bridge agent apps run.
+    path: join(repoRoot, 'target', 'release', 'videorc-mcp'),
+    remedy: 'pnpm package:backend:macos'
+  },
+  {
     path: join(repoRoot, 'target', 'release', 'videorc_native_preview.node'),
     remedy: 'pnpm build:native-preview-addon:release'
   },

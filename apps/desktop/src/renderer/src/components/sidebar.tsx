@@ -68,8 +68,10 @@ function NavRow({
       onClick={onClick}
       className={cn(
         'group flex h-row-compact items-center gap-2.5 rounded-row px-2.5 text-sm',
+        // The page you're on wears the chrome plate (plan 208 S4); hover stays
+        // the flat block, so rows highlight instantly.
         isActive
-          ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
+          ? 'chrome-plate font-medium text-sidebar-accent-foreground'
           : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground'
       )}
     >
@@ -159,24 +161,26 @@ function SidebarUpdateChip({
       <div className="overflow-hidden">
         <div className="px-3 pb-1">
           <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                aria-description={chip.detail}
-                className="flex h-row-compact w-full items-center gap-2.5 rounded-row px-2.5 text-left text-sm text-foreground hover:bg-accent"
-                type="button"
-                onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
-              >
-                <span className="relative flex size-4 shrink-0 items-center justify-center">
-                  <SyncIcon className="size-4 text-muted-foreground" />
-                  <span
-                    className={cn(
-                      'absolute -right-0.5 -top-0.5 size-1.5 rounded-full glass-dot',
-                      chip.tone === 'good' ? 'tone-success' : 'tone-neutral'
-                    )}
-                  />
-                </span>
-                <span className="min-w-0 flex-1 truncate">{chip.label}</span>
-              </button>
+            <TooltipTrigger
+              render={
+                <button
+                  aria-description={chip.detail}
+                  className="flex h-row-compact w-full items-center gap-2.5 rounded-row px-2.5 text-left text-sm text-foreground hover:bg-accent"
+                  type="button"
+                  onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
+                />
+              }
+            >
+              <span className="relative flex size-4 shrink-0 items-center justify-center">
+                <SyncIcon className="size-4 text-muted-foreground" />
+                <span
+                  className={cn(
+                    'absolute -right-0.5 -top-0.5 size-1.5 rounded-full glass-dot',
+                    chip.tone === 'good' ? 'tone-success' : 'tone-neutral'
+                  )}
+                />
+              </span>
+              <span className="min-w-0 flex-1 truncate">{chip.label}</span>
             </TooltipTrigger>
             <TooltipContent side="top">{chip.detail}</TooltipContent>
           </Tooltip>

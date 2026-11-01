@@ -944,6 +944,20 @@ pub async fn update_preview_surface_present(
         if is_stale_present_update(&slot.status, &params) {
             return slot.status.clone();
         }
+        // A stopped (or never created) surface has no presenter left to report
+        // on. Main's 250 ms present report can still be in flight when the
+        // backend destroys the surface: the capture-decay soak destroys
+        // backend-first and drains main's destroy afterwards, and the
+        // renderer's teardown sends the two requests over different sockets.
+        // Applying that report would put the pre-destroy presenter state back
+        // over the reset, so the stopped status would claim a live
+        // CAMetalLayer presenter and retained IOSurface imports after teardown.
+        if matches!(
+            slot.status.state,
+            PreviewSurfaceState::Stopped | PreviewSurfaceState::Unavailable
+        ) {
+            return slot.status.clone();
+        }
         let mut next = slot.status.clone();
         let native_claim_allowed = native_present_claim_allowed(&slot.status, &params);
         let blocked_native_claim = present_update_claims_native(&params) && !native_claim_allowed;
@@ -1803,20 +1817,7 @@ async fn reconcile_live_preview_compositor_with_hook(
 
         let started_run_id = start_synthetic_compositor_if_idle(
             state.clone(),
-            CompositorStartParams {
-                target_fps: status.target_fps,
-                width: status.width,
-                height: status.height,
-                frame_consumer: CompositorFrameConsumer::NativePreview,
-                stream_output: None,
-                source_iso_output: None,
-                caption_overlay_on_primary: false,
-                caption_overlay_on_aux: false,
-                highlight_overlay_on_primary: false,
-                highlight_overlay_on_aux: false,
-                buddy_overlay_on_primary: false,
-                buddy_overlay_on_aux: false,
-            },
+            idle_preview_start_params(state, status.target_fps, status.width, status.height),
         )
         .await
         .and_then(|status| status.run_id);
@@ -1882,23 +1883,43 @@ pub(crate) async fn ensure_preview_compositor_after_scene_commit(state: &AppStat
     let (width, height, target_fps) = preview_compositor_start_size(scene);
     let _ = start_synthetic_compositor_if_idle(
         state.clone(),
-        CompositorStartParams {
-            target_fps,
-            width,
-            height,
-            frame_consumer: CompositorFrameConsumer::NativePreview,
-            stream_output: None,
-            source_iso_output: None,
-            caption_overlay_on_primary: false,
-            caption_overlay_on_aux: false,
-            highlight_overlay_on_primary: false,
-            highlight_overlay_on_aux: false,
-            buddy_overlay_on_primary: false,
-            buddy_overlay_on_aux: false,
-        },
+        idle_preview_start_params(state, target_fps, width, height),
     )
     .await;
     sync_preview_surface_source_from_compositor(state).await;
+}
+
+/// The idle preview run's start parameters (plan 205 S1): the native preview
+/// consumer, no auxiliary leg, no captions (they exist only in a session),
+/// and the highlight and Buddy flags of the program while nothing runs, read
+/// from the stored layout (`compositor::idle_overlay_flags`). When the Buddy
+/// is in it, its atlas for this canvas starts building now.
+fn idle_preview_start_params(
+    state: &AppState,
+    target_fps: u32,
+    width: u32,
+    height: u32,
+) -> CompositorStartParams {
+    let overlays = crate::compositor::idle_overlay_flags(state);
+    crate::compositor::prepare_idle_buddy(state, overlays, (width, height));
+    CompositorStartParams {
+        benchmark: false,
+        target_fps,
+        width,
+        height,
+        frame_consumer: CompositorFrameConsumer::NativePreview,
+        stream_output: None,
+        source_iso_output: None,
+        caption_overlay_on_primary: false,
+        caption_overlay_on_aux: false,
+        highlight_overlay_on_primary: overlays.highlight_on_primary,
+        highlight_overlay_on_aux: overlays.highlight_on_aux,
+        buddy_overlay_on_primary: overlays.buddy_on_primary,
+        buddy_overlay_on_aux: overlays.buddy_on_aux,
+        replay_only: false,
+        highlight_overlay_on_program: overlays.highlight_on_program,
+        buddy_overlay_on_program: overlays.buddy_on_program,
+    }
 }
 
 fn scene_needs_portal_proof_compositor(scene: &Scene) -> bool {
@@ -2388,6 +2409,97 @@ mod tests {
         );
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].kind, NativePreviewHostCommandKind::UpdateBounds);
+    }
+
+    fn native_presenter_report(live_count: u64) -> PreviewSurfacePresentParams {
+        PreviewSurfacePresentParams {
+            transport: Some(PreviewTransport::NativeSurface),
+            backing: Some(PreviewSurfaceBacking::CaMetalLayer),
+            presented_frame_id: Some(42),
+            compositor_frame_lag: Some(0),
+            dropped_frames: 0,
+            input_to_present_latency_ms: Some(18),
+            input_to_present_latency_p50_ms: Some(17),
+            input_to_present_latency_p95_ms: Some(20),
+            input_to_present_latency_p99_ms: Some(23),
+            present_fps: Some(60.0),
+            interval_p95_ms: Some(17.0),
+            interval_p99_ms: Some(18.0),
+            native_preview_main_scene_mismatch_count: None,
+            native_preview_main_scene_mismatch_age_ms: None,
+            native_preview_main_last_skipped_scene_revision: None,
+            native_preview_main_last_skipped_frame_scene_revision: None,
+            native_preview_iosurface_import_live_count: Some(live_count),
+            native_preview_iosurface_import_peak_count: Some(3),
+            native_preview_iosurface_import_ceiling: Some(3),
+            message: Some(
+                "In-process CAMetalLayer preview is presenting compositor output.".to_string(),
+            ),
+            frame_polling_suppressed: true,
+            source_pixels_present: true,
+        }
+    }
+
+    /// Main's 250 ms present report can still be in flight when the backend
+    /// destroys the surface (the capture-decay soak destroys backend-first and
+    /// drains main's destroy afterwards; the renderer's teardown sends the two
+    /// requests over different sockets). The report describes a presenter that
+    /// no longer exists, so it must not resurrect the pre-destroy state over
+    /// the stopped status: on 2026-10-31 the 60-minute soak's teardown read
+    /// "presenting compositor output" with 3 retained IOSurface imports for
+    /// the whole 10 s release window because exactly that happened.
+    #[tokio::test]
+    async fn present_report_after_destroy_leaves_the_stopped_status_alone() {
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(800.0, 450.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        take_native_preview_host_commands(&state).await;
+        let live = update_preview_surface_present(&state, native_presenter_report(3)).await;
+        assert_eq!(live.state, PreviewSurfaceState::Live);
+        assert_eq!(live.native_preview_iosurface_import_live_count, Some(3));
+
+        let stopped = destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
+        assert_eq!(stopped.state, PreviewSurfaceState::Stopped);
+        assert_eq!(stopped.native_preview_iosurface_import_live_count, Some(0));
+
+        // The late report: main has not drained the destroy host command yet.
+        let late = update_preview_surface_present(&state, native_presenter_report(3)).await;
+        assert_eq!(late.state, PreviewSurfaceState::Stopped);
+        assert_eq!(late.native_preview_iosurface_import_live_count, Some(0));
+        assert_eq!(late.native_preview_iosurface_import_peak_count, Some(3));
+        assert_eq!(late.native_preview_iosurface_import_ceiling, Some(3));
+        assert_eq!(late.transport, PreviewTransport::Unavailable);
+        assert_eq!(late.backing, PreviewSurfaceBacking::None);
+        assert!(!late.frame_polling_suppressed);
+        assert!(!late.source_pixels_present);
+        assert_eq!(late.presented_frame_id, None);
+        assert_eq!(
+            late.message.as_deref(),
+            Some("Native preview surface stopped.")
+        );
+        assert_eq!(preview_surface_status(&state).await, late);
+
+        let diagnostics = state.diagnostics.lock().await.clone();
+        assert_eq!(
+            diagnostics.native_preview_iosurface_import_live_count,
+            Some(0)
+        );
+        assert_eq!(diagnostics.preview_transport, PreviewTransport::Unavailable);
+        assert_eq!(
+            diagnostics.preview_surface_backing,
+            PreviewSurfaceBacking::None
+        );
+        assert!(!diagnostics.preview_frame_polling_suppressed);
     }
 
     #[tokio::test]
@@ -3371,6 +3483,7 @@ mod tests {
         let newer = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -3383,6 +3496,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -3814,6 +3930,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -3826,6 +3943,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -3956,6 +4076,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 160,
                 height: 90,
@@ -3968,6 +4089,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -4042,6 +4166,7 @@ mod tests {
             &state,
             "session-lease",
             CompositorArmParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4053,6 +4178,8 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await
@@ -4135,6 +4262,155 @@ mod tests {
         stop_compositor(&state).await;
     }
 
+    /// Plan 205 (S1, D1): the idle run starts with the program's flags from
+    /// the stored layout, not with every overlay off: the owner's stream-only
+    /// Buddy is on the primary from the first frame, as is the highlight.
+    #[tokio::test]
+    async fn the_idle_preview_run_starts_with_the_programs_flags() {
+        let state = test_state();
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).expect("layout saves");
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(160.0, 90.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        wait_for_frame_dimensions_after(&state, 320, 180, None)
+            .await
+            .expect("preview compositor publishes at the surface size");
+        let config = crate::compositor::loop_config_for_test(&state)
+            .await
+            .expect("the preview run is live");
+        assert_eq!(
+            config.frame_consumer,
+            CompositorFrameConsumer::NativePreview
+        );
+        assert!(config.buddy_overlay_on_primary, "{config:?}");
+        assert!(config.highlight_overlay_on_primary, "{config:?}");
+        assert!(!config.buddy_overlay_on_aux && !config.highlight_overlay_on_aux);
+        assert!(
+            !config.caption_overlay_on_primary,
+            "captions exist only in a session"
+        );
+        stop_compositor(&state).await;
+    }
+
+    /// Plan 205 (S1): a lease release returns the run to the program of the
+    /// layout as stored NOW. A layout saved while the capture holds the run
+    /// is left to the session's plan (the idle rule never reaches a leased
+    /// run), and the release reads it fresh instead of restoring the flags
+    /// captured at arm time.
+    #[tokio::test]
+    async fn a_lease_release_restores_the_flags_of_the_layout_saved_during_the_session() {
+        use crate::compositor::{
+            CompositorArmParams, arm_compositor_for_capture, loop_config_for_test,
+            release_compositor_capture_lease,
+        };
+
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(160.0, 90.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        let preview_frame = wait_for_frame_dimensions_after(&state, 320, 180, None)
+            .await
+            .expect("preview compositor publishes at the surface size");
+        let idle = loop_config_for_test(&state).await.expect("live run");
+        assert!(!idle.buddy_overlay_on_primary, "the shipped Buddy is off");
+
+        // A record-only session arms the run; its plan drops a stream-only
+        // Buddy whatever the idle rule says.
+        let capture = state.ffmpeg_work.begin_capture_when_available().await;
+        arm_compositor_for_capture(
+            &state,
+            "session-layout",
+            CompositorArmParams {
+                benchmark: false,
+                target_fps: 30,
+                width: 640,
+                height: 360,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                replay_only: false,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: true,
+                highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
+                highlight_overlay_on_program: true,
+                buddy_overlay_on_program: false,
+            },
+        )
+        .await
+        .expect("live preview run arms in place");
+        wait_for_frame_dimensions_after(&state, 640, 360, Some(preview_frame.sequence))
+            .await
+            .expect("the armed run renders the capture canvas");
+
+        // The layout saved during the session: Buddy stream only. With the
+        // session not yet in `state.recording` (the start window) the idle
+        // rule is refused; with it there, the session re-plans by its shape.
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let held = loop_config_for_test(&state).await.expect("leased run");
+        assert!(!held.buddy_overlay_on_primary, "{held:?}");
+        let mut session = crate::recording::test_active_recording_stub("session-layout");
+        session.overlay_session_shape = Some(crate::overlay_layout::OverlaySessionShape {
+            record_enabled: true,
+            stream_enabled: false,
+            aux_leg: crate::overlay_layout::OverlayAuxLeg::None,
+        });
+        *state.recording.lock().await = Some(session);
+        crate::overlay_layout::set_overlay_layout(&state, layout)
+            .await
+            .expect("layout saves");
+        let replanned = loop_config_for_test(&state).await.expect("leased run");
+        assert!(
+            !replanned.buddy_overlay_on_primary,
+            "a record-only session still drops a stream-only Buddy: {replanned:?}"
+        );
+        drop(state.recording.lock().await.take());
+
+        drop(capture);
+        let released = release_compositor_capture_lease(&state, "session-layout")
+            .await
+            .expect("release restores the live surface");
+        assert_eq!(
+            released.frame_pipeline.consumer.as_deref(),
+            Some("native-preview")
+        );
+        let restored = loop_config_for_test(&state).await.expect("live run");
+        assert!(
+            restored.buddy_overlay_on_primary,
+            "the idle run follows the layout saved during the session: {restored:?}"
+        );
+        assert!(restored.highlight_overlay_on_primary);
+        assert!(!restored.buddy_overlay_on_aux);
+        assert_eq!(
+            restored.frame_consumer,
+            CompositorFrameConsumer::NativePreview
+        );
+        wait_for_frame_dimensions_after(&state, 320, 180, Some(preview_frame.sequence))
+            .await
+            .expect("the released run renders at the surface size");
+        stop_compositor(&state).await;
+    }
+
     #[tokio::test]
     async fn preview_surface_does_not_take_compositor_during_capture_startup() {
         let state = test_state();
@@ -4142,6 +4418,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4154,6 +4431,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;

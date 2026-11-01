@@ -586,33 +586,94 @@ describe('report view', () => {
     ])
   })
 
-  it('says in plain words why greetings were not posted (plan 192 D7)', () => {
-    // Held greetings went out later: said apart, never counted as not posted.
+  it('lists what Buddy said on stream, oldest first, apart from what it posted (plan 211 D11)', () => {
+    const view = buddyReportView({
+      payload: payload({
+        report: report({
+          said: [
+            {
+              id: 'b1',
+              at: '2026-08-22T10:01:30Z',
+              trigger: 'greeting',
+              text: 'Welcome, Ada!',
+              source: 'line'
+            },
+            { id: 'b2', at: '2026-08-22T10:04:05Z', trigger: 'answer', text: '@Ada Rust today!' },
+            { id: 'b3', at: '2026-08-22T10:09:00Z', trigger: 'manual', text: 'brb' },
+            {
+              id: 'b4',
+              at: '2026-08-22T10:12:00Z',
+              trigger: 'greeting',
+              text: 'Welcome Ada, Bo and Kim!',
+              source: 'ai'
+            }
+          ]
+        })
+      }),
+      session: SESSION,
+      buddyOn: true
+    })
+    if (view.kind !== 'report') throw new Error(view.kind)
+    expect(view.said).toEqual([
+      { id: 'b1', trigger: 'Greeting', text: 'Welcome, Ada!', at: '1:30', source: 'Line' },
+      { id: 'b2', trigger: 'Answer', text: '@Ada Rust today!', at: '4:05', source: null },
+      { id: 'b3', trigger: 'Say', text: 'brb', at: '9:00', source: null },
+      { id: 'b4', trigger: 'Greeting', text: 'Welcome Ada, Bo and Kim!', at: '12:00', source: 'AI' }
+    ])
+    // Posts stay chat-only.
+    expect(view.posts).toEqual([])
+    // An older report without `said`, and a stream Buddy missed: nothing to list.
+    const older = buddyReportView({ payload: payload(), session: SESSION, buddyOn: true })
+    if (older.kind !== 'report') throw new Error(older.kind)
+    expect(older.said).toEqual([])
+    const off = buddyReportView({
+      payload: payload({ report: null }),
+      session: SESSION,
+      buddyOn: true
+    })
+    if (off.kind !== 'buddy-off') throw new Error(off.kind)
+    expect(off.said).toEqual([])
+  })
+
+  it('says in plain words why greetings were skipped (plan 192 D7, plan 211 D9)', () => {
+    // Held greetings went out later: said apart, never counted as skipped.
     expect(reportGreetingSkips({ noLine: 3, held: 2 })).toEqual({
       total: '3',
-      sentence: 'Greetings not posted: 3 had no line. 2 greetings waited for the posting limit.'
+      sentence: 'Greetings skipped: 3 had no line. 2 greetings waited their turn.'
     })
     expect(reportGreetingSkips({ held: 1 })).toEqual({
       total: '0',
-      sentence: '1 greeting waited for the posting limit.'
+      sentence: '1 greeting waited its turn.'
     })
     expect(
-      reportGreetingSkips({
-        youtubePaused: 1,
-        destinationFailed: 1,
-        held: 1,
-        deduped: 1,
-        stale: 1,
-        modeOff: 1,
-        noLine: 1
-      })
+      reportGreetingSkips(
+        {
+          youtubePaused: 1,
+          destinationFailed: 1,
+          held: 1,
+          deduped: 1,
+          stale: 1,
+          modeOff: 1,
+          noLine: 1,
+          noBubble: 1
+        },
+        'Golmar'
+      )
     ).toEqual({
-      total: '6',
+      total: '7',
       sentence:
-        "Greetings not posted: 1 had no line, 1 came while posting was off, 1 was too old to greet, 1 was already greeted, 1 couldn't be sent, 1 came while YouTube chat was paused. 1 greeting waited for the posting limit."
+        "Greetings skipped: 1 had no line, 1 came while Golmar was set to Off, 1 was too old to greet, 1 was already greeted, 1 couldn't be sent, 1 came while YouTube chat was paused, 1 came while Golmar wasn't on stream. 1 greeting waited its turn."
     })
     expect(reportGreetingSkips({ stale: 2, deduped: 1200 })?.sentence).toBe(
-      `Greetings not posted: 2 were too old to greet, ${(1200).toLocaleString()} were already greeted.`
+      `Greetings skipped: 2 were too old to greet, ${(1200).toLocaleString()} were already greeted.`
+    )
+    // Plan 211 D9: Bubble with the Buddy on no output, named; "Buddy" without a name.
+    expect(reportGreetingSkips({ noBubble: 46 }, 'Golmar')).toEqual({
+      total: '46',
+      sentence: "Greetings skipped: 46 came while Golmar wasn't on stream."
+    })
+    expect(reportGreetingSkips({ noBubble: 2, modeOff: 3 })?.sentence).toBe(
+      "Greetings skipped: 3 came while Buddy was set to Off, 2 came while Buddy wasn't on stream."
     )
     // Absent (an older report, or every greeting went out) or all zero: no line.
     expect(reportGreetingSkips(undefined)).toBeNull()
@@ -630,7 +691,22 @@ describe('report view', () => {
     })
     if (view.kind !== 'report') throw new Error(view.kind)
     expect(view.greetingSkips?.sentence).toBe(
-      'Greetings not posted: 3 had no line. 2 greetings waited for the posting limit.'
+      'Greetings skipped: 3 had no line. 2 greetings waited their turn.'
+    )
+    // The card passes the Buddy's name through.
+    const named = buddyReportView({
+      payload: payload({
+        report: report({
+          greetings: { ...report().greetings, skipped: { noBubble: 4 } }
+        })
+      }),
+      session: SESSION,
+      buddyOn: true,
+      name: 'Golmar'
+    })
+    if (named.kind !== 'report') throw new Error(named.kind)
+    expect(named.greetingSkips?.sentence).toBe(
+      "Greetings skipped: 4 came while Golmar wasn't on stream."
     )
     const plain = buddyReportView({ payload: payload(), session: SESSION, buddyOn: true })
     if (plain.kind !== 'report') throw new Error(plain.kind)

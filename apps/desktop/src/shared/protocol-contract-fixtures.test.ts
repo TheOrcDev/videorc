@@ -961,6 +961,7 @@ describe('shared high-risk protocol fixture', () => {
       reactions: {}
     })
     expect(fixtures.cohost.settings.autoChat).toStrictEqual({
+      talk: 'bubble',
       mode: 'off',
       greetings: {
         enabled: true,
@@ -1020,6 +1021,30 @@ describe('shared high-risk protocol fixture', () => {
       validateBackendRpcResult('cohost.report.get', {
         ...fixtures.cohost.reportPayload,
         report: { ...fixtures.cohost.report, commands: { removed: 1 } }
+      })
+    ).toThrow('cohost.report.get')
+    // Plan 211 D11: what Buddy said in its bubble rides beside the posts;
+    // the full report from before `said` has none (never null), the skips
+    // count `noBubble`, and the strict shape refuses an unknown field.
+    expect(fixtures.cohost.reportPayload.report?.said).toStrictEqual([
+      {
+        id: 'utt-4-fixture',
+        at: '2026-08-22T10:08:00Z',
+        trigger: 'greeting',
+        text: 'Welcome, Ada!',
+        source: 'line'
+      },
+      { id: 'utt-5-fixture', at: '2026-08-22T10:09:00Z', trigger: 'manual', text: 'Hello horde' }
+    ])
+    expect(fixtures.cohost.report).not.toHaveProperty('said')
+    expect(fixtures.cohost.reportPayload.report?.greetings.skipped?.noBubble).toBe(3)
+    expect(() =>
+      validateBackendRpcResult('cohost.report.get', {
+        ...fixtures.cohost.reportPayload,
+        report: {
+          ...fixtures.cohost.reportPayload.report,
+          said: [{ ...fixtures.cohost.reportPayload.report!.said![0], destinations: ['twitch'] }]
+        }
       })
     ).toThrow('cohost.report.get')
   })

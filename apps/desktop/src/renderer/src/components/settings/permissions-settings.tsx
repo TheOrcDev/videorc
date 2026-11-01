@@ -6,9 +6,9 @@ import { SystemAccessList } from '@/components/system-access-list'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { FieldGroup, SettingsRow } from '@/components/ui/field'
-import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import { osSettingsName } from '@/lib/platform'
-import { systemAccessRows } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 
 /**
  * Settings → Permissions: what the OS lets Videorc capture right now. The
@@ -17,18 +17,16 @@ import { systemAccessRows } from '@/lib/system-access'
  */
 export function PermissionsSettings(): ReactElement {
   const {
-    deviceList,
     mediaAccess,
     refreshBackend,
     handleSystemPermission,
     openSystemPermissionSettings,
     runtimeInfo
   } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
   const platform = runtimeInfo?.platform
   const settingsName = osSettingsName(platform)
 
-  const accessRows = systemAccessRows({ deviceList, audioMeter, platform, mediaAccess })
+  const accessRows = useSystemAccessRows()
 
   return (
     <PanelSection

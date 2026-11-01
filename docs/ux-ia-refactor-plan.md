@@ -34,6 +34,10 @@ only via ⌘K, sources diagnostics list unbounded
 > - **Names**: Destinations became Livestream, Recording became Output, AI
 >   became Buddy, and the live chat rail became the Stream Manager window
 >   (⇧⌘J).
+> - **Chat in Studio** (2026-10-27, plan 204): the Studio has chat again,
+>   as an option off by default: a Chat section in the inspector under
+>   Session while on air, not a rail. The Stream Manager stays the full
+>   chat.
 
 ## The organizing idea
 

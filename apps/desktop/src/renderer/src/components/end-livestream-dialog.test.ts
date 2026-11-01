@@ -56,7 +56,8 @@ describe('EndLivestreamDialog (plan 174 S0.1, D2, D19)', () => {
     // No close button: the two answers are the only way out.
     expect(dialog?.querySelector('button[aria-label="Close"], .sr-only')).toBeNull()
     expect(byTestId('end-livestream-cancel')?.textContent).toBe('Keep streaming')
-    expect(document.activeElement).toBe(byTestId('end-livestream-cancel'))
+    // Base UI moves the first focus on the next animation frame.
+    await vi.waitFor(() => expect(document.activeElement).toBe(byTestId('end-livestream-cancel')))
     expect(onCancel).not.toHaveBeenCalled()
     expect(onConfirm).not.toHaveBeenCalled()
   })

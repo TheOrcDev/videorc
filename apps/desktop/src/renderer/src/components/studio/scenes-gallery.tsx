@@ -11,6 +11,7 @@ import { lazy, Suspense, type ReactElement } from 'react'
 const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
+import { SectionLabel } from '@/components/section-label'
 import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
@@ -133,7 +134,9 @@ export function ScenesGallery(): ReactElement {
     <PanelSection
       title="Scenes"
       description={
-        mode === 'vertical' ? 'Switch the 9:16 program layout.' : 'Switch the program layout.'
+        mode === 'vertical'
+          ? 'Click a scene to put it on the 9:16 stream.'
+          : 'Click a scene to put it on stream.'
       }
       action={
         <div className="flex items-center gap-1.5">
@@ -141,7 +144,7 @@ export function ScenesGallery(): ReactElement {
               canvas is fixed at session start — disabled while live (the
               backend refuses cross-orientation scene switches too). The
               gallery is in the EAGER Studio chunk: SegmentedControl has no
-              Radix, so it costs the initial asset budget nothing. A switch
+              Tabs primitive, so it costs the initial asset budget nothing. A switch
               restarts the canvas, so arrows only move focus (manual). */}
           <DisabledReason
             reason={
@@ -166,6 +169,12 @@ export function ScenesGallery(): ReactElement {
         </div>
       }
     >
+      {/* Plan 210 D6: your saved scenes first, in their order, then the
+          layouts, each under its heading. */}
+      <Suspense fallback={null}>
+        <ScenePresetControls />
+      </Suspense>
+      <SectionLabel className="px-1">Layouts</SectionLabel>
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
         {cards.map(({ preset, gaps }) => {
           const active = galleryPresetIsActive(captureConfig.layout, preset.id, activeSavedSceneId)
@@ -208,9 +217,6 @@ export function ScenesGallery(): ReactElement {
           onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
         />
       ) : null}
-      <Suspense fallback={null}>
-        <ScenePresetControls />
-      </Suspense>
     </PanelSection>
   )
 }
@@ -218,7 +224,7 @@ export function ScenesGallery(): ReactElement {
 /**
  * Fill / Fit for the screen in vertical scenes. Fill is the short-form look
  * (the screen fills its area and is cropped); Fit keeps the whole screen
- * visible. A SegmentedControl, Radix-free like the mode toggle.
+ * visible. A SegmentedControl, with no Tabs primitive, like the mode toggle.
  */
 export function ScreenFramingControl({
   value,

@@ -94,6 +94,7 @@ describe('runtime info helpers', () => {
       env: {
         VIDEORC_NATIVE_PREVIEW_SURFACE: '0',
         VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+        VIDEORC_SMOKE_SKIP_FIRST_RUN: '1',
         VIDEORC_DISABLE_AUTO_PREVIEW: '1',
         VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
         VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED: '1',
@@ -116,6 +117,7 @@ describe('runtime info helpers', () => {
       commentsWindowEnabled: true,
       commentsWindowRecordingOverlayAllowed: true,
       previewSmokeMode: true,
+      firstRunSuppressed: true,
       windowsLiveAudioSmokeMode: true,
       windowsD3d11PreviewSmokeMode: true,
       disableAutoPreview: true,
@@ -123,6 +125,18 @@ describe('runtime info helpers', () => {
       nativePreviewSurfaceStageSuspended: true
     })
   })
+
+  it.each([undefined, '0', 'true', '1'])(
+    'suppresses first-run only for the explicit 1 flag: %s',
+    (flag) => {
+      const info = buildRuntimeInfo({
+        appVersion: '1.0.0',
+        execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+        env: { VIDEORC_SMOKE_SKIP_FIRST_RUN: flag }
+      })
+      expect(info.firstRunSuppressed).toBe(flag === '1')
+    }
+  )
 
   it('enables Notes, Comments, and recording overlays by default after artifact gates', () => {
     const info = buildRuntimeInfo({

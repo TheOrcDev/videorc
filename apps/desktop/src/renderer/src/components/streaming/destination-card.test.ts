@@ -14,6 +14,7 @@ import {
   accountStatus,
   DestinationCard,
   idleDestinationBadge,
+  manualKeyGuidance,
   missingPermissionsRow
 } from './destination-card'
 
@@ -150,7 +151,7 @@ describe('DestinationCard header', () => {
       /<button[^>]*data-slot="list-row-button"[^>]*aria-expanded="false"[^>]*>kick</
     )
     expect(markup).not.toContain('role="button"')
-    expect(markup).toMatch(/<button[^>]*role="switch"[^>]*aria-label="Enable kick"/)
+    expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="Enable kick"/)
     expect(markup).toContain('>Stream key<')
   })
 
@@ -194,6 +195,20 @@ describe('DestinationCard connection mode', () => {
     expect(markup).toContain('TikTok LIVE Center')
     expect(markup).toContain('>Server URL<')
     expect(markup).toContain('>Stream key<')
+  })
+
+  it('keeps Facebook on a stream key until its sign-in exists (plan 206)', () => {
+    for (const authMode of ['manual-rtmp', 'oauth'] as const) {
+      const markup = render({ target: target('facebook', { authMode }) })
+      expect(markup, authMode).not.toContain('Connect with')
+      expect(markup, authMode).not.toContain('>Sign in<')
+      expect(markup, authMode).toContain('Signing in with Facebook isn&#x27;t available yet.')
+      expect(markup, authMode).toContain('choose Streaming software')
+      expect(markup, authMode).toContain('100 followers')
+      expect(markup, authMode).toContain('Live Producer<svg')
+      expect(markup, authMode).toContain('>Stream key<')
+    }
+    expect(manualKeyGuidance('facebook').link?.url).toBe('https://www.facebook.com/live/producer')
   })
 
   it('shows Kick key guidance only in Stream key mode', () => {

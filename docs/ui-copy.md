@@ -42,9 +42,11 @@ app. Two checks hold them (see [Guards](#guards)).
 - One character, "…", never three dots ("...").
 - On a command that opens a further step asking for a choice or input:
   "Import…", "Rename…", "Choose thumbnail…", "Edit…", "Go Live…", "Pair a
-  phone…", "Set up permissions…", "What's new…".
+  phone…", "Run setup again…", "What's new…", "Sign in…" and "Authorize X
+  Live…" (both open an account flow in the browser).
 - Not on a command that acts at once, or one that only opens a page or a
-  window: "Delete", "Open Output", "Open Stream Manager".
+  window: "Delete", "Open Output", "Open Stream Manager", "Open Livestream".
+  "Set level for me" changes Gain at once, so it has no ellipsis either.
 - On every pending label: "Saving…", "Importing…", "Exporting…",
   "Switching…", "Opening preview…".
 - Search placeholders say what they search: "Search recordings…".
@@ -76,6 +78,12 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
 - Quote a control or a page exactly as it reads today, with "→" for a path:
   "Livestream → Setup", "Settings → Shortcuts". Never point at a page, a tab
   or a button that does not exist.
+- Scenes and Hide screen (plan 210) read the same everywhere: "New scene…"
+  makes scenes for apps, a scene for an app says "{App} · front window",
+  "Follow the app in front" is the switch and "Follows" the row's mark
+  ("Stop following" in its ⋯ menu), the control is "Hide screen" and then
+  "Show screen", and the chip while it holds is "Screen hidden". Never
+  "blur", "privacy mode" or "censor".
 - Premium, always the same sentence and action: "{Feature} is part of
   Videorc Premium." with one "View Premium" button.
 - Platform-true words come from the platform helpers, never a literal:

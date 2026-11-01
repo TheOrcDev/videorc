@@ -50,9 +50,11 @@ import {
 import {
   analyzeSystemAudioArtifact,
   mixSourcesIncludeSystemAudio,
+  startedSessionStatus,
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const ALL_CASES = ['idle', 'on-air', 'system-audio']
@@ -120,6 +122,16 @@ class BackendEventRecorder {
       this.events.push(record)
       if (debug && message.event.startsWith('sounds.')) {
         console.log(`[event] ${message.event} ${JSON.stringify(message.payload)}`)
+      } else if (debug && message.event === 'recording.status') {
+        const payload = message.payload ?? {}
+        const mix = (payload.audioTracks ?? [])
+          .map((track) => `${track.id}:[${(track.mixSources ?? []).join('+')}]`)
+          .join(' ')
+        console.log(
+          `[event] recording.status ${payload.state} ${payload.sessionId ?? ''}${payload.replayOnly ? ' replayOnly' : ''} ${mix}`
+        )
+      } else if (debug && message.event === 'health.event') {
+        console.log(`[event] health.event ${JSON.stringify(message.payload)}`)
       }
       for (const waiter of this.waiters) {
         if (waiter.predicate(record)) {
@@ -188,6 +200,11 @@ async function sendIntent(ctx, intent) {
   const ticket = await remoteRequest(ctx.remote, 'remote.intent', intent, { timeoutMs })
   if (!ticket.payload?.accepted) fail(`${intent.kind} was not accepted: ${JSON.stringify(ticket)}`)
   const ack = await ctx.acks.wait(ticket.payload.intentId, intent.kind)
+  if (debug) {
+    console.log(
+      `[intent] ${intent.kind} acked ok=${ack.ok} after ${Math.round(performance.now() - sentAt)} ms`
+    )
+  }
   if (ack.ok !== true) fail(`${intent.kind} was refused: ${ack.message ?? JSON.stringify(ack)}`)
   return { ack, sentAt }
 }
@@ -206,7 +223,7 @@ async function seedRenderer(smoke) {
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const audio = { ...(current.audio ?? {}), systemAudioEnabled: false, systemAudioGainDb: -6 };
         localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, layout, audio, recordEnabled: true, streamEnabled: false }));
-        setTimeout(() => location.reload(), 50);
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       video: { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
@@ -259,12 +276,13 @@ async function waitForPublishedMp4(ctx, sessionId, terminal) {
 /** Record, press once at `pressSeconds`, Stop: the press's file time and the MP4. */
 async function recordWithPress(ctx, { name, systemAudio }) {
   await sendIntent(ctx, { kind: systemAudio ? 'systemAudioOn' : 'systemAudioOff' })
+  // Only the session this Record starts: the Clips ring re-armed after the
+  // last Stop and its buffer-only `recording` status is already buffered.
   const recordingPromise = ctx.recorder.waitFor(
     `${name} recording.status(recording)`,
     (record) =>
       record.event === 'recording.status' &&
-      record.payload?.state === 'recording' &&
-      typeof record.payload?.sessionId === 'string' &&
+      startedSessionStatus(record.payload) &&
       record.at > ctx.since
   )
   await sendIntent(ctx, { kind: 'recordStart' })

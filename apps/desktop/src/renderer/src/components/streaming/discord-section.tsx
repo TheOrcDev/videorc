@@ -203,6 +203,31 @@ function ConnectedDiscord({
   const automatic = snapshot.postAs.kind === 'automatic'
   const sender = automatic ? discord.preview?.sender : undefined
   const automaticLabel = sender ? `Automatic · ${sender.name}` : 'Automatic'
+  const postAsItems = [
+    {
+      value: 'automatic',
+      label: (
+        <>
+          <AvatarCircle
+            avatarUrl={sender?.avatarUrl}
+            className="size-5"
+            name={sender?.name ?? 'Webhook'}
+          />
+          {automaticLabel}
+        </>
+      )
+    },
+    ...snapshot.identities.map((identity) => ({
+      value: postAsKey(identity.postAs),
+      label: (
+        <>
+          <AvatarCircle avatarUrl={identity.avatarUrl} className="size-5" name={identity.name} />
+          {identity.name}
+        </>
+      )
+    })),
+    { value: 'webhook', label: "The webhook's own name" }
+  ]
 
   const setTest = (webhookId: string, state: TestState): void => {
     setTests((previous) => new Map(previous).set(webhookId, state))
@@ -279,32 +304,21 @@ function ConnectedDiscord({
         </SettingsRow>
         <SettingsRow description="Whose name and picture the post shows." label="Post as">
           <Select
+            items={postAsItems}
             value={postAsKey(snapshot.postAs)}
-            onValueChange={(key) => void discord.update({ postAs: postAsFromKey(key) })}
+            onValueChange={(key) => {
+              if (key !== null) void discord.update({ postAs: postAsFromKey(key) })
+            }}
           >
             <SelectTrigger className="w-56" data-testid="discord-post-as">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="automatic">
-                <AvatarCircle
-                  avatarUrl={sender?.avatarUrl}
-                  className="size-5"
-                  name={sender?.name ?? 'Webhook'}
-                />
-                {automaticLabel}
-              </SelectItem>
-              {snapshot.identities.map((identity) => (
-                <SelectItem key={postAsKey(identity.postAs)} value={postAsKey(identity.postAs)}>
-                  <AvatarCircle
-                    avatarUrl={identity.avatarUrl}
-                    className="size-5"
-                    name={identity.name}
-                  />
-                  {identity.name}
+              {postAsItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
                 </SelectItem>
               ))}
-              <SelectItem value="webhook">The webhook's own name</SelectItem>
             </SelectContent>
           </Select>
         </SettingsRow>

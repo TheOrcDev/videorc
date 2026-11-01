@@ -240,9 +240,11 @@ async function main() {
     JSON.stringify(authority.invokeResults)
   )
 
-  // Chat chrome: renamed title, the corner picker, and real glass (plan 050):
-  // the shared window frame, and on macOS the OS material following the app
+  // Chat chrome: renamed title, the corner picker, and the window material:
+  // the shared window frame on the chrome ground (plan 208), following the app
   // theme like the main window (only the Preview is pinned dark).
+  // VIDEORC_GLASS=clear is the one-release A/B: real vibrancy on macOS (plan
+  // 050), Mica or the solid palette elsewhere.
   const chrome = await smokeCommand('comments-window-reader-state')
   assertProbe(
     chrome.headerTitle === 'Stream Manager',
@@ -250,11 +252,16 @@ async function main() {
     chrome.headerTitle
   )
   assertProbe(chrome.windowFrame === true, 'chrome: the shared glass window frame is mounted')
+  const clearGlass = process.env.VIDEORC_GLASS?.trim().toLowerCase() === 'clear'
   assertProbe(
-    process.platform === 'darwin'
-      ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'follows-app'
-      : ['solid', 'mica'].includes(chrome.glass?.mode?.kind),
-    'chrome: Chat sits on real vibrancy that follows the app theme (Mica or the solid palette off macOS)',
+    clearGlass
+      ? process.platform === 'darwin'
+        ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'follows-app'
+        : ['solid', 'mica'].includes(chrome.glass?.mode?.kind)
+      : chrome.glass?.mode?.kind === 'solid' && chrome.glass?.appearance === 'follows-app',
+    clearGlass
+      ? 'chrome: Chat sits on real vibrancy that follows the app theme (Mica or the solid palette off macOS)'
+      : 'chrome: Chat sits on the solid palette and follows the app theme',
     JSON.stringify(chrome.glass)
   )
   assertProbe(

@@ -49,12 +49,14 @@ fn layout_for(format: VideoFormat) -> Option<PortalPixelLayout> {
 
 /// Runs the stream until `stop_rx` fires (or its sender drops), calling
 /// `on_frame` for every complete frame. `on_revoked` is polled from the loop
-/// so a portal `Closed` signal ends the read within one tick.
-pub fn run_pipewire_capture(
+/// so a portal `Closed` signal ends the read within one tick. Any message is
+/// a stop: the portal stream never swaps its target in place (plan 210 S3 is
+/// macOS only), so the preview's screen commands all end it.
+pub fn run_pipewire_capture<T: 'static>(
     fd: OwnedFd,
     node_id: u32,
     target_fps: u32,
-    stop_rx: std_mpsc::Receiver<()>,
+    stop_rx: std_mpsc::Receiver<T>,
     on_revoked: impl FnMut() -> bool + 'static,
     mut on_frame: impl FnMut(PipewireFrame<'_>) + 'static,
 ) -> Result<(), String> {
@@ -238,7 +240,7 @@ pub fn run_pipewire_capture(
         mainloop.loop_().add_timer(move |_| {
             let stop = matches!(
                 stop_rx.try_recv(),
-                Ok(()) | Err(std_mpsc::TryRecvError::Disconnected)
+                Ok(_) | Err(std_mpsc::TryRecvError::Disconnected)
             );
             if stop || (on_revoked.borrow_mut())() {
                 quit_loop.quit();

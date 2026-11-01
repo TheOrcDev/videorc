@@ -27,6 +27,7 @@ import { Separator } from '@/components/ui/separator'
 import { Toggle } from '@/components/ui/toggle'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type {
+  CameraCorner,
   CameraShape,
   EffectiveSceneBackground,
   OverlayItem,
@@ -43,12 +44,15 @@ import {
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import {
+  STAGE_ITEM_BADGE_LABELS,
   overlayRectToStage,
+  stageItemPictureRect,
   stageItemSnapPeers,
   stageRectToOverlay,
   type OverlayStageItem,
   type StageItemDraft
 } from './overlay-stage'
+import { snapCornerOf } from './stage-corner'
 import { stageNudgeForKey } from './stage-nudge'
 import {
   StageEdits,
@@ -87,6 +91,10 @@ const CANVAS_CHROME_PX = 248
  * surface clips itself to it, so the schematic canvas rounds the same way. */
 const CANVAS_RADIUS_PX = 12
 const NO_COMMIT: StageCommit = async () => ({ ok: false })
+/** A corner drop is shown where it landed this long at most while its preset
+ * applies (the editor draft's own TTL): a preset that never lands gives the
+ * canvas back to the committed scene. */
+const CORNER_DROP_HOLD_MS = 2000
 
 /** The canvas box: the full column width at the output aspect, never taller
  * than the pane can show whole. Portrait canvases keep the LANDSCAPE (16:9)
@@ -109,6 +117,8 @@ type ActiveGesture = {
   moved: boolean
   /** Set while the pointer owns an overlay item or a banner instead of a scene source. */
   item?: OverlayStageItem
+  /** The preset corner the move is in (a release there re-enters the preset). */
+  corner?: CameraCorner | null
 }
 
 /** Items drawn over the sources (plan 164, D15; plan 186): the overlay items
@@ -150,13 +160,19 @@ export type StagePhase = 'idle' | 'dragging' | 'pending'
  * the real picture and its chrome follow the pointer; release still makes
  * exactly one authoritative commit through `StageEdits`. Between gestures the
  * selected source's frame and handles are HELD on the live picture as a
- * chrome-only draft (`channel.hold`), so there is something to see and grab. */
+ * chrome-only draft (`channel.hold`), so there is something to see and grab.
+ *
+ * With the preview floating in its own window instead (`previewFollowsGestures`),
+ * the schematic is the canvas and the gesture's drafts still go out, so the
+ * real picture over there follows the drag too; nothing is held between
+ * gestures, so that window shows no selection at rest. */
 export function SceneStage({
   scene,
   selectedSourceId,
   background = null,
   previewOpen,
   liveSurface = false,
+  previewFollowsGestures = false,
   liveDocked = false,
   liveHint = null,
   slotRef,
@@ -179,6 +195,7 @@ export function SceneStage({
   onTogglePreview,
   onCommitTransform,
   onSnapCorner,
+  cornerDropRect,
   onRequestFreeform,
   onNudge,
   onUndo,
@@ -193,6 +210,9 @@ export function SceneStage({
   previewOpen: boolean
   /** The docked surface is showing over the canvas: hit-only mode. */
   liveSurface?: boolean
+  /** The native preview shows the picture in its own (floating) window: a
+   * gesture's drafts go to it, though the canvas here is the schematic. */
+  previewFollowsGestures?: boolean
   /** The surface is docked into this canvas (showing or hidden with a reason). */
   liveDocked?: boolean
   /** Tertiary copy under the canvas while the docked surface is hidden. */
@@ -225,7 +245,10 @@ export function SceneStage({
   onSelectSource: (sourceId: string) => void
   onTogglePreview: () => void
   onCommitTransform?: StageCommit
-  onSnapCorner?: (corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right') => void
+  onSnapCorner?: (corner: CameraCorner) => void
+  /** Where a corner snap puts the camera (the preset's box at that corner):
+   * shown while a move is in the corner, so the drop lands where it is shown. */
+  cornerDropRect?: (corner: CameraCorner) => StageRect
   onRequestFreeform?: () => void
   /** Arrow keys on the focused canvas nudge the selected source (plan 174 S3.9, C-31). */
   onNudge?: (sourceId: string, directionX: number, directionY: number, large: boolean) => void
@@ -251,6 +274,9 @@ export function SceneStage({
   const effectiveSnap = freeform ? snap : true
   const [showFreeformHint, setShowFreeformHint] = useState(false)
   const [ghost, setGhost] = useState<StageGhost | null>(null)
+  /** A corner drop while its preset applies: the camera stays where the drop
+   * showed it (the scene, and on the live canvas the released draft). */
+  const [cornerDrop, setCornerDrop] = useState<{ sourceId: string; rect: StageRect } | null>(null)
   const [pixelScale, setPixelScale] = useState(1)
   const [, redraw] = useReducer((value: number) => value + 1, 0)
   const gestureRef = useRef<ActiveGesture | null>(null)
@@ -298,7 +324,10 @@ export function SceneStage({
   useLayoutEffect(() => {
     edits.observe(scene)
   }, [edits, scene])
-  const draftEnabled = liveSurface && Boolean(onDraft && onDraftClear)
+  // Gestures draft wherever the native picture is showing (here, or in the
+  // floating preview); the idle selection is held only on the live canvas.
+  const draftEnabled = (liveSurface || previewFollowsGestures) && Boolean(onDraft && onDraftClear)
+  const holdEnabled = liveSurface && draftEnabled
   // Unmount needs no dispose: the mount effect's cleanup cancels the gesture,
   // which clears the channel, and an idle channel holds no timer.
   useLayoutEffect(() => {
@@ -306,7 +335,7 @@ export function SceneStage({
   }, [channel, draftEnabled])
   const phase: StagePhase = ghost
     ? 'dragging'
-    : edits.draft || overlays?.drafts.length || externalPending
+    : edits.draft || cornerDrop || overlays?.drafts.length || externalPending
       ? 'pending'
       : 'idle'
   useLayoutEffect(() => {
@@ -336,6 +365,26 @@ export function SceneStage({
     cameraShape,
     cameraAspectLocked
   ])
+  // A corner drop ends when the committed scene shows the camera in that box
+  // (or no longer has it), and at the latest after CORNER_DROP_HOLD_MS. It
+  // never ends with pointer ownership: the preset it applies is what turns
+  // editing off for a moment.
+  useLayoutEffect(() => {
+    if (!cornerDrop) return
+    const source = scene?.sources.find((candidate) => candidate.id === cornerDrop.sourceId)
+    if (
+      !source ||
+      (['x', 'y', 'width', 'height'] as const).every(
+        (key) => Math.abs(source.transform[key] - cornerDrop.rect[key]) <= 0.002
+      )
+    )
+      setCornerDrop(null)
+  }, [cornerDrop, scene])
+  useEffect(() => {
+    if (!cornerDrop) return
+    const timer = setTimeout(() => setCornerDrop(null), CORNER_DROP_HOLD_MS)
+    return () => clearTimeout(timer)
+  }, [cornerDrop])
   // The one selected thing on the stage: a scene source, an overlay item or a banner.
   const selectedItemId = overlays?.selectedId ?? null
   const selectedStageId = selectedSourceId ?? selectedItemId
@@ -393,7 +442,9 @@ export function SceneStage({
       ? ghost.rect
       : edits.draft?.sourceId === source.id
         ? edits.draft.rect
-        : source.transform
+        : cornerDrop?.sourceId === source.id
+          ? cornerDrop.rect
+          : source.transform
   /** Output pixels per CSS pixel of the canvas, as estimated from the session's
    * output width (the schema caps it at 64; a canvas that small has no visible
    * chrome anyway). Only a fallback: the compositor sizes the chrome from
@@ -437,18 +488,23 @@ export function SceneStage({
   // new rect until that commit installs, and a hold sent before then would
   // replace it and let the picture snap back. When the committed scene lands
   // the rect changes, and the hold follows it.
-  // A released banner gesture is held the same way (plan 186): its final
-  // draft keeps the picture where it was dropped until `banners.update` lands.
+  // A released banner or overlay item gesture is held the same way (plan
+  // 186): its final draft keeps the picture where it was dropped until
+  // `banners.update` or `overlays.layout.set` lands.
   const ownCommitPending =
     edits.draft?.sourceId === selectedSourceId ||
+    cornerDrop?.sourceId === selectedSourceId ||
     (!selectedSource &&
-      selectedOverlay?.kind === 'banner' &&
-      Boolean(overlays?.drafts.some((draft) => draft.stageId === selectedOverlay.stageId)))
+      Boolean(
+        selectedOverlay &&
+        overlays?.drafts.some((draft) => draft.stageId === selectedOverlay.stageId)
+      ))
   // A selected overlay item or banner holds the same chrome-only draft under
   // its own stage id (`overlay:<item>`, `banner:<id>`): the backend draws the
-  // frame and handles on the live picture; for an overlay item, knowing no
-  // such source, it moves nothing (plan 164).
-  const heldId = draftEnabled
+  // frame and handles on the live picture, and for the Buddy the pet itself,
+  // which the idle preview otherwise never draws; the highlight card and the
+  // caption bar have nothing to draw until a session (plan 164).
+  const heldId = holdEnabled
     ? (selectedSource?.id ?? (selectedOverlay ? selectedOverlay.stageId : null))
     : null
   const heldRect = selectedSource
@@ -632,7 +688,19 @@ export function SceneStage({
     }
     if (Math.hypot(sample.clientX - gesture.clientX, sample.clientY - gesture.clientY) >= 0.01)
       gesture.moved = true
-    const next = { sourceId: gesture.motion.sourceId, ...gesture.motion.sample(point, sample) }
+    let next: StageGhost = {
+      sourceId: gesture.motion.sourceId,
+      ...gesture.motion.sample(point, sample)
+    }
+    // A preset scene's camera moved into a canvas corner re-enters the preset
+    // there on release: the ghost (and the live draft) is that box, so the
+    // drop lands where it is shown. Out of the corner it follows the pointer.
+    gesture.corner =
+      !gesture.item && gesture.motion.kind === 'move' && onSnapCorner
+        ? snapCornerOf(gesture.motion.rect)
+        : null
+    if (gesture.corner && cornerDropRect)
+      next = { sourceId: next.sourceId, rect: cornerDropRect(gesture.corner), guides: [] }
     setGhost(next)
     if (draft) channel.sample(draftOf(gesture, next))
     return next
@@ -663,27 +731,27 @@ export function SceneStage({
     }
     const changed = gesture.moved && !sameStageRect(final.rect, gesture.initial)
     if (gesture.item) {
-      // No scene revision will end this draft. An overlay item's is cleared
-      // with the gesture, and the hold (its frame) takes over on the live
-      // picture. A banner's last frame is released instead, carrying the
-      // clamped rect `banners.update` stores, so its picture stays where it
-      // was dropped; the hold returns once the update lands (plan 186).
-      if (changed && gesture.item.kind === 'banner')
-        channel.release(overlayRectToStage(stageRectToOverlay(final.rect)))
+      // No scene revision will end this draft: its last frame is released
+      // instead, carrying the clamped rect `banners.update` or
+      // `overlays.layout.set` stores, so the picture (a banner, the Buddy)
+      // and its frame stay where they were dropped; the hold returns once
+      // the save lands (plan 186). An unchanged gesture is cleared with it.
+      if (changed) channel.release(overlayRectToStage(stageRectToOverlay(final.rect)))
       cancelGesture()
       if (changed) overlays?.onCommit(gesture.item, final.rect)
       return
     }
-    const corner =
-      changed && gesture.motion.kind === 'move' && onSnapCorner ? snapCornerOf(final.rect) : null
+    const corner = changed ? (gesture.corner ?? null) : null
     // The draft's last frame and the commit carry the same rounded rect, and
     // the backend drops the draft when that commit's revision installs. A
-    // corner snap commits through a preset instead, so its draft is cleared
-    // with the gesture (cancelGesture below).
-    if (changed && !corner) channel.release(roundRectForCommit(final.rect))
+    // corner snap commits through a preset instead: its last frame is the
+    // preset's box, held (`cornerDrop`) until the preset's scene shows it;
+    // without that box the draft is cleared with the gesture.
+    if (changed && (!corner || cornerDropRect)) channel.release(roundRectForCommit(final.rect))
     cancelGesture()
     if (!changed) return
     if (corner) {
+      if (cornerDropRect) setCornerDrop({ sourceId: gesture.motion.sourceId, rect: final.rect })
       onSnapCorner?.(corner)
       return
     }
@@ -731,9 +799,8 @@ export function SceneStage({
           disabled={phase !== 'idle'}
           aria-label="Scene sources"
           className="min-w-0 flex-wrap"
-          type="single"
-          value={selectedStageId ?? ''}
-          onValueChange={(value) => {
+          value={selectedStageId ? [selectedStageId] : []}
+          onValueChange={([value]) => {
             if (!value) return
             cancelGesture()
             const overlay = overlayItems.find((entry) => entry.stageId === value)
@@ -764,16 +831,31 @@ export function SceneStage({
             return (
               <ToggleGroupItem
                 key={entry.stageId}
-                aria-label={`Select ${entry.label}`}
+                aria-label={
+                  entry.badge ? `Select ${entry.label}, ${entry.badge}` : `Select ${entry.label}`
+                }
                 data-videorc-stage-banner-chip={entry.kind === 'banner' ? entry.id : undefined}
                 data-videorc-stage-overlay-chip={entry.kind === 'overlay' ? entry.item : undefined}
                 value={entry.stageId}
               >
                 <Icon data-icon="inline-start" />
-                {/* The stream-only or recording-only badge is on the stage itself. */}
                 <span className="max-w-44 truncate" title={entry.label}>
                   {entry.label}
                 </span>
+                {/* The state word after the name, quiet like a device's status
+                    (plan 205 S3): "Hidden", "Off", "Stream only" or "Recording
+                    only", nothing when both outputs show it. On the live canvas
+                    the stage's own badge is invisible under the picture, and
+                    the Preview draws nothing for a hidden or off item, so this
+                    chip is the one place the word shows. */}
+                {entry.badge ? (
+                  <span
+                    className="ml-0.5 shrink-0 text-xs font-normal text-muted-foreground"
+                    data-videorc-stage-chip-badge={entry.badge}
+                  >
+                    {STAGE_ITEM_BADGE_LABELS[entry.badge]}
+                  </span>
+                ) : null}
               </ToggleGroupItem>
             )
           })}
@@ -986,10 +1068,14 @@ export function SceneStage({
                   switches turn off, or a selected banner that is hidden, is
                   drawn dimmed with an "off" or "hidden" chip (plan 174,
                   C-13). Hidden under the live surface like every painted
-                  element; the hit targets stay. */}
+                  element; the hit targets stay, and the toolbar chip keeps
+                  the word (plan 205 S3). */}
               {overlayItems.map((entry) => {
                 const rect = displayedOverlay(entry)
                 const selected = selectedItemId === entry.stageId
+                const picture = entry.picture
+                  ? stageItemPictureRect(entry.picture, rect, STAGE_W / stageH)
+                  : null
                 return (
                   <g
                     key={entry.stageId}
@@ -1004,6 +1090,30 @@ export function SceneStage({
                     }}
                     onPointerDown={(event) => beginOverlayGesture(entry, 'move', event)}
                   >
+                    {/* The item itself on the schematic: a banner's image, the
+                        Buddy's still in its pet's square. It moves with the
+                        ghost, so a drag shows how the drop will look. Under
+                        the live surface the compositor draws the real thing.
+                        The Buddy's picture takes the pointer where it is
+                        drawn (its zone stays chip-only, like the other
+                        zones); an item no output shows is dimmed and leaves
+                        the sources under it to the pointer. */}
+                    {entry.picture && picture ? (
+                      <image
+                        data-videorc-stage-item-picture={entry.stageId}
+                        className={cn(liveSurface && 'invisible')}
+                        href={entry.picture.href}
+                        opacity={entry.picture.opacity * (entry.off ? 0.4 : 1)}
+                        pointerEvents={
+                          entry.kind === 'overlay' && !entry.off && !liveSurface ? 'all' : 'none'
+                        }
+                        preserveAspectRatio="xMidYMid meet"
+                        x={picture.x * STAGE_W}
+                        y={picture.y * stageH}
+                        width={picture.width * STAGE_W}
+                        height={picture.height * stageH}
+                      />
+                    ) : null}
                     {/* Overlay items sit above the sources, so an unselected
                         overlay item takes the pointer only on its label chip
                         (the toolbar chips select it too); once selected, its
@@ -1261,18 +1371,6 @@ export function SceneStage({
       </div>
     </div>
   )
-}
-
-/** A move that ends in a canvas corner becomes a preset corner snap. */
-function snapCornerOf(
-  rect: StageRect
-): 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | null {
-  if (
-    (rect.x <= 0.06 || rect.x + rect.width >= 0.94) &&
-    (rect.y <= 0.06 || rect.y + rect.height >= 0.94)
-  )
-    return `${rect.y <= 0.06 ? 'top' : 'bottom'}-${rect.x <= 0.06 ? 'left' : 'right'}`
-  return null
 }
 
 function StageSelection({

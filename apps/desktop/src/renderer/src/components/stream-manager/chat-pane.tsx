@@ -1,13 +1,7 @@
-import {
-  chatDeliveryProgress,
-  deliveryCursor,
-  type ChatDelivery
-} from '../../../../shared/chat-delivery'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import type { ChatDelivery, ChatDeliveryMessage } from '../../../../shared/chat-delivery'
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,6 +10,13 @@ import {
 } from 'react'
 
 import { classifyComposerDraft, markerTime } from '../../../../shared/session-markers'
+import {
+  BUDDY_ASKING,
+  BUDDY_COMMAND,
+  BUDDY_COMMAND_HINT,
+  BUDDY_UNREACHABLE,
+  type CohostActAnswer
+} from '../../../../shared/buddy-act'
 import {
   bannerCompletions,
   type BannerRelayAction,
@@ -58,7 +59,8 @@ import {
   PlatformFilter,
   PlatformFilterMenuItems
 } from '@/components/stream-manager/platform-filter'
-import { AlertIcon, ArrowDownIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
+import { ChatJumpChip } from '@/components/chat-jump-chip'
+import { AlertIcon, ChevronDownIcon, SearchIcon, SendIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -104,7 +106,7 @@ import {
   validateChatDraft,
   type ChatSendFailure
 } from '@/lib/chat-send'
-import { useChatFollow } from '@/hooks/use-chat-follow'
+import { useChatList } from '@/hooks/use-chat-list'
 import {
   chatPaneMessages,
   pickedSendProviders,
@@ -159,6 +161,7 @@ export function ChatPane({
   onBanner,
   sounds,
   onSound,
+  onBuddy,
   prefill = null,
   cohostNudge = false,
   onCohostNudgeTurnOn,
@@ -211,6 +214,8 @@ export function ChatPane({
   /** Plan 189 S9: the board `/sound` reads, and its press or Stop all. */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /** Plan 209 S20: `/buddy <words>`; resolves to Buddy's final answer. */
+  onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
   cohostNudge?: boolean
@@ -264,60 +269,27 @@ export function ChatPane({
     Number(filter.platform !== 'all') + Number(filter.questions) + Number(filter.mentions)
   const filtering = activeFilterCount > 0 || filter.search.trim() !== ''
 
-  const rootRef = useRef<HTMLDivElement>(null)
-  const [viewport, setViewport] = useState<HTMLDivElement | null>(null)
-  useLayoutEffect(() => {
-    setViewport(
-      rootRef.current?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null
-    )
-  }, [])
-  const virtualizer = useVirtualizer({
-    count: shown.length,
-    getScrollElement: () => viewport,
-    estimateSize: () => 58,
-    overscan: 10,
-    getItemKey: (index) => shown[index]?.id ?? index
-  })
-
-  const [unread, setUnread] = useState(0)
-  const [incomplete, setIncomplete] = useState(false)
-  const arrivalRef = useRef({ key: arrivalKey, cursor: deliveryCursor(delivery) })
-  // Newest at the bottom, and the list stays there (hooks/use-chat-follow.ts):
-  // only the streamer scrolling up stops it, and reaching the bottom (or the
-  // jump chip) follows again with nothing unread.
-  const clearUnread = useCallback((): void => {
-    setUnread(0)
-    setIncomplete(false)
-  }, [])
-  const { pinned, pinnedRef, stick, follow, release } = useChatFollow(viewport, {
-    onFollow: clearUnread
-  })
-
-  // Paint retention and filter refreshes are not delivery evidence.
-  useEffect(() => {
-    const prior = arrivalRef.current
-    const progress = chatDeliveryProgress(
-      delivery,
-      prior.key === arrivalKey ? prior.cursor : null,
-      (message) =>
-        chatPaneMessages([message], filter, { questionMessageIds, mentionNames }).length > 0
-    )
-    arrivalRef.current = { key: arrivalKey, cursor: progress.cursor }
-    if (progress.reset || pinnedRef.current) {
-      setUnread(0)
-      setIncomplete(false)
-    } else {
-      setUnread((value) => value + progress.count)
-      if (progress.incomplete) setIncomplete(true)
-    }
-  }, [arrivalKey, delivery, filter, mentionNames, pinnedRef, questionMessageIds])
-  // A new newest message while following: show it before the frame paints.
-  // The bottom of the viewport, not the virtualizer's index scroll, whose
-  // settle loop could pull a streamer who just scrolled up back down.
-  const newestId = shown.at(-1)?.id
-  useLayoutEffect(() => {
-    if (pinnedRef.current) stick()
-  }, [newestId, pinnedRef, shown.length, stick])
+  // The virtualized rows, the follow, the unread count and the roving tab
+  // stop (hooks/use-chat-list.ts, shared with the Studio's Chat section).
+  // Paint retention and filter refreshes are not delivery evidence: only a
+  // delivered message these filters would show counts as an arrival.
+  const countsAsArrival = useCallback(
+    (message: ChatDeliveryMessage): boolean =>
+      chatPaneMessages([message], filter, { questionMessageIds, mentionNames }).length > 0,
+    [filter, mentionNames, questionMessageIds]
+  )
+  const {
+    rootRef,
+    virtualizer,
+    pinned,
+    follow,
+    release,
+    unread,
+    incomplete,
+    activeIndex,
+    setActiveId,
+    focusRow
+  } = useChatList({ shown, delivery, arrivalKey, countsAsArrival, estimateSize: 58 })
 
   // Buddy's "jump to message": clear filters that hide it, then scroll there.
   // The streamer asked for it, so the list stops following until they come
@@ -348,37 +320,9 @@ export function ChatPane({
   // Esc on a row returns to the composer; ⌘L comes from the window.
   const [composerFocus, setComposerFocus] = useState(0)
 
-  // One tab stop with roving focus (plan 174 S3.16a, H-7): the active row
-  // (the newest until one is chosen) holds tabIndex 0, every other -1. A
-  // focused row answers ↑/↓, Home, End, R, C, ⇧⌫ and Esc; Enter and Space
-  // are its button's own click. A row that has scrolled out of the
-  // virtualized window is focused once it is rendered again.
-  const [activeId, setActiveId] = useState<string | null>(null)
-  const activeIndex = useMemo(() => {
-    const index = activeId ? shown.findIndex((message) => message.id === activeId) : -1
-    return index >= 0 ? index : shown.length - 1
-  }, [activeId, shown])
-  const pendingFocusRef = useRef<string | null>(null)
-  const focusPendingRow = useCallback((): void => {
-    const id = pendingFocusRef.current
-    if (!id || typeof CSS === 'undefined') return
-    const row = rootRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
-    const target = row?.matches('[tabindex]')
-      ? row
-      : row?.querySelector<HTMLElement>(':scope > button')
-    if (!target) return
-    pendingFocusRef.current = null
-    target.focus({ preventScroll: true })
-  }, [])
-  useEffect(focusPendingRow)
-  const focusRow = (index: number): void => {
-    const message = shown[index]
-    if (!message) return
-    setActiveId(message.id)
-    pendingFocusRef.current = message.id
-    virtualizer.scrollToIndex(index, { align: 'auto' })
-    focusPendingRow()
-  }
+  // One tab stop with roving focus (plan 174 S3.16a, H-7), from
+  // `useChatList`. A focused row answers ↑/↓, Home, End, R, C, ⇧⌫ and Esc;
+  // Enter and Space are its button's own click.
   /** The row's Remove from chat: the action, or why it is off (H-11). */
   const rowRemoval = (
     message: LiveChatMessage
@@ -455,7 +399,7 @@ export function ChatPane({
           />
           <ToggleGroup
             aria-label="Chat filters"
-            type="multiple"
+            multiple
             value={[
               ...(filter.questions ? ['questions'] : []),
               ...(filter.mentions ? ['mentions'] : [])
@@ -484,21 +428,23 @@ export function ChatPane({
         </div>
         {/* Below 640 px the same filters live in one menu. */}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Chat filters"
-              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              type="button"
-              variant="ghost"
-            >
-              Filters
-              {activeFilterCount > 0 ? (
-                <Badge className="px-1.5" variant="outline">
-                  {activeFilterCount}
-                </Badge>
-              ) : null}
-              <ChevronDownIcon data-icon="inline-end" />
-            </Button>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                aria-label="Chat filters"
+                className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            Filters
+            {activeFilterCount > 0 ? (
+              <Badge className="px-1.5" variant="outline">
+                {activeFilterCount}
+              </Badge>
+            ) : null}
+            <ChevronDownIcon data-icon="inline-end" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-52">
             {platforms.length > 1 ? (
@@ -516,6 +462,7 @@ export function ChatPane({
               {questionMessageIds.size > 0 || filter.questions ? (
                 <DropdownMenuCheckboxItem
                   checked={filter.questions}
+                  closeOnClick
                   onCheckedChange={(checked) =>
                     setFilter((current) => ({ ...current, questions: checked === true }))
                   }
@@ -525,6 +472,7 @@ export function ChatPane({
               ) : null}
               <DropdownMenuCheckboxItem
                 checked={filter.mentions}
+                closeOnClick
                 onCheckedChange={(checked) =>
                   setFilter((current) => ({ ...current, mentions: checked === true }))
                 }
@@ -640,21 +588,9 @@ export function ChatPane({
             </ol>
           )}
         </ScrollArea>
+        {/* Whenever the list is not on the newest message, one way back. */}
         {!pinned ? (
-          // Whenever the list is not on the newest message, one way back.
-          // A glass chip, not an ad-hoc pill (plan 174 H-17): the Badge is
-          // the button.
-          <Badge asChild className="absolute inset-x-0 bottom-2 mx-auto">
-            <button
-              aria-label={`Chat paused: ${incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'reading back'}. Jump to the newest`}
-              data-testid="chat-paused"
-              type="button"
-              onClick={follow}
-            >
-              {incomplete ? 'New chat' : unread > 0 ? `${unread} new` : 'Latest'}
-              <ArrowDownIcon data-icon="inline-end" />
-            </button>
-          </Badge>
+          <ChatJumpChip incomplete={incomplete} unread={unread} onFollow={follow} />
         ) : null}
       </div>
 
@@ -668,6 +604,7 @@ export function ChatPane({
           onBanner={onBanner}
           sounds={sounds}
           onSound={onSound}
+          onBuddy={onBuddy}
           cohostNudge={cohostNudge}
           failures={sendFailures}
           focusSignal={composerFocusSignal + composerFocus}
@@ -686,17 +623,21 @@ export function ChatPane({
 
 /** The composer's own commands, in the order the completion list offers them. */
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
+  { value: '/hide', hint: ' · Hide screen' },
+  { value: '/show', hint: ' · Show screen' },
   { value: '/marker', hint: ' [title] · Save a timeline point' },
   { value: '/clip', hint: ' · Save the last seconds as a clip' },
   // Plan 199 D6: the 1-minute clip.
   { value: '/clip 60', hint: ' · Save the last minute as a clip' },
   { value: '/banner', hint: ' [name] · Show or hide a banner' },
   { value: '/sound', hint: ' [name] · Play a sound' },
+  // Plan 209 S20: Buddy's planner, typed (no wake word, no spoken yes).
+  { value: BUDDY_COMMAND, hint: BUDDY_COMMAND_HINT },
   { value: '/help', hint: ' · Command help' }
 ]
 
 /** The commands that take an argument, and go on to its completions. */
-const COMMANDS_WITH_ARGUMENT = new Set(['/marker', '/banner', '/sound'])
+const COMMANDS_WITH_ARGUMENT = new Set(['/marker', '/banner', '/sound', BUDDY_COMMAND])
 /** The commands whose completions are names (plans 186, 189). */
 const COMMANDS_WITH_NAMES = new Set(['/banner', '/sound'])
 /** No sounds before Studio has read the board: the same empty board. */
@@ -720,7 +661,8 @@ export function Composer({
   banners,
   onBanner,
   sounds,
-  onSound
+  onSound,
+  onBuddy
 }: {
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
@@ -740,6 +682,12 @@ export function Composer({
    */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /**
+   * Plan 209 S20: `/buddy <words>` asks Buddy's planner through Studio.
+   * Resolves to the final answer; its sentence is the composer's notice
+   * ("Switched to BRB. Pressed Drum roll.", or why not). Never posts to chat.
+   */
+  onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   providers: readonly LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
@@ -797,7 +745,8 @@ export function Composer({
     ? !localPending &&
       (command.kind !== 'marker' ||
         Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker)) &&
-      (command.kind !== 'clip' || Boolean(clipContext?.available && onClip))
+      (command.kind !== 'clip' || Boolean(clipContext?.available && onClip)) &&
+      (command.kind !== 'buddy' || Boolean(onBuddy))
     : targets.length > 0 && !pending
   // Under `/banner` and `/sound`, the names (plans 186, 189); otherwise the commands.
   const completions: readonly ComposerCompletion[] =
@@ -809,6 +758,7 @@ export function Composer({
         !draft.includes(' ') &&
         (bannerList || entry.value !== '/banner') &&
         (soundBoard || entry.value !== '/sound') &&
+        (onBuddy || entry.value !== BUDDY_COMMAND) &&
         entry.value.startsWith(draft.toLowerCase())
     )
   const showCompletions = completions.length > 0 && !completionDismissed
@@ -866,7 +816,7 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/hide hides your screen and /show shows it again. /marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /buddy [words] asks Buddy to do something, like /buddy switch to BRB.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -930,6 +880,41 @@ export function Composer({
         })
       return
     }
+    if (command.kind === 'buddy') {
+      // Plan 209 S20: Buddy's planner, typed. The answer is the notice; the
+      // draft clears once Buddy did it, and stays for a retry otherwise.
+      if (!onBuddy) return
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(BUDDY_ASKING)
+      void onBuddy(command.sentence)
+        .then((answer) => {
+          setNotice(answer.message)
+          if (answer.status === 'done' && draftRef.current === submitted) setDraft('')
+        })
+        .catch((error) =>
+          setNotice(error instanceof Error && error.message ? error.message : BUDDY_UNREACHABLE)
+        )
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
+      return
+    }
+    if (command.kind === 'privacy') {
+      const submitted = draft
+      void window.videorc
+        ?.markerFromCommentsWindow({
+          requestId: crypto.randomUUID(),
+          action: command.hidden ? 'screenHide' : 'screenShow'
+        })
+        .then(() => {
+          if (draftRef.current === submitted) setDraft('')
+        })
+        .catch(() => setNotice("Couldn't change screen visibility. Try again."))
+      return
+    }
     if (command.kind === 'marker') {
       if ((!markerContext?.available && !markerContext?.retryAvailable) || !onMarker) {
         setNotice(markerContext?.reason ?? 'Start a recording or livestream to make a marker.')
@@ -986,21 +971,27 @@ export function Composer({
           {local ? (
             <InputGroupAddon>
               <span className="text-[11px] text-muted-foreground">
-                {command.kind === 'marker' ? 'Local · current session' : 'Local'}
+                {command.kind === 'marker'
+                  ? 'Local · current session'
+                  : command.kind === 'buddy'
+                    ? 'Buddy'
+                    : 'Local'}
               </span>
             </InputGroupAddon>
           ) : writable.length > 1 ? (
             <InputGroupAddon>
               <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <InputGroupButton
-                    aria-label={`Send to: ${pickLabel}`}
-                    data-testid="chat-send-to"
-                    size="xs"
-                  >
-                    To: {pickLabel}
-                    <ChevronDownIcon data-icon="inline-end" />
-                  </InputGroupButton>
+                <DropdownMenuTrigger
+                  render={
+                    <InputGroupButton
+                      aria-label={`Send to: ${pickLabel}`}
+                      data-testid="chat-send-to"
+                      size="xs"
+                    />
+                  }
+                >
+                  To: {pickLabel}
+                  <ChevronDownIcon data-icon="inline-end" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56">
                   <DropdownMenuLabel>Send to</DropdownMenuLabel>
@@ -1019,7 +1010,6 @@ export function Composer({
                             return next.size === writable.length ? null : next
                           })
                         }
-                        onSelect={(event) => event.preventDefault()}
                       >
                         <ChatPlatformIcon decorative platform={provider.platform} />
                         {CHAT_PLATFORM_LABELS[provider.platform]}
@@ -1032,7 +1022,7 @@ export function Composer({
                     ))}
                   </DropdownMenuGroup>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={() => setPicked(null)}>
+                  <DropdownMenuItem onClick={() => setPicked(null)}>
                     Every writable destination
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -1237,9 +1227,7 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
   return (
     <div aria-label="Latest message delivery" className="mt-1.5 flex">
       <Tooltip>
-        <TooltipTrigger asChild>
-          <Badge className="max-w-full truncate">Sending…</Badge>
-        </TooltipTrigger>
+        <TooltipTrigger render={<Badge className="max-w-full truncate" />}>Sending…</TooltipTrigger>
         <TooltipContent>{operation.text}</TooltipContent>
       </Tooltip>
     </div>

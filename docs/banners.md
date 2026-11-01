@@ -10,7 +10,9 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
   WebP (up to 25 MB and 40 megapixels). Transparency is kept, so a PNG with
   a transparent background works best. Videorc stores a copy whose longest
   side is at most 3840 px and applies a photo's rotation. You can keep 24
-  banners; animated images are refused.
+  banners; animated images are refused. A new banner shows at once unless
+  four already show or the running session refuses it; then it stays hidden
+  and the list explains why.
 - **Sharp sizes**, shown in the Assets description: wide banner 2400 × 400,
   logo 512 × 512, full frame 3840 × 2160. Each is sharp at its default place
   on a 4K recording.
@@ -46,6 +48,13 @@ A banner is your own image placed anywhere on the picture: a sponsor strip,
   restart Videorc. Banners stay over a takeover and under captions, the
   Buddy and the highlight card. Everything can be changed while recording or
   live except deleting a banner that is showing.
+
+The Preview shows the program: a showing banner appears whenever a running
+output carries it, or either switch is on while nothing runs. That holds
+in every row, Clips at idle and split record + stream included, where the
+Preview composes its own picture, the program leg
+([overlays.md](overlays.md)); a clip saved while nothing runs still holds
+what the recording would (**Show in recording**).
 
 ## For developers
 
@@ -93,7 +102,10 @@ hide` and the event `banners.changed`; `importImage` runs on the
 - Z order on every path: scene, takeover, banners, captions, Buddy,
   highlight card.
 - Scene editor drafts with the stage id `banner:<id>` move the banner's
-  picture live on the idle macOS preview.
+  picture live on the idle macOS preview: on the live canvas, and in the
+  floating preview while a drag runs. The schematic canvas (the preview
+  floating, Windows, Linux) draws the banner's own image in its rect, so a
+  drag there shows the picture moving too.
 
 ### Controls
 

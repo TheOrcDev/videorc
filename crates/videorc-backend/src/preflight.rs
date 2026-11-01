@@ -860,6 +860,54 @@ mod tests {
         assert!(preflight.issues.is_empty());
     }
 
+    #[test]
+    fn facebook_stream_key_is_ready_and_warns_that_comments_need_sign_in() {
+        let mut targets = default_stream_targets();
+        let facebook = targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Facebook)
+            .unwrap();
+        facebook.enabled = true;
+        facebook.stream_key_present = true;
+        facebook.stream_key_secret_ref = Some("stream-target:facebook:test-key".to_string());
+        let streaming = StreamingSettings {
+            enabled: true,
+            mode: StreamMode::Single,
+            selected_target_id: Some("facebook".to_string()),
+            default_output_preset: crate::protocol::VideoPreset::Stream1080p60,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids: vec!["facebook".to_string()],
+            targets,
+        };
+        let metadata = StreamMetadataDraft {
+            title: "Launch stream".to_string(),
+            ..default_stream_metadata_draft("2026-10-27T00:00:00Z".to_string())
+        };
+
+        let preflight = validate_go_live_preflight(
+            GoLivePreflightParams {
+                streaming,
+                scheduled_event_ids: HashMap::new(),
+                scheduled_metadata: HashMap::new(),
+                scheduled_confirmations: HashMap::new(),
+            },
+            &metadata,
+            &[],
+        );
+
+        assert!(preflight.valid, "{preflight:?}");
+        assert!(preflight.destinations[0].ready);
+        assert_eq!(preflight.issues.len(), 1, "{:?}", preflight.issues);
+        assert_eq!(
+            preflight.issues[0].severity,
+            GoLivePreflightIssueSeverity::Warning
+        );
+        assert_eq!(
+            preflight.issues[0].message,
+            crate::live_chat::FACEBOOK_COMMENTS_UNAVAILABLE
+        );
+    }
+
     fn account(platform: StreamPlatform, account_id: &str, label: &str) -> PlatformAccount {
         PlatformAccount {
             id: platform_id(platform).to_string(),
@@ -922,6 +970,7 @@ mod tests {
             StreamPlatform::Twitch => "twitch",
             StreamPlatform::Kick => "kick",
             StreamPlatform::X => "x",
+            StreamPlatform::Facebook => "facebook",
             StreamPlatform::Tiktok => "tiktok",
             StreamPlatform::Instagram => "instagram",
             StreamPlatform::Custom => "custom",

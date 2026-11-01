@@ -3,7 +3,12 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { CohostGreetings, CohostGreetingTemplate, CohostSettings } from '@/lib/backend'
+import type {
+  CohostGreetings,
+  CohostGreetingTemplate,
+  CohostSettings,
+  CohostTalkMode
+} from '@/lib/backend'
 import { COHOST_ACTIVITY_TEMPLATE_KINDS } from '@/lib/backend'
 import { builtinGreeting } from '@/lib/buddy-auto-chat-view'
 
@@ -18,7 +23,8 @@ let patchCohostSettings: ReturnType<typeof vi.fn>
 
 function settings(
   templates: CohostGreetingTemplate[],
-  greetings: Partial<CohostGreetings> = {}
+  greetings: Partial<CohostGreetings> = {},
+  talk: CohostTalkMode = 'off'
 ): CohostSettings {
   return {
     enabled: false,
@@ -42,6 +48,7 @@ function settings(
       reactions: {}
     },
     autoChat: {
+      talk,
       mode: 'off',
       greetings: { enabled: true, templates, ...greetings },
       answers: { enabled: false, cooldownSeconds: 20 },
@@ -69,11 +76,17 @@ async function render(
   {
     greetings,
     premium = true,
-    locked = false
-  }: { greetings?: Partial<CohostGreetings>; premium?: boolean; locked?: boolean } = {}
+    locked = false,
+    talk
+  }: {
+    greetings?: Partial<CohostGreetings>
+    premium?: boolean
+    locked?: boolean
+    talk?: CohostTalkMode
+  } = {}
 ): Promise<void> {
   mocked.core = {
-    cohostSettings: settings(templates, greetings),
+    cohostSettings: settings(templates, greetings, talk),
     cohostGate: premium
       ? { allowed: true }
       : {
@@ -143,7 +156,7 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     expect(document.querySelector('[data-slot="buddy-greeting-preview"]')?.textContent).toContain(
       'Welcome {nam}!'
     )
-    expect(warnings()).toEqual(['{nam} is not a field and will be posted as written.'])
+    expect(warnings()).toEqual(["{nam} isn't a field and stays as written."])
   })
 
   it('warns when the text exceeds a cap on an enabled platform (X takes 140)', async () => {
@@ -157,6 +170,33 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     ])
     await act(async () => toggle('follow').click())
     expect(warnings()).toEqual([])
+  })
+
+  it("hides chat's caps in Bubble, where nothing goes to chat, and keeps them for Suggest (plan 211 S-C4)", async () => {
+    const text = `Welcome {nam}! ${'x'.repeat(150)}`
+    const line = { id: 't1', kind: 'follow' as const, text, state: 'talk' as const, enabled: true }
+    await render([line], { talk: 'bubble' })
+    await act(async () => toggle('follow').click())
+    // The brace still warns: it would show as written in the bubble too.
+    expect(warnings()).toEqual(["{nam} isn't a field and stays as written."])
+    expect(document.querySelector('[data-slot="buddy-greeting-alert"]')?.textContent).not.toContain(
+      'X takes 140'
+    )
+    // The same editor stays open across the save: now in Suggest.
+    await render([line], { talk: 'suggest' })
+    expect(warnings()).toEqual([
+      `X takes 140 characters; this one is ${'Welcome {nam}! '.length + 150}.`,
+      "{nam} isn't a field and stays as written."
+    ])
+  })
+
+  it('says what Buddy says, in Bubble and in Suggest, never what it posts as you (plan 211 S-C4)', async () => {
+    await render([])
+    const description = document.body.textContent ?? ''
+    expect(description).toContain(
+      'What Buddy says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, Buddy says it on stream; in Suggest, you post it.'
+    )
+    expect(description).not.toContain('posts as you')
   })
 
   it('saves the switch and the edited text on blur, never the whole settings', async () => {
@@ -194,7 +234,7 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     expect(enabled.parentElement?.closest('button, [role="button"]')).toBeNull()
     // The warning is the button's description, not a coloured "!" with a tooltip.
     const alert = document.getElementById(button.getAttribute('aria-describedby') ?? '')
-    expect(alert?.textContent).toBe('{nam} is not a field and will be posted as written.')
+    expect(alert?.textContent).toBe("{nam} isn't a field and stays as written.")
     expect(alert?.hasAttribute('title')).toBe(false)
 
     // The switch saves and leaves the editor shut; the title opens it.
@@ -453,7 +493,7 @@ describe('Welcomes (plan 192 S1.3)', () => {
     expect(document.querySelector('[data-slot="buddy-greeting-preview"]')?.textContent).toContain(
       'Back, regular from YouTube {nam}'
     )
-    expect(warnings()).toEqual(['{nam} is not a field and will be posted as written.'])
+    expect(warnings()).toEqual(["{nam} isn't a field and stays as written."])
     expect(savedGreetings().welcomes?.returning).toStrictEqual({
       enabled: true,
       text: 'Back, {name} from {platform} {nam}'
@@ -462,8 +502,10 @@ describe('Welcomes (plan 192 S1.3)', () => {
 })
 
 describe('Write greetings with AI (plan 192 D3)', () => {
-  function aiSwitch(): HTMLButtonElement {
-    return document.getElementById('buddy-greetings-ai') as HTMLButtonElement
+  // The id is on Base UI's hidden input; the label for it names the switch.
+  function aiSwitch(): HTMLElement {
+    const label = document.querySelector('label[for="buddy-greetings-ai"]')
+    return document.querySelector<HTMLElement>(`[role="switch"][aria-labelledby="${label?.id}"]`)!
   }
 
   it("says it writes in Buddy's own voice, with your line as the example", async () => {
@@ -476,7 +518,7 @@ describe('Write greetings with AI (plan 192 D3)', () => {
     )
     // An older backend omits the switch: on, Rust's default.
     expect(aiSwitch().getAttribute('aria-checked')).toBe('true')
-    expect(aiSwitch().disabled).toBe(false)
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(false)
   })
 
   it('saves ai alone in the block, keeping the lines and the welcomes', async () => {
@@ -491,12 +533,12 @@ describe('Write greetings with AI (plan 192 D3)', () => {
 
   it('is Premium like Answers and Banter: disabled under the lock, the lines still free', async () => {
     await render([], { premium: false })
-    expect(aiSwitch().disabled).toBe(true)
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
     expect((document.getElementById('buddy-greetings-enabled') as HTMLButtonElement).disabled).toBe(
       false
     )
     await render([], { locked: true })
-    expect(aiSwitch().disabled).toBe(true)
+    expect(aiSwitch().hasAttribute('data-disabled')).toBe(true)
     // The lines stay editable: a default row still saves.
     await act(async () => row('follow').querySelector<HTMLElement>('[role="switch"]')!.click())
     expect(patchCohostSettings).toHaveBeenCalledTimes(1)

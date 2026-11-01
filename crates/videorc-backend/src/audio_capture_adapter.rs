@@ -446,6 +446,28 @@ impl PulseTimeline {
     }
 }
 
+/// The newest stamp (1/48000 s, wall clock) a pulse packet of `frames` can
+/// carry when it reaches the worker at wall time `wall_now` (1/48000 s): its
+/// last sample cannot be later than its arrival. After a stall long enough to
+/// overrun the Pulse stream, the demuxer's stamps (wall clock less the latency
+/// Pulse reports) ran up to ~17 ms past the packets' arrival for a while (ends
+/// 27 ms past it on ogre). Their capture instants then crossed the 20 ms
+/// `PULSE_CLOCK_UNCERTAINTY`, `CaptureClock` stopped the worker as "PCM is
+/// ahead of its capture clock" and the microphone stayed silent for the rest
+/// of the session (retest 151: 27 minutes of a 30-minute soak).
+fn latest_pulse_stamp_at(wall_now: i64, frames: usize) -> i64 {
+    wall_now.saturating_sub(frames as i64)
+}
+
+/// [`latest_pulse_stamp_at`] for a packet arriving at `now`, read through the
+/// same wall/monotonic pair that maps its anchor back to an `Instant`.
+fn latest_pulse_stamp(clock: &ClockPair, now: Instant, frames: usize) -> i64 {
+    let wall_now_ns =
+        clock.wall_ns + now.saturating_duration_since(clock.monotonic).as_nanos() as i128;
+    let wall_now = i64::try_from(wall_now_ns * 48_000 / 1_000_000_000).unwrap_or(i64::MAX);
+    latest_pulse_stamp_at(wall_now, frames)
+}
+
 /// A pulse packet's anchor: its counted sample position, captured at the
 /// wall-clock stamp `PulseTimeline::place` gave it. Both in 1/48000 s.
 fn pulse_anchor(
@@ -703,6 +725,7 @@ fn capture_command(ffmpeg: &str, device: &str, protocol: CaptureProtocol) -> Com
         "0",
     ]);
     if protocol == CaptureProtocol::Pulse {
+        command.envs(crate::linux_pulse_audio::pulse_pinned_source_env());
         // 10 ms fragments (480 stereo s16 frames): one bounded PCM record per
         // fragment. `-wallclock` is FFmpeg's default and spelled out because
         // the capture clock depends on it.
@@ -835,9 +858,30 @@ fn resolve_target(ffmpeg: &str, id: &str) -> Result<(String, String)> {
         if source.starts_with('-') || source.contains(['\0', '\r', '\n']) {
             bail!("Invalid PulseAudio source identity");
         }
+        // Retest 154 (C4): an unplugged source is not opened at all, so the
+        // session records silence and says so instead of another mic.
+        #[cfg(target_os = "linux")]
+        let listing = crate::linux_pulse_audio::linux_pulse_sources_blocking(ffmpeg);
+        #[cfg(not(target_os = "linux"))]
+        let listing: Option<Vec<crate::linux_pulse_audio::PulseSource>> = None;
+        ensure_pulse_source_present(listing.as_deref(), &source)?;
         return Ok((source.clone(), source));
     }
     bail!("This microphone capture adapter does not recognize the device identity")
+}
+
+fn ensure_pulse_source_present(
+    listing: Option<&[crate::linux_pulse_audio::PulseSource]>,
+    source: &str,
+) -> Result<()> {
+    if crate::linux_pulse_audio::pulse_source_missing(listing, source) {
+        return Err(WorkerStartError::new(
+            WorkerStartFailureKind::DeviceNotInInventory,
+            crate::linux_pulse_audio::pulse_source_not_connected_message(source),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Limits for the worker's two probe children. A cold `ffmpeg-capture.exe`
@@ -1465,7 +1509,12 @@ fn assemble_pcm(
         let mut packet = parse_pcm_description(&line)?;
         if protocol == CaptureProtocol::Pulse {
             observe_wall(&mut clock_pair, &mut wall_watch, &mut last_wall_check, true);
-            let (position, captured) = pulse.place(packet.pts, packet.frames);
+            let stamp = packet.pts.min(latest_pulse_stamp(
+                &clock_pair,
+                Instant::now(),
+                packet.frames,
+            ));
+            let (position, captured) = pulse.place(stamp, packet.frames);
             packet.pts = position;
             clock.push(pulse_anchor(
                 position,
@@ -2007,6 +2056,42 @@ mod tests {
         assert!(args.contains(&"-copyts".into()));
         assert!(!args.iter().any(|arg| arg.contains("videorc_audio")));
         assert_eq!(args.last().unwrap(), "pipe:1");
+        // Retest 154 (C4): pinned to the chosen source, never the default.
+        let pulse_prop = command
+            .get_envs()
+            .find(|(key, _)| *key == "PULSE_PROP")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(
+            pulse_prop.as_deref(),
+            Some("node.dont-fallback=true node.dont-move=true")
+        );
+    }
+
+    #[test]
+    fn non_pulse_capture_commands_carry_no_pulse_stream_properties() {
+        for protocol in [CaptureProtocol::AvFoundation, CaptureProtocol::DirectShow] {
+            let command = capture_command("ffmpeg", "6465736b", protocol);
+            assert!(!command.get_envs().any(|(key, _)| key == "PULSE_PROP"));
+        }
+    }
+
+    #[test]
+    fn an_unplugged_pulse_source_is_refused_as_not_in_inventory() {
+        // Retest 154 (C4): the session then records silence instead of the
+        // direct Pulse input, which would also open nothing else now.
+        let listed = crate::linux_pulse_audio::parse_pulse_sources(
+            "Auto-detected sources for pulse:\n* alsa_input.builtin [Internal Microphone] (none)\n  usb_mic [USB Mic] (none)\n",
+        );
+        assert!(ensure_pulse_source_present(Some(&listed), "usb_mic").is_ok());
+        let error = ensure_pulse_source_present(Some(&listed[..1]), "usb_mic").unwrap_err();
+        assert_eq!(
+            worker_start_failure_kind(&error),
+            Some(WorkerStartFailureKind::DeviceNotInInventory)
+        );
+        assert!(error.to_string().contains("\"usb_mic\" is not connected"));
+        // An unreadable listing says nothing about the device: it still opens.
+        assert!(ensure_pulse_source_present(None, "usb_mic").is_ok());
     }
 
     #[test]
@@ -2019,6 +2104,40 @@ mod tests {
         assert_eq!(anchor.captured_start, now - Duration::from_millis(20));
         assert_eq!(anchor.input_duration, Some(Duration::from_millis(10)));
         assert_eq!(anchor.uncertainty, PULSE_CLOCK_UNCERTAINTY);
+    }
+
+    #[test]
+    fn a_pulse_stamp_never_puts_its_packet_past_its_arrival() {
+        // The pair maps wall 1.000 s to `now`: a 10 ms packet arriving then
+        // can start no later than 0.990 s.
+        let now = Instant::now();
+        assert_eq!(latest_pulse_stamp(&pair(now), now, 480), 47_520);
+        assert_eq!(
+            latest_pulse_stamp(&pair(now), now + Duration::from_millis(5), 480),
+            47_760
+        );
+        // Retest 151: after an overrun the demuxer stamped packets ~17 ms past
+        // their arrival for a while (ends 27.4 ms past it, beyond the 20 ms
+        // `PULSE_CLOCK_UNCERTAINTY`). Clamped, the capture clock follows the
+        // arrivals instead: no packet ends after it arrived, so `CaptureClock`
+        // keeps the worker (and the microphone) running.
+        let future = 835_i64;
+        assert!(
+            Duration::from_secs_f64((future + 480) as f64 / 48_000.0) > PULSE_CLOCK_UNCERTAINTY
+        );
+        let mut timeline = PulseTimeline::default();
+        let mut worst_end_past_arrival = i64::MIN;
+        for index in 0..200_i64 {
+            let arrival = 100_000 + index * 480;
+            let stamp = arrival + future;
+            let (position, captured) =
+                timeline.place(stamp.min(latest_pulse_stamp_at(arrival, 480)), 480);
+            assert_eq!(position, 100_000 - 480 + index * 480);
+            worst_end_past_arrival = worst_end_past_arrival.max(captured + 480 - arrival);
+        }
+        assert!(worst_end_past_arrival <= 0, "{worst_end_past_arrival}");
+        // On-time stamps are untouched.
+        assert_eq!(47_000_i64.min(latest_pulse_stamp_at(47_520, 480)), 47_000);
     }
 
     #[test]
@@ -2177,7 +2296,8 @@ mod tests {
     #[test]
     fn a_pulse_microphone_id_resolves_to_its_source_name_on_linux_only() {
         let id = crate::linux_pulse_audio::linux_pulse_microphone_id("videorc_test_tone");
-        let resolved = resolve_target("ffmpeg", &id);
+        // No FFmpeg to list sources with: an unknown listing still resolves.
+        let resolved = resolve_target("/nonexistent/videorc-ffmpeg", &id);
         if cfg!(target_os = "linux") {
             let (device, name) = resolved.unwrap();
             assert_eq!(device, "videorc_test_tone");
@@ -2187,7 +2307,7 @@ mod tests {
         }
         let hostile = crate::linux_pulse_audio::linux_pulse_microphone_id("-filter_complex");
         if cfg!(target_os = "linux") {
-            assert!(resolve_target("ffmpeg", &hostile).is_err());
+            assert!(resolve_target("/nonexistent/videorc-ffmpeg", &hostile).is_err());
         }
     }
 

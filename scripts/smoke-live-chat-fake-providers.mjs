@@ -1,3 +1,4 @@
+import { acquireHostSmokeLock, waitForHostMemory } from './lib/host-lock.mjs'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -653,14 +654,13 @@ try {
       throw new Error('Finished History accounting changed after local clear and stop.')
     }
 
-    // Plan 164 Phase D: the Buddy's greetings post as the streamer through
-    // the same send path. In `auto` with three enabled templates (every
-    // other kind and both welcomes switched off), every fake activity row
-    // with a template earns exactly one send on the destination it came from
-    // (the throttle spaces them: 5 s apart per destination, so each
-    // platform's rows land one per gap), and with the mode `off` nothing is
-    // sent at all. Plan 192: with no lines of the user's own, the built-in
-    // line and a chatter's welcome go out by themselves.
+    // Plan 211: Buddy talks only in its bubble. In Bubble, with Buddy on
+    // stream and no lines of the user's own (plan 192), the fake follow's
+    // built-in line and the chatters' welcomes show in the bubble one after
+    // another (a burst collapses into one line), nothing is sent and the
+    // report lists what was said; in Suggest one card, approved, lands as
+    // exactly one send and one post; with talk `off` nothing is said or
+    // sent at all.
     await assertBuddyGreetings(ws)
 
     console.log(
@@ -679,27 +679,10 @@ try {
 
 async function assertBuddyGreetings(ws) {
   const settingsBefore = await request(ws, timeoutMs, 'cohost.settings.get', {})
-  const templates = [
-    { id: 'smoke-follow', kind: 'follow', text: 'Welcome {name}!', state: 'talk', enabled: true },
-    {
-      id: 'smoke-raid',
-      kind: 'raid',
-      text: '{name} brings {count} warriors',
-      state: 'laugh',
-      enabled: true
-    },
-    {
-      id: 'smoke-superchat',
-      kind: 'super-chat',
-      platform: 'youtube',
-      text: '{amount} from {name}, thanks',
-      state: 'talk',
-      enabled: true
-    }
-  ]
-  // Plan 192 D1: a kind without a line of the user's own posts its built-in
-  // line, so the scenario switches every other kind off (a kind whose lines
-  // are all off is off) and both welcomes too.
+  const layoutBefore = await request(ws, timeoutMs, 'overlays.layout.get', {})
+  // Plan 192 D1: a kind without a line of the user's own speaks its built-in
+  // line, so a scenario switches every kind it doesn't want off (a kind
+  // whose lines are all off is off).
   const offLines = (keep) =>
     BUDDY_ACTIVITY_KINDS.filter((kind) => !keep.includes(kind)).map((kind) => ({
       id: `smoke-off-${kind}`,
@@ -708,43 +691,34 @@ async function assertBuddyGreetings(ws) {
       state: 'talk',
       enabled: false
     }))
-  const welcomesOff = { firstTime: { enabled: false }, returning: { enabled: false } }
-  const autoChat = (mode) => ({
-    mode,
+  // Plan 211 D3: `talk` is the one truth; the legacy `mode` is never sent.
+  const autoChat = (talk, { welcomes = false } = {}) => ({
+    talk,
     greetings: {
       enabled: true,
       ai: false,
-      templates: [...templates, ...offLines(['follow', 'raid', 'super-chat'])],
-      welcomes: welcomesOff
+      templates: offLines(['follow']),
+      welcomes: { firstTime: { enabled: welcomes }, returning: { enabled: welcomes } }
     },
     answers: { enabled: false, cooldownSeconds: 20 },
     banter: { enabled: false, cooldownSeconds: 240 }
   })
-  const buddyDestinations = [
-    { platform: 'twitch', targetId: 'smoke-buddy-twitch' },
-    { platform: 'youtube', targetId: 'smoke-buddy-youtube' },
-    { platform: 'kick', targetId: 'smoke-buddy-kick' }
-  ]
-  const startBuddySession = async (sessionId) => {
+  const startBuddySession = async (sessionId, fakes) => {
     const operations = collectEvent(ws, 'liveChat.sendOperation')
     const states = collectEvent(ws, 'cohost.state')
+    const bubbles = collectEvent(ws, 'cohost.buddy.state')
     await request(ws, timeoutMs, 'liveChat.start', {
       sessionId,
-      platforms: ['twitch', 'youtube', 'kick'],
-      destinations: buddyDestinations.map(({ platform, targetId }) => ({
+      platforms: [...new Set(fakes.map((fake) => fake.platform))],
+      destinations: fakes.map(({ platform, targetId }) => ({
         platform,
         targetId,
         read: 'ready',
         write: 'ready'
       })),
-      fakes: buddyDestinations.map((destination) => ({
-        ...destination,
-        count: 1,
-        intervalMs: 60,
-        events: true
-      }))
+      fakes: fakes.map((fake) => ({ count: 1, intervalMs: 60, ...fake }))
     })
-    return { operations, states }
+    return { operations, states, bubbles }
   }
   const terminalSends = (operations, sessionId) =>
     operations.payloads.filter(
@@ -754,84 +728,178 @@ async function assertBuddyGreetings(ws) {
           operation.phase === 'partial' ||
           operation.phase === 'failed')
     )
-
-  // Auto: three templates, three fake destinations. Twitch delivers a raid
-  // and a follow (two sends, the second 5 s after the first), YouTube one
-  // Super Chat, Kick one follow. Nothing else has a template.
-  await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: autoChat('auto') })
-  const autoSessionId = `smoke-buddy-auto-${Date.now()}`
-  const auto = await startBuddySession(autoSessionId)
-  const expectedSends = [
-    { targetId: 'smoke-buddy-twitch', text: 'raider42 brings 234 warriors' },
-    { targetId: 'smoke-buddy-youtube', text: '$5.00 from Maria, thanks' },
-    { targetId: 'smoke-buddy-kick', text: 'Welcome kick_fan!' },
-    { targetId: 'smoke-buddy-twitch', text: 'Welcome new_friend!' }
+  const bubbleTexts = (bubbles) => [
+    ...new Set(bubbles.payloads.map((payload) => payload?.bubble?.text).filter(Boolean))
   ]
-  await waitFor(
-    () => terminalSends(auto.operations, autoSessionId).length >= expectedSends.length,
-    Math.max(timeoutMs, 20_000),
-    `the ${expectedSends.length} Buddy greetings`
-  )
-  // Give any extra (wrong) send a moment to show up before counting.
-  await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
-  const sends = terminalSends(auto.operations, autoSessionId)
-  const landed = sends.map((operation) => ({
-    targetId: operation.destinations.map((delivery) => delivery.destinationId).join(','),
-    text: operation.text,
-    phases: operation.destinations.map((delivery) => delivery.phase).join(',')
-  }))
-  if (sends.length !== expectedSends.length) {
-    throw new Error(
-      `Buddy sent ${sends.length} greetings, expected ${expectedSends.length}: ${JSON.stringify(landed)}`
-    )
-  }
-  for (const expected of expectedSends) {
-    const match = landed.find(
-      (entry) => entry.targetId === expected.targetId && entry.text === expected.text
-    )
-    if (!match || match.phases !== 'sent') {
-      throw new Error(
-        `Buddy greeting missing or not sent: ${JSON.stringify(expected)} in ${JSON.stringify(landed)}`
-      )
+  const setBuddyOnStream = (showOnStream) =>
+    request(ws, timeoutMs, 'overlays.layout.set', {
+      ...layoutBefore,
+      buddy: { ...layoutBefore.buddy, showOnStream }
+    })
+
+  // Bubble (plan 211 D1, D7, D9, D11), with Buddy on stream and no lines of
+  // the user's own: Kick delivers a follow (its built-in line, plan 192 D1)
+  // and a KICKs row whose only line is off (counted, never said); five
+  // first-time chatters across Twitch and Kick arrive within the welcome's
+  // 5 s cooldown, so the first is welcomed at once and the other four
+  // collapse into one line (the bubble is one shared destination). Every
+  // line shows in Buddy's bubble, one after another; nothing is sent, the
+  // report lists what was said and has no posts.
+  await setBuddyOnStream(true)
+  await request(ws, timeoutMs, 'cohost.settings.set', {
+    autoChat: autoChat('bubble', { welcomes: true })
+  })
+  const bubbleSessionId = `smoke-buddy-bubble-${Date.now()}`
+  const bubble = await startBuddySession(bubbleSessionId, [
+    {
+      platform: 'twitch',
+      targetId: 'smoke-buddy-bubble-twitch',
+      count: 3,
+      authors: ['Ana', 'Cy', 'Ed']
+    },
+    {
+      platform: 'kick',
+      targetId: 'smoke-buddy-bubble-kick',
+      count: 2,
+      authors: ['Bo', 'Di'],
+      events: true
     }
+  ])
+  const expectedBubbles = [
+    { label: 'the first welcome', test: /^Hi [A-Za-z]+, welcome to the stream!$/ },
+    {
+      label: 'the collapsed welcome',
+      test: /^Hi [A-Za-z]+, [A-Za-z]+, [A-Za-z]+ and 1 other, welcome to the stream!$/
+    },
+    { label: "the follow's built-in line", test: /^Welcome, kick_fan! Thanks for the follow\.$/ }
+  ]
+  // The throttle spaces the lines 5 s apart on the one bubble destination,
+  // and the queue adds the bubble's own time; three lines take about 10 s.
+  await waitFor(
+    () =>
+      expectedBubbles.every(({ test }) => bubbleTexts(bubble.bubbles).some((t) => test.test(t))),
+    Math.max(timeoutMs, 40_000),
+    `Buddy's ${expectedBubbles.length} bubble lines`
+  )
+  // Give any extra (wrong) line or send a moment to show up before counting.
+  await new Promise((resolveWait) => setTimeout(resolveWait, 3_000))
+  const said = bubbleTexts(bubble.bubbles)
+  if (said.length !== expectedBubbles.length) {
+    throw new Error(
+      `Buddy bubbled ${said.length} lines, expected ${expectedBubbles.length}: ${JSON.stringify(said)}`
+    )
   }
-  // Each greeting went to its own destination only (plan 164 D8).
-  if (landed.some((entry) => entry.targetId.includes(','))) {
-    throw new Error(`A Buddy greeting fanned out: ${JSON.stringify(landed)}`)
+  const bubbleSends = bubble.operations.payloads.filter(
+    (operation) => operation.sessionId === bubbleSessionId
+  )
+  if (bubbleSends.length !== 0) {
+    throw new Error(
+      `Buddy sent in Bubble: ${JSON.stringify(bubbleSends.map((operation) => operation.text))}`
+    )
   }
-  // The Twitch follow waited for the 5 s gap after the raid (plan 164 D9).
-  const twitchOrder = sends
-    .filter((operation) => operation.destinations[0]?.destinationId === 'smoke-buddy-twitch')
-    .map((operation) => ({ text: operation.text, at: Date.parse(operation.createdAt) }))
+  const bubbleState = bubble.states.payloads.at(-1)
+  const bubbleUtterances = bubbleState?.utterances ?? []
   if (
-    twitchOrder.length !== 2 ||
-    twitchOrder[0].text !== 'raider42 brings 234 warriors' ||
-    twitchOrder[1].at - twitchOrder[0].at < 4_500
+    (bubbleState?.autoChatSends ?? 0) !== 0 ||
+    bubbleUtterances.length !== expectedBubbles.length ||
+    bubbleUtterances.some((utterance) => utterance.status !== 'bubble-only')
   ) {
-    throw new Error(`Buddy greetings on Twitch broke the 5 s gap: ${JSON.stringify(twitchOrder)}`)
+    throw new Error(`cohost.state did not carry the bubble lines: ${JSON.stringify(bubbleState)}`)
   }
-  // The state carries every utterance as sent, and counts the sends.
-  const sentState = auto.states.payloads.at(-1)
+  const bubbleReport = (
+    await request(ws, timeoutMs, 'cohost.report.get', { sessionId: bubbleSessionId })
+  )?.report
+  const saidRows = bubbleReport?.said ?? []
   if (
-    (sentState?.autoChatSends ?? 0) !== expectedSends.length ||
-    !Array.isArray(sentState?.utterances) ||
-    sentState.utterances.filter((utterance) => utterance.status === 'sent').length !==
-      expectedSends.length
+    saidRows.length !== expectedBubbles.length ||
+    saidRows.some((row) => row.trigger !== 'greeting' || !said.includes(row.text)) ||
+    (bubbleReport?.posts?.length ?? 0) !== 0 ||
+    (bubbleReport?.greetings?.skipped?.noLine ?? 0) < 1
   ) {
-    throw new Error(`cohost.state did not carry the Buddy's sends: ${JSON.stringify(sentState)}`)
-  }
-  // The report has every post, written as each one landed (plan 164 D10).
-  const autoReport = await request(ws, timeoutMs, 'cohost.report.get', { sessionId: autoSessionId })
-  const posts = autoReport?.report?.posts ?? []
-  if (posts.length !== expectedSends.length || posts.some((post) => post.result !== 'sent')) {
-    throw new Error(`The Buddy report lost posts: ${JSON.stringify(autoReport?.report)}`)
+    throw new Error(`The Buddy report lost what was said: ${JSON.stringify(bubbleReport)}`)
   }
   await request(ws, timeoutMs, 'liveChat.stop', {})
 
-  // Off: the same templates, the same rows, zero sends.
-  await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: autoChat('off') })
+  // Suggest (plan 211 D2): the follow becomes a card; nothing shows or
+  // sends before the click. Approving it is the one path from Buddy's lane
+  // to chat: exactly one send, one post in the report, and the bubble when
+  // it lands.
+  await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: autoChat('suggest') })
+  const suggestSessionId = `smoke-buddy-suggest-${Date.now()}`
+  const suggestTarget = 'smoke-buddy-suggest-kick'
+  const suggest = await startBuddySession(suggestSessionId, [
+    { platform: 'kick', targetId: suggestTarget, events: true }
+  ])
+  const proposed = () =>
+    (suggest.states.payloads.at(-1)?.utterances ?? []).filter(
+      (utterance) => utterance.status === 'proposed'
+    )
+  await waitFor(
+    () => proposed().length >= 1,
+    Math.max(timeoutMs, 20_000),
+    "the follow's Suggest card"
+  )
+  await new Promise((resolveWait) => setTimeout(resolveWait, 3_000))
+  const cards = proposed()
+  if (
+    cards.length !== 1 ||
+    cards[0].text !== 'Welcome, kick_fan! Thanks for the follow.' ||
+    bubbleTexts(suggest.bubbles).length !== 0 ||
+    suggest.operations.payloads.some((operation) => operation.sessionId === suggestSessionId)
+  ) {
+    throw new Error(
+      `Suggest showed or sent before the click: ${JSON.stringify({ cards, bubbles: bubbleTexts(suggest.bubbles) })}`
+    )
+  }
+  await request(ws, timeoutMs, 'cohost.utterance.approve', {
+    sessionId: suggestSessionId,
+    utteranceId: cards[0].id
+  })
+  await waitFor(
+    () => terminalSends(suggest.operations, suggestSessionId).length >= 1,
+    Math.max(timeoutMs, 20_000),
+    'the approved card to land'
+  )
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
+  const approvedSends = terminalSends(suggest.operations, suggestSessionId)
+  if (
+    approvedSends.length !== 1 ||
+    approvedSends[0].text !== cards[0].text ||
+    approvedSends[0].destinations.length !== 1 ||
+    approvedSends[0].destinations[0].destinationId !== suggestTarget ||
+    approvedSends[0].destinations[0].phase !== 'sent'
+  ) {
+    throw new Error(`The approved card did not land once: ${JSON.stringify(approvedSends)}`)
+  }
+  await waitFor(
+    () => bubbleTexts(suggest.bubbles).includes(cards[0].text),
+    timeoutMs,
+    'the approved card in the bubble'
+  )
+  const suggestReport = (
+    await request(ws, timeoutMs, 'cohost.report.get', { sessionId: suggestSessionId })
+  )?.report
+  const approvedPosts = suggestReport?.posts ?? []
+  if (
+    approvedPosts.length !== 1 ||
+    approvedPosts[0].result !== 'sent' ||
+    approvedPosts[0].trigger !== 'greeting' ||
+    approvedPosts[0].text !== cards[0].text
+  ) {
+    throw new Error(`The Suggest report is wrong: ${JSON.stringify(suggestReport)}`)
+  }
+  await request(ws, timeoutMs, 'liveChat.stop', {})
+
+  // Off: the same rows, zero lines and zero sends.
+  await request(ws, timeoutMs, 'cohost.settings.set', {
+    autoChat: autoChat('off', { welcomes: true })
+  })
   const offSessionId = `smoke-buddy-off-${Date.now()}`
-  const off = await startBuddySession(offSessionId)
+  const off = await startBuddySession(offSessionId, [
+    { platform: 'twitch', targetId: 'smoke-buddy-off-twitch', events: true },
+    { platform: 'youtube', targetId: 'smoke-buddy-off-youtube', events: true },
+    { platform: 'kick', targetId: 'smoke-buddy-off-kick', events: true }
+  ])
   const offRows = collectMessages(ws).messages
   await waitFor(
     () =>
@@ -845,82 +913,19 @@ async function assertBuddyGreetings(ws) {
     (operation) => operation.sessionId === offSessionId
   )
   if (offSends.length !== 0) {
-    throw new Error(`Buddy sent with the mode off: ${JSON.stringify(offSends.map((o) => o.text))}`)
+    throw new Error(`Buddy sent with talk off: ${JSON.stringify(offSends.map((o) => o.text))}`)
   }
   const offState = off.states.payloads.at(-1)
   if (offState && (offState.utterances?.length ?? 0) > 0) {
-    throw new Error(`Buddy proposed with the mode off: ${JSON.stringify(offState.utterances)}`)
+    throw new Error(`Buddy proposed with talk off: ${JSON.stringify(offState.utterances)}`)
+  }
+  if (bubbleTexts(off.bubbles).length !== 0) {
+    throw new Error(`Buddy bubbled with talk off: ${JSON.stringify(bubbleTexts(off.bubbles))}`)
   }
   await request(ws, timeoutMs, 'liveChat.stop', {})
 
-  await assertBuddyDefaults(ws, terminalSends)
   await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: settingsBefore.autoChat })
-}
-
-// Plan 192 D1/D2: no lines of the user's own. Kick's follow posts its
-// built-in line, the session's one chatter gets a welcome (first-time or
-// returning, by what this profile's earlier sessions saw), and the KICKs
-// row, whose only line is switched off, posts nothing and is counted.
-async function assertBuddyDefaults(ws, terminalSends) {
-  await request(ws, timeoutMs, 'cohost.settings.set', {
-    autoChat: {
-      mode: 'auto',
-      greetings: {
-        enabled: true,
-        ai: false,
-        templates: [
-          { id: 'smoke-off-kicks', kind: 'kicks', text: 'off', state: 'talk', enabled: false }
-        ],
-        welcomes: { firstTime: { enabled: true }, returning: { enabled: true } }
-      },
-      answers: { enabled: false, cooldownSeconds: 20 },
-      banter: { enabled: false, cooldownSeconds: 240 }
-    }
-  })
-  const sessionId = `smoke-buddy-defaults-${Date.now()}`
-  const targetId = 'smoke-buddy-defaults-kick'
-  const operations = collectEvent(ws, 'liveChat.sendOperation')
-  await request(ws, timeoutMs, 'liveChat.start', {
-    sessionId,
-    platforms: ['kick'],
-    destinations: [{ platform: 'kick', targetId, read: 'ready', write: 'ready' }],
-    fakes: [{ platform: 'kick', targetId, count: 1, intervalMs: 60, events: true }]
-  })
-  await waitFor(
-    () => terminalSends(operations, sessionId).length >= 2,
-    Math.max(timeoutMs, 20_000),
-    'the built-in follow line and the welcome'
-  )
-  await new Promise((resolveWait) => setTimeout(resolveWait, 6_000))
-  const sends = terminalSends(operations, sessionId)
-  const texts = sends.map((operation) => operation.text)
-  const welcome = /^(Hi Test Viewer 0, welcome to the stream!|Welcome back, Test Viewer 0!)$/
-  if (
-    sends.length !== 2 ||
-    !texts.includes('Welcome, kick_fan! Thanks for the follow.') ||
-    !texts.some((text) => welcome.test(text)) ||
-    sends.some((operation) =>
-      operation.destinations.some(
-        (delivery) => delivery.destinationId !== targetId || delivery.phase !== 'sent'
-      )
-    )
-  ) {
-    throw new Error(`Buddy defaults sent the wrong greetings: ${JSON.stringify(texts)}`)
-  }
-  const gap = Math.abs(Date.parse(sends[1].createdAt) - Date.parse(sends[0].createdAt))
-  if (gap < 4_500) {
-    throw new Error(`Buddy defaults broke the 5 s gap on Kick: ${gap} ms`)
-  }
-  const report = (await request(ws, timeoutMs, 'cohost.report.get', { sessionId }))?.report
-  const posts = report?.posts ?? []
-  if (
-    posts.length !== 2 ||
-    posts.some((post) => post.source !== 'line' || post.trigger !== 'greeting') ||
-    (report?.greetings?.skipped?.noLine ?? 0) < 1
-  ) {
-    throw new Error(`The Buddy defaults report is wrong: ${JSON.stringify(report)}`)
-  }
-  await request(ws, timeoutMs, 'liveChat.stop', {})
+  await request(ws, timeoutMs, 'overlays.layout.set', layoutBefore)
 }
 
 function closeWebSocket(ws) {
@@ -1050,7 +1055,9 @@ function waitFor(predicate, deadlineMs, label) {
   })
 }
 
-function launchAndReadConnection() {
+async function launchAndReadConnection() {
+  await acquireHostSmokeLock()
+  await waitForHostMemory()
   return new Promise((resolveConnection, rejectConnection) => {
     const timer = setTimeout(() => {
       rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))

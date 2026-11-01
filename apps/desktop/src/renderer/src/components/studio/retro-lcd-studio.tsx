@@ -5,10 +5,12 @@ import {
   SpeakerOnIcon,
   StopIcon
 } from '@/components/icons'
-import { Fragment, useContext, type ReactElement } from 'react'
+import { Fragment, useContext, type ReactElement, type ReactNode } from 'react'
 
-import { DevicePicker } from '@/components/device-picker'
+import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
+import { LcdDevicePicker } from '@/components/lcd-device-picker'
 import {
+  LCD_FADER,
   LCD_MESSAGE,
   LCD_VALUE_BUTTON,
   LcdPanel,
@@ -17,14 +19,14 @@ import {
   LcdPanelKey,
   LcdPanelNavRow,
   LcdPanelPressRow,
-  LcdPanelRow,
   LcdPanelSwitch
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
 import { STATUS_TONE_CLASS } from '@/components/status-badge'
+import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
-import type { MicrophoneSectionViewProps } from '@/components/studio/microphone-section'
-import { useStudioSources } from '@/components/studio/quick-settings'
+import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
+import { type ScreenPrivacyControl, useStudioSources } from '@/components/studio/quick-settings'
 import {
   CohostSessionRow,
   LiveDestinationRows,
@@ -43,12 +45,14 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { LcdDisplaySeparator } from '@/components/ui/lcd-display'
+import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources } from '@/lib/capture'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
+import { screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, micSignalLabel, systemAudioIssueLabel } from '@/lib/state-labels'
 import {
@@ -60,11 +64,7 @@ import {
   streamingSummary,
   type SessionStatusView
 } from '@/lib/studio-session-view'
-import {
-  requestSystemAudioResume,
-  systemAudioIssueCopy,
-  type SystemAudioSwitchView
-} from '@/lib/system-audio'
+import { systemAudioIssueCopy, type SystemAudioSwitchView } from '@/lib/system-audio'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -281,14 +281,68 @@ export function RetroSessionPanel({ live = false, ...notices }: SessionPanelProp
         {live ? <LiveDestinationRows look="lcd" /> : null}
         {live ? <LiveStreamHealthRow look="lcd" /> : null}
         {live ? <CohostSessionRow look="lcd" /> : null}
+        <AgentsSessionRow look="lcd" />
       </LcdPanel>
       <SessionNotices {...notices} />
     </PanelSection>
   )
 }
 
-/** The microphone on one screen: its title and mute, its dropdown, then its level. */
-export function RetroMicrophoneSectionView({
+/**
+ * The Audio section on one screen (plan 201): the Microphone (its title and
+ * mute, its dropdown, its level and Gain), a dotted rule, then System audio
+ * (its switch, its level and Gain). The same props as `AudioSectionView`, and
+ * the same Mixer: one scale for both meters, and Cmd/Ctrl+Up/Down between
+ * the rows.
+ */
+export function RetroAudioSectionView({
+  microphone,
+  systemAudio
+}: {
+  microphone: MicrophoneRowProps
+  /** Null where System audio can't run (Linux, older Windows): Microphone only. */
+  systemAudio: SystemAudioRowProps | null
+}): ReactElement {
+  return (
+    <PanelSection>
+      <LcdPanel>
+        <LcdPanelHeader title="Audio" />
+        <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
+          <MixerChannels className="gap-0" scrollable={false}>
+            <div data-slot="channel-strip">
+              <RetroMicrophoneRows {...microphone} />
+            </div>
+            {systemAudio ? (
+              <div data-slot="channel-strip">
+                <LcdDisplaySeparator />
+                <RetroSystemAudioRows {...systemAudio} />
+              </div>
+            ) : null}
+          </MixerChannels>
+        </Mixer>
+      </LcdPanel>
+    </PanelSection>
+  )
+}
+
+/** A channel's title on the screen, lit, with its control on the right. */
+function RetroChannelHeader({
+  title,
+  children
+}: {
+  title: string
+  children: ReactNode
+}): ReactElement {
+  return (
+    <div className="flex min-h-8 min-w-0 items-center justify-between gap-4 py-1.5">
+      <h3 className="min-w-0 truncate font-normal text-(--lcd-display-lit)">{title}</h3>
+      <div className="flex min-w-0 shrink-0 items-center justify-end gap-3">{children}</div>
+    </div>
+  )
+}
+
+/** The Microphone's rows: the mute by its title, the dropdown, the level, then Gain. */
+function RetroMicrophoneRows({
   devices,
   value,
   selectedName,
@@ -301,111 +355,162 @@ export function RetroMicrophoneSectionView({
   muted,
   muteShortcut,
   platform,
+  gainDb,
   onChange,
-  onMutedChange
-}: MicrophoneSectionViewProps): ReactElement {
+  onMutedChange,
+  onGainChange
+}: MicrophoneRowProps): ReactElement {
   return (
-    <PanelSection>
-      <LcdPanel>
-        <LcdPanelHeader
-          action={
-            // D16: the mute lives here, with its hotkey when one is bound, and
-            // a muted microphone says so in words (plan 174 S3.3). Muted
-            // inverts, like a lit key.
-            <>
-              {muteShortcut ? (
-                <ShortcutKeys
-                  accelerator={muteShortcut}
-                  className="font-normal text-(--lcd-display-ink-dim)"
-                  platform={platform}
-                  variant="text"
-                />
-              ) : null}
-              <ShortcutTooltip
-                accelerator={muteShortcut}
-                label={muted ? 'Unmute microphone' : 'Mute microphone'}
-                platform={platform}
-              >
-                <button
-                  aria-label="Mute microphone"
-                  aria-pressed={muted}
-                  className={cn(
-                    LCD_VALUE_BUTTON,
-                    muted
-                      ? 'bg-(--lcd-display-lit) text-(--glass-solid) hover:bg-(--lcd-display-lit)'
-                      : 'text-(--lcd-display-ink-dim) hover:text-(--lcd-display-lit)'
-                  )}
-                  data-videorc-studio-mic-mute=""
-                  type="button"
-                  onClick={() => onMutedChange(!muted)}
-                >
-                  {muted ? (
-                    <SpeakerOffIcon className="size-3.5 shrink-0" weight="fill" />
-                  ) : (
-                    <SpeakerOnIcon className="size-3.5 shrink-0" weight="fill" />
-                  )}
-                  <span>{muted ? 'Muted' : 'Mute'}</span>
-                </button>
-              </ShortcutTooltip>
-            </>
-          }
-          title="Microphone"
-        />
-        <DevicePicker
-          devices={devices}
-          disabled={disabled}
-          discoveryPending={discoveryPending}
-          kind="microphone"
-          label="Microphone"
-          noneLabel="Off"
-          rowLabel="Mic"
-          selectedDevice={selectedDevice}
-          selectedName={selectedName}
-          trigger="lcd"
-          value={value}
-          onChange={onChange}
-        />
-        {/* The live switch status, under the dropdown. Kept in the
-            accessibility tree while empty, so it is announced when it
-            arrives; it takes no space until then. */}
-        {switchStatus ? (
-          <div aria-live="polite" className={cn(LCD_MESSAGE, 'empty:sr-only')}>
-            {switchStatus}
-          </div>
-        ) : null}
-        <LcdDisplaySeparator />
-        {/* The level (plan 196), which prints the level and a CLIP flag and
-            names it in dB to screen readers. No dB scale (owner 2026-10-25). */}
-        <div
-          className={cn(muted && 'opacity-50')}
-          data-muted={muted ? '' : undefined}
-          data-videorc-mic-level=""
-        >
-          <MicLcdMeter
-            aria-label="Microphone level"
-            data-videorc-mic-visualizer=""
-            meter={meter}
-            scale={false}
+    <>
+      <RetroChannelHeader title="Microphone">
+        {/* D16: the mute, with its hotkey when one is bound, and a muted
+            microphone says so in words (plan 174 S3.3). Muted inverts, like a
+            lit key. */}
+        {muteShortcut ? (
+          <ShortcutKeys
+            accelerator={muteShortcut}
+            className="font-normal text-(--lcd-display-ink-dim)"
+            platform={platform}
+            variant="text"
           />
-          {/* Receiving / Muted / No signal for screen readers, and its state for the perf probe, off screen. */}
-          <span className="sr-only" data-videorc-mic-monitor-state={monitorState}>
-            {micSignalLabel(monitorState)}
-          </span>
+        ) : null}
+        <ShortcutTooltip
+          accelerator={muteShortcut}
+          label={muted ? 'Unmute microphone' : 'Mute microphone'}
+          platform={platform}
+        >
+          <button
+            aria-label="Mute microphone"
+            aria-pressed={muted}
+            className={cn(
+              LCD_VALUE_BUTTON,
+              muted
+                ? 'bg-(--lcd-display-lit) text-(--glass-solid) hover:bg-(--lcd-display-lit)'
+                : 'text-(--lcd-display-ink-dim) hover:text-(--lcd-display-lit)'
+            )}
+            data-videorc-studio-mic-mute=""
+            type="button"
+            onClick={() => onMutedChange(!muted)}
+          >
+            {muted ? (
+              <SpeakerOffIcon className="size-3.5 shrink-0" weight="fill" />
+            ) : (
+              <SpeakerOnIcon className="size-3.5 shrink-0" weight="fill" />
+            )}
+            <span>{muted ? 'Muted' : 'Mute'}</span>
+          </button>
+        </ShortcutTooltip>
+      </RetroChannelHeader>
+      <LcdDevicePicker
+        devices={devices}
+        disabled={disabled}
+        discoveryPending={discoveryPending}
+        kind="microphone"
+        label="Microphone"
+        noneLabel="Off"
+        rowLabel="Device"
+        selectedDevice={selectedDevice}
+        selectedName={selectedName}
+        value={value}
+        onChange={onChange}
+      />
+      {/* The live switch status, under the dropdown. Kept in the
+          accessibility tree while empty, so it is announced when it arrives;
+          it takes no space until then. */}
+      {switchStatus ? (
+        <div aria-live="polite" className={cn(LCD_MESSAGE, 'empty:sr-only')}>
+          {switchStatus}
         </div>
-      </LcdPanel>
-    </PanelSection>
+      ) : null}
+      {/* The level (plan 196), which prints the level and a CLIP flag and
+          names it in dB to screen readers. No dB scale (owner 2026-10-25). */}
+      <div
+        className={cn('py-1', muted && 'opacity-50')}
+        data-muted={muted ? '' : undefined}
+        data-videorc-mic-level=""
+      >
+        <MicLcdMeter
+          aria-label="Microphone level"
+          data-videorc-mic-visualizer=""
+          meter={meter}
+          scale={false}
+        />
+        {/* Receiving / Muted / No signal for screen readers, and its state for the perf probe, off screen. */}
+        <span className="sr-only" data-videorc-mic-monitor-state={monitorState}>
+          {micSignalLabel(monitorState)}
+        </span>
+      </div>
+      <div className={cn(LCD_FADER, 'py-1.5')}>
+        <MicrophoneGainFader gainDb={gainDb} onGainChange={onGainChange} />
+      </div>
+    </>
   )
 }
 
 /**
- * Sources on one screen (its title and the way to Sources, a row per source
- * with its live switch status under it), then Captions on a screen of its
+ * System audio's rows: its switch (or the way to the permission) by its
+ * title; while On, the level, D6's line while Clips is off, and Gain. Without
+ * the grant, Gain shows disabled and there is no level, as in the default
+ * look.
+ */
+function RetroSystemAudioRows({
+  view,
+  gainDb,
+  meter,
+  idleLine,
+  platform,
+  onEnabledChange,
+  onGainChange,
+  onOpenPermissions,
+  onResume
+}: SystemAudioRowProps): ReactElement {
+  return (
+    <div
+      data-videorc-studio-system-audio=""
+      data-videorc-studio-system-audio-issue={
+        view.permissionRequired ? 'permission' : (view.issue ?? undefined)
+      }
+    >
+      <RetroChannelHeader title="System audio">
+        <RetroSystemAudioValue
+          platform={platform}
+          view={view}
+          onEnabledChange={onEnabledChange}
+          onOpenPermissions={onOpenPermissions}
+          onResume={onResume}
+        />
+      </RetroChannelHeader>
+      {view.checked ? (
+        <>
+          {/* The meter rests with no reading and comes back with the bus. */}
+          <div className="py-1" data-videorc-studio-system-audio-level="">
+            <MicLcdMeter aria-label="System audio level" meter={meter} scale={false} />
+          </div>
+          {idleLine}
+        </>
+      ) : null}
+      {view.checked || view.permissionRequired ? (
+        <div className={cn(LCD_FADER, 'py-1.5')}>
+          <SystemAudioGainFader
+            disabled={view.permissionRequired}
+            gainDb={gainDb}
+            onGainChange={onGainChange}
+          />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Sources on one screen (its title and the way to Sources, Screen and Camera
+ * with their live switch status under them; System audio is in Audio since
+ * plan 201), then Captions on a screen of its
  * own: captions aren't a source (B-15).
  */
 export function RetroQuickSettings(): ReactElement {
   const {
     captureConfig,
-    setCaptureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
     allowCaptureNone,
@@ -413,14 +518,12 @@ export function RetroQuickSettings(): ReactElement {
     selectedCamera,
     isSessionActive,
     captionsStatus,
-    runtimeInfo,
-    openSettings,
     openStudioPanel,
-    systemAudio,
     discoveryPending,
     captureDevices,
     cameras,
-    selectedCaptureId
+    selectedCaptureId,
+    screenPrivacy
   } = useStudioSources()
   return (
     <>
@@ -435,7 +538,7 @@ export function RetroQuickSettings(): ReactElement {
             title="Sources"
           />
           {/* F-015: the synthetic diagnostic source replaces the screen. */}
-          <DevicePicker
+          <LcdDevicePicker
             devices={captureDevices}
             disabled={Boolean(sourceSwitchReason('capture'))}
             discoveryPending={discoveryPending}
@@ -446,7 +549,6 @@ export function RetroQuickSettings(): ReactElement {
             selectedDevice={selectedCaptureDevice}
             selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
             selectionLabel={captureConfig.sources.testPattern ? 'Test pattern' : undefined}
-            trigger="lcd"
             value={selectedCaptureId}
             onChange={(captureId) =>
               void switchSourceDeviceLive(
@@ -456,9 +558,10 @@ export function RetroQuickSettings(): ReactElement {
             }
           />
           <RetroSwitchStatusLine kind="capture" />
+          <RetroScreenPrivacyRow control={screenPrivacy} />
           <LcdDisplaySeparator />
           {/* Off is a choice that sticks (plan 080 S4). */}
-          <DevicePicker
+          <LcdDevicePicker
             devices={cameras}
             disabled={Boolean(sourceSwitchReason('camera'))}
             discoveryPending={discoveryPending}
@@ -467,7 +570,6 @@ export function RetroQuickSettings(): ReactElement {
             noneLabel="Off"
             selectedDevice={selectedCamera}
             selectedName={captureConfig.sources.cameraName}
-            trigger="lcd"
             value={captureConfig.sources.cameraId}
             onChange={(cameraId) =>
               void switchSourceDeviceLive(
@@ -477,25 +579,6 @@ export function RetroQuickSettings(): ReactElement {
             }
           />
           <RetroSwitchStatusLine kind="camera" />
-          {systemAudio.visible ? (
-            <>
-              <LcdDisplaySeparator />
-              <LcdPanelRow label="System audio">
-                <RetroSystemAudioValue
-                  platform={runtimeInfo?.platform}
-                  view={systemAudio}
-                  onEnabledChange={(systemAudioEnabled) =>
-                    setCaptureConfig((current) => ({
-                      ...current,
-                      audio: { ...current.audio, systemAudioEnabled }
-                    }))
-                  }
-                  onOpenPermissions={() => openSettings('permissions')}
-                  onResume={requestSystemAudioResume}
-                />
-              </LcdPanelRow>
-            </>
-          ) : null}
         </LcdPanel>
       </PanelSection>
       <PanelSection>
@@ -511,6 +594,37 @@ export function RetroQuickSettings(): ReactElement {
         </LcdPanel>
       </PanelSection>
     </>
+  )
+}
+
+/**
+ * Hide screen on the Sources screen (plan 210 S8b): a row that covers
+ * something, like a takeover's. Off dim, On lit while the screen is hidden,
+ * and its key on hover. Only a hide is ever refused, with its reason.
+ */
+function RetroScreenPrivacyRow({ control }: { control: ScreenPrivacyControl }): ReactElement {
+  const { hidden, accelerator, platform, disabledReason, toggle } = control
+  const row = (
+    <LcdPanelPressRow
+      disabled={disabledReason !== null}
+      label="Hide screen"
+      pressed={hidden}
+      onPressedChange={toggle}
+    />
+  )
+  return disabledReason ? (
+    <DisabledReason className="flex flex-col" reason={disabledReason}>
+      {row}
+    </DisabledReason>
+  ) : (
+    <ShortcutTooltip
+      accelerator={accelerator}
+      className="flex flex-col"
+      label={screenPrivacyActionLabel(hidden)}
+      platform={platform}
+    >
+      {row}
+    </ShortcutTooltip>
   )
 }
 

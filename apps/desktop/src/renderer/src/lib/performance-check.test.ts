@@ -13,10 +13,19 @@ import {
   outputLabel,
   outputVerdict,
   performanceCheckCeiling,
+  firstRunSetupStartsPerformanceCheck,
   performanceCheckTooHeavyToast,
+  previewHoldLabel,
   shouldRunPerformanceCheck
 } from './performance-check'
-import { softwareStreamAdvice, streamingAtSteppedDownProfile } from './go-live-output'
+import {
+  GO_LIVE_CPU_COMPOSITOR_HEADROOM,
+  cpuCompositorStreamAdvice,
+  softwareStreamAdvice,
+  streamPerformanceAdvice,
+  streamQualityUntouched,
+  streamingAtSteppedDownProfile
+} from './go-live-output'
 import { performanceCheckLine } from './performance-check-line'
 
 function result(
@@ -161,7 +170,7 @@ describe('shouldRunPerformanceCheck', () => {
       })
     ).toMatchObject({
       checkLabel: 'Check this computer',
-      text: "This computer hasn't been measured yet."
+      text: 'Not checked on this computer yet.'
     })
     const trustedV2 = { ...poison, capabilityKey: 'performance-check-v2:abc' }
     expect(isUntrustedPerformanceCheckResult(trustedV2)).toBe(false)
@@ -205,6 +214,7 @@ describe('performanceCheckLine', () => {
       busy: false,
       text: '1440p · 30 fps is too heavy for this computer. Recordings will stutter. 720p · 30 fps held steady.',
       checkLabel: 'Check again',
+      checkHint: 'Takes about 20 seconds.',
       applyPreset: 'tutorial-720p30',
       applyLabel: 'Use 720p · 30 fps'
     })
@@ -217,6 +227,55 @@ describe('performanceCheckLine', () => {
       text: '1440p · 30 fps is verified for this computer.'
     })
     expect(verified?.applyPreset).toBeUndefined()
+  })
+
+  it('names the computer the way the platform does (plan 212 S5)', () => {
+    const unchecked = { running: false, stale: false }
+    const words = (platform: string) =>
+      performanceCheckLine({
+        state: unchecked,
+        progress: null,
+        video: videoPresets['tutorial-1080p30'],
+        platform
+      })?.text
+    expect(words('darwin')).toBe('Not checked on this Mac yet.')
+    expect(words('win32')).toBe('Not checked on this PC yet.')
+    expect(words('linux')).toBe('Not checked on this computer yet.')
+  })
+
+  it('offers a check again when the computer changed, without the old verdict', () => {
+    expect(
+      performanceCheckLine({
+        state: { running: false, stale: true, result: weak },
+        progress: null,
+        video: videoPresets['tutorial-1440p30'],
+        platform: 'darwin'
+      })
+    ).toEqual({
+      tone: 'muted',
+      busy: false,
+      text: 'Your Mac changed since the last check.',
+      checkLabel: 'Check again',
+      checkHint: 'Takes about 20 seconds.'
+    })
+  })
+
+  it('says a busy computer stopped the check and keeps the old verdict quiet (D3)', () => {
+    expect(
+      performanceCheckLine({
+        state: { running: false, stale: false, result: strong, lastRunNotRecorded: 'host-busy' },
+        progress: null,
+        video: videoPresets['tutorial-1440p30'],
+        platform: 'darwin',
+        clipsOn: true
+      })
+    ).toEqual({
+      tone: 'warning',
+      busy: false,
+      text: "Your Mac was busy, so the check stopped. Try again when it's quieter.",
+      checkLabel: 'Check again',
+      checkHint: 'Takes about 20 seconds. Clips pauses while it runs.'
+    })
   })
 
   it('says so when an output was never measured, and when nothing held', () => {
@@ -235,6 +294,20 @@ describe('performanceCheckLine', () => {
       checkLabel: 'Check again',
       text: 'Nothing held steady on this computer, not even 720p · 30 fps. Close other apps and check again.'
     })
+  })
+})
+
+describe('previewHoldLabel', () => {
+  it('says why the Preview holds while a check runs, then nothing (plan 212 S5)', () => {
+    expect(previewHoldLabel(undefined, null)).toBeNull()
+    expect(previewHoldLabel({ running: false, stale: false }, null)).toBeNull()
+    expect(previewHoldLabel({ running: true, stale: false }, null)).toBe('Checking this computer')
+    expect(
+      previewHoldLabel(
+        { running: true, stale: false },
+        { rungIndex: 1, rungCount: 3, video: videoPresets['tutorial-1440p30'] }
+      )
+    ).toBe('Checking this computer · 2 of 3')
   })
 })
 
@@ -277,6 +350,7 @@ describe('softwareStreamAdvice (plan 090)', () => {
       })
     ).toEqual({
       kind: 'step-down',
+      reason: 'encoder',
       requested: stream1080,
       video: videoPresets['tutorial-720p30']
     })
@@ -421,8 +495,267 @@ describe('540p30 floor (plan 090 D1)', () => {
       })
     ).toEqual({
       kind: 'step-down',
+      reason: 'encoder',
       requested: videoPresets['stream-safe-1080p30'],
       video: videoPresets['tutorial-540p30']
     })
+  })
+})
+
+describe('Go Live headroom on a CPU compositor (retest 153)', () => {
+  // ogre: i7-8750H, CPU compositor, VAAPI. A 1080p30 Record holds 30 fps, a
+  // 1080p30 Go Live runs at ~14: the check passes 1080p, Go Live can't.
+  const cpu = (
+    rungs: Array<[VideoPreset, PerformanceCheckRungVerdict]>,
+    recommended: VideoPreset,
+    compositorBackend: 'cpu' | 'metal' = 'cpu'
+  ): PerformanceCheckResult => {
+    const checked = result(rungs, recommended)
+    return {
+      ...checked,
+      rungs: checked.rungs.map((rung) => ({
+        ...rung,
+        compositorBackend,
+        encodeBackend: 'hardware-vaapi' as const
+      }))
+    }
+  }
+  const fresh = (checked: PerformanceCheckResult) => ({
+    running: false,
+    stale: false,
+    result: checked
+  })
+  const ogre = cpu(
+    [
+      ['tutorial-1080p30', 'passed'],
+      ['tutorial-720p30', 'passed']
+    ],
+    'tutorial-1080p30'
+  )
+  const untouched = defaultCaptureConfig.streaming
+  const picked = { ...untouched, defaultOutputPreset: 'stream-safe-1080p30' as const }
+  const stream1080 = videoPresets['stream-safe-1080p30']
+  const default720 = videoPresets['tutorial-720p30']
+
+  it('knows an untouched stream quality from a picked one', () => {
+    expect(streamQualityUntouched(untouched)).toBe(true)
+    expect(streamQualityUntouched(picked)).toBe(false)
+    const [first, ...rest] = untouched.targets
+    expect(
+      streamQualityUntouched({
+        ...untouched,
+        targets: [{ ...first, enabled: true, outputPreset: 'stream-safe-1080p30' }, ...rest]
+      })
+    ).toBe(false)
+    // A disabled destination's own quality doesn't count.
+    expect(
+      streamQualityUntouched({
+        ...untouched,
+        targets: [{ ...first, enabled: false, outputPreset: 'stream-safe-1080p30' }, ...rest]
+      })
+    ).toBe(true)
+  })
+
+  it('steps an untouched 1080p stream down to 720p30 when 1080p held only for a Record', () => {
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toEqual({
+      kind: 'step-down',
+      reason: 'go-live-headroom',
+      requested: stream1080,
+      video: default720
+    })
+  })
+
+  it('does the same when 1080p failed or was never measured', () => {
+    const failed = cpu(
+      [
+        ['tutorial-1440p30', 'failed'],
+        ['tutorial-1080p30', 'failed'],
+        ['tutorial-720p30', 'passed']
+      ],
+      'tutorial-720p30'
+    )
+    const only720 = cpu([['tutorial-720p30', 'passed']], 'tutorial-720p30')
+    for (const checked of [failed, only720]) {
+      expect(
+        cpuCompositorStreamAdvice({
+          streamVideo: stream1080,
+          streaming: untouched,
+          state: fresh(checked)
+        })
+      ).toMatchObject({ kind: 'step-down', video: default720 })
+    }
+  })
+
+  it('goes to the smaller output that held when 720p did not', () => {
+    const floor = cpu(
+      [
+        ['tutorial-720p30', 'failed'],
+        ['tutorial-540p30', 'passed']
+      ],
+      'tutorial-540p30'
+    )
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: untouched,
+        state: fresh(floor)
+      })
+    ).toMatchObject({ kind: 'step-down', video: videoPresets['tutorial-540p30'] })
+  })
+
+  it('steps down to the floor when not even the floor held', () => {
+    // ogre under load: every rung failed, 540p came closest (27.5 fps).
+    const belowFloor = {
+      ...cpu(
+        [
+          ['tutorial-1080p30', 'failed'],
+          ['tutorial-720p30', 'failed'],
+          ['tutorial-540p30', 'failed']
+        ],
+        'tutorial-540p30'
+      ),
+      belowFloor: true
+    }
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: untouched,
+        state: fresh(belowFloor)
+      })
+    ).toMatchObject({
+      kind: 'step-down',
+      reason: 'go-live-headroom',
+      video: videoPresets['tutorial-540p30']
+    })
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: stream1080,
+        streaming: picked,
+        state: fresh(belowFloor)
+      })
+    ).toMatchObject({ kind: 'go-live-heavy', video: videoPresets['tutorial-540p30'] })
+  })
+
+  it('only warns about a stream quality the user picked', () => {
+    expect(
+      cpuCompositorStreamAdvice({ streamVideo: stream1080, streaming: picked, state: fresh(ogre) })
+    ).toEqual({ kind: 'go-live-heavy', requested: stream1080, video: default720 })
+  })
+
+  it('leaves the stream alone with measured headroom, a GPU compositor or no trusted check', () => {
+    expect(GO_LIVE_CPU_COMPOSITOR_HEADROOM).toBe(1.5)
+    const headroom = cpu([['tutorial-1440p30', 'passed']], 'tutorial-1440p30')
+    const metal = cpu([['tutorial-1080p30', 'passed']], 'tutorial-1080p30', 'metal')
+    for (const state of [
+      fresh(headroom),
+      fresh(metal),
+      { running: false, stale: true, result: ogre },
+      undefined
+    ]) {
+      expect(
+        cpuCompositorStreamAdvice({ streamVideo: stream1080, streaming: untouched, state })
+      ).toBeNull()
+    }
+    // 720p is the default a CPU compositor lands on, so it is never moved.
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: default720,
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toBeNull()
+    // Portrait streams have their own ladder.
+    expect(
+      cpuCompositorStreamAdvice({
+        streamVideo: videoPresets['vertical-1080x1920'],
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toBeNull()
+  })
+
+  it('lets a software encoder step-down speak first', () => {
+    const weakCpu = cpu(
+      [
+        ['tutorial-1080p30', 'failed'],
+        ['tutorial-720p30', 'passed']
+      ],
+      'tutorial-720p30'
+    )
+    expect(
+      streamPerformanceAdvice({
+        streamVideo: stream1080,
+        encodeBackend: 'software-open-h264',
+        streaming: picked,
+        state: fresh(weakCpu)
+      })
+    ).toMatchObject({ kind: 'step-down', reason: 'encoder' })
+    expect(
+      streamPerformanceAdvice({
+        streamVideo: stream1080,
+        encodeBackend: 'hardware-vaapi',
+        streaming: untouched,
+        state: fresh(ogre)
+      })
+    ).toMatchObject({ kind: 'step-down', reason: 'go-live-headroom' })
+  })
+})
+
+describe('firstRunSetupStartsPerformanceCheck (plan 212 D1)', () => {
+  const firstRun = { kind: 'first-run' }
+  const replay = { kind: 'replay' }
+  const nothingMeasured = { running: false, stale: false }
+  const measured = {
+    running: false,
+    stale: false,
+    result: result([['tutorial-1080p30', 'passed']], 'tutorial-1080p30')
+  }
+
+  it('starts one when this machine has no verdict', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, nothingMeasured, false)).toBe(true)
+  })
+
+  it('starts nothing when a verdict from this machine exists', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, measured, false)).toBe(false)
+  })
+
+  it('re-measures a verdict from another machine, or one that never measured', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, { ...measured, stale: true }, false)).toBe(
+      true
+    )
+    const poison = {
+      ...result([['tutorial-540p30', 'failed']], 'tutorial-540p30', true),
+      rungs: [
+        { video: videoPresets['tutorial-540p30'], verdict: 'failed', reasons: ['did-not-start'] }
+      ]
+    } satisfies PerformanceCheckResult
+    expect(
+      firstRunSetupStartsPerformanceCheck(
+        firstRun,
+        { running: false, stale: false, result: poison },
+        false
+      )
+    ).toBe(true)
+  })
+
+  it('waits for the backend to answer, and never doubles a running check', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, undefined, false)).toBe(false)
+    expect(
+      firstRunSetupStartsPerformanceCheck(firstRun, { running: true, stale: false }, false)
+    ).toBe(false)
+  })
+
+  it('never takes the studio from a running take', () => {
+    expect(firstRunSetupStartsPerformanceCheck(firstRun, nothingMeasured, true)).toBe(false)
+  })
+
+  it('a replay of setup from Settings is not a first run', () => {
+    expect(firstRunSetupStartsPerformanceCheck(replay, nothingMeasured, false)).toBe(false)
   })
 })

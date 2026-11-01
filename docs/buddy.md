@@ -15,12 +15,21 @@ name is Buddy. Saved and wire values keep `orcle` (plan 170 D22): the
 moderation source `orcle-voice`, the service-flags `orcle` key and the
 `videorc.orcleTab` storage key.
 
+The Preview shows the program: Buddy appears whenever a running output
+carries it, or either switch is on while nothing runs. An off Buddy is never
+drawn, even while selected. That holds in every row: with Clips on and Buddy
+"Show on stream" only, the Preview shows the pet while a saved clip does
+not, and during a split record + stream the Preview shows a stream-only
+Buddy the recording leaves out (the program leg,
+[overlays.md](overlays.md)). On Windows and Linux, where the Preview is
+the proof surface, Buddy is drawn there by the same rule, alive and with
+its bubble.
+
 ## The promise
 
-**Buddy posts only in the modes you turn on. Everything is off by
-default.** (D4). It removes a comment only when you tell it to. The old
-sentence "It never posts on its own" is gone; the modes below are the whole
-truth about what Buddy sends.
+**Buddy never posts in your chat on its own.** (plan 211 D6). It talks in
+its bubble on stream. A Suggest card posts only when you click it. It
+removes a comment only when you tell it to.
 
 Everything Buddy posts goes out **as you**, on your own account, on the
 platforms you stream to (D3). There is no bot account.
@@ -30,7 +39,7 @@ platforms you stream to (D3). There is no bot account.
 | Place                                                       | Job                                                                                                                                                                                                                                                                                                                         |
 | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Buddy page** (sidebar, second, directly under Studio, ⌘9) | Creates and sets up. **Profile**: the status row with Buddy Live and Open Stream Manager, My Buddies, name, personality, avatar (Still or Alive), reactions, motion, bubble style, listening, Cloud AI consent. **Chat**: Greetings, Answers, Banter and moderation. **Voice**: voice commands. **Reports**. **Clean cut**. |
-| **Stream Manager** (⇧⌘J, the Buddy pane)                    | Operates live. Buddy Live, Chat posting (Off, Suggest, Auto), Suggest cards, the Say box and reactions, the "{name} on stream" switch, questions, flags. Greetings, Answers and Banter show as read-only chips that open Buddy → Chat.                                                                                      |
+| **Stream Manager** (⇧⌘J, the Buddy pane)                    | Operates live. Buddy Live, "{name} talks" (Off, Bubble, Suggest), Suggest cards, the Say box and reactions, the "{name} on stream" switch, questions, flags. Greetings, Answers and Banter show as read-only chips that open Buddy → Chat.                                                                                  |
 | **Scene page** (⌘3, the Live Scene canvas)                  | Places. Where Buddy sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).                                                                                                                                                                                         |
 
 Each control has one home. The Buddy page stays where it is, second in the
@@ -245,12 +254,12 @@ place on the Live Scene canvas. Still states are `idle`, `talk`, `laugh` and
   the canvas. The avatar is visible whenever
   the item is on for that output, bubble or not (D19).
 - The Say box in the Buddy pane puts your own words in the bubble: ↵ talks,
-  ⌘↵ laughs. In Auto mode a Say also goes to chat; in Off and Suggest it is
-  bubble only.
+  ⌘↵ laughs. It is bubble only in every mode; a Say never goes to chat. It
+  shows at once and replaces whatever is up; Buddy's own lines wait for it.
 - Every session start clears the bubble; the avatar rides into the new video
   if its switch is on.
 
-## Buddy Live, chat posting and the consent
+## Buddy Live, how Buddy talks, and the consent
 
 Two separate controls (plan 174 D7):
 
@@ -259,26 +268,35 @@ Two separate controls (plan 174 D7):
   Buddy pane's header in Stream Manager; both flip the same setting
   (`enabled`). It never names the microphone: listening is its own choice
   (the listening card, and the Buddy Live section of Buddy → Profile).
-- **Chat posting** (`Off | Suggest | Auto`, under the Buddy pane's header)
-  governs only what Buddy posts as you, with the chosen mode's meaning as a
-  line under it. It saves `{autoChat}` alone, so it never turns Buddy or its
-  microphone on (plan 174 S0.2).
-  - **Off** (the default): nothing is posted.
-  - **Suggest**: every message becomes a card in the Buddy pane; one click
-    (or ↵ on the newest) sends it, ⌫ dismisses it, and a card leaves on its
-    own after 45 s. This is the mode the consent dialog lands you in.
-  - **Auto**: messages go out by themselves, within the throttle below. Auto
-    needs its own confirm after the consent, every time.
+- **"{name} talks"** (`Off | Bubble | Suggest`, under the Buddy pane's
+  header; "Buddy talks" while it has no name) governs what Buddy says on its
+  own, with the chosen value's meaning as a line under it. It saves
+  `{autoChat}` alone, so it never turns Buddy or its microphone on (plan 174
+  S0.2). The order runs from least reach to most (plan 211 D1).
+  - **Off**: Buddy says nothing on its own.
+  - **Bubble** (the default): Greetings, Answers and Banter show in Buddy's
+    bubble on stream. Nothing goes to chat. Bubble speaks only while Buddy
+    is on an output; off the picture a greeting is skipped (`no-bubble` in
+    the report) and no AI call is spent (D9).
+  - **Suggest**: every line becomes a card in the Buddy pane; one click (or
+    ↵ on the newest) posts it in chat as you, ⌫ dismisses it, and a card
+    leaves on its own after 45 s. Nothing shows on stream before the click;
+    the line bubbles when it lands.
 - **Greetings, Answers and Banter** have one home, Buddy → Chat. The Buddy
   pane shows them as read-only chips, each a way to Buddy → Chat.
 
-The first time the mode leaves Off, the consent dialog asks "Let {name} post
-as you?" and says: "{name} posts to your chats as you, on the platforms you
-stream to, only in the modes you turn on. You can read every message later
-in Buddy → Reports." Accepting lands in Suggest. Choosing Auto adds a second
-click under the sentence "Automatic messages are sent without asking you
-first." The window remembers the consent (`videorc.buddyAutoChatConsent`);
-Auto asks every time.
+Bubble asks nothing, because Buddy posts nothing as you. The first time
+Suggest is chosen, the consent dialog asks "Let {name} post as you?" and
+says: "{name} posts to your chats as you, on the platforms you stream to,
+only when you click its card. You can read every message later in Buddy →
+Reports." The window remembers the consent (`videorc.buddyAutoChatConsent`).
+There is no Auto and no second confirm any more (plan 211 D5).
+
+Where people start (D4): a new install starts in Bubble. A profile saved on
+Auto before plan 211 reads as Bubble, which never posts; saved Off stays Off
+and saved Suggest stays Suggest. The backend keeps writing the legacy
+`autoChat.mode` for older apps (Bubble is written as `off`, never `auto`),
+and `autoChat.talk` is the one truth (D3).
 
 Where Cloud AI consent is missing, the Buddy pane says what consent covers
 and "Allow cloud AI…" opens the consent dialog; its Allow grants consent and
@@ -368,13 +386,22 @@ Per destination, for every automatic send:
 | Answers         | One per `answers.cooldownSeconds` (default 20 s)                                                                                                                                                                          |
 | Banter          | One per `banter.cooldownSeconds` (default 240 s), never within 60 s of a greeting or answer                                                                                                                               |
 
-Suggest and Auto both go through the throttle; a Suggest card is the same
-utterance with `status: proposed`. Held greetings wait in a bucket and a
-one-shot pump releases them.
+Bubble and Suggest both go through the throttle. In Bubble the bubble is one
+destination shared by every platform, so the limits above hold across all
+your chats, and a viewer is greeted once per platform a session (plan 211
+D7). A Suggest card is the same utterance with `status: proposed`. Held
+greetings wait in a bucket and a one-shot pump releases them.
 
-Every automatic send carries a Buddy-owned `operationId`: its echo in chat
-is still yours (the account is yours), but it never counts as "the streamer
-replied" (D10). Each send is written to the stream report as it lands.
+Bubble lines are paced for reading, not for chat limits (D7): a line waits
+for the current bubble to end plus 0.5 s; at most 3 lines wait, and a line
+that has waited 20 s is dropped (counted `stale`). Your own Say line shows
+at once. Text over 200 characters is clipped at a word with "…". An answer
+in the bubble starts with "@{name}", so it is clear who it answers (D8).
+
+An approved card carries a Buddy-owned `operationId`: its echo in chat is
+still yours (the account is yours), but it never counts as "the streamer
+replied" (D10). Each send is written to the stream report as it lands, and
+each bubble line as it shows.
 
 ## Wake words
 
@@ -408,6 +435,9 @@ still has a report (posts only, `segments: 0`).
 - **posts** (plan 164): every message Buddy sent as you, up to 200, with
   the trigger (greeting, answer, banter, say), the text, the platforms and
   the result (sent, partial, failed). Reports → "Posted as you".
+- **said** (plan 211 D11): every line Buddy said in its bubble, automatic
+  or from the Say box, up to 200, with the trigger and the text. Reports →
+  "Said on stream". Omitted while empty, so older reports read unchanged.
 
 **Where.** In the local Videorc database (table `cohost_reports`, one row per
 session). It is deleted with the recording, and it is never sent to Videorc.
@@ -446,7 +476,7 @@ keyboard-first: ↑ and ↓ move, R drafts a reply, H shows the question on
 stream, A marks it answered, ⌫ dismisses and ⇧⌫ removes a flagged message
 from chat. The header shows Buddy's identity (the living preview, the name,
 the bubble while one is up), the Alpha tag, listening, the status and the
-Buddy Live switch; Chat posting sits under it; the footer holds the Say box,
+Buddy Live switch; "{name} talks" sits under it; the footer holds the Say box,
 the reaction chips and the "{name} on stream" switch. Buddy → Profile's
 status row has "Open Stream Manager" (⇧⌘J).
 
@@ -468,9 +498,10 @@ What Cloud AI covers (`CLOUD_AI_USES`, one list everywhere):
   Buddies you create (their pictures, name, personality and About you) are
   kept in your Videorc account so you can use them on any computer, until
   you delete them or your account.
-- Buddy posts in chat as you: with Answers, Banter or AI greetings on, its
-  messages are drafted by Videorc's cloud AI and posted on your own account,
-  only in the modes you turn on.
+- Buddy's lines: with Answers, Banter or AI greetings on, its lines are
+  drafted by Videorc's cloud AI. They show in Buddy's bubble on stream. In
+  Suggest, a line is posted on your own account only when you click its
+  card.
 - Creating an Alive Buddy: your reference picture and its description go
   to Videorc's cloud AI. Its moves are kept on this computer, and in your
   Videorc account when the Buddy is in your library, until you remove them
@@ -487,9 +518,9 @@ What is kept, and where:
   (`<recording>.srt`) on this computer.
 - A short report of each stream is saved on this computer.
 
-Posting consent (the chat mode) is separate: it lives in the Stream Manager
+Posting consent (Suggest) is separate: it lives in the Stream Manager
 window's storage (`videorc.buddyAutoChatConsent`) and covers sending, not
-cloud use.
+cloud use. Bubble needs no consent: nothing is posted.
 
 ## For developers
 
@@ -598,6 +629,18 @@ Buddy on stream (Phase C):
   or its state images as a flat pack (Still) is pre-scaled per output leg
   into a BGRA atlas and drawn as one quad per leg by the CPU, Metal and
   D3D11 paths. The renderer pushes the bubble only.
+- The proof surface (Windows idle, Linux) has no compositor leg, so the
+  backend serves Buddy's layer on its own (plan 205 S9,
+  `preview_buddy_layer.rs`): `GET /preview/buddy/latest.bmp?token=&canvasWidth=&canvasHeight=`
+  draws the sprite slot's `Preview` leg (its own atlas) and the bubble
+  into one straight-alpha BGRA BMP, with its rect in canvas fractions in
+  `x-videorc-layer-rect`. It answers `204` to an unchanged cursor, and
+  `204` with `x-videorc-layer-empty: 1` while the program does not carry
+  Buddy. The Preview leg reads an output leg's frame clock while one has
+  drawn in the last 500 ms, so the pet animates in step with the legs.
+  Main (`main/preview-surface-buddy.ts`) places it above the banners and
+  polls it apart from the source pollers, so it never counts toward
+  source liveness.
 - Renderer: `lib/buddy-overlay.ts` (lazy) lays out and paints the bubble per
   target canvas (`renderBuddyBubblePng`, its tail tip on the bitmap's
   bottom-centre, which the compositor puts on the pet's head) and the
@@ -610,8 +653,8 @@ Buddy on stream (Phase C):
   `showOnStream`); `cohost-action` kinds `buddy-say {text, state}` and
   `buddy-show-on-stream {showOnStream}`; `buddy-say` carries the live
   `sessionId` when the window shows one, and the Studio routes it to
-  `cohost.utterance.say` (so a manual line is one utterance that bubbles at
-  once and posts per the chat mode) and the switch to `overlays.layout.set`.
+  `cohost.utterance.say` (so a manual line is one bubble-only utterance that
+  shows at once, in every mode) and the switch to `overlays.layout.set`.
 - Placement, the leg plan and the render paths are in
   [overlays.md](overlays.md).
 
@@ -619,11 +662,14 @@ Automatic chat (Phase D):
 
 - Backend: `cohost_greetings.rs` (facts, templates, collapse),
   `cohost_throttle.rs` (pure, clock-injected), `cohost_auto_chat.rs` (the
-  lane: mode, proposals, answers, banter, the Say box), and the send path in
-  `cohost.rs` (`send_automatic`, the pump that releases held greetings). The
-  lane is engine-wide and follows the live-chat session, not the Premium
-  tick session, because greetings are free. `off` produces nothing from any
-  method.
+  lane: the talk mode, bubble lines, proposals, answers, banter, the Say
+  box), the bubble queue in `buddy_overlay.rs` (plan 211 D7), and in
+  `cohost.rs` the pump that releases held greetings and `send_approved`, the
+  one path from the lane to chat: a clicked Suggest card. The lane has no
+  send of its own (`AutoChatPass.send` is gone, D2). The lane is
+  engine-wide and follows the live-chat session, not the Premium tick
+  session, because greetings are free. `off` produces nothing from any
+  method; `bubble` never sends.
 - Every send is `live_chat::send_live_chat_message` with a Buddy-owned
   `operationId` registered on the lane; `live_chat.rs` skips
   `note_own_send_delivered` for it (no question closes, nobody is marked
@@ -644,14 +690,17 @@ personality}` only when `/api/ai/capabilities` reports `cohost.tick: 4`
   the persona leaves. v4 replies carry `addressed` and `mood` per question;
   `intent: banter` returns `banter {text, mood}`. Mood → state: amused →
   laugh, thinking → think, neutral → talk.
-- Stream Manager relay: `cohost-enable` carries an `autoChat` block (mode
-  and the three switches); `cohost-action` kinds `approve-utterance`,
-  `dismiss-utterance`, `say-utterance` (with `text` and `state?`) follow the
-  session kinds (they send to chat).
+- Stream Manager relay: `cohost-enable` carries an `autoChat` block (`talk`
+  and the three switches; the legacy `mode` is refused at the relay, and
+  only the backend's `normalize_talk` writes it); `cohost-action` kinds
+  `approve-utterance`, `dismiss-utterance`, `say-utterance` (with `text` and
+  `state?`) follow the session kinds (approve sends to chat; say is bubble
+  only).
 - Reports: `CohostSessionReport.posts[]` (`{id, at, trigger, text,
 destinations, result}`, cap 200, omitted while empty) written as each send
-  lands through `Database::append_cohost_report_post`; `merged_with` unions
-  by id.
+  lands through `Database::append_cohost_report_post`, and `said[]` (`{id,
+at, trigger, text, source?}`, plan 211 D11, same cap, omitted while empty)
+  written as each bubble line shows; `merged_with` unions both by id.
 
 The report:
 
@@ -692,10 +741,14 @@ Checks:
 - `pnpm smoke:cohost-fake` runs Buddy against a fake server and asserts
   the saved report's counts (it has no capabilities route, so the desktop
   sends v3 there).
-- `pnpm smoke:live-chat-fake-providers` ends with the Buddy scenario: three
-  templates in `auto` land exactly four greetings on the fake destinations
-  (one per event, 5 s apart on Twitch), the report holds the four posts, and
-  the same rows with the mode `off` send nothing.
+- `pnpm smoke:live-chat-fake-providers` ends with the Buddy scenarios (plan
+  211): in Bubble with Buddy on stream and no lines of the user's own, a
+  fake follow's built-in line and five first-time chatters across Twitch
+  and Kick show as three bubble lines (the first welcome, a collapsed
+  welcome for the burst, the follow), with zero sends, `said[]` in the
+  report and no `posts[]`; in Suggest one card, approved over
+  `cohost.utterance.approve`, lands as exactly one send and one post; with
+  talk `off` nothing is said or sent.
 - `pnpm smoke:buddy-commands` covers the wake words.
 - `cargo test -p videorc-backend cohost` covers the settings round trip, the
   greeting engine, the throttle (a 50-follow burst: one now, one collapsed at

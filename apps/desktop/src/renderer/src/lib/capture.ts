@@ -35,6 +35,7 @@ import {
   SYSTEM_AUDIO_GAIN_DB_MIN,
   VERTICAL_LAYOUT_PRESETS
 } from '../../../shared/backend'
+import { STREAM_PLATFORMS } from '../../../shared/stream-platforms'
 
 export type SettingsState = {
   /** Human-readable picker label only; never a filesystem path. */
@@ -61,6 +62,12 @@ export type SettingsState = {
    * section on an audiocn LCD screen. Default off: the inspector's own rows.
    */
   retroLcdStudio?: boolean
+  /**
+   * Chat in Studio (plan 204, owner 2026-10-27): while on air, the Studio
+   * inspector shows the livestream's chat under Session, and a click puts a
+   * message on stream. Default off (owner answer): an absent key is off.
+   */
+  studioChat?: boolean
   /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
@@ -527,10 +534,25 @@ export function resolutionOptionsForOrientation(
 }
 
 /**
+ * The portrait twin of a landscape canvas: the size and frame rate the user
+ * (or the performance check) chose, turned on its side. 1080p30 maps to the
+ * named vertical profile; every other size keeps its own pixels and fps
+ * (720p → 720×1280, 1440p → 1440×2560, 4K → 2160×3840, the 360p floor →
+ * 360×640) as Custom, never silently upscaled to 1080×1920.
+ */
+export function verticalTwinVideo(video: VideoSettings): VideoSettings {
+  const named = videoPresets['vertical-1080x1920']
+  if (video.width === named.height && video.height === named.width && video.fps === named.fps) {
+    return named
+  }
+  return coerceVideoToOrientation(video, 'vertical')
+}
+
+/**
  * Off-air orientation coupling for the Studio modes: entering a vertical
- * scene flips the canvas to the portrait profile and remembers the landscape
- * settings; leaving restores exactly what was there. Returns null when no
- * video change is needed — same orientation class (scene switches WITHIN a
+ * scene flips the canvas to its portrait twin (verticalTwinVideo) and
+ * remembers the landscape settings; leaving restores exactly what was there.
+ * Returns null when no video change is needed — same orientation class (scene switches WITHIN a
  * mode never touch the canvas), a canvas the user already made portrait
  * (entering), or a canvas the user already made landscape while in vertical
  * mode (leaving — their explicit choice wins). Callers MUST NOT apply this
@@ -552,7 +574,7 @@ export function verticalOrientationVideoPatch(
     if (video.height > video.width) {
       return null
     }
-    return { video: videoPresets['vertical-1080x1920'], verticalRestoreVideo: video }
+    return { video: verticalTwinVideo(video), verticalRestoreVideo: video }
   }
   if (video.height <= video.width) {
     return { video, verticalRestoreVideo: null }
@@ -629,6 +651,7 @@ export const STORAGE_KEYS = {
   settings: 'videorc.settings',
   captureConfig: 'videorc.captureConfig',
   onboarding: 'videorc.onboardingComplete',
+  firstRun: 'videorc.firstRun',
   theme: 'videorc.theme',
   backgroundAssets: 'videorc.backgroundAssets',
   // Set once the user picks an output themselves; from then on a performance
@@ -644,10 +667,9 @@ export const STORAGE_KEYS = {
   livestreamView: 'videorc.livestreamView'
 } as const
 
-// Permissions onboarding: ANY stored value means "seen/dismissed" — the gate
-// itself is permission state, not this flag. Older installs hold
-// 'creator-ux-v1' from the retired 4-step tour and stay suppressed; the UI
-// probe scripts seed that same value, which must keep working.
+// Legacy onboarding: ANY stored value marks an existing install. Older apps
+// and seeded smoke profiles keep working; first-run setup also writes this
+// flag when completed or skipped so a downgrade stays dismissed.
 export const ONBOARDING_DISMISSED_VALUE = 'permissions-v1'
 export const MICROPHONE_SYNC_OFFSET_MIN_MS = -1000
 export const MICROPHONE_SYNC_OFFSET_MAX_MS = 1000
@@ -669,22 +691,23 @@ export const rtmpDefaults: Record<RtmpPreset, string> = {
   custom: ''
 }
 
-// Fixed destination order for the Streaming tab (YouTube, Twitch, Kick, X, Custom).
-export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
-  'youtube',
-  'twitch',
-  'kick',
-  'x',
-  'tiktok',
-  'instagram',
-  'custom'
-]
+// Fixed platform order for the Streaming tab: YouTube, Twitch, Kick, X,
+// Facebook, TikTok, Instagram, Custom RTMP.
+export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = STREAM_PLATFORMS
+
+/**
+ * The RTMPS server Facebook Live Producer shows for "Streaming software"
+ * (plan 206). The card is stream-key only until Meta approves Page sign-in.
+ */
+export const FACEBOOK_STREAM_SERVER_URL = 'rtmps://live-api-s.facebook.com:443/rtmp/'
+/** Where the key comes from, and where the streamer presses Go live. */
+export const FACEBOOK_LIVE_PRODUCER_URL = 'https://www.facebook.com/live/producer'
 
 /**
  * The built-in destination cards, ID-keyed (two YouTube cards share one
- * platform): the horizontal group (YouTube, Twitch, Kick, X), the vertical trio (YouTube Vertical is a
- * SECOND broadcast on the same channel; TikTok and Instagram are manual-key
- * only), then Custom RTMP.
+ * platform): the horizontal group (YouTube, Twitch, Kick, X, Facebook), the
+ * vertical trio (YouTube Vertical is a SECOND broadcast on the same channel;
+ * TikTok and Instagram are manual-key only), then Custom RTMP.
  */
 export const STREAM_TARGET_DEFS: ReadonlyArray<{
   id: string
@@ -697,6 +720,12 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
   { id: 'kick', platform: 'kick', label: 'Kick', serverUrl: rtmpDefaults.kick },
   { id: 'x', platform: 'x', label: 'X', serverUrl: '' },
+  {
+    id: 'facebook',
+    platform: 'facebook',
+    label: 'Facebook',
+    serverUrl: FACEBOOK_STREAM_SERVER_URL
+  },
   {
     id: 'youtube-vertical',
     platform: 'youtube',
@@ -721,7 +750,14 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'custom', platform: 'custom', label: 'Custom RTMP', serverUrl: '' }
 ]
 
+/** The card's sign-in note; the backend refuses with the same words. */
+export const FACEBOOK_SIGN_IN_UNAVAILABLE =
+  "Signing in with Facebook isn't available yet. Use a stream key."
+
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
+  if (platform === 'facebook') {
+    return FACEBOOK_SIGN_IN_UNAVAILABLE
+  }
   if (platform === 'custom') {
     return "Custom RTMP uses a stream key. There's no account to sign in to."
   }
@@ -975,6 +1011,15 @@ export const streamPlatformOutputCapabilities: Record<
     maxWidth: 1920,
     maxHeight: 1080,
     maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  // Facebook takes 1080p60 (up to 9,000 kbps); 6,000 kbps is the shared
+  // non-YouTube cap in recording.rs.
+  facebook: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 60,
     maxBitrateKbps: 6000,
     true4k: false
   },
@@ -2259,7 +2304,9 @@ export function bridgeStreamingToLegacy(config: CaptureConfig): CaptureConfig {
 
   if (primary) {
     const legacyPreset: RtmpPreset =
-      primary.platform === 'tiktok' || primary.platform === 'instagram'
+      primary.platform === 'facebook' ||
+      primary.platform === 'tiktok' ||
+      primary.platform === 'instagram'
         ? 'custom'
         : primary.platform
     return {
@@ -2709,8 +2756,10 @@ export function buildCaptureSources(
   captureId: string | undefined
 ): SourceSelection {
   const selected = captureDevices.find((device) => device.id === captureId)
+  const next = { ...current }
+  delete (next as SourceSelection & { app?: unknown }).app
   return {
-    ...current,
+    ...next,
     screenId: selected?.kind === 'screen' ? captureId : undefined,
     screenName: selected?.kind === 'screen' ? selected.name : undefined,
     windowId: selected?.kind === 'window' ? captureId : undefined,
@@ -2763,6 +2812,7 @@ export function mergeSourceKind(
   kind: keyof typeof SOURCE_KIND_FIELDS
 ): SourceSelection {
   const next: Record<string, unknown> = { ...current }
+  if (kind === 'capture') delete next.app
   for (const field of SOURCE_KIND_FIELDS[kind]) next[field] = picked[field]
   return next as SourceSelection
 }

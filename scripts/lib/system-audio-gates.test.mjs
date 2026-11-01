@@ -10,6 +10,7 @@ import {
   bandMaxDbfs,
   broadbandPeakDbfs,
   cutoverFileSeconds,
+  evaluateClipsIdleCase,
   evaluateRecordAndStreamCase,
   evaluateSelfExclusionCase,
   evaluateSystemAudioOffCase,
@@ -22,6 +23,7 @@ import {
   mixSourcesIncludeSystemAudio,
   parseSystemAudioMixCutover,
   parseSystemAudioSyncOffsetMs,
+  startedSessionStatus,
   summarizeSystemAudioSyncRuns,
   toneEnvelope,
   toneWavArgs,
@@ -30,6 +32,88 @@ import {
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const RATE = SYSTEM_AUDIO_SAMPLE_RATE
+
+describe('clips-idle audio.levels gate (plan 201 S0)', () => {
+  const sessionId = 'clips-ring'
+  const timing = { sessionId, toneStartAt: 2000, gainChangedAt: 3500, toneEndAt: 5000 }
+  function levels({ dropDb = 12, floorDb = -120 } = {}) {
+    return Array.from({ length: 140 }, (_, index) => {
+      const at = index * 50
+      const peakDb = at < 2200 || at >= 5200 ? floorDb : at < 3700 ? -15 : -15 - dropDb
+      return { at, payload: { sessionId, systemAudio: { peakDb, rmsDb: peakDb - 3 } } }
+    })
+  }
+  const evaluate = (events) => evaluateClipsIdleCase({ ...timing, levels: events })
+
+  it('requires ring readings, a 12 dB drop and continued readings at the floor', () => {
+    const result = evaluate(levels())
+    assert.equal(result.pass, true, result.failures.join())
+    assert.equal(result.evidence.beforeDbfs, -15)
+    assert.equal(result.evidence.afterDbfs, -27)
+    assert.equal(result.evidence.dropDb, 12)
+    assert.equal(result.evidence.floorPeakDbfs, -120)
+    assert.equal(result.evidence.levelEventCount, 140)
+  })
+
+  it('allows +/- 2 dB, but rejects unchanged, reversed or out-of-tolerance gain', () => {
+    for (const dropDb of [10, 14]) assert.equal(evaluate(levels({ dropDb })).pass, true)
+    for (const dropDb of [0, -12, 9.9, 14.1]) {
+      assert.match(evaluate(levels({ dropDb })).failures.join(), /gain dropped the peak/)
+    }
+  })
+
+  it('rejects absent events or microphone/master-only payloads, preserving STOP evidence', () => {
+    assert.equal(evaluate([]).pass, false)
+    const events = levels().map(({ at }) => ({
+      at,
+      payload: {
+        sessionId,
+        microphone: { peakDb: -15, rmsDb: -18 },
+        master: { peakDb: -15, rmsDb: -18 }
+      }
+    }))
+    const result = evaluate(events)
+    assert.match(result.failures.join(), /only 0 systemAudio readings/)
+    assert.deepEqual(result.evidence.levels, events)
+  })
+
+  it('rejects missing, invalid or too few readings in either tone window', () => {
+    for (const from of [2500, 4000]) {
+      const missing = levels().filter(({ at }) => at < from || at >= from + 1000)
+      assert.equal(evaluate(missing).pass, false)
+      const invalid = levels().map((event) =>
+        event.at >= from && event.at < from + 1000
+          ? { ...event, payload: { sessionId, systemAudio: { peakDb: Number.NaN } } }
+          : event
+      )
+      assert.equal(evaluate(invalid).pass, false)
+    }
+    assert.equal(evaluate(levels().filter(({ at }) => at % 1000 === 0)).pass, false)
+    const silent = levels().map((event) => ({
+      ...event,
+      payload: { sessionId, systemAudio: { peakDb: -120 } }
+    }))
+    assert.match(evaluate(silent).failures.join(), /no systemAudio tone/)
+  })
+
+  it('does not mistake a stopped meter for silence after the tone', () => {
+    assert.match(evaluate(levels().filter(({ at }) => at < 5500)).failures.join(), /after tone/)
+    assert.match(
+      evaluate(levels({ floorDb: -60 })).failures.join(),
+      /return to the -120 dBFS floor/
+    )
+  })
+
+  it('requires every event, including microphone-only events, to carry the ring session id', () => {
+    for (const id of [undefined, 'other-ring']) {
+      const events = [
+        ...levels(),
+        { at: 1000, payload: { sessionId: id, microphone: { peakDb: -120 } } }
+      ]
+      assert.match(evaluate(events).failures.join(), /ring session id/)
+    }
+  })
+})
 
 /** Builds mono f32 PCM from [{from, to, hz, amplitude}] segments (seconds). */
 function synth(seconds, segments = []) {
@@ -148,6 +232,24 @@ describe('time alignment helpers', () => {
       false
     )
     assert.equal(mixSourcesIncludeSystemAudio({}), false)
+  })
+
+  it('startedSessionStatus is the started session, never the Clips ring that re-arms', () => {
+    assert.equal(startedSessionStatus({ state: 'recording', sessionId: 'rec-1' }), true)
+    assert.equal(
+      startedSessionStatus({ state: 'streaming', sessionId: 'live-1', replayOnly: false }),
+      true
+    )
+    // The ring's buffer-only session (plan 181) publishes the same states.
+    assert.equal(
+      startedSessionStatus({ state: 'recording', sessionId: 'ring-1', replayOnly: true }),
+      false
+    )
+    for (const state of ['starting', 'stopping', 'idle', 'failed']) {
+      assert.equal(startedSessionStatus({ state, sessionId: 'rec-1' }), false)
+    }
+    assert.equal(startedSessionStatus({ state: 'recording' }), false)
+    assert.equal(startedSessionStatus(undefined), false)
   })
 
   it('generates a -6 dBFS stereo tone (lavfi sine is too quiet)', () => {

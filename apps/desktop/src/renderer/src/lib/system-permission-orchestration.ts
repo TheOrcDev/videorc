@@ -10,10 +10,19 @@ import type {
   RuntimeInfo,
   SystemPermissionPane
 } from '@/lib/backend'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import {
+  mediaAccessStatusForPane,
+  systemAccessAction,
+  systemAccessRows,
+  type SystemAccessContext
+} from '@/lib/system-access'
 
 type SystemPermissionOrchestration = {
   pane: SystemPermissionPane
+  accessContext?: SystemAccessContext
+  getAccessContext?: () => SystemAccessContext
+  setPendingPane?: (pane: SystemPermissionPane | null) => void
+  onGrantRestart?: (pane: SystemPermissionPane, proof: MicrophonePermissionProof) => void
   platform: RuntimeInfo['platform'] | undefined
   refreshMediaAccess: () => Promise<MediaAccessSnapshot | null>
   getDeviceList: () => DeviceList
@@ -32,21 +41,8 @@ export type MicrophonePermissionProof = {
   staleBackend?: BackendRestartBoundary
 }
 
-function matchesStaleBackend(client: BackendClient, boundary: BackendRestartBoundary): boolean {
-  const { connection } = client
-  return (
-    connection.port === boundary.port &&
-    (boundary.pid === undefined || connection.pid === boundary.pid)
-  )
-}
-
-export function isReplacementPermissionClient(
-  client: BackendClient | null,
-  proof: MicrophonePermissionProof
-): client is BackendClient {
-  if (!client || client === proof.previousClient) return false
-  return !proof.staleBackend || !matchesStaleBackend(client, proof.staleBackend)
-}
+export { isReplacementPermissionClient } from '@/lib/permission-evidence'
+import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 
 export async function waitForPermissionCondition(
   condition: () => boolean,
@@ -95,6 +91,10 @@ export async function runMicrophonePermissionProof({
 
 export async function runSystemPermissionAction({
   pane,
+  accessContext,
+  getAccessContext,
+  setPendingPane,
+  onGrantRestart,
   platform,
   refreshMediaAccess,
   getDeviceList,
@@ -116,28 +116,75 @@ export async function runSystemPermissionAction({
     return
   }
   const row = systemAccessRows({
+    ...(getAccessContext?.() ?? accessContext),
     deviceList: getDeviceList(),
     audioMeter: getAudioMeter(),
     platform,
     mediaAccess: snapshot
   }).find((candidate) => candidate.id === pane)
-  const mediaAccessStatus =
-    pane === 'camera' || pane === 'microphone' ? snapshot?.[pane] : undefined
+  const mediaAccessStatus = mediaAccessStatusForPane(snapshot, pane)
   const action = systemAccessAction({
     pane,
     state: row?.state,
     platform,
-    mediaAccessStatus
+    mediaAccessStatus,
+    checking: row?.checking
   })
 
   if (!action) {
     return
   }
+  if (action === 'relaunch') {
+    const result = await window.videorc.relaunchForPermission()
+    if (!result.relaunched) {
+      toast.warning("Couldn't reopen Videorc", {
+        id: 'permission-relaunch-refused',
+        description:
+          result.reason === 'capture-active'
+            ? 'Finish your recording or livestream first.'
+            : 'Videorc is busy. Try again in a moment.'
+      })
+    }
+    return
+  }
+  if (action === 'open-settings' || pane === 'screen-recording') setPendingPane?.(pane)
   if (action === 'open-settings') {
     if (pane === 'microphone') {
       clearMicrophoneEvidence()
     }
     await openSystemPermissionSettings(pane)
+    return
+  }
+
+  if (pane === 'screen-recording') {
+    // Plan 203 S2: the screen asked in place. macOS answers the first screen
+    // prompt in System Settings, so `granted` is usually false here and the
+    // grant watcher in main restarts capture when it lands; a grant that
+    // lands at once already restarted, and the device list follows.
+    const requestScreenAccess = window.videorc?.requestScreenAccess
+    if (!requestScreenAccess) {
+      console.warn('[permissions] no screen access request in this renderer')
+      return
+    }
+    try {
+      const previousClient = getClient()
+      const result = await requestScreenAccess()
+      if (result.granted)
+        onGrantRestart?.(pane, { previousClient, staleBackend: result.staleBackend })
+      await refreshMediaAccess()
+      if (!result.granted || !result.restarted) {
+        return
+      }
+      await refreshDevicesFromReplacementBackend(
+        {
+          previousClient,
+          ...(result.staleBackend ? { staleBackend: result.staleBackend } : {})
+        },
+        { getClient, getWsStatus, setDeviceList }
+      )
+    } catch (error) {
+      reportError(error)
+    }
     return
   }
 
@@ -150,6 +197,8 @@ export async function runSystemPermissionAction({
   try {
     const previousClient = getClient()
     const result = await requestMediaAccess(pane)
+    if (result.granted)
+      onGrantRestart?.(pane, { previousClient, staleBackend: result.staleBackend })
     await refreshMediaAccess()
     if (!result.granted) {
       return
@@ -170,30 +219,38 @@ export async function runSystemPermissionAction({
       return
     }
 
-    await waitForPermissionCondition(
-      () =>
-        getWsStatus() === 'connected' &&
-        isReplacementPermissionClient(getClient(), {
-          previousClient,
-          ...(result.staleBackend ? { staleBackend: result.staleBackend } : {})
-        })
-    )
-    const activeClient = getClient()
-    if (
-      getWsStatus() !== 'connected' ||
-      !isReplacementPermissionClient(activeClient, {
+    await refreshDevicesFromReplacementBackend(
+      {
         previousClient,
         ...(result.staleBackend ? { staleBackend: result.staleBackend } : {})
-      })
-    ) {
-      return
-    }
-
-    const nextDevices = await activeClient.request<DeviceList>('devices.list')
-    if (getClient() === activeClient) {
-      setDeviceList(nextDevices)
-    }
+      },
+      { getClient, getWsStatus, setDeviceList }
+    )
   } catch (error) {
     reportError(error)
+  }
+}
+
+/** After a fresh grant restarted capture: wait for the replacement backend,
+ * then read its device list (the old one's evidence predates the grant). */
+async function refreshDevicesFromReplacementBackend(
+  proof: MicrophonePermissionProof,
+  {
+    getClient,
+    getWsStatus,
+    setDeviceList
+  }: Pick<SystemPermissionOrchestration, 'getClient' | 'getWsStatus' | 'setDeviceList'>
+): Promise<void> {
+  await waitForPermissionCondition(
+    () => getWsStatus() === 'connected' && isReplacementPermissionClient(getClient(), proof)
+  )
+  const activeClient = getClient()
+  if (getWsStatus() !== 'connected' || !isReplacementPermissionClient(activeClient, proof)) {
+    return
+  }
+
+  const nextDevices = await activeClient.request<DeviceList>('devices.list')
+  if (getClient() === activeClient) {
+    setDeviceList(nextDevices)
   }
 }

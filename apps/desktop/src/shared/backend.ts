@@ -4,6 +4,7 @@ import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 import type { LiveBackgroundId, LiveBackgroundMotion } from './live-background-ids'
 import type { TwitchGifMode } from './chat-gif'
+import type { WindowGround } from './window-ground'
 import type {
   BuddyAvatar,
   BuddyMotionSettings,
@@ -11,6 +12,7 @@ import type {
   BuddyReactionTable
 } from './buddy-pet'
 import type { BuddyLibraryId } from './buddy-library'
+import type { StreamPlatform } from './stream-platforms'
 export type { BackgroundImportResult } from './background-import'
 export type { TwitchGifMode } from './chat-gif'
 
@@ -358,7 +360,50 @@ export type VideorcAccountRefreshResult =
 export type DeviceKind = 'screen' | 'window' | 'camera' | 'microphone' | 'system-audio'
 export type DeviceStatus = 'available' | 'unavailable' | 'permission-required'
 
+export interface DeviceApp {
+  bundleId: string
+  name: string
+  pid: number
+}
+
+export interface ResolveAppWindowParams {
+  bundleId: string
+  preferWindowId?: string
+  minWidth?: number
+  minHeight?: number
+}
+
+export type ResolveAppWindowResult =
+  | { ok: true; windowId: string; title: string; width: number; height: number }
+  | { ok: false; reason: 'not-running' | 'no-window' | 'minimized' }
+
+/** Plan 210 S4: New scene…'s picker asks for these only while it is open. */
+export interface AppPreviewsParams {
+  /** The widest picture to return, in pixels. */
+  maxWidth?: number
+}
+
+/** One running app with a normal window, and a small picture of its front window. */
+export interface AppPreview {
+  bundleId: string
+  name: string
+  pid: number
+  windowCount: number
+  frontWindowId?: string
+  frontWindowTitle?: string
+  /** `data:image/jpeg;base64,…`; absent below macOS 14. */
+  picture?: string
+  width?: number
+  height?: number
+}
+
+export interface AppPreviewsResult {
+  apps: AppPreview[]
+}
+
 export interface Device {
+  app?: DeviceApp
+  windowTitle?: string
   id: string
   name: string
   kind: DeviceKind
@@ -1002,7 +1047,7 @@ export interface RtmpSettings {
 // Multi-platform streaming (per-target) model. Session start consumes it
 // (recording.rs reads params.streaming for the per-target fan-out); the legacy
 // single-RTMP fields remain only as the no-settings fallback.
-export type StreamPlatform = 'youtube' | 'twitch' | 'kick' | 'x' | 'tiktok' | 'instagram' | 'custom'
+export type { StreamPlatform }
 /**
  * Which composed leg a destination consumes in a dual-orientation session.
  * Explicit per-target property — never inferred from resolution equality.
@@ -2157,6 +2202,7 @@ export interface PerformanceCheckResult {
 }
 
 export interface PerformanceCheckState {
+  lastRunNotRecorded?: 'host-busy'
   running: boolean
   result?: PerformanceCheckResult
   /** Measured on a different GPU, driver or app version. */
@@ -2387,6 +2433,18 @@ export interface CompositorFramePipelineStatus {
   /** Plan 190: live background programs built and scratch bytes held (0 while off). */
   liveBackgroundPrograms?: number
   liveBackgroundScratchBytes?: number
+  /**
+   * Plan 205 S6: the Preview presents its own picture (the program leg)
+   * because the program differs from the primary leg: Clips at idle or a
+   * split record + stream with a stream-only item. Left off the wire while
+   * the primary leg is the program.
+   */
+  previewProgramLeg?: boolean
+  /**
+   * Plan 212 S2: frames composed from a scene with a test-pattern source
+   * that the packaged backstop refused to the Preview. Absent while 0.
+   */
+  previewSyntheticRefused?: number
 }
 
 export interface CompositorStatus {
@@ -2422,8 +2480,39 @@ export interface CompositorStatus {
   editorDraft?: SceneEditorDraftStatus | null
   /** Plan 190: the applied live background and how it is drawn. */
   liveBackground?: LiveBackgroundStatus
+  /** Plan 210 S3: how the last screen or window switch changed the capture. */
+  screenSwitch?: ScreenSwitchStatus
+  /**
+   * Plan 212 S2: the Preview holds its last program frame while a
+   * performance check runs. Not a broken Preview: main's first-frame and
+   * presenting watchdogs wait and never heal. Absent when there is no hold.
+   */
+  previewHold?: PreviewHoldReason
   updatedAt: string
   message?: string
+}
+
+/**
+ * Plan 212 S2: why the Preview holds its picture. `performance-check` is the
+ * check's hold (with its words in the Preview); `synthetic-refused` is the
+ * packaged backstop keeping the last program frame instead of a frame
+ * composed from a test-pattern scene (no words of its own).
+ */
+export type PreviewHoldReason = 'performance-check' | 'synthetic-refused'
+
+/**
+ * Plan 210 S3: how the last screen or window switch changed the capture:
+ * the running stream changed its target in place, or it was stopped and
+ * another started, with the reason the in-place change was not used.
+ */
+export interface ScreenSwitchStatus {
+  mode: 'in-place' | 'restart'
+  reason?: string
+  sourceId: string
+  generation: number
+  /** Switch request to the new source's first frame, when it arrived. */
+  firstFrameMs?: number
+  updatedAt: string
 }
 
 /** Capacity-one/latest-wins notification used by native preview presentation. */
@@ -2447,6 +2536,8 @@ export type PreviewSurfaceSceneLayerKind =
   | 'screen-image'
   | 'background'
   | 'banner'
+  /** Plan 205 S9: the Buddy's frame-polled layer (`main/preview-surface-buddy.ts`). */
+  | 'buddy'
 export type PreviewSurfaceSceneLayerFit = 'contain' | 'cover' | 'fill'
 
 export interface PreviewSurfaceSceneLayer {
@@ -3588,6 +3679,37 @@ export type MediaAccessStatus =
 export interface MediaAccessSnapshot {
   camera: MediaAccessStatus
   microphone: MediaAccessStatus
+  /** Screen & System Audio Recording (plan 203 S2): the exact TCC value on
+   * macOS; 'not-applicable' on Windows (no per-app screen grant) and Linux
+   * (portal consent per capture). */
+  screen: MediaAccessStatus
+}
+
+/** The screen request's outcome (plan 203 S2). macOS never answers the first
+ * Screen Recording prompt in place: the user flips the switch in System
+ * Settings, so `status` is usually still 'not-determined' right after the
+ * request and the grant watcher restarts capture when it lands. */
+export interface ScreenAccessResult {
+  status: MediaAccessStatus
+  granted: boolean
+  /** True only when a fresh grant already restarted the capture backend. */
+  restarted: boolean
+  staleBackend?: BackendRestartBoundary
+}
+
+/** `recheckPermissionGrants` (plan 203 S2): whether a late grant (noticed
+ * past the watcher's window, on focus) restarted capture just now. */
+export interface PermissionRecheckResult {
+  restarted: boolean
+}
+
+export type RelaunchForPermissionRefusal = 'capture-active' | 'backend-busy'
+
+/** `relaunchForPermission` (plan 203 S2): false with a reason when a recording,
+ * livestream or capture start is in flight; true once the app is relaunching. */
+export interface RelaunchForPermissionResult {
+  relaunched: boolean
+  reason?: RelaunchForPermissionRefusal
 }
 
 export interface HealthEvent {
@@ -3985,7 +4107,13 @@ export interface SessionListItem {
   takeId?: string
   /** Which file of the take this row is (plan 157); absent on ordinary rows. */
   recordingRole?: RecordingRole
+  /** A take Videorc stopped in the middle of (crash, killed backend, power
+   * loss): `recovered` once its MKV became an MP4 on the next start, `failed`
+   * when that did not work. Absent on every other row. */
+  interruptionRecovery?: InterruptionRecovery
 }
+
+export type InterruptionRecovery = 'recovered' | 'failed'
 
 /** Progress of a background recording finalization job (`recording.finalization`). */
 export interface RecordingFinalizationEvent {
@@ -3997,6 +4125,8 @@ export interface RecordingFinalizationEvent {
   durationMs?: number
   fileSizeBytes?: number
   error?: string
+  /** Set when this job finished an interrupted take's recovery. */
+  interruptionRecovery?: InterruptionRecovery
   updatedAt: string
 }
 
@@ -4105,6 +4235,29 @@ export interface ScreenIdParams {
   screenId: string
 }
 
+// --- Hide screen (plan 210 S7) ---
+/** Who hid the screen: the streamer, or the password-manager list on their behalf. */
+export type ScreenPrivacyReason = 'you' | 'password-manager'
+
+/**
+ * Hide screen state, in memory only and cleared at launch. `screen.privacy.get`
+ * returns it; `screen.privacy.changed` carries it on every hide and show.
+ * Absent fields are omitted by the backend, never `null`.
+ */
+export interface ScreenPrivacy {
+  hidden: boolean
+  /** RFC 3339, the moment of the hide; present only while hidden. */
+  since?: string
+  reason?: ScreenPrivacyReason
+  /** Why `screen.hide` would be refused right now (a legacy FFmpeg session). */
+  unavailable?: string
+}
+
+export interface ScreenHideParams {
+  reason: ScreenPrivacyReason
+}
+// --- end Hide screen (plan 210 S7) ---
+
 export interface RenameScreenParams {
   screenId: string
   name: string
@@ -4140,6 +4293,7 @@ export interface RuntimeInfo {
    * verdict on whether the page drew anything; `skipped` off Mica.
    */
   windowGlass?: {
+    /** `solid` is the default: an opaque window on the theme's solid base. */
     kind: 'material' | 'mica' | 'solid'
     reason: string | null
     paintCheck: 'pending' | 'painted' | 'blank' | 'unknown' | 'skipped'
@@ -4152,6 +4306,8 @@ export interface RuntimeInfo {
     styleRequested: 'clear' | 'material'
   }
   isPackaged: boolean
+  /** Suppresses first-run setup without changing its persisted record (smokes). */
+  firstRunSuppressed: boolean
   permissionTargetName: string
   permissionTargetPath: string
   capturePermissionTargetName: string
@@ -4277,10 +4433,12 @@ export interface CommentsSendOperation {
 // Wire mirror of crates/videorc-backend/src/live_chat_moderation.rs. Every
 // removal is a durable, audited operation; the backend owns the timers. The
 // event `liveChat.moderationOperation` carries a ModerationOperation on every
-// change. Manual removal is free; `orcle-voice` needs Premium.
+// change. Manual removal is free; `orcle-voice` needs Premium. `agent` is an AI
+// agent on this computer (plan 209 S12): free, at once, except on YouTube,
+// where it waits for the streamer's click on the removal card.
 
 // The value stays 'orcle-voice' (plan 170 D22): saved reports and older apps carry it.
-export type ModerationSource = 'manual' | 'orcle-voice'
+export type ModerationSource = 'manual' | 'orcle-voice' | 'agent'
 export type RemoveConfirmMode = 'confirm' | 'countdown'
 export type ModerationPhase =
   | 'pending-confirm'
@@ -4334,7 +4492,8 @@ export interface ModerationRequestParams {
   operationId: string
   /** The app message id (`LiveChatMessage.id`). */
   messageId: string
-  source: ModerationSource
+  /** `agent` is never asked for by a renderer: the Agents endpoint owns it. */
+  source: Exclude<ModerationSource, 'agent'>
   reason?: string
   confirmMode?: RemoveConfirmMode
 }
@@ -4606,9 +4765,14 @@ export type UpdateStatus =
   | { phase: 'downloaded'; version: string }
   | { phase: 'not-available'; currentVersion: string }
   | { phase: 'error'; message: string }
+  // Linux only: a newer Linux release is published on videorc.com. Linux never
+  // downloads it; Settings links to the downloads page (linux-update-notice.ts).
+  | { phase: 'download-available'; version: string }
   // `windows-feed-unpublished`: a Windows build found no update published for
   // it (no public Alpha feed, and no signed-in pilot access). Rechecked.
-  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' }
+  // `linux-version-unknown`: the Linux version check could not tell (offline,
+  // or videorc.com lists no Linux release for this line yet). Rechecked.
+  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' | 'linux-version-unknown' }
 
 export type AccountCallbackEnvelope = {
   id: string
@@ -4664,12 +4828,173 @@ export interface RemoteLanPairing {
   expiresAt: string
 }
 
+// --- Agents (plan 209): AI agents on this computer run the studio over MCP ---
+
+/** Which app the streamer connected (D6): it picks the config line shown. */
+export type AgentClientKind =
+  | 'claude-desktop'
+  | 'claude-code'
+  | 'cursor'
+  | 'codex'
+  | 'vs-code'
+  | 'other'
+
+/** How an agent action ended; the Activity list's word. */
+export type AgentActivityOutcome = 'ok' | 'refused' | 'failed' | 'timeout'
+
+export interface AgentLastAction {
+  tool: string
+  at: string
+  outcome: AgentActivityOutcome
+}
+
+/** One connected agent. Carries no token: the token exists once, in
+ * `agents.create`'s answer. */
+export interface AgentSummary {
+  id: string
+  name: string
+  client: AgentClientKind
+  createdAt: string
+  lastUsedAt?: string
+  lastAction?: AgentLastAction
+  /** Heard from (a call or the bridge's heartbeat) inside the last 45 s. */
+  connected: boolean
+}
+
+/** Why the Agents listener could not bind: what Settings branches on. */
+export type AgentBindErrorKind = 'ports-busy' | 'other'
+
+export interface AgentsStatus {
+  enabled: boolean
+  /** Bound port; absent while off or when the bind failed. */
+  port?: number
+  /** The OS's own words, for the console; Settings shows copy by `bindErrorKind`. */
+  bindError?: string
+  bindErrorKind?: AgentBindErrorKind
+  /** Where `agents.json` lives; absent for an in-memory database. */
+  discoveryPath?: string
+  agents: AgentSummary[]
+  connectedCount: number
+  /** A Studio window is attached, so Studio tools can run. */
+  studioOpen: boolean
+}
+
+export interface AgentsCreateParams {
+  name: string
+  client: AgentClientKind
+}
+
+/** The one time the token exists in the clear. Show it once; never store it. */
+export interface AgentCreated {
+  agent: AgentSummary
+  token: string
+}
+
+export interface AgentIdParams {
+  id: string
+}
+
+/** One row of Settings → Remote → Agents → Activity. */
+export interface AgentActivityEntry {
+  id: string
+  at: string
+  agentId: string
+  agentName: string
+  tool: string
+  /** A short rendering of the arguments. */
+  summary: string
+  outcome: AgentActivityOutcome
+  message?: string
+  /**
+   * D11 (plan 209 S6): on the `agents.activity` event only, the filled
+   * catalog notice of a successful onAir call ("Claude Desktop ended the
+   * livestream."). The Studio shows it; `agents.activity.list` rows never
+   * carry it.
+   */
+  notice?: string
+}
+
+export interface AgentsActivityListParams {
+  /** Newest first; default 100, at most 1,000. */
+  limit?: number
+  agentId?: string
+}
+
+export interface AgentsActivityPage {
+  entries: AgentActivityEntry[]
+}
+
+/** A Studio tool call relayed to the renderer (S3): run it through the
+ * Studio action executor and answer with `agent.intent.ack`. */
+export interface AgentIntentEvent {
+  intentId: string
+  agentId: string
+  agentName: string
+  tool: string
+  args: Record<string, unknown>
+  /** Epoch ms: the agent stops waiting then, so an intent the Studio hasn't
+   * started by then is dropped (plan 209 review fix 1). */
+  deadlineAt?: number
+  /** The cancel generation it was sent in (`agent.intent.cancel`). */
+  generation?: number
+}
+
+/** Stop agents, Off or Remove (plan 209 review fix 1): the Studio drops every
+ * intent of an older generation it hasn't started, one agent's (`agentId`)
+ * or every agent's but Buddy's, and `go_live` stops before it confirms. */
+export interface AgentIntentCancelEvent {
+  generation: number
+  agentId?: string
+}
+
+export interface AgentIntentAckParams {
+  intentId: string
+  ok: boolean
+  /** The app's own sentence; the agent reads it. */
+  message?: string
+  /** The tool's structured result, matching its output schema. */
+  result?: Record<string, unknown>
+}
+
+/** The Studio's projection for `get_status` and the `list_*` tools (S3),
+ * built like the remote surface: allowlisted fields, never a token, a path
+ * or a URL. */
+export interface AgentSurfacePublishParams {
+  surface: Record<string, unknown>
+}
+
+export interface AgentAcknowledged {
+  ok: true
+}
+
+/** Plan 209 S7 (D6, D20): the bridge an agent app runs, from Electron main.
+ * `path` is absolute: the app's own copy on macOS and Windows, the stable
+ * copy in `~/.local/share/videorc/bin` on Linux, the cargo build in dev. */
+export interface AgentBridgeInfo {
+  path: string
+  /** This install has the bridge; false means Connect can't work. */
+  exists: boolean
+}
+
+/** Plan 209 S22: the apps "Add to …" writes Videorc into (every one but Other). */
+export type AgentAddApp = Exclude<AgentClientKind, 'other'>
+
+/** What "Add to …" did, in the dialog's own sentence. `added` false means the
+ * app's file was left alone and the line is the way. */
+export interface AgentAddResult {
+  added: boolean
+  message: string
+}
+// --- end Agents (plan 209) ---
+
 export interface GlobalShortcutsConfig {
   layoutNext?: string
   layoutPrevious?: string
   layouts?: Partial<Record<LayoutPreset, string>>
+  scenes?: Record<string, string>
   recordToggle?: string
   streamToggle?: string
+  screenHideToggle?: string
   micToggle?: string
   /** Turn system audio on/off (plan 069 S6). Unbound by default. */
   systemAudioToggle?: string
@@ -4721,6 +5046,12 @@ export type SessionMediaGrantResult =
 export type AppExitKind = 'quit' | 'close'
 
 export interface VideorcApi {
+  /**
+   * What this window sits on (plan 208): the solid base (the default) or the
+   * OS glass. Main decides it per window and the preload reads it from
+   * the window's argv, so the theme bootstrap knows it before the first paint.
+   */
+  windowGround?: WindowGround
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
   /** While armed, main suspends Videorc's global shortcuts and forwards every
@@ -4963,7 +5294,8 @@ export interface VideorcApi {
   updateNativePreviewSurfaceCompositor: (
     status: PreviewSurfaceCompositorUpdateParams
   ) => Promise<PreviewSurfaceStatus>
-  // Keeps the macOS vibrancy material in step with the in-app theme.
+  // Keeps the windows' opaque base (and the clear glass's vibrancy) in step
+  // with the in-app theme.
   setNativeTheme: (theme: 'dark' | 'light') => Promise<void>
   // True while the MAIN process pumps presents from its own backend socket;
   // the renderer pump stays dormant then and resumes only as a fallback.
@@ -4986,6 +5318,20 @@ export interface VideorcApi {
    * `restarted` is true only when a fresh grant restarted the capture backend
    * — callers probing a device right after must wait for reconnect first. */
   requestMediaAccess: (pane: 'camera' | 'microphone') => Promise<MediaAccessResult>
+  /** Plan 203 S2: ask macOS for Screen & System Audio Recording in place (the
+   * request main's launch prime used to make cold). Starts the grant watcher;
+   * elsewhere answers 'not-applicable'. */
+  requestScreenAccess: () => Promise<ScreenAccessResult>
+  /** Plan 203 S2: re-read the watched grant now (window focus, setup open past
+   * the watcher's window). A real not-granted → granted transition restarts
+   * capture exactly once. */
+  recheckPermissionGrants: () => Promise<PermissionRecheckResult>
+  /** Plan 203 S2: Reopen Videorc after a grant macOS only honours per launch.
+   * Refused while a recording, livestream or capture start is active. */
+  relaunchForPermission: () => Promise<RelaunchForPermissionResult>
+  /** Plan 203 S5: the main window shows the workspace (not first-run setup):
+   * main restores the Preview window from its launch prefs, once per launch. */
+  workspaceShown: () => Promise<void>
   revealPermissionTarget: () => Promise<void>
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>
@@ -4993,6 +5339,12 @@ export interface VideorcApi {
   /** Shows an exported support bundle in Finder or Explorer (plan 174 S3.18).
    * Main reveals only a bundle file inside the backend's export folder. */
   revealSupportBundle: (path: string) => Promise<void>
+  /** Plan 209 S7: where `videorc-mcp` lives, for Settings → Remote → Agents'
+   * config lines. `install` (Connect) puts the Linux copy in place (D20). */
+  getAgentBridge: (install: boolean) => Promise<AgentBridgeInfo>
+  /** Plan 209 S22: "Add to …" writes the agent's entry into that app's own
+   * config (or runs `claude mcp add`); main resolves the bridge's path. */
+  addAgentToApp: (app: AgentAddApp, token: string) => Promise<AgentAddResult>
   obsDiscover?: () => Promise<ObsDiscovery>
   obsRead?: (collection: string, profile: string) => Promise<ObsSetup | null>
   obsReadStreamKey?: (profile: string) => Promise<string | null>
@@ -5566,7 +5918,17 @@ export interface CohostPersona {
   libraryAvatarId?: BuddyLibraryId
 }
 
-/** The chat posting mode (plan 164 D4). */
+/**
+ * How Buddy talks on its own (plan 211 D1): `off` says nothing, `bubble`
+ * speaks on stream in its bubble and never in chat, `suggest` proposes a
+ * card the streamer clicks to post. The one truth (`autoChat.talk`).
+ */
+export type CohostTalkMode = 'off' | 'bubble' | 'suggest'
+/**
+ * Legacy (plan 211 D3): the `autoChat.mode` apps from before plan 211 read.
+ * The backend writes it as the projection of `talk` (Bubble → `off`, never
+ * `auto`). The renderer never reads it; it only rides along in the block.
+ */
 export type CohostAutoChatMode = 'off' | 'suggest' | 'auto'
 /** The activity kinds a greeting template answers (plan 164). */
 export type CohostActivityTemplateKind =
@@ -5665,8 +6027,13 @@ export interface CohostGreetings {
   welcomes?: CohostGreetingWelcomes
 }
 
-/** Automatic chat (plan 164 D5): one mode, three behaviours. */
+/** Automatic chat (plan 164 D5): one talk mode, three behaviours. */
 export interface CohostAutoChat {
+  /** Plan 211 D3: how Buddy talks. The backend always returns it after
+   * normalization; the renderer reads and writes only this field. */
+  talk: CohostTalkMode
+  /** Legacy, for older apps (plan 211 D3): written by the backend as the
+   * projection of `talk`; never read. */
   mode: CohostAutoChatMode
   greetings: CohostGreetings
   /** Default on (plan 192 D5), cooldown 20 s. */
@@ -6418,6 +6785,10 @@ export type CohostCommandKind =
   // stream (`overlayLayout.buddy.showOnStream`), finished at once.
   | 'show-buddy'
   | 'hide-buddy'
+  // Plan 209 S19: a sentence Buddy's planner turned into tool calls. `done`
+  // or `refused` says what ran; `confirm` asks for a spoken yes first (D14:
+  // going live, ending what runs), answered like any card.
+  | 'act'
 
 /**
  * Where the latest voice command stands:
@@ -6679,7 +7050,7 @@ export interface CohostReportPromises {
 export interface CohostReportGreetingSkips {
   /** Nothing to say: every line for the kind was switched off. */
   noLine?: number
-  /** Chat posting was Off. */
+  /** Buddy was set to Off ("{name} talks: Off", plan 211; "Chat posting" before). */
   modeOff?: number
   /** Too old to greet by the time it arrived. */
   stale?: number
@@ -6691,6 +7062,8 @@ export interface CohostReportGreetingSkips {
   destinationFailed?: number
   /** YouTube chat was paused (the quota breaker). */
   youtubePaused?: number
+  /** Plan 211 D9: Bubble mode, and Buddy wasn't on stream, so nobody would have seen it. */
+  noBubble?: number
 }
 
 /** Greeting totals over every chatter of the session. */
@@ -6774,6 +7147,24 @@ export interface CohostSessionReport {
   commands?: CohostReportCommands
   /** Plan 164 D10: what the Buddy posted as you, oldest first, at most 200; absent while empty. */
   posts?: CohostReportPost[]
+  /**
+   * Plan 211 D11: what Buddy said in its bubble on stream (your Say lines
+   * too), oldest first, at most 200; absent while empty and in older reports.
+   */
+  said?: CohostReportSaid[]
+}
+
+/** Plan 211 D11: one line Buddy said in its bubble on stream, written when it showed. */
+export interface CohostReportSaid {
+  /** The utterance id. */
+  id: string
+  /** When it showed. */
+  at: string
+  trigger: CohostUtteranceTriggerKind
+  /** The text as shown, clipped to the bubble's 200 characters. */
+  text: string
+  /** Greetings only: Buddy's AI or a line; absent on answers, banter and Say lines. */
+  source?: CohostReportPostSource
 }
 
 export type CohostReportPostResult = 'sent' | 'partial' | 'failed'
@@ -7146,9 +7537,10 @@ export interface OpenBuddyTabCommand {
   tab: string
 }
 
-/** The part of `autoChat` the Stream Manager may change (plan 164 S-D6). */
+/** The part of `autoChat` the Stream Manager may change (plan 164 S-D6,
+ * plan 211 D3: `talk`, never the legacy `mode`). */
 export interface CohostAutoChatRelayPatch {
-  mode?: CohostAutoChatMode
+  talk?: CohostTalkMode
   greetings?: boolean
   answers?: boolean
   banter?: boolean

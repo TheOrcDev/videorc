@@ -28,13 +28,17 @@ image = { version = "0.25", default-features = false, features = ["png", "webp",
 libc = "0.2"
 rayon = "1"
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
+# Plan 209: Videorc MCP for AI agents. The server side only (JSON-RPC over
+# Streamable HTTP, stateless); the client apps speak stdio through
+# `videorc-mcp`, which hand-rolls its small loop.
+rmcp = { version = "3.8", default-features = false, features = ["server", "transport-streamable-http-server"] }
 rusqlite = { version = "0.37", features = ["bundled", "trace"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.48", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -49,12 +53,12 @@ objc2 = { version = "0.6.4", features = ["exception"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "objc2-quartz-core"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVVideoSettings", "dispatch2", "objc2-core-media", "objc2-core-video"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFNumber", "CFRunLoop"] }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow", "CGImage"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2", "objc2-core-audio-types", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal", "objc2-io-surface"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSValue"] }
-objc2-io-surface = { version = "0.3.2", default-features = false, features = ["IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
+objc2-io-surface = { version = "0.3.2", default-features = false, features = ["IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }
 # `objc2-core-foundation` exposes MTLCommandBuffer GPUStartTime/GPUEndTime: the
 # live background guard times its own command buffer with them (plan 190).
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLBlitCommandEncoder", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "MTLBuffer", "MTLVertexDescriptor", "MTLArgument", "MTLDepthStencil", "MTLSampler", "MTLDrawable", "objc2-io-surface", "objc2-core-foundation"] }
@@ -87,8 +91,19 @@ buddy-pack-example = []
 # (`cargo check --features live-background-gl-check`). Linux always builds it.
 live-background-gl-check = ["dep:khronos-egl", "dep:glow"]
 
+# Plan 209 S4: the stdio bridge agent apps run. Named with a hyphen so the
+# shipped file is `videorc-mcp` (`videorc-mcp.exe` on Windows); the source
+# keeps Rust's file-name style.
+[[bin]]
+name = "videorc-mcp"
+path = "src/bin/videorc_mcp.rs"
+
 [[example]]
 name = "buddy_pack"
 # Dev-only (plan 172): kept out of `cargo test -p videorc-backend`, whose
 # macOS CI compile already runs close to the job limit.
 required-features = ["buddy-pack-example"]
+
+[[example]]
+name = "chrome-grounds"
+test = true

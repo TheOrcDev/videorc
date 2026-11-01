@@ -32,6 +32,7 @@ import {
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
+import { CHROME_ROW_CLASS } from '@/components/ui/chrome-row'
 import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -120,7 +121,7 @@ export function formatCommentTime(iso: string): string {
 function ChipHint({ hint, children }: { hint: string; children: ReactElement }): ReactElement {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipTrigger render={children} />
       <TooltipContent>{hint}</TooltipContent>
     </Tooltip>
   )
@@ -197,7 +198,7 @@ export function HighlightStatus({
     case 'live':
       return (
         <span className="flex items-center gap-1">
-          <Badge variant="success">On stream</Badge>
+          <Badge variant="chrome">On stream</Badge>
           {status.commandError ? <Badge variant="destructive">Action failed</Badge> : null}
         </span>
       )
@@ -317,22 +318,36 @@ const ROLE_LABELS: Record<string, string> = {
 /**
  * Row backgrounds (plan 154, D2, D3): one tint per row, never two. A paid
  * row is a fill and a hairline ring; a member's row is one notch quieter,
- * a fill alone, so a member's Super Chat still reads louder.
+ * a chrome plate with the member hue as its edge (plan 0011), so a member's
+ * Super Chat still reads louder.
  */
-const ROW_TINT_CLASS: Record<Exclude<CommentRowTint, null>, string> = {
+export const COMMENT_ROW_TINT_CLASS: Record<Exclude<CommentRowTint, null>, string> = {
   paid: 'bg-warning/10 ring-1 ring-warning/30',
   spotlight: 'bg-accent',
-  member: 'bg-member/8'
+  member: CHROME_ROW_CLASS.member
 }
 
-/** Role tags (owner, moderator, VIP, member) as glass tag chips (plan 055, D3). */
+/** A row's one background: the chrome plate while on stream (plan 0011),
+ * which no tint shares, else its tint. */
+export function commentRowClass(tint: CommentRowTint, onStream: boolean): string | null {
+  if (onStream) return CHROME_ROW_CLASS.live
+  return tint ? COMMENT_ROW_TINT_CLASS[tint] : null
+}
+
+/** Role tags (owner, moderator, VIP, member) as glass tag chips (plan 055, D3);
+ * Member is a chrome plate (plan 0011). */
 function RoleTags({ roles }: { roles: readonly string[] }): ReactElement | null {
   const labels = [...new Set(roles.map((role) => ROLE_LABELS[role]).filter(Boolean))]
   if (labels.length === 0) return null
   return (
     <>
       {labels.map((label) => (
-        <Badge key={label} className="shrink-0" data-testid="comment-role" variant="outline">
+        <Badge
+          key={label}
+          className="shrink-0"
+          data-testid="comment-role"
+          variant={label === ROLE_LABELS.member ? 'plate' : 'outline'}
+        >
           {label}
         </Badge>
       ))}
@@ -578,24 +593,26 @@ function EmoteText({
 function ChatLink({ link }: { link: ChatLinkPiece }): ReactElement {
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <span
-          className="underline decoration-muted-foreground/50 underline-offset-2"
-          data-slot="comment-link"
-          title={link.href}
-        >
-          {link.text}
-        </span>
+      <ContextMenuTrigger
+        render={
+          <span
+            className="underline decoration-muted-foreground/50 underline-offset-2"
+            data-slot="comment-link"
+            title={link.href}
+          />
+        }
+      >
+        {link.text}
       </ContextMenuTrigger>
       <ContextMenuContent className="w-56" data-testid="comment-link-menu">
         <ContextMenuLabel className="truncate font-normal text-subtle">
           {link.host}
         </ContextMenuLabel>
-        <ContextMenuItem onSelect={() => void openChatLink(link.href)}>
+        <ContextMenuItem onClick={() => void openChatLink(link.href)}>
           <ExternalLinkIcon aria-hidden />
           Open link
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => void copyChatLink(link.href)}>
+        <ContextMenuItem onClick={() => void copyChatLink(link.href)}>
           <CopyIcon aria-hidden />
           Copy link
         </ContextMenuItem>
@@ -663,6 +680,23 @@ function MessageBody({
   )
 }
 
+/**
+ * A message's words as a chat row shows them: emotes, GIFs and inert links,
+ * and a notice's sentence over the viewer's own words. For rows outside
+ * `CommentRow`, like the Studio's Chat section (plan 204).
+ */
+export function CommentMessageBody({
+  message,
+  density
+}: {
+  message: LiveChatMessage
+  density: 'compact' | 'comfortable'
+}): ReactNode {
+  return (
+    <MessageBody density={density} message={message} noticeWords={noticeViewerWords(message)} />
+  )
+}
+
 /** True when the message names one of the streamer's own accounts. */
 export function commentMentions(
   message: Pick<LiveChatMessage, 'eventType' | 'messageText'>,
@@ -681,7 +715,7 @@ function EventStatus({ message }: { message: LiveChatMessage }): ReactElement | 
     return <Badge variant="warning">{message.amountText}</Badge>
   }
   if (message.eventType === 'membership') {
-    return <Badge>Member</Badge>
+    return <Badge variant="plate">Member</Badge>
   }
   if (message.eventType === 'moderation') {
     return <Badge>Moderation</Badge>
@@ -1050,11 +1084,11 @@ export function CommentRow({
           disabled={highlight.phase === 'applying'}
           className={cn(
             'h-auto w-full min-w-0 flex-1 items-start justify-start gap-2 whitespace-normal px-2 py-1.5',
-            tint && ROW_TINT_CLASS[tint]
+            commentRowClass(tint, highlight.phase === 'live')
           )}
           tabIndex={tabIndex}
           type="button"
-          variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}
+          variant="ghost"
           onClick={(event) => {
             // Only a mouse drag that ends with words selected in this row is
             // not a click (owner call, D10): copying text never shows it on
@@ -1070,7 +1104,7 @@ export function CommentRow({
         <div
           className={cn(
             'flex min-w-0 flex-1 items-start gap-2 rounded-row px-2 py-1.5',
-            tint && ROW_TINT_CLASS[tint]
+            commentRowClass(tint, highlight.phase === 'live')
           )}
         >
           {content}

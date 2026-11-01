@@ -61,7 +61,13 @@ import type {
   YouTubeChannel
 } from '@/lib/backend'
 import { AvatarCircle } from '@/lib/chat-avatar'
-import { oauthUnavailableReason, streamServerUrlIssue, videoPresets } from '@/lib/capture'
+import {
+  FACEBOOK_LIVE_PRODUCER_URL,
+  FACEBOOK_SIGN_IN_UNAVAILABLE,
+  oauthUnavailableReason,
+  streamServerUrlIssue,
+  videoPresets
+} from '@/lib/capture'
 import { useCopyText } from '@/lib/copy-text'
 import { destinationSetup } from '@/lib/destination-readiness'
 import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
@@ -226,7 +232,8 @@ export function DestinationCard({
   const fullUrl = target.urlMode === 'full-url'
   const nativeDestination = target.platform !== 'custom'
   const platformName = metadataPlatformLabel(target.platform)
-  // A platform that has no sign-in at all (TikTok, Instagram, Custom RTMP).
+  // A platform that has no sign-in at all (TikTok, Instagram, Custom RTMP), or
+  // none yet (Facebook, until Meta approves Page sign-in: plan 206).
   const keyOnlyPlatform = Boolean(oauthUnavailableReason(target.platform))
   const oauthUnavailableMessage =
     oauthUnavailableReason(target.platform) ??
@@ -451,9 +458,11 @@ export function DestinationCard({
 
             {nativeDestination && oauthUnavailableMessage ? (
               <p className="text-xs text-muted-foreground" data-slot="destination-key-only">
-                {keyOnlyPlatform
-                  ? `${platformName} uses a stream key.`
-                  : `Signing in to ${platformName} isn't available in this build. Use a stream key.`}
+                {target.platform === 'facebook'
+                  ? FACEBOOK_SIGN_IN_UNAVAILABLE
+                  : keyOnlyPlatform
+                    ? `${platformName} uses a stream key.`
+                    : `Signing in to ${platformName} isn't available in this build. Use a stream key.`}
               </p>
             ) : null}
 
@@ -689,6 +698,11 @@ export function DestinationCard({
   )
 }
 
+/** A YouTube channel as the Channel select names it: its title, and its handle when it has one. */
+function youtubeChannelLabel(channel: { title: string; handle?: string | null }): string {
+  return channel.handle ? `${channel.title} (${channel.handle})` : channel.title
+}
+
 function openExternalUrl(url: string): void {
   const opener = window.videorc?.openOAuthUrl
   if (opener) {
@@ -758,6 +772,11 @@ export function manualKeyGuidance(platform: StreamPlatform): {
         copy: 'Instagram keys come from Live Producer (professional accounts). Start the stream here, then press "Go live" there.',
         link: { url: 'https://www.instagram.com/live/producer/', label: 'Live Producer' }
       }
+    case 'facebook':
+      return {
+        copy: 'Facebook keys come from Live Producer: choose Streaming software, and turn on Persistent stream key to reuse it. Start the stream here, then press "Go live" there. Pages and professional profiles need 100 followers.',
+        link: { url: FACEBOOK_LIVE_PRODUCER_URL, label: 'Live Producer' }
+      }
     default:
       return { copy: 'Your streaming server gives you its server URL and stream key.' }
   }
@@ -784,11 +803,94 @@ function streamTargetStatusBadge(state: NonNullable<StreamTargetSettings['status
 }
 
 /**
+ * The consent Google reviewed for YouTube sign-in: the API Services line, the
+ * four policy links and the agreement checkbox, before the browser opens. Its
+ * words never change outside a new review; the Livestream page and first-run
+ * setup (plan 207) share this one copy. The checkbox lives in the content,
+ * which unmounts on close, so every open starts unticked.
+ */
+export function YouTubeConsentDialog({
+  open,
+  onOpenChange,
+  onContinue
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onContinue: () => void
+}): ReactElement {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <YouTubeConsentContent
+          onCancel={() => onOpenChange(false)}
+          onContinue={() => {
+            onOpenChange(false)
+            onContinue()
+          }}
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function YouTubeConsentContent({
+  onCancel,
+  onContinue
+}: {
+  onCancel: () => void
+  onContinue: () => void
+}): ReactElement {
+  const [accepted, setAccepted] = useState(false)
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Connect YouTube to Videorc</DialogTitle>
+        <DialogDescription>
+          Videorc uses YouTube API Services to identify your channel and manage your live broadcasts
+          and chat. The requested YouTube permission is stored locally on this computer and can be
+          revoked with Disconnect at any time.
+        </DialogDescription>
+      </DialogHeader>
+      <div className="grid gap-3 text-sm">
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          <ExternalLinkButton url={VIDEORC_WEB_LINKS.privacy}>Privacy Policy</ExternalLinkButton>
+          <ExternalLinkButton url={VIDEORC_WEB_LINKS.terms}>Videorc Terms</ExternalLinkButton>
+          <ExternalLinkButton url="https://www.youtube.com/t/terms">
+            YouTube Terms
+          </ExternalLinkButton>
+          <ExternalLinkButton url="https://policies.google.com/privacy">
+            Google Privacy
+          </ExternalLinkButton>
+        </div>
+        <label className="flex items-start gap-3 rounded-row border bg-muted/30 p-3">
+          <Checkbox
+            checked={accepted}
+            onCheckedChange={(checked) => setAccepted(checked === true)}
+          />
+          <span>
+            I agree to the Videorc and YouTube terms and want to connect my YouTube account.
+          </span>
+        </label>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button disabled={!accepted} onClick={onContinue}>
+          Continue to Google
+        </Button>
+      </DialogFooter>
+    </>
+  )
+}
+
+/**
  * A sign-in waiting in the browser (plan 174 S3.5a, D-16): what Videorc is
  * waiting for, the link to open in another browser, and a way back to
  * Connect. The browser approves or refuses; Videorc only stops waiting.
+ * First-run setup's "Where you stream" shows the same wait (plan 207).
  */
-function SignInPending({
+export function SignInPending({
   platformName,
   url,
   onCancel
@@ -934,7 +1036,6 @@ function OAuthAccountPanel({
   onUseManualRtmp: () => void
 }): ReactElement {
   const [youtubeConsentOpen, setYoutubeConsentOpen] = useState(false)
-  const [youtubeConsentAccepted, setYoutubeConsentAccepted] = useState(false)
   // Plan 174 S0.3 (D-16): Disconnect signs the account out at once (YouTube
   // and YouTube Vertical share one), so it asks first.
   const [disconnectOpen, setDisconnectOpen] = useState(false)
@@ -985,7 +1086,6 @@ function OAuthAccountPanel({
                 disabled={connectDisabled}
                 onClick={() => {
                   if (platform === 'youtube') {
-                    setYoutubeConsentAccepted(false)
                     setYoutubeConsentOpen(true)
                   } else {
                     connect()
@@ -1005,57 +1105,11 @@ function OAuthAccountPanel({
         </div>
 
         {platform === 'youtube' ? (
-          <Dialog open={youtubeConsentOpen} onOpenChange={setYoutubeConsentOpen}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Connect YouTube to Videorc</DialogTitle>
-                <DialogDescription>
-                  Videorc uses YouTube API Services to identify your channel and manage your live
-                  broadcasts and chat. The requested YouTube permission is stored locally on this
-                  computer and can be revoked with Disconnect at any time.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="grid gap-3 text-sm">
-                <div className="flex flex-wrap gap-x-4 gap-y-1">
-                  <ExternalLinkButton url={VIDEORC_WEB_LINKS.privacy}>
-                    Privacy Policy
-                  </ExternalLinkButton>
-                  <ExternalLinkButton url={VIDEORC_WEB_LINKS.terms}>
-                    Videorc Terms
-                  </ExternalLinkButton>
-                  <ExternalLinkButton url="https://www.youtube.com/t/terms">
-                    YouTube Terms
-                  </ExternalLinkButton>
-                  <ExternalLinkButton url="https://policies.google.com/privacy">
-                    Google Privacy
-                  </ExternalLinkButton>
-                </div>
-                <label className="flex items-start gap-3 rounded-row border bg-muted/30 p-3">
-                  <Checkbox
-                    checked={youtubeConsentAccepted}
-                    onCheckedChange={(checked) => setYoutubeConsentAccepted(checked === true)}
-                  />
-                  <span>
-                    I agree to the Videorc and YouTube terms and want to connect my YouTube account.
-                  </span>
-                </label>
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setYoutubeConsentOpen(false)}>
-                  Cancel
-                </Button>
-                <Button
-                  disabled={!youtubeConsentAccepted}
-                  onClick={() => {
-                    setYoutubeConsentOpen(false)
-                    startSignIn()
-                  }}
-                >
-                  Continue to Google
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+          <YouTubeConsentDialog
+            open={youtubeConsentOpen}
+            onContinue={() => startSignIn()}
+            onOpenChange={setYoutubeConsentOpen}
+          />
         ) : null}
       </>
     )
@@ -1173,10 +1227,14 @@ function OAuthAccountPanel({
           <div className="flex gap-2">
             <Select
               disabled={disabled || youtubeChannelsLoading || youtubeChannelOptions.length === 0}
+              items={youtubeChannelOptions.map((channel) => ({
+                value: channel.channelId,
+                label: youtubeChannelLabel(channel)
+              }))}
               value={account.accountId}
-              onValueChange={(channelId) =>
-                void onSelectYouTubeChannel(channelId, account.accountId)
-              }
+              onValueChange={(channelId) => {
+                if (channelId !== null) void onSelectYouTubeChannel(channelId, account.accountId)
+              }}
             >
               <SelectTrigger className="min-w-0 flex-1">
                 <SelectValue
@@ -1192,26 +1250,24 @@ function OAuthAccountPanel({
               <SelectContent>
                 {youtubeChannelOptions.map((channel) => (
                   <SelectItem key={channel.channelId} value={channel.channelId}>
-                    {channel.title}
-                    {channel.handle ? ` (${channel.handle})` : ''}
+                    {youtubeChannelLabel(channel)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label="Refresh channels"
-                  disabled={disabled || youtubeChannelsLoading}
-                  size="icon"
-                  variant="outline"
-                  onClick={() => void onRefreshYouTubeChannels(account.accountId)}
-                >
-                  <SyncIcon
-                    className={cn(youtubeChannelsLoading && 'animate-spin')}
-                    weight="bold"
+              <TooltipTrigger
+                render={
+                  <Button
+                    aria-label="Refresh channels"
+                    disabled={disabled || youtubeChannelsLoading}
+                    size="icon"
+                    variant="outline"
+                    onClick={() => void onRefreshYouTubeChannels(account.accountId)}
                   />
-                </Button>
+                }
+              >
+                <SyncIcon className={cn(youtubeChannelsLoading && 'animate-spin')} weight="bold" />
               </TooltipTrigger>
               <TooltipContent>Refresh channels</TooltipContent>
             </Tooltip>

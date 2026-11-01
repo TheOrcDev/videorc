@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -16,11 +17,13 @@ import type {
 } from '@/lib/backend'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 import {
-  systemAccessAction,
-  systemAccessRows,
   type SystemAccessAction,
-  type SystemAccessRow
+  type SystemAccessRow,
+  mediaAccessStatusForPane,
+  systemAccessAction
 } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
+import { previewHoldLabel } from '@/lib/performance-check'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
@@ -67,16 +70,12 @@ export function PreviewStage({
     setPreviewWindowAlwaysOnTop,
     setPreviewWindowMode,
     captureConfig,
-    deviceList,
     mediaAccess,
-    runtimeInfo
+    runtimeInfo,
+    performanceCheck,
+    performanceCheckProgress
   } = useStudioCore()
-  const accessRows = systemAccessRows({
-    deviceList,
-    audioMeter: null,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  })
+  const accessRows = useSystemAccessRows()
   const permissionPane = previewPermissionPane(previewWindow.supervisor)
   const permissionRow = accessRows.find((candidate) => candidate.id === permissionPane)
   const permissionAccess: PreviewPermissionAccess | null = permissionPane
@@ -84,12 +83,10 @@ export function PreviewStage({
         row: permissionRow,
         action: systemAccessAction({
           pane: permissionPane,
+          checking: permissionRow?.checking,
           state: permissionRow?.state,
           platform: runtimeInfo?.platform,
-          mediaAccessStatus:
-            permissionPane === 'camera' || permissionPane === 'microphone'
-              ? mediaAccess?.[permissionPane]
-              : undefined
+          mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, permissionPane)
         })
       }
     : null
@@ -107,6 +104,7 @@ export function PreviewStage({
           width: captureConfig.video.width,
           height: captureConfig.video.height
         }}
+        checkingLabel={previewHoldLabel(performanceCheck, performanceCheckProgress)}
         className={className}
         previewSurfaceStatus={previewSurfaceStatus}
         previewWindow={previewWindow}
@@ -212,12 +210,15 @@ function DockedPreviewFrame({
   permissionAccess,
   onOpenPermissions,
   platform,
+  checkingLabel,
   className
 }: {
   previewWindow: PreviewWindowState
   previewSurfaceStatus?: PreviewSurfaceStatus
   aspect: { width: number; height: number }
   slotRef: (element: HTMLElement | null) => void
+  /** Plan 212: the Preview holds its last picture while a check runs; this says why. */
+  checkingLabel?: string | null
   onPopOut: () => void
   onClose: () => void
   permissionAccess: PreviewPermissionAccess | null
@@ -277,6 +278,16 @@ function DockedPreviewFrame({
           panel around it): session status left, dock controls right, flush
           with the video edges. */}
       <div className="flex items-center justify-end gap-1.5 pt-2">
+        {checkingLabel ? (
+          <span
+            className="mr-auto flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+            data-videorc-preview-checking
+            role="status"
+          >
+            <Spinner aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">{checkingLabel}</span>
+          </span>
+        ) : null}
         {permissionPane && permissionAccess?.action && onOpenPermissions ? (
           <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
             {permissionActionLabel(permissionAccess, platform)}

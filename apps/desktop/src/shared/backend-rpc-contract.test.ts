@@ -1,12 +1,16 @@
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import { LIVE_BACKGROUND_DEFAULT_LOOKS, LIVE_BACKGROUND_IDS } from './live-background-ids'
+import { STREAM_PLATFORMS } from './stream-platforms'
 
 import type {
   Banner,
   CompositorStatus,
   DiagnosticStats,
   SceneEditorDraftAck,
+  ScreenSwitchStatus,
   SceneEditorDraftParams,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -805,6 +809,25 @@ describe('backend RPC contract', () => {
       })
     ).toThrow()
 
+    // An interrupted take recovered on the next start (plan 0003).
+    const recovered = { ...item, interruptionRecovery: 'recovered' }
+    expect(validateBackendRpcResult('sessions.list', { items: [recovered] })).toEqual({
+      items: [recovered]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...item, interruptionRecovery: 'pending' }]
+      })
+    ).toThrow()
+    const finalized = {
+      sessionId: 'session-1',
+      state: 'finalized',
+      mp4Path: '/recordings/session-1.mp4',
+      interruptionRecovery: 'recovered',
+      updatedAt: '2026-10-28T00:00:00Z'
+    }
+    expect(validateBackendEventPayload('recording.finalization', finalized)).toEqual(finalized)
+
     const params = { sessionId: 'session-1', cursor: 'created\nid', limit: 120 }
     for (const method of [
       'sessions.healthEvents.list',
@@ -1093,6 +1116,88 @@ describe('backend RPC contract', () => {
     }
   })
 
+  it('reports how the last screen switch changed the capture (plan 210 S3)', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      updatedAt: '2026-10-29T00:00:00Z'
+    } satisfies CompositorStatus
+    const inPlace = {
+      mode: 'in-place',
+      sourceId: 'window:screencapturekit:42',
+      generation: 7,
+      firstFrameMs: 61,
+      updatedAt: '2026-10-29T00:00:01Z'
+    } satisfies ScreenSwitchStatus
+    const restart = {
+      mode: 'restart',
+      reason: 'the canvas changed',
+      sourceId: 'screen:screencapturekit:1',
+      generation: 8,
+      updatedAt: '2026-10-29T00:00:02Z'
+    } satisfies ScreenSwitchStatus
+    expect(validateBackendRpcResult('compositor.status', status)).toEqual(status)
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, screenSwitch: inPlace })
+    ).toEqual({ ...status, screenSwitch: inPlace })
+    expect(
+      validateBackendEventPayload('compositor.status', { ...status, screenSwitch: restart })
+    ).toEqual({ ...status, screenSwitch: restart })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        screenSwitch: { ...inPlace, mode: 'warm' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        screenSwitch: { ...inPlace, pixels: 'no' }
+      })
+    ).toThrow('pixels must be a known field')
+  })
+
+  it('carries the Preview hold of a performance check and nothing else (plan 212)', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      updatedAt: '2026-10-31T00:00:00Z'
+    } satisfies CompositorStatus
+    expect(validateBackendRpcResult('compositor.status', status)).toEqual(status)
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'performance-check' })
+    ).toEqual({ ...status, previewHold: 'performance-check' })
+    expect(
+      validateBackendEventPayload('compositor.status', {
+        ...status,
+        previewHold: 'performance-check'
+      })
+    ).toEqual({ ...status, previewHold: 'performance-check' })
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'synthetic-refused' })
+    ).toEqual({ ...status, previewHold: 'synthetic-refused' })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'recording' })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: null })
+    ).toThrow()
+  })
+
   it('reports the effective editor draft on compositor status and never a forged one', () => {
     const status = {
       state: 'live',
@@ -1171,7 +1276,11 @@ describe('backend RPC contract', () => {
         immutableTextureUploads: 0,
         immutableTextureReuses: 0,
         liveBackgroundPrograms: 2,
-        liveBackgroundScratchBytes: 8_294_400
+        liveBackgroundScratchBytes: 8_294_400,
+        // Plan 205 S6: the Preview's own picture, inside the bounded
+        // pipeline payload, never a top-level field the strict schema
+        // would reject.
+        previewProgramLeg: true
       },
       updatedAt: '2026-10-24T00:00:00Z'
     } satisfies CompositorStatus
@@ -2051,6 +2160,26 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcParams('cohost.settings.set', { autoChat: oldAutoChat })).toEqual({
       autoChat: oldAutoChat
     })
+    // Plan 211 D3: `talk` is the mode (three values, absent never null); the
+    // legacy `mode` rides along.
+    for (const talk of ['off', 'bubble', 'suggest']) {
+      const block = { ...oldAutoChat, mode: 'off', talk }
+      expect(
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: block })
+      ).toEqual({ ...settings, autoChat: block })
+      expect(validateBackendRpcParams('cohost.settings.set', { autoChat: block })).toEqual({
+        autoChat: block
+      })
+    }
+    for (const talk of ['auto', 'loud', null, 1]) {
+      const block = { ...oldAutoChat, talk }
+      expect(() => validateBackendRpcParams('cohost.settings.set', { autoChat: block })).toThrow(
+        'cohost.settings.set'
+      )
+      expect(() =>
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: block })
+      ).toThrow('cohost.settings.get')
+    }
 
     const welcomes = {
       firstTime: { enabled: true },
@@ -2253,14 +2382,47 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
 
-    // One question can gather askers from every platform, Kick included.
-    const everyPlatform = ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom']
+    // One question can gather askers from every platform, Kick included. The
+    // cap is the platform count, never a literal (plan 206: an 8th platform
+    // failed every audience, viewer and co-host event against `maxLength: 7`).
+    const everyPlatform = [...STREAM_PLATFORMS]
+    expect(everyPlatform).toContain('facebook')
     const widest = { ...state, questions: [{ ...state.questions[0], platforms: everyPlatform }] }
     expect(validateBackendEventPayload('cohost.state', widest)).toEqual(widest)
     expect(() =>
       validateBackendEventPayload('cohost.state', {
         ...state,
         questions: [{ ...state.questions[0], platforms: [...everyPlatform, 'kick'] }]
+      })
+    ).toThrow()
+    const audience = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({
+        platform,
+        metric: 'followers',
+        capability: 'unavailable'
+      })),
+      updatedAt: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('stream.audience.snapshot', audience)).toEqual(audience)
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...audience,
+        platforms: [...audience.platforms, audience.platforms[0]]
+      })
+    ).toThrow()
+    const viewers = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({ platform, count: 1 })),
+      total: everyPlatform.length,
+      at: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('sessions.viewers.list', { samples: [viewers] })).toEqual({
+      samples: [viewers]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', {
+        samples: [{ ...viewers, platforms: [...viewers.platforms, viewers.platforms[0]] }]
       })
     ).toThrow()
 
@@ -3253,5 +3415,189 @@ describe('banner backend wire contract (plan 186)', () => {
     }
     expect(validateBackendRpcResult('discord.links.preview', preview)).toStrictEqual(preview)
     expect(validateBackendRpcResult('discord.webhook.sendTest', {})).toStrictEqual({})
+  })
+})
+
+describe('app window source contracts (plan 210 S1)', () => {
+  it('accepts legacy and app-aware devices, rejecting null metadata', () => {
+    const device = {
+      id: 'window:screencapturekit:7',
+      name: 'App - Editor',
+      kind: 'window',
+      status: 'available'
+    }
+    for (const extra of [
+      {},
+      { app: { bundleId: 'test.app', name: 'App', pid: 42 }, windowTitle: 'Editor' }
+    ]) {
+      const payload = { devices: [{ ...device, ...extra }], warnings: [] }
+      expect(validateBackendRpcResult('devices.list', payload)).toEqual(payload)
+      expect(validateBackendEventPayload('devices.changed', payload)).toEqual(payload)
+    }
+    for (const extra of [
+      { app: null },
+      { windowTitle: null },
+      { app: { bundleId: 'test.app', name: 'App', pid: 42, secret: true } }
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('devices.list', {
+          devices: [{ ...device, ...extra }],
+          warnings: []
+        })
+      ).toThrow()
+    }
+  })
+
+  it('registers the resolver and validates params and both result variants strictly', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.resolve_app_window')
+    const params = {
+      bundleId: 'test.app',
+      preferWindowId: 'window:screencapturekit:7',
+      minWidth: 400,
+      minHeight: 300
+    }
+    expect(validateBackendRpcParams('sources.resolve_app_window', params)).toEqual(params)
+    expect(
+      validateBackendRpcParams('sources.resolve_app_window', { bundleId: 'test.app' })
+    ).toEqual({ bundleId: 'test.app' })
+    for (const bad of [
+      { bundleId: '' },
+      { ...params, minWidth: -1 },
+      { ...params, minHeight: 0.5 },
+      { ...params, minSize: {} }
+    ]) {
+      expect(() => validateBackendRpcParams('sources.resolve_app_window', bad)).toThrow()
+    }
+    const found = {
+      ok: true,
+      windowId: 'window:screencapturekit:7',
+      title: '',
+      width: 800,
+      height: 600
+    }
+    expect(validateBackendRpcResult('sources.resolve_app_window', found)).toEqual(found)
+    for (const reason of ['not-running', 'no-window', 'minimized']) {
+      expect(validateBackendRpcResult('sources.resolve_app_window', { ok: false, reason })).toEqual(
+        { ok: false, reason }
+      )
+    }
+    for (const bad of [
+      { ok: false, reason: 'unsupported' },
+      { ...found, reason: 'no-window' },
+      { ok: true }
+    ]) {
+      expect(() => validateBackendRpcResult('sources.resolve_app_window', bad)).toThrow()
+    }
+  })
+
+  // Plan 210 S4/S5: New scene…'s picker. S5 builds against this shape first.
+  it('registers app previews and validates their pictures strictly', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.app_previews')
+    expect(validateBackendRpcParams('sources.app_previews', { maxWidth: 320 })).toEqual({
+      maxWidth: 320
+    })
+    expect(validateBackendRpcParams('sources.app_previews', undefined)).toBeUndefined()
+    for (const bad of [{ maxWidth: 0 }, { maxWidth: 4_000 }, { maxWidth: 320, extra: true }]) {
+      expect(() => validateBackendRpcParams('sources.app_previews', bad)).toThrow()
+    }
+    const figma = {
+      bundleId: 'com.figma.Desktop',
+      name: 'Figma',
+      pid: 42,
+      windowCount: 3,
+      frontWindowId: 'window:screencapturekit:7',
+      frontWindowTitle: 'Untitled',
+      picture: 'data:image/jpeg;base64,/9j/4AAQ',
+      width: 320,
+      height: 200
+    }
+    const iconOnly = { bundleId: 'com.t3.code', name: 'T3 Code', pid: 7, windowCount: 1 }
+    expect(validateBackendRpcResult('sources.app_previews', { apps: [figma, iconOnly] })).toEqual({
+      apps: [figma, iconOnly]
+    })
+    for (const bad of [
+      { ...figma, picture: 'data:image/png;base64,AAAA' },
+      { ...figma, picture: 'https://example.com/a.jpg' },
+      { ...figma, windowCount: -1 },
+      { ...figma, secret: true }
+    ]) {
+      expect(() => validateBackendRpcResult('sources.app_previews', { apps: [bad] })).toThrow()
+    }
+  })
+})
+
+describe('Hide screen wire contract (plan 210 S7)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/screen-privacy.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    visible: unknown
+    hiddenByYou: unknown
+    hiddenByPasswordManager: unknown
+    unavailableOnLegacySession: unknown
+    hideParams: unknown
+    rejected: unknown[]
+  }
+
+  it('accepts every fixture state on the RPC results and the event, field for field', () => {
+    for (const state of [
+      fixture.visible,
+      fixture.hiddenByYou,
+      fixture.hiddenByPasswordManager,
+      fixture.unavailableOnLegacySession
+    ]) {
+      expect(validateBackendRpcResult('screen.privacy.get', state)).toEqual(state)
+      expect(validateBackendRpcResult('screen.hide', state)).toEqual(state)
+      expect(validateBackendRpcResult('screen.show', state)).toEqual(state)
+      expect(validateBackendEventPayload('screen.privacy.changed', state)).toEqual(state)
+    }
+    expect(validateBackendRpcParams('screen.hide', fixture.hideParams)).toEqual(fixture.hideParams)
+    expect(validateBackendRpcParams('screen.hide', { reason: 'you' })).toEqual({ reason: 'you' })
+  })
+
+  it('rejects a null field, an unknown reason, a forged field and a missing flag', () => {
+    for (const bad of fixture.rejected) {
+      expect(() => validateBackendRpcResult('screen.privacy.get', bad)).toThrow()
+      expect(() => validateBackendEventPayload('screen.privacy.changed', bad)).toThrow()
+    }
+    expect(() =>
+      validateBackendRpcResult('screen.privacy.get', { hidden: true, reason: 'you', extra: 1 })
+    ).toThrow()
+    for (const bad of [{}, { reason: 'agent' }, { reason: null }, { reason: 'you', extra: true }]) {
+      expect(() => validateBackendRpcParams('screen.hide', bad)).toThrow()
+    }
+  })
+
+  it('types the three methods and the event', () => {
+    expectTypeOf<BackendRpcParams<'screen.hide'>>().toEqualTypeOf<{
+      reason: 'you' | 'password-manager'
+    }>()
+    expectTypeOf<BackendRpcResult<'screen.show'>>().toEqualTypeOf<
+      BackendEventMap['screen.privacy.changed']
+    >()
+    expect(runtimeValidatedBackendRpcMethods).toEqual(
+      expect.arrayContaining(['screen.hide', 'screen.show', 'screen.privacy.get'])
+    )
+  })
+})
+
+describe('performance check non-recorded reason', () => {
+  it('accepts host-busy and rejects unknown reasons', () => {
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'host-busy'
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'unknown'
+      })
+    ).toThrow()
   })
 })

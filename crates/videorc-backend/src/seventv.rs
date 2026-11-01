@@ -62,6 +62,7 @@ fn seventv_platform(platform: StreamPlatform) -> Option<&'static str> {
         StreamPlatform::Kick => Some("KICK"),
         StreamPlatform::Youtube => Some("GOOGLE"),
         StreamPlatform::X
+        | StreamPlatform::Facebook
         | StreamPlatform::Tiktok
         | StreamPlatform::Instagram
         | StreamPlatform::Custom => None,

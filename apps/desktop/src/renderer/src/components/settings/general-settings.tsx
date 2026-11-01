@@ -19,17 +19,20 @@ import { ChatEmoteSettingsFields } from '@/components/settings/seventv-emotes-fi
 import { PrivacySettingsSection } from '@/components/settings/usage-stats-field'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
 import { FieldGroup, SettingsRow } from '@/components/ui/field'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { workspaceTabLabel } from '@/components/workspace-nav'
 import { useVideorcAccount } from '@/hooks/use-account'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { accountDisplayName, isSignedIn } from '@/lib/account'
 import type { RuntimeInfo } from '@/lib/backend'
+import { FIRST_RUN_REPLAY_LOCKED_REASON, firstRunReplayLocked } from '@/lib/first-run'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { platformCopy } from '@/lib/platform-copy'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { studioChatOn } from '@/lib/studio-chat'
+import { openFirstRunSetup, openWorkspaceTab } from '@/lib/workspace-navigation'
 
 const THEME_OPTIONS = [
   { value: 'light', label: 'Light' },
@@ -38,11 +41,12 @@ const THEME_OPTIONS = [
 ]
 
 /**
- * Settings → General (plan 174 S3.17, I-27): how Videorc looks, the Stream
- * Manager, bringing a setup across, what Videorc shares, and where every
- * other setting lives. Five sections in two columns: Appearance over Stream
- * Manager, Import over Privacy over Elsewhere, so they stack in that order on
- * a narrow window.
+ * Settings → General (plan 174 S3.17, I-27): how Videorc looks, chat in the
+ * Studio and the Stream Manager (plan 204), first-run setup again (plan 203
+ * S6), bringing a setup across, what Videorc shares, and where every other
+ * setting lives. Six sections in two columns: Appearance over Chat over
+ * Setup, Import over Privacy over Elsewhere, so they stack in that order on a
+ * narrow window.
  */
 export function GeneralSettings(): ReactElement {
   const { settings, setSettings, runtimeInfo, scheduleHardwareAccelerationRetry } = useStudioCore()
@@ -116,12 +120,27 @@ export function GeneralSettings(): ReactElement {
           </FieldGroup>
         </PanelSection>
 
-        {runtimeInfo?.commentsWindowEnabled !== false ? (
-          <PanelSection
-            description="The live dashboard window: chat, activity and Buddy."
-            title="Stream Manager"
-          >
-            <ChatEmoteSettingsFields>
+        {/* Chat (plan 204): the livestream's chat in the Studio and in the
+            Stream Manager, and how both draw emotes. Chat in Studio is this
+            row's one home; ⌘K and the section's hide button mirror it. */}
+        <PanelSection
+          description="Your livestream's chat, in the Studio and in the Stream Manager."
+          title="Chat"
+        >
+          <ChatEmoteSettingsFields>
+            <SettingsRow
+              description="While you're on air, the Studio shows your chat under Session. Click a message to show it on stream."
+              label="Chat in Studio"
+            >
+              <Switch
+                checked={studioChatOn(settings)}
+                id="studio-chat"
+                onCheckedChange={(checked) =>
+                  setSettings((current) => ({ ...current, studioChat: checked }))
+                }
+              />
+            </SettingsRow>
+            {runtimeInfo?.commentsWindowEnabled !== false ? (
               <SettingsRow
                 description="Chat, viewers, followers and activity for the whole stream, in their own window."
                 label="Open Stream Manager when you go live"
@@ -134,9 +153,11 @@ export function GeneralSettings(): ReactElement {
                   }
                 />
               </SettingsRow>
-            </ChatEmoteSettingsFields>
-          </PanelSection>
-        ) : null}
+            ) : null}
+          </ChatEmoteSettingsFields>
+        </PanelSection>
+
+        <SetupSection />
       </PageStack>
 
       <PageStack>
@@ -167,6 +188,35 @@ export function GeneralSettings(): ReactElement {
         </PanelSection>
       </PageStack>
     </>
+  )
+}
+
+/**
+ * First-run setup again (plan 203 D5): the same screen over the workspace,
+ * returning here. Setup holds capture back, so it waits for a session to end.
+ */
+function SetupSection(): ReactElement {
+  const { recording } = useStudioRecordingState()
+  const locked = firstRunReplayLocked(recording)
+  return (
+    <PanelSection description="The steps from the first time Videorc opened." title="Setup">
+      <FieldGroup variant="grouped">
+        <SettingsRow
+          description="Go through the welcome steps again, starting with permissions."
+          label="First-run setup"
+        >
+          <DisabledReason reason={locked ? FIRST_RUN_REPLAY_LOCKED_REASON : null}>
+            <Button
+              disabled={locked}
+              variant="outline"
+              onClick={() => openFirstRunSetup({ returnTo: 'settings' })}
+            >
+              Run setup again…
+            </Button>
+          </DisabledReason>
+        </SettingsRow>
+      </FieldGroup>
+    </PanelSection>
   )
 }
 

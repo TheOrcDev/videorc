@@ -279,3 +279,14 @@ export class VideorcClient extends EventEmitter {
         }, RECONNECT_DELAY_MS);
     }
 }
+export function sceneKeyTitle(state, sceneId, connected) {
+    if (!connected)
+        return 'Videorc\noffline';
+    const scene = state?.savedScenes?.find((scene) => scene.id === sceneId);
+    if (!scene)
+        return 'Scene';
+    return state?.activeSavedSceneId === scene.id ? `${scene.name}\nON` : scene.name;
+}
+export function sceneKeyIntent(sceneId) {
+    return sceneId ? { kind: 'sceneApply', sceneId } : null;
+}

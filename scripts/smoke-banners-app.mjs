@@ -18,7 +18,11 @@ import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
-import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import {
+  isRetryableSmokeCommandError,
+  requestSmokeCommand,
+  requestSmokeCommandWithRetry
+} from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
@@ -87,7 +91,20 @@ try {
   })
 
   try {
-    await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 0 }, { timeoutMs })
+    // A fresh profile shows the first-run placeholder, with no sidebar, until
+    // the first-run decision arrives (plan 203). The command is idempotent.
+    await requestSmokeCommandWithRetry(
+      smoke,
+      'enable-synthetic-source',
+      { settleMs: 0 },
+      {
+        timeoutMs: 30_000,
+        requestTimeoutMs: timeoutMs,
+        isRetryable: (error) =>
+          isRetryableSmokeCommandError(error) ||
+          String(error?.message ?? error).includes('Could not find tab ')
+      }
+    )
     await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
     const previewDeadline = Date.now() + timeoutMs
     while (true) {
@@ -103,7 +120,9 @@ try {
     }
     const strip = await importBanner(stripPath)
     const logo = await importBanner(logoPath)
-    assert.equal(strip.shown, false, 'an import never shows itself')
+    // Plan 205 D3: a banner you add shows while it fits the cap and session.
+    assert.equal(strip.shown, true, 'an import shows the new banner')
+    assert.equal(logo.shown, true, 'a second import shows too (under the cap)')
     assert.equal(strip.hasAlpha, false, 'the opaque strip has no alpha')
     assert.equal(logo.hasAlpha, true, 'the half-transparent logo keeps its alpha')
     assert.deepEqual([strip.width, strip.height], [2400, 400])
@@ -261,7 +280,12 @@ try {
       }
       const [stripNow, logoNow] = await Promise.all([bannerById(strip.id), bannerById(logo.id)])
       for (const artifact of artifacts) {
-        verifyArtifact(artifact, mode, { strip: stripNow, stripHome, stripMoved, logo: logoNow })
+        await verifyArtifact(artifact, mode, {
+          strip: stripNow,
+          stripHome,
+          stripMoved,
+          logo: logoNow
+        })
         assertOneSession(statuses, sessionId)
         const quality = await analyzeRecording(artifact.path, {
           ffmpegPath,
@@ -282,11 +306,24 @@ try {
         { path, kind: 'input-file' },
         { timeoutMs }
       )
-      return withFrameContinuity(() =>
-        request(ws, timeoutMs, 'banners.importImage', {
-          sourceCapability: capability.capabilityId
-        })
-      )
+      // One import at a time process-wide (the AssetImport lane), shared
+      // with the first launch's starter-sound seeding. "Already being
+      // imported" means try again, so wait for the lane.
+      const busyUntil = Date.now() + 30_000
+      while (true) {
+        try {
+          return await withFrameContinuity(() =>
+            request(ws, timeoutMs, 'banners.importImage', {
+              sourceCapability: capability.capabilityId
+            })
+          )
+        } catch (error) {
+          if (!/already being imported/.test(error?.message ?? '') || Date.now() > busyUntil) {
+            throw error
+          }
+          await sleep(200)
+        }
+      }
     }
     async function bannerById(id) {
       const banner = (await request(ws, timeoutMs, 'banners.list')).find((b) => b.id === id)
@@ -338,7 +375,7 @@ try {
  * The pixel checks for one artifact. `output` is `recording`, `stream`
  * (horizontal receiver) or `vertical` (the vertical stream receiver).
  */
-function verifyArtifact({ path, output }, mode, banners) {
+async function verifyArtifact({ path, output }, mode, banners) {
   assert(path && existsSync(path), `Banners smoke output was not created: ${path ?? 'missing'}`)
   assert(statSync(path).size > 0, `Banners smoke output is empty: ${path}`)
   const vertical = output === 'vertical'
@@ -346,7 +383,7 @@ function verifyArtifact({ path, output }, mode, banners) {
   // The vertical rect is never moved by the smoke: the strip stays there.
   const stripMovedRect = vertical ? banners.strip.vertical : banners.stripMoved
   const logoRect = vertical ? banners.logo.vertical : banners.logo.horizontal
-  const samples = sampleTimeline(path, [stripHomeRect, stripMovedRect, logoRect, OPEN_AREA])
+  const samples = await sampleTimeline(path, [stripHomeRect, stripMovedRect, logoRect, OPEN_AREA])
   const describe = () =>
     samples
       .map(
@@ -447,50 +484,79 @@ function createPng(outputPath, source, filter) {
   }
 }
 
-/** One frame, the mean colour of the middle fifth of each rect. */
-function sampleRects(path, seconds, rects) {
-  return rects.map((rect) => {
-    const cx = rect.x + rect.w * 0.4
-    const cy = rect.y + rect.h * 0.4
-    const result = spawnSync(
-      ffmpegPath,
-      [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-ss',
-        seconds.toFixed(2),
-        '-i',
-        path,
-        '-frames:v',
-        '1',
-        '-vf',
-        `crop=iw*${(rect.w * 0.2).toFixed(6)}:ih*${(rect.h * 0.2).toFixed(6)}:iw*${cx.toFixed(6)}:ih*${cy.toFixed(6)},scale=1:1,format=rgb24`,
-        '-f',
-        'rawvideo',
-        'pipe:1'
-      ],
-      { encoding: null }
+/**
+ * One child process, read to the end without blocking the event loop. The
+ * timeline takes a few hundred ffmpeg samples; run synchronously on a slow
+ * machine they starve the backend socket past its 5 s slow-peer limit, the
+ * backend drops the smoke's connection, and the next mode's first request
+ * never answers (retest 153: "Timed out waiting for banners.hide").
+ */
+function runCapture(command, args) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const stdout = []
+    const stderr = []
+    child.stdout.on('data', (chunk) => stdout.push(chunk))
+    child.stderr.on('data', (chunk) => stderr.push(chunk))
+    child.on('error', (error) =>
+      resolvePromise({ status: null, stdout: Buffer.alloc(0), stderr: String(error) })
     )
-    if (result.status !== 0 || result.stdout.length < 3) {
-      throw new Error(`Could not sample ${path} at ${seconds}s: ${result.stderr?.toString() ?? ''}`)
-    }
-    return [result.stdout[0], result.stdout[1], result.stdout[2]]
+    child.on('close', (status) =>
+      resolvePromise({
+        status,
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr).toString()
+      })
+    )
   })
 }
 
-function sampleTimeline(path, rects) {
-  const probe = spawnSync(
-    ffprobePath,
-    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', path],
-    { encoding: 'utf8' }
-  )
-  const duration = Number(probe.stdout.trim())
+/** One frame, the mean colour of the middle fifth of each rect. */
+async function sampleRects(path, seconds, rects) {
+  const colours = []
+  for (const rect of rects) {
+    const cx = rect.x + rect.w * 0.4
+    const cy = rect.y + rect.h * 0.4
+    const result = await runCapture(ffmpegPath, [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-ss',
+      seconds.toFixed(2),
+      '-i',
+      path,
+      '-frames:v',
+      '1',
+      '-vf',
+      `crop=iw*${(rect.w * 0.2).toFixed(6)}:ih*${(rect.h * 0.2).toFixed(6)}:iw*${cx.toFixed(6)}:ih*${cy.toFixed(6)},scale=1:1,format=rgb24`,
+      '-f',
+      'rawvideo',
+      'pipe:1'
+    ])
+    if (result.status !== 0 || result.stdout.length < 3) {
+      throw new Error(`Could not sample ${path} at ${seconds}s: ${result.stderr}`)
+    }
+    colours.push([result.stdout[0], result.stdout[1], result.stdout[2]])
+  }
+  return colours
+}
+
+async function sampleTimeline(path, rects) {
+  const probe = await runCapture(ffprobePath, [
+    '-v',
+    'error',
+    '-show_entries',
+    'format=duration',
+    '-of',
+    'default=nw=1:nk=1',
+    path
+  ])
+  const duration = Number(probe.stdout.toString().trim())
   assert(probe.status === 0 && duration > 0, `${path}: artifact duration must be readable`)
   const samples = []
   for (let seconds = 0.5; seconds < duration - 0.15; seconds += 0.25) {
     try {
-      samples.push({ seconds, rgb: sampleRects(path, seconds, rects) })
+      samples.push({ seconds, rgb: await sampleRects(path, seconds, rects) })
     } catch {
       break
     }
@@ -500,7 +566,14 @@ function sampleTimeline(path, rects) {
 }
 
 function assertOneSession(statuses, sessionId) {
-  const ids = new Set(statuses.map((status) => status.sessionId).filter(Boolean))
+  // The Clips ring (a buffer-only session) stops when Record starts and
+  // re-arms after Stop; only the recording or stream session counts.
+  const ids = new Set(
+    statuses
+      .filter((status) => status.replayOnly !== true)
+      .map((status) => status.sessionId)
+      .filter(Boolean)
+  )
   assert(
     ids.size === 1 && ids.has(sessionId),
     `A banner change appears to have restarted the session: ${[...ids].join(', ')}`

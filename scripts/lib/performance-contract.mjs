@@ -15,6 +15,8 @@ const MACOS_PACKAGED_APP_PAYLOAD_SPECS = [
   { relativePath: 'Resources/app.asar', requiresCodeSignature: false },
   { relativePath: 'Resources/videorc-backend', requiresCodeSignature: true },
   { relativePath: 'Resources/native_preview_host_helper', requiresCodeSignature: true },
+  // Plan 209 S4: the stdio bridge agent apps run.
+  { relativePath: 'Resources/videorc-mcp', requiresCodeSignature: true },
   { relativePath: 'Resources/videorc_native_preview.node', requiresCodeSignature: true },
   { relativePath: 'Resources/ffmpeg/bin/ffmpeg', requiresCodeSignature: true },
   { relativePath: 'Resources/ffmpeg/bin/ffprobe', requiresCodeSignature: true },
@@ -30,6 +32,7 @@ const WINDOWS_PACKAGED_APP_PAYLOAD_SPECS = [
   { relativePath: 'Videorc.exe', requiresCodeSignature: false },
   { relativePath: 'resources/app.asar', requiresCodeSignature: false },
   { relativePath: 'resources/videorc-backend.exe', requiresCodeSignature: false },
+  { relativePath: 'resources/videorc-mcp.exe', requiresCodeSignature: false },
   { relativePath: 'resources/ffmpeg/bin/ffmpeg.exe', requiresCodeSignature: false },
   { relativePath: 'resources/ffmpeg/bin/ffprobe.exe', requiresCodeSignature: false },
   { relativePath: 'resources/ffmpeg/bin/ffmpeg-capture.exe', requiresCodeSignature: false },

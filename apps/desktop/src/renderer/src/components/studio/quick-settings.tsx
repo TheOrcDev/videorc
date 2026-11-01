@@ -1,47 +1,44 @@
-import {
-  type AppIcon,
-  CameraIcon,
-  CaptionsIcon,
-  DesktopIcon,
-  DisplayIcon
-} from '@/components/icons'
+import { type AppIcon, CameraIcon, CaptionsIcon, DisplayIcon, HiddenIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
+import { StatusBadge } from '@/components/status-badge'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
-import { InfoTooltip } from '@/components/ui/info-tooltip'
-import { Switch } from '@/components/ui/switch'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
-import { captionsStatusLabel, systemAudioIssueLabel } from '@/lib/state-labels'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import {
-  systemAudioDevice,
-  requestSystemAudioResume,
-  systemAudioIssueCopy,
-  systemAudioSwitchView,
-  type SystemAudioSwitchView
-} from '@/lib/system-audio'
+  SCREEN_HIDDEN_LABEL,
+  screenHideAccelerator,
+  screenPrivacyActionLabel,
+  screenPrivacyDisabledReason
+} from '@/lib/screen-privacy-view'
+import { captionsStatusLabel } from '@/lib/state-labels'
+import { toastUserError } from '@/lib/user-error'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
 
 /**
  * The Studio inspector's mirrors of controls that own their own pages (SD2):
- * Sources (Screen, Camera, System audio, with Open Sources as the way home),
- * then Captions on its own, because captions aren't a source (plan 174 S3.3,
+ * Sources (Screen and Camera, with Open Sources as the way home), then
+ * Captions on its own, because captions aren't a source (plan 174 S3.3,
  * B-15 and B-25). They edit the SAME captureConfig via the shared builders /
  * setters (one state). Device source edits use the shared session controller.
  * Output is one row, the Session section's. Scene switching lives in the
- * Scenes gallery; the microphone and its live level live in the Microphone
- * section above (plan 092), so no Mic row here.
+ * Scenes gallery; the microphone and System audio, with their levels and
+ * Gain, live in the Audio section above (plans 092 and 201), so no audio
+ * rows here.
  */
 export function QuickSettings(): ReactElement {
   const {
     captureConfig,
-    setCaptureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
     allowCaptureNone,
@@ -49,14 +46,12 @@ export function QuickSettings(): ReactElement {
     selectedCamera,
     isSessionActive,
     captionsStatus,
-    runtimeInfo,
-    openSettings,
     openStudioPanel,
-    systemAudio,
     discoveryPending,
     captureDevices,
     cameras,
-    selectedCaptureId
+    selectedCaptureId,
+    screenPrivacy
   } = useStudioSources()
 
   return (
@@ -73,6 +68,7 @@ export function QuickSettings(): ReactElement {
           {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
             searchable picker stays on Sources. */}
           <InspectorRow
+            footer={<ScreenPrivacyLine control={screenPrivacy} />}
             icon={DisplayIcon}
             label="Screen"
             status={<SourceSwitchStatus kind="capture" />}
@@ -126,24 +122,6 @@ export function QuickSettings(): ReactElement {
               }
             />
           </InspectorRow>
-
-          {/* SYSTEM AUDIO: plan 069 On/Off, live-safe; hidden where unsupported. */}
-          {systemAudio.visible ? (
-            <InspectorRow icon={DesktopIcon} label="System audio">
-              <SystemAudioInspectorValue
-                platform={runtimeInfo?.platform}
-                view={systemAudio}
-                onEnabledChange={(systemAudioEnabled) =>
-                  setCaptureConfig((current) => ({
-                    ...current,
-                    audio: { ...current.audio, systemAudioEnabled }
-                  }))
-                }
-                onOpenPermissions={() => openSettings('permissions')}
-                onResume={requestSystemAudioResume}
-              />
-            </InspectorRow>
-          ) : null}
         </GroupedList>
       </PanelSection>
 
@@ -169,78 +147,20 @@ export function QuickSettings(): ReactElement {
   )
 }
 
-/**
- * Short state beside the switch; the full health copy is its tooltip and its
- * description, on hover and on focus (plan 174 S1.10).
- */
-export function SystemAudioInspectorValue({
-  view,
-  platform,
-  onEnabledChange,
-  onOpenPermissions,
-  onResume
-}: {
-  view: SystemAudioSwitchView
-  /** `runtimeInfo.platform`, so the health copy names this computer. */
-  platform?: string
-  onEnabledChange: (enabled: boolean) => void
-  onOpenPermissions: () => void
-  /** Plan 076: turn System audio on again after the echo guard paused it. */
-  onResume: () => void
-}): ReactElement {
-  // The Sources row's words for the same issue (plan 174 J2-4).
-  const status = view.issue ? systemAudioIssueLabel(view.issue) : view.stateLabel
-  return (
-    <div className="flex h-control min-w-0 items-center justify-end gap-2.5 px-2">
-      {view.permissionRequired ? (
-        // The row is narrow: the permission route replaces the (disabled)
-        // switch here; the mixer and Sources show both.
-        <InfoTooltip content="System audio needs Screen Recording permission." focusable={false}>
-          <Button className="min-w-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
-            <span className="truncate">Needs permission</span>
-          </Button>
-        </InfoTooltip>
-      ) : (
-        <>
-          {view.issue === 'echo' ? (
-            // The row is narrow: Resume replaces the status; its tooltip and
-            // description say why.
-            <InfoTooltip content={systemAudioIssueCopy('echo', platform)} focusable={false}>
-              <Button className="min-w-0" size="xs" variant="ghost" onClick={onResume}>
-                <span className="truncate">Resume</span>
-              </Button>
-            </InfoTooltip>
-          ) : (
-            <InfoTooltip
-              className="min-w-0"
-              content={view.issue ? systemAudioIssueCopy(view.issue, platform) : null}
-            >
-              <span className="min-w-0 truncate text-sm font-medium">{status}</span>
-            </InfoTooltip>
-          )}
-          <Switch
-            aria-label="System audio"
-            checked={view.checked}
-            disabled={view.disabled}
-            onCheckedChange={onEnabledChange}
-          />
-        </>
-      )}
-    </div>
-  )
-}
-
 /** A label on the left, its value control filling the right (the inspector row). */
 function InspectorRow({
   icon: RowIcon,
   label,
   status,
+  footer,
   children
 }: {
   icon: AppIcon
   label: string
   /** A live-switch status line under the row; collapses when it renders nothing. */
   status?: ReactNode
+  /** The row's own line under its status (the Screen row's Hide screen). */
+  footer?: ReactNode
   children: ReactNode
 }): ReactElement {
   return (
@@ -253,13 +173,72 @@ function InspectorRow({
       {status ? (
         <div className="px-3 pb-2 pl-9.5 text-xs text-muted-foreground empty:hidden">{status}</div>
       ) : null}
+      {footer}
     </div>
   )
 }
 
 /**
+ * Hide screen on the Screen row (plan 210 D9): a 24 px button with its key,
+ * never beside Record and Go Live (owner, 2026-10-12). It stays at the right
+ * edge in both states, so Show screen is where Hide screen was. While hidden
+ * the chip says so; it shows with or without a screen in the scene, because
+ * hiding is allowed either way. No toast: the chip and the Preview say it.
+ */
+function ScreenPrivacyLine({ control }: { control: ScreenPrivacyControl }): ReactElement {
+  const { hidden, accelerator, platform, disabledReason, toggle } = control
+  const label = screenPrivacyActionLabel(hidden)
+  const button = (
+    <Button
+      data-videorc-screen-privacy=""
+      disabled={disabledReason !== null}
+      size="xs"
+      variant="outline"
+      onClick={toggle}
+    >
+      {label}
+    </Button>
+  )
+  return (
+    <div
+      className="flex min-h-8 items-center gap-2 pr-1 pb-2 pl-9.5"
+      data-hidden={hidden || undefined}
+      data-slot="screen-privacy"
+    >
+      {hidden ? <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} /> : null}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+        {/* The key teaches itself while there is room; while hidden the chip
+            takes that room, and the tooltip keeps the key. */}
+        {accelerator && !hidden ? (
+          <ShortcutKeys accelerator={accelerator} platform={platform} />
+        ) : null}
+        {disabledReason ? (
+          <DisabledReason reason={disabledReason}>{button}</DisabledReason>
+        ) : (
+          <ShortcutTooltip accelerator={accelerator} label={label} platform={platform}>
+            {button}
+          </ShortcutTooltip>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** What both looks' Hide screen controls show and do (the row and the Retro LCD's). */
+export interface ScreenPrivacyControl {
+  hidden: boolean
+  /** The bound key, absent when the streamer cleared it. */
+  accelerator?: string
+  platform?: string
+  /** Why the action is off (a refused hide, Videorc offline), or null. */
+  disabledReason: string | null
+  toggle: () => void
+}
+
+/**
  * What the Studio's Sources rows show and act with: the same state for the
- * inspector's rows and the Retro LCD screen (plan 197).
+ * inspector's rows and the Retro LCD screen (plan 197), which keeps its
+ * System audio row until plan 201 S3 moves it to the Audio screen.
  */
 export function useStudioSources() {
   const {
@@ -272,18 +251,26 @@ export function useStudioSources() {
     selectedCaptureDevice,
     selectedCamera,
     isSessionActive,
+    audioBusActive,
     captionsStatus,
     wsStatus,
     systemAudioConfirmed,
+    systemAudioJoining,
     systemAudioIssue,
-    runtimeInfo
+    runtimeInfo,
+    settings,
+    screenPrivacy: privacy,
+    hideScreen,
+    showScreen
   } = useStudioCore()
   const { openSettings, openStudioPanel } = useWorkspaceNav()
   const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
+    device: systemAudioRowDevice(deviceList, runtimeInfo?.platform),
     requested: captureConfig.audio.systemAudioEnabled,
     sessionActive: isSessionActive,
+    audioBusActive,
     confirmed: systemAudioConfirmed,
+    joining: systemAudioJoining,
     issue: systemAudioIssue
   })
   // Q6 (plan 022): before the backend reports devices, selects say "Finding
@@ -293,6 +280,24 @@ export function useStudioSources() {
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
+  // Plan 210 S8b: the one Studio action, by the state it shows. A failure
+  // says so; a refused hide is the hook's warning, and success is silent.
+  const screenPrivacy: ScreenPrivacyControl = {
+    hidden: privacy.hidden,
+    accelerator: screenHideAccelerator(settings.globalShortcuts?.screenHideToggle),
+    platform: runtimeInfo?.platform,
+    disabledReason: screenPrivacyDisabledReason(privacy, wsStatus === 'connected'),
+    toggle: () => {
+      const hidden = privacy.hidden
+      void (hidden ? showScreen() : hideScreen()).catch((error: unknown) =>
+        toastUserError(
+          error,
+          { action: hidden ? 'show' : 'hide', object: 'your screen' },
+          { id: 'screen-privacy' }
+        )
+      )
+    }
+  }
   return {
     captureConfig,
     setCaptureConfig,
@@ -310,6 +315,7 @@ export function useStudioSources() {
     discoveryPending,
     captureDevices,
     cameras,
-    selectedCaptureId
+    selectedCaptureId,
+    screenPrivacy
   }
 }

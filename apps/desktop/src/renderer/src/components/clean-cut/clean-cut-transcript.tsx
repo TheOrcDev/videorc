@@ -359,28 +359,30 @@ function renderTokens(
     // Why it's a cut and what a click does, on hover (plan 174 S1.10).
     out.push(
       <Tooltip key={`run-${state.id}-${token.index}`}>
-        <TooltipTrigger asChild>
-          <Run
-            className={cn(
-              'rounded-[3px] decoration-2 hover:bg-accent',
-              state.cut ? STRUCK[state.tone] : SUGGESTED[state.tone],
-              selected && 'bg-accent ring-1 ring-ring/50'
-            )}
-            data-cut={state.cut ? 'on' : 'off'}
-            data-removal-id={state.id}
-            data-selected={selected || undefined}
-          >
-            {words.map((word, position) => (
-              <span
-                key={word.index}
-                className={cn(word.index === activeWord && 'bg-accent-pressed')}
-                data-word={word.index}
-              >
-                {position > 0 ? ' ' : null}
-                {word.text}
-              </span>
-            ))}
-          </Run>
+        <TooltipTrigger
+          render={
+            <Run
+              className={cn(
+                'rounded-[3px] decoration-2 hover:bg-accent',
+                state.cut ? STRUCK[state.tone] : SUGGESTED[state.tone],
+                selected && 'bg-accent ring-1 ring-ring/50'
+              )}
+              data-cut={state.cut ? 'on' : 'off'}
+              data-removal-id={state.id}
+              data-selected={selected || undefined}
+            />
+          }
+        >
+          {words.map((word, position) => (
+            <span
+              key={word.index}
+              className={cn(word.index === activeWord && 'bg-accent-pressed')}
+              data-word={word.index}
+            >
+              {position > 0 ? ' ' : null}
+              {word.text}
+            </span>
+          ))}
         </TooltipTrigger>
         <TooltipContent>{removalTitle(state.removal, state.cut)}</TooltipContent>
       </Tooltip>,
@@ -409,28 +411,30 @@ function CutMarker({
   const tone = removalTone(removal.kind)
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge
-          className={cn(
-            'mx-px align-[1px] tabular-nums hover:bg-accent',
-            removal.enabled ? 'decoration-muted-foreground' : 'opacity-70',
-            selected && 'ring-1 ring-ring/50'
-          )}
-          data-cut={removal.enabled ? 'on' : 'off'}
-          data-kind={removal.kind}
-          data-removal-id={removal.id}
-          data-selected={selected || undefined}
-          variant={removal.enabled ? 'outline' : 'ghost'}
-        >
-          {removal.kind === 'gap' ? <WaveformIcon aria-hidden /> : null}
-          <span
+      <TooltipTrigger
+        render={
+          <Badge
             className={cn(
-              removal.enabled ? 'line-through' : cn('underline decoration-dotted', SUGGESTED[tone])
+              'mx-px align-[1px] tabular-nums hover:bg-accent',
+              removal.enabled ? 'decoration-muted-foreground' : 'opacity-70',
+              selected && 'ring-1 ring-ring/50'
             )}
-          >
-            {markerLabel(removal)}
-          </span>
-        </Badge>
+            data-cut={removal.enabled ? 'on' : 'off'}
+            data-kind={removal.kind}
+            data-removal-id={removal.id}
+            data-selected={selected || undefined}
+            variant={removal.enabled ? 'outline' : 'ghost'}
+          />
+        }
+      >
+        {removal.kind === 'gap' ? <WaveformIcon aria-hidden /> : null}
+        <span
+          className={cn(
+            removal.enabled ? 'line-through' : cn('underline decoration-dotted', SUGGESTED[tone])
+          )}
+        >
+          {markerLabel(removal)}
+        </span>
       </TooltipTrigger>
       <TooltipContent>{removalTitle(removal, removal.enabled)}</TooltipContent>
     </Tooltip>
@@ -442,19 +446,19 @@ function PinMarker({ pin }: { pin: CleanCutPin }): ReactElement {
   const Glyph = PIN_ICONS[pin.kind] ?? PinIcon
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge
-          className="mx-px align-[1px] hover:bg-accent"
-          data-pin={pin.kind}
-          data-seek-ms={pin.startMs}
-          variant="outline"
-        >
-          <Glyph aria-hidden data-icon="inline-start" />
-          {pin.label}
-          <span className="font-normal text-subtle tabular-nums">
-            {formatCutClock(pin.startMs)}
-          </span>
-        </Badge>
+      <TooltipTrigger
+        render={
+          <Badge
+            className="mx-px align-[1px] hover:bg-accent"
+            data-pin={pin.kind}
+            data-seek-ms={pin.startMs}
+            variant="outline"
+          />
+        }
+      >
+        <Glyph aria-hidden data-icon="inline-start" />
+        {pin.label}
+        <span className="font-normal text-subtle tabular-nums">{formatCutClock(pin.startMs)}</span>
       </TooltipTrigger>
       <TooltipContent>{pin.excerpt ? `${pin.label}: ${pin.excerpt}` : pin.label}</TooltipContent>
     </Tooltip>

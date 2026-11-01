@@ -12,28 +12,28 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { SegmentedControl } from '@/components/ui/segmented-control'
-import type { CohostAutoChat, CohostAutoChatMode } from '@/lib/backend'
+import type { CohostAutoChat, CohostTalkMode } from '@/lib/backend'
 import {
   BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY,
-  BUDDY_AUTO_CONFIRM_SENTENCE,
-  BUDDY_MODE_HINTS,
-  BUDDY_MODE_LABELS,
-  BUDDY_MODES,
-  BUDDY_POSTING_LABEL,
+  BUDDY_TALK_LABELS,
+  BUDDY_TALK_MODES,
   buddyBehaviourChips,
   buddyModeChangeStep,
   buddyPostingConsentSentence,
-  buddyPostingConsentTitle
+  buddyPostingConsentTitle,
+  buddyTalkHint,
+  buddyTalkLabel
 } from '@/lib/buddy-auto-chat-view'
 
 /**
- * The Buddy pane's chat posting control (plan 164 S-D6, plan 174 S3.14a, D7):
- * one `Off | Suggest | Auto` segmented control that governs only what Buddy
- * posts as you, with the chosen mode's meaning as a line under it, never a
- * tooltip. Whether Buddy runs at all is Buddy Live, its own switch in the
- * pane header: this control never turns Buddy on or off. The first time the
- * mode leaves Off the consent dialog says what posting as you means; Auto
- * asks once more, every time.
+ * The Buddy pane's talk control (plan 164 S-D6, plan 174 S3.14a, D7, plan
+ * 211 D1): one "{name} talks: Off | Bubble | Suggest" segmented control that
+ * governs only how Buddy talks on its own, with the chosen value's meaning
+ * as a line under it, never a tooltip. Whether Buddy runs at all is Buddy
+ * Live, its own switch in the pane header: this control never turns Buddy on
+ * or off. Off and Bubble apply at once, because Buddy posts nothing as you in
+ * either; the first time Suggest is chosen the consent dialog says what
+ * posting as you means (plan 211 D5).
  *
  * Greetings, Answers and Banter have one home, Buddy → Chat (plan 174 F-24):
  * here they are read-only summary chips, each a way there.
@@ -44,7 +44,7 @@ export function BuddyChatControls({
   name = null,
   picture = null,
   disabled = false,
-  onModeChange,
+  onTalkChange,
   onOpenChatSettings
 }: {
   autoChat: CohostAutoChat
@@ -53,7 +53,7 @@ export function BuddyChatControls({
    * allowed. With Greetings' own AI switch on, the chip says "· AI".
    */
   aiGreetings?: boolean
-  /** The streamer's name for Buddy: the consent dialog asks in its name. */
+  /** The streamer's name for Buddy: the label and the consent dialog use it. */
   name?: string | null
   /**
    * That Buddy's own picture (its idle pose): the consent dialog shows the
@@ -61,45 +61,28 @@ export function BuddyChatControls({
    */
   picture?: string | null
   disabled?: boolean
-  onModeChange: (mode: CohostAutoChatMode) => void
+  onTalkChange: (talk: CohostTalkMode) => void
   /** Opens Buddy → Chat in the main window. Absent, the chips are inert. */
   onOpenChatSettings?: () => void
 }): ReactElement {
   const [postingConsented, setPostingConsented] = useState(() => readPostingConsent())
-  const [pending, setPending] = useState<CohostAutoChatMode | null>(null)
-  const [step, setStep] = useState<'consent' | 'confirm-auto' | null>(null)
+  const [consentOpen, setConsentOpen] = useState(false)
 
-  const requestMode = (next: CohostAutoChatMode): void => {
-    if (next === autoChat.mode) return
-    const needed = buddyModeChangeStep({ next, consented: postingConsented })
-    if (needed === 'apply') {
-      onModeChange(next)
+  const requestTalk = (next: CohostTalkMode): void => {
+    if (next === autoChat.talk) return
+    if (buddyModeChangeStep({ next, consented: postingConsented }) === 'consent') {
+      setConsentOpen(true)
       return
     }
-    setPending(next)
-    setStep(needed)
+    onTalkChange(next)
   }
 
-  const closeDialog = (): void => {
-    setPending(null)
-    setStep(null)
-  }
-
-  // Consent lands in Suggest (plan 164 D4); Auto then needs its own click.
+  // The consent is asked only on the way to Suggest, so Allow lands there.
   const acceptConsent = (): void => {
     persistPostingConsent()
     setPostingConsented(true)
-    onModeChange('suggest')
-    if (pending === 'auto') {
-      setStep('confirm-auto')
-      return
-    }
-    closeDialog()
-  }
-
-  const confirmAuto = (): void => {
-    onModeChange('auto')
-    closeDialog()
+    setConsentOpen(false)
+    onTalkChange('suggest')
   }
 
   return (
@@ -109,65 +92,68 @@ export function BuddyChatControls({
         data-slot="buddy-chat-controls"
       >
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-label text-subtle" id="buddy-chat-posting-label">
-              {BUDDY_POSTING_LABEL}
+          {/* The label carries the Buddy's name, so a long one (24
+              characters) wraps the segments under it instead of squeezing
+              them: the three values never wrap inside the track. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="min-w-0 text-label break-words text-subtle" id="buddy-talk-label">
+              {buddyTalkLabel(name)}
             </span>
             <SegmentedControl
-              aria-describedby="buddy-chat-posting-hint"
-              aria-labelledby="buddy-chat-posting-label"
+              aria-describedby="buddy-talk-hint"
+              aria-labelledby="buddy-talk-label"
+              className="shrink-0 flex-nowrap"
               disabled={disabled}
-              options={BUDDY_MODES.map((mode) => ({
-                value: mode,
-                label: BUDDY_MODE_LABELS[mode],
-                'data-buddy-mode': mode
+              options={BUDDY_TALK_MODES.map((talk) => ({
+                value: talk,
+                label: BUDDY_TALK_LABELS[talk],
+                'data-buddy-talk': talk
               }))}
               size="sm"
-              value={autoChat.mode}
-              onValueChange={requestMode}
+              value={autoChat.talk}
+              onValueChange={requestTalk}
             />
           </div>
           {/* Read-only: the behaviours are switched in Buddy → Chat, their
               one home (plan 174 D7). The tone rides the dot, the words say
               the state, and each chip is the way there. */}
           <div
-            aria-label="What Buddy posts"
+            aria-label="What Buddy says"
             className="flex min-w-0 flex-wrap items-center gap-1"
             data-slot="buddy-behaviour-chips"
             role="group"
           >
             {buddyBehaviourChips(autoChat, { aiGreetings }).map((chip) => (
-              <Badge key={chip.id} asChild variant={chip.on ? 'success' : 'neutral'}>
-                <button
-                  aria-label={chip.name}
-                  data-behaviour={chip.id}
-                  data-on={chip.on || undefined}
-                  data-testid="buddy-behaviour-chip"
-                  disabled={!onOpenChatSettings}
-                  type="button"
-                  onClick={onOpenChatSettings}
-                >
-                  {chip.text}
-                </button>
+              <Badge
+                key={chip.id}
+                render={
+                  <button
+                    aria-label={chip.name}
+                    data-behaviour={chip.id}
+                    data-on={chip.on || undefined}
+                    data-testid="buddy-behaviour-chip"
+                    disabled={!onOpenChatSettings}
+                    type="button"
+                    onClick={onOpenChatSettings}
+                  />
+                }
+                variant={chip.on ? 'success' : 'neutral'}
+              >
+                {chip.text}
               </Badge>
             ))}
           </div>
         </div>
         <p
           className="text-xs text-muted-foreground"
-          data-slot="buddy-mode-hint"
-          id="buddy-chat-posting-hint"
+          data-slot="buddy-talk-hint"
+          id="buddy-talk-hint"
         >
-          {BUDDY_MODE_HINTS[autoChat.mode]}
+          {buddyTalkHint(autoChat.talk, name)}
         </p>
       </div>
 
-      <Dialog
-        open={step !== null}
-        onOpenChange={(open) => {
-          if (!open) closeDialog()
-        }}
-      >
+      <Dialog open={consentOpen} onOpenChange={setConsentOpen}>
         <DialogContent showCloseButton={false}>
           <DialogHeader>
             <div className="flex items-center gap-3">
@@ -185,35 +171,20 @@ export function BuddyChatControls({
                 <BuddyEmblem size="lg" />
               )}
               <div className="flex flex-col gap-1">
-                <DialogTitle>
-                  {step === 'confirm-auto' ? 'Turn on Auto?' : buddyPostingConsentTitle(name)}
-                </DialogTitle>
+                <DialogTitle>{buddyPostingConsentTitle(name)}</DialogTitle>
                 <DialogDescription data-testid="buddy-chat-consent-sentence">
-                  {step === 'confirm-auto'
-                    ? BUDDY_AUTO_CONFIRM_SENTENCE
-                    : buddyPostingConsentSentence(name)}
+                  {buddyPostingConsentSentence(name)}
                 </DialogDescription>
               </div>
             </div>
           </DialogHeader>
-          {step === 'consent' ? (
-            <p className="text-xs text-muted-foreground">
-              You land in Suggest: every message is a card here, and one click sends it.
-            </p>
-          ) : null}
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={closeDialog}>
+            <Button type="button" variant="ghost" onClick={() => setConsentOpen(false)}>
               Not now
             </Button>
-            {step === 'confirm-auto' ? (
-              <Button data-testid="buddy-chat-confirm-auto" type="button" onClick={confirmAuto}>
-                Turn on Auto
-              </Button>
-            ) : (
-              <Button data-testid="buddy-chat-accept" type="button" onClick={acceptConsent}>
-                Allow
-              </Button>
-            )}
+            <Button data-testid="buddy-chat-accept" type="button" onClick={acceptConsent}>
+              Allow
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

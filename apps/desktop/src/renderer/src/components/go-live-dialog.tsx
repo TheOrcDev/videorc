@@ -31,19 +31,22 @@ import type {
   StreamingSettings,
   VideoSettings
 } from '@/lib/backend'
-import { broadcastInfoIssues } from '@/lib/broadcast-info'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
-import { unlockActionForGate } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { GO_LIVE_DIALOG_TITLE, goLiveConfirmLabel, goLiveOnReadyLabel } from '@/lib/go-live-copy'
 import {
-  goLiveDialogView,
+  goLiveConfirmGate,
   goLivePendingLabel,
   type GoLiveDestinationView,
   type GoLivePhase
 } from '@/lib/go-live-dialog-view'
 import { streamingWithoutTargets } from '@/lib/go-live-exclusions'
-import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
+import {
+  goLiveStepDownDescription,
+  streamPerformanceAdvice as adviseStreamPerformance,
+  type SoftwareStreamAdvice
+} from '@/lib/go-live-output'
 import { START_NOTICE_LABELS, overlayAndBannerStartNotices } from '@/lib/banner-start-notices'
 import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
@@ -58,7 +61,8 @@ const GO_LIVE_BLOCKED_REASON = 'Fix the items above, then go live.'
 /** The note under a destination left out of this livestream (B-8). */
 export const GO_LIVE_EXCLUDED_NOTE = 'Only for this livestream. Your destination stays on.'
 
-/** Platforms whose destinations sign in, so a Reconnect can fix them. */
+/** Platforms whose destinations sign in, so a Reconnect can fix them.
+ * Facebook joins with its connected Page (plan 206 S8). */
 const SIGN_IN_PLATFORMS: ReadonlySet<StreamPlatform> = new Set(['youtube', 'twitch', 'kick', 'x'])
 
 export type GoLiveResolution = 'exclude' | 'include' | 'manual-rtmp'
@@ -168,33 +172,25 @@ export function GoLiveConfirmationDialog({
   // stream as configured, before anything starts.
   const streamPerformanceAdvice =
     streamOutputTopologyPreflight.state === 'ready' && !simulcast
-      ? softwareStreamAdvice({
+      ? adviseStreamPerformance({
           streamVideo: streamOutputTopologyPreflight.result.streamProfile,
           encodeBackend: streamOutputTopologyPreflight.result.effectiveEncodeBackend,
+          streaming: sentStreaming,
           state: performanceCheck
         })
       : null
-  const sentTargets = sentStreaming.targets.filter((target) => target.enabled)
-  const hasScheduledTargets = sentTargets.some((target) => target.scheduledEventId)
-  // The instant draft's details apply to every destination not tied to a
-  // saved event; privacy reaches YouTube only.
-  const hasInstantTargets = sentTargets.some((target) => !target.scheduledEventId)
-  const instantYouTube = sentTargets.some(
-    (target) => !target.scheduledEventId && target.platform === 'youtube'
-  )
-  const titleIssues =
-    hasInstantTargets && draft ? broadcastInfoIssues(draft, { titleRequired: true }) : null
-  const view = goLiveDialogView(preflight, {
-    titleField: hasInstantTargets,
-    titleMissing: hasInstantTargets && (!draft || draft.title.trim() === '')
-  })
-  const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
-  const blocked =
-    Boolean(entitlementBlocker) ||
-    captionsReadiness.blocksStart ||
-    Boolean(titleIssues?.title || titleIssues?.description) ||
-    (hasInstantTargets && !draft) ||
-    !view.destinationsReady
+  // What the primary waits on, in one pure function an agent's `go_live`
+  // shares (plan 209 S10), so a Go Live without this dialog refuses exactly
+  // what the dialog holds back.
+  const {
+    sentTargets,
+    hasScheduledTargets,
+    hasInstantTargets,
+    instantYouTube,
+    view,
+    entitlementBlocker,
+    blocked
+  } = goLiveConfirmGate({ preflight, draft, sentStreaming, captionsReadiness, entitlementGate })
   const canConfirm = !pending && Boolean(preflight) && !blocked
   const canContinuePartial =
     !pending && !entitlementBlocker && !captionsReadiness.blocksStart && Boolean(partialSetup)
@@ -213,15 +209,12 @@ export function GoLiveConfirmationDialog({
   }
 
   // The first focus is the title, else the primary, never a button that
-  // changes a destination (B-14).
-  const focusFirst = (event: Event): void => {
-    event.preventDefault()
+  // changes a destination (B-14): with all three disabled, focus stays put.
+  const firstFocus = (): HTMLElement | false => {
     for (const element of [titleRef.current, primaryRef.current, cancelRef.current]) {
-      if (element && !element.disabled) {
-        element.focus()
-        return
-      }
+      if (element && !element.disabled) return element
     }
+    return false
   }
 
   const reconnect = (destination: GoLiveDestinationPreflight): void => {
@@ -242,7 +235,7 @@ export function GoLiveConfirmationDialog({
         data-testid="go-live-dialog"
         size="xl"
         onKeyDown={onKeyDown}
-        onOpenAutoFocus={focusFirst}
+        initialFocus={firstFocus}
       >
         <DialogHeader>
           <DialogTitle>{GO_LIVE_DIALOG_TITLE}</DialogTitle>
@@ -346,7 +339,7 @@ export function GoLiveConfirmationDialog({
 
             {entitlementBlocker ? (
               <LockAlert
-                action={unlockActionForGate(entitlementBlocker)}
+                action={lockAlertAction(unlockActionForGate(entitlementBlocker))}
                 reason={entitlementBlocker.reason}
               />
             ) : null}
@@ -378,6 +371,7 @@ export function GoLiveConfirmationDialog({
             ) : null}
 
             {simulcast ? <GoLiveSimulcastAdvisory streaming={sentStreaming} /> : null}
+            <GoLiveProducerReminder streaming={sentStreaming} />
 
             <GoLiveOutputAdvice
               advice={streamPerformanceAdvice}
@@ -533,14 +527,36 @@ export function GoLiveOutputAdvice({
       </Alert>
     )
   }
+  if (advice?.kind === 'go-live-heavy') {
+    return (
+      <Alert data-videorc-go-live-output-advice="go-live-heavy" variant="warning">
+        <AlertTitle>{outputLabel(advice.requested)} may stutter while live</AlertTitle>
+        <AlertDescription>
+          Going live takes about twice the work of a recording on this computer, and its performance
+          check found no room for that. Viewers may see a stuttering picture.{' '}
+          {outputLabel(advice.video)} holds steady.
+        </AlertDescription>
+      </Alert>
+    )
+  }
   if (advice?.kind === 'step-down') {
     return (
-      <Alert>
+      <Alert data-videorc-go-live-output-advice={advice.reason}>
         <AlertTitle>Streaming at {outputLabel(advice.video)}</AlertTitle>
         <AlertDescription>
-          This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
-          session uses the largest output that held steady in its performance check
-          {recordEnabled ? ', for the recording too' : ''}. Your saved settings stay as they are.
+          {advice.reason === 'go-live-headroom' ? (
+            <>
+              {goLiveStepDownDescription(advice)}
+              {recordEnabled ? ' The recording uses it too.' : ''}
+            </>
+          ) : (
+            <>
+              This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
+              session uses the largest output that held steady in its performance check
+              {recordEnabled ? ', for the recording too' : ''}. Your saved settings stay as they
+              are.
+            </>
+          )}
         </AlertDescription>
       </Alert>
     )
@@ -863,9 +879,8 @@ function capitalize(word: string): string {
 
 // Dual-orientation sessions double the encode count and the upstream
 // bandwidth: advice, never a block (per-target dropped-frame status is the
-// honest live signal). Instagram's manual publish step lives here because it
-// happens AT Go Live time, not while configuring the card. `streaming` is
-// what this Go Live sends (left-out destinations already off).
+// honest live signal). `streaming` is what this Go Live sends (left-out
+// destinations already off).
 function GoLiveSimulcastAdvisory({ streaming }: { streaming: StreamingSettings }): ReactElement {
   const enabled = streaming.targets.filter(
     (target) => target.enabled && streaming.enabledTargetIds.includes(target.id)
@@ -875,21 +890,54 @@ function GoLiveSimulcastAdvisory({ streaming }: { streaming: StreamingSettings }
     0
   )
   const mbps = Math.max(1, Math.round(totalKbps / 1000))
-  const hasInstagram = enabled.some((target) => target.platform === 'instagram')
   return (
     <Alert>
       <AlertTitle>Streaming both orientations</AlertTitle>
+      <AlertDescription>
+        The horizontal scene streams to your landscape destinations while the saved vertical scene
+        streams to the vertical ones, about {mbps} Mbps upstream across all legs.
+      </AlertDescription>
+    </Alert>
+  )
+}
+
+// Facebook (with a stream key) and Instagram publish from their Live
+// Producer, not from Videorc, so the step belongs AT Go Live time. Any
+// orientation (plan 206): it used to sit in the both-orientations advice,
+// which a horizontal-only Facebook session never shows.
+const LIVE_PRODUCER_STEPS: ReadonlyArray<{ platform: StreamPlatform; step: string }> = [
+  {
+    platform: 'facebook',
+    step: 'Facebook: once Videorc starts sending, press “Go live” in Facebook Live Producer to publish the stream.'
+  },
+  {
+    platform: 'instagram',
+    step: 'Instagram: once Videorc starts sending, press “Go live” in Instagram Live Producer to publish the stream to your profile.'
+  }
+]
+
+function GoLiveProducerReminder({
+  streaming
+}: {
+  streaming: StreamingSettings
+}): ReactElement | null {
+  const steps = LIVE_PRODUCER_STEPS.filter(({ platform }) =>
+    streaming.targets.some(
+      (target) =>
+        target.platform === platform &&
+        target.authMode === 'manual-rtmp' &&
+        target.enabled &&
+        streaming.enabledTargetIds.includes(target.id)
+    )
+  )
+  if (!steps.length) return null
+  return (
+    <Alert data-testid="go-live-producer-reminder">
+      <AlertTitle>Publish in Live Producer</AlertTitle>
       <AlertDescription className="flex flex-col gap-1">
-        <span>
-          The horizontal scene streams to your landscape destinations while the saved vertical scene
-          streams to the vertical ones, about {mbps} Mbps upstream across all legs.
-        </span>
-        {hasInstagram ? (
-          <span>
-            Instagram: once Videorc starts sending, press “Go live” in Instagram Live Producer to
-            publish the stream to your profile.
-          </span>
-        ) : null}
+        {steps.map(({ platform, step }) => (
+          <span key={platform}>{step}</span>
+        ))}
       </AlertDescription>
     </Alert>
   )

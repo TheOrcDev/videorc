@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
+import { gainReset } from '@/components/audio/gain-faders'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { createFrameEmitter } from '@/lib/audio/frame-source'
 import type { MeterFrame } from '@/lib/audio/types'
@@ -11,7 +12,6 @@ import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system
 import {
   applySyncChange,
   keepMicrophoneReadyHint,
-  gainReset,
   MicrophoneChannel,
   SyncCalibrationView,
   syncOffsetTag,
@@ -36,7 +36,9 @@ function render(
     device: { status: 'available' },
     requested: false,
     sessionActive: false,
+    audioBusActive: false,
     confirmed: null,
+    joining: false,
     issue: null,
     ...input
   })
@@ -68,7 +70,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(markup).toContain('data-slot="source-item"')
     expect(markup).toContain('data-videorc-system-audio-settings=""')
     expect(markup).toContain('>System audio<')
-    expect(markup).toMatch(/<button[^>]*aria-label="System audio"/)
+    expect(markup).toMatch(/<span[^>]*role="switch"[^>]*aria-label="System audio"/)
     expect(markup).toContain('Everything your Mac plays, except Videorc.')
     // Plan 173, D4: the long explanation is folded into More.
     expect(markup).not.toContain('browser tab')
@@ -77,7 +79,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   it('shows its level and the Level fader only while On', () => {
     const off = render({})
     expect(off).not.toContain('aria-label="System audio gain"')
-    expect(off).not.toContain('Level shows while recording or live.')
+    expect(off).not.toContain('Level shows while you record, go live, or keep Clips on.')
     const on = render({ requested: true })
     expect(on).toContain('aria-label="System audio gain"')
     expect(on).toContain('>−6.0 dB<')
@@ -86,7 +88,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
 
   it('says when the level moves instead of drawing a dead meter (plan 173)', () => {
     const idle = render({ requested: true })
-    expect(idle).toContain('Level shows while recording or live.')
+    expect(idle).toContain('Level shows while you record, go live, or keep Clips on.')
     expect(idle).not.toContain('data-videorc-system-audio-visualizer')
     expect(idle).not.toContain('aria-label="System audio level"')
     expect(idle).not.toContain('data-slot="lcd-display"')
@@ -95,7 +97,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   it('draws the meter once the bus level drives it', () => {
     const source = createFrameEmitter<MeterFrame>()
     const markup = render(
-      { requested: true, sessionActive: true, confirmed: true },
+      { requested: true, sessionActive: true, audioBusActive: true, confirmed: true },
       { meter: { kind: 'source', source } }
     )
     expect(markup).toContain('data-videorc-system-audio-visualizer=""')
@@ -103,7 +105,18 @@ describe('Sources System audio row (plans 069, 173)', () => {
     // The segmented bar; the LCD screen is Retro LCD's (plan 197).
     expect(markup).toMatch(/data-videorc-system-audio-visualizer=""[^]*data-slot="level-meter"/)
     expect(markup).not.toContain('data-slot="lcd-display"')
-    expect(markup).not.toContain('Level shows while recording or live.')
+    expect(markup).not.toContain('Level shows while you record, go live, or keep Clips on.')
+  })
+
+  it('draws the idle Clips meter without a recording or livestream', () => {
+    const source = createFrameEmitter<MeterFrame>()
+    const markup = render(
+      { requested: true, sessionActive: false, audioBusActive: true, confirmed: true },
+      { meter: { kind: 'source', source } }
+    )
+    expect(markup).toContain('data-videorc-system-audio-visualizer=""')
+    expect(markup).toContain('aria-label="System audio level"')
+    expect(markup).not.toContain('Level shows while you record, go live, or keep Clips on.')
   })
 
   it('opens More to the echo guard and the three facts', () => {
@@ -130,13 +143,25 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(idle).not.toContain('Mac')
     expect(idle).not.toContain('Screen Recording')
     const failed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'unavailable'
+      },
       { macOS: false }
     )
     expect(failed).toContain('System audio couldn&#x27;t start.')
     expect(failed).not.toContain('Open Permissions')
     const bypassed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'bypassed' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'bypassed'
+      },
       { macOS: false }
     )
     expect(bypassed).toContain(
@@ -145,7 +170,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
   })
 
   it('has the echo guard On by default, and it can be turned off (plan 076)', () => {
-    const guard = /<button[^>]*role="switch"[^>]*>/
+    const guard = /<span[^>]*role="switch"[^>]*>/
     const echoRow = (markup: string): string =>
       markup.slice(markup.indexOf('data-videorc-echo-guard'))
     expect(echoRow(render({}, { open: true })).match(guard)?.[0]).toContain('aria-checked="true"')
@@ -161,7 +186,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(echo).toMatch(
       /data-slot="field-description"[^>]*>Stops System audio when your own stream/
     )
-    expect(echo).toMatch(/<button[^>]*role="switch"/)
+    expect(echo).toMatch(/<span[^>]*role="switch"/)
   })
 
   it('locks the row with one reason without Screen Recording permission', () => {
@@ -170,16 +195,22 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(markup).toContain('Uses the Screen Recording permission. Turn it on above.')
     expect(markup).not.toContain('Open Permissions')
     expect(markup).toContain('>Needs permission<')
-    const onSwitch = markup.match(/<button[^>]*aria-label="System audio"[^>]*>/)?.[0]
-    expect(onSwitch).toContain('disabled=""')
-    expect(markup).toMatch(/data-disabled="true"[^>]*data-slot="source-item"/)
+    const onSwitch = markup.match(/<span[^>]*aria-label="System audio"[^>]*>/)?.[0]
+    expect(onSwitch).toContain('aria-disabled="true"')
+    expect(markup).toMatch(/<section(?=[^>]*data-slot="source-item")[^>]*data-disabled="true"/)
     const echo = markup.slice(markup.indexOf('data-videorc-echo-guard'))
-    expect(echo.match(/<button[^>]*role="switch"[^>]*>/)?.[0]).toContain('disabled=""')
+    expect(echo.match(/<span[^>]*role="switch"[^>]*>/)?.[0]).toContain('aria-disabled="true"')
   })
 
   it('makes an issue a warning Alert, with its action (plan 174 S3.8)', () => {
     const failed = render(
-      { requested: true, sessionActive: true, confirmed: false, issue: 'unavailable' },
+      {
+        requested: true,
+        sessionActive: true,
+        audioBusActive: true,
+        confirmed: false,
+        issue: 'unavailable'
+      },
       { macOS: true }
     )
     expect(failed).toMatch(/data-slot="alert"[^>]*data-variant="warning"/)
@@ -187,11 +218,11 @@ describe('Sources System audio row (plans 069, 173)', () => {
   })
 
   it('keeps the On switch styled by its own state under the shortcut tooltip', () => {
-    // Radix TooltipTrigger asChild writes data-state onto its child; on the
-    // Switch that replaced checked/unchecked, the only hook its track styles use.
-    const onSwitch = /<button[^>]*aria-label="System audio"[^>]*>/
-    expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-state="checked"')
-    expect(render({}).match(onSwitch)?.[0]).toContain('data-state="unchecked"')
+    // The tooltip's trigger is a wrapper, so nothing it writes lands on the
+    // Switch, whose track styles read its own data-checked/data-unchecked.
+    const onSwitch = /<span[^>]*aria-label="System audio"[^>]*>/
+    expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-checked=""')
+    expect(render({}).match(onSwitch)?.[0]).toContain('data-unchecked=""')
   })
 
   it('chips On outside a session, Receiving while mixed, and nothing while Off', () => {
@@ -199,7 +230,7 @@ describe('Sources System audio row (plans 069, 173)', () => {
     const source = createFrameEmitter<MeterFrame>()
     expect(
       render(
-        { requested: true, sessionActive: true, confirmed: true },
+        { requested: true, sessionActive: true, audioBusActive: true, confirmed: true },
         { meter: { kind: 'source', source } }
       )
     ).toContain('>Receiving<')
@@ -350,7 +381,7 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(markup).toContain('>Keep microphone ready<')
     // A settings row: the Field's label names its switch once mounted.
     expect(markup).toMatch(
-      /data-videorc-mic-keep-ready=""[^]*>Keep microphone ready<[^]*role="switch" aria-checked="true"/
+      /data-videorc-mic-keep-ready=""[^]*>Keep microphone ready<[^]*role="switch"[^>]*aria-checked="true"/
     )
     expect(markup).toContain('macOS shows its microphone indicator while it&#x27;s open')
     expect(renderMicrophone({ defaultMoreOpen: true })).not.toContain('Keep microphone ready')

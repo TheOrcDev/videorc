@@ -388,14 +388,14 @@ describe('CohostPane', () => {
     for (const label of ['Reply', 'Show on stream', 'Answered', 'Dismiss']) {
       expect(markup).toContain(label)
     }
-    // Plan 140: Buddy can remove a comment, but only when asked; plan 164 D4:
-    // it posts only in the modes you turn on.
+    // Plan 140: Buddy can remove a comment, but only when asked; plan 211 D6:
+    // it never posts on its own.
     expect(markup).not.toContain('Nothing sends without you.')
-    expect(markup).toContain('Posts only in the modes you turn on.')
+    expect(markup).toContain('Never posts on its own.')
     // The whole sentence is the line's tooltip, never a native title (S1.10).
-    expect(markup).not.toContain('title="Buddy posts only')
+    expect(markup).not.toContain('title="Buddy never posts')
     expect(markup).toMatch(
-      /<span(?=[^>]*data-slot="cohost-acts-on-ask")(?=[^>]*data-state="closed")/
+      /<span(?=[^>]*data-slot="cohost-acts-on-ask")(?=[^>]*data-base-ui-tooltip-trigger)/
     )
   })
 
@@ -415,7 +415,9 @@ describe('CohostPane', () => {
       ['Dismiss', 'Backspace']
     ]) {
       expect(markup).toMatch(
-        new RegExp(`<span[^>]*data-state="closed"[^>]*><button[^>]*>${label}<kbd[^>]*>${key}</kbd>`)
+        new RegExp(
+          `<span[^>]*data-base-ui-tooltip-trigger[^>]*><button[^>]*>${label}<kbd[^>]*>${key}</kbd>`
+        )
       )
     }
     expect(markup).not.toContain('title="Reply')

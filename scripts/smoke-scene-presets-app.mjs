@@ -241,10 +241,16 @@ try {
     false
   )
   assert.equal((await state()).activeId, first.id)
+  // Plan 210 D3: an edit made while a saved scene is on saves into it, so
+  // the checkpoint is never "modified" and the library carries the edit.
   await evaluate(`window.__videorcSmokeScenePresets.layout({cameraZoom: 145}); return true`)
   await waitFor(
-    (current) => current.canSave && current.modified && current.visual.layout.cameraZoom === 145,
-    'modified working checkpoint'
+    (current) =>
+      current.canSave &&
+      !current.modified &&
+      current.visual.layout.cameraZoom === 145 &&
+      current.scenes.find((scene) => scene.id === first.id)?.visual.layout.cameraZoom === 145,
+    'auto-saved working checkpoint'
   )
   await evaluate(`window.__videorcSmokeScenePresets.removeBackground('bg-03'); return true`)
   await waitFor(
@@ -375,9 +381,10 @@ try {
       const select = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === ${JSON.stringify('Select ')} + ${JSON.stringify(camera.name)});
       if (!select || select.disabled) throw new Error('Camera inspector selection unavailable');
       select.click();
+      // The id is on the Switch's hidden checkbox input (Base UI).
       const toggle = await waitFor(${JSON.stringify('[id="source-visible-' + camera.id + '"]')});
       if (toggle.disabled) throw new Error('Camera visibility control unavailable');
-      if ((toggle.getAttribute('aria-checked') === 'true') !== ${visible}) toggle.click();
+      if (toggle.checked !== ${visible}) toggle.click();
       return true;
     `)
     const confirmed = await waitFor(
@@ -392,7 +399,14 @@ try {
     assert.equal(confirmed.visual.sources.cameraOff, false, 'Visibility became Camera Off')
     return confirmed
   }
-  assert.equal((await setCameraVisible(false)).modified, true)
+  // Plan 210 D3: hiding the camera saves into the scene on stream.
+  const autoSavedHidden = await setCameraVisible(false)
+  assert.equal(autoSavedHidden.modified, false)
+  assert.equal(
+    autoSavedHidden.scenes.find((scene) => scene.id === visibleCamera.id).visual.layout
+      .sourceVisibility.camera,
+    false
+  )
   assert.equal(
     await evaluate(
       `return window.__videorcSmokeScenePresets.save('Hidden camera', ${JSON.stringify(visibleCamera.id)})`
@@ -405,17 +419,35 @@ try {
   await waitFor(
     (current) =>
       current.canSave &&
-      current.modified &&
+      !current.modified &&
       current.visual.layout.cameraZoom === 110 &&
-      !current.visual.layout.sourceVisibility.camera,
-    'hidden camera Save-as framing'
+      !current.visual.layout.sourceVisibility.camera &&
+      current.scenes.find((scene) => scene.id === visibleCamera.id)?.visual.layout.cameraZoom ===
+        110,
+    'hidden camera framing saved into the scene'
   )
   assert.equal(
     await evaluate(`return window.__videorcSmokeScenePresets.save('Hidden camera copy')`),
     true
   )
   const hiddenCopy = (await state()).scenes.find((scene) => scene.name === 'Hidden camera copy')
-  assert.equal((await setCameraVisible(true)).modified, true)
+  // Plan 210 D3: leave the copy first (a layout leaves a saved scene), so
+  // showing the camera saves into no scene and both stay hidden for the
+  // live apply below.
+  await evaluate(
+    `window.__videorcSmokeScenePresets.layout({layoutPreset: 'camera-only'}); return true`
+  )
+  await waitFor(
+    (current) => current.canSave && current.activeId === null && !current.pendingLayout,
+    'left the hidden copy'
+  )
+  const shown = await setCameraVisible(true)
+  assert.equal(shown.modified, false)
+  for (const id of [hiddenCopy.id, hiddenCamera.id])
+    assert.equal(
+      shown.scenes.find((scene) => scene.id === id).visual.layout.sourceVisibility.camera,
+      false
+    )
   assert.equal(
     await evaluate(
       `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(hiddenCamera.id)})`

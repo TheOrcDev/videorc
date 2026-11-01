@@ -4,7 +4,11 @@ import { createRequire } from 'node:module'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { compileCaptureModule, compileRendererModules } from './compile-capture-module.mjs'
+import {
+  compileCaptureModule,
+  compileRendererModules,
+  withRelativeAliases
+} from './compile-capture-module.mjs'
 
 test('capture smoke compilation includes runtime layout memory dependencies', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'videorc-capture-module-'))
@@ -40,4 +44,26 @@ test('renderer module compilation keeps relative imports resolvable', async () =
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('rewrites the renderer @/ alias relative to the compiled file', () => {
+  // lib/platform, synced from the @videorc registry, imports through the alias.
+  assert.equal(
+    withRelativeAliases(
+      'const accelerator_1 = require("@/lib/accelerator");',
+      'apps/desktop/src/renderer/src/lib/platform.ts'
+    ),
+    'const accelerator_1 = require("./accelerator");'
+  )
+  assert.equal(
+    withRelativeAliases(
+      "const kbd_1 = require('@/components/ui/kbd');",
+      'apps/desktop/src/shared/backend.ts'
+    ),
+    "const kbd_1 = require('../renderer/src/components/ui/kbd');"
+  )
+  assert.equal(
+    withRelativeAliases('const x = "@/not-a-specifier"', 'a/b.ts'),
+    'const x = "@/not-a-specifier"'
+  )
 })

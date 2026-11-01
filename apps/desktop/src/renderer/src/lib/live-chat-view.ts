@@ -18,7 +18,8 @@ import type {
 import { isActivityOnlyEvent } from '../../../shared/backend'
 import { platformLabel } from './platform-copy'
 
-/** Platforms that can appear in the unified feed, in display order. */
+/** Platforms that can appear in the unified feed, in display order.
+ * Facebook joins with its connected Page (plan 206 S9). */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
 
 /** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
@@ -441,10 +442,20 @@ export function liveChatEmptyMessage(
   if (snapshot.providers.length === 0) {
     return noProviderMessage
   }
-  const provider = snapshot.providers
+  return liveChatProviderNotice(snapshot.providers) ?? healthyMessage
+}
+
+/**
+ * What the destination whose chat most needs the streamer says (failed,
+ * reconnect, unavailable, unsupported), or null when none does. The one
+ * choice behind the empty chat's words and the Studio's Chat notice
+ * (plan 204).
+ */
+export function liveChatProviderNotice(providers: readonly LiveChatProviderState[]): string | null {
+  const provider = providers
     .filter(providerNeedsAction)
     .sort((left, right) => providerStatePriority(left) - providerStatePriority(right))[0]
-  return provider?.message ?? healthyMessage
+  return provider ? provider.message : null
 }
 
 /**
@@ -513,6 +524,7 @@ export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   twitch: platformLabel('twitch'),
   kick: platformLabel('kick'),
   x: platformLabel('x'),
+  facebook: platformLabel('facebook'),
   tiktok: platformLabel('tiktok'),
   instagram: platformLabel('instagram'),
   custom: platformLabel('custom')
