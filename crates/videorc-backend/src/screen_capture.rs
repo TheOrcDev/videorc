@@ -2,7 +2,7 @@
 use std::time::Duration;
 
 use crate::protocol::Device;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use crate::protocol::DeviceKind;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use crate::protocol::DeviceStatus;
