@@ -2279,6 +2279,12 @@ pub struct ActiveRecording {
     /// FFmpeg output clock published by the stderr monitor; the stop ladder
     /// extends its quit grace while this keeps advancing.
     ffmpeg_progress: FfmpegProgressBeacon,
+    /// Live-take marker for a session that encodes on a hardware Media
+    /// Foundation encoder. Declared last so it drops after the bridge and
+    /// D3D11 teardown above: only a session that ended in a live process
+    /// clears it.
+    #[cfg(target_os = "windows")]
+    windows_mf_take_watch: Option<WindowsMfTakeWatch>,
 }
 
 /// Owns a compositor capture lease for exactly one session. Every rejected
@@ -2389,6 +2395,8 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         compositor_capture_lease: None,
         restarted_compositor_run_id: None,
         ffmpeg_progress: FfmpegProgressBeacon::default(),
+        #[cfg(target_os = "windows")]
+        windows_mf_take_watch: None,
     }
 }
 
@@ -6843,6 +6851,24 @@ async fn start_session_with_timeline(
             None,
         );
     }
+    // A recording or stream on the hardware MFT leaves a marker until it ends
+    // in a live process; the Clips ring runs all session long and is not
+    // watched (see `WindowsMfTakeWatch`).
+    #[cfg(target_os = "windows")]
+    let windows_mf_take_watch = (use_encoder_bridge
+        && !replay_only
+        && matches!(
+            encoder_bridge_video_output,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        ))
+    .then(|| {
+        WindowsMfTakeWatch::start(
+            &state.database,
+            &session_id,
+            windows_encoded_bridge_decision.encoder_identity.as_deref(),
+        )
+    })
+    .flatten();
     pending_active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -6903,6 +6929,8 @@ async fn start_session_with_timeline(
         compositor_capture_lease: compositor_capture_lease.take(),
         restarted_compositor_run_id: restarted_compositor_run_id.take(),
         ffmpeg_progress: ffmpeg_progress.clone(),
+        #[cfg(target_os = "windows")]
+        windows_mf_take_watch,
     };
     // The fully-constructed pipeline is now committed to becoming an active
     // capture. Advance the caption epoch only here, after every fallible startup
@@ -18558,14 +18586,16 @@ pub(crate) fn load_windows_mf_rejection_store(database: &Database) {
             None
         }
     };
-    let adopted = StoredRejections::adopt(
+    let mut adopted = StoredRejections::adopt(
         stored,
         &graphics_adapter_driver_identity(),
         &crate::performance_check::desktop_app_version(),
         Utc::now(),
     );
+    settle_windows_mf_live_take(database, &mut adopted);
     tracing::info!(
         remembered = adopted.entries.len(),
+        quarantined = adopted.crash_quarantine(Utc::now()).is_some(),
         "Media Foundation rejection store loaded"
     );
     if WINDOWS_MF_PERSISTED_REJECTIONS
@@ -18619,6 +18649,162 @@ fn remember_mf_rejection(
     }
 }
 
+/// Counts a session the previous backend died in while it encoded on a
+/// hardware MFT (the marker [`WindowsMfTakeWatch`] left behind), then
+/// clears the marker. Runs once at startup, before any session can start.
+#[cfg(target_os = "windows")]
+fn settle_windows_mf_live_take(
+    database: &Database,
+    store: &mut crate::windows_mf_rejections::StoredRejections,
+) {
+    use crate::windows_mf_rejections::{
+        LIVE_TAKE_SETTING_KEY, LiveTakeMarker, LiveTakeOutcome, SETTING_KEY,
+        settle_live_take_marker,
+    };
+    let marker = match database.load_setting::<Option<LiveTakeMarker>>(LIVE_TAKE_SETTING_KEY) {
+        Ok(marker) => marker.flatten(),
+        Err(error) => {
+            tracing::warn!("Could not read the hardware-encoder live-take marker: {error:#}");
+            None
+        }
+    };
+    let outcome = settle_live_take_marker(store, marker.as_ref(), Utc::now());
+    let Some(marker) = marker else {
+        return;
+    };
+    match outcome {
+        LiveTakeOutcome::Counted { quarantined } => {
+            let consecutive = store
+                .crashed_takes
+                .as_ref()
+                .map_or(0, |crashed| crashed.consecutive);
+            tracing::warn!(
+                session = %marker.session_id,
+                encoder = %marker.encoder_identity,
+                consecutive,
+                "Videorc stopped unexpectedly during a session that encoded on the hardware Media Foundation encoder"
+            );
+            if quarantined {
+                tracing::warn!(
+                    "{}",
+                    store
+                        .crash_quarantine(Utc::now())
+                        .unwrap_or_else(|| "Media Foundation hardware encoder quarantined".into())
+                );
+            }
+            if let Err(error) = database.save_setting(SETTING_KEY, &*store) {
+                tracing::warn!("Could not save the crashed hardware-encoder session: {error:#}");
+            }
+        }
+        LiveTakeOutcome::Stale => tracing::info!(
+            session = %marker.session_id,
+            "A hardware-encoder live-take marker from another app version or driver was cleared"
+        ),
+        LiveTakeOutcome::NoMarker => {}
+    }
+    clear_windows_mf_live_take(database);
+}
+
+#[cfg(target_os = "windows")]
+fn clear_windows_mf_live_take(database: &Database) {
+    if let Err(error) = database.save_setting(
+        crate::windows_mf_rejections::LIVE_TAKE_SETTING_KEY,
+        &None::<crate::windows_mf_rejections::LiveTakeMarker>,
+    ) {
+        tracing::warn!("Could not clear the hardware-encoder live-take marker: {error:#}");
+    }
+}
+
+/// Why the hardware Media Foundation encoder is switched off on this driver
+/// and app version after crashed sessions, if it is.
+#[cfg(target_os = "windows")]
+fn windows_mf_crash_quarantine(graphics_adapter_driver_identity: &str) -> Option<String> {
+    let handle = WINDOWS_MF_PERSISTED_REJECTIONS.get()?;
+    let store = handle.store.lock().ok()?;
+    if store.driver_identity != graphics_adapter_driver_identity {
+        return None;
+    }
+    store.crash_quarantine(Utc::now())
+}
+
+/// Held by an [`ActiveRecording`] whose recording or stream encodes on a
+/// hardware Media Foundation encoder. Creating it writes the live-take
+/// marker; dropping it (the session ended in a live process) clears the
+/// marker and breaks the crashed-session streak. A marker that survives to
+/// the next startup is a session the backend died in, counted by
+/// [`settle_windows_mf_live_take`]. The Clips ring is not watched: it runs
+/// for the whole app session, so it would blame the encoder for every crash.
+#[cfg(target_os = "windows")]
+pub(crate) struct WindowsMfTakeWatch {
+    database: Database,
+}
+
+#[cfg(target_os = "windows")]
+impl std::fmt::Debug for WindowsMfTakeWatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WindowsMfTakeWatch")
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsMfTakeWatch {
+    fn start(
+        database: &Database,
+        session_id: &str,
+        encoder_identity: Option<&str>,
+    ) -> Option<Self> {
+        let marker = crate::windows_mf_rejections::LiveTakeMarker {
+            session_id: session_id.to_string(),
+            encoder_identity: encoder_identity.unwrap_or("<unknown>").to_string(),
+            driver_identity: WINDOWS_MF_PERSISTED_REJECTIONS
+                .get()?
+                .store
+                .lock()
+                .ok()?
+                .driver_identity
+                .clone(),
+            app_version: crate::performance_check::desktop_app_version(),
+            started_at: Utc::now().to_rfc3339(),
+        };
+        if let Err(error) = database.save_setting(
+            crate::windows_mf_rejections::LIVE_TAKE_SETTING_KEY,
+            &Some(marker),
+        ) {
+            tracing::warn!("Could not write the hardware-encoder live-take marker: {error:#}");
+            return None;
+        }
+        Some(Self {
+            database: database.clone(),
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsMfTakeWatch {
+    fn drop(&mut self) {
+        clear_windows_mf_live_take(&self.database);
+        let Some(handle) = WINDOWS_MF_PERSISTED_REJECTIONS.get() else {
+            return;
+        };
+        let snapshot = {
+            let Ok(mut store) = handle.store.lock() else {
+                return;
+            };
+            if store.crashed_takes.is_none() {
+                return;
+            }
+            store.record_clean_take();
+            store.clone()
+        };
+        if let Err(error) = handle
+            .database
+            .save_setting(crate::windows_mf_rejections::SETTING_KEY, &snapshot)
+        {
+            tracing::warn!("Could not save the remembered Media Foundation rejections: {error:#}");
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 static WINDOWS_NATIVE_ENCODED_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<std::collections::HashMap<WindowsNativeEncodedProbeKey, Option<String>>>,
@@ -18657,6 +18843,11 @@ async fn probe_windows_native_encoded_bridge(
     topology: &'static str,
     graphics_adapter_driver_identity: &str,
 ) -> Result<crate::windows_media_foundation_encoder::MediaFoundationProbe> {
+    // Checked before any cache: sessions keep dying on this encoder, so no
+    // earlier probe success may select it again (2026-11-01 field bundle).
+    if let Some(reason) = windows_mf_crash_quarantine(graphics_adapter_driver_identity) {
+        bail!("{reason}");
+    }
     let success_key: WindowsNativeEncodedProbeSuccessKey = (
         graphics_adapter_driver_identity.to_string(),
         ffmpeg_path.to_string(),
@@ -32435,6 +32626,8 @@ mod tests {
             compositor_capture_lease: None,
             restarted_compositor_run_id: None,
             ffmpeg_progress: FfmpegProgressBeacon::default(),
+            #[cfg(target_os = "windows")]
+            windows_mf_take_watch: None,
         }
     }
 
@@ -41185,6 +41378,8 @@ mod tests {
             compositor_capture_lease: None,
             restarted_compositor_run_id: None,
             ffmpeg_progress: FfmpegProgressBeacon::default(),
+            #[cfg(target_os = "windows")]
+            windows_mf_take_watch: None,
         });
 
         let update_state = state.clone();

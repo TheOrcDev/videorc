@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/videorc-backend", "crates/videorc-native-preview-addon"]
+members = ["crates/videorc-backend", "crates/videorc-native-preview-addon", "crates/videorc-wer-helper"]
 resolver = "3"
 
 # Disable incremental codegen for dev builds. On macOS arm64, stale incremental

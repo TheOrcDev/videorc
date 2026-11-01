@@ -60,6 +60,47 @@ pub(crate) struct StoredRejections {
     pub app_version: String,
     #[serde(default)]
     pub entries: Vec<StoredRejection>,
+    /// Sessions the backend died in while they encoded on the hardware MFT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crashed_takes: Option<CrashedTakes>,
+}
+
+/// `app_settings` key of the live-take marker (see [`LiveTakeMarker`]).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) const LIVE_TAKE_SETTING_KEY: &str = "windows_mf_live_take";
+
+/// Consecutive crashed hardware-encoder sessions that switch the hardware
+/// encoder off. One is not enough: a power loss or a killed app also leaves
+/// the marker, and software encoding on a weak laptop is a real cost.
+pub(crate) const CRASHED_TAKES_QUARANTINE_THRESHOLD: u32 = 2;
+
+/// Written while a recording or stream encodes on a hardware Media
+/// Foundation encoder, removed when that session ends in a live process. A
+/// marker found at startup means the previous backend died mid-session
+/// (2026-11-01 field bundle: an Iris Xe laptop on 0.17.4 died with heap
+/// corruption, 0xC0000374, in five Quick Sync takes in a row).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LiveTakeMarker {
+    pub session_id: String,
+    pub encoder_identity: String,
+    pub driver_identity: String,
+    pub app_version: String,
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CrashedTakes {
+    /// Crashed sessions since the last one that ended in a live process.
+    pub consecutive: u32,
+    pub last_encoder_identity: String,
+    pub last_crashed_at: String,
+    /// RFC 3339; set when `consecutive` reached the threshold. The hardware
+    /// encoder stays off until it expires, the driver changes or the app
+    /// updates (`adopt` drops the whole set then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantined_at: Option<String>,
 }
 
 impl StoredRejections {
@@ -68,7 +109,60 @@ impl StoredRejections {
             driver_identity: driver_identity.to_string(),
             app_version: app_version.to_string(),
             entries: Vec::new(),
+            crashed_takes: None,
         }
+    }
+
+    /// Counts a session the previous backend died in while it encoded on
+    /// `encoder_identity`. Returns true when this crash switched the hardware
+    /// encoder off.
+    pub(crate) fn record_crashed_take(
+        &mut self,
+        encoder_identity: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let crashed = self.crashed_takes.get_or_insert_with(|| CrashedTakes {
+            consecutive: 0,
+            last_encoder_identity: String::new(),
+            last_crashed_at: String::new(),
+            quarantined_at: None,
+        });
+        crashed.consecutive = crashed.consecutive.saturating_add(1);
+        crashed.last_encoder_identity = encoder_identity.chars().take(MAX_REASON_CHARS).collect();
+        crashed.last_crashed_at = now.to_rfc3339();
+        if crashed.quarantined_at.is_none()
+            && crashed.consecutive >= CRASHED_TAKES_QUARANTINE_THRESHOLD
+        {
+            crashed.quarantined_at = Some(now.to_rfc3339());
+            return true;
+        }
+        false
+    }
+
+    /// A hardware-encoded session ended in a live process: the streak of
+    /// crashed sessions is broken. An active quarantine is kept as it was.
+    pub(crate) fn record_clean_take(&mut self) {
+        if self
+            .crashed_takes
+            .as_ref()
+            .is_some_and(|crashed| crashed.quarantined_at.is_none())
+        {
+            self.crashed_takes = None;
+        }
+    }
+
+    /// Why the hardware encoder is off on this driver and app version, while
+    /// the quarantine has not expired.
+    pub(crate) fn crash_quarantine(&self, now: DateTime<Utc>) -> Option<String> {
+        let crashed = self.crashed_takes.as_ref()?;
+        let quarantined_at = crashed.quarantined_at.as_deref()?;
+        if expired(quarantined_at, now) {
+            return None;
+        }
+        Some(format!(
+            "Media Foundation hardware encoder quarantined: Videorc stopped unexpectedly during {} recordings in a row that encoded on {} (last {}); this PC records with the fallback encoder for a week, or until Videorc or the graphics driver updates",
+            crashed.consecutive, crashed.last_encoder_identity, crashed.last_crashed_at
+        ))
     }
 
     /// The stored set when it was written for this driver and app version,
@@ -131,6 +225,37 @@ impl StoredRejections {
             index += 1;
             kept
         });
+    }
+}
+
+/// What startup did with a live-take marker the previous backend left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LiveTakeOutcome {
+    /// The previous backend ended every hardware-encoded session it started.
+    NoMarker,
+    /// Written for another driver or app version: that crash says nothing
+    /// about the encoder this run would use.
+    Stale,
+    /// Counted as a crashed session; `quarantined` when it was the one that
+    /// switched the hardware encoder off.
+    Counted { quarantined: bool },
+}
+
+/// Settles the marker found at startup against the adopted store. The
+/// caller clears the marker either way.
+pub(crate) fn settle_live_take_marker(
+    store: &mut StoredRejections,
+    marker: Option<&LiveTakeMarker>,
+    now: DateTime<Utc>,
+) -> LiveTakeOutcome {
+    let Some(marker) = marker else {
+        return LiveTakeOutcome::NoMarker;
+    };
+    if marker.driver_identity != store.driver_identity || marker.app_version != store.app_version {
+        return LiveTakeOutcome::Stale;
+    }
+    LiveTakeOutcome::Counted {
+        quarantined: store.record_crashed_take(&marker.encoder_identity, now),
     }
 }
 
@@ -251,6 +376,108 @@ mod tests {
         assert!(!is_encoder_session_exhaustion(
             "Media Foundation probe stage=process-output HRESULT=0x8000FFFF encoder=\"Intel Quick Sync Video H.264 Encoder MFT\""
         ));
+    }
+
+    fn marker(driver: &str, app: &str) -> LiveTakeMarker {
+        LiveTakeMarker {
+            session_id: "take-1".into(),
+            encoder_identity: "Intel® Quick Sync Video H.264 Encoder MFT".into(),
+            driver_identity: driver.into(),
+            app_version: app.into(),
+            started_at: at(1).to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn two_crashed_takes_in_a_row_quarantine_the_hardware_encoder_for_a_week() {
+        let mut store = StoredRejections::empty("driver-a", "0.17.4");
+        let live = marker("driver-a", "0.17.4");
+        assert_eq!(
+            settle_live_take_marker(&mut store, None, at(1)),
+            LiveTakeOutcome::NoMarker
+        );
+        assert_eq!(
+            settle_live_take_marker(&mut store, Some(&live), at(1)),
+            LiveTakeOutcome::Counted { quarantined: false },
+            "one crash can be a power loss"
+        );
+        assert_eq!(store.crash_quarantine(at(1)), None);
+        assert_eq!(
+            settle_live_take_marker(&mut store, Some(&live), at(1)),
+            LiveTakeOutcome::Counted { quarantined: true }
+        );
+        let reason = store.crash_quarantine(at(2)).expect("quarantined");
+        assert!(reason.contains("2 recordings in a row"), "{reason}");
+        assert!(reason.contains("Intel® Quick Sync"), "{reason}");
+        // A third crash keeps counting but does not re-arm the stamp.
+        assert_eq!(
+            settle_live_take_marker(&mut store, Some(&live), at(3)),
+            LiveTakeOutcome::Counted { quarantined: false }
+        );
+        assert!(
+            store.crash_quarantine(at(8)).is_some(),
+            "still within the week"
+        );
+        assert_eq!(
+            store.crash_quarantine(at(10)),
+            None,
+            "a week after the switch-off"
+        );
+    }
+
+    #[test]
+    fn a_clean_take_breaks_the_streak_but_not_an_active_quarantine() {
+        let mut store = StoredRejections::empty("driver-a", "0.17.4");
+        let live = marker("driver-a", "0.17.4");
+        settle_live_take_marker(&mut store, Some(&live), at(1));
+        store.record_clean_take();
+        assert_eq!(store.crashed_takes, None);
+        assert_eq!(
+            settle_live_take_marker(&mut store, Some(&live), at(1)),
+            LiveTakeOutcome::Counted { quarantined: false },
+            "the streak restarted"
+        );
+        settle_live_take_marker(&mut store, Some(&live), at(1));
+        store.record_clean_take();
+        assert!(store.crash_quarantine(at(1)).is_some());
+    }
+
+    #[test]
+    fn a_marker_from_another_driver_or_app_version_is_not_counted() {
+        let mut store = StoredRejections::empty("driver-a", "0.17.5");
+        assert_eq!(
+            settle_live_take_marker(&mut store, Some(&marker("driver-a", "0.17.4")), at(1)),
+            LiveTakeOutcome::Stale
+        );
+        assert_eq!(
+            settle_live_take_marker(&mut store, Some(&marker("driver-b", "0.17.5")), at(1)),
+            LiveTakeOutcome::Stale
+        );
+        assert_eq!(store.crashed_takes, None);
+    }
+
+    #[test]
+    fn an_app_update_lifts_the_quarantine_and_old_stores_still_load() {
+        let mut store = StoredRejections::empty("driver-a", "0.17.4");
+        let live = marker("driver-a", "0.17.4");
+        settle_live_take_marker(&mut store, Some(&live), at(1));
+        settle_live_take_marker(&mut store, Some(&live), at(1));
+        let json = serde_json::to_string(&store).unwrap();
+        let back: StoredRejections = serde_json::from_str(&json).unwrap();
+        assert!(back.crash_quarantine(at(2)).is_some());
+        let updated = StoredRejections::adopt(Some(back), "driver-a", "0.17.5", at(2));
+        assert_eq!(updated.crash_quarantine(at(2)), None);
+        // A store written before crashed takes existed has no such field.
+        let old: StoredRejections = serde_json::from_str(
+            r#"{"driverIdentity":"driver-a","appVersion":"0.17.4","entries":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.crashed_takes, None);
+        assert!(
+            !serde_json::to_string(&old)
+                .unwrap()
+                .contains("crashedTakes")
+        );
     }
 
     #[test]

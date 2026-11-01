@@ -27,7 +27,8 @@ const requiredFiles = {
   'resources/ffmpeg/capture/TOOLCHAIN.txt': 'toolchain',
   'resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch': 'patch',
   'resources/videorc-backend.exe': 'backend',
-  'resources/videorc-mcp.exe': 'bridge'
+  'resources/videorc-mcp.exe': 'bridge',
+  'resources/videorc_wer_helper.dll': 'wer helper'
 }
 
 const temporaryDirectories = []

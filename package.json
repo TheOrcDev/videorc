@@ -47,7 +47,7 @@
     "build:native-preview-addon": "node scripts/build-native-preview-addon.mjs",
     "build:native-preview-addon:release": "node scripts/build-native-preview-addon.mjs --release --universal",
     "build:mcpb": "node scripts/build-mcpb.mjs",
-    "package:backend": "cargo build --release -p videorc-backend",
+    "package:backend": "cargo build --release -p videorc-backend -p videorc-wer-helper",
     "package:desktop:linux": "pnpm package:backend && pnpm ffmpeg:fetch:linux && node scripts/preflight-linux-package.mjs && pnpm --filter @videorc/desktop package:linux",
     "package:backend:macos": "cargo build --release -p videorc-backend --bin videorc-backend --bin native_preview_host_helper --bin videorc-mcp && pnpm build:native-preview-addon:release",
     "package:preflight:macos": "node scripts/preflight-macos-package.mjs",
@@ -312,6 +312,7 @@
     "release:sync:controlled": "gh workflow run release-sync-origins.yml --ref main",
     "release:recover": "gh workflow run release-recover-publication.yml --ref main",
     "smoke:windows-mf-probe": "node scripts/smoke-windows-mf-probe.mjs",
+    "smoke:windows-mf-crash-breaker": "node scripts/smoke-windows-mf-crash-breaker.mjs",
     "probe:windows-openh264": "node scripts/probe-windows-openh264-comparison.mjs"
   },
   "devDependencies": {
