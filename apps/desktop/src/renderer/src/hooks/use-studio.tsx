@@ -1,3 +1,9 @@
+import {
+  cameraIsAvailable,
+  cameraPreviewStartAllowed,
+  returningSourceChoices,
+  sourceReturnAction
+} from '@/lib/source-return'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 import {
@@ -180,6 +186,7 @@ import {
   auxiliaryStreamOutputVideoSettings,
   bridgeStreamingToLegacy,
   buildCameraSources,
+  buildCaptureSources,
   areEnabledStreamTargetsStartReady,
   coerceVideoToOrientation,
   defaultSettings,
@@ -10013,7 +10020,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               deviceListRef.current.devices,
               // Plan 213 D6: a stand-in never gives way mid-session without a
               // click, not even on a scene switch.
-              { holdStandIns: sessionActive }
+              { holdStandIns: sessionOwnsTransport(recordingRef.current) }
             )
           const requestedBackground =
             options && 'backgroundOverride' in options
@@ -11091,6 +11098,70 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ]
   )
 
+  const announcedSourceReturnsRef = useRef(new Set<string>())
+  useEffect(() => {
+    const sources = captureConfigRef.current.sources
+    // A missing camera may be retried only after discovery finds it again.
+    if (!cameraIsAvailable(sources.cameraId, deviceList.devices)) {
+      nativePreviewCameraKeyRef.current = null
+    }
+    const returns =
+      sourceStatusKnown &&
+      !startRequestPending &&
+      !stopRequestPending &&
+      isActiveRecordingState(recording.state)
+        ? returningSourceChoices(sources, deviceList.devices)
+        : []
+    const keys = new Set(returns.map(({ kind, device }) => `${kind}:${device.id}`))
+    for (const old of announcedSourceReturnsRef.current) {
+      if (!keys.has(old)) toast.dismiss(`source-return:${old}`)
+    }
+    for (const { kind, device } of returns) {
+      const key = `${kind}:${device.id}`
+      if (announcedSourceReturnsRef.current.has(key)) continue
+      const applyDevice = () => {
+        const current = captureConfigRef.current.sources
+        if (
+          !returningSourceChoices(current, deviceListRef.current.devices).some(
+            (choice) => choice.kind === kind && choice.device.id === device.id
+          )
+        )
+          return
+        const next =
+          kind === 'camera'
+            ? buildCameraSources(current, deviceListRef.current.devices, device.id)
+            : buildCaptureSources(current, deviceListRef.current.devices, device.id)
+        void switchSourceDeviceLive(kind, next).catch((error) => toastUserError(error))
+      }
+      if (
+        sourceReturnAction({ state: recording.state, replayOnly: recording.replayOnly }) ===
+        'restore'
+      ) {
+        if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current) {
+          keys.delete(key)
+          continue
+        }
+        applyDevice()
+        continue
+      }
+      toast(`${device.name} is back`, {
+        id: `source-return:${key}`,
+        duration: Infinity,
+        action: { label: 'Use it', onClick: applyDevice }
+      })
+    }
+    announcedSourceReturnsRef.current = keys
+  }, [
+    captureConfig.sources,
+    deviceList,
+    recording.state,
+    recording.replayOnly,
+    sourceStatusKnown,
+    startRequestPending,
+    stopRequestPending,
+    switchSourceDeviceLive
+  ])
+
   const ensureNativePreviewCamera = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
       return previewCameraStatusRef.current
@@ -11135,20 +11206,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const current = previewCameraStatusRef.current
     if (
-      nativePreviewCameraKeyRef.current === key &&
-      current.cameraId === cameraId &&
-      (current.state === 'starting' || current.state === 'live')
-    ) {
+      !cameraPreviewStartAllowed(
+        cameraId,
+        deviceListRef.current.devices,
+        key,
+        nativePreviewCameraKeyRef.current,
+        current.state
+      )
+    )
       return current
-    }
 
     const status = await client.request<PreviewCameraStatus>('preview.camera.start', {
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       video: captureConfig.video
     })
-    nativePreviewCameraKeyRef.current =
-      status.state === 'failed' || status.state === 'device-missing' ? null : key
+    nativePreviewCameraKeyRef.current = key
     applyPreviewCameraStatus(status)
     if (status.state === 'permission-needed') {
       const permissionReport = window.videorc?.reportPreviewPermissionRequired?.(

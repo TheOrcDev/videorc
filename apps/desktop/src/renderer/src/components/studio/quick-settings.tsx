@@ -321,8 +321,8 @@ export function useStudioSources() {
   const selectedCaptureId =
     sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId
   const selectedCameraId = sources.cameraId ?? sources.wantedCameraId
-  const cameraStandIn = sourceStandIn(sources, 'camera')
-  const captureStandIn = sourceStandIn(sources, 'capture')
+  const cameraStandIn = sourceStandIn(sources, 'camera', deviceList.devices)
+  const captureStandIn = sourceStandIn(sources, 'capture', deviceList.devices)
   // Plan 210 S8b: the one Studio action, by the state it shows. A failure
   // says so; a refused hide is the hook's warning, and success is silent.
   const screenPrivacy: ScreenPrivacyControl = {

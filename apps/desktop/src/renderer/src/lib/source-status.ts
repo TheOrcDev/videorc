@@ -57,7 +57,11 @@ export const SOURCE_STAND_IN_LABEL = 'Stand-in'
 export function standInLine(standIn: SourceStandIn): string {
   const noun = standIn.kind === 'camera' ? 'camera' : standIn.kind
   const wanted = standIn.wantedName?.trim() || `Your ${noun}`
-  const missing = standIn.kind === 'window' ? "isn't open" : "isn't connected"
+  const missing = standIn.available
+    ? 'is back'
+    : standIn.kind === 'window'
+      ? "isn't open"
+      : "isn't connected"
   const using = standIn.usingName?.trim()
   return using ? `${wanted} ${missing} · using ${using}` : `${wanted} ${missing}`
 }
@@ -97,7 +101,8 @@ export function videoSourceStatus(input: {
   if (!input.standIn || input.switching || !input.selected) return status
   // The stand-in line rides under the pipeline's chip; a line with a fix to
   // do (permission, not found, failed) keeps its place.
-  if (!status) return { label: SOURCE_STAND_IN_LABEL, tone: 'neutral', hint: standInLine(input.standIn) }
+  if (!status)
+    return { label: SOURCE_STAND_IN_LABEL, tone: 'neutral', hint: standInLine(input.standIn) }
   return status.hint ? status : { ...status, hint: standInLine(input.standIn) }
 }
 

@@ -2843,8 +2843,7 @@ function isAvFoundationScreenCaptureDevice(device: Device): boolean {
 export interface ReconcileSourceSelectionOptions {
   /**
    * Plan 213 D6: during a recording or stream a stand-in stays until a click,
-   * even when the pick behind it is connected again. A stand-in that vanished
-   * itself is still replaced.
+   * even when the pick behind it is connected again.
    */
   holdStandIns?: boolean
 }
@@ -2930,9 +2929,11 @@ export function reconcileSourceSelection(
         : undefined
     const rememberedCapture =
       heldStandIn ?? findRememberedSource(pick.id, pick.name, selectableCaptureDevices)
-    const selectedCapture = rememberedCapture ?? defaultCaptureDevice
-    const standIn =
-      heldStandIn !== undefined || (!rememberedCapture && Boolean(pick.id || pick.name))
+    const holdingCapture = options.holdStandIns && pick.standIn
+    const selectedCapture = holdingCapture
+      ? selectableCaptureDevices.find((device) => device.id === usingId)
+      : (rememberedCapture ?? defaultCaptureDevice)
+    const standIn = holdingCapture || (!rememberedCapture && Boolean(pick.id || pick.name))
     nextSources.screenId = selectedCapture?.kind === 'screen' ? selectedCapture.id : undefined
     nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
     nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
@@ -2956,10 +2957,15 @@ export function reconcileSourceSelection(
   const rememberedCamera = cameraOff
     ? undefined
     : (heldCamera ?? findRememberedSource(cameraPick.id, cameraPick.name, cameras))
-  const selectedCamera = cameraOff ? undefined : (rememberedCamera ?? cameras[0])
+  const holdingCamera = options.holdStandIns && cameraPick.standIn && !cameraOff
+  const selectedCamera = cameraOff
+    ? undefined
+    : holdingCamera
+      ? cameras.find((device) => device.id === nextSources.cameraId)
+      : (rememberedCamera ?? cameras[0])
   const cameraStandIn =
     !cameraOff &&
-    (heldCamera !== undefined || (!rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
+    (holdingCamera || (!rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
   nextSources.cameraOff = cameraOff ? true : undefined
   nextSources.wantedCameraId = cameraStandIn ? cameraPick.id : undefined
   nextSources.wantedCameraName = cameraStandIn ? cameraPick.name : undefined
@@ -3082,17 +3088,26 @@ export interface SourceStandIn {
   wantedName?: string
   /** The stand-in's name; absent when nothing stands in (the slot is empty). */
   usingName?: string
+  available?: boolean
 }
 
 export function sourceStandIn(
   sources: SourceSelection,
-  sourceKind: 'capture' | 'camera'
+  sourceKind: 'capture' | 'camera',
+  devices: Device[] = []
 ): SourceStandIn | undefined {
   const pick = sourceKind === 'camera' ? wantedCamera(sources) : wantedCapture(sources)
   if (!pick.standIn) return undefined
   const usingName =
     sourceKind === 'camera' ? sources.cameraName : (sources.screenName ?? sources.windowName)
-  return { kind: pick.kind, wantedName: pick.name, usingName }
+  const available = Boolean(
+    findRememberedSource(
+      pick.id,
+      pick.name,
+      devices.filter((device) => device.kind === pick.kind && device.status === 'available')
+    )
+  )
+  return { kind: pick.kind, wantedName: pick.name, usingName, available }
 }
 
 export function sourceSelectionChangeEvents(

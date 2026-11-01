@@ -234,8 +234,8 @@ export function VideoSources(): ReactElement {
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
   // Plan 213 E1: the picker shows what is in use; with nothing standing in,
   // it shows the pick itself as the device that is gone.
-  const cameraStandIn = sourceStandIn(sources, 'camera')
-  const captureStandIn = sourceStandIn(sources, 'capture')
+  const cameraStandIn = sourceStandIn(sources, 'camera', deviceList.devices)
+  const captureStandIn = sourceStandIn(sources, 'capture', deviceList.devices)
   const selectedCameraId = sources.cameraId ?? sources.wantedCameraId
   const selectedCaptureId =
     sources.screenId ?? sources.windowId ?? sources.wantedWindowId ?? sources.wantedScreenId

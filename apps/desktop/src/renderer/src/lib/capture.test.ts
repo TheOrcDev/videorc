@@ -285,7 +285,7 @@ describe('reconcileSourceSelection', () => {
       ])
     })
 
-    it('during a session the stand-in stays until a click (D6), unless it vanished itself', () => {
+    it('during a session the wanted source waits for a click, even if its stand-in vanished', () => {
       const standIn = reconcileSourceSelection(
         {
           windowId: keynote.id,
@@ -306,10 +306,10 @@ describe('reconcileSourceSelection', () => {
 
       const replaced = reconcileSourceSelection(standIn, [display2, iphone], { holdStandIns: true })
       expect(replaced).toMatchObject({
-        screenId: display2.id,
+        screenId: undefined,
         wantedWindowId: keynote.id,
-        cameraId: iphone.id,
-        wantedCameraId: undefined
+        cameraId: undefined,
+        wantedCameraId: iphone.id
       })
     })
 

@@ -243,6 +243,9 @@ describe('missing choices', () => {
     expect(
       videoSourceStatus({ kind: 'camera', selected: true, switching: false, standIn })
     ).toMatchObject({ hint: standInLine(standIn) })
+    expect(standInLine({ ...standIn, available: true })).toBe(
+      'iPhone is back · using FaceTime HD Camera'
+    )
     expect(standInLine({ kind: 'window', wantedName: 'Keynote' })).toBe("Keynote isn't open")
   })
 })
