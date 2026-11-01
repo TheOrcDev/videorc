@@ -280,7 +280,8 @@ describe('layout transaction policy', () => {
         sceneEditMode: false,
         recordingState: 'idle',
         startRequestPending: false,
-        stopRequestPending: false
+        stopRequestPending: false,
+        performanceCheckRunning: false
       })
     ).toBe(true)
     expect(
@@ -289,7 +290,8 @@ describe('layout transaction policy', () => {
         sceneEditMode: false,
         recordingState: 'starting',
         startRequestPending: false,
-        stopRequestPending: false
+        stopRequestPending: false,
+        performanceCheckRunning: false
       })
     ).toBe(false)
   })
@@ -301,7 +303,24 @@ describe('layout transaction policy', () => {
         sceneEditMode: false,
         recordingState: 'idle',
         startRequestPending: true,
-        stopRequestPending: false
+        stopRequestPending: false,
+        performanceCheckRunning: false
+      })
+    ).toBe(false)
+  })
+
+  it('holds an idle reload while a performance check runs its hidden sessions', () => {
+    // First launch: setup starts the check, launch settles the capture config,
+    // and the backend refused the reload ("superseded by session startup"),
+    // which the Studio showed as "Videorc hit a problem".
+    expect(
+      shouldReloadSceneFromCaptureConfig({
+        connected: true,
+        sceneEditMode: false,
+        recordingState: 'idle',
+        startRequestPending: false,
+        stopRequestPending: false,
+        performanceCheckRunning: true
       })
     ).toBe(false)
   })
