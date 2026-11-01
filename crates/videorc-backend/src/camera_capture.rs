@@ -613,6 +613,11 @@ fn camera_default_priority(is_system_preferred: bool, is_builtin: bool) -> u8 {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn camera_is_builtin(device_type: &str, is_continuity: bool) -> bool {
+    device_type == "AVCaptureDeviceTypeBuiltInWideAngleCamera" && !is_continuity
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn camera_device_type_label(device_type: &str) -> &str {
     match device_type {
         "AVCaptureDeviceTypeContinuityCamera" => "iPhone camera",
@@ -683,22 +688,28 @@ mod macos {
             let name =
                 ns_string_to_string(&name).unwrap_or_else(|| format!("Camera {}", index + 1));
             let device_type = unsafe { camera.deviceType() }.to_string();
+            let is_continuity = device_type == "AVCaptureDeviceTypeContinuityCamera"
+                || (objc2::available!(macos = 13.0) && unsafe { camera.isContinuityCamera() });
             priorities.insert(
                 native_camera_device_id(&unique_id),
                 camera_default_priority(
                     preferred_id.as_deref() == Some(unique_id.as_str()),
-                    device_type == "AVCaptureDeviceTypeBuiltInWideAngleCamera",
+                    camera_is_builtin(&device_type, is_continuity),
                 ),
             );
             let transport = unsafe { camera.transportType() };
-            let name = if device_type == "AVCaptureDeviceTypeContinuityCamera" {
+            let name = if is_continuity {
                 format!("{name} · iPhone camera")
             } else {
                 name
             };
             let type_detail = format!(
                 "{} · device type: {device_type} · transport: 0x{transport:08x}.",
-                camera_device_type_label(&device_type)
+                if is_continuity {
+                    "iPhone camera"
+                } else {
+                    camera_device_type_label(&device_type)
+                }
             );
             let formats = normalize_camera_formats(camera_formats(&camera));
             let active_format = active_camera_format_detail(&camera);
@@ -927,6 +938,17 @@ mod tests {
             .sort_by_key(|(_, preferred, builtin)| camera_default_priority(*preferred, *builtin));
         assert_eq!(cameras[0].0, "USB");
         assert_eq!(cameras[1].0, "Built-in");
+    }
+
+    #[test]
+    fn a_ventura_continuity_camera_does_not_get_builtin_default_priority() {
+        let legacy_type = "AVCaptureDeviceTypeBuiltInWideAngleCamera";
+        assert!(camera_is_builtin(legacy_type, false));
+        assert!(!camera_is_builtin(legacy_type, true));
+        assert!(
+            camera_default_priority(false, camera_is_builtin(legacy_type, false))
+                < camera_default_priority(false, camera_is_builtin(legacy_type, true))
+        );
     }
 
     #[test]
