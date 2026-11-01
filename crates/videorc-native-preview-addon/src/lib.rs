@@ -241,7 +241,10 @@ mod macos {
         /// Electron's own view and resizes with its window.
         fn host_geometry(&self) -> (f64, bool) {
             match self._host_view.layer() {
-                Some(host_layer) => (host_layer.bounds().size.height, host_layer.isGeometryFlipped()),
+                Some(host_layer) => (
+                    host_layer.bounds().size.height,
+                    host_layer.isGeometryFlipped(),
+                ),
                 None => (self.host_height, self.host_flipped),
             }
         }
@@ -271,7 +274,10 @@ mod macos {
                 frame.visible,
                 self.presented,
             );
-            if !frame_changed && !scale_changed && !radius_changed && visibility_transition.is_none()
+            if !frame_changed
+                && !scale_changed
+                && !radius_changed
+                && visibility_transition.is_none()
             {
                 self.visible_requested = frame.visible;
                 return;
@@ -1071,7 +1077,10 @@ mod macos {
                 height: 450.0,
             };
             let rect = layer_frame_in_host(slot, 780.0, false);
-            assert_eq!((rect.origin.x, rect.origin.y), (240.0, 780.0 - 96.0 - 450.0));
+            assert_eq!(
+                (rect.origin.x, rect.origin.y),
+                (240.0, 780.0 - 96.0 - 450.0)
+            );
             assert_eq!((rect.size.width, rect.size.height), (800.0, 450.0));
         }
 

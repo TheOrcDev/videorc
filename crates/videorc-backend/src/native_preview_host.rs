@@ -946,7 +946,10 @@ mod tests {
             &PreviewSurfaceBounds::default(),
         ))
         .unwrap();
-        assert!(legacy.get("hostX").is_none(), "absent stays absent on the wire");
+        assert!(
+            legacy.get("hostX").is_none(),
+            "absent stays absent on the wire"
+        );
     }
 
     fn slot(screen_x: f64, screen_y: f64, scale: f64) -> NativePreviewHostBounds {
