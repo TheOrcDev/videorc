@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { useStudioCaptions, useStudioCore } from '@/hooks/use-studio'
 import { renderCaptionCueFramePng } from '@/lib/caption-overlay'
+import { CAPTIONS_PREVIEW_PIN } from '@/lib/page-layout'
 import { formatResolution } from '@/lib/format-video'
 import { cn } from '@/lib/utils'
 
@@ -54,7 +55,7 @@ export function CaptionPreview(): ReactElement {
         // Which text the preview shows, not a status (plan 174 D-26): never a green "Live".
         <Badge>{isSample ? 'Sample' : 'Latest caption'}</Badge>
       }
-      className="lg:sticky lg:top-0"
+      className={CAPTIONS_PREVIEW_PIN}
       description="The selected style at your current video aspect ratio."
       icon={PreviewIcon}
       title="Caption preview"
