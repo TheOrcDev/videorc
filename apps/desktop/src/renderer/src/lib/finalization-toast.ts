@@ -1,5 +1,6 @@
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { toast } from '@/lib/toast'
+import { exportSpaceRefusal } from '@/lib/user-error'
 
 // Plan 174 S2.4 (J2-13): the MP4 export's toasts, one id per recording and
 // one wording each, whether the export ran after Stop or from Library's
@@ -42,7 +43,9 @@ export function showMp4ExportFailed(
   toast.error('MP4 export failed', {
     id: finalizationToastId(sessionId),
     duration: Infinity,
-    description: 'Your original recording is safe.',
+    // A refusal for want of disk space says how much and what to do; any
+    // other reason stays in the console.
+    description: exportSpaceRefusal(reason) ?? 'Your original recording is safe.',
     action: { label: 'Retry export', onClick: retry }
   })
 }

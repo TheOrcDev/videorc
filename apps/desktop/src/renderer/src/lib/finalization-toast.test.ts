@@ -37,4 +37,25 @@ describe('finalization toasts', () => {
     expect(saving).toMatchObject({ type: 'loading', title: 'Saving MP4…' })
     expect(saving && 'action' in saving ? saving.action : undefined).toBeUndefined()
   })
+
+  // E2E 2026-11-01 (Linux, low disk): the export after Stop was refused for
+  // want of space, and the toast only said the recording was safe, so Retry
+  // was the one step offered and it could not work until space was freed.
+  it('a failed export for want of disk space says how much and what to do', () => {
+    const refusal =
+      'Not enough disk space to finish the MP4 (needs 541 MB, 148 MB free). Your recording is safe as MKV; free some space and use Export MP4.'
+    showMp4ExportFailed('take-3', () => undefined, refusal)
+
+    expect(current('take-3')).toMatchObject({
+      type: 'error',
+      title: 'MP4 export failed',
+      description: refusal
+    })
+  })
+
+  it('any other export failure keeps its reason out of the toast', () => {
+    showMp4ExportFailed('take-4', () => undefined, 'ffmpeg exited with status 1')
+
+    expect(current('take-4')).toMatchObject({ description: 'Your original recording is safe.' })
+  })
 })

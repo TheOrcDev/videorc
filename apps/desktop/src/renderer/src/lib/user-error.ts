@@ -63,6 +63,18 @@ const SECURE_STORAGE_UNAVAILABLE = /^Protected desktop persistence is unavailabl
 export const SECURE_STORAGE_REASON =
   "Videorc couldn't reach your system keyring to save this. Make sure a keyring is running and unlocked, then try again."
 
+// The backend's refusal of an MP4 export with no room for the copy (plan 200
+// C5, disk_space.rs `export_space_message`). It names the sizes and the next
+// step, so it is shown as is: "Try again" cannot work until space is freed.
+const EXPORT_SPACE_REFUSAL =
+  /^Not enough disk space to finish the MP4 \(needs [^(),]+, [^(),]+ free\)\. Your recording is safe as MKV; free some space and use Export MP4\.$/
+
+/** `raw` when it is the backend's no-room refusal of an MP4 export, else null. */
+export function exportSpaceRefusal(raw: string | undefined): string | null {
+  const reason = raw?.trim()
+  return reason && EXPORT_SPACE_REFUSAL.test(reason) ? reason : null
+}
+
 const BUSY_REASON = "Videorc was busy and didn't do it. Try again in a moment."
 
 /** Backend error codes with a cause the streamer can act on. */
@@ -159,6 +171,10 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
   }
   if (SECURE_STORAGE_UNAVAILABLE.test(raw)) {
     return shape('known', SECURE_STORAGE_REASON, 'error')
+  }
+  const spaceRefusal = exportSpaceRefusal(raw)
+  if (spaceRefusal) {
+    return shape('known', spaceRefusal, 'error')
   }
   if (UNKNOWN_OUTCOME.test(raw)) {
     return shape('known', KNOWN_CODES['request-outcome-unknown'], 'error')

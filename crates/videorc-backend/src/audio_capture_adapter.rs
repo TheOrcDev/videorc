@@ -1676,13 +1676,20 @@ fn assemble_pcm(
                 pulse.place_delivery_stamped(packet.pts, packet.frames, DSHOW_DROPOUT_FRAMES);
         }
         let wanted = packet.frames * 8;
-        let deadline = Instant::now() + Duration::from_millis(100);
+        // FFmpeg logs the record and writes its PCM from different threads, so
+        // the PCM may trail it by as long as the packet may age (Pulse: the
+        // worker stopped on a loaded Linux desktop at 100 ms, retest 153).
+        let match_budget = max_capture_age(protocol);
+        let deadline = Instant::now() + match_budget;
         while queued.len() < wanted {
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                bail!("Capture PCM did not match its timestamp metadata within 100ms");
+                bail!(
+                    "Capture PCM did not match its timestamp metadata within {}ms",
+                    match_budget.as_millis()
+                );
             }
             match raw.recv_timeout(Duration::from_millis(5)) {
                 Ok(bytes) => queued.extend(bytes),
@@ -2609,6 +2616,72 @@ mod tests {
         // A protocol that expects separate clock records has no anchor here.
         let (result, frames) = run(CaptureProtocol::AvFoundation, ClockPair::sample().unwrap());
         assert!(result.unwrap_err().to_string().contains("anchor"));
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn pulse_pcm_may_trail_its_record_within_the_pulse_age_budget() {
+        // The PCM arrives 130 ms after its record: past the 100 ms that
+        // stopped the Linux worker under load, inside Pulse's 250 ms budget.
+        let late = Duration::from_millis(130);
+        let bytes: Vec<u8> = (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect();
+        let run = |protocol: CaptureProtocol, pair: ClockPair, records: Vec<String>| {
+            let (meta_tx, meta_rx) = mpsc::channel();
+            for record in records {
+                meta_tx.send(record).unwrap();
+            }
+            drop(meta_tx);
+            let (raw_tx, raw_rx) = mpsc::channel();
+            let bytes = bytes.clone();
+            let sender = thread::spawn(move || {
+                thread::sleep(late);
+                let _ = raw_tx.send(bytes);
+            });
+            let (out_tx, out_rx) = mpsc::sync_channel(4);
+            let stats = Arc::new(AudioCaptureStats::default());
+            let result = assemble_pcm(
+                protocol,
+                pair,
+                meta_rx,
+                raw_rx,
+                out_tx,
+                &AtomicBool::new(false),
+                &stats,
+            );
+            sender.join().unwrap();
+            (result, out_rx.try_iter().collect::<Vec<_>>())
+        };
+        let wall_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        let pts = i64::try_from(i128::from(wall_us - 10_000) * 48_000 / 1_000_000).unwrap();
+        let (result, frames) = run(
+            CaptureProtocol::Pulse,
+            ClockPair::sample().unwrap(),
+            vec![pcm(0, pts, 480)],
+        );
+        assert!(
+            result.as_ref().map_or_else(
+                |error| error.to_string().contains("stopped producing"),
+                |_| true
+            ),
+            "{result:?}"
+        );
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].samples, vec![0.25; 960]);
+        // macOS and Windows keep their 100 ms match budget.
+        let (result, frames) = run(
+            CaptureProtocol::AvFoundation,
+            pair(Instant::now()),
+            vec![metadata(), pcm(0, 0, 480)],
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("did not match its timestamp metadata within 100ms")
+        );
         assert!(frames.is_empty());
     }
 
