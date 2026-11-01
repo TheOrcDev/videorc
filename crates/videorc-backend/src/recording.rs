@@ -20487,11 +20487,18 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
         crate::system_audio_session::system_audio_capable(),
     );
     let params = session_params.as_ref();
+    // RTMP legs here are fifo-wrapped too: their "Recovery successful" is
+    // INFO, so without `level+info` a reconnected leg never shows as resumed.
+    let loglevel = if stream_targets.is_empty() {
+        "warning"
+    } else {
+        BRIDGE_FFMPEG_LOGLEVEL
+    };
     let mut args = vec![
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        loglevel.to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -34280,6 +34287,51 @@ mod tests {
     fn bridge_ffmpeg_tags_every_log_line_with_its_level() {
         let args = bridge_ffmpeg_base_args();
         assert_eq!(arg_value(&args, "-loglevel"), Some("level+info"));
+    }
+
+    #[test]
+    fn a_raw_bridge_with_stream_legs_logs_their_recoveries() {
+        // Linux record+stream (raw frames into one tee): the fifo legs print
+        // "Recovery successful" at INFO, so at `warning` a leg that reconnected
+        // stayed "Reconnecting…" until the stream ended.
+        let params = base_params(true, true);
+        let targets = vec![build_stream_url(&params.output.rtmp).unwrap()];
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let fifo_path = Path::new("/tmp/videorc-bridge-raw.yuv");
+        let mut vaapi = ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::LinuxVaapi);
+        vaapi.vaapi_device = Some(PathBuf::from("/dev/dri/renderD128"));
+        let software = ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::LinuxSoftware);
+        for encoder in [&vaapi, &software] {
+            let streaming = bridge_compositor_ffmpeg_args_with_encoder(
+                &capture,
+                &params,
+                Some(Path::new("/tmp/videorc-raw.mkv")),
+                &targets,
+                fifo_path,
+                EncoderBridgeVideoOutput::RawYuv420p,
+                encoder,
+            )
+            .unwrap();
+            assert!(streaming.iter().any(|arg| arg == "tee"), "{streaming:?}");
+            assert_eq!(arg_value(&streaming, "-loglevel"), Some("level+info"));
+
+            // A record-only session has no legs to recover: unchanged.
+            let record_only = bridge_compositor_ffmpeg_args_with_encoder(
+                &capture,
+                &params,
+                Some(Path::new("/tmp/videorc-raw.mkv")),
+                &[],
+                fifo_path,
+                EncoderBridgeVideoOutput::RawYuv420p,
+                encoder,
+            )
+            .unwrap();
+            assert_eq!(arg_value(&record_only, "-loglevel"), Some("warning"));
+        }
     }
 
     #[test]
