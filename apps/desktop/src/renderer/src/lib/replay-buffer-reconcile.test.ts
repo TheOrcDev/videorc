@@ -26,6 +26,28 @@ describe('replayBufferReconcileAction (plan 181 S4)', () => {
     expect(replayBufferReconcileAction(idle)).toBe('start')
   })
 
+  it('waits for the camera after a not-ready refusal, without spending a strike', () => {
+    // Launch: the ring is asked for before the camera preview delivers.
+    expect(replayBufferReconcileAction({ ...idle, waitingForCamera: true })).toBeNull()
+    expect(
+      replayBufferReconcileAction({ ...idle, waitingForCamera: true, failedStarts: 2 })
+    ).toBeNull()
+    // The camera's live edge clears the wait; the count was never touched.
+    expect(replayBufferReconcileAction({ ...idle, waitingForCamera: false })).toBe('start')
+    // Turning the switch off still stops a running ring.
+    expect(
+      replayBufferReconcileAction({
+        ...idle,
+        armed: false,
+        waitingForCamera: true,
+        replayState: 'on',
+        replayOnlyBuffer: true,
+        recordingReplayOnly: true,
+        recordingState: 'recording'
+      })
+    ).toBe('stop')
+  })
+
   it('waits while a Record or Go Live is in flight: the backend hands over itself', () => {
     expect(replayBufferReconcileAction({ ...idle, startPending: true })).toBeNull()
     expect(replayBufferReconcileAction({ ...idle, stopPending: true })).toBeNull()
