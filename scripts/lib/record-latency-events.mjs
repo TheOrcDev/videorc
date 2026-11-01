@@ -97,8 +97,14 @@ export function createRemoteAckWait(remote, { timeoutMs = 120000 } = {}) {
   let cancel
   const promise = new Promise((resolveEvent, rejectEvent) => {
     const onMessage = (raw) => {
-      const message = JSON.parse(String(raw))
-      if (message.event === 'remote.ack') {
+      let message
+      try {
+        message = JSON.parse(String(raw))
+      } catch {
+        // A frame that is not JSON is not the ack; the timeout still bounds the wait.
+        return
+      }
+      if (message && typeof message === 'object' && message.event === 'remote.ack') {
         if (!active) return
         cancel()
         resolveEvent(message.payload)

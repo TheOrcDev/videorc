@@ -337,9 +337,13 @@ async function main() {
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-      // The unified D3D11 session draws from the renderer's screen preview, so
-      // that mode lets the renderer start it.
-      ...(windowsPreviewMode === 'windows-d3d11' ? {} : { VIDEORC_DISABLE_AUTO_PREVIEW: '1' }),
+      // The unified D3D11 session starts with the renderer's session, so that
+      // mode keeps auto preview and only drops the source previews: a real
+      // camera's slow start holds the backend's ordered lane at launch, which
+      // expires the probe's scene commit or restarts the backend.
+      ...(windowsPreviewMode === 'windows-d3d11'
+        ? { VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1' }
+        : { VIDEORC_DISABLE_AUTO_PREVIEW: '1' }),
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_PREVIEW_LIFECYCLE_PROBE: '1',
       ...(windowsPreviewMode === 'windows-d3d11'

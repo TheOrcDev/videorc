@@ -120,6 +120,7 @@ import {
   BackendRuntimeOwner,
   backendRuntimeAcceptsBootstrap,
   claimDurableBackendPid,
+  observedExitedPid,
   requestBackendRuntimeTermination,
   settleBackendRuntimeExit,
   type OwnedBackendRuntime
@@ -467,6 +468,8 @@ import {
   resolveGlassStyle,
   solidWindowBase,
   WINDOW_HEADER_HEIGHT,
+  WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY,
+  WINDOWS_PREVIEW_TITLE_BAR_OVERLAY,
   windowGlassOptions,
   windowGroundForMode,
   type AppliedGlass,
@@ -3199,7 +3202,11 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   }
   window.on('close', (event) => {
     if (notesWindow === window) {
-      if (!notesWindowCloseFlushReady) {
+      // Electron reads a prevented window close during app.quit() as a
+      // cancelled quit, which on macOS leaves the app running with no
+      // windows and no backend. The quit path asked for the flush already
+      // (before-quit), so a close during the quit never prevents.
+      if (!notesWindowCloseFlushReady && !appIsQuitting) {
         event.preventDefault()
         requestNotesWindowCloseFlush(window)
         return
@@ -3277,6 +3284,26 @@ function requestNotesWindowCloseFlush(window: BrowserWindow): void {
     safeConsole.warn('Notes close flush timed out; closing with the last acknowledged save.')
     finishNotesWindowClose(window)
   }, 1_500)
+}
+
+/**
+ * Asks Notes to flush and settles once the window has closed: after its save
+ * acknowledgement, or after the 1.5 s flush timeout closes it with the last
+ * acknowledged save. The cap only covers a window that never closes.
+ */
+function flushNotesWindowBeforeQuit(capMs = 2_000): Promise<void> {
+  const window = notesWindow
+  if (!window || window.isDestroyed()) {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, capMs)
+    window.once('closed', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    requestNotesWindowCloseFlush(window)
+  })
 }
 
 function closeNotesWindow(message?: string): NotesWindowState {
@@ -4628,7 +4655,9 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
     font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; cursor: default;
     user-select: none; -webkit-user-select: none; -webkit-app-region: drag; }
   .drag-bar { position: fixed; top: 0; left: 0; right: 0; height: ${WINDOW_HEADER_HEIGHT.preview}px;
-    display: flex; align-items: center; padding: 0 12px 0 88px; /* the shared traffic-light gutter */
+    /* macOS: the shared traffic-light gutter. Windows draws its caption
+       buttons over the right end (window-glass.ts). */
+    display: flex; align-items: center; padding: 0 12px 0 ${isMac ? 88 : 12}px;
     border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; box-sizing: border-box; }
   .drag-bar .label { color: ${DARK_WINDOW_PALETTE.textSecondary}; font-size: 12px; font-weight: 600;
     white-space: nowrap; }
@@ -4696,8 +4725,8 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     minHeight: docked ? 1 : 208,
     title: WINDOW_NAMES.preview,
     // window-glass.ts: real material pinned dark and the traffic lights centred
-    // on the 28px strip on macOS; off macOS the standard frame and solid base
-    // keep the window draggable without renderer drag regions.
+    // on the 28px strip on macOS; Windows drops the OS title bar for caption
+    // buttons on the strip, so the strip and video drag the window there too.
     ...previewChrome.options,
     // A docked window stays hidden until the renderer answers the dock epoch
     // with a slot rect; showing it at the remembered FLOATING frame first would
@@ -4880,6 +4909,7 @@ function applyDockedPreviewChrome(window: BrowserWindow): void {
     window.setWindowButtonVisibility(false)
     window.setHasShadow(false)
   }
+  setWindowsPreviewCaptionButtonsVisible(window, false)
   window.setAlwaysOnTop(false)
   window.setIgnoreMouseEvents(true)
   previewWindowMouseEventsIgnored = true
@@ -4895,8 +4925,28 @@ function removeDockedPreviewChrome(window: BrowserWindow): void {
     window.setWindowButtonVisibility(true)
     window.setHasShadow(true)
   }
+  setWindowsPreviewCaptionButtonsVisible(window, true)
   if (previewWindowAlwaysOnTop) {
     window.setAlwaysOnTop(true, 'floating')
+  }
+}
+
+// The Windows twin of setWindowButtonVisibility: the Preview's caption buttons
+// (window-glass.ts) cannot be removed after creation, so docked they turn
+// transparent. Cosmetic only: a failed update never breaks placement.
+function setWindowsPreviewCaptionButtonsVisible(window: BrowserWindow, visible: boolean): void {
+  if (!isWindows) return
+  try {
+    window.setTitleBarOverlay(
+      visible
+        ? {
+            color: WINDOWS_PREVIEW_TITLE_BAR_OVERLAY.color,
+            symbolColor: WINDOWS_PREVIEW_TITLE_BAR_OVERLAY.symbolColor
+          }
+        : { ...WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY }
+    )
+  } catch (error) {
+    console.warn('[preview-window] could not update the caption buttons', error)
   }
 }
 
@@ -9948,10 +9998,17 @@ function finalizeBackendRuntimeExit(
   code: number | null,
   signal: NodeJS.Signals | null
 ): void {
+  // Only an observed exit proves the child pid dead. A stop that timed out
+  // after SIGKILL observed none, so that pid goes through the ledger probe
+  // like every other owned pid instead of losing its record.
   const settlement = settleBackendRuntimeExit(
     backendRuntimeOwner,
     runtime,
-    validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+    observedExitedPid(
+      validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+      code,
+      signal
+    ),
     (pid) => recordedBackendProcessMayStillBeOwned(runtime, pid)
   )
   for (const pid of settlement.confirmedDead) {
@@ -12870,7 +12927,7 @@ async function runSmokePreviewMotionCommand(
         input: { x: number; y: number; width: number; height: number }
       }
       const contentBounds = previewWindow.getContentBounds()
-      const windowBounds = previewWindow.getBounds()
+      const videoBounds = previewWindowVideoBounds(previewWindow)
       const physicalPoint = (rect: { x: number; y: number; width: number; height: number }) =>
         screen.dipToScreenPoint({
           x: Math.round(contentBounds.x + rect.x + rect.width / 2),
@@ -12879,14 +12936,13 @@ async function runSmokePreviewMotionCommand(
       return {
         prepared: true,
         inputPoint: physicalPoint(rects.input),
-        // The window's top edge: a synthetic drag anywhere in the client area
-        // (strip or video) does not move Preview on Windows, with the proof
-        // surface as much as with the presenter. That is tracked separately.
+        // A grab in the video, below the input target: it lands on Preview's
+        // own drag surface through the click-through presenter.
         dragPoint: screen.dipToScreenPoint({
-          x: Math.round(windowBounds.x + windowBounds.width / 2),
-          y: Math.round(windowBounds.y + 12)
+          x: Math.round(videoBounds.x + videoBounds.width / 2),
+          y: Math.round(videoBounds.y + videoBounds.height * 0.7)
         }),
-        initialBounds: windowBounds,
+        initialBounds: previewWindow.getBounds(),
         presenter,
         previewFocused: previewWindow.isFocused(),
         webContentsFocused: previewWindow.webContents.isFocused()
@@ -17048,9 +17104,17 @@ previewLifecycleEvidence.bindBeforeQuit(app, {
     accountSignInTransactions?.dispose()
     providerOAuthCallbacks?.dispose()
     cancelBackendRestart()
+    // Notes flushes its unsaved text before it closes. Ask now, while the
+    // backend shuts down, so the window closes itself ahead of the final
+    // quit instead of prevent-defaulting that quit away. The final quit also
+    // waits for that close: a backend that stops at once would otherwise
+    // close Notes before its save is acknowledged.
+    const notesFlushed = flushNotesWindowBeforeQuit()
     handleBackendBeforeQuit(event, backendQuitState, {
       stopBackend,
-      quit: () => app.quit(),
+      quit: () => {
+        void notesFlushed.then(() => app.quit())
+      },
       onFailure: (error) => {
         logBackend(
           'error',

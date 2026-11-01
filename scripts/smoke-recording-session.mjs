@@ -464,8 +464,13 @@ export function connectBackend(connection, timeoutMs) {
 export function request(ws, timeoutMs, method, params) {
   const id = `smoke-${Date.now()}-${Math.random().toString(16).slice(2)}`
   return new Promise((resolveRequest, rejectRequest) => {
-    const timer = setTimeout(() => {
+    const settle = () => {
+      clearTimeout(timer)
       ws.removeEventListener('message', onMessage)
+      ws.removeEventListener('close', onClose)
+    }
+    const timer = setTimeout(() => {
+      settle()
       rejectRequest(new Error(`Timed out waiting for ${method}.`))
     }, timeoutMs)
 
@@ -474,8 +479,7 @@ export function request(ws, timeoutMs, method, params) {
       try {
         message = JSON.parse(event.data)
       } catch (error) {
-        clearTimeout(timer)
-        ws.removeEventListener('message', onMessage)
+        settle()
         rejectRequest(error)
         return
       }
@@ -483,16 +487,22 @@ export function request(ws, timeoutMs, method, params) {
         return
       }
 
-      clearTimeout(timer)
-      ws.removeEventListener('message', onMessage)
+      settle()
       if (message.ok) {
         resolveRequest(message.payload)
       } else {
         rejectRequest(new Error(message.error?.message ?? `${method} failed.`))
       }
     }
+    // A backend that restarts (a mutating command past its execution
+    // contract) closes the socket; no answer can follow.
+    const onClose = () => {
+      settle()
+      rejectRequest(new Error(`Backend connection closed before ${method} answered.`))
+    }
 
     ws.addEventListener('message', onMessage)
+    ws.addEventListener('close', onClose)
     ws.send(JSON.stringify({ id, method, params }))
   })
 }

@@ -35,6 +35,12 @@ export function notifyOnceId(
     state.set(key, { shownAt: now, id: previous.id })
     return previous.id
   }
+  // A new key is the moment to forget keys whose window has passed: backend
+  // errors and per-take notices key on free text, so an unpruned map would
+  // grow for the life of the window.
+  for (const [staleKey, entry] of state) {
+    if (now - entry.shownAt >= windowMs) state.delete(staleKey)
+  }
   sequence += 1
   const id = `once:${key}:${sequence}`
   state.set(key, { shownAt: now, id })

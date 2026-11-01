@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -3792,6 +3792,39 @@ fn replay_auto_start_requested(replay_only: bool, params: &StartSessionParams) -
     replay_only && params.replay.as_ref().is_some_and(|replay| replay.auto)
 }
 
+/// An automatic ring on the bridge waits for a visible camera's first frame:
+/// the bridge refuses a scene source with no frames, and the ring is the one
+/// start nobody pressed, so it can wait instead of failing.
+fn automatic_ring_waits_for_camera(
+    automatic_ring: bool,
+    bridge_ruled_out: bool,
+    scene: &Scene,
+    has_camera_frame: bool,
+) -> bool {
+    automatic_ring
+        && !bridge_ruled_out
+        && !has_camera_frame
+        && scene
+            .sources
+            .iter()
+            .any(|source| source.visible && source.kind == SceneSourceKind::Camera)
+}
+
+/// The scene a session composes: the request's own, else the one its capture
+/// config describes.
+fn requested_session_scene(params: &StartSessionParams) -> Scene {
+    params.scene.clone().unwrap_or_else(|| {
+        scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: params.sources.clone(),
+            layout: params.layout.clone(),
+            video: Some(params.output.video.clone()),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        })
+    })
+}
+
 /// Plan 181: a buffer-only session composes exactly like a record-only
 /// session (same bridge, encoder posture, overlay plan) and writes no file;
 /// the replay ring is its only output. The request shape is kept in the
@@ -3823,6 +3856,17 @@ async fn start_session_with_timeline(
         replay_only.then(|| crate::replay_buffer::begin_start_in_flight(&state));
     if let Some(replay) = params.replay.as_mut() {
         replay.seconds = crate::replay_buffer::clamp_seconds(replay.seconds);
+    }
+    // Decided before admission, the probes and the microphone: an automatic
+    // ring whose camera has no frame yet would be refused at the bridge's
+    // source wait anyway, after holding the ordered lane for seconds.
+    if automatic_ring_waits_for_camera(
+        replay_auto_start_requested(replay_only, &params),
+        compositor_encoder_bridge_ruled_out(&params),
+        &requested_session_scene(&params),
+        preview_camera_latest_frame_info(&state).await.is_some(),
+    ) {
+        return Err(crate::replay_buffer::AutoStartSourcesNotReady.into());
     }
     // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
     // over here, so no caller meets "A capture session is already running"
@@ -5026,6 +5070,29 @@ async fn start_session_with_timeline(
             .lock()
             .await
             .release_native_session_output(&session_id);
+        // A Record click right after launch queues the renderer's
+        // preview.screen.start behind this session.start; without this the
+        // startup barrier refused with 0 fresh screen frames.
+        if windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            windows_d3d11_media_mode,
+            use_encoder_bridge,
+            recording_encoder_bridge_video_output(
+                params.output.record_enabled,
+                params.output.stream_enabled,
+            ),
+        ) {
+            let screen = ensure_selected_preview_screen_live(&state, &params, &ffmpeg_path).await;
+            anyhow::ensure!(
+                matches!(screen.state, crate::protocol::PreviewScreenState::Live),
+                "Cannot start: the GPU recording path fell back and the selected Screen could not be prepared ({:?}): {}",
+                screen.state,
+                screen
+                    .message
+                    .as_deref()
+                    .unwrap_or("capture did not become live")
+            );
+        }
     }
 
     // The legacy graph's only live layer: the full-canvas RGBA FIFO. It exists
@@ -10128,6 +10195,20 @@ async fn stop_kill_fallback(
     let _ = send_process_signal(pid, "KILL").await;
 }
 
+/// Performance check only: ends the active benchmark session's FFmpeg without
+/// waiting for its encoder backlog. Nobody keeps a benchmark file, and a
+/// below-realtime software encoder can need 13 s to flush (UHD 620 field log)
+/// — longer than the user's Record waits for the capture slot. Refuses any
+/// session that is not a benchmark.
+pub(crate) async fn kill_benchmark_ffmpeg(state: &AppState) -> bool {
+    let pid = match state.recording.lock().await.as_ref() {
+        Some(active) if active.performance_check => active.pid,
+        _ => return false,
+    };
+    mark_ffmpeg_stop_escalated(state, pid).await;
+    send_process_signal(pid, "KILL").await.is_ok()
+}
+
 async fn mark_ffmpeg_stop_escalated(state: &AppState, pid: u32) {
     if let Some(active) = state.recording.lock().await.as_ref()
         && active.pid == pid
@@ -10281,7 +10362,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
     let mut microphone_generation = 0;
-    let mut microphone_reopen_attempts = 0_u32;
+    let microphone_reopen_attempts = Arc::new(AtomicU32::new(0));
     loop {
         ticker.tick().await;
         let counters = {
@@ -10359,16 +10440,15 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             );
             if microphone_auto_reopen_due(
                 source_loss_after_ms.reason,
-                microphone_reopen_attempts,
-                cfg!(target_os = "linux"),
+                microphone_reopen_attempts.load(Ordering::Acquire),
+                cfg!(any(target_os = "linux", target_os = "windows")),
             ) {
-                microphone_reopen_attempts += 1;
                 tokio::spawn(reopen_stopped_microphone(
                     state.clone(),
                     session_id.clone(),
                     source_loss_after_ms.device_name.clone(),
                     source_loss_after_ms.after_ms,
-                    microphone_reopen_attempts,
+                    Arc::clone(&microphone_reopen_attempts),
                 ));
             }
         }
@@ -10607,7 +10687,10 @@ fn emit_microphone_input_lost_health_event(
 /// session recorded and streamed 27 minutes of silence. Such a stop now opens
 /// the same microphone again through the path that choosing it again uses, a
 /// bounded number of times per session. A timeline loss keeps its own
-/// re-anchor (plan 076); other platforms keep their behaviour.
+/// re-anchor (plan 076). The Windows capture worker stops the same way: on
+/// the field Intel SST microphone it refused one packet's clock record 32 s
+/// into an idle session while the post-recording quality check ran, and the
+/// session stayed silent. macOS keeps its behaviour.
 const MICROPHONE_AUTO_REOPEN_LIMIT: u32 = 5;
 const MICROPHONE_AUTO_REOPEN_DELAY: Duration = Duration::from_secs(1);
 const MICROPHONE_REOPENED_CODE: &str = "microphone-input-recovered";
@@ -10622,60 +10705,84 @@ fn microphone_auto_reopen_due(
         && attempts < MICROPHONE_AUTO_REOPEN_LIMIT
 }
 
+/// The next reopen attempt's number, or `None` once the session's bounded
+/// attempts are spent. Counted here, not per source-loss event: a reopen
+/// whose worker dies during the switch itself (the field Intel SST
+/// microphone refused its clock record two seconds after it came back)
+/// never went live, so it raises no new loss event; waiting for one left the
+/// session silent after "attempt 1 of 5".
+fn next_microphone_reopen_attempt(attempts: &AtomicU32) -> Option<u32> {
+    let mut taken = attempts.load(Ordering::Acquire);
+    loop {
+        if taken >= MICROPHONE_AUTO_REOPEN_LIMIT {
+            return None;
+        }
+        match attempts.compare_exchange_weak(taken, taken + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return Some(taken + 1),
+            Err(current) => taken = current,
+        }
+    }
+}
+
 /// Opens the session's confirmed microphone again after its capture stopped,
-/// unless it already came back, the user is changing it, or it is gone.
+/// unless it already came back, the user is changing it, or it is gone. A
+/// failed reopen is tried again after the same delay, up to the session's
+/// limit.
 async fn reopen_stopped_microphone(
     state: AppState,
     session_id: String,
     device_name: String,
     stopped_after_ms: u64,
-    attempt: u32,
+    attempts: Arc<AtomicU32>,
 ) {
-    tokio::time::sleep(MICROPHONE_AUTO_REOPEN_DELAY).await;
-    let Ok(sources) = crate::live_source_switch::get(&state, &session_id).await else {
-        return;
-    };
-    let Some(device_id) = sources.confirmed.microphone_id.clone() else {
-        return;
-    };
-    let lost = sources.health.iter().any(|health| {
-        health.kind == crate::live_source_switch::SourceKind::Microphone
-            && health.health == crate::live_source_switch::SourceHealth::Unavailable
-    });
-    if !lost || sources.pending.is_some() {
-        return;
-    }
-    let request = crate::live_source_switch::SourceSwitchParams {
-        session_id: session_id.clone(),
-        request_id: format!("microphone-reopen-{attempt}-{}", Uuid::new_v4()),
-        expected_source_revision: sources.source_revision,
-        kind: crate::live_source_switch::SourceKind::Microphone,
-        device_id: Some(device_id),
-        protected_overlay_window_ids: Vec::new(),
-    };
-    let reopened = crate::live_source_switch::reopen_microphone(&state, request)
-        .await
-        .is_ok_and(|after| {
-            after.health.iter().any(|health| {
-                health.kind == crate::live_source_switch::SourceKind::Microphone
-                    && matches!(
-                        health.health,
-                        crate::live_source_switch::SourceHealth::Ready
-                            | crate::live_source_switch::SourceHealth::Starting
-                    )
-            })
+    while let Some(attempt) = next_microphone_reopen_attempt(&attempts) {
+        tokio::time::sleep(MICROPHONE_AUTO_REOPEN_DELAY).await;
+        let Ok(sources) = crate::live_source_switch::get(&state, &session_id).await else {
+            return;
+        };
+        let Some(device_id) = sources.confirmed.microphone_id.clone() else {
+            return;
+        };
+        let lost = sources.health.iter().any(|health| {
+            health.kind == crate::live_source_switch::SourceKind::Microphone
+                && health.health == crate::live_source_switch::SourceHealth::Unavailable
         });
-    if reopened {
-        let message = microphone_reopened_message(&device_name, stopped_after_ms);
-        state.emit_log("info", &message);
-        let _ = emit_health_event(
-            &state,
-            Some(&session_id),
-            HealthLevel::Info,
-            MICROPHONE_REOPENED_CODE,
-            &message,
-        );
-    } else {
+        if !lost || sources.pending.is_some() {
+            return;
+        }
+        let request = crate::live_source_switch::SourceSwitchParams {
+            session_id: session_id.clone(),
+            request_id: format!("microphone-reopen-{attempt}-{}", Uuid::new_v4()),
+            expected_source_revision: sources.source_revision,
+            kind: crate::live_source_switch::SourceKind::Microphone,
+            device_id: Some(device_id),
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let reopened = crate::live_source_switch::reopen_microphone(&state, request)
+            .await
+            .is_ok_and(|after| {
+                after.health.iter().any(|health| {
+                    health.kind == crate::live_source_switch::SourceKind::Microphone
+                        && matches!(
+                            health.health,
+                            crate::live_source_switch::SourceHealth::Ready
+                                | crate::live_source_switch::SourceHealth::Starting
+                        )
+                })
+            });
+        if reopened {
+            let message = microphone_reopened_message(&device_name, stopped_after_ms);
+            state.emit_log("info", &message);
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                MICROPHONE_REOPENED_CODE,
+                &message,
+            );
+            return;
+        }
         state.emit_log(
             "warn",
             format!(
@@ -16478,36 +16585,7 @@ async fn prepare_source_iso_selected_capture(
                 .await
             }
         },
-        async {
-            let status = crate::preview_screen::preview_screen_status(state).await;
-            let current = crate::preview_screen::preview_screen_frame_source(state).await;
-            let selected = params
-                .sources
-                .window_id
-                .as_ref()
-                .or(params.sources.screen_id.as_ref());
-            if status.state == crate::protocol::PreviewScreenState::Live
-                && current
-                    .as_ref()
-                    .and_then(|source| source.source_key())
-                    .is_some_and(|key| selected == Some(&key.id))
-            {
-                status
-            } else {
-                crate::preview_screen::start_preview_screen(
-                    state.clone(),
-                    crate::protocol::PreviewScreenStartParams {
-                        sources: params.sources.clone(),
-                        video: params.output.video.clone(),
-                        protected_overlay_window_ids:
-                            crate::preview_screen::source_iso_protected_overlay_window_ids(state)
-                                .await,
-                        ffmpeg_path: Some(ffmpeg_path.to_owned()),
-                    },
-                )
-                .await
-            }
-        }
+        ensure_selected_preview_screen_live(state, params, ffmpeg_path)
     );
     anyhow::ensure!(
         matches!(camera.state, crate::protocol::PreviewCameraState::Live),
@@ -16528,6 +16606,41 @@ async fn prepare_source_iso_selected_capture(
             .unwrap_or("capture did not become live")
     );
     Ok(())
+}
+
+/// Starts the selected Screen/Window preview unless it is already live on that
+/// source; a healthy generation is reused by its existing owner.
+async fn ensure_selected_preview_screen_live(
+    state: &AppState,
+    params: &StartSessionParams,
+    ffmpeg_path: &str,
+) -> crate::protocol::PreviewScreenStatus {
+    let status = crate::preview_screen::preview_screen_status(state).await;
+    let current = crate::preview_screen::preview_screen_frame_source(state).await;
+    let selected = params
+        .sources
+        .window_id
+        .as_ref()
+        .or(params.sources.screen_id.as_ref());
+    if status.state == crate::protocol::PreviewScreenState::Live
+        && current
+            .as_ref()
+            .and_then(|source| source.source_key())
+            .is_some_and(|key| selected == Some(&key.id))
+    {
+        return status;
+    }
+    crate::preview_screen::start_preview_screen(
+        state.clone(),
+        crate::protocol::PreviewScreenStartParams {
+            sources: params.sources.clone(),
+            video: params.output.video.clone(),
+            protected_overlay_window_ids:
+                crate::preview_screen::source_iso_protected_overlay_window_ids(state).await,
+            ffmpeg_path: Some(ffmpeg_path.to_owned()),
+        },
+    )
+    .await
 }
 
 fn recording_startup_source_requirements(scene: &Scene) -> CompositorStartupSourceRequirements {
@@ -16811,6 +16924,20 @@ fn windows_d3d11_screen_preflight_candidate(
         && windows_d3d11_display_camera_layout(&params.layout.layout_preset).is_some()
 }
 
+/// The source preflight skips the screen preview when the D3D11 path will
+/// capture the display itself. A bridge session that then falls back from that
+/// path composites the screen preview instead, so it must start it first.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_fallback_needs_screen_preview(
+    params: &StartSessionParams,
+    mode: WindowsD3d11MediaMode,
+    use_encoder_bridge: bool,
+    requested_video_output: EncoderBridgeVideoOutput,
+) -> bool {
+    use_encoder_bridge
+        && windows_d3d11_screen_preflight_candidate(params, mode, requested_video_output)
+}
+
 /// The legacy-path choices `should_use_compositor_encoder_bridge` makes from
 /// the request alone, before it waits on any source. Past them the session
 /// either takes the bridge or refuses to start, never the legacy path.
@@ -16856,16 +16983,7 @@ async fn should_use_compositor_encoder_bridge(
     if compositor_encoder_bridge_ruled_out(params) {
         return Ok(false);
     }
-    let scene = params.scene.clone().unwrap_or_else(|| {
-        scene_from_capture_config(SceneConfigParams {
-            transition_ms: None,
-            sources: params.sources.clone(),
-            layout: params.layout.clone(),
-            video: Some(params.output.video.clone()),
-            background: None,
-            protected_overlay_window_ids: Vec::new(),
-        })
-    });
+    let scene = requested_session_scene(params);
     let screen_image_usable = stream_screen_image_usable(active_screen);
     #[cfg(target_os = "windows")]
     let d3d11_screen_source_authoritative = windows_d3d11_screen_preflight_candidate(
@@ -17291,13 +17409,10 @@ pub(crate) fn graphics_adapter_driver_identity() -> String {
 #[cfg(target_os = "windows")]
 fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIFactory1,
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIDevice,
+        IDXGIFactory1,
     };
-
-    // IID_ID3D11Device from d3d11.h. CheckInterfaceSupport only needs this
-    // GUID, so Plan 039 does not widen the windows crate feature set.
-    const IID_ID3D11_DEVICE: windows::core::GUID =
-        windows::core::GUID::from_u128(0xdb6f6ddb_ac77_4e88_8253_819df9bbf140);
+    use windows::core::Interface;
 
     let windows_error_code =
         |error: windows::core::Error| format!("hresult-{:08x}", error.code().0 as u32);
@@ -17316,7 +17431,11 @@ fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
         if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
             continue;
         }
-        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IID_ID3D11_DEVICE) }
+        // DXGI answers CheckInterfaceSupport only for IDXGIDevice and D3D10
+        // GUIDs; ID3D11Device always returns DXGI_ERROR_UNSUPPORTED, which made
+        // every identity a fresh non-cacheable UUID. Since WDDM 2.3 all UMDs in
+        // a driver package share this one version.
+        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
             .map_err(windows_error_code)?;
         identities.push(WindowsGraphicsAdapterDriverIdentity {
             adapter_luid: (u64::from(description.AdapterLuid.HighPart as u32) << 32)
@@ -17927,13 +18046,25 @@ async fn resolve_windows_recordable_video(
     if !params.output.record_enabled || params.output.stream_enabled {
         return None;
     }
+    resolve_windows_record_only_video(state, ffmpeg_path, &params.output.video).await
+}
+
+/// The record-only canvas for `requested`, cached per profile. A record-only
+/// session's encoder topology is the one shared profile, so the probe needs
+/// nothing else from the request (the startup prewarm calls this directly).
+#[cfg(target_os = "windows")]
+async fn resolve_windows_record_only_video(
+    state: &AppState,
+    ffmpeg_path: &str,
+    requested: &VideoSettings,
+) -> Option<WindowsRecordableVideo> {
     if !matches!(
         recording_encoder_bridge_video_output(true, false),
         EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
         return None;
     }
-    let requested = params.output.video.clone();
+    let requested = requested.clone();
     let identity = graphics_adapter_driver_identity();
     // Plan 195 S5: this machine's own measured verdict, when it has one.
     let verdict_cap =
@@ -17980,15 +18111,11 @@ async fn resolve_windows_recordable_video(
     let mut candidates = vec![requested.clone()];
     candidates.extend(windows_recordable_video_rungs(&requested));
     for candidate in candidates {
-        let mut candidate_params = params.clone();
-        candidate_params.output.video = candidate.clone();
-        let accepted = match encoder_output_topology_plan_from_session(&candidate_params) {
-            Ok(plan) => matches!(
-                probe_windows_media_foundation_topology(ffmpeg_path, &plan, &identity).await,
-                MediaFoundationTopologyProbe::Passed { .. }
-            ),
-            Err(_) => false,
-        };
+        let plan = EncoderOutputTopologyPlan::shared(candidate.clone());
+        let accepted = matches!(
+            probe_windows_media_foundation_topology(ffmpeg_path, &plan, &identity).await,
+            MediaFoundationTopologyProbe::Passed { .. }
+        );
         verdicts.push((candidate, accepted));
         if accepted {
             break;
@@ -18362,6 +18489,65 @@ struct WindowsMfRejectionStore {
 #[cfg(target_os = "windows")]
 static WINDOWS_MF_PERSISTED_REJECTIONS: std::sync::OnceLock<WindowsMfRejectionStore> =
     std::sync::OnceLock::new();
+
+/// The profile the launch replay ring most likely asks for: the remembered
+/// capture's (Record and Go Live save it), else the renderer's default 1080p30.
+#[cfg(any(test, target_os = "windows"))]
+fn replay_ring_prewarm_video(remembered: Option<&StartSessionParams>) -> VideoSettings {
+    remembered.map_or_else(
+        || video_preset_defaults(VideoPreset::Tutorial1080p30),
+        |params| params.output.video.clone(),
+    )
+}
+
+/// The replay ring starts on its own at launch (plan 181), and its first
+/// start paid the cold Windows encoder probes while it held the ordered
+/// command lane: the recordable-video probe and the first in-process Media
+/// Foundation encoder open (3.3 s against 1.55 s warm on a GTX 1650, right
+/// behind the camera start). Warm both in the background at startup, through
+/// the same caches the start reads: the record-only canvas, then the ring's
+/// encoded-bridge decision for it. Best effort: a start that lands first
+/// probes for itself, and another profile simply misses the cache.
+#[cfg(target_os = "windows")]
+pub(crate) fn spawn_windows_replay_ring_prewarm(state: &AppState) {
+    let remembered = state
+        .database
+        .load_setting::<StartSessionParams>("last_capture_session")
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                "Could not load the remembered capture for the encoder prewarm: {error}"
+            );
+            None
+        });
+    let requested = replay_ring_prewarm_video(remembered.as_ref());
+    let state = state.clone();
+    tokio::spawn(async move {
+        let started = Instant::now();
+        let ffmpeg_path = resolve_ffmpeg_path(None);
+        let Some(selected) =
+            resolve_windows_record_only_video(&state, &ffmpeg_path, &requested).await
+        else {
+            return;
+        };
+        let decision = resolve_windows_encoded_bridge_decision(
+            &ffmpeg_path,
+            &EncoderOutputTopologyPlan::shared(selected.video.clone()),
+            recording_encoder_bridge_video_output(true, false),
+        )
+        .await;
+        tracing::info!(
+            "[encoder-prewarm] replay ring profile {}x{}@{} warmed in {}ms ({})",
+            selected.video.width,
+            selected.video.height,
+            selected.video.fps,
+            started.elapsed().as_millis(),
+            match &decision {
+                Ok(decision) => format!("{:?}", decision.effective_encode_backend),
+                Err(error) => format!("decision failed: {error}"),
+            }
+        );
+    });
+}
 
 #[cfg(target_os = "windows")]
 pub(crate) fn load_windows_mf_rejection_store(database: &Database) {
@@ -27139,9 +27325,22 @@ mod tests {
             MICROPHONE_AUTO_REOPEN_LIMIT,
             true
         ));
-        // A timeline loss keeps its own re-anchor; other platforms are unchanged.
+        // A timeline loss keeps its own re-anchor; macOS is unchanged.
         assert!(!microphone_auto_reopen_due(TimelineRejected, 0, true));
         assert!(!microphone_auto_reopen_due(CaptureStopped, 0, false));
+        // The reopen task counts its own attempts, so a worker that dies
+        // during the switch (no new loss event) is still tried again, and
+        // the session's limit holds across loss events.
+        let attempts = AtomicU32::new(0);
+        let taken: Vec<u32> = std::iter::from_fn(|| next_microphone_reopen_attempt(&attempts))
+            .take(10)
+            .collect();
+        assert_eq!(taken, vec![1, 2, 3, 4, 5]);
+        assert!(!microphone_auto_reopen_due(
+            CaptureStopped,
+            attempts.load(Ordering::Acquire),
+            true
+        ));
         // The `-recovered` code clears the renderer's "stopped" notice.
         assert!(MICROPHONE_REOPENED_CODE.ends_with("-recovered"));
         assert_eq!(
@@ -29822,6 +30021,35 @@ mod tests {
             windows_graphics_adapter_driver_identity_material(Vec::new()),
             None
         );
+    }
+
+    /// UHD 620 field log: CheckInterfaceSupport(ID3D11Device) always returned
+    /// DXGI_ERROR_UNSUPPORTED, so every call minted a fresh UUID identity and
+    /// no MF rejection, perf-check verdict or Quick Sync detection ever held.
+    /// CI runners without a hardware adapter may still fail with
+    /// `no-hardware-dxgi-adapter`; any other error leaves the identity
+    /// uncacheable and is a bug.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_graphics_adapter_driver_identity_query_is_supported_and_stable() {
+        match query_windows_graphics_adapter_driver_identity() {
+            Ok(identity) => {
+                assert_eq!(
+                    graphics_adapter_driver_identity(),
+                    identity,
+                    "a queryable adapter identity must be stable across calls"
+                );
+                assert_eq!(
+                    crate::screen_capture::graphics_adapter_driver_identity(),
+                    identity,
+                    "screen capture and recording must key verdicts on the same identity"
+                );
+            }
+            Err(reason) => assert_eq!(
+                reason, "no-hardware-dxgi-adapter",
+                "only an adapter-free host may fail the driver identity query"
+            ),
+        }
     }
 
     #[test]
@@ -37873,6 +38101,42 @@ mod tests {
     }
 
     #[test]
+    fn windows_d3d11_fallback_prepares_the_screen_the_preflight_skipped() {
+        // Field UHD 620 laptop: the preflight trusted D3D11 for the screen,
+        // D3D11 startup failed, and the legacy compositor had no screen frames.
+        let mut params = base_params(false, true);
+        params.sources.screen_id = Some("screen:dxgi:00000000000003f1:2".to_string());
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        let media_foundation = EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs;
+        assert!(windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            true,
+            media_foundation,
+        ));
+        // The preflight already waited for the screen preview here.
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Disabled,
+            true,
+            media_foundation,
+        ));
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            true,
+            EncoderBridgeVideoOutput::RawYuv420p,
+        ));
+        // The FFmpeg legacy path captures the screen itself.
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            false,
+            media_foundation,
+        ));
+    }
+
+    #[test]
     fn windows_d3d11_fallback_diagnostics_name_the_legacy_path() {
         let diagnostics = windows_d3d11_fallback_diagnostics(
             WindowsD3d11MediaMode::Automatic,
@@ -39489,6 +39753,97 @@ mod tests {
                 .is_none()
         );
         assert!(session_start_failed_logs(&database, session_id).is_empty());
+    }
+
+    #[test]
+    fn the_ring_prewarm_uses_the_remembered_profile_else_the_default_1080p30() {
+        let default = replay_ring_prewarm_video(None);
+        assert_eq!(
+            (
+                default.width,
+                default.height,
+                default.fps,
+                default.bitrate_kbps
+            ),
+            (1920, 1080, 30, 6000),
+            "the renderer's default profile (tutorial-1080p30)"
+        );
+        let mut remembered = base_params(true, false);
+        remembered.output.video = video_preset_defaults(VideoPreset::Tutorial1440p30);
+        assert_eq!(
+            replay_ring_prewarm_video(Some(&remembered)),
+            remembered.output.video
+        );
+    }
+
+    #[test]
+    fn a_record_only_session_probes_the_one_shared_profile() {
+        // The startup prewarm builds this plan from the profile alone; it must
+        // be the plan a record-only start builds from the full request.
+        let params = base_params(true, false);
+        assert_eq!(
+            encoder_output_topology_plan_from_session(&params).unwrap(),
+            EncoderOutputTopologyPlan::shared(params.output.video.clone())
+        );
+    }
+
+    #[test]
+    fn only_an_automatic_bridge_ring_waits_for_a_visible_cameras_first_frame() {
+        let mut params = base_params(true, false);
+        let camera_scene = requested_session_scene(&params);
+        assert!(automatic_ring_waits_for_camera(
+            true,
+            false,
+            &camera_scene,
+            false
+        ));
+        assert!(
+            !automatic_ring_waits_for_camera(true, false, &camera_scene, true),
+            "a camera with a frame starts the ring"
+        );
+        assert!(
+            !automatic_ring_waits_for_camera(false, false, &camera_scene, false),
+            "Record and a ring the user turned on keep the bridge's own source wait"
+        );
+        assert!(
+            !automatic_ring_waits_for_camera(true, true, &camera_scene, false),
+            "the legacy path captures the camera itself"
+        );
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        assert!(
+            !automatic_ring_waits_for_camera(true, false, &requested_session_scene(&params), false),
+            "a scene without a visible camera never waits for one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_automatic_ring_without_camera_frames_is_refused_before_admission() {
+        let state = test_state();
+        let mut params = base_params(true, false);
+        params.output.record_enabled = false;
+        params.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: true,
+        });
+        let error = start_session(state.clone(), params)
+            .await
+            .expect_err("the camera has no frame");
+        assert!(
+            error
+                .downcast_ref::<crate::replay_buffer::AutoStartSourcesNotReady>()
+                .is_some(),
+            "typed so the renderer waits instead of counting a failed start: {error:#}"
+        );
+        assert!(state.recording.lock().await.is_none());
+        assert!(
+            state
+                .database
+                .list_session_items_page(None, 20)
+                .unwrap()
+                .items
+                .is_empty(),
+            "no Library row for a start that never ran"
+        );
     }
 
     #[test]

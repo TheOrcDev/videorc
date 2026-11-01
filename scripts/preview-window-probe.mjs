@@ -145,7 +145,11 @@ async function main() {
             VIDEORC_WINDOWS_D3D11_MEDIA: '1',
             VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
             VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts',
-            VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1'
+            VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1',
+            // As in the D3D11 smoke: no renderer source previews. A real
+            // camera's slow start holds the backend's ordered lane at launch,
+            // which expires the probe's scene commit or restarts the backend.
+            VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1'
           }
         : {})
     },
@@ -158,12 +162,15 @@ async function main() {
   })
   smoke = launched.connections['preview-motion-ready']
 
-  // Give the production CAMetalLayer a deterministic compositor target. The
-  // older helper-only probe could validate window geometry before any pixels
-  // existed; the in-process drawable contract must exercise an actual present.
-  await smokeCommandWhenShellReady('enable-synthetic-source', { settleMs: 250 })
-  await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
   if (expectWindowsD3d11) {
+    // No synthetic source here: its test-pattern scene commit can land after
+    // the probe's ScreenOnly commit (each socket has its own ordered lane),
+    // leaving every preview frame source-stalled. This is the first command,
+    // so it waits for the shell the way the synthetic source does below.
+    await smokeCommandWhenShellReady('open-tab', {
+      tab: 'studio',
+      waitFor: '[data-videorc-preview-card]'
+    })
     const screenId = await configureWindowsD3d11ProbeSources({
       backendConnection: launched.connections['backend-ready'],
       smokeCommand,
@@ -172,6 +179,12 @@ async function main() {
     console.log(`Preview window probe feeds the D3D11 media path from ${screenId}.`)
     return runWindowsD3d11WindowProbe()
   }
+
+  // Give the production CAMetalLayer a deterministic compositor target. The
+  // older helper-only probe could validate window geometry before any pixels
+  // existed; the in-process drawable contract must exercise an actual present.
+  await smokeCommandWhenShellReady('enable-synthetic-source', { settleMs: 250 })
+  await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
 
   // --- Open: surface session created at the window's content rect ---------------
   const opened = await smokeCommand('preview-window-open')
@@ -1048,7 +1061,7 @@ async function runWindowsD3d11WindowProbe() {
   const inputProbe = await smokeCommand('windows-preview-os-input-probe', {
     action: 'prepare'
   })
-  // Focus is read before the drag, which moves it to the window frame.
+  // Focus is read before the drag, which starts the OS move loop.
   runWindowsOsInputProbe(inputProbe, 'type')
   const inputResult = await waitFor(
     async () => smokeCommand('windows-preview-os-input-probe', { action: 'read' }),
@@ -1073,7 +1086,7 @@ async function runWindowsD3d11WindowProbe() {
   )
   assertProbe(
     dragResult.ok,
-    'input: a real Win32 drag on the window frame moves Preview with the presenter claimed',
+    'input: a real Win32 drag in the video moves Preview with the presenter claimed',
     JSON.stringify(dragResult.last)
   )
   if (inputResult.last) {

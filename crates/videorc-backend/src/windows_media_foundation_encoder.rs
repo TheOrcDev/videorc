@@ -261,6 +261,8 @@ pub struct MediaFoundationH264Encoder {
     /// waits feed [`RECORDING_FRAME_ACCOUNTING`].
     accounts_session_frames: bool,
     input_credit_timeouts: u64,
+    /// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame.
+    stream_changes: StreamChangeBudget,
     drained: bool,
     mf_started: bool,
     com_started: bool,
@@ -448,6 +450,8 @@ pub(crate) struct MediaFoundationD3d11H264Encoder {
     submitted_pts: VecDeque<i64>,
     last_output_pts: Option<i64>,
     started_at: Instant,
+    /// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame.
+    stream_changes: StreamChangeBudget,
     drained: bool,
     mf_started: bool,
     com_started: bool,
@@ -806,6 +810,7 @@ impl MediaFoundationH264Encoder {
             saw_first_input_credit: false,
             accounts_session_frames: false,
             input_credit_timeouts: 0,
+            stream_changes: StreamChangeBudget::default(),
             drained: false,
             mf_started,
             com_started,
@@ -1069,7 +1074,7 @@ impl MediaFoundationH264Encoder {
         while Instant::now() < deadline {
             match self.next_event()? {
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
-                    output.push(self.process_one_output()?);
+                    output.extend(self.process_one_output()?);
                 }
                 Some(event_type) if event_type == METransformDrainComplete.0 as u32 => {
                     drain_complete = true;
@@ -1110,7 +1115,7 @@ impl MediaFoundationH264Encoder {
                     return Ok((output, true));
                 }
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
-                    output.push(self.process_one_output()?);
+                    output.extend(self.process_one_output()?);
                 }
                 Some(_) => {}
                 None => thread::sleep(EVENT_POLL_INTERVAL),
@@ -1135,7 +1140,7 @@ impl MediaFoundationH264Encoder {
         while Instant::now() < deadline {
             match self.next_event()? {
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
-                    output.push(self.process_one_output()?);
+                    output.extend(self.process_one_output()?);
                     if self
                         .d3d11_input
                         .as_ref()
@@ -1175,7 +1180,7 @@ impl MediaFoundationH264Encoder {
         while Instant::now() < deadline {
             match self.next_event()? {
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
-                    output.push(self.process_one_output()?);
+                    output.extend(self.process_one_output()?);
                     if self
                         .d3d11_cpu_upload
                         .as_ref()
@@ -1203,7 +1208,7 @@ impl MediaFoundationH264Encoder {
         let mut output = Vec::new();
         while let Some(event_type) = self.next_event()? {
             if event_type == METransformHaveOutput.0 as u32 {
-                output.push(self.process_one_output()?);
+                output.extend(self.process_one_output()?);
             } else if event_type == METransformNeedInput.0 as u32 {
                 self.input_credits = self.input_credits.saturating_add(1);
             }
@@ -1256,78 +1261,81 @@ impl MediaFoundationH264Encoder {
             .map(Some)
     }
 
-    fn process_one_output(&mut self) -> Result<MediaFoundationEncodedFrame> {
+    /// Answers one `METransformHaveOutput`. `Ok(None)` means the MFT reported
+    /// a stream change instead of a frame: the output type was renegotiated
+    /// and the caller must go back to the event loop. An async MFT allows
+    /// `ProcessOutput` only against a pending HaveOutput, so calling it again
+    /// straight after renegotiating returns E_UNEXPECTED (UHD 620 field log:
+    /// every Quick Sync probe failed exactly that way).
+    fn process_one_output(&mut self) -> Result<Option<MediaFoundationEncodedFrame>> {
         let profile_label = self.config.profile_label();
-        let mut renegotiations = 0_u32;
-        let sample = loop {
-            let stream_info =
-                unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
-                    stage_windows_error(
-                        "output-stream-info",
-                        &error,
-                        &self.identity,
-                        Some(self.input_subtype),
-                        &profile_label,
-                    )
-                })?;
-            let transform_provides_sample = stream_info.dwFlags
-                & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
-                    as u32)
-                != 0;
-            let supplied_sample = if transform_provides_sample {
-                None
-            } else {
-                let sample = unsafe { MFCreateSample() }?;
-                let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
-                unsafe { sample.AddBuffer(&buffer) }?;
-                Some(sample)
-            };
-            let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: 0,
-                pSample: ManuallyDrop::new(supplied_sample),
-                dwStatus: 0,
-                pEvents: ManuallyDrop::new(None),
-            };
-            let mut status = 0_u32;
-            let process_result = unsafe {
-                self.transform.ProcessOutput(
-                    0,
-                    std::slice::from_mut(&mut output_buffer),
-                    &mut status,
-                )
-            };
-            let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
-            let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
-            match process_result {
-                Ok(()) => break sample,
-                Err(error)
-                    if is_mf_stream_change(error.code())
-                        && renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
-                {
-                    renegotiations += 1;
-                    tracing::warn!(
-                        "Media Foundation encoder {:?} requested output-type renegotiation (attempt {renegotiations}/{}); re-selecting output type",
-                        self.identity,
-                        MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
-                    );
-                    renegotiate_mft_output_type(
-                        &self.transform,
-                        &self.config,
-                        &self.identity,
-                        Some(self.input_subtype),
-                    )?;
-                }
-                Err(error) => {
-                    return Err(stage_windows_error(
-                        "process-output",
-                        &error,
-                        &self.identity,
-                        Some(self.input_subtype),
-                        &profile_label,
-                    ));
-                }
-            }
+        let stream_info = unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
+            stage_windows_error(
+                "output-stream-info",
+                &error,
+                &self.identity,
+                Some(self.input_subtype),
+                &profile_label,
+            )
+        })?;
+        let transform_provides_sample = stream_info.dwFlags
+            & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
+                as u32)
+            != 0;
+        let supplied_sample = if transform_provides_sample {
+            None
+        } else {
+            let sample = unsafe { MFCreateSample() }?;
+            let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
+            unsafe { sample.AddBuffer(&buffer) }?;
+            Some(sample)
         };
+        let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
+            dwStreamID: 0,
+            pSample: ManuallyDrop::new(supplied_sample),
+            dwStatus: 0,
+            pEvents: ManuallyDrop::new(None),
+        };
+        let mut status = 0_u32;
+        let process_result = unsafe {
+            self.transform
+                .ProcessOutput(0, std::slice::from_mut(&mut output_buffer), &mut status)
+        };
+        let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
+        let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
+        match process_result {
+            Ok(()) => self.stream_changes.output_produced(),
+            Err(error)
+                if is_mf_stream_change(error.code())
+                    && self.stream_changes.allows_renegotiation() =>
+            {
+                let attempt = self.stream_changes.renegotiated();
+                tracing::info!(
+                    "Media Foundation encoder {:?} requested output-type renegotiation (attempt {}/{}); re-selecting output type and waiting for the next HaveOutput",
+                    self.identity,
+                    attempt,
+                    MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
+                );
+                renegotiate_mft_output_type(
+                    &self.transform,
+                    &self.config,
+                    &self.identity,
+                    Some(self.input_subtype),
+                )?;
+                // The renegotiated type carries the authoritative SPS/PPS.
+                self.sequence_header.clear();
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(stage_windows_error(
+                    "process-output",
+                    &error,
+                    &self.identity,
+                    Some(self.input_subtype),
+                    &profile_label,
+                ));
+            }
+        }
         let sample = sample.context("Media Foundation HaveOutput event returned no sample")?;
         let pts = unsafe { sample.GetSampleTime() }.map_err(|error| {
             stage_windows_error(
@@ -1414,12 +1422,12 @@ impl MediaFoundationH264Encoder {
             self.saw_first_idr = true;
         }
         let frame_index = frame_index_from_100ns(pts, self.config.fps)?;
-        Ok(MediaFoundationEncodedFrame {
+        Ok(Some(MediaFoundationEncodedFrame {
             frame_index,
             pts_100ns: pts,
             duration_100ns: duration,
             bytes,
-        })
+        }))
     }
 }
 
@@ -2457,6 +2465,7 @@ impl MediaFoundationD3d11H264Encoder {
             submitted_pts: VecDeque::new(),
             last_output_pts: None,
             started_at: Instant::now(),
+            stream_changes: StreamChangeBudget::default(),
             drained: false,
             mf_started,
             com_started,
@@ -2659,7 +2668,7 @@ impl MediaFoundationD3d11H264Encoder {
             self.drain_release_callbacks(&mut progress);
             while let Some(event_type) = self.next_event()? {
                 if event_type == METransformHaveOutput.0 as u32 {
-                    progress.encoded_frames.push(self.process_one_output()?);
+                    progress.encoded_frames.extend(self.process_one_output()?);
                 } else if event_type == METransformDrainComplete.0 as u32 {
                     self.ownership.note_transform_drain_complete()?;
                 }
@@ -2813,7 +2822,7 @@ impl MediaFoundationD3d11H264Encoder {
                     return Ok(());
                 }
                 Some(event_type) if event_type == METransformHaveOutput.0 as u32 => {
-                    progress.encoded_frames.push(self.process_one_output()?);
+                    progress.encoded_frames.extend(self.process_one_output()?);
                 }
                 Some(_) => {}
                 None => thread::sleep(EVENT_POLL_INTERVAL),
@@ -2833,7 +2842,7 @@ impl MediaFoundationD3d11H264Encoder {
     ) -> Result<()> {
         while let Some(event_type) = self.next_event()? {
             if event_type == METransformHaveOutput.0 as u32 {
-                progress.encoded_frames.push(self.process_one_output()?);
+                progress.encoded_frames.extend(self.process_one_output()?);
             } else if event_type == METransformNeedInput.0 as u32 {
                 self.ownership.note_input_credit()?;
             }
@@ -2886,78 +2895,76 @@ impl MediaFoundationD3d11H264Encoder {
             .map(Some)
     }
 
-    fn process_one_output(&mut self) -> Result<MediaFoundationEncodedFrame> {
+    /// See [`MediaFoundationH264Encoder::process_one_output`]: `Ok(None)` is a
+    /// handled stream change that waits for the next HaveOutput event.
+    fn process_one_output(&mut self) -> Result<Option<MediaFoundationEncodedFrame>> {
         let profile_label = self.config.profile_label();
-        let mut renegotiations = 0_u32;
-        let sample = loop {
-            let stream_info =
-                unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
-                    stage_windows_error(
-                        "d3d11-output-stream-info",
-                        &error,
-                        &self.identity,
-                        Some(MediaFoundationInputSubtype::Nv12),
-                        &profile_label,
-                    )
-                })?;
-            let transform_provides_sample = stream_info.dwFlags
-                & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
-                    as u32)
-                != 0;
-            let supplied_sample = if transform_provides_sample {
-                None
-            } else {
-                let sample = unsafe { MFCreateSample() }?;
-                let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
-                unsafe { sample.AddBuffer(&buffer) }?;
-                Some(sample)
-            };
-            let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: 0,
-                pSample: ManuallyDrop::new(supplied_sample),
-                dwStatus: 0,
-                pEvents: ManuallyDrop::new(None),
-            };
-            let mut status = 0_u32;
-            let process_result = unsafe {
-                self.transform.ProcessOutput(
-                    0,
-                    std::slice::from_mut(&mut output_buffer),
-                    &mut status,
-                )
-            };
-            let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
-            let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
-            match process_result {
-                Ok(()) => break sample,
-                Err(error)
-                    if is_mf_stream_change(error.code())
-                        && renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
-                {
-                    renegotiations += 1;
-                    tracing::warn!(
-                        "Media Foundation D3D11 encoder {:?} requested output-type renegotiation (attempt {renegotiations}/{}); re-selecting output type",
-                        self.identity,
-                        MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
-                    );
-                    renegotiate_mft_output_type(
-                        &self.transform,
-                        &self.config,
-                        &self.identity,
-                        Some(MediaFoundationInputSubtype::Nv12),
-                    )?;
-                }
-                Err(error) => {
-                    return Err(stage_windows_error(
-                        "d3d11-process-output",
-                        &error,
-                        &self.identity,
-                        Some(MediaFoundationInputSubtype::Nv12),
-                        &profile_label,
-                    ));
-                }
-            }
+        let stream_info = unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
+            stage_windows_error(
+                "d3d11-output-stream-info",
+                &error,
+                &self.identity,
+                Some(MediaFoundationInputSubtype::Nv12),
+                &profile_label,
+            )
+        })?;
+        let transform_provides_sample = stream_info.dwFlags
+            & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
+                as u32)
+            != 0;
+        let supplied_sample = if transform_provides_sample {
+            None
+        } else {
+            let sample = unsafe { MFCreateSample() }?;
+            let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
+            unsafe { sample.AddBuffer(&buffer) }?;
+            Some(sample)
         };
+        let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
+            dwStreamID: 0,
+            pSample: ManuallyDrop::new(supplied_sample),
+            dwStatus: 0,
+            pEvents: ManuallyDrop::new(None),
+        };
+        let mut status = 0_u32;
+        let process_result = unsafe {
+            self.transform
+                .ProcessOutput(0, std::slice::from_mut(&mut output_buffer), &mut status)
+        };
+        let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
+        let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
+        match process_result {
+            Ok(()) => self.stream_changes.output_produced(),
+            Err(error)
+                if is_mf_stream_change(error.code())
+                    && self.stream_changes.allows_renegotiation() =>
+            {
+                let attempt = self.stream_changes.renegotiated();
+                tracing::info!(
+                    "Media Foundation D3D11 encoder {:?} requested output-type renegotiation (attempt {}/{}); re-selecting output type and waiting for the next HaveOutput",
+                    self.identity,
+                    attempt,
+                    MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
+                );
+                renegotiate_mft_output_type(
+                    &self.transform,
+                    &self.config,
+                    &self.identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                )?;
+                self.sequence_header.clear();
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(stage_windows_error(
+                    "d3d11-process-output",
+                    &error,
+                    &self.identity,
+                    Some(MediaFoundationInputSubtype::Nv12),
+                    &profile_label,
+                ));
+            }
+        }
         let sample = sample.context("Media Foundation HaveOutput event returned no sample")?;
         let pts = unsafe { sample.GetSampleTime() }.map_err(|error| {
             stage_windows_error(
@@ -3018,12 +3025,12 @@ impl MediaFoundationD3d11H264Encoder {
             bytes = with_header;
         }
         let frame_index = frame_index_from_100ns(pts, self.config.fps)?;
-        Ok(MediaFoundationEncodedFrame {
+        Ok(Some(MediaFoundationEncodedFrame {
             frame_index,
             pts_100ns: pts,
             duration_100ns: duration,
             bytes,
-        })
+        }))
     }
 
     fn drain_release_callbacks(&mut self, progress: &mut MediaFoundationD3d11EncoderProgress) {
@@ -4128,8 +4135,32 @@ fn is_mf_stream_change(hresult: windows::core::HRESULT) -> bool {
     hresult == MF_E_TRANSFORM_STREAM_CHANGE
 }
 
-/// Bounded number of output-type renegotiations per `ProcessOutput` attempt.
+/// Bounded number of consecutive output-type renegotiations without an
+/// output frame in between.
 const MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS: u32 = 2;
+
+/// Consecutive `MF_E_TRANSFORM_STREAM_CHANGE` answers since the last frame,
+/// shared by both encoders so the cap is one tested rule.
+#[derive(Debug, Default)]
+struct StreamChangeBudget {
+    consecutive: u32,
+}
+
+impl StreamChangeBudget {
+    fn allows_renegotiation(&self) -> bool {
+        self.consecutive < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
+    }
+
+    /// Records one renegotiation and returns its 1-based attempt number.
+    fn renegotiated(&mut self) -> u32 {
+        self.consecutive += 1;
+        self.consecutive
+    }
+
+    fn output_produced(&mut self) {
+        self.consecutive = 0;
+    }
+}
 
 /// Human-facing annotations for the Media Foundation HRESULTs an operator can
 /// act on. Unknown codes return `None` so logs stay free of guesses.
@@ -4205,6 +4236,26 @@ mod tests {
             0xC00D6D62_u32 as i32
         )));
         assert!(!is_mf_stream_change(windows::core::HRESULT(0)));
+    }
+
+    #[test]
+    fn stream_change_budget_caps_consecutive_renegotiations_and_resets_on_output() {
+        let mut budget = StreamChangeBudget::default();
+        assert!(budget.allows_renegotiation());
+        assert_eq!(budget.renegotiated(), 1);
+        assert!(budget.allows_renegotiation());
+        assert_eq!(budget.renegotiated(), 2);
+        assert!(
+            !budget.allows_renegotiation(),
+            "a third consecutive stream change without output is a failure"
+        );
+        budget.output_produced();
+        assert!(budget.allows_renegotiation());
+        assert_eq!(
+            budget.renegotiated(),
+            1,
+            "a frame in between resets the count"
+        );
     }
 
     #[test]

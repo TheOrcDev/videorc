@@ -840,6 +840,11 @@ async fn run_ladder_under_hold(
         let (measurement, stats) = measure_rung(state, &video, &directory).await;
         let pressure_end = sample_pressure();
         discard_benchmark_sessions(state, &directory).await;
+        if state.performance_check.cancelled() {
+            // A rung cut short (and its encoder killed) is not a measurement;
+            // logging it as "failed" would read as a verdict on this machine.
+            bail!("cancelled");
+        }
         if measurement.studio_busy {
             // ogre 2026-09-30: the check ran while a session was starting,
             // every rung was refused in 100 ms, and the refusals were saved
@@ -1085,7 +1090,7 @@ async fn measure_rung(
     // below-realtime encoder holds seconds of backlog, which is exactly what
     // cost the UHD 600 tester every recording.
     let stop_started = Instant::now();
-    let stopped = crate::recording::stop_recording(state.clone()).await;
+    let stopped = stop_rung_yielding_to_capture(state).await;
     measurement.drain_after_stop_ms = Some(stop_started.elapsed().as_millis() as u64);
     measurement.finalized_cleanly =
         matches!(&stopped, Ok(status) if matches!(status.state, RecordingState::Idle));
@@ -1131,6 +1136,43 @@ async fn measure_rung(
         );
     }
     (measurement, Some(stats))
+}
+
+/// Graceful stop, measured as drain time — unless the user's Record cancels
+/// the check meanwhile. Then the benchmark's FFmpeg is killed: its backlog is
+/// worthless, and on a below-realtime machine flushing it outlasted
+/// `YIELD_TO_CAPTURE_TIMEOUT`, so Record failed with "A capture session is
+/// active or finalizing" (UHD 620 field log: 13 s drain vs 8 s yield).
+///
+/// The stop runs as its own task: it holds `state.recording` across awaits,
+/// and the kill needs that lock, so a stop that is only polled from this
+/// `select!` would deadlock against the kill branch.
+async fn stop_rung_yielding_to_capture(
+    state: &AppState,
+) -> Result<crate::protocol::RecordingStatus> {
+    let stop_state = state.clone();
+    let mut stop = tokio::spawn(async move { crate::recording::stop_recording(stop_state).await });
+    let mut killed = false;
+    loop {
+        tokio::select! {
+            stopped = &mut stop => {
+                return stopped.unwrap_or_else(|error| {
+                    Err(anyhow::anyhow!("benchmark stop task failed: {error}"))
+                });
+            }
+            () = tokio::time::sleep(CANCEL_POLL), if !killed => {
+                if state.performance_check.cancelled() {
+                    killed = true;
+                    if crate::recording::kill_benchmark_ffmpeg(state).await {
+                        state.emit_log(
+                            "info",
+                            "Performance check cancelled for a recording; ended its benchmark encoder without flushing.",
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn stalled_frames(stats: &DiagnosticStats) -> u64 {

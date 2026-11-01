@@ -329,6 +329,8 @@ pub struct RetainedPixelBuffer;
 
 #[cfg(target_os = "windows")]
 mod source_d3d11_texture {
+    use std::sync::Arc;
+
     use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
     /// A captured D3D11 texture retained with the logical source frame.
@@ -336,14 +338,18 @@ mod source_d3d11_texture {
     /// The capture device is created with D3D11 multithread protection. Consumers
     /// may therefore retain this COM reference across the capture/compositor
     /// boundary instead of forcing the source through a BGRA byte pipe first.
+    ///
+    /// The texture is a capture-owned copy shared through an `Arc` so the
+    /// capture can tell when every holder has let a slot go (the strong count
+    /// is back to the capture's own one) before it writes a later frame there.
     #[derive(Clone)]
     pub struct RetainedD3D11Texture {
-        texture: ID3D11Texture2D,
+        texture: Arc<ID3D11Texture2D>,
         adapter_luid: u64,
     }
 
     impl RetainedD3D11Texture {
-        pub fn new(texture: ID3D11Texture2D, adapter_luid: u64) -> Self {
+        pub fn new(texture: Arc<ID3D11Texture2D>, adapter_luid: u64) -> Self {
             Self {
                 texture,
                 adapter_luid,

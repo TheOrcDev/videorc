@@ -8841,9 +8841,19 @@ impl Database {
     }
 
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SQLite connection lock was poisoned"))
+        // A panic on another thread while it held the connection must not
+        // turn every later database call into a permanent error for the rest
+        // of the process (chat persistence terminal, session rows unwritable).
+        // rusqlite rolls an open transaction back when its guard drops, so the
+        // connection behind a poisoned lock is still consistent.
+        // Clearing the flag makes one panic one warning, not one per query.
+        Ok(self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "[storage] SQLite connection lock was poisoned by a panic; recovering the connection"
+            );
+            self.conn.clear_poison();
+            poisoned.into_inner()
+        }))
     }
 }
 
@@ -11375,6 +11385,30 @@ mod tests {
                 Ok(())
             })
             .unwrap()
+    }
+
+    #[test]
+    fn a_poisoned_connection_lock_recovers_instead_of_failing_forever() {
+        let database = Database::open_in_memory_for_tests();
+        let poisoner = database.clone();
+        let panicked = std::thread::spawn(move || {
+            let _guard = poisoner.lock().expect("fresh lock");
+            panic!("a panic while holding the SQLite connection");
+        })
+        .join();
+        assert!(panicked.is_err());
+
+        // The next caller gets the connection back; chat persistence and the
+        // session rows must not stay broken for the rest of the process.
+        let guard = database.lock().expect("the lock recovers after a panic");
+        let one: i64 = guard.query_row("SELECT 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(one, 1);
+        drop(guard);
+        // Recovered once: later callers neither see the poison nor warn again.
+        assert!(!database.conn.is_poisoned());
+        database
+            .create_session(&sample_session("after-panic"))
+            .unwrap();
     }
 
     #[test]

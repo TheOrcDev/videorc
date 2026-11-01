@@ -267,6 +267,7 @@ export async function startFakeYouTubeApi({
         }
         if (request.method === 'DELETE') {
           broadcasts.delete(url.searchParams.get('id'))
+          record.status = 204
           response.writeHead(204).end()
           return
         }

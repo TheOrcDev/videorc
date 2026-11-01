@@ -1306,8 +1306,9 @@ pub struct ReplayParams {
     /// The ring runs by default whenever Videorc is open (owner redesign,
     /// R2), so a buffer-only start nobody asked for says so: on a software
     /// encoder path the backend refuses it with `replay-software-encoder`
-    /// and the Output page explains. A start the user chose carries `false`
-    /// and runs anywhere.
+    /// and the Output page explains, and while the scene's camera has no
+    /// frame yet with `replay-sources-not-ready` (the renderer waits for the
+    /// camera). A start the user chose carries `false` and runs anywhere.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto: bool,
 }

@@ -62,9 +62,40 @@ test('pure helpers: roles, census, bad runs, dropped-frame windows, slope', () =
     atMs: s * 1000,
     value: s >= 5 && s <= 15 ? 0.9 : 1
   }))
+  // Three bad samples at a 5 s cadence are 15 s of slow encoding: the run is
+  // measured from the last good sample, not from its own first sample.
   assert.equal(
     longestBadRunMs(samples, (p) => p.value < 0.97),
-    10_000
+    15_000
+  )
+  // Twelve bad samples at 5 s reach a 60 s `forSeconds` gate.
+  const twelveSlow = Array.from({ length: 13 }, (_, i) => ({
+    atMs: i * 5000,
+    value: i === 0 ? 1 : 0.9
+  }))
+  assert.equal(
+    longestBadRunMs(twelveSlow, (p) => p.value < 0.97),
+    60_000
+  )
+  // Samples without a speed are a gap, not good time: one bad sample after
+  // a minute of missing measurements is not a minute of slow encoding.
+  const gapped = [
+    { atMs: 0, value: 1 },
+    ...Array.from({ length: 11 }, (_, i) => ({ atMs: (i + 1) * 5000, value: null })),
+    { atMs: 60_000, value: 0.9 }
+  ]
+  assert.equal(
+    longestBadRunMs(
+      gapped,
+      (p) => p.value < 0.97,
+      (p) => p.value !== null
+    ),
+    0
+  )
+  // A series that opens bad starts its run at the first bad sample.
+  assert.equal(
+    longestBadRunMs([{ atMs: 0, value: 0.9 }], (p) => p.value < 0.97),
+    0
   )
   const journal = Array.from({ length: 13 }, (_, i) => ({
     kind: 'sample',
@@ -220,6 +251,36 @@ test('without clips the same run is needs-eyes, never a failure', async () => {
     assert.equal(byId(verdict, 'frames:comment-highlight').status, 'needs-eyes')
     assert.ok(verdict.needsEyes.some((entry) => entry.id === 'frame:comment-highlight'))
     assert.equal(byId(verdict, 'clips').status, 'skipped')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a reconnect gap ends a slow or low-bitrate run instead of counting toward it', async () => {
+  const dir = await fixtureCopy('clean')
+  try {
+    const run = await readRunFolder(dir)
+    const thresholds = await loadThresholds()
+    const T0 = Date.parse('2026-10-12T06:00:00.000Z')
+    const leg = (state, speed, bitrateKbps) => ({ targetId: 'yt', state, speed, bitrateKbps })
+    const good = { kind: 'sample', tsMs: T0, legs: [leg('live', 1, 6000)] }
+    const bad = { kind: 'sample', tsMs: T0 + 65_000, legs: [leg('live', 0.5, 100)] }
+    const reconnecting = Array.from({ length: 12 }, (_, i) => ({
+      kind: 'sample',
+      tsMs: T0 + (i + 1) * 5000,
+      legs: [leg('reconnecting', undefined, 0)]
+    }))
+    const verdictFor = async (journal) =>
+      (await computeVerdict({ ...run, journal }, thresholds, { runFrames: false })).verdict
+    // One bad live sample after a minute of reconnecting is not a minute of
+    // slow encoding or low bitrate.
+    const gapped = await verdictFor([good, ...reconnecting, bad])
+    assert.equal(byId(gapped, 'stream:encoder-speed').status, 'pass')
+    assert.equal(byId(gapped, 'stream:bitrate').status, 'pass')
+    // Control: with no samples between them, the same two samples are a run.
+    const unbroken = await verdictFor([good, bad])
+    assert.equal(byId(unbroken, 'stream:encoder-speed').status, 'warn')
+    assert.equal(byId(unbroken, 'stream:bitrate').status, 'warn')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

@@ -297,6 +297,31 @@ pub fn list_native_capture_sources() -> NativeCaptureSources {
     windows_native::list_native_capture_sources()
 }
 
+/// Native pixel size of a DXGI output. The backend is not DPI aware, so a
+/// scaled display's `DesktopCoordinates` read in logical pixels (1280x720 for
+/// 1920x1080 at 150%), while Desktop Duplication and WGC hand back
+/// native-resolution textures. The D3D11 capture pool sized from the logical
+/// size failed its copy contract and the session fell back.
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_dxgi_output_native_dimensions(
+    output_desc: &windows::Win32::Graphics::Dxgi::DXGI_OUTPUT_DESC,
+) -> (Option<u32>, Option<u32>) {
+    windows_native::dxgi_output_native_dimensions(output_desc)
+}
+
+/// The current display mode is never DPI-virtualized, so it wins whenever it
+/// is readable; the desktop rectangle is the fallback.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_output_native_dimensions(
+    current_mode: Option<(u32, u32)>,
+    desktop: (Option<u32>, Option<u32>),
+) -> (Option<u32>, Option<u32>) {
+    match current_mode {
+        Some((width, height)) if width > 0 && height > 0 => (Some(width), Some(height)),
+        _ => desktop,
+    }
+}
+
 /// Stable material for invalidating Windows GPU capability verdicts when the
 /// adapter or its user-mode D3D11 driver changes. On non-Windows platforms the
 /// explicit marker keeps shared key construction portable without pretending
@@ -458,12 +483,12 @@ pub(crate) fn is_foreign_session_window_app(app_name: Option<&str>) -> bool {
 mod windows_native {
     use super::*;
     use windows::Win32::Foundation::{LUID, RECT};
-    use windows::Win32::Graphics::Direct3D11::ID3D11Device;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1,
-        IDXGIFactory1,
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, DXGI_OUTPUT_DESC,
+        IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
     };
-    use windows::core::Interface;
+    use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+    use windows::core::{Interface, PCWSTR};
 
     pub fn list_native_capture_sources() -> NativeCaptureSources {
         match list_dxgi_displays() {
@@ -503,7 +528,9 @@ mod windows_native {
             if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
                 continue;
             }
-            let driver_version = unsafe { adapter.CheckInterfaceSupport(&ID3D11Device::IID) }
+            // ID3D11Device is unsupported here (DXGI_ERROR_UNSUPPORTED); see
+            // recording::query_windows_graphics_adapter_driver_identity.
+            let driver_version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
                 .map_err(windows_error_code)?;
             identities.push(WindowsAdapterDriverIdentity {
                 adapter_luid: adapter_luid_u64(description.AdapterLuid),
@@ -559,7 +586,7 @@ mod windows_native {
             let output_desc = unsafe { output.GetDesc()? };
             let output_name = utf16_z(&output_desc.DeviceName)
                 .unwrap_or_else(|| format!("DXGI output {output_index}"));
-            let (width, height) = rect_dimensions(output_desc.DesktopCoordinates);
+            let (width, height) = dxgi_output_native_dimensions(&output_desc);
             devices.push(Device {
                 app: None,
                 window_title: None,
@@ -578,6 +605,30 @@ mod windows_native {
         }
 
         Ok(())
+    }
+
+    pub(super) fn dxgi_output_native_dimensions(
+        output_desc: &DXGI_OUTPUT_DESC,
+    ) -> (Option<u32>, Option<u32>) {
+        let mut mode = DEVMODEW {
+            dmSize: u16::try_from(std::mem::size_of::<DEVMODEW>()).unwrap_or(u16::MAX),
+            ..Default::default()
+        };
+        // SAFETY: DeviceName is DXGI's NUL-terminated GDI device name and the
+        // DEVMODEW is initialized local storage with dmSize set.
+        let current_mode = unsafe {
+            EnumDisplaySettingsW(
+                PCWSTR(output_desc.DeviceName.as_ptr()),
+                ENUM_CURRENT_SETTINGS,
+                &mut mode,
+            )
+        }
+        .as_bool()
+        .then_some((mode.dmPelsWidth, mode.dmPelsHeight));
+        super::windows_output_native_dimensions(
+            current_mode,
+            rect_dimensions(output_desc.DesktopCoordinates),
+        )
     }
 
     fn adapter_luid_u64(luid: LUID) -> u64 {
@@ -1403,6 +1454,24 @@ mod tests {
         assert_eq!(
             parse_screencapturekit_window_id("screen:screencapturekit:2"),
             None
+        );
+    }
+
+    #[test]
+    fn windows_output_dimensions_prefer_the_unscaled_display_mode() {
+        // Field UHD 620 laptop at 150%: DesktopCoordinates read 1280x720 in
+        // the DPI-unaware backend; Desktop Duplication delivered 1920x1080.
+        assert_eq!(
+            windows_output_native_dimensions(Some((1920, 1080)), (Some(1280), Some(720))),
+            (Some(1920), Some(1080))
+        );
+        assert_eq!(
+            windows_output_native_dimensions(None, (Some(1280), Some(720))),
+            (Some(1280), Some(720))
+        );
+        assert_eq!(
+            windows_output_native_dimensions(Some((0, 1080)), (Some(1920), Some(1080))),
+            (Some(1920), Some(1080))
         );
     }
 
