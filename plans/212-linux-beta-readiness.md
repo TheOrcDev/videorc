@@ -1901,3 +1901,47 @@ RPC contract tests and Rust formatting also pass. Default-stack behavior
 verification is next; this is not yet a runtime or Beta acceptance pass.
 Comparison receipt: `/tmp/videorc-beta-rpc-router-equivalence.json`.
 Compile receipt: `/tmp/videorc-beta-rpc-router-check-owned-cleanup.json`.
+
+### Windows OAuth fixture failure, 2026-11-01
+
+Windows source job `124684664664` on `ac5af551` passes Clippy and all 25
+preview-bounds stability runs. The first source/audio ownership iteration
+passes its Rust filters, then all 12 OAuth launch fixture cases fail: the mock
+recognizes `cargo`, while the production Windows launcher correctly selects
+`cargo.exe`. It consequently mistakes the build for the app. The remaining
+24 ownership iterations, three full Rust runs and downstream source gates do
+not run. This is a required source-gate failure, not the separate FFmpeg
+incident diagnostic or a timeout.
+
+A two-line fixture correction recognizes both executable names and asserts
+the expected platform command. Its copied fixture reproduces all 12 failures
+before the change and passes all 12 cases afterward, both on Linux and with
+the Windows launcher branch exercised on Linux. Those simulated results do
+not replace the required PowerShell 7 stability runs. Production launch code,
+readiness assertions and deadlines are unchanged. The correction is now integrated after the native dispatcher verification
+completed. Verification of the checked-in fixture and the full Node suite is
+pending; the app queue remains held until that source evidence passes. Receipts: `/tmp/videorc-beta-windows-source-124684664664-classification.json`
+and `/tmp/videorc-beta-oauth-launch-fix-receipt.json`.
+
+The separate Windows incident diagnostic `124684664544` on the same source
+passes all 48 controlled-audio cases. Its independent FFmpeg controls pass
+12 cases and fail 36 streaming cases: packet A/V tails are 117–234 ms against
+100 ms, and seven cases also miss the 2% frame-count tolerance. These are the
+previously observed independent-control failure categories. The release
+runbook's existing diagnostic exclusion does not turn them into acceptance
+passes or exclude the required Windows source gates above. No threshold or
+waiver changes, and no unchanged rerun. Receipt:
+`/tmp/videorc-beta-windows-diagnostics-124684664544-classification.json`.
+
+The per-command dispatcher now passes the default-stack preview-layout and
+chat regressions, dispatch ordering/inventory, role/resource authority, the
+remaining selected RPC tests, Clippy with the four existing Linux allowances,
+and the optimized backend/MCP build. All 20 Linux-applicable filters execute passing tests (169 executions, 168
+distinct tests, zero ignored). One additional filter selects a macOS-only Metal
+frame-lease test: it executed zero tests on Linux and remains owed on macOS;
+it is not counted as a pass. Platform classification:
+`/tmp/videorc-beta-rpc-native-platform-classification.json`. The native
+supervisor reports no interruption or forced child cleanup.
+Receipt: `/tmp/videorc-beta-rpc-dispatch-native-2wqVBG/report.json`. The subsequent OAuth fixture change alters
+no native input or production app code. Its source verification and the app
+runtime gates remain separate prerequisites, not Beta acceptance.
