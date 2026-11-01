@@ -1491,3 +1491,84 @@ mod tests {
         );
     }
 }
+
+/// Plan 213 G1: the one cropped-screen fixture every render path draws (CPU,
+/// Metal, the FFmpeg legacy graph and the aux leg), so a crop that one path
+/// ignores shows up as a wrong colour at a known point.
+#[cfg(test)]
+pub(crate) mod screen_crop_fixture {
+    use crate::protocol::SceneTransform;
+
+    pub const SOURCE_WIDTH: u32 = 64;
+    pub const SOURCE_HEIGHT: u32 = 36;
+
+    pub const RED: [u8; 3] = [255, 0, 0];
+    pub const GREEN: [u8; 3] = [0, 255, 0];
+    pub const BLUE: [u8; 3] = [0, 0, 255];
+    pub const WHITE: [u8; 3] = [255, 255, 255];
+    pub const MAGENTA: [u8; 3] = [255, 0, 255];
+    pub const CYAN: [u8; 3] = [0, 255, 255];
+    pub const BLACK: [u8; 3] = [0, 0, 0];
+
+    /// The screen picture as RGB: four 16 px columns (red, green, blue,
+    /// white) between a magenta band on top and a cyan band at the bottom,
+    /// 9 rows each.
+    pub fn source_rgb(x: u32, y: u32) -> [u8; 3] {
+        if y < 9 {
+            MAGENTA
+        } else if y >= SOURCE_HEIGHT - 9 {
+            CYAN
+        } else {
+            [RED, GREEN, BLUE, WHITE][(x / 16) as usize]
+        }
+    }
+
+    pub fn source_bgra() -> Vec<u8> {
+        (0..SOURCE_HEIGHT)
+            .flat_map(|y| (0..SOURCE_WIDTH).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let [r, g, b] = source_rgb(x, y);
+                [b, g, r, 255]
+            })
+            .collect()
+    }
+
+    /// A box in the middle half of the canvas with a quarter cropped off
+    /// every side. What is left is the green and blue columns, 32×18: the
+    /// box's own 16:9, so Fit fills the box exactly.
+    pub fn transform() -> SceneTransform {
+        SceneTransform {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            crop_left: 0.25,
+            crop_top: 0.25,
+            crop_right: 0.25,
+            crop_bottom: 0.25,
+        }
+    }
+
+    /// Canvas points (fractions, so any canvas size) and the colour each
+    /// shows. Without the crop the four points next to the box's edges would
+    /// show red, magenta, cyan and white instead.
+    pub fn expected_samples() -> [((f64, f64), [u8; 3]); 7] {
+        [
+            ((0.30, 0.50), GREEN),
+            ((0.45, 0.30), GREEN),
+            ((0.45, 0.70), GREEN),
+            ((0.55, 0.50), BLUE),
+            ((0.70, 0.50), BLUE),
+            ((0.10, 0.10), BLACK),
+            ((0.90, 0.90), BLACK),
+        ]
+    }
+
+    /// The sample's pixel on a `width`×`height` canvas.
+    pub fn sample_pixel(point: (f64, f64), width: u32, height: u32) -> (usize, usize) {
+        (
+            (point.0 * f64::from(width)).floor() as usize,
+            (point.1 * f64::from(height)).floor() as usize,
+        )
+    }
+}

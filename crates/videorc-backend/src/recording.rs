@@ -42206,6 +42206,95 @@ mod tests {
         assert!(filter.contains("overlay=x=75:y=70"));
     }
 
+    /// Plan 213 G1: the legacy FFmpeg graph draws the cropped-screen fixture
+    /// the way the compositor does. The production scene graph runs on the
+    /// fixture picture in a real FFmpeg and the samples are read back; it
+    /// skips with a line where FFmpeg is not on PATH (the Rust CI job).
+    #[test]
+    fn ffmpeg_legacy_graph_draws_the_screen_crop_fixture() {
+        use crate::scene_geometry::screen_crop_fixture::{
+            SOURCE_HEIGHT, SOURCE_WIDTH, expected_samples, sample_pixel, source_bgra, transform,
+        };
+        use std::io::Write as _;
+        let ffmpeg_runs = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !ffmpeg_runs {
+            eprintln!("ffmpeg_legacy_graph_draws_the_screen_crop_fixture: skipped, ffmpeg is not on PATH");
+            return;
+        }
+        let (width, height) = (128_u32, 72_u32);
+        let mut params = base_params(true, false);
+        params.output.video.width = width;
+        params.output.video.height = height;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let scene = scene_with_sources(vec![scene_source(
+            "source:base",
+            SceneSourceKind::Screen,
+            transform(),
+            true,
+        )]);
+        let graph = scene_video_filter(
+            &scene,
+            &CaptureInputs {
+                video: VideoInput::MacScreen { index: 3 },
+                camera_index: None,
+                microphone: None,
+            },
+            &InputLayout {
+                video_input_index: 0,
+                camera_input_index: None,
+                screen_overlay_input_index: None,
+                audio_inputs: Vec::new(),
+                microphone_graph_gain: false,
+                microphone_is_linux_pulse: false,
+            },
+            &params,
+        );
+        let mut child = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "rawvideo"])
+            .args(["-pix_fmt", "bgra", "-framerate", "30", "-video_size"])
+            .arg(format!("{SOURCE_WIDTH}x{SOURCE_HEIGHT}"))
+            .args(["-i", "pipe:0", "-filter_complex"])
+            .arg(&graph)
+            .args(["-map", "[v]", "-frames:v", "1", "-f", "rawvideo"])
+            .args(["-pix_fmt", "rgb24", "pipe:1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("ffmpeg spawns");
+        child
+            .stdin
+            .take()
+            .expect("ffmpeg stdin")
+            .write_all(&source_bgra())
+            .expect("the fixture reaches ffmpeg");
+        let output = child.wait_with_output().expect("ffmpeg finishes");
+        assert!(
+            output.status.success(),
+            "ffmpeg failed on {graph}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), (width * height * 3) as usize);
+        for (point, expected) in expected_samples() {
+            let (x, y) = sample_pixel(point, width, height);
+            let offset = (y * width as usize + x) * 3;
+            let actual = &output.stdout[offset..offset + 3];
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (i16::from(*actual) - i16::from(expected)).abs() <= 12),
+                "ffmpeg: at {point:?} ({x}, {y}) expected {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
     #[test]
     fn scene_filter_without_background_keeps_sources_full_canvas() {
         // The user-facing contract for "Remove from scene": with no digital

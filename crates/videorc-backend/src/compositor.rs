@@ -14732,6 +14732,173 @@ mod tests {
         );
     }
 
+    /// Plan 213 G1: the cropped-screen fixture as a Freeform scene on a
+    /// Screen only canvas, the one screen source carrying the fixture's box
+    /// and crop.
+    fn screen_crop_fixture_snapshot() -> CompositorSceneSnapshot {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenOnly;
+        layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let transform = crate::scene_geometry::screen_crop_fixture::transform();
+        CompositorSceneSnapshot {
+            synthetic_hard_content: false,
+            selected_sources: None,
+            revision: 1,
+            scene: Some(Scene {
+                id: "scene:screen-crop".to_string(),
+                name: "Screen crop".to_string(),
+                sources: vec![SceneSource {
+                    id: "source:base".to_string(),
+                    name: "Screen capture".to_string(),
+                    kind: SceneSourceKind::Screen,
+                    device_id: Some("screen-1".to_string()),
+                    transform: transform.clone(),
+                    default_transform: transform,
+                    visible: true,
+                    locked: false,
+                }],
+                outputs: Vec::new(),
+                background: None,
+            }),
+            layout,
+            active_screen: None,
+        }
+    }
+
+    fn screen_crop_fixture_frame() -> FrameHandle<PreviewScreenPixelFormat> {
+        use crate::scene_geometry::screen_crop_fixture::{
+            SOURCE_HEIGHT, SOURCE_WIDTH, source_bgra,
+        };
+        crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+            storage: crate::frame_store::FrameStorage::untracked(),
+            sequence: 1,
+            width: SOURCE_WIDTH,
+            height: SOURCE_HEIGHT,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: source_bgra(),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            source_d3d11_texture: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        })
+    }
+
+    fn screen_crop_inputs<'a>(
+        snapshot: &'a CompositorSceneSnapshot,
+        screen_frame: &'a FrameHandle<PreviewScreenPixelFormat>,
+        width: u32,
+        height: u32,
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence: 1,
+            width,
+            height,
+            snapshot: Some(snapshot),
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: Some(screen_frame),
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        }
+    }
+
+    /// Every fixture sample's Y, U and V on a YUV420p frame, within the
+    /// rounding two linear colour conversions leave.
+    fn assert_screen_crop_samples(path: &str, yuv: &[u8], width: u32, height: u32) {
+        use crate::scene_geometry::screen_crop_fixture::{expected_samples, sample_pixel};
+        assert_eq!(yuv.len(), raw_yuv420p_len(width, height), "{path}: frame size");
+        let (w, h) = (width as usize, height as usize);
+        let (chroma_w, chroma_h) = (w.div_ceil(2), h.div_ceil(2));
+        for (point, [r, g, b]) in expected_samples() {
+            let (x, y) = sample_pixel(point, width, height);
+            let expected = rgb_to_yuv(r, g, b);
+            let chroma = (y / 2) * chroma_w + x / 2;
+            let actual = (
+                yuv[y * w + x],
+                yuv[w * h + chroma],
+                yuv[w * h + chroma_w * chroma_h + chroma],
+            );
+            let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 8;
+            assert!(
+                close(actual.0, expected.0) && close(actual.1, expected.1) && close(actual.2, expected.2),
+                "{path}: at {point:?} ({x}, {y}) expected {:?} (YUV {expected:?}), got YUV {actual:?}",
+                [r, g, b]
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_compositor_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+        render_compositor_yuv420p_frame(
+            screen_crop_inputs(&snapshot, &frame, 128, 72),
+            &mut bytes,
+        );
+        assert_screen_crop_samples("cpu", &bytes, 128, 72);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_compositor_draws_the_screen_crop_fixture_or_skips() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let composed = try_gpu_compose(
+            Some(&mut gpu),
+            &screen_crop_inputs(&snapshot, &frame, 128, 72),
+            true,
+        )
+        .expect("the cropped screen composes on Metal");
+        assert_screen_crop_samples("metal", &composed.yuv, 128, 72);
+    }
+
+    /// The aux leg (a record + stream session's stream leg on macOS) re-renders
+    /// the program snapshot at its own canvas through its own publisher: the
+    /// crop must land there too, on the CPU fallback and on Metal.
+    #[test]
+    fn auxiliary_leg_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut gpu = new_gpu_compositor(false);
+        let mut legs = vec![("aux cpu", None)];
+        if let Some(gpu) = gpu.as_mut() {
+            legs.push(("aux metal", Some(gpu)));
+        } else {
+            eprintln!("aux metal: skipped, no GPU compositor here");
+        }
+        for (path, gpu) in legs {
+            let store = Arc::new(std::sync::Mutex::new(FrameStore::new(2)));
+            publish_auxiliary_compositor_frame(
+                1,
+                Instant::now(),
+                Instant::now(),
+                store.clone(),
+                screen_crop_inputs(&snapshot, &frame, 64, 36),
+                gpu,
+                CompositorFrameConsumer::RawYuvEncoder,
+                &[],
+                3,
+            );
+            let published = store.lock().unwrap().latest().expect("aux frame");
+            assert_eq!((published.width, published.height), (64, 36), "{path}");
+            assert_screen_crop_samples(path, &published.bytes, 64, 36);
+        }
+    }
+
     #[test]
     fn cover_pan_chooses_the_visible_window_of_the_aspect_slack() {
         // A 16:9 source into a square box in Fill mode has horizontal slack;
