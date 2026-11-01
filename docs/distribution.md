@@ -6,7 +6,7 @@ Current release policy:
 | ----------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | macOS 13+ Apple Silicon | **Beta**  | Publish only the signed, notarized, stapled DMG after the macOS clean-machine gate.                                                                                                          |
 | Windows 11 x64          | **Alpha** | Default deny. Publish only a signed installer whose exact publisher and timestamp, digest and byte size, malware scan, real-device acceptance, update feed, and uninstall evidence all pass. |
-| Ubuntu 24.04 LTS x64    | **Alpha** | Default deny. The candidate workflow may store a private unsigned AppImage. Do not publish a public download, website button, or updater pointer until promote and named-box proof exist.     |
+| Ubuntu 24.04 LTS x64    | **Alpha** | Default deny. The candidate workflow may store a private unsigned AppImage. Do not publish a public download, website button, or updater pointer until promote and named-box proof exist.    |
 
 Hosted CI and local unsigned packages are engineering evidence, not public
 Windows or Linux Alpha releases. Keep those downloads unavailable when any
@@ -75,6 +75,28 @@ Run both packaged release smokes:
 pnpm smoke:packaged:release
 ```
 
+### Packaged hardening (fuses and test hooks)
+
+Every packaged build flips four Electron fuses before signing (`electronFuses` in `apps/desktop/electron-builder.yml`): `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `--inspect` and the `SIGUSR1` inspector are off, and app code loads only from `app.asar`. A release build also ignores `VIDEORC_REMOTE_DEBUG_PORT`, `--remote-debugging-port`/`--remote-debugging-pipe` and the native preview module/helper path overrides (`VIDEORC_NATIVE_PREVIEW_HOST_MODULE`, `VIDEORC_NATIVE_PREVIEW_IN_PROCESS_MODULE`, `VIDEORC_NATIVE_PREVIEW_HOST_HELPER`) and logs one `Release build ignored test-only hooks` line. Each of those lets another same-user process run code as Videorc, inheriting its Screen Recording, Camera and Microphone grants on macOS.
+
+Check an artifact:
+
+```sh
+pnpm check:packaged-app                      # default release/ path for this OS
+pnpm check:packaged-app --app /path/to/Videorc.app
+```
+
+A harness that needs CDP in a packaged app (the live lab, `smoke:windows-main-window-recovery`, perf probes against a packaged build) needs a **packaged test build**: set `VIDEORC_PACKAGED_TEST_HOOKS=1` when `electron-vite build` runs (`pnpm --filter @videorc/desktop package:linux:test-hooks`, `VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop`, or `$env:VIDEORC_PACKAGED_TEST_HOOKS='1'` before `pnpm package:desktop:windows`). The fuses stay flipped. `pnpm check:packaged-app` refuses such a build unless you pass `--allow-test-hooks`; it must never ship. The packaged smoke command server (`VIDEORC_PACKAGED_SMOKE_TEST`, used by `smoke:packaged*` against the exact release payload) is unchanged.
+
+`pnpm smoke:windows-main-window-recovery` prepares that separate test package
+automatically from the current source and existing compiled backend/FFmpeg.
+Set `VIDEORC_PERF_APP_EXECUTABLE` to the original production executable. The
+runner checks its hardening, builds a temporary directory with CDP enabled,
+checks the test package's fuses, runs recovery there, and verifies that the
+original executable and app.asar hashes did not change. Its report identifies
+the result as test-build evidence. The original installer and its recording
+checks remain production-build evidence; the recovery test package never ships.
+
 For development acceptance, run the same backend recording smoke through `pnpm dev`:
 
 ```sh
@@ -109,6 +131,14 @@ The development smoke test opens the Electron app through `electron-vite`, waits
 - Intended later public prefix:
   `releases/linux-alpha/<releaseId>/`
 - Updater feed filename: `latest-linux.yml` only
+- In-app update notice: Linux builds never run electron-updater. They read
+  the public `https://www.videorc.com/api/changelog?since=<core>-alpha.0`
+  and show "Videorc X is available. Download it from videorc.com" for the
+  newest entry whose `platforms` include `linux` and whose version is newer
+  (`apps/desktop/src/main/linux-update-notice.ts`). Publishing a Linux
+  release must therefore publish its `linux` changelog entry; until the
+  changelog lists the running Linux line, Settings says nothing about being
+  up to date.
 - Public download, videorc-web button, and `updates/linux-alpha/` pointers
   stay disabled until `promote-linux-alpha.yml` and Ubuntu 24.04 named-box
   packaged/updater proof exist. Hold the Linux Discord announcement until

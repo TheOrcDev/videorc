@@ -23,6 +23,7 @@ import {
   mixSourcesIncludeSystemAudio,
   parseSystemAudioMixCutover,
   parseSystemAudioSyncOffsetMs,
+  startedSessionStatus,
   summarizeSystemAudioSyncRuns,
   toneEnvelope,
   toneWavArgs,
@@ -231,6 +232,24 @@ describe('time alignment helpers', () => {
       false
     )
     assert.equal(mixSourcesIncludeSystemAudio({}), false)
+  })
+
+  it('startedSessionStatus is the started session, never the Clips ring that re-arms', () => {
+    assert.equal(startedSessionStatus({ state: 'recording', sessionId: 'rec-1' }), true)
+    assert.equal(
+      startedSessionStatus({ state: 'streaming', sessionId: 'live-1', replayOnly: false }),
+      true
+    )
+    // The ring's buffer-only session (plan 181) publishes the same states.
+    assert.equal(
+      startedSessionStatus({ state: 'recording', sessionId: 'ring-1', replayOnly: true }),
+      false
+    )
+    for (const state of ['starting', 'stopping', 'idle', 'failed']) {
+      assert.equal(startedSessionStatus({ state, sessionId: 'rec-1' }), false)
+    }
+    assert.equal(startedSessionStatus({ state: 'recording' }), false)
+    assert.equal(startedSessionStatus(undefined), false)
   })
 
   it('generates a -6 dBFS stereo tone (lavfi sine is too quiet)', () => {

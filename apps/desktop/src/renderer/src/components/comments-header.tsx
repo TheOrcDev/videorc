@@ -31,7 +31,7 @@ export function HighlightAnchorOptions({
         onValueChange={(value) => onChange(normalizeCommentHighlightAnchor(value))}
       >
         {COMMENT_HIGHLIGHT_ANCHORS.map((option) => (
-          <DropdownMenuRadioItem key={option} value={option}>
+          <DropdownMenuRadioItem key={option} closeOnClick value={option}>
             {HIGHLIGHT_ANCHOR_LABELS[option]}
           </DropdownMenuRadioItem>
         ))}

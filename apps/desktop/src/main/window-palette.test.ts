@@ -132,14 +132,13 @@ describe('window palette mirrors styles.css', () => {
     expect(DARK_GLASS_COATS.content).toBe(`oklch(${DARK_GLASS_BASE} / ${coats.content * 100}%)`)
   })
 
-  it('reads the Increase Contrast covers at 95% and the reduced-transparency solid without the ground', () => {
+  it('reads the Increase Contrast covers at 95% and the reduced-transparency solid', () => {
     const contrast = styles.slice(styles.indexOf('@media (prefers-contrast: more)'))
     expect(contrast.match(/--glass-cover-(?:sidebar|work):\s*0\.95;/g)).toHaveLength(4)
     const reduced = styles.slice(styles.indexOf('@media (prefers-reduced-transparency: reduce)'))
     expect(reduced).toMatch(/--glass-window:\s*var\(--glass-solid\);/)
     expect(reduced).toMatch(/--glass-sidebar:\s*transparent;/)
     expect(reduced).toMatch(/--glass-content:\s*transparent;/)
-    expect(reduced).toMatch(/\[data-chrome-ground\]\s*\{\s*display:\s*none;\s*\}/)
   })
 
   it('clips the docked preview to the panel radius the Studio slot draws', () => {

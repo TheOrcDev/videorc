@@ -332,7 +332,6 @@ async function runScenario(ws, smoke, scenario, index) {
         sessionId,
         messageId: message.id
       })
-      await recordStudioChatEvidence(smoke, scenarioDirectory)
     } else {
       await waitForDetachedComment(smoke, message)
       highlight = await selectAndWaitForHighlight(ws, smoke, {
@@ -387,6 +386,10 @@ async function runScenario(ws, smoke, scenario, index) {
     if (surface === 'studio') {
       // After the capture, so the card's frames are already in the stream.
       await takeOffStudioRow(ws, smoke, message)
+      // The layout and the theme shots once the card is off: they take
+      // seconds on a slow host, and before the capture they ran the 10 s
+      // highlight out mid-capture (plan 0009). The section still shows.
+      await recordStudioChatEvidence(smoke, scenarioDirectory)
       await shootStudioChatRetroLcd(smoke, scenarioDirectory)
       await hideAndUndoStudioChat(smoke)
     }
@@ -651,14 +654,20 @@ async function studioEval(smoke, code, params = {}) {
 /** Settings → General → Chat in Studio, then back to the Studio. */
 async function turnOnStudioChat(smoke) {
   // The main window's default size (D8): the section must fit there.
-  await smokeCommand(smoke, 'resize-window', { width: 1180, height: 780 })
+  // VIDEORC_STUDIO_CHAT_WINDOW=800x560 checks a small window too (plan 0009).
+  const [width, height] = (process.env.VIDEORC_STUDIO_CHAT_WINDOW ?? '1180x780')
+    .split('x')
+    .map(Number)
+  await smokeCommand(smoke, 'resize-window', { width, height })
   const result = await studioEval(
     smoke,
     `await openTab('settings', '#studio-chat')
+     // The id is on the Switch's hidden checkbox input (Base UI), which
+     // mirrors its state and toggles it on a click.
      const toggle = document.querySelector('#studio-chat')
-     if (toggle.getAttribute('aria-checked') !== 'true') toggle.click()
+     if (!toggle.checked) toggle.click()
      await sleep(150)
-     const checked = document.querySelector('#studio-chat')?.getAttribute('aria-checked')
+     const checked = String(document.querySelector('#studio-chat')?.checked)
      await openTab('studio')
      await sleep(400)
      return {
@@ -797,6 +806,10 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
      }
      return {
        window: { width: window.innerWidth, height: window.innerHeight },
+       document: {
+         scrollWidth: document.documentElement.scrollWidth,
+         scrollHeight: document.documentElement.scrollHeight
+       },
        paneScrollTop: pane?.scrollTop ?? null,
        pane: rect(pane),
        section: rect(section),
@@ -835,6 +848,16 @@ async function recordStudioChatEvidence(smoke, scenarioDirectory) {
       `The preview card moved when the Chat section appeared: ${JSON.stringify(evidence)}`
     )
   }
+  // Only the pane scrolls (plan 0009): anything that stretches the document
+  // past the window gives it a scrollbar, which takes the preview's width.
+  const page = metrics?.document
+  if (
+    !page ||
+    page.scrollHeight > metrics.window.height ||
+    page.scrollWidth > metrics.window.width
+  ) {
+    throw new Error(`The window scrolls with the Chat section showing: ${JSON.stringify(evidence)}`)
+  }
 }
 
 /** The main window in one theme, as `videorc-ui-studio-chat-<name>.png`. */
@@ -855,13 +878,15 @@ async function shootStudio(smoke, theme, name) {
  * the card's 10 s lifetime never meets the detour through Settings.
  */
 async function shootStudioChatRetroLcd(smoke, scenarioDirectory) {
+  // The id is on the Switch's hidden checkbox input (Base UI).
   const retro = `await openTab('settings', '#retro-lcd-studio')
      const toggle = document.querySelector('#retro-lcd-studio')
-     if (toggle.getAttribute('aria-checked') !== String(params.on)) toggle.click()
+     if (toggle.checked !== params.on) toggle.click()
      await sleep(150)
      await openTab('studio', ${JSON.stringify(STUDIO_CHAT)})
      await sleep(400)
-     return document.querySelector('#retro-lcd-studio')?.getAttribute('aria-checked') ?? null`
+     const checked = document.querySelector('#retro-lcd-studio')?.checked
+     return checked === undefined ? null : String(checked)`
   await studioEval(smoke, retro, { on: true })
   const file = await shootStudio(smoke, 'dark', 'retro-dark')
   await studioEval(smoke, retro, { on: false })

@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 
-import type { CaughtError } from '@/components/error-boundary'
-import { CopyDetailsButton, errorDetails } from '@/components/root-error-panel'
+import { errorDetails, type CaughtError } from '@/components/error-boundary'
+import { CopyDetailsButton } from '@/components/root-error-panel'
 import { Button } from '@/components/ui/button'
 import {
   Empty,

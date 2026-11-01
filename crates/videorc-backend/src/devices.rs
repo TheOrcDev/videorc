@@ -145,6 +145,8 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
                             && !device.name.to_lowercase().contains("capture screen")
                         {
                             devices.push(Device {
+                                app: None,
+                                window_title: None,
                                 id: format!("camera:avfoundation:{}", device.index),
                                 name: format!("FFmpeg fallback - {}", device.name),
                                 kind: DeviceKind::Camera,
@@ -230,6 +232,8 @@ fn unsupported_device_list() -> DeviceList {
 
     devices.extend([
         Device {
+            app: None,
+            window_title: None,
             id: "screen:unsupported-platform".to_string(),
             name: "Primary Display".to_string(),
             kind: DeviceKind::Screen,
@@ -239,6 +243,8 @@ fn unsupported_device_list() -> DeviceList {
             height: None,
         },
         Device {
+            app: None,
+            window_title: None,
             id: "window:unsupported-platform".to_string(),
             name: "Window Capture".to_string(),
             kind: DeviceKind::Window,
@@ -291,6 +297,8 @@ fn avfoundation_screen_devices(
                 && device.name.to_lowercase().contains("capture screen")
         })
         .map(|device| Device {
+            app: None,
+            window_title: None,
             id: format!("screen:avfoundation:{}", device.index),
             name: device.name.clone(),
             kind: DeviceKind::Screen,
@@ -315,6 +323,8 @@ fn avfoundation_screen_devices(
 #[cfg(target_os = "macos")]
 fn missing_avfoundation_screen_device() -> Device {
     Device {
+        app: None,
+        window_title: None,
         id: "screen:avfoundation-missing".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -331,6 +341,8 @@ fn missing_avfoundation_screen_device() -> Device {
 #[cfg(target_os = "macos")]
 fn avfoundation_probe_failed_screen_device() -> Device {
     Device {
+        app: None,
+        window_title: None,
         id: "screen:probe-failed".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -467,6 +479,8 @@ fn system_audio_device_for(support: SystemAudioSupport) -> Device {
         ),
     };
     Device {
+        app: None,
+        window_title: None,
         id: SYSTEM_AUDIO_DEVICE_ID.to_string(),
         name: "System audio".to_string(),
         kind: DeviceKind::SystemAudio,
@@ -569,11 +583,34 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
         .and_then(crate::linux_pulse_audio::parse_linux_pulse_microphone_id)
     {
         let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
-        return run_ffmpeg_volume_meter(
-            &ffmpeg_path,
-            crate::linux_pulse_audio::pulse_meter_args(&source_name),
-        )
-        .await;
+        // Retest 154 (C4): an unplugged source says so; the check itself is
+        // pinned, so it never measures the default (built-in) microphone.
+        #[cfg(target_os = "linux")]
+        {
+            let lister = ffmpeg_path.clone();
+            let listing = tokio::task::spawn_blocking(move || {
+                crate::linux_pulse_audio::linux_pulse_sources_blocking(&lister)
+            })
+            .await
+            .ok()
+            .flatten();
+            if crate::linux_pulse_audio::pulse_source_missing(listing.as_deref(), &source_name) {
+                return AudioMeterResult {
+                    status: AudioMeterStatus::Unavailable,
+                    level: None,
+                    peak_db: None,
+                    mean_db: None,
+                    message: Some(
+                        crate::linux_pulse_audio::pulse_source_not_connected_message(&source_name),
+                    ),
+                };
+            }
+        }
+        let mut command = Command::new(&ffmpeg_path);
+        command
+            .envs(crate::linux_pulse_audio::pulse_pinned_source_env())
+            .args(crate::linux_pulse_audio::pulse_meter_args(&source_name));
+        return run_ffmpeg_volume_meter_command(&ffmpeg_path, command).await;
     }
 
     if !cfg!(target_os = "macos") {
@@ -649,10 +686,15 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
 /// Runs a bounded FFmpeg `volumedetect` capture and maps its levels.
 async fn run_ffmpeg_volume_meter(ffmpeg_path: &str, args: Vec<String>) -> AudioMeterResult {
     let mut command = Command::new(ffmpeg_path);
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.args(&args);
+    run_ffmpeg_volume_meter_command(ffmpeg_path, command).await
+}
+
+async fn run_ffmpeg_volume_meter_command(
+    ffmpeg_path: &str,
+    mut command: Command,
+) -> AudioMeterResult {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let output = timeout(Duration::from_secs(6), output_owned_tokio(&mut command)).await;
     let output = match output {
@@ -945,6 +987,8 @@ fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
         ),
     };
     Device {
+        app: None,
+        window_title: None,
         id,
         name: device.name.clone(),
         kind: DeviceKind::Microphone,
@@ -1277,6 +1321,8 @@ mod tests {
     fn native_screen_and_window_sources_are_selectable_for_preview() {
         let devices = preview_ready_native_capture_devices(vec![
             Device {
+                app: None,
+                window_title: None,
                 id: "screen:screencapturekit:1".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1286,6 +1332,8 @@ mod tests {
                 height: None,
             },
             Device {
+                app: None,
+                window_title: None,
                 id: "window:screencapturekit:42".to_string(),
                 name: "Editor".to_string(),
                 kind: DeviceKind::Window,
@@ -1295,6 +1343,8 @@ mod tests {
                 height: None,
             },
             Device {
+                app: None,
+                window_title: None,
                 id: "camera:native".to_string(),
                 name: "Camera".to_string(),
                 kind: DeviceKind::Camera,
@@ -1322,6 +1372,8 @@ mod tests {
         let devices = windows_device_list_from_parts(
             crate::screen_capture::NativeCaptureSources {
                 devices: vec![Device {
+                    app: None,
+                    window_title: None,
                     id: "screen:dxgi:0000000000000001:0".to_string(),
                     name: "Display 1".to_string(),
                     kind: DeviceKind::Screen,
@@ -1334,6 +1386,8 @@ mod tests {
             },
             crate::camera_capture::NativeCameraDevices {
                 devices: vec![Device {
+                    app: None,
+                    window_title: None,
                     id: "camera:windows-dshow:5553422043616d657261".to_string(),
                     name: "USB Camera".to_string(),
                     kind: DeviceKind::Camera,
@@ -1345,6 +1399,8 @@ mod tests {
                 warnings: vec!["camera warning".to_string()],
             },
             vec![Device {
+                app: None,
+                window_title: None,
                 id: "microphone:windows-dshow:4d6963726f70686f6e65204172726179".to_string(),
                 name: "Microphone Array".to_string(),
                 kind: DeviceKind::Microphone,
@@ -1542,6 +1598,8 @@ mod tests {
     fn native_second_display_maps_to_second_avfoundation_capture_screen() {
         let native_capture_devices = vec![
             Device {
+                app: None,
+                window_title: None,
                 id: "screen:screencapturekit:111".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1551,6 +1609,8 @@ mod tests {
                 height: None,
             },
             Device {
+                app: None,
+                window_title: None,
                 id: "screen:screencapturekit:222".to_string(),
                 name: "Display 2".to_string(),
                 kind: DeviceKind::Screen,

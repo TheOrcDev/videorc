@@ -66,6 +66,11 @@ export function buildRecordingStudioGateSteps({
       args: ['smoke:scene-switch-pixels']
     },
     {
+      label: 'app scenes, follow the app in front and Hide screen smoke (plan 210)',
+      command: 'pnpm',
+      args: ['smoke:smart-scenes']
+    },
+    {
       label: 'separate source recordings fixture take',
       command: 'pnpm',
       args: ['smoke:separate-source-fixture']
@@ -234,6 +239,21 @@ export function buildRecordingStudioGateSteps({
           VIDEORC_PREVIEW_SURFACE_MAX_INTERVAL_P95_MS: '120',
           VIDEORC_PREVIEW_SURFACE_MAX_INPUT_TO_PRESENT_P95_MS: '100'
         }
+      },
+      {
+        // With frame polling on, as in a production build: Buddy, Clips and
+        // banners change while the native Preview must keep presenting.
+        label: 'native preview presentation across overlay changes smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-overlay-presentation']
+      },
+      {
+        // Plan 212: a performance check never shows in the Preview. Reads the
+        // frame main is handed (the lease-free dev oracle) while a real check
+        // runs with Clips on, off, and with Record pressed during rung 2.
+        label: 'performance check invisible in the Preview smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-check-invisible']
       },
       {
         label: 'real ScreenCaptureKit screen recording smoke',

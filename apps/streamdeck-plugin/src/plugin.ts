@@ -4,17 +4,21 @@
 // optimistic intent. When Videorc is closed or Remote Control is disabled in
 // Settings, every key shows an alert glyph on press and the title says so.
 
+import { privacyKeyTitle, privacyKeyIntent } from './privacy-key.js'
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck'
 import type {
   DidReceiveSettingsEvent,
   JsonObject,
   KeyDownEvent,
   WillAppearEvent,
+  KeyAction,
   WillDisappearEvent
 } from '@elgato/streamdeck'
 
 import {
   VideorcClient,
+  sceneKeyIntent,
+  sceneKeyTitle,
   bannerKeyIntent,
   bannerKeyTitle,
   soundKeyIntent,
@@ -39,12 +43,19 @@ type InspectorOption = {
 
 abstract class VideorcAction<TSettings extends JsonObject> extends SingletonAction<TSettings> {
   protected abstract renderTitle: TitleRenderer<TSettings>
+  protected renderPressed(_state: RemoteState | null, _settings: TSettings): boolean | null {
+    return null
+  }
+  private updatePressed(key: KeyAction<TSettings>, settings: TSettings): void {
+    const pressed = this.renderPressed(client.state, settings)
+    if (pressed !== null) void key.setState(client.connected && pressed ? 1 : 0)
+  }
   /** Each visible key's settings, so a refresh can title every key on its own. */
   private readonly settingsById = new Map<string, TSettings>()
-  protected abstract intentFor(settings: TSettings, state: RemoteState | null): Record<
-    string,
-    unknown
-  > | null
+  protected abstract intentFor(
+    settings: TSettings,
+    state: RemoteState | null
+  ): Record<string, unknown> | null
 
   constructor() {
     super()
@@ -52,6 +63,7 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
     // onWillAppear fires on every visibility change and would stack
     // duplicate listeners (each refresh() would then run N times).
     client.on('state', this.refresh)
+    client.on('state', this.pushInspectorOptions)
     client.on('connected', this.refresh)
     client.on('describe', this.pushInspectorOptions)
     // Banner and sound keys render `shown` and `playing` from describe
@@ -63,12 +75,15 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
   private refresh = (): void => {
     for (const visible of this.actions) {
       const settings = this.settingsById.get(visible.id) ?? ({} as TSettings)
+      if (visible.isKey()) this.updatePressed(visible, settings)
       void visible.setTitle(this.renderTitle(client.state, client.connected, settings))
     }
   }
 
   private pushInspectorOptions = (): void => {
-    void streamDeck.ui.current?.sendToPropertyInspector({
+    const inspector = streamDeck.ui.current
+    if (!inspector || inspector.action.manifestId !== this.manifestId) return
+    void inspector.sendToPropertyInspector({
       event: 'videorc-options',
       connected: client.connected,
       options: this.inspectorOptions()
@@ -82,6 +97,7 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
 
   override onWillAppear(ev: WillAppearEvent<TSettings>): void {
     this.settingsById.set(ev.action.id, ev.payload.settings)
+    if (ev.action.isKey()) this.updatePressed(ev.action, ev.payload.settings)
     void ev.action.setTitle(this.renderTitle(client.state, client.connected, ev.payload.settings))
   }
 
@@ -92,6 +108,7 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
   /** The property inspector picked something: the title follows at once. */
   override onDidReceiveSettings(ev: DidReceiveSettingsEvent<TSettings>): void {
     this.settingsById.set(ev.action.id, ev.payload.settings)
+    if (ev.action.isKey()) this.updatePressed(ev.action, ev.payload.settings)
     void ev.action.setTitle(this.renderTitle(client.state, client.connected, ev.payload.settings))
   }
 
@@ -171,6 +188,26 @@ class SystemAudioToggle extends VideorcAction<JsonObject> {
   }
 }
 
+type SavedSceneSettings = { sceneId?: string }
+
+@action({ UUID: 'com.videorc.streamdeck.saved-scene' })
+class SavedSceneApply extends VideorcAction<SavedSceneSettings> {
+  protected override renderPressed(
+    state: RemoteState | null,
+    settings: SavedSceneSettings
+  ): boolean {
+    return Boolean(settings.sceneId && state?.activeSavedSceneId === settings.sceneId)
+  }
+  protected renderTitle: TitleRenderer<SavedSceneSettings> = (state, connected, settings) =>
+    sceneKeyTitle(state, settings.sceneId, connected)
+  protected intentFor(settings: SavedSceneSettings): Record<string, unknown> | null {
+    return sceneKeyIntent(settings.sceneId)
+  }
+  protected override inspectorOptions(): InspectorOption[] {
+    return (client.state?.savedScenes ?? []).map(({ id, name }) => ({ value: id, label: name }))
+  }
+}
+
 type SceneSettings = { layoutPreset?: string }
 
 @action({ UUID: 'com.videorc.streamdeck.scene-apply' })
@@ -188,6 +225,17 @@ class SceneApply extends VideorcAction<SceneSettings> {
       value: preset,
       label: preset
     }))
+  }
+}
+
+@action({ UUID: 'com.videorc.streamdeck.screen-hide-toggle' })
+class ScreenHideToggle extends VideorcAction<JsonObject> {
+  protected renderTitle: TitleRenderer = (state) => privacyKeyTitle(Boolean(state?.screenHidden))
+  protected override renderPressed(state: RemoteState | null): boolean {
+    return Boolean(state?.screenHidden)
+  }
+  protected intentFor(): Record<string, unknown> {
+    return privacyKeyIntent()
   }
 }
 
@@ -284,6 +332,8 @@ streamDeck.actions.registerAction(new StreamToggle())
 streamDeck.actions.registerAction(new MicToggle())
 streamDeck.actions.registerAction(new SystemAudioToggle())
 streamDeck.actions.registerAction(new SceneApply())
+streamDeck.actions.registerAction(new SavedSceneApply())
+streamDeck.actions.registerAction(new ScreenHideToggle())
 streamDeck.actions.registerAction(new TakeoverToggle())
 streamDeck.actions.registerAction(new BannerToggle())
 streamDeck.actions.registerAction(new SoundPlay())

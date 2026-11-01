@@ -36,6 +36,7 @@ import {
   windowsPreviewLifecycleOpenFailures,
   windowsPreviewPresenterFailures
 } from './lib/windows-preview-lifecycle-gates.mjs'
+import { configureWindowsD3d11ProbeSources } from './lib/windows-d3d11-preview-sources.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const expectWindowsD3d11 = process.env.VIDEORC_EXPECT_WINDOWS_D3D11 === '1'
@@ -143,7 +144,8 @@ async function main() {
         ? {
             VIDEORC_WINDOWS_D3D11_MEDIA: '1',
             VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
-            VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
+            VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts',
+            VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1'
           }
         : {})
     },
@@ -162,6 +164,12 @@ async function main() {
   await smokeCommandWhenShellReady('enable-synthetic-source', { settleMs: 250 })
   await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
   if (expectWindowsD3d11) {
+    const screenId = await configureWindowsD3d11ProbeSources({
+      backendConnection: launched.connections['backend-ready'],
+      smokeCommand,
+      timeoutMs
+    })
+    console.log(`Preview window probe feeds the D3D11 media path from ${screenId}.`)
     return runWindowsD3d11WindowProbe()
   }
 
@@ -248,7 +256,7 @@ async function main() {
     code: `
       for (let i = 0; i < 25; i++) {
         const scrim = document.querySelector(
-          '[data-slot="dialog-overlay"][data-state="open"], [data-slot="alert-dialog-overlay"][data-state="open"]'
+          '[data-slot="dialog-overlay"][data-open], [data-slot="alert-dialog-overlay"][data-open]'
         )
         if (!scrim) return { dismissed: true }
         document.querySelectorAll('[data-slot="dialog-close"]').forEach((button) => button.click())
@@ -388,8 +396,8 @@ async function main() {
   // surface because the watcher knew only the plain dialog's scrim. Each
   // stand-in carries the slot and state its ui primitive renders.
   for (const [kind, markup] of [
-    ['alert-dialog', '<div data-slot="alert-dialog-overlay" data-state="open"></div>'],
-    ['dialog', '<div data-slot="dialog-overlay" data-state="open"></div>']
+    ['alert-dialog', '<div data-slot="alert-dialog-overlay" data-open></div>'],
+    ['dialog', '<div data-slot="dialog-overlay" data-open></div>']
   ]) {
     await smokeCommand('eval-js', {
       code: `
@@ -594,6 +602,31 @@ async function main() {
 }
 
 /**
+ * Plan 210 put Scenes and Layouts above the canvas, so on a laptop-height
+ * window the canvas starts below the fold. A docked surface over a slot out of
+ * view hides as 'scrolled-away' (the edge-scroll case above proves that), so
+ * the Scene scenarios bring the canvas into view first, scrolling only its own
+ * pane. That pane is shared by every page and resets per page since #956, so
+ * Studio opens at its top again.
+ */
+async function revealSceneSlot() {
+  await smokeCommand('eval-js', {
+    code: `
+      const slot = document.querySelector(${JSON.stringify(SCENE_SLOT)})
+      if (!slot) return false
+      let pane = slot.parentElement
+      while (pane && !/(auto|scroll)/.test(getComputedStyle(pane).overflowY)) pane = pane.parentElement
+      if (!pane) return false
+      const slotRect = slot.getBoundingClientRect()
+      const paneRect = pane.getBoundingClientRect()
+      pane.scrollTop += slotRect.top - paneRect.top - Math.max(0, (paneRect.height - slotRect.height) / 2)
+      await sleep(150)
+      return true
+    `
+  })
+}
+
+/**
  * Plan 058: the Scene tab's canvas is a second dock slot. Runs while the
  * preview is already docked (the Studio scenarios above) and leaves it docked
  * in the Studio slot again.
@@ -601,6 +634,7 @@ async function main() {
 async function runSceneSlotScenarios() {
   // --- Scene slot: the surface re-docks into the canvas rect --------------------
   await smokeCommand('open-tab', { tab: 'layout', waitFor: SCENE_SLOT })
+  await revealSceneSlot()
   const sceneDocked = await waitForDockedSurfaceAtSlot(
     'scene-dock: surface covers the Scene canvas rect',
     { selector: SCENE_SLOT }
@@ -753,6 +787,7 @@ async function runSceneSlotScenarios() {
     JSON.stringify({ dockSlot: studioAgain?.dockSlot })
   )
   await smokeCommand('open-tab', { tab: 'layout', waitFor: SCENE_SLOT })
+  await revealSceneSlot()
   const sceneAgain = await waitForDockedSurfaceAtSlot(
     'studio-to-scene: surface re-docks into the Scene canvas',
     { selector: SCENE_SLOT }
@@ -797,11 +832,11 @@ async function runPassThroughScenario() {
       const sources = [...document.querySelectorAll('[data-videorc-stage-source]')]
       if (!sources.length) return null
       // The toolbar's source toggles render in the same order as the stage
-      // sources (both map scene.sources), and Radix marks the pressed item
-      // with data-state="on" (aria-checked in a single-select group).
+      // sources (both map scene.sources), and Base UI marks the pressed item
+      // with data-pressed (and aria-pressed).
       const toggles = [...document.querySelectorAll('[data-videorc-stage-toolbar] button[aria-label^="Select "]')]
       const isOn = (button) =>
-        button?.dataset.state === 'on' ||
+        button?.hasAttribute('data-pressed') ||
         button?.getAttribute('aria-checked') === 'true' ||
         button?.getAttribute('aria-pressed') === 'true'
       const selectedBefore = toggles.findIndex(isOn)
@@ -829,7 +864,7 @@ async function runPassThroughScenario() {
         downs: window.__videorcPassThrough.downs,
         selectedIndex: [...document.querySelectorAll('[data-videorc-stage-toolbar] button[aria-label^="Select "]')]
           .findIndex((button) =>
-            button.dataset.state === 'on' ||
+            button.hasAttribute('data-pressed') ||
             button.getAttribute('aria-checked') === 'true' ||
             button.getAttribute('aria-pressed') === 'true'),
         inspectorTitle: [...document.querySelectorAll('h3, h2, [data-slot="panel-section-title"]')].map((el) => el.textContent).join(' | '),
@@ -1013,7 +1048,8 @@ async function runWindowsD3d11WindowProbe() {
   const inputProbe = await smokeCommand('windows-preview-os-input-probe', {
     action: 'prepare'
   })
-  runWindowsOsInputProbe(inputProbe)
+  // Focus is read before the drag, which moves it to the window frame.
+  runWindowsOsInputProbe(inputProbe, 'type')
   const inputResult = await waitFor(
     async () => smokeCommand('windows-preview-os-input-probe', { action: 'read' }),
     (candidate) =>
@@ -1021,14 +1057,24 @@ async function runWindowsD3d11WindowProbe() {
       candidate?.state?.focusEvents > 0 &&
       candidate?.state?.inputEvents > 0 &&
       candidate?.state?.value === 'VIDEORC42' &&
-      candidate?.state?.activeElementId === 'videorc-windows-preview-input-target' &&
-      movedAtLeast(inputProbe.initialBounds, candidate.bounds, 12),
+      candidate?.state?.activeElementId === 'videorc-windows-preview-input-target',
     8000
   )
   assertProbe(
     inputResult.ok,
-    'input: real Win32 click, typing, and drag reached Electron through the presenter',
+    'input: real Win32 click and typing reached Electron through the presenter',
     JSON.stringify(inputResult.last)
+  )
+  runWindowsOsInputProbe(inputProbe, 'drag')
+  const dragResult = await waitFor(
+    async () => smokeCommand('windows-preview-os-input-probe', { action: 'read' }),
+    (candidate) => movedAtLeast(inputProbe.initialBounds, candidate.bounds, 12),
+    8000
+  )
+  assertProbe(
+    dragResult.ok,
+    'input: a real Win32 drag on the window frame moves Preview with the presenter claimed',
+    JSON.stringify(dragResult.last)
   )
   if (inputResult.last) {
     assertProbe(
@@ -1079,7 +1125,8 @@ async function runWindowsD3d11WindowProbe() {
 
   await smokeCommand('main-window-set-bounds', { x: 120, y: 120, width: 1180, height: 780 })
   await smokeCommand('main-window-focus')
-  await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-dock-slot]' })
+  // The Studio dock slot only mounts once the preview is docked.
+  await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
   const docked = await smokeCommand('preview-window-set-mode', { mode: 'docked' })
   assertProbe(
     docked.mode === 'docked',
@@ -1153,7 +1200,7 @@ async function waitForWindowsPresenter(label, previousPresentedSequence) {
   return result.last
 }
 
-function runWindowsOsInputProbe(probe) {
+function runWindowsOsInputProbe(probe, phase) {
   for (const name of ['inputPoint', 'dragPoint']) {
     if (!probe?.[name] || !Number.isInteger(probe[name].x) || !Number.isInteger(probe[name].y)) {
       throw new Error(`Windows OS-input probe did not return a valid ${name}.`)
@@ -1175,10 +1222,12 @@ function Click-Point([int]$x, [int]$y) {
   [VideorcPreviewInput]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
   [VideorcPreviewInput]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
 }
-Click-Point ([int]$env:VIDEORC_INPUT_X) ([int]$env:VIDEORC_INPUT_Y)
-Start-Sleep -Milliseconds 150
-[System.Windows.Forms.SendKeys]::SendWait('VIDEORC42')
-Start-Sleep -Milliseconds 150
+if ($env:VIDEORC_INPUT_PHASE -eq 'type') {
+  Click-Point ([int]$env:VIDEORC_INPUT_X) ([int]$env:VIDEORC_INPUT_Y)
+  Start-Sleep -Milliseconds 150
+  [System.Windows.Forms.SendKeys]::SendWait('VIDEORC42')
+  exit 0
+}
 $startX = [int]$env:VIDEORC_DRAG_X
 $startY = [int]$env:VIDEORC_DRAG_Y
 [VideorcPreviewInput]::SetCursorPos($startX, $startY) | Out-Null
@@ -1200,7 +1249,8 @@ foreach ($step in 1..6) {
         VIDEORC_INPUT_X: String(probe.inputPoint.x),
         VIDEORC_INPUT_Y: String(probe.inputPoint.y),
         VIDEORC_DRAG_X: String(probe.dragPoint.x),
-        VIDEORC_DRAG_Y: String(probe.dragPoint.y)
+        VIDEORC_DRAG_Y: String(probe.dragPoint.y),
+        VIDEORC_INPUT_PHASE: phase
       }
     }
   )

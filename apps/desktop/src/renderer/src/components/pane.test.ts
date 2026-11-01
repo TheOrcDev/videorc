@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -6,7 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GroupedList, ListRow } from './list-row'
 import { ConfigGrid, PageHeader } from './page'
-import { PANE_OWNS_SCROLL, Pane, PaneBody, PaneStrip, Toolbar, WINDOW_TITLE_CLASS } from './pane'
+import {
+  PANE_OWNS_SCROLL,
+  PANE_STABLE_GUTTER,
+  Pane,
+  PaneBody,
+  PaneStrip,
+  Toolbar,
+  WINDOW_TITLE_CLASS
+} from './pane'
 import { PanelSection } from './panel-section'
 import { STATUS_BAR_ACTION_CLASS, StatusBar, StatusBarHint } from './status-bar'
 import { StatusBarAction } from './status-bar-action'
@@ -70,6 +80,25 @@ describe('Toolbar', () => {
     }
   })
 
+  it('is the containing block of what it scrolls, so nothing escapes to the window (plan 0009)', () => {
+    // An `sr-only` span positioned against <body> stretched the document past
+    // the window: a window scrollbar took 15 px from the Studio preview.
+    for (const scroll of [true, false]) {
+      const markup = renderToStaticMarkup(createElement(PaneBody, { scroll, children: 'x' }))
+      expect(markup).toMatch(/class="relative\s/)
+    }
+  })
+
+  it('keeps the gutter for a page whose width must not move, and Studio asks (plan 0009)', () => {
+    // Chat showing up on air grew the Studio past the pane: a classic
+    // scrollbar appeared and the preview card shrank 604 → 589 px.
+    expect(PANE_STABLE_GUTTER).toEqual({ 'data-pane-gutter': 'stable' })
+    const markup = renderToStaticMarkup(createElement(PaneBody, null, 'x'))
+    expect(markup).toContain('has-[&gt;[data-pane-gutter=stable]]:[scrollbar-gutter:stable]')
+    const studio = readFileSync(join(__dirname, 'tabs/studio-tab.tsx'), 'utf8')
+    expect(studio).toContain('<div className={STUDIO_CONTAINER} {...PANE_STABLE_GUTTER}>')
+  })
+
   it('titles the toolbar with the one window title recipe: 14 px / 600', () => {
     expect(WINDOW_TITLE_CLASS).toContain('text-sm font-semibold text-foreground')
     const markup = renderToStaticMarkup(createElement(Toolbar, { title: 'Studio' }))
@@ -109,7 +138,9 @@ describe('flush sections', () => {
     expect(markup).toContain('p-gutter')
     // The type tokens (plan 174 S1.6a): 13 / 600 header, 12 px description,
     // and the header is an h2 under the toolbar's h1 (A-24).
-    expect(markup).toContain('text-section font-semibold')
+    expect(/<h2 class="([^"]*)"/.exec(markup)?.[1].split(' ')).toEqual(
+      expect.arrayContaining(['text-section', 'font-semibold'])
+    )
     expect(markup).toContain('text-meta text-muted-foreground')
     expect(markup).toMatch(/<h2[^>]*>Recording<\/h2>/)
   })
@@ -153,7 +184,9 @@ describe('lists', () => {
       })
     )
     expect(markup).toContain('data-slot="grouped-list"')
-    expect(markup).toContain('divide-y divide-border')
+    expect(/<div class="([^"]*)" data-slot="grouped-list"/.exec(markup)?.[1].split(' ')).toEqual(
+      expect.arrayContaining(['divide-y', 'divide-border'])
+    )
     expect(markup).toContain('>Devices<')
     // Rows inside a group are flush; the group owns the radius.
     expect(markup).toContain('in-data-[slot=grouped-list]:rounded-none')
@@ -203,7 +236,7 @@ describe('StatusBarAction', () => {
     expect(action?.getAttribute('aria-label')).toBe('Open Preview')
     // Named on hover by a tooltip, never a native title (plan 174 S1.10).
     expect(action?.hasAttribute('title')).toBe(false)
-    expect(action?.getAttribute('data-state')).toBe('closed')
+    expect(action?.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     expect(action?.getAttribute('type')).toBe('button')
     expect(action?.className).toContain(STATUS_BAR_ACTION_CLASS)
     act(() => action?.click())
@@ -228,7 +261,8 @@ describe('StatusBarAction', () => {
   })
 
   it('shares one look with the shortcut hints', () => {
-    for (const token of ['h-5', 'text-[11px]', 'text-subtle', 'hover:bg-accent']) {
+    // 11 px is the label size at the body's weight.
+    for (const token of ['h-5', 'text-label', 'font-normal', 'text-subtle', 'hover:bg-accent']) {
       expect(STATUS_BAR_ACTION_CLASS).toContain(token)
     }
     act(() =>

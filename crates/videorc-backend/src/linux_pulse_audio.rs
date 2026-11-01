@@ -24,6 +24,46 @@ const PULSE_SAMPLE_RATE: &str = "48000";
 const PULSE_CHANNELS: &str = "2";
 const PULSE_FRAGMENT_BYTES: &str = "3840";
 
+/// The environment variable libpulse reads extra stream properties from.
+pub const PULSE_STREAM_PROPS_ENV: &str = "PULSE_PROP";
+/// Retest 154 (C4): pipewire-pulse attaches a capture whose source is gone
+/// to the DEFAULT source, and moves a running capture there when its source
+/// disappears, so an unplugged USB mic silently became the laptop's built-in
+/// mic in the take. FFmpeg's pulse demuxer has no option for this; libpulse
+/// copies `PULSE_PROP` onto every stream of the process. Measured on
+/// PipeWire 1.6 with `pactl list source-outputs`: `node.dont-fallback`
+/// makes FFmpeg fail to open a missing source and exit ("Error during
+/// demuxing") within 3 s of an unplug; `node.dont-move` keeps it off other
+/// sources. `node.dont-reconnect` is left out on purpose: it leaves the
+/// stream unlinked and FFmpeg blocked forever, with no EOF or error.
+pub const PULSE_PINNED_SOURCE_PROPS: &str = "node.dont-fallback=true node.dont-move=true";
+
+/// The child environment every FFmpeg Pulse capture of a chosen source runs
+/// with (session worker, direct input, audio meter).
+pub fn pulse_pinned_source_env() -> [(&'static str, &'static str); 1] {
+    [(PULSE_STREAM_PROPS_ENV, PULSE_PINNED_SOURCE_PROPS)]
+}
+
+/// Whether a source listing says the chosen source is plugged in. Monitor
+/// sources are never chosen as microphones, so they never count.
+pub fn pulse_source_listed(sources: &[PulseSource], source_name: &str) -> bool {
+    sources.iter().any(|source| source.name == source_name)
+}
+
+/// The capture decision for a chosen source: a listing that succeeded and
+/// lacks it means it is unplugged, so nothing is spawned and the session
+/// records silence. A listing that failed says nothing about the device, so
+/// the capture still opens (pinned, it cannot reach another source).
+pub fn pulse_source_missing(listing: Option<&[PulseSource]>, source_name: &str) -> bool {
+    listing.is_some_and(|sources| !pulse_source_listed(sources, source_name))
+}
+
+pub fn pulse_source_not_connected_message(source_name: &str) -> String {
+    format!(
+        "The microphone \"{source_name}\" is not connected. Videorc records silence instead of switching to another microphone."
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PulseSource {
     pub name: String,
@@ -80,10 +120,20 @@ pub fn parse_pulse_sources(text: &str) -> Vec<PulseSource> {
         .collect()
 }
 
+/// A complete `-sources pulse` listing, or `None` when FFmpeg could not
+/// reach the Pulse server: it then prints the header, "Cannot list sources"
+/// on stderr and still exits 0, which must not read as "no microphones".
+pub fn pulse_source_listing(stdout: &str, stderr: &str) -> Option<Vec<PulseSource>> {
+    (stdout.contains("Auto-detected sources for pulse") && !stderr.contains("Cannot list sources"))
+        .then(|| parse_pulse_sources(stdout))
+}
+
 pub fn pulse_microphone_devices(sources: &[PulseSource]) -> Vec<Device> {
     sources
         .iter()
         .map(|source| Device {
+            app: None,
+            window_title: None,
             id: linux_pulse_microphone_id(&source.name),
             name: if source.description.is_empty() {
                 source.name.clone()
@@ -142,6 +192,23 @@ pub fn pulse_meter_args(source_name: &str) -> Vec<String> {
     args
 }
 
+/// The current Pulse input sources, or `None` when FFmpeg could not list
+/// them in time. Blocking: call it off the async runtime.
+#[cfg(target_os = "linux")]
+pub fn linux_pulse_sources_blocking(ffmpeg_path: &str) -> Option<Vec<PulseSource>> {
+    let output = crate::process_job::output_owned_std_with_timeout(
+        std::process::Command::new(ffmpeg_path)
+            .args(["-hide_banner", "-sources", "pulse"])
+            .stdin(std::process::Stdio::null()),
+        std::time::Duration::from_secs(4),
+    )
+    .ok()?;
+    pulse_source_listing(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
 /// Microphone rows for `devices.list`, or one unavailable row naming why.
 #[cfg(target_os = "linux")]
 pub async fn list_linux_microphones(ffmpeg_path: &str) -> Vec<Device> {
@@ -175,6 +242,8 @@ pub async fn list_linux_microphones(ffmpeg_path: &str) -> Vec<Device> {
         Err(_) => "Listing PulseAudio/PipeWire microphones timed out".to_string(),
     };
     vec![Device {
+        app: None,
+        window_title: None,
         id: "microphone:linux-pulse-unavailable".to_string(),
         name: "Microphone".to_string(),
         kind: DeviceKind::Microphone,
@@ -249,6 +318,47 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("system default")
+        );
+    }
+
+    #[test]
+    fn pulse_captures_are_pinned_to_the_chosen_source() {
+        // Retest 154 (C4): without these, pipewire-pulse attached a capture
+        // of an unplugged mic to the default (built-in) source.
+        assert_eq!(
+            pulse_pinned_source_env(),
+            [("PULSE_PROP", "node.dont-fallback=true node.dont-move=true")]
+        );
+    }
+
+    #[test]
+    fn a_source_missing_from_a_complete_listing_is_not_opened() {
+        let listing = pulse_source_listing(OGRE_SOURCES, "").unwrap();
+        let builtin = "alsa_input.pci-0000_02_00.3.HiFi__Mic__source";
+        assert!(!pulse_source_missing(Some(&listing), builtin));
+        assert!(pulse_source_missing(Some(&listing), "lanec_hotplug"));
+        // A monitor is never a chosen microphone, so it never counts as one.
+        assert!(pulse_source_missing(
+            Some(&listing),
+            "alsa_output.pci-0000_02_00.3.HiFi__Speaker__sink.monitor"
+        ));
+        // Every source unplugged: a complete, empty listing.
+        let empty = pulse_source_listing("Auto-detected sources for pulse:\n", "").unwrap();
+        assert!(pulse_source_missing(Some(&empty), builtin));
+        // No Pulse server: FFmpeg prints the header, an error, and exits 0.
+        // That says nothing about the device, so the pinned capture opens.
+        assert_eq!(
+            pulse_source_listing(
+                "Auto-detected sources for pulse:\n",
+                "Cannot list sources: Generic error in an external library\n"
+            ),
+            None
+        );
+        assert_eq!(pulse_source_listing("", ""), None);
+        assert!(!pulse_source_missing(None, "lanec_hotplug"));
+        assert!(
+            pulse_source_not_connected_message("lanec_hotplug")
+                .contains("\"lanec_hotplug\" is not connected")
         );
     }
 

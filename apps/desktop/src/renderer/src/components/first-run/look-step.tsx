@@ -66,28 +66,30 @@ function BackgroundTile({
       selected={selected}
     >
       <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            aria-label={label}
-            aria-pressed={selected}
-            className="flex w-full rounded-row p-1 outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
-            disabled={disabled}
-            type="button"
-            onClick={onSelect}
-          >
-            {src ? (
-              <img
-                alt=""
-                className="aspect-video w-full rounded-chip object-cover"
-                draggable={false}
-                src={src}
-              />
-            ) : (
-              <span className="flex aspect-video w-full items-center justify-center rounded-chip border border-border bg-inset text-meta text-muted-foreground">
-                None
-              </span>
-            )}
-          </button>
+        <TooltipTrigger
+          render={
+            <button
+              aria-label={label}
+              aria-pressed={selected}
+              className="flex w-full rounded-row p-1 outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
+              disabled={disabled}
+              type="button"
+              onClick={onSelect}
+            />
+          }
+        >
+          {src ? (
+            <img
+              alt=""
+              className="aspect-video w-full rounded-chip object-cover"
+              draggable={false}
+              src={src}
+            />
+          ) : (
+            <span className="flex aspect-video w-full items-center justify-center rounded-chip border border-border bg-inset text-meta text-muted-foreground">
+              None
+            </span>
+          )}
         </TooltipTrigger>
         <TooltipContent>{label}</TooltipContent>
       </Tooltip>

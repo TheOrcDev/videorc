@@ -31,19 +31,22 @@ import type {
   StreamingSettings,
   VideoSettings
 } from '@/lib/backend'
-import { broadcastInfoIssues } from '@/lib/broadcast-info'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
-import { unlockActionForGate } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { GO_LIVE_DIALOG_TITLE, goLiveConfirmLabel, goLiveOnReadyLabel } from '@/lib/go-live-copy'
 import {
-  goLiveDialogView,
+  goLiveConfirmGate,
   goLivePendingLabel,
   type GoLiveDestinationView,
   type GoLivePhase
 } from '@/lib/go-live-dialog-view'
 import { streamingWithoutTargets } from '@/lib/go-live-exclusions'
-import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
+import {
+  goLiveStepDownDescription,
+  streamPerformanceAdvice as adviseStreamPerformance,
+  type SoftwareStreamAdvice
+} from '@/lib/go-live-output'
 import { START_NOTICE_LABELS, overlayAndBannerStartNotices } from '@/lib/banner-start-notices'
 import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
@@ -169,33 +172,25 @@ export function GoLiveConfirmationDialog({
   // stream as configured, before anything starts.
   const streamPerformanceAdvice =
     streamOutputTopologyPreflight.state === 'ready' && !simulcast
-      ? softwareStreamAdvice({
+      ? adviseStreamPerformance({
           streamVideo: streamOutputTopologyPreflight.result.streamProfile,
           encodeBackend: streamOutputTopologyPreflight.result.effectiveEncodeBackend,
+          streaming: sentStreaming,
           state: performanceCheck
         })
       : null
-  const sentTargets = sentStreaming.targets.filter((target) => target.enabled)
-  const hasScheduledTargets = sentTargets.some((target) => target.scheduledEventId)
-  // The instant draft's details apply to every destination not tied to a
-  // saved event; privacy reaches YouTube only.
-  const hasInstantTargets = sentTargets.some((target) => !target.scheduledEventId)
-  const instantYouTube = sentTargets.some(
-    (target) => !target.scheduledEventId && target.platform === 'youtube'
-  )
-  const titleIssues =
-    hasInstantTargets && draft ? broadcastInfoIssues(draft, { titleRequired: true }) : null
-  const view = goLiveDialogView(preflight, {
-    titleField: hasInstantTargets,
-    titleMissing: hasInstantTargets && (!draft || draft.title.trim() === '')
-  })
-  const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
-  const blocked =
-    Boolean(entitlementBlocker) ||
-    captionsReadiness.blocksStart ||
-    Boolean(titleIssues?.title || titleIssues?.description) ||
-    (hasInstantTargets && !draft) ||
-    !view.destinationsReady
+  // What the primary waits on, in one pure function an agent's `go_live`
+  // shares (plan 209 S10), so a Go Live without this dialog refuses exactly
+  // what the dialog holds back.
+  const {
+    sentTargets,
+    hasScheduledTargets,
+    hasInstantTargets,
+    instantYouTube,
+    view,
+    entitlementBlocker,
+    blocked
+  } = goLiveConfirmGate({ preflight, draft, sentStreaming, captionsReadiness, entitlementGate })
   const canConfirm = !pending && Boolean(preflight) && !blocked
   const canContinuePartial =
     !pending && !entitlementBlocker && !captionsReadiness.blocksStart && Boolean(partialSetup)
@@ -214,15 +209,12 @@ export function GoLiveConfirmationDialog({
   }
 
   // The first focus is the title, else the primary, never a button that
-  // changes a destination (B-14).
-  const focusFirst = (event: Event): void => {
-    event.preventDefault()
+  // changes a destination (B-14): with all three disabled, focus stays put.
+  const firstFocus = (): HTMLElement | false => {
     for (const element of [titleRef.current, primaryRef.current, cancelRef.current]) {
-      if (element && !element.disabled) {
-        element.focus()
-        return
-      }
+      if (element && !element.disabled) return element
     }
+    return false
   }
 
   const reconnect = (destination: GoLiveDestinationPreflight): void => {
@@ -243,7 +235,7 @@ export function GoLiveConfirmationDialog({
         data-testid="go-live-dialog"
         size="xl"
         onKeyDown={onKeyDown}
-        onOpenAutoFocus={focusFirst}
+        initialFocus={firstFocus}
       >
         <DialogHeader>
           <DialogTitle>{GO_LIVE_DIALOG_TITLE}</DialogTitle>
@@ -347,7 +339,7 @@ export function GoLiveConfirmationDialog({
 
             {entitlementBlocker ? (
               <LockAlert
-                action={unlockActionForGate(entitlementBlocker)}
+                action={lockAlertAction(unlockActionForGate(entitlementBlocker))}
                 reason={entitlementBlocker.reason}
               />
             ) : null}
@@ -535,14 +527,36 @@ export function GoLiveOutputAdvice({
       </Alert>
     )
   }
+  if (advice?.kind === 'go-live-heavy') {
+    return (
+      <Alert data-videorc-go-live-output-advice="go-live-heavy" variant="warning">
+        <AlertTitle>{outputLabel(advice.requested)} may stutter while live</AlertTitle>
+        <AlertDescription>
+          Going live takes about twice the work of a recording on this computer, and its performance
+          check found no room for that. Viewers may see a stuttering picture.{' '}
+          {outputLabel(advice.video)} holds steady.
+        </AlertDescription>
+      </Alert>
+    )
+  }
   if (advice?.kind === 'step-down') {
     return (
-      <Alert>
+      <Alert data-videorc-go-live-output-advice={advice.reason}>
         <AlertTitle>Streaming at {outputLabel(advice.video)}</AlertTitle>
         <AlertDescription>
-          This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
-          session uses the largest output that held steady in its performance check
-          {recordEnabled ? ', for the recording too' : ''}. Your saved settings stay as they are.
+          {advice.reason === 'go-live-headroom' ? (
+            <>
+              {goLiveStepDownDescription(advice)}
+              {recordEnabled ? ' The recording uses it too.' : ''}
+            </>
+          ) : (
+            <>
+              This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
+              session uses the largest output that held steady in its performance check
+              {recordEnabled ? ', for the recording too' : ''}. Your saved settings stay as they
+              are.
+            </>
+          )}
         </AlertDescription>
       </Alert>
     )

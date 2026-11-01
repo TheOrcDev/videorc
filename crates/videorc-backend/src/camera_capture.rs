@@ -538,6 +538,8 @@ mod windows_native {
         // stays in the detail for support triage, not as the ffmpeg arg.
         let capture_name = friendly_name.clone();
         Device {
+            app: None,
+            window_title: None,
             id: windows_dshow_camera_device_id(&capture_name),
             name: friendly_name.clone(),
             kind: DeviceKind::Camera,
@@ -583,6 +585,8 @@ mod windows_native {
 
     fn unavailable_camera(id: &str, detail: &str) -> Device {
         Device {
+            app: None,
+            window_title: None,
             id: id.to_string(),
             name: "Camera".to_string(),
             kind: DeviceKind::Camera,
@@ -671,6 +675,8 @@ mod macos {
             };
 
             camera_devices.push(Device {
+                app: None,
+                window_title: None,
                 id: native_camera_device_id(&unique_id),
                 name,
                 kind: DeviceKind::Camera,
@@ -832,6 +838,8 @@ mod macos {
 
     fn unavailable_camera(id: &str, detail: &str) -> Device {
         Device {
+            app: None,
+            window_title: None,
             id: id.to_string(),
             name: "Camera".to_string(),
             kind: DeviceKind::Camera,

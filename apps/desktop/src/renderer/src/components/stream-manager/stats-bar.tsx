@@ -1,6 +1,8 @@
 import { useState, type DragEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
+import { HiddenIcon } from '@/components/icons'
+import { StatusBadge } from '@/components/status-badge'
 import { ViewersIcon } from '@/components/stream-manager/activity-icons'
 import { Sparkline } from '@/components/stream-manager/sparkline'
 import { Badge } from '@/components/ui/badge'
@@ -23,6 +25,7 @@ import {
   setStatHidden,
   type StatsLayout
 } from '@/lib/stream-manager-stats-layout'
+import { SCREEN_HIDDEN_LABEL } from '@/lib/screen-privacy-view'
 import { cn } from '@/lib/utils'
 
 // The stats bar (plan 057, D1): one 32 px row at every width, flush under the
@@ -185,8 +188,8 @@ function StatCell({
   )
   if (item.details.length === 0) return cell
   return (
-    <HoverCard closeDelay={80} openDelay={400}>
-      <HoverCardTrigger asChild>{cell}</HoverCardTrigger>
+    <HoverCard>
+      <HoverCardTrigger closeDelay={80} delay={400} render={cell} />
       <StatDetails item={item} />
     </HoverCard>
   )
@@ -195,12 +198,15 @@ function StatCell({
 export function StatsBar({
   items,
   layout = DEFAULT_STATS_LAYOUT,
-  onLayoutChange
+  onLayoutChange,
+  screenHidden = false
 }: {
   items: readonly StatItemModel[]
   layout?: StatsLayout
   /** Absent: the order is fixed (tests, previews). */
   onLayoutChange?: (layout: StatsLayout) => void
+  /** Plan 210 D9: the screen is hidden from viewers; the chip closes the bar. */
+  screenHidden?: boolean
 }): ReactElement {
   const { main, more } = arrangeStats(items, layout)
   const [dragging, setDragging] = useState<StatId | null>(null)
@@ -300,12 +306,20 @@ export function StatsBar({
           ))}
         </div>
       ) : null}
+      {/* Hide screen's chip (plan 210 D9) at the trailing edge: it is never
+          clipped, and no stat moves when it comes or goes. The stats wrap
+          out of sight before it. */}
+      {screenHidden ? (
+        <span className="ml-auto flex shrink-0 items-center pl-3" data-slot="stats-screen-hidden">
+          <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} />
+        </span>
+      ) : null}
     </section>
   )
   if (!onLayoutChange) return bar
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>{bar}</ContextMenuTrigger>
+      <ContextMenuTrigger render={bar} />
       <ContextMenuContent className="w-52" data-testid="stats-bar-menu">
         <ContextMenuLabel>Stats</ContextMenuLabel>
         {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
@@ -313,7 +327,6 @@ export function StatsBar({
             key={id}
             checked={!layout.hidden.includes(id)}
             onCheckedChange={(checked) => change(setStatHidden(layout, id, checked !== true))}
-            onSelect={(event) => event.preventDefault()}
           >
             {STAT_NAMES[id]}
           </ContextMenuCheckboxItem>
@@ -321,16 +334,16 @@ export function StatsBar({
         {menuTarget ? (
           <>
             <ContextMenuSeparator />
-            <ContextMenuItem disabled={moveLeft === layout} onSelect={() => change(moveLeft)}>
+            <ContextMenuItem disabled={moveLeft === layout} onClick={() => change(moveLeft)}>
               Move {STAT_NAMES[menuTarget]} left
             </ContextMenuItem>
-            <ContextMenuItem disabled={moveRight === layout} onSelect={() => change(moveRight)}>
+            <ContextMenuItem disabled={moveRight === layout} onClick={() => change(moveRight)}>
               Move {STAT_NAMES[menuTarget]} right
             </ContextMenuItem>
           </>
         ) : null}
         <ContextMenuSeparator />
-        <ContextMenuItem disabled={isDefault} onSelect={() => change(DEFAULT_STATS_LAYOUT)}>
+        <ContextMenuItem disabled={isDefault} onClick={() => change(DEFAULT_STATS_LAYOUT)}>
           Reset stats
         </ContextMenuItem>
         <ContextMenuLabel className="text-subtle">Drag a stat to move it.</ContextMenuLabel>

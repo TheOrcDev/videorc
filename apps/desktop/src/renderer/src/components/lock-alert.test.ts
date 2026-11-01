@@ -3,7 +3,8 @@ import { act, createElement as h, type ComponentProps, type ReactElement } from 
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { OFFLINE_LOCK_REASON, SESSION_LOCK_REASON } from '@/lib/lock-view'
+import { OFFLINE_LOCK_REASON, SESSION_LOCK_REASON } from '@/lib/lock-reason'
+import { lockAlertAction } from '@/lib/lock-view'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { LockAlert, OfflineAlert, SessionLockAlert } from './lock-alert'
 
@@ -55,7 +56,7 @@ describe('LockAlert', () => {
 
   it('opens Premium from its one action', async () => {
     const props: ComponentProps<typeof LockAlert> & { 'data-testid': string } = {
-      action: { kind: 'view-premium', url: VIDEORC_PREMIUM_URL },
+      action: lockAlertAction({ kind: 'view-premium', url: VIDEORC_PREMIUM_URL }),
       'data-testid': 'lock',
       reason: 'Live captions are part of Videorc Premium.'
     }
@@ -71,7 +72,10 @@ describe('LockAlert', () => {
 
   it('starts sign-in from its one action', async () => {
     const alert = await render(
-      h(LockAlert, { action: { kind: 'sign-in' }, reason: 'Sign in to use Buddy.' })
+      h(LockAlert, {
+        action: lockAlertAction({ kind: 'sign-in' }),
+        reason: 'Sign in to use Buddy.'
+      })
     )
     const button = alert.querySelector('button')!
     expect(button.textContent).toBe('Sign in')

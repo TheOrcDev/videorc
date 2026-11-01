@@ -52,6 +52,7 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
       reactions: {}
     },
     autoChat: {
+      talk: 'off',
       mode: 'off',
       greetings: { enabled: false, templates: [] },
       answers: { enabled: false, cooldownSeconds: 20 },
@@ -132,7 +133,7 @@ describe('Show on stream automatically', () => {
       'What I talk about needs Buddy to hear you (or live captions).'
     )
     expect(document.body.textContent).toContain('nothing Buddy flagged is ever shown')
-    expect(option('Off').getAttribute('data-state')).toBe('on')
+    expect(option('Off').hasAttribute('data-checked')).toBe(true)
 
     await act(async () => option('What I talk about').click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
@@ -149,7 +150,7 @@ describe('Show on stream automatically', () => {
   it('shows a stored picks-only row as the third option and rewrites it on a click', async () => {
     await render(settings({ autoHighlight: true, voiceHighlight: false }))
     const third = option("What I talk about and Buddy's picks")
-    expect(third.getAttribute('data-state')).toBe('on')
+    expect(third.hasAttribute('data-checked')).toBe(true)
     await act(async () => third.click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
       autoHighlight: true,
@@ -223,8 +224,13 @@ describe('under the Buddy tab', () => {
 })
 
 describe('Buddy hears you while you are live (plan 068)', () => {
-  function listenSwitch(): HTMLButtonElement {
-    const control = document.getElementById('cohost-listen') as HTMLButtonElement | null
+  function listenSwitch(): HTMLElement {
+    // The id is on Base UI's hidden input, which the label points at; the
+    // label names the switch.
+    const label = document.querySelector('label[for="cohost-listen"]')
+    const control = document.querySelector<HTMLElement>(
+      `[role="switch"][aria-labelledby="${label?.id}"]`
+    )
     expect(control).toBeTruthy()
     return control!
   }
@@ -232,21 +238,21 @@ describe('Buddy hears you while you are live (plan 068)', () => {
   it('is a switch bound to the listen setting', async () => {
     await render(settings())
     expect(document.body.textContent).toContain("Buddy hears you while you're live")
-    expect(listenSwitch().getAttribute('data-state')).toBe('unchecked')
+    expect(listenSwitch().hasAttribute('data-unchecked')).toBe(true)
     await act(async () => listenSwitch().click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({ listen: true })
   })
 
   it('turns listening off again', async () => {
     await render(settings({ listen: true }))
-    expect(listenSwitch().getAttribute('data-state')).toBe('checked')
+    expect(listenSwitch().hasAttribute('data-checked')).toBe(true)
     await act(async () => listenSwitch().click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({ listen: false })
   })
 
   it('is locked with the rest of the section for a Basic account', async () => {
     await render(settings(), { allowed: false, featureId: 'live-cohost', reason: 'Premium.' })
-    expect(listenSwitch().disabled).toBe(true)
+    expect(listenSwitch().hasAttribute('data-disabled')).toBe(true)
   })
 
   it('shows listening time left only when the server reported it', async () => {

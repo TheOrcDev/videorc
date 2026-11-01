@@ -13,8 +13,8 @@ function glassText(glass) {
 }
 
 /**
- * A normal launch (plan 208): the page mounts on the opaque chrome ground, on
- * every Windows build. Mica is only the VIDEORC_GLASS=clear A/B now.
+ * A normal launch: the page mounts on the opaque solid palette, on every
+ * Windows build. Mica is only the VIDEORC_GLASS=clear A/B.
  */
 export function evaluateDefaultLaunch({ mounted, glass }) {
   const failures = []
@@ -23,8 +23,8 @@ export function evaluateDefaultLaunch({ mounted, glass }) {
     failures.push('runtime info carries no windowGlass')
     return failures
   }
-  if (glass.kind !== 'ground') {
-    failures.push(`expected the chrome ground window, got ${glassText(glass)}`)
+  if (glass.kind !== 'solid' || glass.reason !== 'default') {
+    failures.push(`expected the solid window, got ${glassText(glass)}`)
   }
   return failures
 }

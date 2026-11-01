@@ -30,6 +30,7 @@ import {
 } from '@/components/stream-manager/platform-filter'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CHROME_ROW_CLASS } from '@/components/ui/chrome-row'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -239,18 +240,20 @@ export function activityRowActions(
   ]
 }
 
-export type ActivityRowTint = 'reward' | 'paid'
+export type ActivityRowTint = 'reward' | 'paid' | 'member'
 
 /** A row's one background (plan 177, as chat's plan 154): a channel point
- * reward paints the reward tint and a tip (bits, Power-ups, KICKs, Super
- * Chats and Stickers) chat's paid tint, unless it is on stream, where the
- * on-stream fill wins. Hover still paints over it. */
+ * reward paints the reward tint, a tip (bits, Power-ups, KICKs, Super Chats
+ * and Stickers) chat's paid tint, and a sub or membership chat's member plate
+ * (plan 0011), unless it is on stream, where the on-stream plate wins. Hover
+ * still paints under it. */
 export function activityRowTint(
   item: ActivityItem,
   highlight: CommentHighlightPresentation
 ): ActivityRowTint | null {
   if (highlight.phase === 'live') return null
   if (item.kind === 'redemption') return 'reward'
+  if (item.filter === 'support') return 'member'
   return item.filter === 'tips' ? 'paid' : null
 }
 
@@ -258,7 +261,8 @@ export function activityRowTint(
  * ring. */
 const ACTIVITY_ROW_TINT_CLASS: Record<ActivityRowTint, string> = {
   reward: 'bg-reward/8',
-  paid: 'bg-warning/10'
+  paid: 'bg-warning/10',
+  member: CHROME_ROW_CLASS.member
 }
 
 function ActivityRow({
@@ -297,7 +301,7 @@ function ActivityRow({
     <li
       className={cn(
         'group/activity group/kebab-host flex items-start gap-2.5 px-3 py-2 hover:bg-accent',
-        highlight.phase === 'live' && 'bg-accent',
+        highlight.phase === 'live' && CHROME_ROW_CLASS.live,
         tint && ACTIVITY_ROW_TINT_CLASS[tint]
       )}
       data-activity-id={item.id}
@@ -401,7 +405,7 @@ function SentenceHint({
   if (!line) return children
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipTrigger render={children} />
       <TooltipContent>{line}</TooltipContent>
     </Tooltip>
   )
@@ -481,15 +485,14 @@ export function ActivityPane({
             <ToggleGroup
               aria-label="Filter activity"
               className="flex-wrap justify-start"
-              type="single"
-              value={filter === 'all' ? '' : filter}
-              onValueChange={(value) => setFilter((value || 'all') as ActivityFilter | 'all')}
+              value={filter === 'all' ? [] : [filter]}
+              onValueChange={([value]) => setFilter((value ?? 'all') as ActivityFilter | 'all')}
             >
               {/* A chip shows once it has rows, with its count: the pane's
                   old "This stream: …" sentence, where it can be clicked. */}
               {shownFilters.map((option) => (
-                // ShortcutTooltip wraps the chip: a trigger's own data-state
-                // would overwrite the item's on/off state.
+                // ShortcutTooltip wraps the chip in its own span trigger, so
+                // the chip keeps only its pressed state.
                 <ShortcutTooltip key={option.id} label={option.title}>
                   <ToggleGroupItem className="gap-1 text-xs" value={option.id}>
                     {option.label}
@@ -502,21 +505,23 @@ export function ActivityPane({
         </div>
         {/* Below 640 px the same filters live in one menu, like chat's. */}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Activity filters"
-              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              type="button"
-              variant="ghost"
-            >
-              Filters
-              {activeFilterCount > 0 ? (
-                <Badge className="px-1.5" variant="outline">
-                  {activeFilterCount}
-                </Badge>
-              ) : null}
-              <ChevronDownIcon data-icon="inline-end" />
-            </Button>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                aria-label="Activity filters"
+                className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            Filters
+            {activeFilterCount > 0 ? (
+              <Badge className="px-1.5" variant="outline">
+                {activeFilterCount}
+              </Badge>
+            ) : null}
+            <ChevronDownIcon data-icon="inline-end" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-52">
             <DropdownMenuLabel>Show</DropdownMenuLabel>
@@ -524,9 +529,11 @@ export function ActivityPane({
               value={filter}
               onValueChange={(value) => setFilter(value as ActivityFilter | 'all')}
             >
-              <DropdownMenuRadioItem value="all">Everything</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem closeOnClick value="all">
+                Everything
+              </DropdownMenuRadioItem>
               {shownFilters.map((option) => (
-                <DropdownMenuRadioItem key={option.id} value={option.id}>
+                <DropdownMenuRadioItem key={option.id} closeOnClick value={option.id}>
                   {option.label}
                   <span className="ml-auto text-muted-foreground tabular-nums">
                     {counts[option.id]}
@@ -552,17 +559,19 @@ export function ActivityPane({
             Manual picks always win; the switch only feeds an idle slot. */}
         {onAutoShowChange ? (
           <Tooltip>
-            <TooltipTrigger asChild>
-              <label className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none">
-                Auto-show
-                <Switch
-                  aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
-                  checked={autoShow}
-                  data-testid="activity-auto-show"
-                  size="sm"
-                  onCheckedChange={onAutoShowChange}
-                />
-              </label>
+            <TooltipTrigger
+              render={
+                <label className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none" />
+              }
+            >
+              Auto-show
+              <Switch
+                aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
+                checked={autoShow}
+                data-testid="activity-auto-show"
+                size="sm"
+                onCheckedChange={onAutoShowChange}
+              />
             </TooltipTrigger>
             <TooltipContent>
               Shows new follows, subs, gifts, tips, rewards, raids and streaks on stream for a few

@@ -1,5 +1,89 @@
 # Implementation Plans
 
+- 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
+  Preview never shows test noise. Owner report: on the first launch after
+  0.17.2 the Preview showed coloured noise for about 18 s before the
+  camera. Cause: the performance check re-runs after every update, 8 s
+  after launch. Each rung borrows the Preview's compositor, replaces the
+  user's scene with a test pattern, and turns on a process-wide noise
+  switch. Nothing gives the scene back except a Clips re-arm. Its smoke
+  never looked at the Preview, and this run's verdict came from an
+  overloaded Mac (1080p30 on a 4K30 machine).
+  - Phase 1: a gate that reads the Preview (red first). The benchmark
+    draws only into its encoder, the user's scene stays, the noise
+    belongs to the benchmark, the Preview holds the program across the
+    ladder, main's watchdog leaves a hold alone, and packaged builds
+    never present a test-pattern frame. No launch or post-update check
+    (first-run setup or the Output button only), and no verdict from a
+    busy Mac.
+  - Phase 2 (optional, D2): the Preview stays live during a check.
+    **Phase 1 BUILT** 2026-10-31 (D1 to D3 as recommended; Phase 2 not
+    built). Owed: by-eye in both themes, packaged acceptance, Windows
+    tester, and the owner's "Check this computer" on a quiet Mac.
+- 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
+  Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
+  needs to be much smarter", quoting a user who switches between T3 Code and
+  Figma on stream and hides a sign-in behind a blurry picture in OBS. Today
+  that takes about nine clicks, the scene breaks when the app relaunches (a
+  window id), every switch stops one capture and starts another (a frozen
+  picture, probably a black frame, never measured), saved scenes have no
+  key, Deck or phone button, and nothing can blur the screen.
+  - Phase A (macOS): New scene… makes one scene per app in your current look.
+    The scene follows the app's front window and survives a relaunch. Swap in
+    place on one capture, holding the last frame (no black). A scene list on
+    the Scene page with auto-save. Keys, Deck and phone for saved scenes.
+  - Phase B (all platforms): Hide screen, a frosted still of the screen on
+    every output while the camera and microphone stay on, done at the
+    capture source. A default key (⌃⌥H) and every other surface. Agents can
+    hide, never show.
+  - Phase C (macOS): Follow the app in front, and Hide screen when a password
+    manager comes to the front on a display scene.
+  - Phase D: the smoke, docs and acceptance.
+
+  **EXECUTING** 2026-10-28: the owner took every recommended answer (D1
+  to D13) and asked for the whole plan in one PR. S11's smoke and docs
+  landed 2026-10-29:
+  [acceptance record](../docs/acceptance/2026-10-29-smarter-scenes-acceptance.md)
+  (owner by-eye checks owed).
+
+- 2026-10-28: [Plan 211](211-buddy-talks-only-in-its-bubble.md), Buddy
+  talks only in its bubble, and Auto is gone. Owner request, after Auto
+  posted an AI welcome in chat as them on the 2026-10-28 stream and Off then
+  skipped 46 greetings: Buddy greets on stream, never in chat. The control
+  becomes "{name} talks: Off · Bubble · Suggest". Bubble speaks greetings,
+  answers ("@name …") and banter in the bubble only. It is paced and queued
+  so no line cuts another short, skipped while Buddy is off stream, and
+  listed under "Said on stream" in Reports. Nothing automatic can reach
+  chat: the lane's send output is deleted, and the Say box and `buddy_say`
+  are bubble-only. A new `autoChat.talk` field keeps older apps safe (Bubble
+  is saved as `mode: off`). New installs and saved Auto start in Bubble;
+  saved Off stays Off. Agents' `set_buddy` takes `talk`. One desktop PR in
+  five phases, plus an eval-fixture tidy on the web. Supersedes plan 202
+  Phases B to D. **BUILT** 2026-10-29 as one desktop PR (all five phases)
+  and a web eval-fixture PR; owner answers recorded 2026-10-28. Owed: the
+  owner's by-eye pass in both themes, a live take, and `smoke:agent-mcp`
+  B1 (local RTMP go-live), red on this Mac before Buddy's step.
+- 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
+  agents and Buddy run the studio. Owner request: a complete MCP so people
+  control everything from their agents, with Buddy using it too. Agents on
+  this computer (Claude Desktop, Claude Code, Cursor, Codex, VS Code) connect
+  through `videorc-mcp`, a stdio bridge shipped in the app, to a loopback-only
+  `/mcp` endpoint with per-agent tokens. 43 tools cover looking (status,
+  picture, chat, Library), running the show, arranging the picture ("move
+  Buddy to the top left", "the banner to the bottom left", with the Scene
+  canvas's own snaps), chat, Buddy, preparing and the Library. They run through the same executor as the buttons and Stream
+  Deck, whose allowlists stay unchanged. The owner chose full control with no
+  prompts, so actions are logged and attributed, one Stop cuts every agent,
+  deletes go to the Trash, and YouTube removals still wait for a click (API
+  policy). Free; Buddy's tool use is Premium, triggered only by the
+  streamer's voice or `/buddy`, through a new videorc.com planner whose
+  calls the desktop checks against Buddy's subset.
+  **BUILT** 2026-10-28 as one desktop PR (all 23 slices, plus one-click
+  Connect, a `.mcpb` and two MCP prompts) and a videorc.com PR (the planner
+  route and an agents page; deploy it first). Local gates and smokes green;
+  owner acceptance, packaged by-eye, the planner's live eval and
+  Windows/Linux runs owed; the owner took all seven recommended answers
+  (2026-10-28).
 - 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
   colours. Owner request: redesign Videorc's colour after the Welcome
   screen's Liquid Chrome, metallic black with its shine, and the other way
@@ -21,6 +105,7 @@
   glass for one release. Gates in the
   [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
   the owner's by-eye in both themes and a Windows pass are owed.
+
 - 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
   steps 2 to 5. Owner request: after permissions, "What are you making?",
   "Your look", "Sound check" and "Where you stream". The goal (Recordings,
@@ -103,6 +188,8 @@
   in Layout → Buddy hides the pet and bubble while a takeover shows; it
   starts off for everyone, so the release notes must say so. Four desktop
   phases, no web change. **PLANNED**; owner answers recorded 2026-10-26.
+  **2026-10-28**: Phases B to D (Bubble mode) are superseded by plan 211.
+  Only Phase A, "Show on takeovers", remains, and it runs after plan 211.
 - 2026-10-26: [Plan 201](201-studio-audio-balance.md), Balance the Microphone
   and System audio from the Studio. One Audio section puts both levels on
   one audiocn Mixer scale, each with the same Gain fader Sources uses, in

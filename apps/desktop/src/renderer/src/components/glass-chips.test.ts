@@ -256,7 +256,15 @@ describe('chip tokens', () => {
 // touch. Four materials, defined once, with a dark and a light column; red
 // stays the LED's alone (D6, D8).
 describe('chrome materials (plan 208 S4)', () => {
-  const MATERIALS = ['chrome-fill', 'chrome-plate', 'chrome-bead', 'chrome-bead-ink', 'chrome-led']
+  const MATERIALS = [
+    'chrome-fill',
+    'chrome-plate',
+    'chrome-bead',
+    'chrome-bead-ink',
+    'chrome-led',
+    'chrome-row-live',
+    'chrome-row-member'
+  ]
   const body = (name: string): string => {
     const match = new RegExp(`@utility ${name} \\{([\\s\\S]*?)\\n\\}`).exec(styles)
     if (!match) throw new Error(`@utility ${name} is missing from styles.css`)
@@ -299,7 +307,17 @@ describe('chrome materials (plan 208 S4)', () => {
       '--chrome-led-drop',
       '--chrome-led-lift',
       '--chrome-led-glow',
-      '--chrome-edge'
+      '--chrome-edge',
+      '--chrome-row-edge-stops',
+      '--chrome-row-live-top',
+      '--chrome-row-live-bottom',
+      '--chrome-row-live-hi',
+      '--chrome-row-member-top',
+      '--chrome-row-member-bottom',
+      '--chrome-row-member-hi',
+      '--chrome-row-member-edge',
+      '--chrome-row-rim',
+      '--chrome-row-lift'
     ]
     for (const token of tokens) {
       expect(light, token).toContain(`${token}:`)
@@ -329,5 +347,38 @@ describe('chrome materials (plan 208 S4)', () => {
     const contrast = /@media \(prefers-contrast: more\) \{([\s\S]*?)\n\}/.exec(styles)?.[1] ?? ''
     expect(contrast.match(/--chrome-edge: oklch\(/g)).toHaveLength(2)
     expect(contrast.match(/--chrome-plate-rim: oklch\(/g)).toHaveLength(2)
+    expect(contrast.match(/--chrome-row-rim: oklch\(/g)).toHaveLength(2)
+  })
+
+  // Plan 0011: the chrome rows are cheap on a CPU-only compositor. Static
+  // gradients and inset shadows on the row's own box: no filter, no blur, no
+  // fixed or viewport-sized background, no layer promotion.
+  it('keeps the chrome rows static and paint-cheap', () => {
+    for (const name of ['chrome-row-live', 'chrome-row-member']) {
+      expect(body(name), name).not.toMatch(
+        /filter|blur|will-change|background-attachment|vw|vh|transform|::?(?:before|after)/
+      )
+    }
+    // The member hue is only the member row's edge; the on-stream row is neutral.
+    expect(body('chrome-row-member')).toContain('inset 2px 0 0 var(--chrome-row-member-edge)')
+    for (const column of [light, dark]) {
+      expect(column).toContain(
+        '--chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);'
+      )
+    }
+    expect(body('chrome-row-live')).not.toContain('--member')
+    // Each plate stands on the theme's solid, its last layer, also on hover.
+    for (const name of ['chrome-row-live', 'chrome-row-member']) {
+      const stacks = [...body(name).matchAll(/background-image:([^;]*);/g)].map(([, layers]) =>
+        layers.trim()
+      )
+      expect(stacks, name).toHaveLength(2)
+      for (const layers of stacks) {
+        expect(
+          layers.endsWith('linear-gradient(var(--glass-solid), var(--glass-solid))'),
+          name
+        ).toBe(true)
+      }
+    }
   })
 })

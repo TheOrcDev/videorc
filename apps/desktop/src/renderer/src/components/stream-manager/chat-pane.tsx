@@ -11,6 +11,13 @@ import {
 
 import { classifyComposerDraft, markerTime } from '../../../../shared/session-markers'
 import {
+  BUDDY_ASKING,
+  BUDDY_COMMAND,
+  BUDDY_COMMAND_HINT,
+  BUDDY_UNREACHABLE,
+  type CohostActAnswer
+} from '../../../../shared/buddy-act'
+import {
   bannerCompletions,
   type BannerRelayAction,
   type BannerSummary,
@@ -154,6 +161,7 @@ export function ChatPane({
   onBanner,
   sounds,
   onSound,
+  onBuddy,
   prefill = null,
   cohostNudge = false,
   onCohostNudgeTurnOn,
@@ -206,6 +214,8 @@ export function ChatPane({
   /** Plan 189 S9: the board `/sound` reads, and its press or Stop all. */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /** Plan 209 S20: `/buddy <words>`; resolves to Buddy's final answer. */
+  onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
   cohostNudge?: boolean
@@ -389,7 +399,7 @@ export function ChatPane({
           />
           <ToggleGroup
             aria-label="Chat filters"
-            type="multiple"
+            multiple
             value={[
               ...(filter.questions ? ['questions'] : []),
               ...(filter.mentions ? ['mentions'] : [])
@@ -418,21 +428,23 @@ export function ChatPane({
         </div>
         {/* Below 640 px the same filters live in one menu. */}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Chat filters"
-              className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
-              type="button"
-              variant="ghost"
-            >
-              Filters
-              {activeFilterCount > 0 ? (
-                <Badge className="px-1.5" variant="outline">
-                  {activeFilterCount}
-                </Badge>
-              ) : null}
-              <ChevronDownIcon data-icon="inline-end" />
-            </Button>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                aria-label="Chat filters"
+                className={cn('shrink-0 gap-1 px-2 text-xs', NARROW_ONLY)}
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            Filters
+            {activeFilterCount > 0 ? (
+              <Badge className="px-1.5" variant="outline">
+                {activeFilterCount}
+              </Badge>
+            ) : null}
+            <ChevronDownIcon data-icon="inline-end" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-52">
             {platforms.length > 1 ? (
@@ -450,6 +462,7 @@ export function ChatPane({
               {questionMessageIds.size > 0 || filter.questions ? (
                 <DropdownMenuCheckboxItem
                   checked={filter.questions}
+                  closeOnClick
                   onCheckedChange={(checked) =>
                     setFilter((current) => ({ ...current, questions: checked === true }))
                   }
@@ -459,6 +472,7 @@ export function ChatPane({
               ) : null}
               <DropdownMenuCheckboxItem
                 checked={filter.mentions}
+                closeOnClick
                 onCheckedChange={(checked) =>
                   setFilter((current) => ({ ...current, mentions: checked === true }))
                 }
@@ -590,6 +604,7 @@ export function ChatPane({
           onBanner={onBanner}
           sounds={sounds}
           onSound={onSound}
+          onBuddy={onBuddy}
           cohostNudge={cohostNudge}
           failures={sendFailures}
           focusSignal={composerFocusSignal + composerFocus}
@@ -608,17 +623,21 @@ export function ChatPane({
 
 /** The composer's own commands, in the order the completion list offers them. */
 const COMPOSER_COMMANDS: readonly ComposerCompletion[] = [
+  { value: '/hide', hint: ' · Hide screen' },
+  { value: '/show', hint: ' · Show screen' },
   { value: '/marker', hint: ' [title] · Save a timeline point' },
   { value: '/clip', hint: ' · Save the last seconds as a clip' },
   // Plan 199 D6: the 1-minute clip.
   { value: '/clip 60', hint: ' · Save the last minute as a clip' },
   { value: '/banner', hint: ' [name] · Show or hide a banner' },
   { value: '/sound', hint: ' [name] · Play a sound' },
+  // Plan 209 S20: Buddy's planner, typed (no wake word, no spoken yes).
+  { value: BUDDY_COMMAND, hint: BUDDY_COMMAND_HINT },
   { value: '/help', hint: ' · Command help' }
 ]
 
 /** The commands that take an argument, and go on to its completions. */
-const COMMANDS_WITH_ARGUMENT = new Set(['/marker', '/banner', '/sound'])
+const COMMANDS_WITH_ARGUMENT = new Set(['/marker', '/banner', '/sound', BUDDY_COMMAND])
 /** The commands whose completions are names (plans 186, 189). */
 const COMMANDS_WITH_NAMES = new Set(['/banner', '/sound'])
 /** No sounds before Studio has read the board: the same empty board. */
@@ -642,7 +661,8 @@ export function Composer({
   banners,
   onBanner,
   sounds,
-  onSound
+  onSound,
+  onBuddy
 }: {
   markerContext?: MarkerContext | null
   onMarker?: (label?: string) => Promise<SessionMarker>
@@ -662,6 +682,12 @@ export function Composer({
    */
   sounds?: SoundboardSummary | null
   onSound?: (action: SoundRelayAction) => Promise<boolean>
+  /**
+   * Plan 209 S20: `/buddy <words>` asks Buddy's planner through Studio.
+   * Resolves to the final answer; its sentence is the composer's notice
+   * ("Switched to BRB. Pressed Drum roll.", or why not). Never posts to chat.
+   */
+  onBuddy?: (sentence: string) => Promise<CohostActAnswer>
   providers: readonly LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
@@ -719,7 +745,8 @@ export function Composer({
     ? !localPending &&
       (command.kind !== 'marker' ||
         Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker)) &&
-      (command.kind !== 'clip' || Boolean(clipContext?.available && onClip))
+      (command.kind !== 'clip' || Boolean(clipContext?.available && onClip)) &&
+      (command.kind !== 'buddy' || Boolean(onBuddy))
     : targets.length > 0 && !pending
   // Under `/banner` and `/sound`, the names (plans 186, 189); otherwise the commands.
   const completions: readonly ComposerCompletion[] =
@@ -731,6 +758,7 @@ export function Composer({
         !draft.includes(' ') &&
         (bannerList || entry.value !== '/banner') &&
         (soundBoard || entry.value !== '/sound') &&
+        (onBuddy || entry.value !== BUDDY_COMMAND) &&
         entry.value.startsWith(draft.toLowerCase())
     )
   const showCompletions = completions.length > 0 && !completionDismissed
@@ -788,7 +816,7 @@ export function Composer({
     }
     if (command.kind === 'help') {
       setNotice(
-        `/marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
+        `/hide hides your screen and /show shows it again. /marker [title] saves a point on this recording or livestream. /clip saves the last ${clipSeconds(clipContext)} as a clip, and /clip 60 the last ${clipSeconds(clipContext, true)}.${onBanner ? ' /banner [name] shows or hides a banner, and /banner off hides them all.' : ''}${onSound ? ' /sound [name] plays a sound, and /sound stop stops them all.' : ''}${onBuddy ? ' /buddy [words] asks Buddy to do something, like /buddy switch to BRB.' : ''} // sends a literal slash to chat. Markers are in Library → Session actions → Markers.`
       )
       return
     }
@@ -852,6 +880,41 @@ export function Composer({
         })
       return
     }
+    if (command.kind === 'buddy') {
+      // Plan 209 S20: Buddy's planner, typed. The answer is the notice; the
+      // draft clears once Buddy did it, and stays for a retry otherwise.
+      if (!onBuddy) return
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice(BUDDY_ASKING)
+      void onBuddy(command.sentence)
+        .then((answer) => {
+          setNotice(answer.message)
+          if (answer.status === 'done' && draftRef.current === submitted) setDraft('')
+        })
+        .catch((error) =>
+          setNotice(error instanceof Error && error.message ? error.message : BUDDY_UNREACHABLE)
+        )
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
+      return
+    }
+    if (command.kind === 'privacy') {
+      const submitted = draft
+      void window.videorc
+        ?.markerFromCommentsWindow({
+          requestId: crypto.randomUUID(),
+          action: command.hidden ? 'screenHide' : 'screenShow'
+        })
+        .then(() => {
+          if (draftRef.current === submitted) setDraft('')
+        })
+        .catch(() => setNotice("Couldn't change screen visibility. Try again."))
+      return
+    }
     if (command.kind === 'marker') {
       if ((!markerContext?.available && !markerContext?.retryAvailable) || !onMarker) {
         setNotice(markerContext?.reason ?? 'Start a recording or livestream to make a marker.')
@@ -908,21 +971,27 @@ export function Composer({
           {local ? (
             <InputGroupAddon>
               <span className="text-[11px] text-muted-foreground">
-                {command.kind === 'marker' ? 'Local · current session' : 'Local'}
+                {command.kind === 'marker'
+                  ? 'Local · current session'
+                  : command.kind === 'buddy'
+                    ? 'Buddy'
+                    : 'Local'}
               </span>
             </InputGroupAddon>
           ) : writable.length > 1 ? (
             <InputGroupAddon>
               <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <InputGroupButton
-                    aria-label={`Send to: ${pickLabel}`}
-                    data-testid="chat-send-to"
-                    size="xs"
-                  >
-                    To: {pickLabel}
-                    <ChevronDownIcon data-icon="inline-end" />
-                  </InputGroupButton>
+                <DropdownMenuTrigger
+                  render={
+                    <InputGroupButton
+                      aria-label={`Send to: ${pickLabel}`}
+                      data-testid="chat-send-to"
+                      size="xs"
+                    />
+                  }
+                >
+                  To: {pickLabel}
+                  <ChevronDownIcon data-icon="inline-end" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56">
                   <DropdownMenuLabel>Send to</DropdownMenuLabel>
@@ -941,7 +1010,6 @@ export function Composer({
                             return next.size === writable.length ? null : next
                           })
                         }
-                        onSelect={(event) => event.preventDefault()}
                       >
                         <ChatPlatformIcon decorative platform={provider.platform} />
                         {CHAT_PLATFORM_LABELS[provider.platform]}
@@ -954,7 +1022,7 @@ export function Composer({
                     ))}
                   </DropdownMenuGroup>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={() => setPicked(null)}>
+                  <DropdownMenuItem onClick={() => setPicked(null)}>
                     Every writable destination
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -1159,9 +1227,7 @@ function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): Re
   return (
     <div aria-label="Latest message delivery" className="mt-1.5 flex">
       <Tooltip>
-        <TooltipTrigger asChild>
-          <Badge className="max-w-full truncate">Sending…</Badge>
-        </TooltipTrigger>
+        <TooltipTrigger render={<Badge className="max-w-full truncate" />}>Sending…</TooltipTrigger>
         <TooltipContent>{operation.text}</TooltipContent>
       </Tooltip>
     </div>

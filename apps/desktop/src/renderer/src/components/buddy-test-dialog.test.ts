@@ -196,6 +196,15 @@ function byTestId<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.querySelector(`[data-testid="${id}"]`) as T
 }
 
+/**
+ * The bubble switch sits in its row's <label>, which toggles it. (happy-dom
+ * runs a label's activation before React's handler on the switch can cancel
+ * it, so a click on the switch itself would toggle twice here.)
+ */
+function toggleBubble(): void {
+  byTestId('buddy-test-bubble-switch').closest('label')!.click()
+}
+
 function stage(): BuddyPetPreviewProps {
   return mocked.previews.get(320)!
 }
@@ -369,7 +378,7 @@ describe('Test your Buddy (plan 169 D14)', () => {
     await press('3')
     expect(image.classList.contains('hidden')).toBe(true)
     await press('2')
-    await act(async () => byTestId('buddy-test-bubble-switch').click())
+    await act(async () => toggleBubble())
     expect(bubble()?.classList.contains('hidden') ?? true).toBe(true)
   })
 
@@ -386,8 +395,8 @@ describe('Test your Buddy (plan 169 D14)', () => {
       )) {
         await act(async () => button.click())
       }
-      await act(async () => byTestId('buddy-test-bubble-switch').click())
-      await act(async () => byTestId('buddy-test-bubble-switch').click())
+      await act(async () => toggleBubble())
+      await act(async () => toggleBubble())
       await press('Escape')
       expect(dialog()).toBeNull()
     }

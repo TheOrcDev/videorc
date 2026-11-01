@@ -391,7 +391,17 @@ pub(crate) fn is_protected_rung(video: &VideoSettings, is_floor: bool) -> bool {
 }
 
 const RESULT_SETTING_KEY: &str = "performance_check_result";
-const CAPABILITY_KEY_VERSION: &str = "performance-check-v2";
+const CAPABILITY_KEY_VERSION: &str = "performance-check-v3";
+/// The key shape before plan 212. It hashed the desktop app version and the
+/// crate version, so every update made the verdict stale and re-ran the
+/// check (noise in the Preview, 8 s after launch). Kept only to recognise a
+/// stored v2 row written by this same machine.
+const CAPABILITY_KEY_V2_VERSION: &str = "performance-check-v2";
+/// What a rung measures, as a version. An app update never re-measures a
+/// machine (plan 212 D1). Bump this constant only when an encode change
+/// alters what a rung measures (a new encoder path, a different ladder,
+/// another frame budget), and every stored verdict re-measures once.
+pub const PERFORMANCE_CHECK_PIPELINE_VERSION: u32 = 1;
 const DESKTOP_APP_VERSION_ENV: &str = "VIDEORC_APP_VERSION";
 const RUNG_WARMUP: Duration = Duration::from_millis(1_500);
 const RUNG_MEASURE: Duration = Duration::from_secs(4);
@@ -416,6 +426,7 @@ const SUPPRESSED_EVENTS: [&str; 6] = [
 
 #[derive(Debug, Default)]
 pub struct PerformanceCheckRuntime {
+    host_busy: AtomicBool,
     running: AtomicBool,
     cancel: AtomicBool,
 }
@@ -448,8 +459,9 @@ impl Drop for RunningGuard<'_> {
 }
 
 /// Desktop version when Electron set it; otherwise the backend crate version.
-/// The crate stays at 0.9.0 across desktop releases, so hashing only that
-/// left Linux `belowFloor` poison sticky (ogre, 2026-09-28).
+/// Recorded on every verdict (`app_version`) and sent as the User-Agent. The
+/// v2 key hashed it too, which is why a v2 row is re-hashed with its own
+/// `app_version` in `stored_result_is_stale`.
 pub(crate) fn desktop_app_version() -> String {
     app_version_or_crate(std::env::var(DESKTOP_APP_VERSION_ENV).ok().as_deref())
 }
@@ -473,18 +485,23 @@ fn app_version_or_crate(app_version: Option<&str>) -> String {
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
-/// Names the machine a verdict belongs to. A new GPU, driver or app version
-/// makes the stored result stale instead of silently trusting it.
+/// Names the machine a verdict belongs to: the OS, the architecture, the
+/// graphics identity and the measuring pipeline's version. A new GPU, driver
+/// or OS makes the stored result stale instead of silently trusting it. An
+/// app update does not (plan 212 D1): the check runs once per machine.
 pub(crate) fn capability_key() -> String {
     capability_key_from(
         std::env::consts::OS,
         std::env::consts::ARCH,
-        &graphics_identity_for_encoder_preference(
-            &crate::recording::graphics_adapter_driver_identity(),
-            crate::recording::windows_h264_encoder_preference().0,
-        ),
-        &desktop_app_version(),
-        env!("CARGO_PKG_VERSION"),
+        &current_graphics_identity(),
+        PERFORMANCE_CHECK_PIPELINE_VERSION,
+    )
+}
+
+fn current_graphics_identity() -> String {
+    graphics_identity_for_encoder_preference(
+        &crate::recording::graphics_adapter_driver_identity(),
+        crate::recording::windows_h264_encoder_preference().0,
     )
 }
 
@@ -509,25 +526,86 @@ pub(crate) fn capability_key_from(
     os: &str,
     arch: &str,
     graphics_identity: &str,
-    app_version: &str,
-    backend_crate_version: &str,
+    pipeline_version: u32,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CAPABILITY_KEY_VERSION);
     hasher.update(os);
     hasher.update(arch);
     hasher.update(graphics_identity);
-    hasher.update(app_version);
-    hasher.update(backend_crate_version);
+    hasher.update(pipeline_version.to_string());
     format!("{CAPABILITY_KEY_VERSION}:{:x}", hasher.finalize())
 }
 
-/// v1 keys never match the v2 hasher, and Linux `belowFloor` rows whose
-/// every measured rung is `did-not-start` are a failed ladder, not a
-/// machine class. `run_ladder` no longer saves a ladder where nothing
-/// started, so only rows written before that rule can match.
+/// The v2 hasher, byte for byte, so a row written before plan 212 can be
+/// recognised as this machine's own. Never used to write a new key.
+fn capability_key_v2_from(
+    os: &str,
+    arch: &str,
+    graphics_identity: &str,
+    app_version: &str,
+    backend_crate_version: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(CAPABILITY_KEY_V2_VERSION);
+    hasher.update(os);
+    hasher.update(arch);
+    hasher.update(graphics_identity);
+    hasher.update(app_version);
+    hasher.update(backend_crate_version);
+    format!("{CAPABILITY_KEY_V2_VERSION}:{:x}", hasher.finalize())
+}
+
+/// A stored verdict is stale when it was measured on another machine, by
+/// another pipeline, or never really measured at all:
+///
+/// - A v3 row is stale when its key differs from today's v3 key (a new GPU,
+///   driver or OS, or a `PERFORMANCE_CHECK_PIPELINE_VERSION` bump).
+/// - A v2 row (written before plan 212) is NOT stale when re-hashing it the
+///   v2 way, with the row's own `app_version` and today's OS, arch and
+///   graphics identity, reproduces its key: the same machine, so an update
+///   keeps its verdict. The crate version in that hash is today's
+///   `CARGO_PKG_VERSION`; it rarely moves, and when it does, every v2 row
+///   re-measures once, which is acceptable.
+/// - v1 keys match neither hasher, and Linux `belowFloor` rows whose every
+///   measured rung is `did-not-start` are a failed ladder, not a machine
+///   class. `run_ladder` no longer saves a ladder where nothing started, so
+///   only rows written before that rule can match.
 pub(crate) fn stored_result_is_stale(result: &PerformanceCheckResult) -> bool {
-    result.capability_key != capability_key() || linux_did_not_start_below_floor(result)
+    stored_result_is_stale_for(
+        result,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &current_graphics_identity(),
+        PERFORMANCE_CHECK_PIPELINE_VERSION,
+    )
+}
+
+fn stored_result_is_stale_for(
+    result: &PerformanceCheckResult,
+    os: &str,
+    arch: &str,
+    graphics_identity: &str,
+    pipeline_version: u32,
+) -> bool {
+    if linux_did_not_start_below_floor(result) {
+        return true;
+    }
+    let expected = if result
+        .capability_key
+        .starts_with(&format!("{CAPABILITY_KEY_V2_VERSION}:"))
+    {
+        capability_key_v2_from(
+            os,
+            arch,
+            graphics_identity,
+            &result.app_version,
+            env!("CARGO_PKG_VERSION"),
+        )
+    } else {
+        capability_key_from(os, arch, graphics_identity, pipeline_version)
+    };
+    result.capability_key != expected
 }
 
 pub(crate) fn linux_did_not_start_below_floor(result: &PerformanceCheckResult) -> bool {
@@ -580,6 +658,11 @@ pub async fn current_state(state: &AppState) -> PerformanceCheckState {
         .flatten();
     let stale = result.as_ref().is_some_and(stored_result_is_stale);
     PerformanceCheckState {
+        last_run_not_recorded: state
+            .performance_check
+            .host_busy
+            .load(Ordering::Acquire)
+            .then_some(crate::protocol::PerformanceCheckNotRecorded::HostBusy),
         running: state.performance_check.is_running(),
         result,
         stale,
@@ -600,6 +683,10 @@ pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result
     {
         bail!("A performance check is already running");
     }
+    state
+        .performance_check
+        .host_busy
+        .store(false, Ordering::Release);
     tokio::spawn(async move {
         let outcome = {
             let _running = RunningGuard(&state.performance_check);
@@ -619,15 +706,87 @@ pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result
     Ok(())
 }
 
+/// Plan 212 S2: the Preview holds its last program frame from before rung
+/// 1 until the first program frame after the last rung's session left the
+/// slot, so no rung and no hand-over between rungs ever reaches it. The
+/// benchmark's noise is its own scene's (plan 212 S2), committed by its
+/// session beside the user's scene.
 async fn run_ladder(
     state: &AppState,
     params: &PerformanceCheckRunParams,
+) -> Result<PerformanceCheckResult> {
+    run_ladder_with(state, params, crate::host_pressure::sample_host_pressure).await
+}
+
+/// A busy computer is turned away before the Preview holds (review of S2):
+/// the hold would otherwise flash on and off for a check that never ran.
+async fn run_ladder_with(
+    state: &AppState,
+    params: &PerformanceCheckRunParams,
+    sample_pressure: impl Fn() -> Option<crate::host_pressure::HostPressureSample>,
+) -> Result<PerformanceCheckResult> {
+    reject_host_pressure(state, sample_pressure())?;
+    let hold = crate::compositor::PreviewHoldGuard::engage(state).await;
+    let result = run_ladder_under_hold(state, params, sample_pressure).await;
+    hold.release().await;
+    result
+}
+
+fn overloaded_pressure(
+    sample: Option<crate::host_pressure::HostPressureSample>,
+) -> Option<crate::host_pressure::HostPressureSample> {
+    sample.filter(|sample| sample.is_overloaded())
+}
+
+/// Plan 212 D3: a rung that failed while the computer was overloaded (at its
+/// start or its end) says nothing about what this computer can hold, so the
+/// ladder records no verdict. A pass stands under load: it held anyway. The
+/// 1-minute load average barely moves during a ~6 s encode, so the check's
+/// own work does not make a weak machine read busy. A failure forced by the
+/// test seam is not a measurement, so it never reads busy either. Windows
+/// has no load average and never reads busy.
+fn busy_failure(
+    reasons: &[String],
+    start: Option<crate::host_pressure::HostPressureSample>,
+    end: Option<crate::host_pressure::HostPressureSample>,
+) -> Option<crate::host_pressure::HostPressureSample> {
+    let measured_failure = reasons.iter().any(|reason| reason != FORCED_FAILURE_REASON);
+    if !measured_failure {
+        return None;
+    }
+    overloaded_pressure(start).or_else(|| overloaded_pressure(end))
+}
+
+fn reject_host_pressure(
+    state: &AppState,
+    sample: Option<crate::host_pressure::HostPressureSample>,
+) -> Result<()> {
+    if let Some(sample) = overloaded_pressure(sample) {
+        state
+            .performance_check
+            .host_busy
+            .store(true, Ordering::Release);
+        state.emit_log(
+            "info",
+            format!(
+                "Performance check stopped: {}; no verdict recorded",
+                sample.diagnostics_fields()
+            ),
+        );
+        bail!("the computer was busy; no verdict recorded");
+    }
+    Ok(())
+}
+
+async fn run_ladder_under_hold(
+    state: &AppState,
+    params: &PerformanceCheckRunParams,
+    sample_pressure: impl Fn() -> Option<crate::host_pressure::HostPressureSample>,
 ) -> Result<PerformanceCheckResult> {
     let started = Instant::now();
     let directory = benchmark_directory();
     tokio::fs::create_dir_all(&directory).await?;
     discard_benchmark_sessions(state, &directory).await;
-    let _hard_content = crate::compositor::SyntheticHardContentGuard::engage();
 
     let ladder = ladder_under_ceiling(
         params.ceiling_width,
@@ -677,7 +836,9 @@ async fn run_ladder(
                 video: video.clone(),
             },
         );
+        let pressure_start = sample_pressure();
         let (measurement, stats) = measure_rung(state, &video, &directory).await;
+        let pressure_end = sample_pressure();
         discard_benchmark_sessions(state, &directory).await;
         if measurement.studio_busy {
             // ogre 2026-09-30: the check ran while a session was starting,
@@ -696,7 +857,7 @@ async fn run_ladder(
         let encode_backend = stats.as_ref().and_then(|stats| stats.encode_backend);
         let mut reasons = score_rung_for_backend(&measurement, encode_backend);
         if forced_failure_above_height().is_some_and(|height| video.height > height) {
-            reasons.push("forced-by-test-seam".to_string());
+            reasons.push(FORCED_FAILURE_REASON.to_string());
         }
         if reasons.is_empty() {
             let rate = pixel_rate(&video);
@@ -708,6 +869,7 @@ async fn run_ladder(
         {
             reasons.push(SEPARATE_FILES_OVER_BUDGET.to_string());
         }
+        reject_host_pressure(state, busy_failure(&reasons, pressure_start, pressure_end))?;
         skip_next = !reasons.is_empty() && should_fast_skip_next(&measurement);
         passed = reasons.is_empty();
         // One line per rung in the backend log: the support bundle then shows
@@ -788,8 +950,15 @@ async fn run_ladder(
         rungs,
     };
     state.database.save_setting(RESULT_SETTING_KEY, &result)?;
+    state
+        .performance_check
+        .host_busy
+        .store(false, Ordering::Release);
     Ok(result)
 }
+
+/// The reason a rung failed only because the test seam below said so.
+const FORCED_FAILURE_REASON: &str = "forced-by-test-seam";
 
 /// Test seam for `smoke:performance-check`: fail every rung taller than this
 /// so the step-down path runs on hardware that would pass the top rung.
@@ -994,6 +1163,128 @@ async fn discard_benchmark_sessions(state: &AppState, directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pressure(load_average: f64) -> Option<crate::host_pressure::HostPressureSample> {
+        Some(crate::host_pressure::HostPressureSample {
+            load_average,
+            logical_cores: 10,
+            swap_used_mb: Some(17_000),
+        })
+    }
+
+    /// Plan 212 D3: only a measured failure under load is "busy". A pass
+    /// stands, a quiet failure is a verdict, and the test seam's forced
+    /// failure is never judged by the host.
+    #[test]
+    fn a_failed_rung_on_a_busy_computer_is_no_verdict_and_a_pass_still_stands() {
+        let failed = vec!["delivered-fps".to_string()];
+        let forced = vec![FORCED_FAILURE_REASON.to_string()];
+        assert!(busy_failure(&failed, pressure(27.0), pressure(3.0)).is_some());
+        assert!(busy_failure(&failed, pressure(3.0), pressure(27.0)).is_some());
+        assert!(busy_failure(&failed, pressure(3.0), pressure(3.0)).is_none());
+        assert!(
+            busy_failure(&failed, None, None).is_none(),
+            "no load average (Windows)"
+        );
+        assert!(
+            busy_failure(&[], pressure(27.0), pressure(27.0)).is_none(),
+            "a pass stands"
+        );
+        assert!(busy_failure(&forced, pressure(27.0), pressure(27.0)).is_none());
+        let both = vec![
+            FORCED_FAILURE_REASON.to_string(),
+            "delivered-fps".to_string(),
+        ];
+        assert!(busy_failure(&both, pressure(27.0), None).is_some());
+    }
+
+    /// The owner's Mac on 2026-10-31 (a load of 27 on 10 cores): a check on
+    /// an overloaded computer measures nothing, keeps the previous verdict,
+    /// and says why; a quiet `get` afterwards no longer carries the reason
+    /// once a new run starts.
+    #[tokio::test]
+    async fn a_busy_computer_records_no_verdict_and_keeps_the_previous_one() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let previous = sample_result(&capability_key(), false, Vec::new());
+        state
+            .database
+            .save_setting(RESULT_SETTING_KEY, &previous)
+            .expect("save");
+        let mut progress = state.events.subscribe();
+
+        let outcome = run_ladder_with(
+            &state,
+            &PerformanceCheckRunParams {
+                ceiling_width: 1920,
+                ceiling_height: 1080,
+                ceiling_fps: 30,
+                separate_source_recordings: false,
+            },
+            || pressure(27.0),
+        )
+        .await;
+
+        assert!(outcome.is_err(), "no verdict on a busy computer");
+        assert!(
+            !crate::compositor::compositor_preview_hold_active(&state).await,
+            "a busy computer is turned away before the Preview holds"
+        );
+        let after = current_state(&state).await;
+        assert_eq!(
+            after.result.map(|result| result.checked_at),
+            Some(previous.checked_at),
+            "the previous verdict stays"
+        );
+        assert_eq!(
+            after.last_run_not_recorded,
+            Some(crate::protocol::PerformanceCheckNotRecorded::HostBusy)
+        );
+        while let Ok(event) = progress.try_recv() {
+            assert_ne!(event.event, "performance.check.progress", "no rung ran");
+            assert_ne!(
+                event.event, "compositor.status",
+                "the Preview never held for a check that did not run"
+            );
+        }
+    }
+
+    #[test]
+    fn performance_check_pressure_and_wire_reason() {
+        use crate::host_pressure::HostPressureSample;
+        let sample = |load_average| {
+            Some(HostPressureSample {
+                load_average,
+                logical_cores: 10,
+                swap_used_mb: None,
+            })
+        };
+        assert!(overloaded_pressure(sample(20.0)).is_some());
+        assert!(overloaded_pressure(sample(19.9)).is_none());
+        assert!(overloaded_pressure(None).is_none());
+        let mut state = PerformanceCheckState {
+            running: false,
+            result: None,
+            stale: false,
+            last_run_not_recorded: None,
+        };
+        assert!(
+            serde_json::to_value(&state)
+                .unwrap()
+                .get("lastRunNotRecorded")
+                .is_none()
+        );
+        state.last_run_not_recorded = Some(crate::protocol::PerformanceCheckNotRecorded::HostBusy);
+        assert_eq!(
+            serde_json::to_value(&state).unwrap()["lastRunNotRecorded"],
+            "host-busy"
+        );
+    }
 
     #[test]
     fn the_user_agent_names_the_desktop_app_version_not_the_crate() {
@@ -1386,60 +1677,129 @@ mod tests {
                 "windows",
                 "x86_64",
                 &graphics_identity_for_encoder_preference(identity, preference),
-                "0.9.126",
-                "0.9.0",
+                PERFORMANCE_CHECK_PIPELINE_VERSION,
             )
         };
         assert_eq!(
             key(Preference::Auto),
-            capability_key_from("windows", "x86_64", identity, "0.9.126", "0.9.0")
+            capability_key_from(
+                "windows",
+                "x86_64",
+                identity,
+                PERFORMANCE_CHECK_PIPELINE_VERSION
+            )
         );
         assert_ne!(key(Preference::Auto), key(Preference::QuickSync));
         assert_ne!(key(Preference::QuickSync), key(Preference::Software));
     }
 
     #[test]
-    fn capability_key_changes_with_gpu_identity_and_app_version() {
-        let a = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.119",
-            "0.9.0",
-        );
-        let same = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.119",
-            "0.9.0",
-        );
-        let gpu = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD129=amdgpu",
-            "0.9.119",
-            "0.9.0",
-        );
-        let app = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.120",
-            "0.9.0",
-        );
-        let crate_version = capability_key_from(
-            "linux",
-            "x86_64",
-            "linux-render-nodes=renderD128=i915",
-            "0.9.119",
-            "0.9.1",
-        );
-        assert!(a.starts_with("performance-check-v2:"));
+    fn capability_key_changes_with_gpu_identity_and_pipeline_version_only() {
+        let a = capability_key_from("linux", "x86_64", "linux-render-nodes=renderD128=i915", 1);
+        let same = capability_key_from("linux", "x86_64", "linux-render-nodes=renderD128=i915", 1);
+        let gpu = capability_key_from("linux", "x86_64", "linux-render-nodes=renderD129=amdgpu", 1);
+        let pipeline =
+            capability_key_from("linux", "x86_64", "linux-render-nodes=renderD128=i915", 2);
+        assert!(a.starts_with("performance-check-v3:"));
         assert_eq!(a, same);
         assert_ne!(a, gpu);
-        assert_ne!(a, app);
-        assert_ne!(a, crate_version);
+        assert_ne!(a, pipeline);
+    }
+
+    const THIS_GPU: &str = "apple-silicon;metal=Apple M2 Pro";
+    const OTHER_GPU: &str = "apple-silicon;metal=Apple M4 Max";
+
+    fn verdict_with_key(capability_key: &str, app_version: &str) -> PerformanceCheckResult {
+        let floor = full_ladder().last().cloned().expect("floor");
+        PerformanceCheckResult {
+            app_version: app_version.to_string(),
+            ..sample_result(
+                capability_key,
+                false,
+                vec![rung(floor, PerformanceCheckRungVerdict::Passed)],
+            )
+        }
+    }
+
+    #[test]
+    fn a_v2_row_from_the_same_machine_survives_an_app_update() {
+        // Written by 0.17.2 before plan 212; the app is now newer, the Mac is not.
+        let key = capability_key_v2_from(
+            "macos",
+            "aarch64",
+            THIS_GPU,
+            "0.17.2",
+            env!("CARGO_PKG_VERSION"),
+        );
+        let row = verdict_with_key(&key, "0.17.2");
+        assert!(!stored_result_is_stale_for(
+            &row,
+            "macos",
+            "aarch64",
+            THIS_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+        // A new GPU, or another OS, is another machine.
+        assert!(stored_result_is_stale_for(
+            &row,
+            "macos",
+            "aarch64",
+            OTHER_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+        assert!(stored_result_is_stale_for(
+            &row,
+            "linux",
+            "aarch64",
+            THIS_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+        // A v2 row that claims another app version than the one it was hashed
+        // with is not this machine's row either.
+        let tampered = verdict_with_key(&key, "0.17.3");
+        assert!(stored_result_is_stale_for(
+            &tampered,
+            "macos",
+            "aarch64",
+            THIS_GPU,
+            PERFORMANCE_CHECK_PIPELINE_VERSION
+        ));
+    }
+
+    #[test]
+    fn a_v3_row_is_stale_on_a_new_gpu_or_a_pipeline_bump_never_on_an_update() {
+        let key = capability_key_from("macos", "aarch64", THIS_GPU, 1);
+        // Two app versions write the same v3 key; both rows stand.
+        for app_version in ["0.17.2", "0.18.0"] {
+            let row = verdict_with_key(&key, app_version);
+            assert!(!stored_result_is_stale_for(
+                &row, "macos", "aarch64", THIS_GPU, 1
+            ));
+            assert!(stored_result_is_stale_for(
+                &row, "macos", "aarch64", OTHER_GPU, 1
+            ));
+            assert!(stored_result_is_stale_for(
+                &row, "macos", "aarch64", THIS_GPU, 2
+            ));
+        }
+    }
+
+    #[test]
+    fn a_v1_row_is_always_stale_and_linux_poison_stays_stale() {
+        let floor = did_not_start(full_ladder().last().cloned().expect("floor"));
+        let poison = sample_result("performance-check-v1:deadbeef", true, vec![floor]);
+        let passed = verdict_with_key("performance-check-v1:deadbeef", "0.9.0");
+        // Neither hasher reproduces a v1 key, so both re-measure once; on
+        // Linux the poison row is also caught by its own rule.
+        assert!(stored_result_is_stale_for(
+            &poison, "linux", "x86_64", THIS_GPU, 1
+        ));
+        assert!(stored_result_is_stale_for(
+            &passed, "linux", "x86_64", THIS_GPU, 1
+        ));
+        if cfg!(target_os = "linux") {
+            assert!(linux_did_not_start_below_floor(&poison));
+        }
     }
 
     fn sample_result(

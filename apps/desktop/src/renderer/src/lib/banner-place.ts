@@ -1,5 +1,10 @@
-import type { Banner, OverlayOrientation, OverlayRect } from '@/lib/backend'
-import { clampOverlayRect } from '@/lib/overlay-layout'
+import {
+  OVERLAY_RECT_MIN_SIZE,
+  type Banner,
+  type OverlayOrientation,
+  type OverlayRect
+} from '@/lib/backend'
+import { clampOverlayRect, overlayPlaceOrigin, type OverlayPlace } from '@/lib/overlay-layout'
 import {
   overlayRectBottomGravity,
   overlayRectHorizontalGravity
@@ -91,26 +96,99 @@ export function bannerFitRect(
   return clampOverlayRect({ x, y, w, h })
 }
 
+/** Every place a banner can go: the canvas's 3×3 grid, or the whole frame.
+ * The inspector's snaps (`BannerSnap`) are seven of them (plan 209 D22). */
+export type BannerPlace = OverlayPlace | 'full-frame'
+
 /**
  * A snap for the orientation shown. Unlike an overlay snap, which writes the
  * item's default size, a banner keeps the size its image has now and only
  * moves, inside the overlay margins (a landscape canvas keeps a 4 % margin,
- * a portrait one its safe area). Full frame fills the canvas.
+ * a portrait one its safe area; `overlayPlaceOrigin`, the overlay snaps' own
+ * rule). Full frame fills the canvas.
  */
 export function bannerSnapRect(
   image: Pick<Banner, 'width' | 'height'>,
   rect: OverlayRect,
   orientation: OverlayOrientation,
   canvasAspect: number,
-  snap: BannerSnap
+  snap: BannerPlace
 ): OverlayRect {
   if (snap === 'full-frame') return { x: 0, y: 0, w: 1, h: 1 }
   const { w, h } = bannerFitRect(image, rect, canvasAspect, orientation)
-  const portrait = orientation === 'vertical'
-  const side = portrait ? BANNER_PORTRAIT_SIDE_MARGIN : BANNER_LANDSCAPE_SIDE_MARGIN
-  const top = portrait ? BANNER_PORTRAIT_TOP_MARGIN : BANNER_LANDSCAPE_EDGE_MARGIN
-  const bottom = portrait ? BANNER_PORTRAIT_BOTTOM_MARGIN : BANNER_LANDSCAPE_EDGE_MARGIN
-  const x = snap.endsWith('-left') ? side : snap.endsWith('-right') ? 1 - side - w : (1 - w) / 2
-  const y = snap.startsWith('top-') ? top : 1 - bottom - h
+  const { x, y } = overlayPlaceOrigin(snap, orientation, w, h)
   return clampOverlayRect({ x, y, w, h })
+}
+
+// --- Where an import lands (plan 209 S11b) ------------------------------------
+
+const LANDSCAPE_ASPECT = 16 / 9
+const PORTRAIT_ASPECT = 9 / 16
+/** Below the 22 % portrait safe area. */
+const PORTRAIT_WIDE_BOTTOM = 0.78
+
+function round6(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000
+}
+
+/** Mirror of Rust `rounded_clamped` (`banners.rs`). */
+function roundedClamped(rect: OverlayRect): OverlayRect {
+  const w = Math.min(1, Math.max(OVERLAY_RECT_MIN_SIZE, round6(rect.w)))
+  const h = Math.min(1, Math.max(OVERLAY_RECT_MIN_SIZE, round6(rect.h)))
+  const x = Math.min(round6(1 - w), Math.max(0, round6(rect.x)))
+  const y = Math.min(round6(1 - h), Math.max(0, round6(rect.y)))
+  return { x, y, w, h }
+}
+
+/**
+ * Where a freshly imported banner lands on each orientation: the TS twin of
+ * Rust `banner_default_places` (`banners.rs`), pinned by
+ * `protocol-fixtures/high-risk-contracts.json`'s banner and the Rust test
+ * values. This is a banner's default ("medium") size for an agent's
+ * `move_on_scene` (D22): a full-frame image, a wide strip, a tall panel or a
+ * badge, by the image's aspect.
+ */
+export function bannerDefaultPlaces(
+  image: Pick<Banner, 'width' | 'height'>
+): Record<OverlayOrientation, OverlayRect> {
+  const aspect = Math.max(1, image.width) / Math.max(1, image.height)
+  const portraitSpan = 1 - 2 * BANNER_PORTRAIT_SIDE_MARGIN
+  let horizontal: OverlayRect
+  let vertical: OverlayRect
+  if (Math.abs(aspect - LANDSCAPE_ASPECT) <= 0.02 && image.width >= 1280) {
+    const h = PORTRAIT_ASPECT / aspect
+    horizontal = { x: 0, y: 0, w: 1, h: 1 }
+    vertical = { x: 0, y: (1 - h) / 2, w: 1, h }
+  } else if (aspect >= 2.5) {
+    const w = 0.6
+    const h = (w * LANDSCAPE_ASPECT) / aspect
+    const vw = portraitSpan
+    const vh = (vw * PORTRAIT_ASPECT) / aspect
+    horizontal = { x: 0.2, y: 1 - BANNER_LANDSCAPE_EDGE_MARGIN - h, w, h }
+    vertical = { x: BANNER_PORTRAIT_SIDE_MARGIN, y: PORTRAIT_WIDE_BOTTOM - vh, w: vw, h: vh }
+  } else if (aspect <= 0.6) {
+    const h = 0.7
+    const w = (h * aspect) / LANDSCAPE_ASPECT
+    let vh = 0.4
+    let vw = (vh * aspect) / PORTRAIT_ASPECT
+    if (vw > portraitSpan) {
+      vw = portraitSpan
+      vh = (vw * PORTRAIT_ASPECT) / aspect
+    }
+    horizontal = { x: 1 - BANNER_LANDSCAPE_SIDE_MARGIN - w, y: 0.15, w, h }
+    vertical = { x: 1 - BANNER_PORTRAIT_SIDE_MARGIN - vw, y: 0.3, w: vw, h: vh }
+  } else {
+    const h = 0.2
+    const w = (h * aspect) / LANDSCAPE_ASPECT
+    const vw = 0.3 * Math.min(aspect, 1)
+    const vh = (vw * PORTRAIT_ASPECT) / aspect
+    horizontal = { x: 1 - BANNER_LANDSCAPE_SIDE_MARGIN - w, y: BANNER_LANDSCAPE_EDGE_MARGIN, w, h }
+    vertical = {
+      x: 1 - BANNER_PORTRAIT_SIDE_MARGIN - vw,
+      y: BANNER_PORTRAIT_TOP_MARGIN,
+      w: vw,
+      h: vh
+    }
+  }
+  return { horizontal: roundedClamped(horizontal), vertical: roundedClamped(vertical) }
 }

@@ -2,7 +2,7 @@
 // no theme provider: they follow the app theme through prefers-color-scheme,
 // which main drives from the main window's toggle (nativeTheme.themeSource).
 // That is the same signal main repaints the window's opaque base from, so the
-// text tokens, the coats and the chrome ground always agree, and a toggle in
+// text tokens, the coats and the window's base always agree, and a toggle in
 // the main window restyles every open window live. Kept external so the CSP
 // can reject inline scripts.
 ;(() => {
@@ -23,8 +23,7 @@
       ? 'darwin'
       : 'linux'
   // What the window sits on (plan 208): main's call, read off the preload's
-  // bridge (it came in on the window's argv, like the renderer role), so
-  // ChromeGround mounts on the first React paint and never pops in.
+  // bridge (it came in on the window's argv, like the renderer role).
   const ground = window.videorc?.windowGround
-  root.dataset.ground = ground === 'glass' || ground === 'solid' ? ground : 'chrome'
+  root.dataset.ground = ground === 'glass' ? 'glass' : 'solid'
 })()

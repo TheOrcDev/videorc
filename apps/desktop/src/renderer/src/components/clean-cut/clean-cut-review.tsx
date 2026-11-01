@@ -1054,7 +1054,7 @@ function KindChips({
       data-testid="clean-cut-chips"
       size="xs"
       spacing={1}
-      type="multiple"
+      multiple
       value={pressed}
       onValueChange={(values) => {
         const changed = chips.find(
@@ -1093,12 +1093,10 @@ function KindChips({
           )
         }
         // What a click does, on hover and on focus (plan 174 S1.10). The chip
-        // sits in a span trigger: the toggle's own data-state must stay on/off.
+        // sits in a span trigger, so it carries only its own pressed state.
         return (
           <Tooltip key={chip.group.id}>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">{item}</span>
-            </TooltipTrigger>
+            <TooltipTrigger render={<span className="inline-flex" />}>{item}</TooltipTrigger>
             <TooltipContent>
               {chip.state === 'on' ? `Keep all ${chip.total}` : `Cut all ${chip.total}`}
             </TooltipContent>
@@ -1134,18 +1132,20 @@ function Moments({
           const Glyph = MOMENT_ICONS[pin.kind] ?? PinIcon
           return (
             <Tooltip key={pin.key}>
-              <TooltipTrigger asChild>
-                <Button
-                  className="max-w-full"
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                  onClick={() => onSeek(pin.startMs)}
-                >
-                  <Glyph data-icon="inline-start" />
-                  <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
-                  <span className="truncate">{pin.label}</span>
-                </Button>
+              <TooltipTrigger
+                render={
+                  <Button
+                    className="max-w-full"
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={() => onSeek(pin.startMs)}
+                  />
+                }
+              >
+                <Glyph data-icon="inline-start" />
+                <span className="tabular-nums">{formatCutClock(pin.startMs)}</span>
+                <span className="truncate">{pin.label}</span>
               </TooltipTrigger>
               <TooltipContent>{pin.excerpt || pin.label}</TooltipContent>
             </Tooltip>

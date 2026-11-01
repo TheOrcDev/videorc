@@ -117,7 +117,7 @@ describe('NavigableRow (B-25)', () => {
     expect(button.className).toContain('hover:bg-accent')
     // The hint is a Tooltip the keyboard reaches, never a native title (S1.10).
     expect(button.hasAttribute('title')).toBe(false)
-    expect(button.dataset.state).toBe('closed')
+    expect(button.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     await act(async () => button.click())
     expect(onNavigate).toHaveBeenCalledTimes(1)
   })
@@ -151,7 +151,10 @@ describe('SettingsRow and FieldDescription (I-7, F-17)', () => {
     expect(row.dataset.orientation).toBe('horizontal')
     const control = container.querySelector('[role="switch"]') as HTMLElement
     const label = container.querySelector('label') as HTMLLabelElement
-    expect(label.htmlFor).toBe(control.id)
+    // Base UI points the label at the switch's hidden input and names the
+    // switch by the label.
+    expect(label.htmlFor).toBe(container.querySelector('input[type="checkbox"]')?.id)
+    expect(control.getAttribute('aria-labelledby')).toBe(label.id)
     const describedBy = control.getAttribute('aria-describedby')
     expect(describedBy).toBeTruthy()
     expect(document.getElementById(describedBy!)?.textContent).toBe(

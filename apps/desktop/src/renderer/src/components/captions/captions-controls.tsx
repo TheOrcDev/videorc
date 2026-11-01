@@ -66,22 +66,16 @@ import {
   type CaptionsCaptureSettings
 } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
-import { SESSION_LOCK_REASON, unlockActionForGate } from '@/lib/lock-view'
+import { SESSION_LOCK_REASON } from '@/lib/lock-reason'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
+import { CAPTION_LANGUAGES } from '@/lib/caption-languages'
 import { captionsStatusLabel, captionsStatusTone } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
-const LANGUAGES = [
-  { id: 'auto', label: 'Auto-detect' },
-  { id: 'en', label: 'English' },
-  { id: 'es', label: 'Spanish' },
-  { id: 'fr', label: 'French' },
-  { id: 'de', label: 'German' },
-  { id: 'pt', label: 'Portuguese' },
-  { id: 'it', label: 'Italian' }
-] as const
+const LANGUAGES = CAPTION_LANGUAGES
 
 const CAPTION_TEXT_SIZE_OPTIONS: SegmentedControlOption<CaptionTextSize>[] = [
   { value: 's', label: 'Small' },
@@ -201,7 +195,9 @@ export function CaptionsControls(): ReactElement {
     >
       <FieldGroup>
         {/* Locked means disabled with one reason, and the lock leads (S1.5). */}
-        {locked ? <LockAlert action={unlockActionForGate(gate)} reason={gate.reason} /> : null}
+        {locked ? (
+          <LockAlert action={lockAlertAction(unlockActionForGate(gate))} reason={gate.reason} />
+        ) : null}
         {/* One state signal (V-5): the switch says on or off; while on, one
             dot names what captions are doing, with its line. */}
         <FieldGroup variant="grouped">
@@ -295,10 +291,9 @@ export function CaptionsControls(): ReactElement {
             aria-label="Caption style"
             className="grid w-full grid-cols-2 gap-2"
             disabled={locked}
-            type="single"
-            value={captions.styleId}
+            value={[captions.styleId]}
             variant="outline"
-            onValueChange={(value) => {
+            onValueChange={([value]) => {
               if (CAPTION_STYLE_IDS.includes(value as CaptionStyleId)) {
                 patchCaptions({ styleId: value as CaptionStyleId }, true)
               }
@@ -309,7 +304,7 @@ export function CaptionsControls(): ReactElement {
               return (
                 <ToggleGroupItem
                   aria-label={definition.label}
-                  className="h-auto min-w-0 flex-col items-stretch gap-2 overflow-hidden rounded-row p-2 text-left whitespace-normal data-[state=on]:border-primary/50 data-[state=on]:bg-primary/10"
+                  className="h-auto min-w-0 flex-col items-stretch gap-2 overflow-hidden rounded-row p-2 text-left whitespace-normal data-pressed:border-primary/50 data-pressed:bg-primary/10"
                   key={styleId}
                   value={styleId}
                 >
@@ -352,8 +347,11 @@ export function CaptionsControls(): ReactElement {
           </FieldContent>
           <Select
             disabled={locked || isSessionActive}
+            items={LANGUAGES.map((language) => ({ value: language.id, label: language.label }))}
             value={captions.language}
-            onValueChange={(language) => patchCaptions({ language })}
+            onValueChange={(language) => {
+              if (language !== null) patchCaptions({ language })
+            }}
           >
             <SelectTrigger className="w-full" id="caption-language">
               <SelectValue />

@@ -109,19 +109,21 @@ function MarkerPin({
   const marker = group.markers[0]
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          aria-label={`${markerName(marker)} · ${markerTime(marker.atSeconds)}`}
-          className={PIN_CLASS}
-          data-testid="marker-pin"
-          size="icon-xs"
-          style={{ left: markerPinLeft(group.fraction) }}
-          type="button"
-          variant="ghost"
-          onClick={() => onSelect(marker)}
-        >
-          <PinTick />
-        </Button>
+      <TooltipTrigger
+        render={
+          <Button
+            aria-label={`${markerName(marker)} · ${markerTime(marker.atSeconds)}`}
+            className={PIN_CLASS}
+            data-testid="marker-pin"
+            size="icon-xs"
+            style={{ left: markerPinLeft(group.fraction) }}
+            type="button"
+            variant="ghost"
+            onClick={() => onSelect(marker)}
+          />
+        }
+      >
+        <PinTick />
       </TooltipTrigger>
       <TooltipContent>
         {markerTime(marker.atSeconds)} · {markerName(marker)}
@@ -140,23 +142,25 @@ function MarkerPinChooser({
   const first = group.markers[0]
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-label={`${group.markers.length} markers near ${markerTime(first.atSeconds)}`}
-          className={PIN_CLASS}
-          data-testid="marker-pin"
-          size="icon-xs"
-          style={{ left: markerPinLeft(group.fraction) }}
-          type="button"
-          variant="ghost"
-        >
-          <PinTick several />
-        </Button>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            aria-label={`${group.markers.length} markers near ${markerTime(first.atSeconds)}`}
+            className={PIN_CLASS}
+            data-testid="marker-pin"
+            size="icon-xs"
+            style={{ left: markerPinLeft(group.fraction) }}
+            type="button"
+            variant="ghost"
+          />
+        }
+      >
+        <PinTick several />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="center" side="top">
         <DropdownMenuGroup>
           {group.markers.map((marker) => (
-            <DropdownMenuItem key={marker.id} onSelect={() => onSelect(marker)}>
+            <DropdownMenuItem key={marker.id} onClick={() => onSelect(marker)}>
               <span className="text-muted-foreground tabular-nums">
                 {markerTime(marker.atSeconds)}
               </span>

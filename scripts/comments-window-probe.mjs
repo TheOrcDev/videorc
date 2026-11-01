@@ -258,10 +258,10 @@ async function main() {
       ? process.platform === 'darwin'
         ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'follows-app'
         : ['solid', 'mica'].includes(chrome.glass?.mode?.kind)
-      : chrome.glass?.mode?.kind === 'ground' && chrome.glass?.appearance === 'follows-app',
+      : chrome.glass?.mode?.kind === 'solid' && chrome.glass?.appearance === 'follows-app',
     clearGlass
       ? 'chrome: Chat sits on real vibrancy that follows the app theme (Mica or the solid palette off macOS)'
-      : 'chrome: Chat sits on the chrome ground and follows the app theme',
+      : 'chrome: Chat sits on the solid palette and follows the app theme',
     JSON.stringify(chrome.glass)
   )
   assertProbe(

@@ -1,4 +1,3 @@
-import { findAcceleratorOwner } from '../../../../shared/accelerator'
 import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
 import {
   globalShortcutEntries,
@@ -15,12 +14,15 @@ import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
+import { globalShortcutTakenReason } from '@/lib/global-shortcut-owner'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
-import { shortcutsByGroup } from '@/lib/shortcuts'
+import type { ShortcutRecorderAppKey } from '@/lib/shortcut-recorder'
+import { shortcutAccelerator, shortcutsByGroup } from '@/lib/shortcuts'
 import { systemAudioDevice } from '@/lib/system-audio'
 
 const GLOBAL_ACTION_ROWS = [
+  'screen-hide-toggle',
   'record-toggle',
   'stream-toggle',
   'mic-toggle',
@@ -31,6 +33,15 @@ const GLOBAL_ACTION_ROWS = [
   'layout-next',
   'layout-previous'
 ] as const satisfies readonly GlobalShortcutAction[]
+
+/**
+ * Keys that already do a row's action inside Videorc. Space records on the
+ * Studio page (plan 174 D1), so the Record row shows it until a global key is
+ * recorded; Space keeps working there either way.
+ */
+export const GLOBAL_ROW_APP_KEYS: Partial<Record<GlobalShortcutAction, ShortcutRecorderAppKey>> = {
+  'record-toggle': { accelerator: shortcutAccelerator('record-toggle'), where: 'in Studio' }
+}
 
 /**
  * The global shortcut rows this computer can act on. System audio has no
@@ -54,7 +65,7 @@ export function globalShortcutRows(input: {
  * so the in-app list does not repeat them.
  */
 export function ShortcutsSettings(): ReactElement {
-  const { settings, setSettings, runtimeInfo, deviceList } = useStudioCore()
+  const { settings, setSettings, runtimeInfo, deviceList, savedScenes } = useStudioCore()
   const systemAudio = systemAudioDevice(deviceList)
   const actionRows = globalShortcutRows({
     systemAudioAvailable: Boolean(systemAudio && systemAudio.status !== 'unavailable'),
@@ -75,15 +86,14 @@ export function ShortcutsSettings(): ReactElement {
     }))
   const validateGlobalShortcut =
     (action: GlobalShortcutAction) =>
-    (accelerator: string): string | null => {
-      const owner = findAcceleratorOwner(
-        settings.globalShortcuts ?? {},
+    (accelerator: string): string | null =>
+      globalShortcutTakenReason({
+        config: settings.globalShortcuts ?? {},
         accelerator,
         action,
-        runtimeInfo?.platform
-      )
-      return owner ? `Already used by ${globalShortcutLabel(owner)}.` : null
-    }
+        platform: runtimeInfo?.platform,
+        scenes: savedScenes
+      })
 
   return (
     <>
@@ -101,10 +111,35 @@ export function ShortcutsSettings(): ReactElement {
               validate={validateGlobalShortcut(action)}
               registrationFailed={shortcutRegistration[action] === false}
               value={globalShortcutValue(action)}
+              appKey={GLOBAL_ROW_APP_KEYS[action]}
               onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
             />
           ))}
         </FieldGroup>
+        {savedScenes.length > 0 && (
+          <FieldSet className="min-w-0 gap-0">
+            <FieldLegend className="mb-1.5 px-1" variant="label">
+              <SectionLabel>Scenes</SectionLabel>
+            </FieldLegend>
+            <FieldGroup variant="grouped">
+              {savedScenes.map(({ id, name }) => {
+                const action = `scene:${id}` as const
+                return (
+                  <ShortcutRecorderField
+                    key={id}
+                    id={`global-scene-${id}`}
+                    label={name}
+                    platform={runtimeInfo?.platform}
+                    validate={validateGlobalShortcut(action)}
+                    registrationFailed={shortcutRegistration[action] === false}
+                    value={globalShortcutValue(action)}
+                    onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
+                  />
+                )
+              })}
+            </FieldGroup>
+          </FieldSet>
+        )}
         {/* One inset group per orientation, rows shaped like the ones
             above: the headers and fields used to sit loose inside the
             group, flush against its border. */}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { globalShortcutRows } from './shortcuts-settings'
+import { GLOBAL_ROW_APP_KEYS, globalShortcutRows } from './shortcuts-settings'
 
 describe('globalShortcutRows (Linux plan 0019)', () => {
   it('offers the system audio shortcut only where system audio can run', () => {
@@ -22,5 +22,18 @@ describe('globalShortcutRows (Linux plan 0019)', () => {
     expect(globalShortcutRows({ systemAudioAvailable: false, systemAudioBound: true })).toContain(
       'system-audio-toggle'
     )
+  })
+})
+
+describe('GLOBAL_ROW_APP_KEYS', () => {
+  it("shows Studio's Space in the Record row, the key it really is", () => {
+    expect(GLOBAL_ROW_APP_KEYS['record-toggle']).toEqual({
+      accelerator: 'Space',
+      where: 'in Studio'
+    })
+  })
+
+  it('claims no in-app key for actions that have none', () => {
+    expect(Object.keys(GLOBAL_ROW_APP_KEYS)).toEqual(['record-toggle'])
   })
 })

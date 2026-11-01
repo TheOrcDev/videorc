@@ -105,6 +105,14 @@ mod tests {
             h264_high_level_label(2160, 3840, 30),
             h264_high_level_label(3840, 2160, 30)
         );
+        // 9:16 keeps the chosen size (verticalTwinVideo): the 720p and 540p
+        // twins must tag the same level as the rungs they turn on their side.
+        assert_eq!(h264_high_level_label(720, 1280, 30), Some("3.1"));
+        assert_eq!(h264_high_level_label(1280, 720, 30), Some("3.1"));
+        assert_eq!(
+            h264_high_level_label(540, 960, 30),
+            h264_high_level_label(960, 540, 30)
+        );
     }
 
     #[test]

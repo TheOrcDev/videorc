@@ -1,5 +1,9 @@
 'use client'
 
+// Forked from audiocn (MIT, https://audiocn.dev) parameter-slider; Videorc's
+// changes: the range is the chrome fill, the thumb a chrome bead on the knob's
+// hairline rim, and Reset sits on rounded-row. Everything else is upstream's.
+
 import { mergeProps } from '@base-ui/react/merge-props'
 import { NumberField as NumberFieldPrimitive } from '@base-ui/react/number-field'
 import { Slider as SliderPrimitive } from '@base-ui/react/slider'
@@ -470,7 +474,7 @@ export const ParameterSliderReset = ({
         'aria-label': 'Reset',
         children: children ?? 'Reset',
         className: cn(
-          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 inline-flex h-6 items-center rounded-row px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
+          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 rounded-row inline-flex h-6 items-center px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
           className
         ),
         disabled: disabled || !modified,

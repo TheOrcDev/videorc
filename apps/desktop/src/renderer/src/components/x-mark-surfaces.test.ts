@@ -77,7 +77,7 @@ describe('X mark surfaces', () => {
       expect(check).toContain(`alt="${X_VERIFIED_LABEL[verified]}"`)
       // Named on hover by a tooltip, never a native title (plan 174 S1.10).
       expect(check).not.toContain('title=')
-      expect(check).toContain('data-state="closed"')
+      expect(check).toContain('data-base-ui-tooltip-trigger')
       expect(check).toContain('size-4')
       expect(markup.indexOf('data-slot="comment-verified"')).toBeGreaterThan(
         markup.indexOf('>Dom<')

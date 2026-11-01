@@ -74,7 +74,22 @@ export function updateRowView(status: UpdateStatus, captureActive: boolean): Upd
         description:
           'Check your internet connection, then try again. If it keeps happening, export a support bundle below.'
       }
+    case 'download-available':
+      // Linux: the app never downloads it; the downloads page has it.
+      return {
+        kind: 'row',
+        description: `Videorc ${status.version} is available. Download it from videorc.com.`,
+        control: { kind: 'link', label: 'Open downloads page', link: 'download' }
+      }
     case 'unsupported':
+      if (status.reason === 'linux-version-unknown') {
+        return {
+          kind: 'row',
+          description:
+            "This build doesn't update itself. Videorc tells you here when a new version is on videorc.com.",
+          control: { kind: 'link', label: 'Open downloads page', link: 'download' }
+        }
+      }
       return status.reason === 'windows-feed-unpublished'
         ? {
             kind: 'row',

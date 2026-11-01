@@ -1,10 +1,10 @@
 <!doctype html>
 <!--
-  Shared property inspector for the five setting-backed Videorc actions
-  (scene-apply, takeover-toggle, banner-toggle, sound-play, window-front). No external dependencies:
+  Shared property inspector for the six setting-backed Videorc actions
+  (saved-scene, scene-apply, takeover-toggle, banner-toggle, sound-play, window-front). No external dependencies:
   it speaks the Stream Deck property-inspector WebSocket protocol directly
   and asks the plugin (sendToPlugin) for live options from Videorc's
-  remote.describe projection.
+  remote.state and remote.describe projections.
 -->
 <html lang="en">
   <head>
@@ -19,8 +19,7 @@
         padding: 10px 12px;
         background: #2d2d2d;
         color: #d8d8d8;
-        font-family:
-          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         font-size: 12px;
       }
       label {
@@ -61,6 +60,11 @@
     <script>
       // Per-action field wiring: which settings key this inspector edits.
       const FIELDS = {
+        'com.videorc.streamdeck.saved-scene': {
+          key: 'sceneId',
+          label: 'Scene',
+          hint: 'Saved scenes from Videorc, in library order.'
+        },
         'com.videorc.streamdeck.scene-apply': {
           key: 'layoutPreset',
           label: 'Layout preset',

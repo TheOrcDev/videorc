@@ -72,14 +72,16 @@ export function CohostQuestionRow({
       <span className="min-w-0 flex-1 truncate text-foreground">{question.text}</span>
       {question.onTopic === true ? (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <Badge
-              className="shrink-0 text-muted-foreground"
-              data-testid="cohost-on-topic"
-              variant="outline"
-            >
-              On topic
-            </Badge>
+          <TooltipTrigger
+            render={
+              <Badge
+                className="shrink-0 text-muted-foreground"
+                data-testid="cohost-on-topic"
+                variant="outline"
+              />
+            }
+          >
+            On topic
           </TooltipTrigger>
           <TooltipContent>About what you're talking about right now</TooltipContent>
         </Tooltip>
@@ -101,21 +103,23 @@ export function CohostQuestionRow({
       ) : null}
       {talkingAbout ? (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <Badge
-              aria-label="Talking about this"
-              className="shrink-0"
-              data-testid="cohost-talking-about"
-              variant="outline"
-            >
-              <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
-              <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
-            </Badge>
+          <TooltipTrigger
+            render={
+              <Badge
+                aria-label="Talking about this"
+                className="shrink-0"
+                data-testid="cohost-talking-about"
+                variant="outline"
+              />
+            }
+          >
+            <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
+            <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
           </TooltipTrigger>
           <TooltipContent>You're talking about this question</TooltipContent>
         </Tooltip>
       ) : null}
-      {onStream ? <Badge variant="success">On stream</Badge> : null}
+      {onStream ? <Badge variant="chrome">On stream</Badge> : null}
       <CommandShortcut className="tabular-nums">{age}</CommandShortcut>
     </CommandItem>
   )

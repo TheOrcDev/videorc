@@ -98,11 +98,13 @@ import {
   evaluateStaticScreenEpoch,
   parseRecordingEpochLine,
   mixSourcesIncludeSystemAudio,
+  startedSessionStatus,
   parseSystemAudioMixCutover,
   reportDbfs,
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const ALL_CASES = ['clips-idle', 'on', 'toggle-off', 'toggle-on', 'off', 'self', 'stream']
@@ -487,7 +489,7 @@ async function seedRenderer(smoke, sources) {
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const audio = { ...(current.audio ?? {}), systemAudioEnabled: params.systemAudioEnabled, systemAudioGainDb: -6 };
         localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources: params.sources ?? current.sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
-        setTimeout(() => location.reload(), 50);
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       sources,
@@ -602,12 +604,12 @@ async function recordRendererSession(ctx, { name, systemAudioAtStart, timeline }
       `static screen ready: content age ${ready.previewScreenFrameAgeMs}ms, callback age ${ready.previewScreenCaptureCallbackAgeMs}ms`
     )
   }
+  // Only the session this Record starts: the Clips ring re-arms after the
+  // last Stop and can publish its buffer-only `recording` status (marked
+  // `replayOnly`) right here, before the Record hands over from it.
   const recordingPromise = recorder.waitFor(
     `${name} recording.status(recording)`,
-    (record) =>
-      record.event === 'recording.status' &&
-      (record.payload?.state === 'recording' || record.payload?.state === 'streaming') &&
-      typeof record.payload?.sessionId === 'string'
+    (record) => record.event === 'recording.status' && startedSessionStatus(record.payload)
   )
   const clickAt = performance.now()
   const startTicket = await remoteRequest(

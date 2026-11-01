@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { acquireHostSmokeLock, waitForHostMemory } from './lib/host-lock.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -110,6 +111,8 @@ if (printOnly) {
 }
 
 try {
+  await acquireHostSmokeLock()
+  await waitForHostMemory()
   if (stimulusKind === 'motion') {
     stimulus = await launchScreenMotionStimulus()
     console.log(`\nMotion stimulus launched: ${stimulus.htmlPath}`)

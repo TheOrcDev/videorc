@@ -9,7 +9,8 @@
 //!   `live_chat_moderation_operations`, persisted before any provider call.
 //!   The `operationId` is an idempotency key: the same id returns the same row.
 //! - `Manual` requests (the row menu's "Remove from chat") are express consent
-//!   and run at once. `BuddyVoice` requests start in `pending-confirm` and run
+//!   and run at once. `Agent` requests (plan 209 S12) run at once too, except
+//!   on YouTube, where they wait for the streamer's click like a voice card. `BuddyVoice` requests start in `pending-confirm` and run
 //!   only when confirmed, or when an opt-in 5 s countdown passes uncancelled.
 //!   YouTube targets always need an explicit confirmation (API policy §III.E),
 //!   so their countdown never runs.
@@ -129,6 +130,11 @@ pub enum ModerationSource {
     /// strict RPC/IPC schemas and older apps carry it.
     #[serde(rename = "orcle-voice")]
     BuddyVoice,
+    /// An AI agent on this computer (plan 209 S12, D2). Runs at once like
+    /// `Manual`, except on YouTube, where it waits in `pending-confirm` for
+    /// the streamer's click on the removal card (YouTube API policy: express
+    /// consent before a delete). Free, like `Manual`; no Buddy kill switch.
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -322,6 +328,27 @@ pub fn new_moderation_slot() -> ModerationSlot {
     }))
 }
 
+/// Buddy's removals, by voice or through its tools (plan 209 review fix
+/// 12): Videorc's removal switch and Premium, checked again at the moment.
+pub(crate) async fn buddy_removal_gate(state: &AppState) -> Result<(), ModerationRefusal> {
+    if !crate::service_flags::buddy_remove_enabled(state) {
+        return Err(ModerationRefusal::new("disabled", REMOVE_PAUSED_MESSAGE));
+    }
+    let premium = state
+        .live_chat_moderation
+        .lock()
+        .await
+        .premium_check
+        .clone();
+    if !premium() {
+        return Err(ModerationRefusal::new(
+            "premium-required",
+            PREMIUM_REQUIRED_MESSAGE,
+        ));
+    }
+    Ok(())
+}
+
 fn premium_entitled() -> bool {
     crate::entitlements::require_feature(
         &crate::entitlements::current_entitlements(),
@@ -418,6 +445,20 @@ pub(crate) fn initial_schedule(
 ) -> Schedule {
     match source {
         ModerationSource::Manual => Schedule {
+            phase: ModerationPhase::Executing,
+            requires_explicit_confirm: false,
+            confirm_by: None,
+            execute_at: None,
+        },
+        // An agent's removal is the streamer's own (D2), except where the
+        // platform asks for their click: YouTube's card waits for it.
+        ModerationSource::Agent if platform == StreamPlatform::Youtube => Schedule {
+            phase: ModerationPhase::PendingConfirm,
+            requires_explicit_confirm: true,
+            confirm_by: Some(now + chrono_duration(CONFIRM_WINDOW)),
+            execute_at: None,
+        },
+        ModerationSource::Agent => Schedule {
             phase: ModerationPhase::Executing,
             requires_explicit_confirm: false,
             confirm_by: None,
@@ -546,21 +587,7 @@ pub async fn request(
     }
 
     if req.source == ModerationSource::BuddyVoice {
-        if !crate::service_flags::buddy_remove_enabled(state) {
-            return Err(ModerationRefusal::new("disabled", REMOVE_PAUSED_MESSAGE));
-        }
-        let premium = state
-            .live_chat_moderation
-            .lock()
-            .await
-            .premium_check
-            .clone();
-        if !premium() {
-            return Err(ModerationRefusal::new(
-                "premium-required",
-                PREMIUM_REQUIRED_MESSAGE,
-            ));
-        }
+        buddy_removal_gate(state).await?;
     }
 
     let (message, session_id) = find_live_message(state, &message_id).await?;
@@ -1585,6 +1612,52 @@ mod tests {
     }
 
     #[test]
+    fn agent_removals_run_at_once_except_on_youtube() {
+        let now = Utc::now();
+        for platform in [
+            StreamPlatform::Twitch,
+            StreamPlatform::Kick,
+            StreamPlatform::X,
+        ] {
+            let agent = initial_schedule(
+                ModerationSource::Agent,
+                platform,
+                RemoveConfirmMode::Countdown,
+                now,
+            );
+            assert_eq!(agent.phase, ModerationPhase::Executing, "{platform:?}");
+            assert!(!agent.requires_explicit_confirm);
+            assert_eq!((agent.confirm_by, agent.execute_at), (None, None));
+        }
+        // YouTube's express-consent rule: the card waits for the click, and
+        // no countdown ever runs it.
+        let youtube = initial_schedule(
+            ModerationSource::Agent,
+            StreamPlatform::Youtube,
+            RemoveConfirmMode::Countdown,
+            now,
+        );
+        assert_eq!(youtube.phase, ModerationPhase::PendingConfirm);
+        assert!(youtube.requires_explicit_confirm);
+        assert_eq!(
+            youtube.confirm_by,
+            Some(now + chrono_duration(CONFIRM_WINDOW))
+        );
+        assert_eq!(youtube.execute_at, None);
+        assert_eq!(
+            serde_json::to_value(ModerationSource::Agent).unwrap(),
+            "agent"
+        );
+        let params: ModerationRequestParams = serde_json::from_value(serde_json::json!({
+            "operationId": "x",
+            "messageId": "m-1",
+            "source": "agent"
+        }))
+        .unwrap();
+        assert_eq!(params.source, ModerationSource::Agent);
+    }
+
+    #[test]
     fn tombstones_keep_the_row_identity_and_name_their_kind() {
         let original = message(StreamPlatform::Kick, 1);
         let removed = removal_tombstone(&original, LocalTombstoneKind::Removed);
@@ -1796,6 +1869,64 @@ mod tests {
             .unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].operation_id, operation.operation_id);
+    }
+
+    #[tokio::test]
+    async fn an_agent_removal_is_free_runs_at_once_on_twitch_and_waits_on_youtube() {
+        let (state, mut events) = test_state();
+        // Basic account and the Buddy kill switch off: neither gates an agent.
+        set_premium_check_for_tests(&state, Arc::new(|| false)).await;
+        let twitch = message(StreamPlatform::Twitch, 1);
+        seed(
+            &state,
+            StreamPlatform::Twitch,
+            Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)),
+            &[twitch.clone()],
+        )
+        .await;
+        let removed = request(&state, request_for(&twitch, ModerationSource::Agent))
+            .await
+            .unwrap();
+        assert_eq!(removed.phase, ModerationPhase::Removed);
+        assert_eq!(removed.source, ModerationSource::Agent);
+        assert!(!removed.requires_explicit_confirm);
+        assert!(buffered_message(&state, &twitch.id).await.is_deleted);
+        assert_eq!(
+            next_event(&mut events)
+                .iter()
+                .map(|op| op.phase)
+                .collect::<Vec<_>>(),
+            vec![ModerationPhase::Executing, ModerationPhase::Removed]
+        );
+
+        let (state, mut events) = test_state();
+        set_premium_check_for_tests(&state, Arc::new(|| false)).await;
+        let youtube = message(StreamPlatform::Youtube, 2);
+        seed(
+            &state,
+            StreamPlatform::Youtube,
+            Some(ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)),
+            &[youtube.clone()],
+        )
+        .await;
+        let pending = request(&state, request_for(&youtube, ModerationSource::Agent))
+            .await
+            .unwrap();
+        assert_eq!(pending.phase, ModerationPhase::PendingConfirm);
+        assert!(pending.requires_explicit_confirm);
+        assert!(pending.confirm_by.is_some());
+        assert!(!buffered_message(&state, &youtube.id).await.is_deleted);
+        assert_eq!(
+            next_event(&mut events)
+                .iter()
+                .map(|op| op.phase)
+                .collect::<Vec<_>>(),
+            vec![ModerationPhase::PendingConfirm]
+        );
+        // The streamer's click on the card runs it.
+        let confirmed = confirm(&state, &pending.operation_id).await.unwrap();
+        assert_eq!(confirmed.phase, ModerationPhase::Removed);
+        assert!(buffered_message(&state, &youtube.id).await.is_deleted);
     }
 
     #[tokio::test]
@@ -2086,6 +2217,57 @@ mod tests {
         assert!(!buffered_message(&state, &target.id).await.is_deleted);
         let done = confirm(&state, &pending.operation_id).await.unwrap();
         assert_eq!(done.phase, ModerationPhase::Removed);
+    }
+
+    /// Plan 209 review fix 20: a source this build doesn't know (a newer
+    /// Videorc wrote it) reads as `manual`, and the row still loads.
+    #[tokio::test]
+    async fn an_unknown_stored_source_reads_as_manual() {
+        let (state, _events) = test_state();
+        let now = Utc::now().to_rfc3339();
+        state
+            .database
+            .save_chat_moderation_operation(&ModerationOperation {
+                operation_id: "future".to_string(),
+                session_id: SESSION.to_string(),
+                message_id: "m".to_string(),
+                platform: StreamPlatform::Twitch,
+                target_id: None,
+                provider_message_id: "p".to_string(),
+                author_name: "viewer".to_string(),
+                excerpt: "hello".to_string(),
+                source: ModerationSource::Agent,
+                reason: None,
+                phase: ModerationPhase::Removed,
+                confirm_mode: RemoveConfirmMode::Confirm,
+                requires_explicit_confirm: false,
+                confirm_by: None,
+                execute_at: None,
+                outcome: None,
+                outcome_code: None,
+                attempts: 1,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .unwrap();
+        let read = |id: &str| {
+            state
+                .database
+                .get_chat_moderation_operation(id)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(read("future").source, ModerationSource::Agent);
+        state
+            .database
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE live_chat_moderation_operations SET source_json = '\"from-a-newer-videorc\"' WHERE id = 'future'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(read("future").source, ModerationSource::Manual);
     }
 
     #[tokio::test]

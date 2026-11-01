@@ -1,10 +1,14 @@
 // Fail-closed classifier for CI path filters.
 //
 // Ordinary code PRs must keep today's full macOS / Linux / Windows gates.
-// Only two narrowly allow-listed change sets may skip the heavy jobs:
+// Only four narrowly allow-listed change sets may skip the heavy jobs:
 //
 // - docs-record: release records and owner-waiver JSON only
 // - version-release: desktop version field + changelog + those records
+// - docs: prose only (docs/, plans/, Markdown at the repo root); the cheap
+//   JS job still runs because some Node tests read docs and plans
+// - js-test: JS/TS test files only (*.test.* / *.spec.* outside crates/);
+//   nothing ships or builds from them, so only the JS job runs
 //
 // Anything else, including a package.json edit that is not exactly the
 // version field, a rename that also deletes a non-allow-listed path, an
@@ -13,7 +17,9 @@
 export const CI_SCOPE_KINDS = Object.freeze({
   CODE: 'code',
   VERSION_RELEASE: 'version-release',
-  DOCS_RECORD: 'docs-record'
+  DOCS_RECORD: 'docs-record',
+  DOCS: 'docs',
+  JS_TEST: 'js-test'
 })
 
 export const CI_SCOPE_EVENTS_WITH_DIFF = Object.freeze(['pull_request', 'push'])
@@ -26,6 +32,10 @@ const DOCS_RECORD_PREFIXES = Object.freeze([
 
 const VERSION_RELEASE_FILES = Object.freeze(['apps/desktop/package.json'])
 const VERSION_RELEASE_PREFIXES = Object.freeze(['changelog/'])
+
+const DOCS_PREFIXES = Object.freeze(['docs/', 'plans/'])
+const ROOT_MARKDOWN_RE = /^[^/]+\.md$/
+const JS_TEST_FILE_RE = /\.(test|spec)\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
 
 const ZERO_SHA_RE = /^0+$/
 
@@ -43,6 +53,22 @@ const DOCS_RECORD_SCOPE = Object.freeze({
   linuxHeavy: false,
   macosRust: false,
   js: false
+})
+
+const DOCS_SCOPE = Object.freeze({
+  kind: CI_SCOPE_KINDS.DOCS,
+  windowsHeavy: false,
+  linuxHeavy: false,
+  macosRust: false,
+  js: true
+})
+
+const JS_TEST_SCOPE = Object.freeze({
+  kind: CI_SCOPE_KINDS.JS_TEST,
+  windowsHeavy: false,
+  linuxHeavy: false,
+  macosRust: false,
+  js: true
 })
 
 const VERSION_RELEASE_SCOPE = Object.freeze({
@@ -65,6 +91,18 @@ export function isSafeChangedPath(value) {
 
 export function isDocsRecordPath(path) {
   return DOCS_RECORD_PREFIXES.some((prefix) => path.startsWith(prefix))
+}
+
+/** Prose only. docs/ includes acceptance records, which nothing builds from. */
+export function isDocsPath(path) {
+  return DOCS_PREFIXES.some((prefix) => path.startsWith(prefix)) || ROOT_MARKDOWN_RE.test(path)
+}
+
+/** A JS/TS test file outside the Rust crates and the workflow directory. */
+export function isJsTestPath(path) {
+  return (
+    JS_TEST_FILE_RE.test(path) && !path.startsWith('crates/') && !path.startsWith('.github/')
+  )
 }
 
 export function isVersionReleasePath(path) {
@@ -129,6 +167,10 @@ export function classifyChangeScope({
     }
     return { ...VERSION_RELEASE_SCOPE }
   }
+
+  if (files.every(isDocsPath)) return { ...DOCS_SCOPE }
+  // A mix of prose and JS tests needs no more than the JS job either.
+  if (files.every((file) => isJsTestPath(file) || isDocsPath(file))) return { ...JS_TEST_SCOPE }
 
   return { ...HEAVY_CODE_SCOPE }
 }

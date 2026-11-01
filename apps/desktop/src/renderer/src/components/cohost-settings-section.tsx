@@ -171,7 +171,7 @@ export function BuddyRepliesSection({
   const saveAutoChat = (next: CohostAutoChat): void => save({ autoChat: next })
   return (
     <PanelSection
-      description={`How Buddy drafts the replies you approve. It answers from About you, under Name and personality on the ${buddyTabLabel('live')} tab. Answers and Banter post as you, only in the modes you turn on in Stream Manager.`}
+      description={`How Buddy writes its replies. It answers from About you, under Name and personality on the ${buddyTabLabel('live')} tab. In Bubble, Buddy says them on stream; in Suggest, you post them.`}
       title="Replies"
     >
       <FieldGroup variant="grouped">
@@ -260,12 +260,10 @@ function CohostCooldownField({
           max={max}
           min={5}
           step={5}
-          value={[draft]}
-          onValueChange={([value]) => {
-            if (value !== undefined) setDraft(value)
-          }}
-          onValueCommit={([value]) => {
-            if (value !== undefined && value !== cooldown) {
+          value={draft}
+          onValueChange={(value) => setDraft(value)}
+          onValueCommitted={(value) => {
+            if (value !== cooldown) {
               onChange({ enabled, cooldownSeconds: value })
             }
           }}
@@ -287,7 +285,7 @@ function cooldownLabel(seconds: number): string {
 
 /**
  * Moderation (plan 150, Chat tab): what Buddy flags for you and what it may
- * put on stream. It posts only in the modes you turn on (plan 164 D4).
+ * put on stream. It never posts in your chat on its own (plan 211 D6).
  */
 export function BuddyModerationSection({
   locked: lockedByTab = false

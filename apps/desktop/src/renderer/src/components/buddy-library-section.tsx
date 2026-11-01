@@ -220,20 +220,22 @@ export function BuddyLibrarySection({
                   {BUDDY_LIBRARY_COPY.invitationAction}
                 </Button>
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label="Dismiss"
-                      data-testid="buddy-library-invitation-dismiss"
-                      size="icon-xs"
-                      type="button"
-                      variant="ghost"
-                      onClick={() => {
-                        writeBuddyInvitationDismissed()
-                        setDismissed(true)
-                      }}
-                    >
-                      <CloseIcon />
-                    </Button>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        aria-label="Dismiss"
+                        data-testid="buddy-library-invitation-dismiss"
+                        size="icon-xs"
+                        type="button"
+                        variant="ghost"
+                        onClick={() => {
+                          writeBuddyInvitationDismissed()
+                          setDismissed(true)
+                        }}
+                      />
+                    }
+                  >
+                    <CloseIcon />
                   </TooltipTrigger>
                   <TooltipContent>Dismiss</TooltipContent>
                 </Tooltip>
@@ -478,31 +480,33 @@ function BuddyCard({
       )}
       {menu ? (
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label={`More for ${card.name}`}
-              data-testid="buddy-library-more"
-              disabled={disabled}
-              size="icon-xs"
-              type="button"
-              variant="ghost"
-            >
-              <MoreIcon weight="bold" />
-            </Button>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                aria-label={`More for ${card.name}`}
+                data-testid="buddy-library-more"
+                disabled={disabled}
+                size="icon-xs"
+                type="button"
+                variant="ghost"
+              />
+            }
+          >
+            <MoreIcon weight="bold" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-44">
             {card.kind === 'mine' ? (
               <>
                 <DropdownMenuItem
                   data-testid="buddy-library-rename"
-                  onSelect={() => onEdit({ kind: 'rename', card })}
+                  onClick={() => onEdit({ kind: 'rename', card })}
                 >
                   <EditIcon />
                   {BUDDY_LIBRARY_COPY.rename}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   data-testid="buddy-library-edit-personality"
-                  onSelect={() => onEdit({ kind: 'personality', card })}
+                  onClick={() => onEdit({ kind: 'personality', card })}
                 >
                   <NoteIcon />
                   {BUDDY_LIBRARY_COPY.editPersonality}
@@ -510,7 +514,7 @@ function BuddyCard({
               </>
             ) : null}
             {card.canMakeAlive ? (
-              <DropdownMenuItem data-testid="buddy-library-alive" onSelect={onAlive}>
+              <DropdownMenuItem data-testid="buddy-library-alive" onClick={onAlive}>
                 <SparkleIcon />
                 {BUDDY_LIBRARY_COPY.makeAlive}
               </DropdownMenuItem>
@@ -521,7 +525,7 @@ function BuddyCard({
                 <DropdownMenuItem
                   data-testid="buddy-library-delete"
                   variant="destructive"
-                  onSelect={() => onEdit({ kind: 'delete', card })}
+                  onClick={() => onEdit({ kind: 'delete', card })}
                 >
                   <DeleteIcon />
                   {BUDDY_LIBRARY_COPY.delete}
@@ -600,16 +604,24 @@ function EditDialog({
         }}
       >
         {target && target.kind !== 'delete' ? (
-          <EditForm
-            // A fresh form for every Buddy and every open.
-            key={`${target.kind}:${target.card.id}:${String(open)}`}
-            context={context}
-            personality={personality}
-            problem={problem}
-            target={target}
-            onClose={onClose}
-            onUpdate={onUpdate}
-          />
+          <DialogContent
+            aria-describedby={undefined}
+            size={target.kind === 'rename' ? 'sm' : 'lg'}
+            data-testid="buddy-library-edit-dialog"
+          >
+            <EditForm
+              // A fresh form for every Buddy, and for every open: the dialog
+              // unmounts its content once it has closed. A key that changed on
+              // close would remount the popup mid-exit, which never finishes.
+              key={`${target.kind}:${target.card.id}`}
+              context={context}
+              personality={personality}
+              problem={problem}
+              target={target}
+              onClose={onClose}
+              onUpdate={onUpdate}
+            />
+          </DialogContent>
         ) : null}
       </Dialog>
     </>
@@ -664,96 +676,87 @@ function EditForm({
     })
   }
   return (
-    <DialogContent
-      aria-describedby={undefined}
-      size={rename ? 'sm' : 'lg'}
-      data-testid="buddy-library-edit-dialog"
+    <form
+      className="flex flex-col gap-5"
+      onSubmit={(event) => {
+        event.preventDefault()
+        save()
+      }}
     >
-      <form
-        className="flex flex-col gap-5"
-        onSubmit={(event) => {
-          event.preventDefault()
-          save()
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>
-            {rename ? BUDDY_LIBRARY_COPY.rename : BUDDY_LIBRARY_COPY.editPersonality}
-          </DialogTitle>
-        </DialogHeader>
-        {rename ? (
+      <DialogHeader>
+        <DialogTitle>
+          {rename ? BUDDY_LIBRARY_COPY.rename : BUDDY_LIBRARY_COPY.editPersonality}
+        </DialogTitle>
+      </DialogHeader>
+      {rename ? (
+        <Field>
+          <FieldLabel htmlFor="buddy-library-name">{BUDDY_ONBOARDING_STEP3.nameLabel}</FieldLabel>
+          <Input
+            autoFocus
+            id="buddy-library-name"
+            maxLength={BUDDY_LIBRARY_NAME_MAX_CHARS}
+            placeholder={BUDDY_ONBOARDING_STEP3.namePlaceholder}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+          <FieldDescription>{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
+        </Field>
+      ) : (
+        <FieldGroup className="gap-5">
           <Field>
-            <FieldLabel htmlFor="buddy-library-name">{BUDDY_ONBOARDING_STEP3.nameLabel}</FieldLabel>
-            <Input
+            <FieldLabel htmlFor="buddy-library-personality">
+              {BUDDY_ONBOARDING_STEP3.personalityLabel}
+            </FieldLabel>
+            <Textarea
               autoFocus
-              id="buddy-library-name"
-              maxLength={BUDDY_LIBRARY_NAME_MAX_CHARS}
-              placeholder={BUDDY_ONBOARDING_STEP3.namePlaceholder}
-              value={name}
-              onChange={(event) => setName(event.target.value)}
+              className="min-h-20"
+              id="buddy-library-personality"
+              placeholder={BUDDY_ONBOARDING_STEP3.personalityPlaceholder}
+              value={personality}
+              onChange={(event) => setPersonality(event.target.value)}
             />
-            <FieldDescription>{BUDDY_ONBOARDING_STEP3.nameHelp}</FieldDescription>
+            <span className="self-end text-xs text-muted-foreground tabular-nums">
+              {buddyOnboardingCounter(
+                buddyTextLength(personality),
+                BUDDY_LIBRARY_PERSONALITY_MAX_CHARS
+              )}
+            </span>
           </Field>
-        ) : (
-          <FieldGroup className="gap-5">
-            <Field>
-              <FieldLabel htmlFor="buddy-library-personality">
-                {BUDDY_ONBOARDING_STEP3.personalityLabel}
-              </FieldLabel>
-              <Textarea
-                autoFocus
-                className="min-h-20"
-                id="buddy-library-personality"
-                placeholder={BUDDY_ONBOARDING_STEP3.personalityPlaceholder}
-                value={personality}
-                onChange={(event) => setPersonality(event.target.value)}
-              />
-              <span className="self-end text-xs text-muted-foreground tabular-nums">
-                {buddyOnboardingCounter(
-                  buddyTextLength(personality),
-                  BUDDY_LIBRARY_PERSONALITY_MAX_CHARS
-                )}
+          <Field>
+            <FieldLabel htmlFor="buddy-library-about">
+              {BUDDY_ONBOARDING_STEP3.aboutLabel}
+            </FieldLabel>
+            <Textarea
+              className="min-h-24"
+              id="buddy-library-about"
+              placeholder={BUDDY_ONBOARDING_STEP3.aboutPlaceholder}
+              value={context}
+              onChange={(event) => setContext(event.target.value)}
+            />
+            <div className="flex items-center gap-2">
+              <FieldDescription>{BUDDY_ONBOARDING_STEP3.aboutHelp}</FieldDescription>
+              <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+                {buddyOnboardingCounter(buddyTextLength(context), BUDDY_LIBRARY_CONTEXT_MAX_CHARS)}
               </span>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="buddy-library-about">
-                {BUDDY_ONBOARDING_STEP3.aboutLabel}
-              </FieldLabel>
-              <Textarea
-                className="min-h-24"
-                id="buddy-library-about"
-                placeholder={BUDDY_ONBOARDING_STEP3.aboutPlaceholder}
-                value={context}
-                onChange={(event) => setContext(event.target.value)}
-              />
-              <div className="flex items-center gap-2">
-                <FieldDescription>{BUDDY_ONBOARDING_STEP3.aboutHelp}</FieldDescription>
-                <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-                  {buddyOnboardingCounter(
-                    buddyTextLength(context),
-                    BUDDY_LIBRARY_CONTEXT_MAX_CHARS
-                  )}
-                </span>
-              </div>
-            </Field>
-          </FieldGroup>
-        )}
-        {refused && problem ? (
-          <FieldError data-testid="buddy-library-edit-error">{problem}</FieldError>
-        ) : null}
-        <DialogFooter>
-          <Button disabled={saving} type="button" variant="ghost" onClick={onClose}>
-            {BUDDY_LIBRARY_COPY.cancel}
-          </Button>
-          <Button
-            data-testid="buddy-library-save"
-            disabled={!changed || !valid || saving}
-            type="submit"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </Button>
-        </DialogFooter>
-      </form>
-    </DialogContent>
+            </div>
+          </Field>
+        </FieldGroup>
+      )}
+      {refused && problem ? (
+        <FieldError data-testid="buddy-library-edit-error">{problem}</FieldError>
+      ) : null}
+      <DialogFooter>
+        <Button disabled={saving} type="button" variant="ghost" onClick={onClose}>
+          {BUDDY_LIBRARY_COPY.cancel}
+        </Button>
+        <Button
+          data-testid="buddy-library-save"
+          disabled={!changed || !valid || saving}
+          type="submit"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </Button>
+      </DialogFooter>
+    </form>
   )
 }

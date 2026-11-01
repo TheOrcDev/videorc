@@ -66,7 +66,10 @@ const studio = vi.hoisted(() => ({
     // Your look (plan 207 S5): the committed scene and the look hold.
     scene: null as unknown,
     firstRunLookHold: null,
-    applyFirstRunLook: vi.fn()
+    applyFirstRunLook: vi.fn(),
+    // The performance check (plan 212 D1) starts here, once, as setup opens.
+    performanceCheck: undefined,
+    runPerformanceCheck: vi.fn(async () => undefined)
   },
   rows: [] as SystemAccessRow[],
   registry: null as unknown
@@ -120,6 +123,10 @@ const render = (
   renderToStaticMarkup(
     createElement(FirstRunSetup, { mode, onLeave: () => undefined, ...progress })
   )
+
+/** The opening tag of the button with `attribute`, however its attributes are ordered. */
+const buttonTag = (markup: string, attribute: string): string =>
+  markup.match(new RegExp(`<button[^>]*${attribute}[^>]*>`))?.[0] ?? ''
 
 const SYSTEM_AUDIO = { id: 'system-audio:default', kind: 'system-audio', status: 'available' }
 
@@ -215,9 +222,8 @@ describe('FirstRunSetup', () => {
 
   it('reads Continue with the arrow once every needed grant is in, Skip for now as an outline before', () => {
     const done = render()
-    expect(done).toMatch(
-      /<button[^>]*class="[^"]*chrome-fill[^"]*"[^>]*data-first-run-primary=""[^>]*>Continue</
-    )
+    expect(buttonTag(done, 'data-first-run-primary=""')).toMatch(/class="[^"]*chrome-fill/)
+    expect(done).toMatch(/data-first-run-primary=""[^>]*>Continue</)
     expect(done).toMatch(/Continue<svg[^>]*data-icon="inline-end"/)
     studio.rows = [
       row('screen-recording', 'first-use'),
@@ -226,9 +232,8 @@ describe('FirstRunSetup', () => {
       row('camera', 'first-use')
     ]
     const skip = render()
-    expect(skip).toMatch(
-      /<button[^>]*class="[^"]*border-border[^"]*"[^>]*data-first-run-primary=""[^>]*>Skip for now</
-    )
+    expect(buttonTag(skip, 'data-first-run-primary=""')).toMatch(/class="[^"]*border-border/)
+    expect(skip).toMatch(/data-first-run-primary=""[^>]*>Skip for now</)
     expect(skip).not.toContain('data-icon="inline-end"')
   })
 
@@ -286,7 +291,7 @@ describe('FirstRunSetup', () => {
     expect(markup).toContain('data-first-run-sound-verdict="none"')
     expect(markup).toContain('Say something. The bar moves when Videorc hears you.')
     // No verdict yet: the level button waits, and says why.
-    expect(markup).toMatch(/<button[^>]*data-first-run-sound-level=""[^>]*disabled=""/)
+    expect(buttonTag(markup, 'data-first-run-sound-level=""')).toMatch(/\sdisabled=""/)
     expect(markup).toContain('Talk for a few seconds first.')
     expect(markup).toContain('data-first-run-primary=""')
   })
@@ -420,5 +425,45 @@ describe('FirstRunSetup', () => {
     expect(markup).toContain('Allow Screen Recording first.')
     expect(markup).toMatch(/data-first-run-look-option="screen-only"[\s\S]*?disabled=""/)
     expect(markup).not.toContain('aria-label="Camera shape"')
+  })
+})
+
+// Plan 212 D1: the check runs once per machine, started by setup as it opens
+// or by Recording → Output, never by the Studio at launch. Effects do not run
+// in a static render, so the wiring is read from the sources.
+describe('the performance check starts in setup or from Output, never at launch (plan 212 D1)', () => {
+  const read = (path: string): string => readFileSync(new URL(path, import.meta.url), 'utf8')
+
+  it('setup decides once, as soon as the backend has answered, through the helper', () => {
+    const setup = read('./first-run-setup.tsx')
+    expect(setup).toContain(
+      "import { firstRunSetupStartsPerformanceCheck } from '@/lib/performance-check'"
+    )
+    expect(setup).toContain(
+      'if (performanceCheckDecided.current || performanceCheck === undefined) return'
+    )
+    expect(setup).toContain(
+      'if (firstRunSetupStartsPerformanceCheck(mode, performanceCheck, isSessionActive)) {'
+    )
+    expect(setup).toContain('void runPerformanceCheck()')
+    // Leaving setup does not cancel it: no cleanup touches the check.
+    expect(setup).not.toContain('performance.check.cancel')
+  })
+
+  it('the Studio has no launch auto-run left, and only runPerformanceCheck reaches the backend', () => {
+    const studio = read('../../hooks/use-studio.tsx')
+    expect(studio).not.toContain('PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS')
+    expect(studio).not.toContain('performanceCheckMayAutoRun')
+    expect(studio).not.toContain('performanceCheckAutoRunRef')
+    // The definition and the one call inside runPerformanceCheck.
+    expect(studio.match(/requestPerformanceCheck\(\)/g)).toHaveLength(1)
+    expect(studio.match(/'performance\.check\.run'/g)).toHaveLength(1)
+  })
+
+  it('runPerformanceCheck has two callers: the Output button and setup', () => {
+    const output = read('../tabs/recording-tab.tsx')
+    expect(output).toContain('onClick={() => void runPerformanceCheck()}')
+    const setup = read('./first-run-setup.tsx')
+    expect(setup.match(/runPerformanceCheck\(\)/g)).toHaveLength(1)
   })
 })

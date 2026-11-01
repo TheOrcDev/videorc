@@ -34,20 +34,22 @@ export function StatusBarSessionState({
     // it, or every tick would be read out.
     <div className="flex min-w-0" role="status">
       <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            className="-ml-1.5 flex h-5 min-w-0 items-center gap-1.5 rounded-chip px-1.5 transition-colors duration-100 hover:bg-accent hover:text-foreground"
-            data-slot="status-bar-state"
-            type="button"
-            onClick={() => openWorkspaceTab('diagnostics')}
-          >
-            <StatusDot label={label} pulse={pulse} tone={sessionStatusTone(recording, wsStatus)} />
-            {pulse && elapsedMs !== undefined ? (
-              <span aria-hidden className="text-xs tabular-nums">
-                {sessionClockLabel(elapsedMs)}
-              </span>
-            ) : null}
-          </button>
+        <TooltipTrigger
+          render={
+            <button
+              className="-ml-1.5 flex h-5 min-w-0 items-center gap-1.5 rounded-chip px-1.5 transition-colors duration-100 hover:bg-accent hover:text-foreground"
+              data-slot="status-bar-state"
+              type="button"
+              onClick={() => openWorkspaceTab('diagnostics')}
+            />
+          }
+        >
+          <StatusDot label={label} pulse={pulse} tone={sessionStatusTone(recording, wsStatus)} />
+          {pulse && elapsedMs !== undefined ? (
+            <span aria-hidden className="text-xs tabular-nums">
+              {sessionClockLabel(elapsedMs)}
+            </span>
+          ) : null}
         </TooltipTrigger>
         <TooltipContent side="top">Open Health</TooltipContent>
       </Tooltip>

@@ -13,6 +13,7 @@ import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import { cameraFacts, screenFacts } from '@/lib/source-facts'
+import { screenShareLostStatus } from '@/lib/screen-share-recovery'
 import { selectedDeviceStatus, videoSourceStatus, type SourceStatus } from '@/lib/source-status'
 import { systemAccessRows } from '@/lib/system-access'
 
@@ -276,15 +277,21 @@ export function VideoSources(): ReactElement {
         selectedDevice: deviceList.devices.find((device) => device.id === selectedCaptureId),
         allowNone: allowCaptureNone,
         disabled: screenLocked || Boolean(sourceSwitchReason('capture') || layoutSwitchPending),
-        status: videoSourceStatus({
-          kind: 'screen',
-          selected: Boolean(selectedCaptureId),
-          switching: sourceDeviceSwitchPending === 'capture',
-          // The whole list, not the picker's: a selected legacy capture row the
-          // picker hides is still connected.
-          device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
-          preview: previewScreenStatus
-        }),
+        status:
+          screenShareLostStatus({
+            selected: Boolean(selectedCaptureId),
+            switching: sourceDeviceSwitchPending === 'capture',
+            preview: previewScreenStatus
+          }) ??
+          videoSourceStatus({
+            kind: 'screen',
+            selected: Boolean(selectedCaptureId),
+            switching: sourceDeviceSwitchPending === 'capture',
+            // The whole list, not the picker's: a selected legacy capture row the
+            // picker hides is still connected.
+            device: selectedDeviceStatus(deviceList.devices, selectedCaptureId),
+            preview: previewScreenStatus
+          }),
         facts: selectedCaptureId ? screenFacts(previewScreenStatus) : null,
         switchStatus: <SourceSwitchStatus kind="capture" />,
         onChange: switchCapture

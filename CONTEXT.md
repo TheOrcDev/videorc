@@ -112,6 +112,35 @@ _Avoid_: scene (for the arrangement), composition
 A quality preset only: resolution, frame rate and bitrate together.
 _Avoid_: preset for a scene or a layout ("Layout preset")
 
+**Scene for an app**:
+A saved scene New scene… makes from an app you show (plan 210): it shows the
+app's front window, whichever window that is, and keeps working after the app
+quits and comes back. Its row reads "Figma · front window".
+_Avoid_: app scene (in copy), window scene, app capture
+
+**Follow the app in front**:
+When the streamer brings an app to the front, the stream switches to that
+app's scene. Each scene for an app follows; its ⋯ menu's "Stop following"
+turns that off, and its row says "Follows" while it does. macOS only.
+_Avoid_: auto-switch, smart switching
+
+**Swap in place**:
+How a scene switch changes the screen or window on stream (plan 210 D5): the
+one running capture changes its target instead of stopping and starting, and
+the program keeps the outgoing picture (the **held frame**) until the new
+window's first frame, then cuts. No black frame, no frame of the new window
+under the old scene's layout. Budget: 150 ms p95 from the click.
+_Avoid_: crossfade (there is none), warm capture, restart
+
+**Hide screen**:
+Covers the screen on every output (the recording, every stream, Clips and the
+Screen file) with a frosted still of it, while the camera and microphone stay
+on; "Show screen" brings it back. While it holds, the Studio and the Stream
+Manager say "Screen hidden". Its key is Control-Option-H (Ctrl+Alt+H on
+Windows and Linux) until changed in Settings → Shortcuts, and on macOS a
+password manager in front hides the screen too. Plan 210.
+_Avoid_: blur (it isn't live), privacy mode, BRB (that's a takeover), censor
+
 **Source**:
 A capture input: a screen or window, a camera, a microphone, system audio.
 _Avoid_: input, feed
@@ -266,10 +295,10 @@ The two other windows, by these names.
 _Avoid_: Teleprompter, Preview window (as a title)
 
 **Chrome ground**:
-The still of Liquid Chrome under every Videorc window (plan 208): black
-metal with soft silver streaks in dark, and the same turned around,
-porcelain with graphite streaks, in light. It never moves, and the desktop
-never shows through it. The Preview has none, because it frames video.
+The still of Liquid Chrome that plan 208 put under every Videorc window. The
+owner removed it on 2026-10-29: windows are now the plain solid (chrome
+black in dark, porcelain in light), and only the phone remote still shows
+the still.
 _Avoid_: wallpaper, background (a scene has one), live background (it never
 moves), glass
 
@@ -296,6 +325,20 @@ _Avoid_: diagnostics, logs (as the thing to send)
 Bringing a local file into Videorc: an image, a recording, an OBS setup.
 _Avoid_: Upload (for a local file), Add file
 
+### Agents
+
+**Agents**:
+AI apps on this computer (Claude, Cursor, Codex, VS Code and others) that
+run Videorc through Videorc MCP: Settings → Remote → Agents, "Let AI agents
+control Videorc". Each connected app is "an agent" with the name the
+streamer gave it ("Claude Desktop"); Stop disconnects every agent. Plan 209.
+_Avoid_: bots, AI assistants, integrations, MCP clients (in copy)
+
+**Videorc MCP**:
+What docs and the website call the way agents connect. In agent apps the
+server is named `videorc`.
+_Avoid_: Videorc API, MCP server (in the app's own copy)
+
 ### Buddy and Premium
 
 **Buddy**:
@@ -309,10 +352,13 @@ _Avoid_: the Buddy, co-host, Orcle, pet, sidekick
 The switch that lets Buddy join a livestream.
 _Avoid_: Joins my streams, chat mode (for the on switch)
 
-**Chat posting**:
-What Buddy may post to your chats as you: Off, Suggest or Auto. It never
-turns Buddy on or off; Buddy Live does.
-_Avoid_: chat mode, auto chat
+**{name} talks**:
+How Buddy talks on its own, named after the streamer's Buddy ("Golmar
+talks", else "Buddy talks"): Off, Bubble (in its bubble on stream, never in
+chat) or Suggest (a card; one click posts it to chat as you). Buddy never
+posts in your chat on its own. It never turns Buddy on or off; Buddy Live
+does. Plan 211.
+_Avoid_: Chat posting, chat mode, auto chat, Auto (gone since plan 211)
 
 **Profile**:
 The Buddy page's first tab: Buddy Live and its status, My Buddies, the look,

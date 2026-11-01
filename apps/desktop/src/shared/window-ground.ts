@@ -1,18 +1,16 @@
 // What a renderer window sits on (plan 208, S2). Main decides it per window
 // in window-glass.ts and hands it to the renderer the same way the window
 // learns its role: a BrowserWindow `additionalArguments` entry the preload
-// reads from `process.argv` before the first paint, so `ChromeGround` never
-// waits for an IPC round trip and never pops in.
+// reads from `process.argv` before the first paint.
 //
-//   chrome  the opaque chrome ground (the default): the window's backing is
-//           the theme's solid base and the renderer paints the frosted
-//           Liquid Chrome still under its coats.
+//   solid   the plain solid palette (the default, `VIDEORC_GLASS=0`, or a
+//           platform that took no material): the coats over the solid base.
 //   glass   the plan 091 clear glass or Windows Mica (`VIDEORC_GLASS=clear`,
-//           the one-release A/B control): the OS shows through, no ground.
-//   solid   the plain solid palette (`VIDEORC_GLASS=0`, or a platform that
-//           took no material): no ground, the coats over the solid base.
+//           the A/B control): the OS shows through.
+//
+// The plan 208 chrome ground (`chrome`) was removed on 2026-10-29.
 
-export type WindowGround = 'chrome' | 'glass' | 'solid'
+export type WindowGround = 'glass' | 'solid'
 
 export const WINDOW_GROUND_ARGUMENT_PREFIX = '--videorc-window-ground='
 
@@ -28,7 +26,7 @@ export function windowGroundFromArguments(arguments_: readonly string[]): Window
     const argument = arguments_[index]
     if (argument.startsWith(WINDOW_GROUND_ARGUMENT_PREFIX)) {
       const raw = argument.slice(WINDOW_GROUND_ARGUMENT_PREFIX.length)
-      return raw === 'chrome' || raw === 'glass' || raw === 'solid' ? raw : null
+      return raw === 'glass' || raw === 'solid' ? raw : null
     }
   }
   return null

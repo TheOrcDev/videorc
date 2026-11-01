@@ -158,7 +158,9 @@ describe('CohostStatus', () => {
     // Hovering the lone dot still says what Buddy is doing: a tooltip, never
     // a native title (plan 174 S1.10).
     expect(markup).not.toContain('title=')
-    expect(markup).toMatch(/<span(?=[^>]*data-testid="cohost-status")(?=[^>]*data-state="closed")/)
+    expect(markup).toMatch(
+      /<span(?=[^>]*data-testid="cohost-status")(?=[^>]*data-base-ui-tooltip-trigger)/
+    )
   })
 
   it('keeps the trigger draggable-safe in the frameless window header', () => {
@@ -184,7 +186,9 @@ describe('BuddyLiveSwitch (plan 174 S3.14a, D7)', () => {
     const markup = render({ checked: true })
     expect(markup).toContain('data-slot="buddy-live-switch"')
     expect(markup).toMatch(/<label[^>]*for="buddy-live-switch"[^>]*>Buddy Live<\/label>/)
-    expect(markup).toMatch(/role="switch"[^>]*aria-checked="true"[^>]*id="buddy-live-switch"/)
+    expect(markup).toMatch(/role="switch"[^>]*aria-checked="true"/)
+    // Base UI puts the id on the switch's hidden input, which the label points at.
+    expect(markup).toMatch(/<input[^>]*id="buddy-live-switch"[^>]*type="checkbox"/)
     expect(markup).not.toContain('disabled=""')
   })
 

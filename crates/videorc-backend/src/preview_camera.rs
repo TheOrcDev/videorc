@@ -51,7 +51,20 @@ const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 #[cfg(target_os = "macos")]
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 const WINDOWS_CAMERA_PREVIEW_STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
-const CAMERA_COMMAND_TRANSITION_TIMEOUT: Duration = Duration::from_secs(15);
+/// One DirectShow inventory or mode probe (`-list_devices` / `-list_options`).
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_CAMERA_INVENTORY_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long `preview.camera.start` waits for the transition before it replies
+/// Starting; the detached supervisor keeps owning the start. With the Windows
+/// inventory ahead of it, the reply must land inside the 10 s mutation
+/// execution contract, past which the backend restarts (a C920 start of
+/// 10-15 s did, when this was 15 s).
+pub(crate) const CAMERA_COMMAND_TRANSITION_TIMEOUT: Duration = Duration::from_secs(7);
+/// The command-facing worst case: inventory, then the bounded transition wait.
+#[cfg(test)]
+pub(crate) const CAMERA_COMMAND_RESPONSE_BUDGET: Duration = Duration::from_secs(
+    WINDOWS_CAMERA_INVENTORY_TIMEOUT.as_secs() + CAMERA_COMMAND_TRANSITION_TIMEOUT.as_secs(),
+);
 const CAMERA_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS: f64 = 0.000_001;
@@ -932,7 +945,7 @@ async fn resolve_windows_camera_target(
                 "-i",
                 "dummy",
             ]),
-            Duration::from_secs(2),
+            WINDOWS_CAMERA_INVENTORY_TIMEOUT,
         )
         .map_err(|error| format!("Could not verify the selected camera: {error}"))?;
         crate::audio_capture_adapter::resolve_dshow_video_name(
@@ -3369,7 +3382,7 @@ async fn delayed_camera_transition_status(
         if slot.start_generation == lease.generation && slot.starting.as_ref() == Some(&lease.key) {
             slot.status.updated_at = Utc::now().to_rfc3339();
             slot.status.message = Some(
-                "Camera transition is still retiring the previous native session; cleanup continues without overlapping capture."
+                "Camera is still starting; its status updates when the native session goes live or fails, without overlapping capture."
                     .to_string(),
             );
         }
@@ -3397,8 +3410,8 @@ async fn wait_for_camera_start(
     state: &AppState,
     start_key: &PreviewCameraStartKey,
 ) -> PreviewCameraStatus {
-    let timeout =
-        native_camera_preview_thread_startup_timeout().saturating_add(Duration::from_secs(1));
+    // A join replies inside the same command budget as the owning start.
+    let timeout = CAMERA_COMMAND_TRANSITION_TIMEOUT;
     let started_at = Instant::now();
     loop {
         let (still_starting, status) = {
@@ -4285,10 +4298,19 @@ fn windows_camera_mjpeg_capture_modes(width: u32, height: u32) -> Vec<(u32, u32)
         (1600, 896),
         (1920, 1080),
     ];
+    sort_windows_camera_capture_modes(COMMON_MODES.to_vec(), width, height)
+}
+
+/// Closest usable capture shape first: not undersized, then aspect, then area.
+#[cfg(any(target_os = "windows", test))]
+fn sort_windows_camera_capture_modes(
+    mut modes: Vec<(u32, u32)>,
+    width: u32,
+    height: u32,
+) -> Vec<(u32, u32)> {
     let target_width = u64::from(width.max(1));
     let target_height = u64::from(height.max(1));
     let target_pixels = target_width.saturating_mul(target_height);
-    let mut modes = COMMON_MODES.to_vec();
     modes.sort_by_key(|&(mode_width, mode_height)| {
         let mode_width = u64::from(mode_width);
         let mode_height = u64::from(mode_height);
@@ -4304,6 +4326,84 @@ fn windows_camera_mjpeg_capture_modes(width: u32, height: u32) -> Vec<(u32, u32)
         )
     });
     modes
+}
+
+/// The capture modes one DirectShow camera advertises (`-list_options true`).
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DshowAdvertisedVideoModes {
+    mjpeg_sizes: Vec<(u32, u32)>,
+    other_mode_count: usize,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl DshowAdvertisedVideoModes {
+    fn is_empty(&self) -> bool {
+        self.mjpeg_sizes.is_empty() && self.other_mode_count == 0
+    }
+}
+
+/// Parses the stderr of `ffmpeg -list_options true -f dshow -i video=...`:
+/// one `vcodec=` or `pixel_format=` line per mode, each with `min s=WxH` and
+/// `max s=WxH`.
+#[cfg(any(target_os = "windows", test))]
+fn parse_dshow_advertised_video_modes(stderr: &str) -> DshowAdvertisedVideoModes {
+    fn size_after(line: &str, key: &str) -> Option<(u32, u32)> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let (width, height) = rest.split_whitespace().next()?.split_once('x')?;
+        Some((width.parse().ok()?, height.parse().ok()?))
+    }
+
+    let mut modes = DshowAdvertisedVideoModes::default();
+    for line in stderr.lines() {
+        if !line.contains("vcodec=") && !line.contains("pixel_format=") {
+            continue;
+        }
+        let sizes = [size_after(line, "min s="), size_after(line, "max s=")];
+        if sizes.iter().all(Option::is_none) {
+            continue;
+        }
+        if line.contains("vcodec=mjpeg") {
+            for size in sizes.into_iter().flatten() {
+                if !modes.mjpeg_sizes.contains(&size) {
+                    modes.mjpeg_sizes.push(size);
+                }
+            }
+        } else {
+            modes.other_mode_count += 1;
+        }
+    }
+    modes
+}
+
+/// One DirectShow rung: the requested frame rate (None negotiates the device
+/// default) and an explicit MJPEG capture size.
+#[cfg(any(target_os = "windows", test))]
+type WindowsCameraCaptureAttempt = (Option<u32>, Option<(u32, u32)>);
+
+/// The DirectShow attempt ladder: explicit MJPEG modes, then the exact rate,
+/// then the negotiated default. With the camera's advertised modes the MJPEG
+/// rungs cover only the sizes it offers. Each rung it does not offer fails in
+/// about a quarter second, and a camera without MJPEG paid all 17 (4.5 s of a
+/// 7.8 s C920 start). Without them (the probe failed or parsed nothing) the
+/// ladder keeps every common mode.
+#[cfg(any(target_os = "windows", test))]
+fn windows_camera_capture_attempts(
+    width: u32,
+    height: u32,
+    fps: u32,
+    advertised: Option<&DshowAdvertisedVideoModes>,
+) -> Vec<WindowsCameraCaptureAttempt> {
+    let mjpeg_modes = match advertised.filter(|modes| !modes.is_empty()) {
+        Some(modes) => sort_windows_camera_capture_modes(modes.mjpeg_sizes.clone(), width, height),
+        None => windows_camera_mjpeg_capture_modes(width, height),
+    };
+    let mut attempts = mjpeg_modes
+        .into_iter()
+        .map(|capture_size| (Some(fps), Some(capture_size)))
+        .collect::<Vec<_>>();
+    attempts.extend([(Some(fps), None), (None, None)]);
+    attempts
 }
 
 fn camera_capture_target_dimensions(_layout: &LayoutSettings, video: &VideoSettings) -> (u32, u32) {
@@ -4754,11 +4854,11 @@ mod windows {
         // 720p30 for MJPEG while their uncompressed DirectShow mode tops out
         // at 5-10 fps. Retain the exact-rate and negotiated-default fallbacks
         // for cameras that do not expose MJPEG.
-        let mut attempts = windows_camera_mjpeg_capture_modes(width, height)
-            .into_iter()
-            .map(|capture_size| (Some(fps), Some(capture_size)))
-            .collect::<Vec<_>>();
-        attempts.extend([(Some(fps), None), (None, None)]);
+        let advertised = probe_dshow_advertised_video_modes(&config);
+        if stop_flag.load(Ordering::Acquire) {
+            return;
+        }
+        let attempts = windows_camera_capture_attempts(width, height, fps, advertised.as_ref());
         let attempt_count = attempts.len();
         for (attempt_index, (request_fps, mjpeg_capture_size)) in attempts.into_iter().enumerate() {
             if stop_flag.load(Ordering::Acquire) {
@@ -4785,6 +4885,42 @@ mod windows {
                 }
             }
         }
+    }
+
+    /// One bounded `-list_options` probe. None when it fails or reports no
+    /// modes; the ladder then keeps every common MJPEG mode.
+    fn probe_dshow_advertised_video_modes(
+        config: &NativeCameraPreviewConfig,
+    ) -> Option<DshowAdvertisedVideoModes> {
+        let started_at = Instant::now();
+        let output = crate::process_job::output_owned_std_with_timeout(
+            Command::new(&config.ffmpeg_path).args([
+                "-hide_banner",
+                "-list_options",
+                "true",
+                "-f",
+                "dshow",
+                "-i",
+                &format!("video={}", config.unique_id),
+            ]),
+            WINDOWS_CAMERA_INVENTORY_TIMEOUT,
+        );
+        let modes = match output {
+            Ok(output) => {
+                parse_dshow_advertised_video_modes(&String::from_utf8_lossy(&output.stderr))
+            }
+            Err(error) => {
+                tracing::warn!("[camera-modes] DirectShow mode probe failed: {error}");
+                return None;
+            }
+        };
+        tracing::info!(
+            "[camera-modes] DirectShow advertises {} MJPEG size(s) and {} other mode(s) in {}ms",
+            modes.mjpeg_sizes.len(),
+            modes.other_mode_count,
+            started_at.elapsed().as_millis()
+        );
+        (!modes.is_empty()).then_some(modes)
     }
 
     enum CameraPreviewAttempt {
@@ -8951,6 +9087,84 @@ mod tests {
             args[..input_index]
                 .windows(2)
                 .any(|pair| pair == ["-framerate", "30"])
+        );
+    }
+
+    // `ffmpeg -list_options true -f dshow` on a Logitech C920 behind the
+    // Windows camera frame server (2026-10-27): uncompressed modes only.
+    const C920_FRAME_SERVER_OPTIONS: &str =
+        "[dshow @ 0000025dbdd84e00] DirectShow video device options (from video devices)
+[dshow @ 0000025dbdd84e00]  Pin \"Capture\" (alternative pin name \"0\")
+[in#0 @ 0000025dbdd84e00]   pixel_format=yuyv422  min s=1920x1080 fps=30 max s=1920x1080 fps=30
+[in#0 @ 0000025dbdd84e00]   pixel_format=nv12  min s=1920x1080 fps=30 max s=1920x1080 fps=30
+[in#0 @ 0000025dbdd84e00] Error opening input file video=HD Pro Webcam C920.";
+
+    const MJPEG_WEBCAM_OPTIONS: &str =
+        "[in#0 @ 000001]   vcodec=mjpeg  min s=1280x720 fps=30 max s=1280x720 fps=30
+[in#0 @ 000001]   vcodec=mjpeg  min s=640x360 fps=30 max s=640x360 fps=30
+[in#0 @ 000001]   vcodec=mjpeg  min s=1280x720 fps=5 max s=1280x720 fps=30
+[in#0 @ 000001]   pixel_format=yuyv422  min s=1280x720 fps=10 max s=1280x720 fps=10";
+
+    #[test]
+    fn dshow_mode_probe_reads_mjpeg_sizes_and_other_modes() {
+        assert_eq!(
+            parse_dshow_advertised_video_modes(C920_FRAME_SERVER_OPTIONS),
+            DshowAdvertisedVideoModes {
+                mjpeg_sizes: Vec::new(),
+                other_mode_count: 2,
+            }
+        );
+        assert_eq!(
+            parse_dshow_advertised_video_modes(MJPEG_WEBCAM_OPTIONS),
+            DshowAdvertisedVideoModes {
+                mjpeg_sizes: vec![(1280, 720), (640, 360)],
+                other_mode_count: 1,
+            }
+        );
+        assert!(
+            parse_dshow_advertised_video_modes("Error opening input files: I/O error").is_empty()
+        );
+    }
+
+    #[test]
+    fn windows_camera_ladder_skips_mjpeg_modes_the_camera_does_not_offer() {
+        let c920 = parse_dshow_advertised_video_modes(C920_FRAME_SERVER_OPTIONS);
+        assert_eq!(
+            windows_camera_capture_attempts(1920, 1080, 30, Some(&c920)),
+            vec![(Some(30), None), (None, None)],
+            "a camera without MJPEG goes straight to the exact rate"
+        );
+
+        let webcam = parse_dshow_advertised_video_modes(MJPEG_WEBCAM_OPTIONS);
+        assert_eq!(
+            windows_camera_capture_attempts(360, 203, 30, Some(&webcam)),
+            vec![
+                (Some(30), Some((640, 360))),
+                (Some(30), Some((1280, 720))),
+                (Some(30), None),
+                (None, None),
+            ],
+            "only advertised MJPEG sizes, closest shape first"
+        );
+    }
+
+    #[test]
+    fn windows_camera_ladder_keeps_every_common_mode_without_a_probe() {
+        let full = windows_camera_capture_attempts(1920, 1080, 30, None);
+        assert_eq!(
+            full.len(),
+            windows_camera_mjpeg_capture_modes(1920, 1080).len() + 2
+        );
+        assert_eq!(full.first(), Some(&(Some(30), Some((1920, 1080)))));
+        assert_eq!(
+            windows_camera_capture_attempts(
+                1920,
+                1080,
+                30,
+                Some(&DshowAdvertisedVideoModes::default())
+            ),
+            full,
+            "a probe that parsed nothing is no evidence"
         );
     }
 

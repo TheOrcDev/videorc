@@ -8,7 +8,7 @@ import {
 import { Fragment, useContext, type ReactElement, type ReactNode } from 'react'
 
 import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
-import { DevicePicker } from '@/components/device-picker'
+import { LcdDevicePicker } from '@/components/lcd-device-picker'
 import {
   LCD_FADER,
   LCD_MESSAGE,
@@ -23,9 +23,10 @@ import {
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
 import { STATUS_TONE_CLASS } from '@/components/status-badge'
+import { AgentsSessionRow } from '@/components/studio/agents-session-row'
 import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
-import { useStudioSources } from '@/components/studio/quick-settings'
+import { type ScreenPrivacyControl, useStudioSources } from '@/components/studio/quick-settings'
 import {
   CohostSessionRow,
   LiveDestinationRows,
@@ -51,6 +52,7 @@ import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources } from '@/lib/capture'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
+import { screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, micSignalLabel, systemAudioIssueLabel } from '@/lib/state-labels'
 import {
@@ -279,6 +281,7 @@ export function RetroSessionPanel({ live = false, ...notices }: SessionPanelProp
         {live ? <LiveDestinationRows look="lcd" /> : null}
         {live ? <LiveStreamHealthRow look="lcd" /> : null}
         {live ? <CohostSessionRow look="lcd" /> : null}
+        <AgentsSessionRow look="lcd" />
       </LcdPanel>
       <SessionNotices {...notices} />
     </PanelSection>
@@ -398,7 +401,7 @@ function RetroMicrophoneRows({
           </button>
         </ShortcutTooltip>
       </RetroChannelHeader>
-      <DevicePicker
+      <LcdDevicePicker
         devices={devices}
         disabled={disabled}
         discoveryPending={discoveryPending}
@@ -408,7 +411,6 @@ function RetroMicrophoneRows({
         rowLabel="Device"
         selectedDevice={selectedDevice}
         selectedName={selectedName}
-        trigger="lcd"
         value={value}
         onChange={onChange}
       />
@@ -520,7 +522,8 @@ export function RetroQuickSettings(): ReactElement {
     discoveryPending,
     captureDevices,
     cameras,
-    selectedCaptureId
+    selectedCaptureId,
+    screenPrivacy
   } = useStudioSources()
   return (
     <>
@@ -535,7 +538,7 @@ export function RetroQuickSettings(): ReactElement {
             title="Sources"
           />
           {/* F-015: the synthetic diagnostic source replaces the screen. */}
-          <DevicePicker
+          <LcdDevicePicker
             devices={captureDevices}
             disabled={Boolean(sourceSwitchReason('capture'))}
             discoveryPending={discoveryPending}
@@ -546,7 +549,6 @@ export function RetroQuickSettings(): ReactElement {
             selectedDevice={selectedCaptureDevice}
             selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
             selectionLabel={captureConfig.sources.testPattern ? 'Test pattern' : undefined}
-            trigger="lcd"
             value={selectedCaptureId}
             onChange={(captureId) =>
               void switchSourceDeviceLive(
@@ -556,9 +558,10 @@ export function RetroQuickSettings(): ReactElement {
             }
           />
           <RetroSwitchStatusLine kind="capture" />
+          <RetroScreenPrivacyRow control={screenPrivacy} />
           <LcdDisplaySeparator />
           {/* Off is a choice that sticks (plan 080 S4). */}
-          <DevicePicker
+          <LcdDevicePicker
             devices={cameras}
             disabled={Boolean(sourceSwitchReason('camera'))}
             discoveryPending={discoveryPending}
@@ -567,7 +570,6 @@ export function RetroQuickSettings(): ReactElement {
             noneLabel="Off"
             selectedDevice={selectedCamera}
             selectedName={captureConfig.sources.cameraName}
-            trigger="lcd"
             value={captureConfig.sources.cameraId}
             onChange={(cameraId) =>
               void switchSourceDeviceLive(
@@ -592,6 +594,37 @@ export function RetroQuickSettings(): ReactElement {
         </LcdPanel>
       </PanelSection>
     </>
+  )
+}
+
+/**
+ * Hide screen on the Sources screen (plan 210 S8b): a row that covers
+ * something, like a takeover's. Off dim, On lit while the screen is hidden,
+ * and its key on hover. Only a hide is ever refused, with its reason.
+ */
+function RetroScreenPrivacyRow({ control }: { control: ScreenPrivacyControl }): ReactElement {
+  const { hidden, accelerator, platform, disabledReason, toggle } = control
+  const row = (
+    <LcdPanelPressRow
+      disabled={disabledReason !== null}
+      label="Hide screen"
+      pressed={hidden}
+      onPressedChange={toggle}
+    />
+  )
+  return disabledReason ? (
+    <DisabledReason className="flex flex-col" reason={disabledReason}>
+      {row}
+    </DisabledReason>
+  ) : (
+    <ShortcutTooltip
+      accelerator={accelerator}
+      className="flex flex-col"
+      label={screenPrivacyActionLabel(hidden)}
+      platform={platform}
+    >
+      {row}
+    </ShortcutTooltip>
   )
 }
 

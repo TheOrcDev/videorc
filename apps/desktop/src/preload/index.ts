@@ -36,9 +36,14 @@ function subscribe<TChannel extends ElectronEventChannel>(
 }
 
 const api: VideorcApi = {
+  onFrontAppChanged: (callback) => subscribe('app:front-changed', callback),
+  setFrontWindowWatch: (enabled) => invoke('app:front-window-watch', { enabled }),
+  getSelfBundleIds: () => invoke('app:self-bundle-ids'),
+  getAppIcons: (bundleIds) => invoke('app:icons', bundleIds),
   // What this window sits on (plan 208): main's call, off the window's argv,
   // so the theme bootstrap can set data-ground before the first paint. Every
-  // Videorc window names one; a missing value leaves the bootstrap's default.
+  // Videorc window names one; a missing value leaves the bootstrap's default
+  // (solid).
   ...(() => {
     const windowGround = windowGroundFromArguments(process.argv)
     return windowGround ? { windowGround } : {}
@@ -117,6 +122,9 @@ const api: VideorcApi = {
   soundFromCommentsWindow: (command) => invoke('comments-window:sound', command),
   onSoundRequest: (callback) => subscribe('comments-window:sound-request', callback),
   pushSoundResult: (resolution) => invoke('comments-window:sound-result-push', resolution),
+  buddyActFromCommentsWindow: (command) => invoke('comments-window:buddy-act', command),
+  onBuddyActRequest: (callback) => subscribe('comments-window:buddy-act-request', callback),
+  pushBuddyActResult: (resolution) => invoke('comments-window:buddy-act-result-push', resolution),
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),
@@ -228,6 +236,8 @@ const api: VideorcApi = {
   revealSession: (sessionId) => invoke('resource:reveal-session', sessionId),
   revealBackgroundAsset: (assetId) => invoke('resource:reveal-background', assetId),
   revealSupportBundle: (path) => invoke('resource:reveal-support-bundle', path),
+  getAgentBridge: (install) => invoke('agents:bridge', install),
+  addAgentToApp: (app, token) => invoke('agents:add-to-app', app, token),
   obsDiscover: () => invoke('obs:discover'),
   obsRead: (collection, profile) => invoke('obs:read', collection, profile),
   obsReadStreamKey: (profile) => invoke('obs:read-stream-key', profile),

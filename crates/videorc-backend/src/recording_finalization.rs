@@ -408,6 +408,7 @@ pub fn emit_finalization_event(
         duration_ms: detail.duration_ms,
         file_size_bytes: detail.file_size_bytes,
         error: detail.error,
+        interruption_recovery: detail.interruption_recovery,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
     state.emit_event("recording.finalization", event);
@@ -421,6 +422,7 @@ pub struct FinalizationEventDetail {
     pub duration_ms: Option<i64>,
     pub file_size_bytes: Option<i64>,
     pub error: Option<String>,
+    pub interruption_recovery: Option<String>,
 }
 
 /// Maps the persisted `sessions.finalization_state` column to the wire enum.
@@ -437,6 +439,12 @@ pub fn finalization_state_from_column(value: Option<&str>) -> Option<RecordingFi
 pub const FINALIZATION_STATE_FINALIZING: &str = "finalizing";
 pub const FINALIZATION_STATE_FINALIZED: &str = "finalized";
 pub const FINALIZATION_STATE_FAILED: &str = "failed";
+
+/// `sessions.interruption_recovery`: the interrupted take's MKV was finalized
+/// to an MP4.
+pub const INTERRUPTION_RECOVERY_RECOVERED: &str = "recovered";
+/// The recovery ran and produced no MP4; the MKV is kept.
+pub const INTERRUPTION_RECOVERY_FAILED: &str = "failed";
 
 #[cfg(test)]
 mod tests {

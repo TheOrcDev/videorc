@@ -70,6 +70,9 @@ pub enum PortalCaptureState {
     Revoked,
     /// The portal (or the compositor's backend) is not available at all.
     MissingSource { reason: String },
+    /// The portal service went away (crashed or restarted) while its share
+    /// dialog was open, so its answer will never come.
+    PortalLost,
     /// A revoked session is being restarted with its restore token.
     Reconnecting,
 }
@@ -82,7 +85,9 @@ impl PortalCaptureState {
                 SourceLifecycleStatus::Starting
             }
             PortalCaptureState::Granted { .. } => SourceLifecycleStatus::Live,
-            PortalCaptureState::Cancelled => SourceLifecycleStatus::PermissionNeeded,
+            PortalCaptureState::Cancelled | PortalCaptureState::PortalLost => {
+                SourceLifecycleStatus::PermissionNeeded
+            }
             PortalCaptureState::Revoked | PortalCaptureState::MissingSource { .. } => {
                 SourceLifecycleStatus::SourceMissing
             }
@@ -100,6 +105,9 @@ impl PortalCaptureState {
             }
             PortalCaptureState::Cancelled => {
                 "Screen sharing was cancelled in the desktop portal dialog; pick a source to try again.".to_string()
+            }
+            PortalCaptureState::PortalLost => {
+                "The screen share dialog closed unexpectedly. Choose your screen again.".to_string()
             }
             PortalCaptureState::Revoked => {
                 "The compositor ended the screen share; pick the source again to restart it.".to_string()
@@ -233,6 +241,8 @@ pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
     };
     vec![
         Device {
+            app: None,
+            window_title: None,
             id: PORTAL_MONITOR_SOURCE_ID.to_string(),
             name: "Screen (portal)".to_string(),
             kind: DeviceKind::Screen,
@@ -242,6 +252,8 @@ pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
             height: None,
         },
         Device {
+            app: None,
+            window_title: None,
             id: PORTAL_WINDOW_SOURCE_ID.to_string(),
             name: "Window (portal)".to_string(),
             kind: DeviceKind::Window,
@@ -351,6 +363,17 @@ mod tests {
         assert_eq!(
             PortalCaptureState::Cancelled.lifecycle_status(),
             SourceLifecycleStatus::PermissionNeeded
+        );
+        // A portal that went away mid-dialog asks the person again; it is not
+        // a missing source (that would also forget a saved restore token).
+        assert_eq!(
+            PortalCaptureState::PortalLost.lifecycle_status(),
+            SourceLifecycleStatus::PermissionNeeded
+        );
+        assert!(
+            PortalCaptureState::PortalLost
+                .message()
+                .contains("Choose your screen again")
         );
         assert_eq!(
             PortalCaptureState::Revoked.lifecycle_status(),

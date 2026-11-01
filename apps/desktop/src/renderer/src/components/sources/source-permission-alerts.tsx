@@ -14,6 +14,7 @@ import {
   mediaAccessStatusForPane
 } from '@/lib/system-access'
 import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
+import { cn } from '@/lib/utils'
 
 // Plan 174 S3.8 (C-8, C-14): the Sources page's one place for what blocks a
 // source. One flush warning Alert per missing permission, with its fix, and
@@ -25,7 +26,8 @@ export function SourcePermissionAlertsView({
   deviceProblem,
   onOpen,
   onReveal,
-  onOpenHealth
+  onOpenHealth,
+  className
 }: {
   alerts: readonly SourcePermissionAlert[]
   /** The device list has warnings no alert covers. */
@@ -33,6 +35,8 @@ export function SourcePermissionAlertsView({
   onOpen: (id: SourcePermissionAlert['id']) => Promise<void> | void
   onReveal: () => void
   onOpenHealth: () => void
+  /** Layout only: Sources pads it under its strip; a dialog body does not. */
+  className?: string
 }): ReactElement | null {
   const [pending, setPending] = useState<SourcePermissionAlert['id'] | null>(null)
   if (alerts.length === 0 && !deviceProblem) return null
@@ -47,7 +51,10 @@ export function SourcePermissionAlertsView({
   }
 
   return (
-    <div className="flex flex-col gap-2 px-gutter pt-3" data-videorc-source-alerts="">
+    <div
+      className={cn('flex flex-col gap-2 px-gutter pt-3', className)}
+      data-videorc-source-alerts=""
+    >
       {alerts.map((alert) => (
         <Alert key={alert.id} data-permission={alert.id} variant="warning">
           <AlertTitle>{alert.title}</AlertTitle>
@@ -86,8 +93,15 @@ export function SourcePermissionAlertsView({
   )
 }
 
-/** The alerts, wired to the studio. */
-export function SourcePermissionAlerts(): ReactElement | null {
+/**
+ * The alerts, wired to the studio. `only` keeps one permission's alert, for
+ * a place that needs just that one (New scene… needs Screen Recording,
+ * plan 210 S5), in the same words as Sources.
+ */
+export function SourcePermissionAlerts({
+  only,
+  className
+}: { only?: SourcePermissionAlert['id']; className?: string } = {}): ReactElement | null {
   const {
     deviceList,
     captureConfig,
@@ -140,8 +154,9 @@ export function SourcePermissionAlerts(): ReactElement | null {
 
   return (
     <SourcePermissionAlertsView
-      alerts={alerts}
-      deviceProblem={unknownDeviceWarnings(deviceList.warnings).length > 0}
+      alerts={only ? alerts.filter((alert) => alert.id === only) : alerts}
+      className={className}
+      deviceProblem={!only && unknownDeviceWarnings(deviceList.warnings).length > 0}
       onOpen={(id) => handleSystemPermission(id)}
       onOpenHealth={openHealth}
       onReveal={() => void revealPermissionTarget()}

@@ -1,46 +1,57 @@
-import { Component, Suspense, lazy, type ErrorInfo, type ReactElement, type ReactNode } from 'react'
+'use client'
 
-// The root boundary (plan 174 S3.21, A-7), shared by every window: a crash
-// in the shell itself (or in the providers above it) shows the root panel,
-// which keeps a drag band so the window still moves, and a way to the
-// support bundle. The main window's pages have their own boundary
-// (page-error-boundary.tsx). The panel lives in its own chunk: this module
-// is in every window's eager bundle, and the panel must depend on nothing
-// the main window alone loads.
+// An error boundary is a class, and a class keeps its state with setState.
+/* oxlint-disable react/no-set-state */
 
-/** What a boundary caught, for the panel's "Copy details". */
-export interface CaughtError {
+import { Component } from 'react'
+import type { ErrorInfo, ReactNode } from 'react'
+
+/** What a boundary caught, for a fallback's "Copy details". */
+interface CaughtError {
   error: Error
   componentStack: string | null
 }
 
-const RootErrorPanel = lazy(async () => ({
-  default: (await import('@/components/root-error-panel')).RootErrorPanel
-}))
+interface ErrorBoundaryProps {
+  children: ReactNode
+  /** Draws the caught error; `reset` renders the children again. */
+  fallback: (caught: CaughtError, reset: () => void) => ReactNode
+  /** Reports the crash (a log line, a crash reporter). React logs it as well. */
+  onError?: (error: Error, info: ErrorInfo) => void
+}
+
+interface ErrorBoundaryState {
+  caught: CaughtError | null
+}
 
 /**
  * The one boundary: `fallback` draws the caught error and gets `reset`,
- * which renders the children again.
+ * which renders the children again. Without a boundary React 19 unmounts the
+ * whole root on an uncaught render error, which in a window means an empty
+ * frame with no way back. Wrap the window's shell in one, so a crash still
+ * leaves a way to reload; wrap each page in another, keyed by the page, so
+ * a crash stays in the page and the rest of the window keeps working.
+ *
+ * A class, because only a class component can catch a render error.
  */
-export class ErrorBoundary extends Component<
-  {
-    children: ReactNode
-    fallback: (caught: CaughtError, reset: () => void) => ReactNode
-  },
-  { caught: CaughtError | null }
-> {
-  state: { caught: CaughtError | null } = { caught: null }
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props)
+    this.state = { caught: null }
+  }
 
-  static getDerivedStateFromError(error: Error): { caught: CaughtError } {
-    return { caught: { error, componentStack: null } }
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { caught: { componentStack: null, error } }
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    console.error('[shell] render crash:', error, info.componentStack)
-    this.setState({ caught: { error, componentStack: info.componentStack ?? null } })
+    this.props.onError?.(error, info)
+    this.setState({
+      caught: { componentStack: info.componentStack ?? null, error }
+    })
   }
 
-  private reset = (): void => {
+  private readonly reset = (): void => {
     this.setState({ caught: null })
   }
 
@@ -50,41 +61,13 @@ export class ErrorBoundary extends Component<
   }
 }
 
-/**
- * Last-resort catch for render crashes. Without it React 19 unmounts the
- * entire root on an uncaught render error, which in a transparent window
- * means an empty see-through frame with no way back. `supportBundle` is the
- * export button, passed in by the shell where the studio provider is still
- * there to serve it; the root boundary in main.tsx and the other windows
- * pass none. Should the panel's own chunk fail to load, a bare reload
- * button remains.
- */
-export function AppErrorBoundary({
-  children,
-  supportBundle
-}: {
-  children: ReactNode
-  supportBundle?: ReactNode
-}): ReactElement {
-  return (
-    <ErrorBoundary
-      fallback={(caught, reset) => (
-        <ErrorBoundary
-          fallback={() => (
-            <div className="flex h-screen items-center justify-center" role="alert">
-              <button className="text-sm underline" type="button" onClick={() => location.reload()}>
-                Reload Videorc
-              </button>
-            </div>
-          )}
-        >
-          <Suspense fallback={null}>
-            <RootErrorPanel {...caught} supportBundle={supportBundle} onReset={reset} />
-          </Suspense>
-        </ErrorBoundary>
-      )}
-    >
-      {children}
-    </ErrorBoundary>
-  )
+/** What "Copy details" puts on the clipboard: the error and where it rendered. */
+function errorDetails(error: Error, componentStack?: string | null): string {
+  const lines = [error.stack || `${error.name}: ${error.message}`]
+  if (componentStack?.trim()) {
+    lines.push('Rendered by:', componentStack.trim())
+  }
+  return lines.join('\n')
 }
+
+export { ErrorBoundary, errorDetails, type CaughtError, type ErrorBoundaryProps }

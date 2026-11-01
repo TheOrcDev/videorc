@@ -1,10 +1,15 @@
-import { app, Notification } from 'electron'
+import { app, net, Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import electronUpdater from 'electron-updater'
 import type { ProgressInfo, UpdateInfo } from 'electron-updater'
 
 import type { UpdateStatus } from '../shared/backend'
 import type { AcquireBackendInterruption } from './interruption-actions'
+import {
+  checkLinuxUpdateNotice,
+  linuxUpdateNoticeSource,
+  linuxUpdateNoticeStatus
+} from './linux-update-notice'
 import { safeConsole } from './safe-console'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import { installUpdateWithInterruptionLease } from './updater-install'
@@ -60,6 +65,12 @@ let pilotFeedActive = false
 let accountPilotActive = false
 let probingAccountPilot = false
 let requestAccountPilotGrant: (() => Promise<unknown>) | null = null
+// Linux never runs electron-updater: it only learns from videorc.com that a
+// newer release exists (linux-update-notice.ts). Null when the check must not
+// run (a dev build without a local endpoint).
+const linuxNoticeSource =
+  process.platform === 'linux' ? linuxUpdateNoticeSource(process.env, app.isPackaged) : null
+let linuxNoticeInFlight: Promise<UpdateStatus> | null = null
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -245,6 +256,49 @@ async function downloadUpdateWithMirrorFallback(): Promise<void> {
   }
 }
 
+// One Linux check at a time; a manual check during a background one joins it.
+function checkLinuxNotice(): Promise<UpdateStatus> {
+  if (!linuxNoticeSource) {
+    setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    return Promise.resolve(currentStatus)
+  }
+  const sourceUrl = linuxNoticeSource
+  linuxNoticeInFlight ??= (async () => {
+    setStatus(updateStatusFromEvent({ type: 'checking' }))
+    const runningVersion = app.getVersion()
+    const check = await checkLinuxUpdateNotice({
+      sourceUrl,
+      runningVersion,
+      fetchImpl: (url, init) => net.fetch(url, init)
+    })
+    safeConsole.log(`[auto-update] Linux version check: ${JSON.stringify(check)}`)
+    setStatus(linuxUpdateNoticeStatus(check, runningVersion))
+    return currentStatus
+  })().finally(() => {
+    linuxNoticeInFlight = null
+  })
+  return linuxNoticeInFlight
+}
+
+// Launch check plus the same interval re-check as the other platforms.
+// VIDEORC_DISABLE_AUTO_UPDATE=1 turns off the background checks here too.
+function initLinuxUpdateNotice(): void {
+  if (!linuxNoticeSource) {
+    return
+  }
+  if (process.env.VIDEORC_DISABLE_AUTO_UPDATE === '1') {
+    setStatus(updateStatusFromEvent({ type: 'unsupported', reason: 'linux-version-unknown' }))
+    return
+  }
+  void checkLinuxNotice()
+  const recheckTimer = setInterval(() => {
+    if (shouldBackgroundRecheck(currentStatus)) {
+      void checkLinuxNotice()
+    }
+  }, BACKGROUND_RECHECK_INTERVAL_MS)
+  recheckTimer.unref?.()
+}
+
 // Attach the autoUpdater event → UpdateStatus mapping exactly once. Safe to call
 // from both initAutoUpdater (background) and registerUpdaterIpc (manual).
 function attachUpdaterListeners(): void {
@@ -309,6 +363,11 @@ function attachUpdaterListeners(): void {
 export function initAutoUpdater(
   options: { requestWindowsPilotUpdateGrant?: () => Promise<unknown> } = {}
 ): void {
+  if (process.platform === 'linux') {
+    delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
+    initLinuxUpdateNotice()
+    return
+  }
   if (!app.isPackaged) {
     delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
     return
@@ -399,6 +458,10 @@ export function registerUpdaterIpc(
 ): void {
   getMainWindow = mainWindowGetter
   captureActive = captureInstallBlocked
+  if (process.platform === 'linux') {
+    registerLinuxUpdaterIpc()
+    return
+  }
   if (!updaterConfigurationBlocked) {
     attachUpdaterListeners()
   }
@@ -468,4 +531,13 @@ export function registerUpdaterIpc(
       safeConsole.warn(`[auto-update] install admission failed: ${errorMessage(error)}`)
     }
   })
+}
+
+// Linux: Check for updates asks videorc.com; there is nothing to download or
+// install in the app, so those two never touch electron-updater.
+function registerLinuxUpdaterIpc(): void {
+  secureIpcHandle('updates:get-status', () => currentStatus)
+  secureIpcHandle('updates:check', () => checkLinuxNotice())
+  secureIpcHandle('updates:download', () => currentStatus)
+  secureIpcHandle('updates:install', () => undefined)
 }

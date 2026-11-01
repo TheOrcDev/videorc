@@ -67,7 +67,7 @@ async function render(
 /** The active tab's label, without its unseen badge. */
 function activeTab(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
   const tab = container.querySelector<HTMLElement>(
-    `[data-slot="${slot}"] [role="tab"][data-state="active"]`
+    `[data-slot="${slot}"] [role="tab"][data-active]`
   )
   if (!tab) return null
   const badge = tab.querySelector('[data-testid="pane-unseen"]')?.textContent ?? ''
@@ -132,5 +132,42 @@ describe('StreamManager: a proposed Buddy post behind a tab (plan 174 S0.2)', ()
     const send = container.querySelector<HTMLButtonElement>('[data-testid="buddy-utterance-send"]')
     await act(async () => send!.click())
     expect(onCohostUtteranceApprove).toHaveBeenCalledWith(proposed)
+  })
+})
+
+describe('StreamManager: how Buddy talks reaches the relay (plan 211 S-C1, D3)', () => {
+  const autoChat = {
+    talk: 'off' as const,
+    // The legacy projection rides along; the control never reads or sends it.
+    mode: 'suggest' as const,
+    greetings: { enabled: true, templates: [] },
+    answers: { enabled: false, cooldownSeconds: 20 },
+    banter: { enabled: false, cooldownSeconds: 240 }
+  }
+
+  /** A segment checks on a click. */
+  async function choose(talk: string): Promise<void> {
+    const option = container.querySelector<HTMLButtonElement>(`[data-buddy-talk="${talk}"]`)
+    expect(option, talk).toBeTruthy()
+    await act(async () => option!.click())
+  }
+
+  it('sends `{ talk }` alone for each value, never `mode`', async () => {
+    localStorage.setItem('videorc.buddyAutoChatConsent', '1')
+    const onCohostAutoChatChange = vi.fn()
+    await render([], { cohostAutoChat: autoChat, onCohostAutoChatChange })
+    expect(container.querySelector('[data-buddy-talk="off"]')?.getAttribute('aria-checked')).toBe(
+      'true'
+    )
+    await choose('bubble')
+    await choose('suggest')
+    await render([], { cohostAutoChat: { ...autoChat, talk: 'bubble' }, onCohostAutoChatChange })
+    await choose('off')
+    expect(onCohostAutoChatChange.mock.calls).toEqual([
+      [{ talk: 'bubble' }],
+      [{ talk: 'suggest' }],
+      [{ talk: 'off' }]
+    ])
+    localStorage.clear()
   })
 })

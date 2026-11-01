@@ -337,6 +337,14 @@ for (const [step, change] of [
   ['sound', { soundBlocked: true, microphoneGrant: 'granted' }],
   ['workspace-look', { watchMs: 9999 }],
   ['workspace-look', { toasts: ["Clips couldn't start"] }],
+  [
+    'look',
+    {
+      toasts: [
+        'Videorc hit a problemTry again. If it keeps happening, export a support bundle from Health.'
+      ]
+    }
+  ],
   ['workspace-look', { refusedStarts: ['Session start refused'] }],
   ['workspace-look', { committedBackground: 'plasma' }],
   ['destinations', { destinationRows: [] }],

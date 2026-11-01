@@ -53,6 +53,44 @@ test('recognizes only the private MKV-to-MP4 finalization export', () => {
   )
 })
 
+test('recognizes the plan 200 export that copies AAC and adds chapters', () => {
+  const copyAudioExport = [
+    '-n',
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    '-i',
+    '/tmp/recording.mkv',
+    '-f',
+    'ffmetadata',
+    '-i',
+    '/tmp/chapters.txt',
+    '-map',
+    '0',
+    '-map_chapters',
+    '1',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'copy',
+    '-movflags',
+    '+faststart',
+    '-metadata',
+    'creation_time=2026-10-31T00:00:00Z',
+    '/tmp/.videorc-export-abc.partial/export.mp4'
+  ]
+
+  assert.equal(isMp4FinalizationExport(copyAudioExport), true)
+  assert.equal(
+    isMp4FinalizationExport(
+      copyAudioExport.map((argument, index) =>
+        argument === 'copy' && copyAudioExport[index - 1] === '-c:a' ? 'opus' : argument
+      )
+    ),
+    false
+  )
+})
+
 test('builds a synthetic recording with a one-shot output directory capability', () => {
   const params = appQuitRecordingSessionParams({
     outputDirectoryCapability: 'capability-1'
