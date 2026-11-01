@@ -149,6 +149,16 @@ describe('GeneralSettings', () => {
     expect(requests).toEqual([{ returnTo: 'settings' }])
   })
 
+  it('does not promise a permissions step on Linux, where setup has none', async () => {
+    mocked.core = {
+      ...mocked.core,
+      runtimeInfo: { platform: 'linux', commentsWindowEnabled: true }
+    }
+    await act(async () => root.render(createElement(GeneralSettings)))
+    expect(container.textContent).toContain('Go through the welcome steps again.')
+    expect(container.textContent).not.toContain('starting with permissions')
+  })
+
   it('locks Run setup again… while a recording or livestream runs, and says why', async () => {
     mocked.recording = { state: 'streaming' }
     await act(async () => root.render(createElement(GeneralSettings)))
