@@ -1,9 +1,10 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { once } from 'node:events'
+import { spawnProcessGroup } from './lib/process-group.mjs'
 import { assertSceneSwitchPixels } from './lib/scene-switch-pixels.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 
@@ -207,25 +208,14 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
   }
 }
 
-function run(command, args, env = process.env) {
-  return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, args, { cwd: root, env, stdio: 'inherit' })
-    let forceKill
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM')
-      forceKill = setTimeout(() => child.kill('SIGKILL'), 2000)
-      forceKill.unref()
-    }, 600000)
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      clearTimeout(forceKill)
-      rejectRun(error)
-    })
-    child.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      clearTimeout(forceKill)
-      if (code === 0) resolveRun()
-      else rejectRun(new Error(`${command} exited ${code ?? signal}`))
-    })
+async function run(command, args, env = process.env) {
+  const { result } = spawnProcessGroup(command, args, {
+    cwd: root,
+    env,
+    stdio: 'inherit',
+    timeoutMs: 600000
   })
+  const { status, signal, error } = await result
+  if (error) throw error
+  if (status !== 0) throw new Error(`${command} exited ${status ?? signal}`)
 }

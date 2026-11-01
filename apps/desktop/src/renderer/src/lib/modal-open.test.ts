@@ -21,10 +21,12 @@ describe('isModalOpen (plan 174 S3.21, A-2)', () => {
 
   it('is true while a dialog, an alert, a menu or a select is open', () => {
     for (const html of [
-      '<div role="dialog" data-state="open">Schedule</div>',
-      '<div role="alertdialog" data-state="open">End livestream?</div>',
-      '<div role="menu" data-state="open"><div role="menuitem">Rename</div></div>',
-      '<div role="listbox" data-state="open"><div role="option">1080p</div></div>'
+      '<div role="dialog" data-open>Schedule</div>',
+      '<div role="alertdialog" data-open>End livestream?</div>',
+      '<div role="menu" data-open><div role="menuitem">Rename</div></div>',
+      '<div role="listbox" data-open><div role="option">1080p</div></div>',
+      // Base UI's Select puts the listbox role on its list, inside the open popup.
+      '<div role="presentation" data-open><div role="listbox"><div role="option">720p</div></div></div>'
     ]) {
       document.body.innerHTML = ''
       mount(html)
@@ -34,7 +36,7 @@ describe('isModalOpen (plan 174 S3.21, A-2)', () => {
 
   it('ignores a closed dialog and a list that is part of the page', () => {
     mount(`
-      <div role="dialog" data-state="closed">Gone</div>
+      <div role="dialog" data-closed>Gone</div>
       <div role="listbox"><div role="option">Row</div></div>
     `)
     expect(isModalOpen(document)).toBe(false)

@@ -944,6 +944,20 @@ pub async fn update_preview_surface_present(
         if is_stale_present_update(&slot.status, &params) {
             return slot.status.clone();
         }
+        // A stopped (or never created) surface has no presenter left to report
+        // on. Main's 250 ms present report can still be in flight when the
+        // backend destroys the surface: the capture-decay soak destroys
+        // backend-first and drains main's destroy afterwards, and the
+        // renderer's teardown sends the two requests over different sockets.
+        // Applying that report would put the pre-destroy presenter state back
+        // over the reset, so the stopped status would claim a live
+        // CAMetalLayer presenter and retained IOSurface imports after teardown.
+        if matches!(
+            slot.status.state,
+            PreviewSurfaceState::Stopped | PreviewSurfaceState::Unavailable
+        ) {
+            return slot.status.clone();
+        }
         let mut next = slot.status.clone();
         let native_claim_allowed = native_present_claim_allowed(&slot.status, &params);
         let blocked_native_claim = present_update_claims_native(&params) && !native_claim_allowed;
@@ -1889,6 +1903,7 @@ fn idle_preview_start_params(
     let overlays = crate::compositor::idle_overlay_flags(state);
     crate::compositor::prepare_idle_buddy(state, overlays, (width, height));
     CompositorStartParams {
+        benchmark: false,
         target_fps,
         width,
         height,
@@ -1901,6 +1916,9 @@ fn idle_preview_start_params(
         highlight_overlay_on_aux: overlays.highlight_on_aux,
         buddy_overlay_on_primary: overlays.buddy_on_primary,
         buddy_overlay_on_aux: overlays.buddy_on_aux,
+        replay_only: false,
+        highlight_overlay_on_program: overlays.highlight_on_program,
+        buddy_overlay_on_program: overlays.buddy_on_program,
     }
 }
 
@@ -2391,6 +2409,97 @@ mod tests {
         );
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].kind, NativePreviewHostCommandKind::UpdateBounds);
+    }
+
+    fn native_presenter_report(live_count: u64) -> PreviewSurfacePresentParams {
+        PreviewSurfacePresentParams {
+            transport: Some(PreviewTransport::NativeSurface),
+            backing: Some(PreviewSurfaceBacking::CaMetalLayer),
+            presented_frame_id: Some(42),
+            compositor_frame_lag: Some(0),
+            dropped_frames: 0,
+            input_to_present_latency_ms: Some(18),
+            input_to_present_latency_p50_ms: Some(17),
+            input_to_present_latency_p95_ms: Some(20),
+            input_to_present_latency_p99_ms: Some(23),
+            present_fps: Some(60.0),
+            interval_p95_ms: Some(17.0),
+            interval_p99_ms: Some(18.0),
+            native_preview_main_scene_mismatch_count: None,
+            native_preview_main_scene_mismatch_age_ms: None,
+            native_preview_main_last_skipped_scene_revision: None,
+            native_preview_main_last_skipped_frame_scene_revision: None,
+            native_preview_iosurface_import_live_count: Some(live_count),
+            native_preview_iosurface_import_peak_count: Some(3),
+            native_preview_iosurface_import_ceiling: Some(3),
+            message: Some(
+                "In-process CAMetalLayer preview is presenting compositor output.".to_string(),
+            ),
+            frame_polling_suppressed: true,
+            source_pixels_present: true,
+        }
+    }
+
+    /// Main's 250 ms present report can still be in flight when the backend
+    /// destroys the surface (the capture-decay soak destroys backend-first and
+    /// drains main's destroy afterwards; the renderer's teardown sends the two
+    /// requests over different sockets). The report describes a presenter that
+    /// no longer exists, so it must not resurrect the pre-destroy state over
+    /// the stopped status: on 2026-10-31 the 60-minute soak's teardown read
+    /// "presenting compositor output" with 3 retained IOSurface imports for
+    /// the whole 10 s release window because exactly that happened.
+    #[tokio::test]
+    async fn present_report_after_destroy_leaves_the_stopped_status_alone() {
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(800.0, 450.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        take_native_preview_host_commands(&state).await;
+        let live = update_preview_surface_present(&state, native_presenter_report(3)).await;
+        assert_eq!(live.state, PreviewSurfaceState::Live);
+        assert_eq!(live.native_preview_iosurface_import_live_count, Some(3));
+
+        let stopped = destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
+        assert_eq!(stopped.state, PreviewSurfaceState::Stopped);
+        assert_eq!(stopped.native_preview_iosurface_import_live_count, Some(0));
+
+        // The late report: main has not drained the destroy host command yet.
+        let late = update_preview_surface_present(&state, native_presenter_report(3)).await;
+        assert_eq!(late.state, PreviewSurfaceState::Stopped);
+        assert_eq!(late.native_preview_iosurface_import_live_count, Some(0));
+        assert_eq!(late.native_preview_iosurface_import_peak_count, Some(3));
+        assert_eq!(late.native_preview_iosurface_import_ceiling, Some(3));
+        assert_eq!(late.transport, PreviewTransport::Unavailable);
+        assert_eq!(late.backing, PreviewSurfaceBacking::None);
+        assert!(!late.frame_polling_suppressed);
+        assert!(!late.source_pixels_present);
+        assert_eq!(late.presented_frame_id, None);
+        assert_eq!(
+            late.message.as_deref(),
+            Some("Native preview surface stopped.")
+        );
+        assert_eq!(preview_surface_status(&state).await, late);
+
+        let diagnostics = state.diagnostics.lock().await.clone();
+        assert_eq!(
+            diagnostics.native_preview_iosurface_import_live_count,
+            Some(0)
+        );
+        assert_eq!(diagnostics.preview_transport, PreviewTransport::Unavailable);
+        assert_eq!(
+            diagnostics.preview_surface_backing,
+            PreviewSurfaceBacking::None
+        );
+        assert!(!diagnostics.preview_frame_polling_suppressed);
     }
 
     #[tokio::test]
@@ -3374,6 +3483,7 @@ mod tests {
         let newer = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -3386,6 +3496,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -3817,6 +3930,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -3829,6 +3943,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -3959,6 +4076,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 160,
                 height: 90,
@@ -3971,6 +4089,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -4045,6 +4166,7 @@ mod tests {
             &state,
             "session-lease",
             CompositorArmParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4215,6 +4337,7 @@ mod tests {
             &state,
             "session-layout",
             CompositorArmParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4295,6 +4418,7 @@ mod tests {
         let recording_status = start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
+                benchmark: false,
                 target_fps: 30,
                 width: 640,
                 height: 360,
@@ -4307,6 +4431,9 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;

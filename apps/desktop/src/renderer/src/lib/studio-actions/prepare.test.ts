@@ -6,7 +6,7 @@ import type {
   StreamTargetSettings,
   StreamingSettings
 } from '../../../../shared/backend'
-import { SESSION_LOCK_REASON } from '@/lib/lock-view'
+import { SESSION_LOCK_REASON } from '@/lib/lock-reason'
 import { executeAgentIntent, type AgentIntent } from './agent'
 import type { StudioActionContext, StudioPrepareAccess, StudioSettingsAccess } from './context'
 import { PREPARE_TOOL_COPY } from './prepare'

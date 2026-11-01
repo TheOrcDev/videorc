@@ -2167,10 +2167,18 @@ pub struct PerformanceCheckProgress {
     pub video: VideoSettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerformanceCheckNotRecorded {
+    HostBusy,
+}
+
 /// `performance.check.get` result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceCheckState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_not_recorded: Option<PerformanceCheckNotRecorded>,
     pub running: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<PerformanceCheckResult>,
@@ -3827,6 +3835,11 @@ pub struct CompositorFramePipelineStatus {
     /// the wire, so a run without one sends exactly what it sent before.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preview_program_leg: bool,
+    /// Plan 212 S2: frames composed from a scene with a test-pattern source
+    /// that the packaged backstop refused to hand the Preview. 0 is left off
+    /// the wire, so a run without one sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub preview_synthetic_refused: u64,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -3931,9 +3944,26 @@ pub struct CompositorStatus {
     /// capture, and why the in-place change was not used when it wasn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_switch: Option<ScreenSwitchStatus>,
+    /// Plan 212 S2: the Preview is holding its last program frame while a
+    /// performance check runs; not a broken Preview. Left off the wire when
+    /// there is no hold, so the strict renderer contract sees exactly what it
+    /// saw before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_hold: Option<PreviewHoldReason>,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Why the Preview holds its picture (plan 212 S2). `PerformanceCheck` is
+/// the check's hold, with its words in the Preview; `SyntheticRefused` is
+/// the packaged backstop keeping the last program frame instead of a frame
+/// composed from a test-pattern scene, with no words of its own.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewHoldReason {
+    PerformanceCheck,
+    SyntheticRefused,
 }
 
 /// Plan 210 S3: how the last screen or window switch changed the capture.
@@ -8725,6 +8755,7 @@ mod tests {
             }],
         };
         let state = PerformanceCheckState {
+            last_run_not_recorded: None,
             running: false,
             result: Some(result.clone()),
             stale: false,
@@ -8738,6 +8769,7 @@ mod tests {
         let decoded: PerformanceCheckState = serde_json::from_str(&text).unwrap();
         assert_eq!(decoded.result, Some(result));
         let idle = serde_json::to_string(&PerformanceCheckState {
+            last_run_not_recorded: None,
             running: true,
             result: None,
             stale: false,

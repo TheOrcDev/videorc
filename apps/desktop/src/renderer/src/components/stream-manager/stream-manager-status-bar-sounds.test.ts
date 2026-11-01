@@ -117,12 +117,18 @@ describe('StreamManagerStatusBar Sounds (plan 189 S9)', () => {
   })
 
   it('folds into the narrow ⋯ menu as Sounds…, and leaves both out without a relay', async () => {
-    await render(board)
+    // Base UI finishes closing the menu on an animation frame, so this test
+    // runs real frames; with no pad playing, no progress loop asks for them.
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
+      window.setTimeout(() => callback(performance.now()), 16)
+    )
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
+    await render({ ...board, voices: [] })
     const more = container.querySelector<HTMLButtonElement>(
       '[aria-label="More Stream Manager actions"]'
     )!
     await act(async () => {
-      more.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+      more.click()
     })
     const menu = document.querySelector<HTMLElement>('[role=menu]')!
     const item = [...menu.querySelectorAll<HTMLElement>('[role=menuitem]')].find(
@@ -134,11 +140,13 @@ describe('StreamManagerStatusBar Sounds (plan 189 S9)', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('[data-videorc-sounds-popover]')).not.toBeNull()
     )
-    expect(
-      document
-        .querySelector('[data-testid="stream-manager-sounds"]')
-        ?.contains(document.activeElement)
-    ).toBe(true)
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector('[data-testid="stream-manager-sounds"]')
+          ?.contains(document.activeElement)
+      ).toBe(true)
+    )
     await act(async () => root.unmount())
     root = createRoot(container)
     await render(board, null)

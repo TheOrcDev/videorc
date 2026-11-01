@@ -163,7 +163,6 @@ function BannerMenuItems({
             onCheckedChange={(checked) =>
               onBanner({ action: checked === true ? 'show' : 'hide', id: banner.id })
             }
-            onSelect={(event) => event.preventDefault()}
           >
             <span className="truncate">{banner.name}</span>
           </DropdownMenuCheckboxItem>
@@ -172,7 +171,7 @@ function BannerMenuItems({
       <DropdownMenuSeparator />
       <DropdownMenuItem
         disabled={!banners.some((banner) => banner.shown)}
-        onSelect={() => onBanner({ action: 'hideAll' })}
+        onClick={() => onBanner({ action: 'hideAll' })}
       >
         Hide all banners
       </DropdownMenuItem>
@@ -372,34 +371,38 @@ export function StreamManagerStatusBar({
               // The details open on hover and on focus (plan 174 H-15), and
               // below 640 px a dot that is not green keeps a word beside it.
               return (
-                <HoverCard key={provider.id} closeDelay={80} openDelay={400}>
-                  <HoverCardTrigger asChild>
-                    <button
-                      aria-label={lines[0]}
-                      className="-mx-1 flex min-w-0 shrink items-center gap-1.5 rounded-chip px-1 outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
-                      data-slot="chat-state"
-                      type="button"
-                    >
-                      <ChatPlatformIcon decorative platform={provider.platform} />
-                      <StatusDot tone={tone} />
-                      {problem ? (
-                        <span
-                          className={cn('max-w-[32rem] truncate', ABOVE_NARROW)}
-                          data-slot="chat-state-problem"
-                        >
-                          {problem}
-                        </span>
-                      ) : label ? (
-                        <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
-                          {CHAT_PLATFORM_LABELS[provider.platform]} {label}
-                        </span>
-                      ) : null}
-                      {tone !== 'good' && label ? (
-                        <span className={cn('truncate', NARROW_ONLY)} data-slot="chat-state-word">
-                          {label}
-                        </span>
-                      ) : null}
-                    </button>
+                <HoverCard key={provider.id}>
+                  <HoverCardTrigger
+                    closeDelay={80}
+                    delay={400}
+                    render={
+                      <button
+                        aria-label={lines[0]}
+                        className="-mx-1 flex min-w-0 shrink items-center gap-1.5 rounded-chip px-1 outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
+                        data-slot="chat-state"
+                        type="button"
+                      />
+                    }
+                  >
+                    <ChatPlatformIcon decorative platform={provider.platform} />
+                    <StatusDot tone={tone} />
+                    {problem ? (
+                      <span
+                        className={cn('max-w-[32rem] truncate', ABOVE_NARROW)}
+                        data-slot="chat-state-problem"
+                      >
+                        {problem}
+                      </span>
+                    ) : label ? (
+                      <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
+                        {CHAT_PLATFORM_LABELS[provider.platform]} {label}
+                      </span>
+                    ) : null}
+                    {tone !== 'good' && label ? (
+                      <span className={cn('truncate', NARROW_ONLY)} data-slot="chat-state-word">
+                        {label}
+                      </span>
+                    ) : null}
                   </HoverCardTrigger>
                   <HoverCardContent align="start" className="w-64 p-2" side="top">
                     <div className="flex flex-col gap-1 text-xs">
@@ -422,288 +425,298 @@ export function StreamManagerStatusBar({
         }
       >
         <Popover open={soundsOpen} onOpenChange={setSoundsOpen}>
-          <PopoverAnchor asChild>
-            <div className="flex min-w-0 items-center" data-slot="stream-manager-controls">
-              <div
-                className={cn(
-                  'items-center gap-0.5 [-webkit-app-region:no-drag]',
-                  'flex',
-                  ABOVE_NARROW
-                )}
-                data-slot="stream-manager-actions"
-              >
-                {hints.map((hint) => (
-                  <StatusBarHint
-                    key={hint.id}
-                    accelerator={shortcutAccelerator(hint.id)}
-                    label={hint.label}
-                    labelClassName={COMPACT_LABEL}
-                    onClick={hint.run}
-                  />
-                ))}
-                {/* Icon and word at Wide; below it the word would push the
+          <PopoverAnchor
+            render={
+              <div className="flex min-w-0 items-center" data-slot="stream-manager-controls" />
+            }
+          >
+            <div
+              className={cn(
+                'items-center gap-0.5 [-webkit-app-region:no-drag]',
+                'flex',
+                ABOVE_NARROW
+              )}
+              data-slot="stream-manager-actions"
+            >
+              {hints.map((hint) => (
+                <StatusBarHint
+                  key={hint.id}
+                  accelerator={shortcutAccelerator(hint.id)}
+                  label={hint.label}
+                  labelClassName={COMPACT_LABEL}
+                  onClick={hint.run}
+                />
+              ))}
+              {/* Icon and word at Wide; below it the word would push the
                     last control off the bar, so the icon, the tooltip and the
                     stats bar's Screen hidden chip carry it. Its key is in the
                     hint. */}
-                {privacy ? (
-                  <DisabledReason reason={privacy.disabledReason} side="top">
-                    <StatusBarAction
-                      data-videorc-screen-privacy=""
-                      disabled={privacy.disabledReason !== null}
-                      hint={privacy.disabledReason ? undefined : privacy.hint}
-                      icon={<HiddenIcon aria-hidden />}
-                      label={privacy.label}
-                      text={<span className={WIDE_LABEL}>{privacy.label}</span>}
-                      onClick={privacy.run}
-                    />
-                  </DisabledReason>
-                ) : null}
-                {onToggleAlwaysOnTop ? (
-                  <PinWindowButton
-                    pinned={alwaysOnTop}
-                    variant="status-bar"
-                    onPinnedChange={() => onToggleAlwaysOnTop()}
+              {privacy ? (
+                <DisabledReason reason={privacy.disabledReason} side="top">
+                  <StatusBarAction
+                    data-videorc-screen-privacy=""
+                    disabled={privacy.disabledReason !== null}
+                    hint={privacy.disabledReason ? undefined : privacy.hint}
+                    icon={<HiddenIcon aria-hidden />}
+                    label={privacy.label}
+                    text={<span className={WIDE_LABEL}>{privacy.label}</span>}
+                    onClick={privacy.run}
                   />
-                ) : null}
-                {anchorControl ? (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
+                </DisabledReason>
+              ) : null}
+              {onToggleAlwaysOnTop ? (
+                <PinWindowButton
+                  pinned={alwaysOnTop}
+                  variant="status-bar"
+                  onPinnedChange={() => onToggleAlwaysOnTop()}
+                />
+              ) : null}
+              {anchorControl ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
                       <StatusBarAction
                         hint={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[anchorControl.anchor]}`}
                         icon={<FrameIcon aria-hidden />}
                         label="Highlight position"
                       />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" side="top">
-                      <HighlightAnchorOptions {...anchorControl} />
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                ) : null}
-                {onMarkClip
-                  ? clipButtons(clip).map((button, index) => (
-                      <StatusBarAction
-                        key={button.seconds}
-                        hint={button.hint}
-                        icon={index === 0 ? <ClipIcon aria-hidden /> : undefined}
-                        label={button.label}
-                        text={button.text}
-                        onClick={() => onMarkClip(button.seconds)}
-                      />
-                    ))
-                  : null}
-                {bannerItems ? (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      {/* The word alone, like Clear: no icon glyph rides into this
+                    }
+                  />
+                  <DropdownMenuContent align="end" side="top">
+                    <HighlightAnchorOptions {...anchorControl} />
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+              {onMarkClip
+                ? clipButtons(clip).map((button, index) => (
+                    <StatusBarAction
+                      key={button.seconds}
+                      hint={button.hint}
+                      icon={index === 0 ? <ClipIcon aria-hidden /> : undefined}
+                      label={button.label}
+                      text={button.text}
+                      onClick={() => onMarkClip(button.seconds)}
+                    />
+                  ))
+                : null}
+              {bannerItems ? (
+                <DropdownMenu>
+                  {/* The word alone, like Clear: no icon glyph rides into this
                     window's bundle for it. */}
+                  <DropdownMenuTrigger
+                    render={
                       <StatusBarAction
                         hint="Show or hide your banners (or type /banner)"
                         label="Banners"
                         text="Banners"
                       />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-56" side="top">
-                      {bannerItems}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                ) : null}
-                {onSound ? (
-                  <PopoverTrigger asChild>
-                    {/* The word alone, like Banners. */}
+                    }
+                  />
+                  <DropdownMenuContent align="end" className="w-56" side="top">
+                    {bannerItems}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+              {onSound ? (
+                // The word alone, like Banners.
+                <PopoverTrigger
+                  render={
                     <StatusBarAction
                       hint="Play a sound (or type /sound)"
                       label="Sounds"
                       text="Sounds"
                     />
-                  </PopoverTrigger>
-                ) : null}
-                {requestClear ? (
-                  <StatusBarAction
-                    hint="Clear view (keeps Library history)"
-                    label="Clear view"
-                    text="Clear"
-                    onClick={requestClear}
-                  />
-                ) : null}
-                {onOpenPreview ? (
-                  <StatusBarAction
-                    icon={<PreviewIcon aria-hidden />}
-                    label={`Open ${WINDOW_NAMES.preview}`}
-                    onClick={onOpenPreview}
-                  />
-                ) : null}
-              </div>
-              <DropdownMenu>
-                {/* The menu's trigger outside the tooltip's: the menu's open state
+                  }
+                />
+              ) : null}
+              {requestClear ? (
+                <StatusBarAction
+                  hint="Clear view (keeps Library history)"
+                  label="Clear view"
+                  text="Clear"
+                  onClick={requestClear}
+                />
+              ) : null}
+              {onOpenPreview ? (
+                <StatusBarAction
+                  icon={<PreviewIcon aria-hidden />}
+                  label={`Open ${WINDOW_NAMES.preview}`}
+                  onClick={onOpenPreview}
+                />
+              ) : null}
+            </div>
+            <DropdownMenu>
+              {/* The menu's trigger outside the tooltip's: the menu's open state
               is the one the button carries. */}
-                <Tooltip>
-                  <DropdownMenuTrigger asChild>
-                    <TooltipTrigger asChild>
-                      <Button
-                        aria-label="More Stream Manager actions"
-                        className={NARROW_ONLY}
-                        size="icon-xs"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <MoreIcon data-icon="inline-start" weight="bold" />
-                      </Button>
-                    </TooltipTrigger>
-                  </DropdownMenuTrigger>
-                  <TooltipContent side="top">More Stream Manager actions</TooltipContent>
-                </Tooltip>
-                <DropdownMenuContent
-                  align="end"
-                  className="w-56"
-                  side="top"
-                  onCloseAutoFocus={(event) => {
-                    if (!soundsAfterMenu.current) return
-                    soundsAfterMenu.current = false
-                    event.preventDefault()
-                    setSoundsOpen(true)
-                  }}
+              <Tooltip>
+                <DropdownMenuTrigger
+                  render={
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          aria-label="More Stream Manager actions"
+                          className={NARROW_ONLY}
+                          size="icon-xs"
+                          type="button"
+                          variant="ghost"
+                        />
+                      }
+                    />
+                  }
                 >
-                  {hints.length > 0 ? (
-                    <>
-                      <DropdownMenuGroup>
-                        {hints.map((hint) => (
-                          <DropdownMenuItem key={hint.id} onSelect={hint.run}>
-                            {hint.menuLabel}
-                            <DropdownMenuShortcut>
-                              <ShortcutKeys
-                                accelerator={shortcutAccelerator(hint.id)}
-                                variant="text"
-                              />
-                            </DropdownMenuShortcut>
-                          </DropdownMenuItem>
-                        ))}
-                      </DropdownMenuGroup>
-                      <DropdownMenuSeparator />
-                    </>
+                  <MoreIcon data-icon="inline-start" weight="bold" />
+                </DropdownMenuTrigger>
+                <TooltipContent side="top">More Stream Manager actions</TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent
+                align="end"
+                className="w-56"
+                side="top"
+                finalFocus={() => {
+                  if (!soundsAfterMenu.current) return true
+                  soundsAfterMenu.current = false
+                  setSoundsOpen(true)
+                  return false
+                }}
+              >
+                {hints.length > 0 ? (
+                  <>
+                    <DropdownMenuGroup>
+                      {hints.map((hint) => (
+                        <DropdownMenuItem key={hint.id} onClick={hint.run}>
+                          {hint.menuLabel}
+                          <DropdownMenuShortcut>
+                            <ShortcutKeys
+                              accelerator={shortcutAccelerator(hint.id)}
+                              variant="text"
+                            />
+                          </DropdownMenuShortcut>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuGroup>
+                    <DropdownMenuSeparator />
+                  </>
+                ) : null}
+                <DropdownMenuGroup>
+                  {privacy ? (
+                    <DisabledReason focusable={false} reason={privacy.disabledReason} side="left">
+                      <DropdownMenuItem
+                        disabled={privacy.disabledReason !== null}
+                        onClick={privacy.run}
+                      >
+                        <HiddenIcon />
+                        {privacy.label}
+                        {screen?.accelerator ? (
+                          <DropdownMenuShortcut>
+                            <ShortcutKeys accelerator={screen.accelerator} variant="text" />
+                          </DropdownMenuShortcut>
+                        ) : null}
+                      </DropdownMenuItem>
+                    </DisabledReason>
                   ) : null}
-                  <DropdownMenuGroup>
-                    {privacy ? (
-                      <DisabledReason focusable={false} reason={privacy.disabledReason} side="left">
+                  {anchorControl ? (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>
+                        <FrameIcon />
+                        Highlight position
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        <HighlightAnchorOptions {...anchorControl} />
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  ) : null}
+                  {onToggleAlwaysOnTop ? (
+                    <DropdownMenuCheckboxItem
+                      checked={alwaysOnTop}
+                      closeOnClick
+                      onCheckedChange={() => onToggleAlwaysOnTop()}
+                    >
+                      {PIN_WINDOW_LABEL}
+                    </DropdownMenuCheckboxItem>
+                  ) : null}
+                  {onMarkClip
+                    ? clipButtons(clip).map((button) => (
                         <DropdownMenuItem
-                          disabled={privacy.disabledReason !== null}
-                          onSelect={privacy.run}
+                          key={button.seconds}
+                          onClick={() => onMarkClip(button.seconds)}
                         >
-                          <HiddenIcon />
-                          {privacy.label}
-                          {screen?.accelerator ? (
-                            <DropdownMenuShortcut>
-                              <ShortcutKeys accelerator={screen.accelerator} variant="text" />
-                            </DropdownMenuShortcut>
+                          <ClipIcon />
+                          {button.menuText}
+                          {button.shortcutLabel ? (
+                            <DropdownMenuShortcut>{button.shortcutLabel}</DropdownMenuShortcut>
                           ) : null}
                         </DropdownMenuItem>
-                      </DisabledReason>
-                    ) : null}
-                    {anchorControl ? (
-                      <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>
-                          <FrameIcon />
-                          Highlight position
-                        </DropdownMenuSubTrigger>
-                        <DropdownMenuSubContent>
-                          <HighlightAnchorOptions {...anchorControl} />
-                        </DropdownMenuSubContent>
-                      </DropdownMenuSub>
-                    ) : null}
-                    {onToggleAlwaysOnTop ? (
-                      <DropdownMenuCheckboxItem
-                        checked={alwaysOnTop}
-                        onCheckedChange={() => onToggleAlwaysOnTop()}
-                      >
-                        {PIN_WINDOW_LABEL}
-                      </DropdownMenuCheckboxItem>
-                    ) : null}
-                    {onMarkClip
-                      ? clipButtons(clip).map((button) => (
-                          <DropdownMenuItem
-                            key={button.seconds}
-                            onSelect={() => onMarkClip(button.seconds)}
-                          >
-                            <ClipIcon />
-                            {button.menuText}
-                            {button.shortcutLabel ? (
-                              <DropdownMenuShortcut>{button.shortcutLabel}</DropdownMenuShortcut>
-                            ) : null}
-                          </DropdownMenuItem>
-                        ))
-                      : null}
-                    {bannerItems ? (
-                      <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>
-                        <DropdownMenuSubContent className="w-56">
-                          {bannerItems}
-                        </DropdownMenuSubContent>
-                      </DropdownMenuSub>
-                    ) : null}
-                    {onSound ? (
-                      <DropdownMenuItem
-                        onSelect={() => {
-                          soundsAfterMenu.current = true
-                        }}
-                      >
-                        Sounds…
-                      </DropdownMenuItem>
-                    ) : null}
-                    {onOpenPreview ? (
-                      <DropdownMenuItem onSelect={onOpenPreview}>
-                        <PreviewIcon />
-                        {`Open ${WINDOW_NAMES.preview}`}
-                      </DropdownMenuItem>
-                    ) : null}
-                    {statsLayout && onStatsLayoutChange ? (
-                      <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>Show or hide stats</DropdownMenuSubTrigger>
-                        <DropdownMenuSubContent>
-                          {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
-                            <DropdownMenuCheckboxItem
-                              key={id}
-                              checked={!statsLayout.hidden.includes(id)}
-                              onCheckedChange={(checked) =>
-                                onStatsLayoutChange(
-                                  setStatHidden(statsLayout, id, checked !== true)
-                                )
-                              }
-                              onSelect={(event) => event.preventDefault()}
-                            >
-                              {STAT_NAMES[id]}
-                            </DropdownMenuCheckboxItem>
-                          ))}
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            disabled={
-                              statsLayout.hidden.length === 0 &&
-                              statsLayout.order.every(
-                                (id, index) => id === DEFAULT_STATS_LAYOUT.order[index]
-                              )
-                            }
-                            onSelect={() => onStatsLayoutChange(DEFAULT_STATS_LAYOUT)}
-                          >
-                            Reset stats
-                          </DropdownMenuItem>
-                        </DropdownMenuSubContent>
-                      </DropdownMenuSub>
-                    ) : null}
-                  </DropdownMenuGroup>
-                  {requestClear ? (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onSelect={requestClear}>
-                        <span className="flex flex-col">
-                          <span>Clear view</span>
-                          <span className="text-[11px] text-muted-foreground">
-                            Keeps Library history.
-                          </span>
-                        </span>
-                      </DropdownMenuItem>
-                    </>
+                      ))
+                    : null}
+                  {bannerItems ? (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>Banners</DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="w-56">
+                        {bannerItems}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
                   ) : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
+                  {onSound ? (
+                    <DropdownMenuItem
+                      onClick={() => {
+                        soundsAfterMenu.current = true
+                      }}
+                    >
+                      Sounds…
+                    </DropdownMenuItem>
+                  ) : null}
+                  {onOpenPreview ? (
+                    <DropdownMenuItem onClick={onOpenPreview}>
+                      <PreviewIcon />
+                      {`Open ${WINDOW_NAMES.preview}`}
+                    </DropdownMenuItem>
+                  ) : null}
+                  {statsLayout && onStatsLayoutChange ? (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>Show or hide stats</DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
+                          <DropdownMenuCheckboxItem
+                            key={id}
+                            checked={!statsLayout.hidden.includes(id)}
+                            onCheckedChange={(checked) =>
+                              onStatsLayoutChange(setStatHidden(statsLayout, id, checked !== true))
+                            }
+                          >
+                            {STAT_NAMES[id]}
+                          </DropdownMenuCheckboxItem>
+                        ))}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          disabled={
+                            statsLayout.hidden.length === 0 &&
+                            statsLayout.order.every(
+                              (id, index) => id === DEFAULT_STATS_LAYOUT.order[index]
+                            )
+                          }
+                          onClick={() => onStatsLayoutChange(DEFAULT_STATS_LAYOUT)}
+                        >
+                          Reset stats
+                        </DropdownMenuItem>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  ) : null}
+                </DropdownMenuGroup>
+                {requestClear ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={requestClear}>
+                      <span className="flex flex-col">
+                        <span>Clear view</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          Keeps Library history.
+                        </span>
+                      </span>
+                    </DropdownMenuItem>
+                  </>
+                ) : null}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </PopoverAnchor>
           {onSound ? (
             <PopoverContent

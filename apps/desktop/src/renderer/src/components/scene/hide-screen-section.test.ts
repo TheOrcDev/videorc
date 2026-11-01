@@ -64,7 +64,7 @@ async function render(platform: string, screenHideToggle?: string): Promise<void
   await act(async () =>
     root.render(
       createElement(TooltipProvider, {
-        delayDuration: 0,
+        delay: 0,
         children: createElement(HideScreenSection)
       })
     )
@@ -83,7 +83,7 @@ const managerSwitch = (): HTMLButtonElement =>
 async function openRowMenu(name: string): Promise<HTMLElement> {
   const trigger = container.querySelector<HTMLButtonElement>(`[aria-label="Actions for ${name}"]`)!
   await act(async () => {
-    trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+    trigger.click()
   })
   return document.querySelector<HTMLElement>('[role=menu]')!
 }

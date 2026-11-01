@@ -698,6 +698,11 @@ export function DestinationCard({
   )
 }
 
+/** A YouTube channel as the Channel select names it: its title, and its handle when it has one. */
+function youtubeChannelLabel(channel: { title: string; handle?: string | null }): string {
+  return channel.handle ? `${channel.title} (${channel.handle})` : channel.title
+}
+
 function openExternalUrl(url: string): void {
   const opener = window.videorc?.openOAuthUrl
   if (opener) {
@@ -1222,10 +1227,14 @@ function OAuthAccountPanel({
           <div className="flex gap-2">
             <Select
               disabled={disabled || youtubeChannelsLoading || youtubeChannelOptions.length === 0}
+              items={youtubeChannelOptions.map((channel) => ({
+                value: channel.channelId,
+                label: youtubeChannelLabel(channel)
+              }))}
               value={account.accountId}
-              onValueChange={(channelId) =>
-                void onSelectYouTubeChannel(channelId, account.accountId)
-              }
+              onValueChange={(channelId) => {
+                if (channelId !== null) void onSelectYouTubeChannel(channelId, account.accountId)
+              }}
             >
               <SelectTrigger className="min-w-0 flex-1">
                 <SelectValue
@@ -1241,26 +1250,24 @@ function OAuthAccountPanel({
               <SelectContent>
                 {youtubeChannelOptions.map((channel) => (
                   <SelectItem key={channel.channelId} value={channel.channelId}>
-                    {channel.title}
-                    {channel.handle ? ` (${channel.handle})` : ''}
+                    {youtubeChannelLabel(channel)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label="Refresh channels"
-                  disabled={disabled || youtubeChannelsLoading}
-                  size="icon"
-                  variant="outline"
-                  onClick={() => void onRefreshYouTubeChannels(account.accountId)}
-                >
-                  <SyncIcon
-                    className={cn(youtubeChannelsLoading && 'animate-spin')}
-                    weight="bold"
+              <TooltipTrigger
+                render={
+                  <Button
+                    aria-label="Refresh channels"
+                    disabled={disabled || youtubeChannelsLoading}
+                    size="icon"
+                    variant="outline"
+                    onClick={() => void onRefreshYouTubeChannels(account.accountId)}
                   />
-                </Button>
+                }
+              >
+                <SyncIcon className={cn(youtubeChannelsLoading && 'animate-spin')} weight="bold" />
               </TooltipTrigger>
               <TooltipContent>Refresh channels</TooltipContent>
             </Tooltip>

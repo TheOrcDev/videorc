@@ -144,7 +144,7 @@ describe('Sources Video column (plan 173)', () => {
   it('keeps the development synthetic switch visible for the smokes', () => {
     expect(render()).not.toContain('data-videorc-synthetic-source-toggle')
     const markup = render({ synthetic: { checked: false, disabled: false, onChange: noop } })
-    const toggle = markup.match(/<button[^>]*data-videorc-synthetic-source-toggle[^>]*>/)?.[0]
+    const toggle = markup.match(/<span[^>]*data-videorc-synthetic-source-toggle[^>]*>/)?.[0]
     expect(toggle).toContain('role="switch"')
     expect(toggle).toContain('aria-checked="false"')
   })

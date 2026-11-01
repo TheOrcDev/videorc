@@ -50,8 +50,11 @@ export function EncoderPreferenceField({
         </div>
         <Select
           disabled={state.envOverride}
+          items={OPTIONS}
           value={state.preference}
-          onValueChange={(value) => onChange(value as WindowsH264EncoderPreference)}
+          onValueChange={(value) => {
+            if (value !== null) onChange(value)
+          }}
         >
           <SelectTrigger className="w-44 shrink-0" id="encoder-preference">
             <SelectValue />

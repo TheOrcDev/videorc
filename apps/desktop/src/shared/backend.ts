@@ -2204,6 +2204,7 @@ export interface PerformanceCheckResult {
 }
 
 export interface PerformanceCheckState {
+  lastRunNotRecorded?: 'host-busy'
   running: boolean
   result?: PerformanceCheckResult
   /** Measured on a different GPU, driver or app version. */
@@ -2441,6 +2442,11 @@ export interface CompositorFramePipelineStatus {
    * the primary leg is the program.
    */
   previewProgramLeg?: boolean
+  /**
+   * Plan 212 S2: frames composed from a scene with a test-pattern source
+   * that the packaged backstop refused to the Preview. Absent while 0.
+   */
+  previewSyntheticRefused?: number
 }
 
 export interface CompositorStatus {
@@ -2478,9 +2484,23 @@ export interface CompositorStatus {
   liveBackground?: LiveBackgroundStatus
   /** Plan 210 S3: how the last screen or window switch changed the capture. */
   screenSwitch?: ScreenSwitchStatus
+  /**
+   * Plan 212 S2: the Preview holds its last program frame while a
+   * performance check runs. Not a broken Preview: main's first-frame and
+   * presenting watchdogs wait and never heal. Absent when there is no hold.
+   */
+  previewHold?: PreviewHoldReason
   updatedAt: string
   message?: string
 }
+
+/**
+ * Plan 212 S2: why the Preview holds its picture. `performance-check` is the
+ * check's hold (with its words in the Preview); `synthetic-refused` is the
+ * packaged backstop keeping the last program frame instead of a frame
+ * composed from a test-pattern scene (no words of its own).
+ */
+export type PreviewHoldReason = 'performance-check' | 'synthetic-refused'
 
 /**
  * Plan 210 S3: how the last screen or window switch changed the capture:

@@ -18,7 +18,7 @@ import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, withoutSceneShortcut } from '../../../shared/global-shortcuts'
 import { screenHideAccelerator } from '@/lib/screen-privacy-view'
 import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
-import { acceleratorLabel } from '../../../shared/accelerator-format'
+import { acceleratorLabel } from '@/lib/accelerator'
 import {
   DEFAULT_CLIP_SECONDS,
   LONG_CLIP_SECONDS,
@@ -239,7 +239,6 @@ import {
   isShippedDefaultOutput,
   isUntrustedPerformanceCheckResult,
   performanceCheckCeiling,
-  performanceCheckMayAutoRun,
   performanceCheckTooHeavyToast
 } from '@/lib/performance-check'
 import type * as GoLiveOutput from '@/lib/go-live-output'
@@ -274,6 +273,7 @@ import { buildStartSessionParams } from '@/lib/session-params'
 import {
   applyFinalizationEvent,
   finalizationEventNeedsRefresh,
+  finalizationNoticesForRows,
   finalizingBadgeLabel,
   FinalizationSnapshotJournal
 } from '@/lib/session-finalization'
@@ -335,6 +335,7 @@ import {
   layoutTransactionFailureDisposition,
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
+  layoutTransactionSourcesFromScene,
   layoutTransactionUnprovenSeverity,
   NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
@@ -743,8 +744,6 @@ const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
 const SCENE_TRANSITION_MS = 320
 
 const SESSION_LIST_PAGE_LIMIT = 50
-// Long enough for first paint, preview warm-up and the bootstrap burst.
-const PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS = 8_000
 
 function outputChosenByUser(): boolean {
   try {
@@ -2643,24 +2642,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     // Restore progress after relaunch; settle a notice whose terminal event
     // was missed while disconnected using the authoritative database row.
-    for (const session of sessions) {
-      if (session.finalizationState === 'finalizing') {
-        activeFinalizationNoticesRef.current.add(session.id)
-        showMp4Finalizing(session.id, finalizingBadgeLabel(session))
-      } else if (activeFinalizationNoticesRef.current.delete(session.id)) {
-        if (
-          session.finalizationState === 'finalized' &&
-          !announcedFinalizationsRef.current.has(session.id)
-        ) {
-          announcedFinalizationsRef.current.add(session.id)
-          showMp4Ready(session.id)
-        } else if (session.finalizationState === 'failed') {
-          showMp4ExportFailed(
-            session.id,
-            () => void remuxSessionRef.current?.(session.id),
-            session.finalizationError
-          )
-        }
+    for (const notice of finalizationNoticesForRows(
+      sessions,
+      activeFinalizationNoticesRef.current,
+      announcedFinalizationsRef.current
+    )) {
+      if (notice.kind === 'finalizing') {
+        showMp4Finalizing(notice.sessionId, notice.label)
+      } else if (notice.kind === 'ready') {
+        showMp4Ready(notice.sessionId)
+      } else {
+        showMp4ExportFailed(
+          notice.sessionId,
+          () => void remuxSessionRef.current?.(notice.sessionId),
+          notice.error
+        )
       }
     }
   }, [sessions])
@@ -9380,7 +9376,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [refreshMediaAccess])
 
+  // Plan 212: a performance check's sessions never reach `recording`, and the
+  // backend refuses an idle reload while one runs. The hold covers the run
+  // request; the completed event clears both and re-arms the held reload.
+  const performanceCheckRunning = performanceCheck?.running === true
   useEffect(() => {
+    const checkRunning = (): boolean => performanceCheckHoldRef.current || performanceCheckRunning
     if (
       !client ||
       !shouldReloadSceneFromCaptureConfig({
@@ -9388,7 +9389,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sceneEditMode,
         recordingState: recording.state,
         startRequestPending,
-        stopRequestPending
+        stopRequestPending,
+        performanceCheckRunning: checkRunning()
       })
     ) {
       return
@@ -9405,7 +9407,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sceneEditMode,
           recordingState: recordingRef.current.state,
           startRequestPending,
-          stopRequestPending
+          stopRequestPending,
+          performanceCheckRunning: checkRunning()
         })
       ) {
         return
@@ -9417,7 +9420,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneEditMode,
             recordingState: recordingRef.current.state,
             startRequestPending,
-            stopRequestPending
+            stopRequestPending,
+            performanceCheckRunning: checkRunning()
           })
         ) {
           reportError(error)
@@ -9428,6 +9432,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => window.clearTimeout(timer)
   }, [
     client,
+    performanceCheckRunning,
     recording.state,
     reloadSceneFromCaptureConfig,
     reportError,
@@ -9827,35 +9832,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
 
-    const sources = { ...captureConfigRef.current.sources }
-    for (const source of sceneAfter.sources) {
-      if (source.kind === 'camera') {
-        sources.cameraName =
-          sources.cameraId === source.deviceId ? (sources.cameraName ?? source.name) : source.name
-        sources.cameraId = source.deviceId
-      }
-      if (source.kind === 'screen') {
-        sources.screenName =
-          sources.screenId === source.deviceId ? (sources.screenName ?? source.name) : source.name
-        sources.screenId = source.deviceId
-        sources.windowId = undefined
-        sources.windowName = undefined
-        sources.testPattern = false
-      }
-      if (source.kind === 'window') {
-        sources.windowName =
-          sources.windowId === source.deviceId ? (sources.windowName ?? source.name) : source.name
-        sources.windowId = source.deviceId
-        sources.screenId = undefined
-        sources.screenName = undefined
-        sources.testPattern = false
-      }
-      if (source.kind === 'test-pattern') {
-        sources.screenId = undefined
-        sources.windowId = undefined
-        sources.testPattern = true
-      }
-    }
+    // Plan 212 S2: the packaged app never adopts a test-pattern source.
+    const sources = layoutTransactionSourcesFromScene(
+      captureConfigRef.current.sources,
+      sceneAfter.sources,
+      { packaged: !import.meta.env.DEV }
+    )
     const visual = normalizeSceneVisual({
       layout: compositorStatus.sceneLayout,
       sources: visualSources({ ...sources, app: workingAppRef.current }),
@@ -16598,6 +16580,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // what Sources says. A chosen screen without frames still fails as today.
   // On Linux the portal placeholder is not a choice: the ring waits for this
   // run's share to be granted, and never opens the share dialog itself.
+  // Closing setup starts the preview half a second later: the ring waits
+  // until the screen preview names its source (REPLAY_WAITS_FOR_PREVIEW).
+  const replayAutoPreviewStarts =
+    nativePreviewSurfaceEnabled &&
+    !runtimeInfo?.previewSmokeMode &&
+    !runtimeInfo?.disableAutoPreview &&
+    !runtimeInfo?.disableAutoSourcePreview
   const replayGrantWait =
     firstRunSetupOpen ||
     replayStartWaitsForGrant({
@@ -16609,19 +16598,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       portalShareGrantedSourceId,
-      previewScreen: previewScreenStatus
+      previewScreen: previewScreenStatus,
+      previewStarts: replayAutoPreviewStarts
     }) ||
     // The previews the Studio opens itself (refreshPreview) must have a
     // frame first: a start before them is refused and, through the command
     // lane's fence, holds them back for its two-second wait. The backend
     // refuses the camera case early; the screen is the renderer's to wait for.
     replayStartWaitsForPreview({
-      autoPreview:
-        nativePreviewSurfaceEnabled &&
-        !firstRunSetupOpen &&
-        !runtimeInfo?.disableAutoPreview &&
-        !runtimeInfo?.disableAutoSourcePreview &&
-        !runtimeInfo?.previewSmokeMode,
+      autoPreview: replayAutoPreviewStarts,
       sources: captureConfig.sources,
       layoutPreset: captureConfig.layout.layoutPreset,
       previewCamera: previewCameraStatus,
@@ -16961,7 +16946,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const [performanceCheckProgress, setPerformanceCheckProgress] =
     useState<PerformanceCheckProgress | null>(null)
-  const performanceCheckAutoRunRef = useRef(false)
 
   const commitPerformanceCheck = useCallback((next: PerformanceCheckState) => {
     setPerformanceCheck(next)
@@ -17004,6 +16988,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     scheduleReplayReconcile()
   }, [scheduleReplayReconcile])
 
+  // The only way a check starts (plan 212 D1): first-run setup as it opens,
+  // or "Check this computer" in Recording → Output, both through
+  // `runPerformanceCheck`. Nothing starts one at launch or after an update;
+  // a verdict is stale only when the machine or the measuring pipeline
+  // changed (`stored_result_is_stale` in performance_check.rs).
   const requestPerformanceCheck = useCallback(async () => {
     if (!client || performanceCheckHoldRef.current) {
       return
@@ -17104,26 +17093,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client, commitPerformanceCheck, refreshStreamOutputTopology]
   )
-
-  // Measure once per machine, after the app has settled. Packaged builds only:
-  // dev sessions and smokes start captures immediately and use the button.
-  // The Clips ring counts as idle; capture must be ready (a Linux portal
-  // screen chosen), or the run measures nothing.
-  const performanceCheckMayRun = performanceCheckMayAutoRun(
-    performanceCheck,
-    recording,
-    !replayGrantWait
-  )
-  useEffect(() => {
-    if (performanceCheckAutoRunRef.current || !runtimeInfo?.isPackaged || !performanceCheckMayRun) {
-      return
-    }
-    const timer = window.setTimeout(() => {
-      performanceCheckAutoRunRef.current = true
-      void requestPerformanceCheck().catch(() => undefined)
-    }, PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS)
-    return () => window.clearTimeout(timer)
-  }, [performanceCheckMayRun, requestPerformanceCheck, runtimeInfo?.isPackaged])
 
   const patchStreamingTarget = useCallback(
     (targetId: string, patch: Partial<StreamTargetSettings>) => {
@@ -18234,6 +18203,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         value.setCaptureConfig((current) => ({ ...current, ...patch })),
       start: value.startSession,
       stop: value.stopSession,
+      // Plan 212 S1: "Check this computer" the way the Output panel runs it
+      // (Clips stopped first, re-armed after), so a smoke can read the
+      // Preview while a real check runs. Errors reach the smoke.
+      checkComputer: requestPerformanceCheck,
       confirmGoLive: value.confirmGoLive,
       cancelGoLive: value.cancelGoLiveConfirmation,
       setSettings: value.setSettings,

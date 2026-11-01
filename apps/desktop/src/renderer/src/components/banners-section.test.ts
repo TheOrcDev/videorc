@@ -97,9 +97,7 @@ const trigger = (name: string): HTMLButtonElement =>
   document.querySelector<HTMLButtonElement>(`button[aria-label="Actions for ${name}"]`)!
 
 async function openMenu(name: string): Promise<HTMLElement[]> {
-  await act(async () =>
-    trigger(name).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  )
+  await act(async () => trigger(name).click())
   return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
 }
 

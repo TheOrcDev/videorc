@@ -199,7 +199,7 @@ try {
     }
   )
   await cdp.eval(
-    `(async () => {const deadline=performance.now()+5000;while(document.querySelector('[data-slot="dialog-overlay"][data-state="open"]')){document.querySelectorAll('[data-slot="dialog-close"]').forEach(button=>button.click());document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(performance.now()>deadline)throw Error('Could not dismiss launch dialog');await new Promise(resolve=>setTimeout(resolve,100))}})()`
+    `(async () => {const deadline=performance.now()+5000;while(document.querySelector('[data-slot="dialog-overlay"][data-open]')){document.querySelectorAll('[data-slot="dialog-close"]').forEach(button=>button.click());document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(performance.now()>deadline)throw Error('Could not dismiss launch dialog');await new Promise(resolve=>setTimeout(resolve,100))}})()`
   )
   await command('select-layout-preset', {
     preset: cameraSelected ? 'screen-camera' : 'screen-only',
@@ -439,7 +439,7 @@ async function select(item) {
   await settled()
   await cdp.eval(`document.querySelector(${JSON.stringify(item.chip)}).click()`)
   await waitUntil(
-    `document.querySelector(${JSON.stringify(item.chip)})?.getAttribute('data-state') === 'on'`
+    `document.querySelector(${JSON.stringify(item.chip)})?.hasAttribute('data-pressed')`
   )
   await cdp.eval(
     `document.activeElement?.blur(); document.querySelector('[data-videorc-stage-phase]').scrollIntoView({block:'center',behavior:'instant'})`
@@ -482,6 +482,12 @@ async function ensureLiveSurface() {
     await command('preview-window-set-mode', { mode: 'docked' })
     await command('preview-window-open')
   }
+  // Plan 210 put Scenes and Layouts above the canvas, so on a laptop-height
+  // window it starts below the fold. The docked surface hides while its slot is
+  // scrolled away, and the stage never reads live until the canvas is in view.
+  await cdp.eval(
+    `document.querySelector('[data-videorc-stage-phase]')?.scrollIntoView({block:'center',behavior:'instant'})`
+  )
   await waitUntil(`document.querySelector('[data-videorc-stage-live="true"]') !== null`)
   const deadline = performance.now() + 10000
   let readiness

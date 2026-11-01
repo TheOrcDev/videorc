@@ -985,7 +985,7 @@ async function smokeCommandRetry(smoke, command, params = {}) {
 async function dismissBlockingLaunchDialogs(smoke) {
   const response = await smokeCommandRetry(smoke, 'eval-js', {
     code: `
-      const scrimSelector = '[data-slot="dialog-overlay"][data-state="open"]'
+      const scrimSelector = '[data-slot="dialog-overlay"][data-open]'
       const deadline = Date.now() + 10000
       let quietSince = Date.now()
       let closed = 0

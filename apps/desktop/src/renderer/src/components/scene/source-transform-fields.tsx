@@ -112,7 +112,7 @@ export function SourceTransformFields({
         ) : (
           // What the lock does now, on hover and on focus (plan 174 S1.10).
           <Tooltip>
-            <TooltipTrigger asChild>{aspectLockButton}</TooltipTrigger>
+            <TooltipTrigger render={aspectLockButton} />
             <TooltipContent>
               {aspectLocked
                 ? 'Aspect locked. Size edits keep the shape.'

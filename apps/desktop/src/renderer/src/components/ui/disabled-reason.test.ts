@@ -31,7 +31,7 @@ async function render(props: Partial<Parameters<typeof DisabledReason>[0]>): Pro
   await act(async () =>
     root.render(
       createElement(TooltipProvider, {
-        delayDuration: 0,
+        delay: 0,
         children: createElement(DisabledReason, {
           reason: null,
           children: createElement(Button, { disabled: true }, 'Save changes'),
@@ -87,7 +87,7 @@ describe('DisabledReason', () => {
     )
   })
 
-  it('describes a Radix item in place, with no wrapper, when it is not focusable', async () => {
+  it('describes a menu or select item in place, with no wrapper, when it is not focusable', async () => {
     await render({
       reason: '4K exceeds the recording limit.',
       focusable: false,

@@ -85,6 +85,19 @@ export const REPLAY_WAITS_FOR_SCREEN =
  */
 export const REPLAY_WAITS_FOR_PORTAL_SHARE =
   'No screen is shared yet. Choose one in Sources to use this scene.'
+
+/**
+ * A chosen screen whose preview has not started for any source yet: the
+ * backend's idle status (never started, or stopped) names no source. Closing
+ * first-run setup starts the preview half a second later and arms the ring
+ * at once; a start then waited behind the barrier for frames the queued
+ * preview start could not give, was refused ("the screen preview source(s)
+ * produced no frames") and opened the microphone twice. The ring waits for
+ * the preview the way it waits for setup. Only where the app starts that
+ * preview itself (`previewStarts`); once the preview names the source, a
+ * chosen screen without frames still fails as today.
+ */
+export const REPLAY_WAITS_FOR_PREVIEW = 'Waiting for the screen preview to start.'
 export const REPLAY_WAITS_FOR_SHARE_DIALOG =
   'Waiting for you to choose a screen in the share dialog.'
 
@@ -131,13 +144,16 @@ export function replayStartWaitsForScreen({
   sources,
   layout,
   portalShareGrantedSourceId = null,
-  previewScreen
+  previewScreen,
+  previewStarts = false
 }: {
   sources: Pick<CaptureConfig['sources'], 'screenId' | 'windowId' | 'captureOff' | 'testPattern'>
   layout: Pick<CaptureConfig['layout'], 'layoutPreset' | 'arrangementMode'>
   /** `nextPortalShareGrant`'s latch. */
   portalShareGrantedSourceId?: string | null
-  previewScreen?: Pick<PreviewScreenStatus, 'state' | 'message'>
+  previewScreen?: Pick<PreviewScreenStatus, 'state' | 'message' | 'sourceId'>
+  /** The app starts the screen preview itself (no smoke or auto-preview opt-out). */
+  previewStarts?: boolean
 }): string | null {
   if (layout.arrangementMode === 'freeform') return null
   if (!layoutPresetNeedsScreen(layout.layoutPreset)) return null
@@ -150,6 +166,9 @@ export function replayStartWaitsForScreen({
       previewScreen.message === SCREEN_SHARE_DIALOG_PENDING_MESSAGE
       ? REPLAY_WAITS_FOR_SHARE_DIALOG
       : REPLAY_WAITS_FOR_PORTAL_SHARE
+  }
+  if (previewStarts && previewScreen?.state === 'source-missing' && !previewScreen.sourceId) {
+    return REPLAY_WAITS_FOR_PREVIEW
   }
   return null
 }

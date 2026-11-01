@@ -159,6 +159,19 @@ portTest('exactly N slots, nested builds and inherited holders', async (t) => {
   proc.send('done')
   await once(proc, 'exit')
 })
+portTest('release never waits on a peer that probed the lock port', async (t) => {
+  const port = await freePort()
+  const lock = await acquirePortLock({ port })
+  // T3 Code probes every new localhost listener (HTTP GET, TLS hello) and keeps the socket open.
+  const peer = net.connect({ host: '127.0.0.1', port })
+  t.after(() => peer.destroy())
+  peer.on('error', () => {})
+  const hungUp = new Promise((done) => peer.once('close', done))
+  peer.write('GET / HTTP/1.1\r\nhost: localhost\r\n\r\n')
+  await delay(50)
+  assert.equal(await Promise.race([lock.release().then(() => true), delay(2000, false)]), true)
+  await hungUp
+})
 test('memory parsers and thresholds (swap alone does not block)', () => {
   assert.equal(parseDarwinMemory('1\n', '51', 'total = 8G used = 6.8G free = 1.2G').busy, false)
   assert.equal(parseDarwinMemory('2', '20', '').pressure, 'warning')

@@ -53,7 +53,7 @@ import type { LiveBackgroundId } from '../../../shared/live-background-ids'
  * Kept here, in the lazy Assets chunk, so the eager bundle exports nothing new.
  */
 const REVEAL_ON_HOVER =
-  'opacity-0 group-hover/kebab-host:opacity-100 group-focus-within/kebab-host:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100'
+  'opacity-0 group-hover/kebab-host:opacity-100 group-focus-within/kebab-host:opacity-100 focus-visible:opacity-100 data-popup-open:opacity-100'
 
 type LiveStyleField = (typeof BACKGROUND_STYLE_FIELDS)[number] & {
   key: 'visibilityPercent' | 'dimPercent'
@@ -203,24 +203,34 @@ export function LiveBackgroundStylePopover({
   return (
     <Popover>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <Button
-              aria-label={`Adjust style for ${name}`}
-              className={cn(revealOnHover && REVEAL_ON_HOVER)}
-              size="icon"
-              variant="ghost"
-            >
-              <AdjustIcon />
-            </Button>
-          </PopoverTrigger>
+        <TooltipTrigger
+          render={
+            <PopoverTrigger
+              render={
+                <Button
+                  aria-label={`Adjust style for ${name}`}
+                  className={cn(revealOnHover && REVEAL_ON_HOVER)}
+                  size="icon"
+                  variant="ghost"
+                />
+              }
+            />
+          }
+        >
+          <AdjustIcon />
         </TooltipTrigger>
         <TooltipContent>Adjust style</TooltipContent>
       </Tooltip>
       <PopoverContent align="end" className="w-80" data-videorc-live-background-style={id}>
         <Field className="gap-1.5">
           <FieldLabel>Look</FieldLabel>
-          <Select value={look.id} onValueChange={(next) => onChange({ look: next })}>
+          <Select
+            items={looks.map((entry) => ({ value: entry.id, label: entry.name }))}
+            value={look.id}
+            onValueChange={(next) => {
+              if (next !== null) onChange({ look: next })
+            }}
+          >
             <SelectTrigger className="w-full">
               <SelectValue />
             </SelectTrigger>

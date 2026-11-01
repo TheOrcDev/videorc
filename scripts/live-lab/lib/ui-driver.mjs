@@ -256,7 +256,7 @@ export function pageHelper(bindingName) {
     // closes a Radix dialog without choosing anything.
     dismissOtherDialogs() {
       let closed = 0
-      for (const overlay of qa('[data-slot="dialog-overlay"][data-state="open"]')) {
+      for (const overlay of qa('[data-slot="dialog-overlay"][data-open]')) {
         if (dialogEl()) break
         overlay.ownerDocument.dispatchEvent(
           new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })

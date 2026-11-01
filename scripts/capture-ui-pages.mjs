@@ -93,7 +93,7 @@ const settingsTabs = await cmd('eval-js', {
 for (const id of settingsTabs) {
   try {
     await cmd('eval-js', {
-      code: `document.querySelector('[data-videorc-settings-tab="${id}"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await sleep(600); return true`
+      code: `document.querySelector('[data-videorc-settings-tab="${id}"]').click(); await sleep(600); return true`
     })
     const shot = await cmd('capture-page', { name: `settings-${id}${suffix}` })
     console.log(shot.file)
@@ -109,7 +109,7 @@ try {
   for (const id of buddyTabs) {
     try {
       await cmd('eval-js', {
-        code: `document.querySelector('[data-videorc-buddy-tab="${id}"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await sleep(600); return true`
+        code: `document.querySelector('[data-videorc-buddy-tab="${id}"]').click(); await sleep(600); return true`
       })
       const shot = await cmd('capture-page', { name: `buddy-${id}${suffix}` })
       console.log(shot.file)

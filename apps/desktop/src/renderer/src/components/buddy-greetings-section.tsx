@@ -64,6 +64,9 @@ const STATE_OPTIONS: SegmentedControlOption<CohostUtteranceState>[] = [
   { value: 'think', label: 'Think' }
 ]
 
+/** The platform filter's words: Any, then each platform by name. */
+const PLATFORM_ITEMS = { any: 'Any', ...BUDDY_GREETING_PLATFORM_LABELS }
+
 /**
  * Greetings (plan 164 S-D5, plan 192, Buddy tab → Chat): what Buddy says
  * when someone chats for the first time (the welcomes) or chat does
@@ -589,16 +592,19 @@ function LineEditor({
         />
         {onPlatform ? (
           <Select
+            items={PLATFORM_ITEMS}
             value={platform ?? 'any'}
-            onValueChange={(next) =>
-              onPlatform(next === 'any' ? undefined : (next as CohostGreetingPlatform))
-            }
+            onValueChange={(next) => {
+              if (next !== null) {
+                onPlatform(next === 'any' ? undefined : (next as CohostGreetingPlatform))
+              }
+            }}
           >
             <SelectTrigger aria-label="Platform" className="w-28" size="xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="any">Any</SelectItem>
+              <SelectItem value="any">{PLATFORM_ITEMS.any}</SelectItem>
               {BUDDY_TEMPLATE_KIND_PLATFORMS[kind].map((option) => (
                 <SelectItem key={option} value={option}>
                   {BUDDY_GREETING_PLATFORM_LABELS[option]}
@@ -608,10 +614,8 @@ function LineEditor({
           </Select>
         ) : null}
         <Popover>
-          <PopoverTrigger asChild>
-            <Button size="xs" type="button" variant="ghost">
-              Fields
-            </Button>
+          <PopoverTrigger render={<Button size="xs" type="button" variant="ghost" />}>
+            Fields
           </PopoverTrigger>
           <PopoverContent align="start" className="w-64 p-1">
             <ul className="flex flex-col" data-slot="buddy-greeting-fields">

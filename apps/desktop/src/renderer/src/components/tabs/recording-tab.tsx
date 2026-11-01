@@ -37,9 +37,10 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Spinner } from '@/components/ui/spinner'
-import { VideoPresetSelectItems } from '@/components/video-preset-select-items'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { VideoPresetSelectItems, videoPresetItems } from '@/components/video-preset-select-items'
 import { useStudioCore, useStudioReplay } from '@/hooks/use-studio'
-import type { DirectoryFacts, VideoPreset, VideoSettings } from '@/lib/backend'
+import type { DirectoryFacts, VideoSettings } from '@/lib/backend'
 import {
   REPLAY_RING_SECONDS,
   layoutPresetOrientation,
@@ -54,7 +55,7 @@ import {
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { formatVideoQuality } from '@/lib/format-video'
 import { performanceCheckLine } from '@/lib/performance-check-line'
-import { unlockActionForGate } from '@/lib/lock-view'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { platformCopy } from '@/lib/platform-copy'
 import { recordingsFolderView } from '@/lib/recordings-folder'
@@ -202,6 +203,7 @@ function LocalRecordingSection(): ReactElement {
   // canvas can never contradict the scene's orientation.
   const orientation = layoutPresetOrientation(captureConfig.layout.layoutPreset)
   const resolutionPresets = resolutionOptionsForOrientation(orientation)
+  const presetOptions = recordingPresetOptions(video.preset, orientation)
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   // Plan 157: the switch stays available; when the current selection cannot
@@ -225,7 +227,9 @@ function LocalRecordingSection(): ReactElement {
   const checkLine = performanceCheckLine({
     state: performanceCheck,
     progress: performanceCheckProgress,
-    video
+    video,
+    platform: runtimeInfo?.platform,
+    clipsOn: captureConfig.replayBuffer.enabled
   })
   const sessionLocked = isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
   // Off means stream-only: the quality is the file's, so it waits for the
@@ -318,8 +322,11 @@ function LocalRecordingSection(): ReactElement {
           <FieldLabel htmlFor="video-preset">Recording preset</FieldLabel>
           <Select
             disabled={qualityLocked}
+            items={videoPresetItems(presetOptions)}
             value={video.preset}
-            onValueChange={(value) => applyVideoPreset(value as VideoPreset, { kind: 'recording' })}
+            onValueChange={(value) => {
+              if (value !== null) applyVideoPreset(value, { kind: 'recording' })
+            }}
           >
             <SelectTrigger className="w-full" id="video-preset">
               <SelectValue />
@@ -328,7 +335,7 @@ function LocalRecordingSection(): ReactElement {
               <VideoPresetSelectItems
                 entitlements={entitlements}
                 kind="recording"
-                options={recordingPresetOptions(video.preset, orientation)}
+                options={presetOptions}
                 performanceResult={performanceCheck?.result}
               />
             </SelectContent>
@@ -361,20 +368,29 @@ function LocalRecordingSection(): ReactElement {
                 </Button>
               ) : null}
               {checkLine.checkLabel ? (
-                <Button
-                  disabled={sessionLocked}
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => void runPerformanceCheck()}
-                >
-                  {checkLine.checkLabel}
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        disabled={sessionLocked}
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => void runPerformanceCheck()}
+                      />
+                    }
+                  >
+                    {checkLine.checkLabel}
+                  </TooltipTrigger>
+                  {checkLine.checkHint ? (
+                    <TooltipContent>{checkLine.checkHint}</TooltipContent>
+                  ) : null}
+                </Tooltip>
               ) : null}
             </div>
           ) : null}
           {profileEntitlementMessage ? (
             <LockAlert
-              action={unlockActionForGate(profileGate)}
+              action={lockAlertAction(unlockActionForGate(profileGate))}
               reason={profileEntitlementMessage}
             />
           ) : null}

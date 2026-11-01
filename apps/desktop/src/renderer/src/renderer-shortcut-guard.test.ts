@@ -16,6 +16,8 @@ const RENDERER_ROOT = join(__dirname, '..')
  * reader could see is checked.
  */
 const ALLOWLIST = new Set([
+  // Prints an accelerator per platform: the Mac glyphs live here.
+  'src/lib/accelerator.ts',
   // Maps a lone Mac glyph to its Windows word.
   'src/lib/platform.ts',
   // The recorder's refusal names the Mac modifiers on a Mac only.
