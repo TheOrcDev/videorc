@@ -272,6 +272,7 @@ import { buildStartSessionParams } from '@/lib/session-params'
 import {
   applyFinalizationEvent,
   finalizationEventNeedsRefresh,
+  finalizationNoticesForRows,
   finalizingBadgeLabel,
   FinalizationSnapshotJournal
 } from '@/lib/session-finalization'
@@ -2634,24 +2635,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     // Restore progress after relaunch; settle a notice whose terminal event
     // was missed while disconnected using the authoritative database row.
-    for (const session of sessions) {
-      if (session.finalizationState === 'finalizing') {
-        activeFinalizationNoticesRef.current.add(session.id)
-        showMp4Finalizing(session.id, finalizingBadgeLabel(session))
-      } else if (activeFinalizationNoticesRef.current.delete(session.id)) {
-        if (
-          session.finalizationState === 'finalized' &&
-          !announcedFinalizationsRef.current.has(session.id)
-        ) {
-          announcedFinalizationsRef.current.add(session.id)
-          showMp4Ready(session.id)
-        } else if (session.finalizationState === 'failed') {
-          showMp4ExportFailed(
-            session.id,
-            () => void remuxSessionRef.current?.(session.id),
-            session.finalizationError
-          )
-        }
+    for (const notice of finalizationNoticesForRows(
+      sessions,
+      activeFinalizationNoticesRef.current,
+      announcedFinalizationsRef.current
+    )) {
+      if (notice.kind === 'finalizing') {
+        showMp4Finalizing(notice.sessionId, notice.label)
+      } else if (notice.kind === 'ready') {
+        showMp4Ready(notice.sessionId)
+      } else {
+        showMp4ExportFailed(
+          notice.sessionId,
+          () => void remuxSessionRef.current?.(notice.sessionId),
+          notice.error
+        )
       }
     }
   }, [sessions])
