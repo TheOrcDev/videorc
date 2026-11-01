@@ -114,6 +114,10 @@ export interface DockVisibilityInput {
   mainWindowVisible: boolean
   mainWindowMinimized: boolean
   mainWindowFullScreen: boolean
+  // The surface is drawn inside the main window's own view (the macOS
+  // in-process layer, the Linux in-window proof surface), not in a child
+  // window: fullscreen keeps it, since it is part of the window now.
+  surfaceInsideMainWindow?: boolean
   overlayOpen: boolean
 }
 
@@ -127,7 +131,7 @@ export interface DockVisibilityDecision {
 // Order matters: window-level conditions outrank slot-level ones so the reason
 // shown matches what the user actually did last.
 export function decideDockVisibility(input: DockVisibilityInput): DockVisibilityDecision {
-  if (input.mainWindowFullScreen) {
+  if (input.mainWindowFullScreen && !input.surfaceInsideMainWindow) {
     return { visible: false, hiddenReason: 'main-window-fullscreen' }
   }
   if (!input.mainWindowVisible || input.mainWindowMinimized) {

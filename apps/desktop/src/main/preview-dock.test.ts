@@ -33,7 +33,7 @@ const visibleInput: DockVisibilityInput = {
 }
 
 describe('parsePreviewWindowMode', () => {
-  it('defaults legacy prefs without a mode to floating', () => {
+  it('reads an unknown IPC value as floating', () => {
     expect(parsePreviewWindowMode(undefined)).toBe('floating')
     expect(parsePreviewWindowMode(null)).toBe('floating')
     expect(parsePreviewWindowMode('attached')).toBe('floating')
@@ -197,9 +197,28 @@ describe('decideDockVisibility', () => {
     )
   })
 
-  it('hides in fullscreen with its own reason', () => {
+  it('hides in fullscreen with its own reason when the surface is a child window', () => {
     expect(decideDockVisibility({ ...visibleInput, mainWindowFullScreen: true }).hiddenReason).toBe(
       'main-window-fullscreen'
     )
+  })
+
+  it('keeps showing in fullscreen when the surface is drawn inside the main window', () => {
+    // Plan 213 D3: the layer is part of the window, so fullscreen takes it along.
+    expect(
+      decideDockVisibility({
+        ...visibleInput,
+        mainWindowFullScreen: true,
+        surfaceInsideMainWindow: true
+      })
+    ).toEqual({ visible: true, hiddenReason: null })
+    expect(
+      decideDockVisibility({
+        ...visibleInput,
+        mainWindowFullScreen: true,
+        surfaceInsideMainWindow: true,
+        overlayOpen: true
+      }).hiddenReason
+    ).toBe('overlay-open')
   })
 })

@@ -639,6 +639,7 @@ import type {
   OAuthCallbackEnvelope,
   ObsSetup,
   PreviewSurfaceCompositorUpdateParams,
+  NativePreviewHostWindow,
   PreviewSurfaceBounds,
   PreviewSurfaceSceneLayer,
   PreviewSurfaceSceneLayerKind,
@@ -4428,14 +4429,44 @@ function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
     mainWindowFullScreen: Boolean(
       mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()
     ),
+    surfaceInsideMainWindow: previewDockedInWindow(),
     overlayOpen: previewDockOverlayOpen
   })
 }
 
-// Linux docks the proof surface INTO the main window (in-window-proof-surface.ts);
-// the preview BrowserWindow stays hidden and only owns the lifecycle.
+// The docked surface lives INSIDE the main window, and the preview
+// BrowserWindow stays hidden and only owns the lifecycle: on Linux the proof
+// surface is a view in the window (in-window-proof-surface.ts); on macOS the
+// in-process CAMetalLayer is a sublayer of the main window's own view at the
+// slot (plan 213 D3), so there is one window, as in OBS, and nothing a tiling
+// window manager can move on its own. The helper-process and external drivers
+// still need the child window they order above.
 function previewDockedInWindow(): boolean {
-  return proofSurfaceHostedInWindow && currentPreviewWindowMode() === 'docked'
+  return (
+    currentPreviewWindowMode() === 'docked' &&
+    (proofSurfaceHostedInWindow || nativePreviewLayerHostedInMainWindow())
+  )
+}
+
+function nativePreviewLayerHostedInMainWindow(): boolean {
+  return process.platform === 'darwin' && nativePreviewRealSurfaceDriverKind === 'in-process'
+}
+
+// Which app window hosts the in-process layer right now; the driver attaches
+// to its handle and names it in status (never a silent change of host).
+function nativePreviewHostWindow(): NativePreviewHostWindow {
+  return currentPreviewWindowMode() === 'docked' && nativePreviewLayerHostedInMainWindow()
+    ? 'main'
+    : 'preview'
+}
+
+// The dock's host follows the driver: when the in-process layer comes or goes
+// (a failure, a retry, the helper fallback) the stuck Preview must move between
+// the main window's view and its child window, with the matching visibility.
+function reconcileDockedPreviewHost(): void {
+  if (currentPreviewWindowMode() === 'docked' && previewWindowIsOpenForSurface()) {
+    queueDockedPreviewPlacement()
+  }
 }
 
 // What the user sees of the preview: the window itself, or for an in-window
@@ -4489,9 +4520,10 @@ function applyDockedPreviewPlacement(): void {
   }
   const decision = dockVisibilityDecision()
   if (previewDockedInWindow()) {
-    // Wayland would ignore a frame for the preview window anyway: it stays
-    // hidden, and the placement push moves the in-window surface to the slot
-    // (visible or not, per the same predicate).
+    // The lifecycle window stays hidden (Wayland would ignore its frame; on
+    // macOS it would be a second window for a window manager to move), and
+    // the placement push moves the in-window surface to the slot (visible or
+    // not, per the same predicate).
     if (window.isVisible()) {
       window.hide()
     }
@@ -4544,6 +4576,16 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
   const contentBounds = state.contentBounds
   const visible = state.visible && (visibleOverride ?? true)
   const orderAboveWindowId = previewWindowGlobalId()
+  // The in-process layer is placed inside its host window (plan 213 D2): the
+  // video rect in the host's content coordinates, plus the host's height.
+  // Only macOS has that layer; elsewhere the fields would describe nothing.
+  const hostWindow =
+    process.platform !== 'darwin'
+      ? null
+      : nativePreviewHostWindow() === 'main'
+        ? mainWindow
+        : previewWindow
+  const hostContent = hostWindow && !hostWindow.isDestroyed() ? hostWindow.getContentBounds() : null
   return {
     screenX: contentBounds.x,
     screenY: contentBounds.y,
@@ -4551,6 +4593,13 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
     height: contentBounds.height,
     scaleFactor: state.scaleFactor,
     screenHeight: state.screenHeight,
+    ...(hostContent
+      ? {
+          hostX: contentBounds.x - hostContent.x,
+          hostY: contentBounds.y - hostContent.y,
+          hostHeight: hostContent.height
+        }
+      : {}),
     visible,
     // Docked previews clip to the studio slot's rounded panel (--radius-panel,
     // 12pt); the floating window stays square. CALayer radii are in points.
@@ -6940,6 +6989,9 @@ async function createNativePreviewSurface(
     nativePreviewHostAttached: preserveNativeSurface
       ? nativePreviewSurfaceStatus.nativePreviewHostAttached
       : false,
+    nativePreviewHostWindow: preserveNativeSurface
+      ? nativePreviewSurfaceStatus.nativePreviewHostWindow
+      : undefined,
     ...nativePreviewPlacementStatusFields(),
     bounds,
     startedAt: nativePreviewSurfaceStatus.startedAt ?? new Date().toISOString(),
@@ -7007,6 +7059,9 @@ async function updateNativePreviewSurfaceBounds(
     nativePreviewHostAttached: preserveNativeSurface
       ? nativePreviewSurfaceStatus.nativePreviewHostAttached
       : false,
+    nativePreviewHostWindow: preserveNativeSurface
+      ? nativePreviewSurfaceStatus.nativePreviewHostWindow
+      : undefined,
     ...nativePreviewPlacementStatusFields(),
     bounds,
     updatedAt: new Date().toISOString()
@@ -7208,6 +7263,7 @@ async function disableNativePreviewRealSurfaceDriver(reason: string): Promise<vo
   } catch {
     // The helper is already unreachable; nothing left to tear down.
   }
+  reconcileDockedPreviewHost()
   if (nativePreviewNativeFailureFallbackActive) {
     nativePreviewSurfaceStatus = nativePreviewDriverFailureFallbackStatus(
       nativePreviewSurfaceStatus,
@@ -9010,15 +9066,18 @@ function loadNativePreviewPrimaryDriver(): NativePreviewPrimaryDriverLoad {
   const loaded = loadNativePreviewInProcessDriver({
     modulePath: nativePreviewInProcessModuleResolution.path,
     loadModule: (modulePath) => requireNativePreviewRealSurfaceModule(modulePath),
-    getNativeWindowHandle: nativePreviewWindowHandle
+    getNativeWindowHandle: nativePreviewWindowHandle,
+    getNativeHostWindow: nativePreviewHostWindow
   })
   return loaded.driver
     ? { driver: loaded.driver, kind: 'in-process' }
     : { driver: null, unavailableReason: loaded.unavailableReason }
 }
 
+// The NSView the in-process layer attaches to: the main window's while the
+// Preview is stuck to the app (plan 213 D3), the Preview window's otherwise.
 function nativePreviewWindowHandle(): Buffer | null {
-  const window = previewWindow
+  const window = nativePreviewHostWindow() === 'main' ? mainWindow : previewWindow
   return window && !window.isDestroyed() ? window.getNativeWindowHandle() : null
 }
 
@@ -9037,6 +9096,7 @@ function ensureNativePreviewRealSurfaceDriver(): NativePreviewRealSurfaceDriver 
     nativePreviewRealSurfaceDriverKind = primary.kind
     nativePreviewRealSurfaceDriverUnavailableReason = undefined
     nativePreviewHelperProcessDriverResolved = false
+    reconcileDockedPreviewHost()
     return primary.driver
   }
   nativePreviewRealSurfaceDriverUnavailableReason = primary.unavailableReason
@@ -9060,6 +9120,7 @@ function ensureNativePreviewRealSurfaceDriver(): NativePreviewRealSurfaceDriver 
   nativePreviewRealSurfaceDriver = helperDriver.driver
   nativePreviewRealSurfaceDriverKind = 'helper-process'
   nativePreviewRealSurfaceDriverUnavailableReason = undefined
+  reconcileDockedPreviewHost()
   return nativePreviewRealSurfaceDriver
 }
 
@@ -11794,6 +11855,15 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    if (previewDockedInWindow()) {
+      // The lifecycle window of an in-window dock stays hidden: a window
+      // manager moving it on its own (plan 213 D1, wm-displaces-child) moves
+      // nothing the user sees, and placement re-derives from the main window
+      // and the slot.
+      queueDockedPreviewPlacement()
+      emitPreviewWindowState()
+      return previewWindowState()
+    }
     showSmokeWindow(previewWindow, params)
     previewWindow.moveTop()
     if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
@@ -11962,6 +12032,12 @@ async function runSmokePreviewMotionCommand(
       ...smokeNativeWindowIdentity(previewWindow),
       // macOS: a docked window must cast no shadow (applyDockedPreviewChrome).
       hasShadow: previewWindow && !previewWindow.isDestroyed() ? previewWindow.hasShadow() : null,
+      // The Preview BrowserWindow itself is on screen (as opposed to `visible`,
+      // what the user sees of the preview): an in-window dock keeps it hidden.
+      previewWindowShown:
+        previewWindow && !previewWindow.isDestroyed() ? previewWindow.isVisible() : null,
+      windowContentBounds:
+        previewWindow && !previewWindow.isDestroyed() ? previewWindow.getContentBounds() : null,
       surface: {
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
@@ -11994,6 +12070,8 @@ async function runSmokePreviewMotionCommand(
         framePollingSuppressed: nativePreviewSurfaceStatus.framePollingSuppressed,
         nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
         nativePreviewHostAttached: nativePreviewSurfaceStatus.nativePreviewHostAttached,
+        nativePreviewHostWindow: nativePreviewSurfaceStatus.nativePreviewHostWindow,
+        bounds: nativePreviewSurfaceStatus.bounds ?? null,
         firstFrameContract: nativePreviewSurfaceStatus.firstFrameContract,
         firstFrameReason: nativePreviewSurfaceStatus.firstFrameReason,
         sourcePixelsPresent: nativePreviewSurfaceStatus.sourcePixelsPresent,
