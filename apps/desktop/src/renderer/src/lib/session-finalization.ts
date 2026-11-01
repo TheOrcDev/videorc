@@ -95,6 +95,49 @@ export function finalizingBadgeLabel(session: FinalizationRow): string {
     : 'Saving MP4…'
 }
 
+export type FinalizationNotice =
+  | { kind: 'finalizing'; sessionId: string; label: string }
+  | { kind: 'ready'; sessionId: string }
+  | { kind: 'failed'; sessionId: string; error?: string }
+
+/**
+ * The MP4 toasts the Library rows call for: "Saving MP4" restored after a
+ * relaunch, and the outcome of a notice whose terminal event was missed while
+ * disconnected. `active` (notices the rows opened) and `announced` (takes
+ * whose "MP4 ready" was shown) are updated in place.
+ *
+ * React can run a commit's effects after the next backend event, so a row may
+ * still read `finalizing` after its take's `finalized` event was announced.
+ * That row is stale: reopening "Saving MP4" from it left the toast spinning
+ * at 98% for good, because the settled row then finds the take announced.
+ */
+export function finalizationNoticesForRows(
+  sessions: readonly (FinalizationRow & { id: string })[],
+  active: Set<string>,
+  announced: Set<string>
+): FinalizationNotice[] {
+  const notices: FinalizationNotice[] = []
+  for (const session of sessions) {
+    if (session.finalizationState === 'finalizing') {
+      if (announced.has(session.id)) continue
+      active.add(session.id)
+      notices.push({
+        kind: 'finalizing',
+        sessionId: session.id,
+        label: finalizingBadgeLabel(session)
+      })
+    } else if (active.delete(session.id)) {
+      if (session.finalizationState === 'finalized' && !announced.has(session.id)) {
+        announced.add(session.id)
+        notices.push({ kind: 'ready', sessionId: session.id })
+      } else if (session.finalizationState === 'failed') {
+        notices.push({ kind: 'failed', sessionId: session.id, error: session.finalizationError })
+      }
+    }
+  }
+  return notices
+}
+
 /**
  * Applies a `recording.finalization` event to the Library row it belongs to.
  * Returns the same array when nothing changed so React skips the re-render.

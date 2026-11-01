@@ -668,6 +668,10 @@ async fn run_backend() -> Result<()> {
     // this driver already failed.
     #[cfg(target_os = "windows")]
     recording::load_windows_mf_rejection_store(&state.database);
+    // After the rejection store, so the prewarm skips probes this driver
+    // already failed: the launch replay ring's encoder probes, off the lane.
+    #[cfg(target_os = "windows")]
+    recording::spawn_windows_replay_ring_prewarm(&state);
     // Plan 166 S1: the metrics journal, off unless the setting or
     // VIDEORC_METRICS_JOURNAL=1 turns it on. Nothing is running yet, so there
     // is no state to seed.
@@ -11675,6 +11679,11 @@ fn dispatch_authorized_backend_command(
                                 .is_some()
                             {
                                 replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE
+                            } else if error
+                                .downcast_ref::<replay_buffer::AutoStartSourcesNotReady>()
+                                .is_some()
+                            {
+                                replay_buffer::SOURCES_NOT_READY_CODE
                             } else {
                                 "session-start-failed"
                             };

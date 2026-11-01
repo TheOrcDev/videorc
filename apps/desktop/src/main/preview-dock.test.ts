@@ -7,6 +7,7 @@ import {
   parseDockSlot,
   parseDockSlotReport,
   parsePreviewWindowMode,
+  previewWindowClosePrefs,
   type DockSlotReport,
   type DockVisibilityInput
 } from './preview-dock'
@@ -40,6 +41,26 @@ describe('parsePreviewWindowMode', () => {
 
   it('accepts docked', () => {
     expect(parsePreviewWindowMode('docked')).toBe('docked')
+  })
+})
+
+describe('previewWindowClosePrefs', () => {
+  const frame = { x: 276, y: 143, width: 960, height: 568 }
+
+  it('remembers that the streamer closed the Preview', () => {
+    expect(previewWindowClosePrefs(frame, false)).toEqual({ frame, open: false })
+  })
+
+  it('keeps the open state when quitting closes the window (E2E 2026-11-01)', () => {
+    // Quit with the Preview open wrote `open: false`, so the next launch
+    // never restored it although `restorePreviewWindowOnLaunch` opens a
+    // Preview whose prefs are not `open: false`.
+    expect(previewWindowClosePrefs(frame, true)).toEqual({ frame })
+  })
+
+  it('saves no frame it does not know', () => {
+    expect(previewWindowClosePrefs(null, false)).toEqual({ open: false })
+    expect(previewWindowClosePrefs(null, true)).toEqual({})
   })
 })
 

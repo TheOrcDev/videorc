@@ -8,12 +8,19 @@ export function shouldReloadSceneFromCaptureConfig(input: {
   recordingState: RecordingStatus['state']
   startRequestPending: boolean
   stopRequestPending: boolean
+  /**
+   * A performance check runs backend sessions the recording status never
+   * shows (plan 212), and the backend refuses an idle reload while one holds
+   * the session slot. The reload waits for the check's completed event.
+   */
+  performanceCheckRunning: boolean
 }): boolean {
   return (
     input.connected &&
     !input.sceneEditMode &&
     !input.startRequestPending &&
     !input.stopRequestPending &&
+    !input.performanceCheckRunning &&
     !['starting', 'recording', 'streaming', 'stopping'].includes(input.recordingState)
   )
 }

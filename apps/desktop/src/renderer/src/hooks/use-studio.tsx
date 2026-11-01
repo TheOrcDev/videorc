@@ -123,6 +123,7 @@ import {
 import {
   nextPortalShareGrant,
   replayStartWaitsForGrant,
+  replayStartWaitsForPreview,
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
@@ -272,6 +273,7 @@ import { buildStartSessionParams } from '@/lib/session-params'
 import {
   applyFinalizationEvent,
   finalizationEventNeedsRefresh,
+  finalizationNoticesForRows,
   finalizingBadgeLabel,
   FinalizationSnapshotJournal
 } from '@/lib/session-finalization'
@@ -1729,6 +1731,9 @@ async function waitForRecordingIdle(
 /** `session.start`'s code for a default ring start the backend keeps off a
  * software encoder path (mirrors `replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE`). */
 const REPLAY_SOFTWARE_ENCODER_REFUSAL = 'replay-software-encoder'
+/** `session.start`'s code for a default ring start whose scene camera has no
+ * frame yet (mirrors `replay_buffer::SOURCES_NOT_READY_CODE`). */
+const REPLAY_SOURCES_NOT_READY = 'replay-sources-not-ready'
 
 export type StudioCoreContextValue = Omit<
   StudioContextValue,
@@ -2567,6 +2572,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const replayBlockedReasonRef = useRef<string | null>(null)
   const replayStartInFlightRef = useRef(false)
   const replayFailedStartsRef = useRef(0)
+  // The backend refused the default ring because the scene's camera has no
+  // frame yet; it starts again once the camera preview goes live.
+  const replayWaitingForCameraRef = useRef(false)
   const replayReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const replayGaveUpToastedRef = useRef(false)
   const replayLaunchArmedRef = useRef(false)
@@ -2634,24 +2642,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     // Restore progress after relaunch; settle a notice whose terminal event
     // was missed while disconnected using the authoritative database row.
-    for (const session of sessions) {
-      if (session.finalizationState === 'finalizing') {
-        activeFinalizationNoticesRef.current.add(session.id)
-        showMp4Finalizing(session.id, finalizingBadgeLabel(session))
-      } else if (activeFinalizationNoticesRef.current.delete(session.id)) {
-        if (
-          session.finalizationState === 'finalized' &&
-          !announcedFinalizationsRef.current.has(session.id)
-        ) {
-          announcedFinalizationsRef.current.add(session.id)
-          showMp4Ready(session.id)
-        } else if (session.finalizationState === 'failed') {
-          showMp4ExportFailed(
-            session.id,
-            () => void remuxSessionRef.current?.(session.id),
-            session.finalizationError
-          )
-        }
+    for (const notice of finalizationNoticesForRows(
+      sessions,
+      activeFinalizationNoticesRef.current,
+      announcedFinalizationsRef.current
+    )) {
+      if (notice.kind === 'finalizing') {
+        showMp4Finalizing(notice.sessionId, notice.label)
+      } else if (notice.kind === 'ready') {
+        showMp4Ready(notice.sessionId)
+      } else {
+        showMp4ExportFailed(
+          notice.sessionId,
+          () => void remuxSessionRef.current?.(notice.sessionId),
+          notice.error
+        )
       }
     }
   }, [sessions])
@@ -9372,7 +9377,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [refreshMediaAccess])
 
+  // Plan 212: a performance check's sessions never reach `recording`, and the
+  // backend refuses an idle reload while one runs. The hold covers the run
+  // request; the completed event clears both and re-arms the held reload.
+  const performanceCheckRunning = performanceCheck?.running === true
   useEffect(() => {
+    const checkRunning = (): boolean => performanceCheckHoldRef.current || performanceCheckRunning
     if (
       !client ||
       !shouldReloadSceneFromCaptureConfig({
@@ -9380,7 +9390,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         sceneEditMode,
         recordingState: recording.state,
         startRequestPending,
-        stopRequestPending
+        stopRequestPending,
+        performanceCheckRunning: checkRunning()
       })
     ) {
       return
@@ -9397,7 +9408,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sceneEditMode,
           recordingState: recordingRef.current.state,
           startRequestPending,
-          stopRequestPending
+          stopRequestPending,
+          performanceCheckRunning: checkRunning()
         })
       ) {
         return
@@ -9409,7 +9421,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneEditMode,
             recordingState: recordingRef.current.state,
             startRequestPending,
-            stopRequestPending
+            stopRequestPending,
+            performanceCheckRunning: checkRunning()
           })
         ) {
           reportError(error)
@@ -9420,6 +9433,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => window.clearTimeout(timer)
   }, [
     client,
+    performanceCheckRunning,
     recording.state,
     reloadSceneFromCaptureConfig,
     reportError,
@@ -16593,6 +16607,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // run's share to be granted, and never opens the share dialog itself.
   // Closing setup starts the preview half a second later: the ring waits
   // until the screen preview names its source (REPLAY_WAITS_FOR_PREVIEW).
+  const replayAutoPreviewStarts =
+    nativePreviewSurfaceEnabled &&
+    !runtimeInfo?.previewSmokeMode &&
+    !runtimeInfo?.disableAutoPreview &&
+    !runtimeInfo?.disableAutoSourcePreview
   const replayGrantWait =
     firstRunSetupOpen ||
     replayStartWaitsForGrant({
@@ -16605,11 +16624,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       layout: captureConfig.layout,
       portalShareGrantedSourceId,
       previewScreen: previewScreenStatus,
-      previewStarts:
-        nativePreviewSurfaceEnabled &&
-        !runtimeInfo?.previewSmokeMode &&
-        !runtimeInfo?.disableAutoPreview &&
-        !runtimeInfo?.disableAutoSourcePreview
+      previewStarts: replayAutoPreviewStarts
+    }) ||
+    // The previews the Studio opens itself (refreshPreview) must have a
+    // frame first: a start before them is refused and, through the command
+    // lane's fence, holds them back for its two-second wait. The backend
+    // refuses the camera case early; the screen is the renderer's to wait for.
+    replayStartWaitsForPreview({
+      autoPreview: replayAutoPreviewStarts,
+      sources: captureConfig.sources,
+      layoutPreset: captureConfig.layout.layoutPreset,
+      previewCamera: previewCameraStatus,
+      previewScreen: previewScreenStatus
     })
   const replayStartContextRef = useRef({
     captureConfig,
@@ -16710,6 +16736,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setReplayBlockedReasonState(message)
         return
       }
+      if ((error as { code?: unknown } | null)?.code === REPLAY_SOURCES_NOT_READY) {
+        // Not a failure: at launch the ring is asked for before the camera
+        // preview starts. No strike and no toast; the camera's live edge
+        // starts it (below). A camera that went live meanwhile retries now.
+        const camera = previewCameraStatusRef.current
+        if (camera.state === 'live') {
+          scheduleReplayReconcile()
+          return
+        }
+        if (
+          camera.state === 'starting' ||
+          !camera.cameraId ||
+          camera.cameraId !== captureConfigRef.current.sources.cameraId
+        ) {
+          replayWaitingForCameraRef.current = true
+          return
+        }
+        // A camera that reported failed, missing or denied brings no live
+        // edge: the start counts as failed, and says so like any other.
+      }
       replayFailedStartsRef.current += 1
       console.warn('[replay-buffer] start failed', error)
       const { REPLAY_START_RETRY_LIMIT, replayStartRetryDelayMs } =
@@ -16764,7 +16810,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           replayStartInFlightRef.current ||
           replayReconcileHoldRef.current ||
           performanceCheckHoldRef.current,
-        failedStarts: replayFailedStartsRef.current
+        failedStarts: replayFailedStartsRef.current,
+        waitingForCamera: replayWaitingForCameraRef.current
       })
       if (action === 'start') void startReplayBuffer()
       else if (action === 'stop') void stopReplayBuffer()
@@ -16778,6 +16825,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the record block clears, it tries again from a clean count.
   useEffect(() => {
     replayFailedStartsRef.current = 0
+    replayWaitingForCameraRef.current = false
     rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
   }, [recordBlockedReason, replayGrantWait, scheduleReplayReconcile])
@@ -16798,6 +16846,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (replaySourcesRef.current === replaySources) return
     replaySourcesRef.current = replaySources
     replayFailedStartsRef.current = 0
+    replayWaitingForCameraRef.current = false
     rearmReplayAfterErrorRef.current()
     void import('@/lib/replay-buffer-reconcile').then(({ replayBufferShouldRestartForSources }) => {
       if (
@@ -16832,10 +16881,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (sessionIsReplayOnly(recordingRef.current)) void stopReplayBuffer()
   }, [replayShape, stopReplayBuffer])
 
+  // A layout without the camera it waited for (screen-only) can start now.
+  const replayLayoutPreset = captureConfig.layout.layoutPreset
+  useEffect(() => {
+    if (!replayWaitingForCameraRef.current) return
+    replayWaitingForCameraRef.current = false
+    scheduleReplayReconcile()
+  }, [replayLayoutPreset, scheduleReplayReconcile])
+
+  // A ring that waits for the camera starts on its live edge.
+  const previewCameraState = previewCameraStatus.state
+  useEffect(() => {
+    if (!replayWaitingForCameraRef.current || previewCameraState !== 'live') return
+    replayWaitingForCameraRef.current = false
+    scheduleReplayReconcile()
+  }, [previewCameraState, scheduleReplayReconcile])
+
   const setReplayArmed = useCallback(
     (armed: boolean): void => {
       replayArmedRef.current = armed
       replayFailedStartsRef.current = 0
+      replayWaitingForCameraRef.current = false
       setReplayArmedState(armed)
       scheduleReplayReconcile(0)
     },

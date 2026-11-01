@@ -51,6 +51,7 @@ import {
   nativeImage,
   nativeTheme,
   net,
+  powerSaveBlocker,
   protocol,
   safeStorage,
   screen,
@@ -391,6 +392,7 @@ import {
   decideDockVisibility,
   parseDockSlotReport,
   parsePreviewWindowMode,
+  previewWindowClosePrefs,
   type DockHiddenReason,
   type DockSlot,
   type DockSlotReport,
@@ -427,6 +429,7 @@ import {
 import { installContextMenu } from './context-menu'
 import { installAppMenu } from './app-menu'
 import { LiveExitGuard, type AppExitKind } from './exit-guard'
+import { DisplaySleepGuard } from './display-sleep-guard'
 import {
   appMenuReleaseNotesUrl,
   type AppMenuPageKey,
@@ -465,6 +468,8 @@ import {
   resolveGlassStyle,
   solidWindowBase,
   WINDOW_HEADER_HEIGHT,
+  WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY,
+  WINDOWS_PREVIEW_TITLE_BAR_OVERLAY,
   windowGlassOptions,
   windowGroundForMode,
   type AppliedGlass,
@@ -942,6 +947,12 @@ let mainPreviewProgramShape: ReturnType<typeof previewProgramShape> = null
 // Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
 // the renderer's End livestream question (exit-guard.ts).
 const liveExitGuard = new LiveExitGuard()
+// The display stays awake while a recording or livestream runs: a sleeping
+// display stops every ScreenCaptureKit stream (display-sleep-guard.ts).
+const displaySleepGuard = new DisplaySleepGuard(
+  () => powerSaveBlocker.start('prevent-display-sleep'),
+  (id) => powerSaveBlocker.stop(id)
+)
 let deferredPermissionRestartState: DeferredPermissionRestartState =
   idleDeferredPermissionRestartState
 let smokePreviewMotionServer: HttpServer | null = null
@@ -4620,7 +4631,9 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
     font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; cursor: default;
     user-select: none; -webkit-user-select: none; -webkit-app-region: drag; }
   .drag-bar { position: fixed; top: 0; left: 0; right: 0; height: ${WINDOW_HEADER_HEIGHT.preview}px;
-    display: flex; align-items: center; padding: 0 12px 0 88px; /* the shared traffic-light gutter */
+    /* macOS: the shared traffic-light gutter. Windows draws its caption
+       buttons over the right end (window-glass.ts). */
+    display: flex; align-items: center; padding: 0 12px 0 ${isMac ? 88 : 12}px;
     border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; box-sizing: border-box; }
   .drag-bar .label { color: ${DARK_WINDOW_PALETTE.textSecondary}; font-size: 12px; font-weight: 600;
     white-space: nowrap; }
@@ -4688,8 +4701,8 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     minHeight: docked ? 1 : 208,
     title: WINDOW_NAMES.preview,
     // window-glass.ts: real material pinned dark and the traffic lights centred
-    // on the 28px strip on macOS; off macOS the standard frame and solid base
-    // keep the window draggable without renderer drag regions.
+    // on the 28px strip on macOS; Windows drops the OS title bar for caption
+    // buttons on the strip, so the strip and video drag the window there too.
     ...previewChrome.options,
     // A docked window stays hidden until the renderer answers the dock epoch
     // with a slot rect; showing it at the remembered FLOATING frame first would
@@ -4779,10 +4792,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
         currentPreviewWindowMode() === 'docked'
           ? (previewWindowFloatingFrame ?? previewWindowLastFrame)
           : window.getBounds()
-      savePreviewWindowPrefs({
-        ...(previewWindowLastFrame ? { frame: previewWindowLastFrame } : {}),
-        open: false
-      })
+      savePreviewWindowPrefs(previewWindowClosePrefs(previewWindowLastFrame, appIsQuitting))
     }
   })
   window.on('closed', () => {
@@ -4875,6 +4885,7 @@ function applyDockedPreviewChrome(window: BrowserWindow): void {
     window.setWindowButtonVisibility(false)
     window.setHasShadow(false)
   }
+  setWindowsPreviewCaptionButtonsVisible(window, false)
   window.setAlwaysOnTop(false)
   window.setIgnoreMouseEvents(true)
   previewWindowMouseEventsIgnored = true
@@ -4890,8 +4901,28 @@ function removeDockedPreviewChrome(window: BrowserWindow): void {
     window.setWindowButtonVisibility(true)
     window.setHasShadow(true)
   }
+  setWindowsPreviewCaptionButtonsVisible(window, true)
   if (previewWindowAlwaysOnTop) {
     window.setAlwaysOnTop(true, 'floating')
+  }
+}
+
+// The Windows twin of setWindowButtonVisibility: the Preview's caption buttons
+// (window-glass.ts) cannot be removed after creation, so docked they turn
+// transparent. Cosmetic only: a failed update never breaks placement.
+function setWindowsPreviewCaptionButtonsVisible(window: BrowserWindow, visible: boolean): void {
+  if (!isWindows) return
+  try {
+    window.setTitleBarOverlay(
+      visible
+        ? {
+            color: WINDOWS_PREVIEW_TITLE_BAR_OVERLAY.color,
+            symbolColor: WINDOWS_PREVIEW_TITLE_BAR_OVERLAY.symbolColor
+          }
+        : { ...WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY }
+    )
+  } catch (error) {
+    console.warn('[preview-window] could not update the caption buttons', error)
   }
 }
 
@@ -10204,6 +10235,7 @@ function disconnectBackendEventSocket(): void {
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
+  displaySleepGuard.update(mainCaptureState)
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -10239,6 +10271,7 @@ function retireBackendEventSocket(
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
+  displaySleepGuard.update(mainCaptureState)
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -12876,7 +12909,7 @@ async function runSmokePreviewMotionCommand(
         input: { x: number; y: number; width: number; height: number }
       }
       const contentBounds = previewWindow.getContentBounds()
-      const windowBounds = previewWindow.getBounds()
+      const videoBounds = previewWindowVideoBounds(previewWindow)
       const physicalPoint = (rect: { x: number; y: number; width: number; height: number }) =>
         screen.dipToScreenPoint({
           x: Math.round(contentBounds.x + rect.x + rect.width / 2),
@@ -12885,14 +12918,13 @@ async function runSmokePreviewMotionCommand(
       return {
         prepared: true,
         inputPoint: physicalPoint(rects.input),
-        // The window's top edge: a synthetic drag anywhere in the client area
-        // (strip or video) does not move Preview on Windows, with the proof
-        // surface as much as with the presenter. That is tracked separately.
+        // A grab in the video, below the input target: it lands on Preview's
+        // own drag surface through the click-through presenter.
         dragPoint: screen.dipToScreenPoint({
-          x: Math.round(windowBounds.x + windowBounds.width / 2),
-          y: Math.round(windowBounds.y + 12)
+          x: Math.round(videoBounds.x + videoBounds.width / 2),
+          y: Math.round(videoBounds.y + videoBounds.height * 0.7)
         }),
-        initialBounds: windowBounds,
+        initialBounds: previewWindow.getBounds(),
         presenter,
         previewFocused: previewWindow.isFocused(),
         webContentsFocused: previewWindow.webContents.isFocused()
@@ -14466,6 +14498,7 @@ function updateMainCaptureState(payload: RecordingStatus): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
+  displaySleepGuard.update(nextState)
   const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {

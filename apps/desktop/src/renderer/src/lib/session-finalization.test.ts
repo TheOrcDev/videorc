@@ -5,6 +5,7 @@ import {
   FinalizationSnapshotJournal,
   finalizationEventNeedsRefresh,
   finalizationFailed,
+  finalizationNoticesForRows,
   finalizingBadgeLabel,
   interruptedTakeBadge,
   isFinalizingSession,
@@ -204,4 +205,58 @@ it('keeps completion and retry events newer than an in-flight Library snapshot',
   ).toMatchObject({ finalizationState: 'finalizing', finalizationError: undefined })
   const fresh = [row({ finalizationState: 'finalized' })]
   expect(journal.reconcile(fresh, journal.checkpoint())).toBe(fresh)
+})
+
+describe('finalizationNoticesForRows', () => {
+  it('restores Saving MP4 after a relaunch, then says MP4 ready once', () => {
+    const active = new Set<string>()
+    const announced = new Set<string>()
+    expect(
+      finalizationNoticesForRows(
+        [row({ finalizationState: 'finalizing', finalizationProgressPercent: 40 })],
+        active,
+        announced
+      )
+    ).toEqual([{ kind: 'finalizing', sessionId: 's-1', label: 'Saving MP4 · 40%' }])
+    expect(
+      finalizationNoticesForRows([row({ finalizationState: 'finalized' })], active, announced)
+    ).toEqual([{ kind: 'ready', sessionId: 's-1' }])
+    expect(
+      finalizationNoticesForRows([row({ finalizationState: 'finalized' })], active, announced)
+    ).toEqual([])
+  })
+
+  it('a stale finalizing row after the finalized event never reopens Saving MP4', () => {
+    // E2E 2026-11-01, traced in the dev app: the `finalized` handler showed
+    // "MP4 ready", then the effect of an earlier commit (row still at 98%)
+    // reopened "Saving MP4 · 98%", and the settled row found the take
+    // announced, so the loading toast never closed.
+    const active = new Set(['s-1'])
+    const announced = new Set<string>()
+    // The `finalized` event handler announces the take.
+    announced.add('s-1')
+    expect(
+      finalizationNoticesForRows(
+        [row({ finalizationState: 'finalizing', finalizationProgressPercent: 98 })],
+        active,
+        announced
+      )
+    ).toEqual([])
+    expect(
+      finalizationNoticesForRows([row({ finalizationState: 'finalized' })], active, announced)
+    ).toEqual([])
+    expect(active.has('s-1')).toBe(false)
+  })
+
+  it('reports a failed export a row opened, with its error', () => {
+    const active = new Set(['s-1'])
+    expect(
+      finalizationNoticesForRows(
+        [row({ finalizationState: 'failed', finalizationError: 'disk full' })],
+        active,
+        new Set()
+      )
+    ).toEqual([{ kind: 'failed', sessionId: 's-1', error: 'disk full' }])
+    expect(active.size).toBe(0)
+  })
 })

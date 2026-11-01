@@ -1120,6 +1120,20 @@ impl SaveRefusal {
 /// the renderer, which then keeps the switch off and says why.
 pub const SOFTWARE_ENCODER_REFUSAL_CODE: &str = "replay-software-encoder";
 
+/// The `session.start` error code for an automatic buffer-only start whose
+/// scene shows a camera that has not delivered a frame yet. Not a failure:
+/// the renderer starts the ring again once the camera goes live.
+pub const SOURCES_NOT_READY_CODE: &str = "replay-sources-not-ready";
+
+/// An automatic buffer-only start refused before its probes because the
+/// scene's camera has no frame yet. At launch the renderer asks for the ring
+/// before the camera preview starts; it could only be refused after the
+/// encoder probes, the microphone and the source wait, holding the ordered
+/// command lane for 2-7 s ahead of the camera start.
+#[derive(Debug, thiserror::Error)]
+#[error("Clips start once the camera preview delivers its first frame.")]
+pub struct AutoStartSourcesNotReady;
+
 /// Why an automatic buffer-only start was refused (owner redesign, guard):
 /// the ring on a raw CPU encode path is a second encode on a computer that
 /// already struggles with one, so it never runs on its own there. The user

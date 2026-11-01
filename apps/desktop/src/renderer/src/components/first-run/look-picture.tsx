@@ -228,8 +228,10 @@ export function LookPicture({
               height: `${boxHeight * 100}%`
             }}
           >
-            <Badge className="max-w-full truncate" variant="neutral">
-              {name}
+            {/* The text truncates, not the chip: a flex chip centers an
+                overflowing name and clips both ends (and its dot). */}
+            <Badge className="max-w-full" variant="neutral">
+              <span className="truncate">{name}</span>
             </Badge>
           </div>
         )
