@@ -2348,7 +2348,7 @@ fn emit_terminal_camera_recovery_warning(state: &AppState) {
         None,
         HealthLevel::Warn,
         "camera-degraded-restart-failed",
-        "The camera is delivering frames far below its target rate and automatic restarts did not recover it. Check the camera connection, or restart Videorc.",
+        "The camera is delivering frames far below its target rate and automatic restarts did not recover it. Reconnect the camera, or choose another camera.",
     );
 }
 
@@ -2864,6 +2864,9 @@ async fn handle_capture_health_transition_with_driver(
         } => {
             let (recovery_stage, scope) = match stage {
                 CaptureStage::CameraDelivery => {
+                    if state.preview_camera.lock().await.status.state == PreviewCameraState::Disconnected {
+                        return capture_recovery_status(&state).await;
+                    }
                     let scope = camera_epoch.map(|epoch| {
                         CaptureRecoveryScope::camera(epoch.source_key, epoch.generation)
                     });

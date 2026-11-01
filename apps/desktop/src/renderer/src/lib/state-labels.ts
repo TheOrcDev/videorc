@@ -56,6 +56,7 @@ const PREVIEW_SOURCE_STATE_LABELS: Record<PreviewCameraState | PreviewScreenStat
   // The preview's `device-missing` / `source-missing` is also its idle state
   // (plan 173): a connected source whose preview is not running reports it,
   // so it reads "Not running", never "Not found".
+  disconnected: 'Disconnected',
   'device-missing': 'Not running',
   'source-missing': 'Not running',
   failed: 'Failed'

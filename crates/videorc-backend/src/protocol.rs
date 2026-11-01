@@ -4173,6 +4173,7 @@ pub struct CameraCapabilityFormat {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewCameraState {
+    Disconnected,
     Starting,
     Live,
     PermissionNeeded,

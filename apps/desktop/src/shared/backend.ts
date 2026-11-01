@@ -2856,6 +2856,7 @@ export interface PreviewSurfaceBoundsParams {
 }
 
 export type PreviewCameraState =
+  | 'disconnected'
   | 'starting'
   | 'live'
   | 'permission-needed'
