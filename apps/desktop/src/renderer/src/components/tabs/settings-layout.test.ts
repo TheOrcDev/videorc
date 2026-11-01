@@ -99,7 +99,9 @@ describe('Settings layout', () => {
       pageSource.indexOf('function ConfigGrid'),
       pageSource.indexOf('const CONFIG_GRID_PAIR')
     )
-    expect(configGrid).toContain("'grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r'")
+    expect(configGrid).toContain(
+      "'grid @min-[940px]/page:grid-cols-2 @min-[940px]/page:[&>*:nth-child(odd)]:border-r'"
+    )
     expect(configGrid).not.toMatch(/\bgap-\d/)
   })
 
@@ -179,7 +181,7 @@ describe('Settings layout', () => {
   })
 
   it('pairs multi-section tabs side by side and stacks single-section tabs', () => {
-    // At `lg` the pair fills the visible height with one stretched row, so the
+    // In two columns the pair fills the visible height with one stretched row, so the
     // column hairline runs the full height; stacked, rows keep content height.
     // One pair class for every two-section tab (plan 174 S1.6a, I-33).
     expect(shellSource).toContain('CONFIG_GRID_PAIR')
@@ -201,8 +203,9 @@ describe('Settings layout', () => {
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
     // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
     // (PageTabs), so the shell keeps no list of such pages.
-    // PaneBody may be keyed to reset each page to its top. Check scroll
-    // ownership regardless of the presence or order of other props.
+    // PaneBody may be keyed to reset each page to its top and carry
+    // PAGE_CONTAINER for responsive columns. Check scroll ownership
+    // regardless of the presence or order of those props.
     const paneBodies = openingTags(appShellSource, 'PaneBody')
     expect(paneBodies).toHaveLength(1)
     expect(paneBodies[0]).not.toMatch(/\bscroll\s*=/)

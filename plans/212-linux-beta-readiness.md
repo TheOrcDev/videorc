@@ -2547,3 +2547,37 @@ first-run/preview stability and all outstanding Beta acceptance remain open.
 Verification for the retained tooling: all 3,047 Node tests pass with zero
 skips; all 12 focused EOF/packet-tail tests pass. Changed-script lint, formatting,
 syntax and diff checks pass. Native runtime code and quality limits are unchanged.
+
+### Responsive-layout main merge, 2026-11-01
+
+Integrated main `3e0dc25e5c26ccb6dade5d9b9ca3159f4f782cc6`, including
+the larger click targets and responsive page containers from #1001 and #1003.
+The only conflict was the Settings scroll-ownership assertion. Its opening-tag
+inspection now accepts the page container and keyed body while still refusing
+a shell-owned scroll prop. The imported page-layout tests retain coverage of
+the container and key. The first-run chunk-loading and deferred workspace
+prefetch fixes remain intact.
+
+On the resolved source, all 273 focused desktop tests (11 files) and four
+Node layout-check tests pass. Typecheck, lint, formatting, production build
+and diff checks pass. The full Node suite passes all 3,051 tests with zero
+skips. The full desktop suite passes all 615 files: 6,765 tests pass and one
+is skipped. The skip is not acceptance evidence. The owned supervisor exits
+successfully with no forced orphan cleanup or leaked PIDs; individual child
+exit records remain in its receipt.
+
+`pnpm ui:check` **fails**: the responsive `components/page.tsx` imported
+byte-for-byte from main differs from the published `@videorc/page` component.
+This dependency is also acknowledged in
+<https://github.com/TheOrcDev/videorc/pull/1003>: the shared-component change
+must be published from videorc-ui before the registry check can pass. The
+failure is retained, with no local sync that would undo the responsive layout.
+
+Private commands, source tree identity, logs and cleanup receipts are under
+`~/.cache/videorc-linux-beta-evidence/merge-main3e0d-h_t027p4/`. Rust inputs
+are unchanged by this merge, so earlier native results, including the Metal
+and Windows failures, remain prior evidence rather than fresh validation.
+No runtime smoke or exact AppImage acceptance is claimed for this merge.
+Registry publication, the existing runtime and feature gaps, physical passes,
+endurance, pilot, update/rollback, workflow correction and protected release
+remain open. No Linux Beta candidate has been accepted or published.
