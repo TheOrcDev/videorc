@@ -104,6 +104,11 @@ import {
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
 import { plural } from '@/lib/format'
+import {
+  CLEAN_CUT_REVIEW_GRID,
+  CLEAN_CUT_REVIEW_PLAYER,
+  CLEAN_CUT_REVIEW_PLAYER_PANE
+} from '@/lib/page-layout'
 import { isCommandKey } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { sessionIsLive, sessionOwnsTransport } from '../../../../shared/capture-state'
@@ -709,11 +714,12 @@ export function CleanCutReview({
       </header>
 
       {load.kind === 'ready' && data ? (
-        // Two panes from the lg breakpoint (the player beside the transcript);
-        // below it the player sits beside its controls, above the transcript.
-        <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-          <div className="flex shrink-0 gap-4 border-b border-border p-gutter lg:min-h-0 lg:flex-col lg:gap-3 lg:overflow-y-auto lg:border-r lg:border-b-0">
-            <div className="w-[min(22rem,50%)] shrink-0 lg:w-full">
+        // Two panes from the page's wide width (the player beside the
+        // transcript); below it the player sits beside its controls, above
+        // the transcript (plan 213 C3).
+        <div className={CLEAN_CUT_REVIEW_GRID}>
+          <div className={CLEAN_CUT_REVIEW_PLAYER_PANE}>
+            <div className={CLEAN_CUT_REVIEW_PLAYER}>
               {playable ? (
                 <Suspense fallback={<PlayerPlaceholder label="Loading the player…" />}>
                   <SessionPlayer
