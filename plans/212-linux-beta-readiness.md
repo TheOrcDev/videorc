@@ -2203,3 +2203,38 @@ the prior camera-start failure nor private-benchmark shutdown overrun is resolve
 No identical retry or relaxed motion/privacy/shutdown limit is used. This remains
 development evidence, not physical candidate acceptance. Classification:
 `/home/orcdev/.cache/videorc-linux-beta-evidence/source-request-trace-runtime-classification.json`.
+
+### Windows installer recovery-probe handshake, 2026-11-01
+
+The Windows installer job on `5017bf97` builds successfully and passes packaged
+capture-worker validation, live microphone controls, 1080p recording duration/A/V,
+native DXGI/GDI ScreenOnly capture/BMP preview, and preview during recording.
+The separate CDP-enabled test package passes five window scenarios, but its
+crash-recovery case fails. Installer upload does not run. Job:
+<https://github.com/TheOrcDev/videorc/actions/runs/41279177796/job/124767487650>.
+
+The failed probe reports `crashed: true` despite having no renderer-exit or
+reload log, and the retained desktop screenshot still shows a mounted UI. Its
+implementation returned true after a 500 ms sleep and discarded the `Page.crash`
+response/error. Actual crash injection is unproven; these observations alone do
+not establish a product recovery regression.
+
+The probe now enables CDP Inspector observations before requesting the crash,
+keeps its connection until an explicit `Inspector.targetCrashed` event or bounded
+deadline, and retains protocol errors. An ordinary command response, socket
+closure, refused command or elapsed time cannot count as a crash. Remount and
+both backend log witnesses remain required, with the same 45-second recovery
+budget. Production recovery code and the installer-under-test bytes are unchanged.
+
+The 28 focused gate, package-isolation and observer tests pass. All 11 observer
+tests pass in 25 Linux repetitions; the full Node suite passes 3,025 tests with
+zero skips. Formatting, syntax and diff checks pass. These portable results are
+not native Windows stability evidence: the PowerShell 7 repetitions, three full
+Windows Rust suites and corrected packaged recovery smoke remain owed on the new
+head. No superseded-head retry or waiver is used.
+
+Failed-run artifact, log hashes and classification:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/windows-installer-job-124767487650-classification.json`.
+Local verification: `renderer-crash-observer-tests.log`,
+`renderer-crash-observer-tests-cleanup.json` and
+`renderer-crash-observer-repeat.json` in the same directory.
