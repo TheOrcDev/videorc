@@ -739,6 +739,9 @@ const BUDDY_LIBRARY_FOCUS_SYNC_MS = 60_000
 // keeps the post-capture replay from racing Main into a second deferral.
 const ACCOUNT_REFRESH_IDLE_REPLAY_DELAY_MS = 1_000
 const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
+// The engine dropped this window's socket but may still be running: how long
+// to wait before each quiet check that it still answers.
+const ENGINE_RECONNECT_DELAY_MS = 2_000
 /// Scene-motion duration: content motion on-air sits just above the UI's
 /// 100-150ms tier; >=500ms reads as a broadcast wipe.
 const SCENE_TRANSITION_MS = 320
@@ -7196,6 +7199,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const nextClient = new BackendClient(connection)
     const platformBootstrapClient = new BackendClient(connection)
+    let engineReconnectTimer: number | null = null
+    // The engine closes a socket whose replies sat unread too long (a renderer
+    // stalled by a busy machine) and keeps running. Main only pushes a
+    // connection when the engine (re)starts, so nothing else would bring this
+    // window back. While Main still reports this engine, ping it quietly on a
+    // fresh socket; once it answers, a fresh connection object re-runs this
+    // effect as a restart would. An engine stopping for a restart fails the
+    // ping, and its successor arrives through onBackendConnection.
+    const reconnectAfterEngineDrop = (): void => {
+      if (disposed || engineReconnectTimer !== null) return
+      engineReconnectTimer = window.setTimeout(() => {
+        engineReconnectTimer = null
+        void (async () => {
+          const current = await window.videorc.getBackendConnection()
+          if (
+            disposed ||
+            !current ||
+            current.host !== connection.host ||
+            current.port !== connection.port ||
+            current.token !== connection.token
+          ) {
+            return
+          }
+          const probe = new BackendClient(current)
+          try {
+            await probe.connect()
+            await probe.request<BackendHealth>('health.ping')
+          } finally {
+            probe.close()
+          }
+          if (!disposed) setConnection({ ...current })
+        })().catch(() => reconnectAfterEngineDrop())
+      }, ENGINE_RECONNECT_DELAY_MS)
+    }
     const bootstrapRequest = <TPayload,>(method: string, params?: unknown): Promise<TPayload> =>
       nextClient.request<TPayload>(method, params, { signal: bootstrapAbort.signal })
     const bootstrapGuard = new StudioBootstrapGuard()
@@ -8425,6 +8462,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('connection.closed', () => {
         soundboard.disconnect(nextClient)
         setWsStatus('closed')
+        reconnectAfterEngineDrop()
       })
     ]
 
@@ -8870,6 +8908,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null
+      }
+      if (engineReconnectTimer !== null) {
+        window.clearTimeout(engineReconnectTimer)
+        engineReconnectTimer = null
       }
       platformBootstrapClient.close()
       nativePreviewCompositorPendingRef.current = null
