@@ -2238,3 +2238,47 @@ Failed-run artifact, log hashes and classification:
 Local verification: `renderer-crash-observer-tests.log`,
 `renderer-crash-observer-tests-cleanup.json` and
 `renderer-crash-observer-repeat.json` in the same directory.
+
+### Windows source-gate portability correction, 2026-11-01
+
+The current `c335e9ac` Windows source job, tested on merge tree `62a91d9`,
+passes Clippy, the existing 25-pass preview/source/audio stability groups, and
+three full Rust suites. Each full suite passes 4,205 backend tests with 20
+ignored, 24 bridge tests and both single-test targets. All 609 desktop test
+files pass: 6,682 tests pass and five are skipped. This confirms the earlier
+Windows icon-glob correction. These skips remain explicit, not acceptance.
+
+The Node gate passes 2,911 tests, skips 99 and fails one: the Linux render-node
+planner uses host-native `node:path.join` for its Linux sysfs path. On Windows,
+that produces backslashes even though the fixture selects a Linux target. The
+planner now explicitly uses `node:path/posix`; device authorization, card
+ownership checks and mount isolation remain unchanged. The existing fixture
+reproduces the exact Windows path mismatch locally when `node:path` is routed
+to `node:path/win32`, and all three fixture tests pass after the correction.
+That controlled reproduction is not a native Windows run.
+
+All 3,025 Node tests pass locally with zero skips after the correction. The
+owned test supervisor sends no cleanup signals and leaves no descendants;
+focused path tests and explicit module/document formatting checks also pass.
+
+The actual corrected wrapper on Ogre still exposes exactly `card1` and
+`renderD128`, with Mesa preference `pci-0000_00_02_0`; no other GPU is probed.
+The source job did not reach formatting, TypeScript, ESLint or advisory audits
+after the Node failure. Fresh CI must complete the source gate. Job:
+<https://github.com/TheOrcDev/videorc/actions/runs/41281490434/job/124774256529>.
+
+The separate current-head installer job passes build/upload, packaged capture,
+audio and preview checks, plus all six recovery scenarios. The crash case has
+an explicit `Inspector.targetCrashed` event, both renderer-exit/reload log
+witnesses and a remounted UI. This proves the corrected probe on the separate
+CDP test package; it does not replace native repeated observer verification or
+Linux candidate acceptance. Job:
+<https://github.com/TheOrcDev/videorc/actions/runs/41281490434/job/124774256442>.
+
+Windows diagnostics still fail 36 independent streaming controls on
+114–264 ms audio tails against the unchanged 100 ms limit, with six cases
+also failing frame count. The 48 controlled-audio cases and 50 standalone
+PCM EOF candidates pass; the earlier 10.219-second encoder-start outlier is
+retained as unresolved. Linux runtime, physical acceptance and publication
+gates remain open. Evidence and hashes are under
+`/home/orcdev/.cache/videorc-linux-beta-evidence/`.

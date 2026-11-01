@@ -1,5 +1,6 @@
 import { readdirSync, realpathSync, statSync } from 'node:fs'
-import { basename, join } from 'node:path'
+// These paths belong to Linux sysfs even when the planner is tested on Windows.
+import { basename, join } from 'node:path/posix'
 
 // Scope device visibility to this command and its descendants. VAAPI's pin
 // alone does not constrain Chromium, Mesa, or Vulkan device selection.
