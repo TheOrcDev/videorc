@@ -467,6 +467,8 @@ import {
   resolveGlassStyle,
   solidWindowBase,
   WINDOW_HEADER_HEIGHT,
+  WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY,
+  WINDOWS_PREVIEW_TITLE_BAR_OVERLAY,
   windowGlassOptions,
   windowGroundForMode,
   type AppliedGlass,
@@ -4882,6 +4884,7 @@ function applyDockedPreviewChrome(window: BrowserWindow): void {
     window.setWindowButtonVisibility(false)
     window.setHasShadow(false)
   }
+  setWindowsPreviewCaptionButtonsVisible(window, false)
   window.setAlwaysOnTop(false)
   window.setIgnoreMouseEvents(true)
   previewWindowMouseEventsIgnored = true
@@ -4897,8 +4900,28 @@ function removeDockedPreviewChrome(window: BrowserWindow): void {
     window.setWindowButtonVisibility(true)
     window.setHasShadow(true)
   }
+  setWindowsPreviewCaptionButtonsVisible(window, true)
   if (previewWindowAlwaysOnTop) {
     window.setAlwaysOnTop(true, 'floating')
+  }
+}
+
+// The Windows twin of setWindowButtonVisibility: the Preview's caption buttons
+// (window-glass.ts) cannot be removed after creation, so docked they turn
+// transparent. Cosmetic only: a failed update never breaks placement.
+function setWindowsPreviewCaptionButtonsVisible(window: BrowserWindow, visible: boolean): void {
+  if (!isWindows) return
+  try {
+    window.setTitleBarOverlay(
+      visible
+        ? {
+            color: WINDOWS_PREVIEW_TITLE_BAR_OVERLAY.color,
+            symbolColor: WINDOWS_PREVIEW_TITLE_BAR_OVERLAY.symbolColor
+          }
+        : { ...WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY }
+    )
+  } catch (error) {
+    console.warn('[preview-window] could not update the caption buttons', error)
   }
 }
 

@@ -165,8 +165,12 @@ async function main() {
   if (expectWindowsD3d11) {
     // No synthetic source here: its test-pattern scene commit can land after
     // the probe's ScreenOnly commit (each socket has its own ordered lane),
-    // leaving every preview frame source-stalled.
-    await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
+    // leaving every preview frame source-stalled. This is the first command,
+    // so it waits for the shell the way the synthetic source does below.
+    await smokeCommandWhenShellReady('open-tab', {
+      tab: 'studio',
+      waitFor: '[data-videorc-preview-card]'
+    })
     const screenId = await configureWindowsD3d11ProbeSources({
       backendConnection: launched.connections['backend-ready'],
       smokeCommand,

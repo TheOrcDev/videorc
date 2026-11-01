@@ -245,6 +245,16 @@ export const WINDOWS_PREVIEW_TITLE_BAR_OVERLAY = Object.freeze({
   height: WINDOW_HEADER_HEIGHT.preview
 })
 
+/**
+ * Docked, the Preview has no strip and ignores the mouse, and Electron cannot
+ * remove a Window Controls Overlay once the window exists: the caption
+ * buttons go fully transparent instead, so none sit over the docked video.
+ */
+export const WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY = Object.freeze({
+  color: 'rgba(0, 0, 0, 0)',
+  symbolColor: 'rgba(0, 0, 0, 0)'
+})
+
 // The Preview promises that a grab anywhere in its strip or video moves it.
 // A framed Windows window cannot keep that promise: Electron's WinFrameView
 // hands a framed window's hit test to the client view, so
