@@ -72,6 +72,7 @@ struct FragParams {
     // crop_clamp (plan 200 D3) keeps a linear sample half a texel inside the
     // crop so a scaled draw never blends in pixels the crop removed.
     float4 layer;
+    float4 camera_look; // brightness, contrast, saturation, enabled
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -170,6 +171,12 @@ fragment float4 f_main(VOut in [[stage_in]],
         }
         color.a *= alpha;
     }
+    if (params.camera_look.w > 0.5) {
+        float y = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
+        color.rgb = clamp(y + params.camera_look.x
+            + (params.camera_look.y - 1.0) * (y - 0.5)
+            + params.camera_look.z * (color.rgb - y), 0.0, 1.0);
+    }
     color.a *= params.layer.x;
     return color;
 }
@@ -194,6 +201,7 @@ struct FragParams {
     chroma_key2: [f32; 4],
     /// (opacity, reserved, reserved, reserved); see the MSL comment.
     layer: [f32; 4],
+    camera_look: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -273,6 +281,8 @@ pub struct GpuSource<'a> {
     /// Chroma key applied in the fragment shader (camera green screen). The
     /// caller must also set `blend` or the computed alpha is ignored.
     pub chroma_key: Option<GpuChromaKey>,
+    /// Brightness, contrast and saturation in gamma-encoded RGB.
+    pub camera_look: Option<[f32; 3]>,
     /// A turned quad (plan 168 S-B2, the Buddy sprite): the source's corners
     /// in normalized [0,1] canvas coords, top-left origin, in the order
     /// top-left, top-right, bottom-left, bottom-right of the (cropped)
@@ -1523,6 +1533,9 @@ impl MetalSceneCompositor {
                 radius: source.mask.shader_radius(),
                 chroma_key,
                 chroma_key2,
+                camera_look: source
+                    .camera_look
+                    .map_or([0.0, 1.0, 1.0, 0.0], |[b, c, s]| [b, c, s, 1.0]),
                 layer: [
                     source.opacity.clamp(0.0, 1.0),
                     // Only a draw D3 moved to linear: explicit linear quads
@@ -2751,6 +2764,7 @@ fn encode_texture_present(
         chroma_key: [0.0; 4],
         chroma_key2: [0.0; 4],
         layer: [1.0, 0.0, 0.0, 0.0],
+        camera_look: [0.0, 1.0, 1.0, 0.0],
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -3016,6 +3030,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -3581,6 +3596,7 @@ mod tests {
             mask,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -3892,6 +3908,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3911,6 +3928,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3943,6 +3961,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -3962,6 +3981,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -4065,6 +4085,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4114,6 +4135,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4207,6 +4229,7 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                camera_look: None,
                 corners: None,
                 sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                 opacity: 1.0,
@@ -4367,6 +4390,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4474,6 +4498,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4525,6 +4550,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -4714,6 +4740,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,

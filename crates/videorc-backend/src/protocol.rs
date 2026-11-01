@@ -460,7 +460,11 @@ pub struct CameraLook {
 
 impl Default for CameraLook {
     fn default() -> Self {
-        Self { brightness: 0.0, contrast: 1.0, saturation: 1.0 }
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
     }
 }
 
@@ -7638,8 +7642,16 @@ mod tests {
         graded.camera_look = look;
         let wire = serde_json::to_value(&graded).unwrap();
         assert_eq!(wire["cameraLook"], look_wire);
-        assert_eq!(serde_json::from_value::<LayoutSettings>(wire).unwrap(), graded);
-        assert!(serde_json::to_value(default_layout_settings()).unwrap().get("cameraLook").is_none());
+        assert_eq!(
+            serde_json::from_value::<LayoutSettings>(wire).unwrap(),
+            graded
+        );
+        assert!(
+            serde_json::to_value(default_layout_settings())
+                .unwrap()
+                .get("cameraLook")
+                .is_none()
+        );
         let legacy_layout = shared_high_risk_contract_fixture_value("/layout/legacyWire");
         assert!(legacy_layout.get("sourceVisibility").is_none());
         let expected_layout = shared_high_risk_contract_fixture_value("/layout/normalized");

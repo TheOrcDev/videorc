@@ -66,6 +66,8 @@ const ENCODER_BRIDGE_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub struct DirectD3D11CameraOverlay {
     pub source: PreviewCameraFrameSource,
+    pub compositor: crate::compositor::CompositorSlot,
+    pub camera_look: crate::protocol::CameraLook,
     pub destination: PixelRect,
     pub crop: SceneCrop,
     pub contain: bool,
@@ -3780,6 +3782,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut direct_camera_overlay_bytes = Vec::new();
     #[cfg(target_os = "windows")]
     let mut direct_camera_overlay_sequence = None::<u64>;
+    #[cfg(target_os = "windows")]
+    let mut direct_camera_overlay_look = None::<crate::protocol::CameraLook>;
+    #[cfg(target_os = "windows")]
+    let mut direct_camera_overlay_revision = 0_u64;
     #[cfg(target_os = "macos")]
     let mut pending_video_toolbox_output_started_at = HashMap::<u64, Instant>::new();
     #[cfg(target_os = "macos")]
@@ -5008,8 +5014,22 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                     .as_ref()
                                     .zip(direct_camera_frame.as_ref())
                                     .map(|(config, camera_frame)| {
+                                        let look = config
+                                            .compositor
+                                            .try_lock()
+                                            .ok()
+                                            .and_then(|runtime| {
+                                                runtime
+                                                    .status
+                                                    .scene_layout
+                                                    .as_ref()
+                                                    .map(|layout| layout.camera_look)
+                                            })
+                                            .or(direct_camera_overlay_look)
+                                            .unwrap_or(config.camera_look);
                                         if direct_camera_overlay_sequence
                                             != Some(camera_frame.sequence)
+                                            || direct_camera_overlay_look != Some(look)
                                         {
                                             if !render_camera_overlay_bgra(
                                                 &camera_frame.bytes,
@@ -5021,6 +5041,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                                 config.contain,
                                                 config.mirror_x,
                                                 config.mask,
+                                                look,
                                                 &mut direct_camera_overlay_bytes,
                                             ) {
                                                 return Err(io::Error::other(
@@ -5029,12 +5050,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                             }
                                             direct_camera_overlay_sequence =
                                                 Some(camera_frame.sequence);
+                                            direct_camera_overlay_look = Some(look);
+                                            direct_camera_overlay_revision =
+                                                direct_camera_overlay_revision.wrapping_add(1);
                                         }
                                         Ok(D3D11BgraOverlay {
                                             bytes: &direct_camera_overlay_bytes,
                                             width: config.destination.width,
                                             height: config.destination.height,
-                                            sequence: camera_frame.sequence,
+                                            sequence: direct_camera_overlay_revision,
                                             destination: config.destination,
                                         })
                                     })
@@ -12297,6 +12321,7 @@ mod tests {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
