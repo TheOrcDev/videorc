@@ -206,10 +206,25 @@ fn secrets_path() -> PathBuf {
     if let Some(custom) = std::env::var_os("VIDEORC_SECRETS_PATH") {
         return PathBuf::from(custom);
     }
+    // A unit test that writes a secret without isolating the store must never
+    // reach the developer's real one: `cargo test` replaced the real
+    // `remote-control.lan` and `agents.registry` with test fixtures.
+    #[cfg(test)]
+    if std::env::var_os("VIDEORC_DATABASE_PATH").is_none() {
+        return unit_test_secrets_path();
+    }
     crate::storage::default_database_path()
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+        .join("videorc-secrets.json")
+}
+
+/// One throwaway store per test process, outside every real profile.
+#[cfg(test)]
+fn unit_test_secrets_path() -> PathBuf {
+    std::env::temp_dir()
+        .join(format!("videorc-unit-test-secrets-{}", std::process::id()))
         .join("videorc-secrets.json")
 }
 
@@ -500,6 +515,25 @@ mod tests {
 
         clear_secret_store_env_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_unit_test_without_an_isolated_store_never_reaches_the_real_profile() {
+        let _guard = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The state every other module's test runs in: nothing set.
+        clear_secret_store_env_for_tests();
+        let real_store = crate::storage::default_database_path()
+            .parent()
+            .map(|dir| dir.join("videorc-secrets.json"))
+            .unwrap();
+
+        let path = secret_store_diagnostics().unwrap().path.unwrap();
+
+        assert_ne!(path, real_store);
+        assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+        clear_secret_store_env_for_tests();
     }
 
     #[test]
