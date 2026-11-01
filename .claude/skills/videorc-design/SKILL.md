@@ -431,6 +431,19 @@ Everything except ⌘K uses the desktop scale.
   `SourceItem` per source (`components/sources/source-item.tsx`), a header
   row (icon, title, one status chip, one quick control, More), a body
   indented to the title, and the rare settings folded into More.
+  - **What a stretched row lets through** (plan 213 A2). The row is
+    `relative`. Only its real controls (a switch, a button, a menu) are
+    positioned, each on its own (the Switch already is; wrap a Button in a
+    `relative` span), so they sit above the row's button. Trailing
+    decorations (tags, chips, status icons, a shortcut, the chevron) are
+    never positioned, and never inside a positioned wrapper with a control,
+    so a click on them acts as the row. A chevron that only pictures the
+    row's state is `aria-hidden` and `pointer-events-none`.
+  - **Hit areas.** A control's invisible hit area never reaches over a
+    neighbour's: trim the spill on the side that faces one (the destination
+    row's Switch spills 4 px toward its chevron, not 12). A disabled control
+    in a stretched row takes no click (`data-disabled:pointer-events-none`),
+    so the row opens and says why.
 - **Overflow menus.** Low-frequency per-item actions go in one `KebabMenu`
   (⋯): items grouped with a hairline between groups, destructive items last,
   each item's keys right-aligned, a spinner while an item's work runs.
