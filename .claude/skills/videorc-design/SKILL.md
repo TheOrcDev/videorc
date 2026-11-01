@@ -471,6 +471,13 @@ Everything except ⌘K uses the desktop scale.
     transcript and marker rows); a card's actions (`MediaCard`, the Buddy and
     Stream Manager cards); the Stream Manager's panes and status bar; a
     small inline action under a field (Reset, Calibrate).
+  - A compact control still takes a click across 28 × 28 px (plan 213 A4):
+    `xs` and `icon-xs` buttons, `xs` toggle group items and the status
+    bar's actions spill an invisible hit area (`styles.css`), so nothing
+    you can see grows. The status bar's spill only goes up and down, and an
+    input group's button stays out of its field. A call site whose spill
+    would reach a neighbour passes `before:hidden` (marker pins, View in
+    Discord).
   - A page's or a dialog's own actions stay 28 px, and so does a control
     beside a 28 px control in the same row.
   - There is no `sm` or `icon-sm`: both were 28 px under another name.
