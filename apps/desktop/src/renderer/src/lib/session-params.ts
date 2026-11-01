@@ -1,3 +1,4 @@
+import { cameraLookLayout } from './camera-look'
 import type { Scene, StartSessionParams } from './backend'
 import {
   captionsEnabledForSession,
@@ -56,7 +57,11 @@ export function buildStartSessionParams(input: {
 
   return {
     sources: captureConfig.sources,
-    layout: captureConfig.layout,
+    layout: cameraLookLayout(
+      captureConfig.layout,
+      captureConfig.sources.cameraId,
+      settings.cameraLooks
+    ),
     scene: includeScene ? (scene ?? undefined) : undefined,
     output: {
       recordEnabled: captureConfig.recordEnabled,
@@ -89,7 +94,14 @@ export function buildStartSessionParams(input: {
     },
     // Present only when a vertical destination is armed on a horizontal
     // session — the backend refuses vertical targets without this leg.
-    simulcast: buildSimulcastParams(captureConfig),
+    simulcast: buildSimulcastParams({
+      ...captureConfig,
+      layout: cameraLookLayout(
+        captureConfig.layout,
+        captureConfig.sources.cameraId,
+        settings.cameraLooks
+      )
+    }),
     // `auto` (redesign R2): a ring the user never asked for, which the
     // backend keeps off a software encoder path; a chosen one runs anywhere.
     // Plan 199: the ring always keeps the minute; only a smoke shortens it.

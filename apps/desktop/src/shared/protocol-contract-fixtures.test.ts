@@ -101,6 +101,7 @@ import { validateElectronEventPayload, validateElectronInvokeArgs } from './elec
 import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
 
 interface HighRiskContractFixtures {
+  cameraLook: NonNullable<LayoutSettings['cameraLook']>
   schemaVersion: 2
   sessionChatTotals: {
     params: { sessionId: string }
@@ -417,6 +418,31 @@ describe('shared high-risk protocol fixture', () => {
       orderAboveWindowId: 4242,
       elevated: false
     })
+  })
+
+  it('round trips camera looks through the strict RPC and IPC contracts and accepts legacy layouts', () => {
+    for (const cameraLook of [undefined, fixtures.cameraLook]) {
+      const layout = { ...fixtures.layout.normalized, ...(cameraLook ? { cameraLook } : {}) }
+      const params = { intentId: 1, layout, sources: {} }
+      expect(validateBackendRpcParams('scene.layout.apply_live', params)).toEqual(params)
+      const snapshot = { revision: 1, scene: null, layout, activeScreen: null }
+      expect(validateElectronInvokeArgs('preview-surface:update-scene', [snapshot])).toEqual([
+        snapshot
+      ])
+    }
+    for (const cameraLook of [
+      null,
+      { ...fixtures.cameraLook, extra: true },
+      { ...fixtures.cameraLook, saturation: 3 }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          intentId: 1,
+          layout: { ...fixtures.layout.normalized, cameraLook },
+          sources: {}
+        })
+      ).toThrow()
+    }
   })
 
   it('normalizes legacy layouts and validates the exact scene wire shape', () => {
