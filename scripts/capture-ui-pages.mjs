@@ -50,7 +50,8 @@ const launched = await launchDevApp({
     VIDEORC_SMOKE_COMMAND_SERVER: '1',
     VIDEORC_DISABLE_AUTO_PREVIEW: '1'
   },
-  onLine: () => {}
+  // The host queues (build slot, smoke lock, memory) say why a run waits.
+  onLine: (line) => { if (line.startsWith('[smoke:')) console.error(line) }
 })
 const smoke = launched.connections['preview-motion-ready']
 const cmd = async (command, params = {}) => {
@@ -75,10 +76,11 @@ const setTheme = async (theme) => {
   }
 }
 // Pages by tab id. The Buddy tab (id `ai`, ⌘9; plan 119) doubles as a probe:
-// it must render the Buddy Live switch (its Live tab, the first-run default;
-// plan 150), or the run fails at the end. The profile under the output folder
-// outlives a run and the tab reopens on the sub-tab used last, so the probe
-// selects Live itself.
+// it must render Buddy Live's status (its Profile tab, id `live`), or the run
+// fails at the end. The profile under the output folder outlives a run and
+// the tab reopens on the sub-tab used last, so the probe selects Profile
+// itself, with a click: Base UI tabs switch on click, not mousedown.
+// Health has no sidebar row: the status bar's state is its door (`door`).
 const pages = [
   { tab: 'studio' },
   { tab: 'ai', name: 'buddy', subTab: 'live', mustShow: '[data-slot="buddy-live-status"]' },
@@ -90,7 +92,7 @@ const pages = [
   { tab: 'recording' },
   { tab: 'library' },
   { tab: 'settings' },
-  { tab: 'diagnostics', name: 'health' }
+  { tab: 'diagnostics', name: 'health', door: '[data-slot="status-bar-state"]' }
 ]
 const failures = []
 const report = []
@@ -124,15 +126,19 @@ const shootStripTabs = async (name, selector, tag, size, theme) => {
   return tabs
 }
 const shootAll = async (tag, size, theme) => {
-  for (const { tab, name = tab, subTab, mustShow } of pages) {
+  for (const { tab, name = tab, subTab, mustShow, door } of pages) {
     try {
-      if (subTab) {
+      if (door) {
+        await cmd('eval-js', {
+          code: `(await waitFor(${JSON.stringify(door)}, 30000)).click(); await sleep(600); return true`
+        })
+      } else if (subTab) {
         // The Buddy tab is a lazy chunk: its first open in the dev app can take
         // longer than open-tab's 8 s wait on a busy machine.
         await cmd('open-tab', { tab })
         const trigger = `[data-videorc-buddy-tab="${subTab}"]`
         await cmd('eval-js', {
-          code: `(await waitFor(${JSON.stringify(trigger)}, 30000)).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await waitFor(${JSON.stringify(mustShow)}, 30000); return true`
+          code: `(await waitFor(${JSON.stringify(trigger)}, 30000)).click(); await waitFor(${JSON.stringify(mustShow)}, 30000); return true`
         })
       } else {
         await cmd('open-tab', mustShow ? { tab, waitFor: mustShow } : { tab })
