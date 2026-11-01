@@ -2086,3 +2086,49 @@ streaming cases fail 117–267 ms tails, with six also failing frame count.
 Limits and release exclusions are unchanged. Receipts:
 `/tmp/videorc-beta-rust-124721181458-classification.json` and
 `/tmp/videorc-beta-windows-diagnostics-124721205478-classification.json`.
+
+### First-run look isolation, Windows glob paths and quit evidence, 2026-11-01
+
+The idle capture-config reload now permits a user scene commit beside a private
+performance check. Real active and stopping sessions still refuse that reload
+without mutating the scene. Native regressions cover both states, no unnecessary
+device startup, and fresh/in-place benchmark encoder isolation. Before the fix,
+the private-check test fails and the real-session fence passes. After the fix,
+164 native test executions covering 162 distinct tests pass with zero ignores.
+Rust formatting, Clippy with the four existing Linux allowances and the optimized
+backend/MCP build pass. Native report:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/idle-scene-fix-RC93ZH/report.json`.
+
+Windows source CI on `036eb06e` executes merge tree `5564f307` against
+`f80f63d6`: Clippy, the required 25-repetition stability groups and three full
+Rust runs pass. Each Rust run passes 4,202 backend tests (20 ignored), 24 bridge
+tests and both one-test targets. Desktop tests pass 6,674 and fail only the icon
+optimizer entry scan (five skipped). Vite treats entries as globs; Windows
+backslashes match no files. Both paths now use Vite's `normalizePath`, retaining
+the real optimizer and original assertions/timeouts. All ten icon tests and
+full typecheck/lint/format pass locally; native Windows revalidation is owed.
+Complete job classification: `/tmp/videorc-beta-windows-source-124736625614-classification.json`.
+
+The first-run smoke now requests authenticated normal app quit before checking
+owned process retirement and empty ledgers. A refused quit, timeout, fallback
+termination, stale ledger or unsuccessful controller exit fails the smoke.
+Overall PASS is printed only after final teardown. All 160 focused shutdown,
+first-run and process-evidence tests pass; the full Node suite passes 3,007 with
+zero skips, and lint/format pass. Source receipt:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/first-run-graceful-source-classification.json`.
+
+The matched app run passes all 51 behavior assertions, including look changes,
+migration and Skip setup, with zero renderer exceptions. Recording and
+livestream setup profiles quit normally with clean ownership. The Skip setup
+profile fails the existing ten-second shutdown deadline while its private
+performance check is finalizing; fallback cleanup records Electron SIGTRAP and
+backend SIGKILL. All owned descendants are reaped, but the run correctly fails.
+Real OAuth sign-in remains skipped and preview lifecycle does not execute.
+Receipt: `/home/orcdev/.cache/videorc-linux-beta-evidence/first-run-graceful-runtime-classification.json`.
+
+The same process census shows Chromium selecting quarantined `renderD129` even
+though backend VAAPI uses `renderD128`. Further app runs are blocked until an
+app-scoped Chromium override explicitly selects the permitted node and launch
+evidence confirms it. No desktop configuration or GPU policy is changed. These
+are development results, not AppImage or physical Beta acceptance; existing
+quality, latency, endurance and publication gates remain open.

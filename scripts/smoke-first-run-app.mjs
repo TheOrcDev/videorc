@@ -18,6 +18,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { ownedProcessLedgerPaths } from './lib/process-census.mjs'
+import { stopFirstRunApp } from './lib/first-run-smoke-stop.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import {
   evaluateFirstRunSmokeStep,
@@ -46,6 +48,7 @@ const report = {
   limits: FIRST_RUN_SMOKE_LIMITS,
   output,
   steps: [],
+  teardowns: [],
   rendererErrors: []
 }
 const save = () =>
@@ -496,8 +499,23 @@ async function stopApp() {
   cdp = null
   browserCdp?.close()
   browserCdp = null
-  if (launched) await launched.stop()
+  const app = launched
   launched = null
+  if (app) {
+    const profile = join(output, profileName)
+    const teardown = await stopFirstRunApp(
+      app,
+      ownedProcessLedgerPaths({
+        appDataDir: join(profile, 'app-data'),
+        userDataDir: join(profile, 'user-data'),
+        workspaceRoot: repoRoot
+      })
+    )
+    report.teardowns.push({ profile: profileName, ...teardown })
+    save()
+    if (!teardown.pass)
+      throw new Error(`First-run teardown failed: ${teardown.failures.join('; ')}`)
+  }
 }
 
 async function startApp(name) {
@@ -987,7 +1005,6 @@ try {
     beforeRegistryRaw: beforeSkip.registryRaw
   })
   report.pass = true
-  console.log('PASS first-run smoke: all steps passed')
 } catch (error) {
   report.pass = false
   report.error = error.stack ?? String(error)
@@ -1002,7 +1019,15 @@ try {
   console.error(`FAIL first-run smoke: ${error.message}`)
   process.exitCode = 1
 } finally {
-  await stopApp()
+  try {
+    await stopApp()
+  } catch (error) {
+    report.pass = false
+    report.teardownError = error.stack ?? String(error)
+    console.error(`FAIL first-run smoke teardown: ${error.message}`)
+    process.exitCode = 1
+  }
   save()
+  if (report.pass) console.log('PASS first-run smoke: all steps passed')
   console.log(`Report: ${join(output, 'report.json')}`)
 }

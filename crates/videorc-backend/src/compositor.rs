@@ -19111,6 +19111,108 @@ mod tests {
         assert!(state.compositor.lock().await.benchmark_scene.is_none());
     }
 
+    #[tokio::test]
+    async fn idle_capture_config_edits_stay_separate_from_benchmark_encoder_frames() {
+        for in_place in [false, true] {
+            let state = test_state();
+            start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+            let (mut user_scene, user_sources) = test_pattern_scene(64, 36);
+            user_scene.id = "user-before-check".into();
+            update_compositor_scene_with_selected_sources(
+                &state,
+                CompositorSceneUpdateParams {
+                    revision: 10,
+                    scene: Some(user_scene.clone()),
+                    layout: crate::protocol::default_layout_settings(),
+                    active_screen: None,
+                    transition_ms: None,
+                },
+                &user_sources,
+            )
+            .await;
+            wait_for_frame_at_revision(&state, Some(10)).await;
+            if in_place {
+                arm_compositor_for_capture(
+                    &state,
+                    "private-check",
+                    CompositorArmParams {
+                        benchmark: true,
+                        ..arm_params(128, 72)
+                    },
+                )
+                .await
+                .expect("benchmark arms the preview run");
+            } else {
+                start_synthetic_compositor(
+                    state.clone(),
+                    CompositorStartParams {
+                        benchmark: true,
+                        frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                        ..preview_params(128, 72)
+                    },
+                )
+                .await;
+            }
+            let (mut benchmark_scene, benchmark_sources) = test_pattern_scene(128, 72);
+            benchmark_scene.id = "private-check-scene".into();
+            assert!(
+                commit_benchmark_scene(
+                    &state,
+                    11,
+                    benchmark_scene,
+                    crate::protocol::default_layout_settings(),
+                    benchmark_sources,
+                )
+                .await
+            );
+            *state.recording.lock().await = Some(
+                crate::recording::test_performance_check_recording_stub("private-check"),
+            );
+            user_scene.id = "user-chosen-look".into();
+            let committed = crate::live_layout::commit_idle_scene_with_layout(
+                &state,
+                &user_scene,
+                crate::protocol::default_layout_settings(),
+                None,
+            )
+            .await
+            .expect("the user can edit a look while the private check runs");
+            assert!(committed.applied);
+            assert_eq!(committed.scene.id, "user-chosen-look");
+            assert_eq!(state.scene.lock().await.id, "user-chosen-look");
+            wait_for_frame_at_revision(&state, Some(11)).await;
+            {
+                let compositor = state.compositor.lock().await;
+                assert_eq!(
+                    compositor.status.scene_revision,
+                    Some(committed.scene_revision)
+                );
+                assert_eq!(
+                    compositor.status.scene_id.as_deref(),
+                    Some("user-chosen-look")
+                );
+                let benchmark = compositor.benchmark_scene.as_ref().unwrap();
+                assert_eq!(benchmark.revision, 11);
+                assert_eq!(benchmark.scene.as_ref().unwrap().id, "private-check-scene");
+                assert!(benchmark.synthetic_hard_content);
+                assert!(
+                    compositor
+                        .frame_store
+                        .lock()
+                        .unwrap()
+                        .latest()
+                        .unwrap()
+                        .metadata
+                        .is_benchmark()
+                );
+            }
+            let active = state.recording.lock().await.take().unwrap();
+            assert!(active.is_performance_check());
+            assert_eq!(active.session_id, "private-check");
+            stop_compositor(&state).await;
+        }
+    }
+
     async fn wait_for_frame_at_revision(
         state: &AppState,
         revision: Option<u64>,

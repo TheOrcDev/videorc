@@ -2421,7 +2421,17 @@ async fn commit_scene_with_layout_at_time_with_policy(
     // about which scene actually won.
     let _commit = state.scene_commit.lock().await;
 
-    if idle_only && state.recording.lock().await.is_some() {
+    // The performance check owns a private encoder scene. First-run look
+    // choices still commit the user's scene beside it, without opening devices
+    // or changing that private scene. Real sessions keep the idle-reload fence.
+    if idle_only
+        && state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|active| !active.is_performance_check())
+    {
         bail!("Idle capture-config scene reload was superseded by session startup");
     }
 
@@ -2517,6 +2527,99 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn idle_capture_config_commits_the_users_look_during_a_private_benchmark() {
+        for stopping in [false, true] {
+            let state = test_state();
+            let mut benchmark = crate::recording::test_performance_check_recording_stub("check");
+            benchmark.stop_requested = stopping;
+            *state.recording.lock().await = Some(benchmark);
+            let mut params = config(LayoutPreset::ScreenOnly, false, true);
+            params.background = Some(crate::protocol::EffectiveSceneBackground {
+                asset_id: "live:silk".into(),
+                managed_asset_path: String::new(),
+                fit: crate::protocol::BackgroundFit::Fill,
+                scale: 100.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur_px: 0.0,
+                dim_percent: 0.0,
+                saturation_percent: 100.0,
+                vignette_percent: 0.0,
+                visibility_percent: 20.0,
+                live: Some(crate::protocol::LiveBackgroundSpec {
+                    id: crate::protocol::LiveBackgroundId::Silk,
+                    look: "studio".into(),
+                    motion: Default::default(),
+                }),
+            });
+            let scene = scene_from_capture_config(params.clone());
+            let status = commit_idle_scene_with_layout(&state, &scene, params.layout, None)
+                .await
+                .expect("a private benchmark must not block first-run look choices");
+            assert!(status.applied);
+            assert_eq!(
+                status.compositor_status.scene_layout.unwrap().layout_preset,
+                LayoutPreset::ScreenOnly
+            );
+            assert_eq!(
+                serde_json::to_value(&*state.scene.lock().await).unwrap(),
+                serde_json::to_value(&scene).unwrap()
+            );
+            let recording = state.recording.lock().await;
+            let active = recording.as_ref().expect("benchmark remains owned");
+            assert!(active.is_performance_check());
+            assert_eq!(active.session_id, "check");
+            assert_eq!(active.stop_requested, stopping);
+            drop(recording);
+            assert!(state.compositor.lock().await.status.run_id.is_none());
+            assert!(
+                crate::preview_camera::preview_camera_frame_source(&state)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                crate::preview_screen::preview_screen_frame_source(&state)
+                    .await
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_capture_config_still_refuses_a_real_session_without_changing_the_scene() {
+        for stopping in [false, true] {
+            let state = test_state();
+            let mut active = crate::recording::test_active_recording_stub("real-session");
+            active.stop_requested = stopping;
+            *state.recording.lock().await = Some(active);
+            let before = serde_json::to_value(&*state.scene.lock().await).unwrap();
+            let params = config(LayoutPreset::ScreenOnly, false, true);
+            let scene = scene_from_capture_config(params.clone());
+            let error = commit_idle_scene_with_layout(&state, &scene, params.layout, None)
+                .await
+                .expect_err("real sessions keep the idle-reload fence");
+            assert!(error.to_string().contains("superseded by session startup"));
+            assert_eq!(
+                serde_json::to_value(&*state.scene.lock().await).unwrap(),
+                before
+            );
+            assert!(
+                state
+                    .compositor
+                    .lock()
+                    .await
+                    .status
+                    .scene_revision
+                    .is_none()
+            );
+            assert_eq!(
+                state.recording.lock().await.as_ref().unwrap().session_id,
+                "real-session"
+            );
+        }
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { build, optimizeDeps, resolveConfig } from 'vite'
+import { build, normalizePath, optimizeDeps, resolveConfig } from 'vite'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -37,9 +37,13 @@ describe('semantic icon registry', SOURCE_SCAN_TIMEOUT, () => {
           cacheDir,
           logLevel: 'silent',
           optimizeDeps: {
+            // Vite treats these as glob patterns, so Windows separators must
+            // be normalized before the dependency scan.
             entries: [
-              fileURLToPath(new URL('./icons.tsx', import.meta.url)),
-              fileURLToPath(new URL('./stream-manager/activity-icons.tsx', import.meta.url))
+              normalizePath(fileURLToPath(new URL('./icons.tsx', import.meta.url))),
+              normalizePath(
+                fileURLToPath(new URL('./stream-manager/activity-icons.tsx', import.meta.url))
+              )
             ]
           }
         },
