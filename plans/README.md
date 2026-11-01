@@ -1,5 +1,24 @@
 # Implementation Plans
 
+- 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
+  feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,
+  Continuity Camera). Ten workstreams, one PR each:
+  - A: bigger hit targets; the destination row opens from its chevron.
+  - B: a Chat door in the Studio inspector, under Captions.
+  - C: pages that fit a small window or display.
+  - D: Stick to app draws inside the main window, and a floating Preview
+    stops fighting a tiling window manager.
+  - E: a missing screen or camera never rewrites your choice.
+  - F: real display names, hot-plug, and resolution changes.
+  - G: screen crop and Fill.
+  - H: Continuity Camera disconnects and returns cleanly.
+  - I: camera brightness, contrast and saturation.
+  - J: X chat with a stream key says how to get it.
+
+  **EXECUTING** 2026-11-01: the owner took every recommendation except
+  D2 (no window-size change; C2 dropped) and asked for one PR per
+  workstream.
+
 - 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
   Preview never shows test noise. Owner report: on the first launch after
   0.17.2 the Preview showed coloured noise for about 18 s before the
