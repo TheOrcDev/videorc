@@ -30,7 +30,14 @@ vi.mock('@/hooks/use-studio', () => ({
     armed: false,
     blockedReason: null,
     setEnabled: () => {}
-  })
+  }),
+  // The Studio's Chat row under Captions (plan 213 B1), idle.
+  useStudioChat: () => ({
+    liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
+    chatNewCount: 0
+  }),
+  useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
 }))
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
 vi.mock('@/lib/toast', () => ({ toast }))
