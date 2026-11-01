@@ -430,7 +430,9 @@ Everything except ⌘K uses the desktop scale.
   Sources (plan 173) is the reference for rows that carry controls: one
   `SourceItem` per source (`components/sources/source-item.tsx`), a header
   row (icon, title, one status chip, one quick control, More), a body
-  indented to the title, and the rare settings folded into More.
+  indented to the title, and the rare settings folded into More. The whole
+  header row opens More (plan 213 A3): the chevron's button stretches over
+  it, and only the quick control sits above.
   - **What a stretched row lets through** (plan 213 A2). The row is
     `relative`. Only its real controls (a switch, a button, a menu) are
     positioned, each on its own (the Switch already is; wrap a Button in a
