@@ -11276,14 +11276,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       fps: captureConfig.video.fps
     })
     const current = previewCameraStatusRef.current
-    if (current.state === 'disconnected' && current.cameraId === cameraId) return current
     if (
       !cameraPreviewStartAllowed(
         cameraId,
         deviceListRef.current.devices,
         key,
         nativePreviewCameraKeyRef.current,
-        current.state
+        current.state,
+        current.cameraId
       )
     )
       return current
