@@ -6,8 +6,7 @@ import {
   InfoIcon,
   LivestreamIcon,
   BuddyIcon,
-  RecordIcon,
-  StopIcon
+  RecordIcon
 } from '@/components/icons'
 import { useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
@@ -22,6 +21,7 @@ import { StatusDot } from '@/components/status-dot'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
+import { RecordButton, type RecordButtonState } from '@/components/record-button'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { InfoTooltip } from '@/components/ui/info-tooltip'
@@ -67,6 +67,9 @@ import { cn } from '@/lib/utils'
  * reuse the transport handlers StudioTab owns (no second session state
  * machine). Record shows its Space key, which lives on the Studio page (plan
  * 174 S0.1), not on this button. The words are D3's (lib/go-live-copy.ts).
+ * Record and the stop button are one RecordButton (plan 005 in videorc-ui):
+ * it stays mounted from the click to the stop, so keyboard focus stays on it,
+ * and it keeps one width through every state's words.
  */
 export function SessionTransport({
   active,
@@ -75,6 +78,8 @@ export function SessionTransport({
   stopNote,
   stopOverrun = false,
   startRequestPending,
+  startingLivestream = false,
+  stopRequestPending = false,
   goLivePending = false,
   recordBlockedReason,
   liveStreamBlockedReason,
@@ -93,6 +98,10 @@ export function SessionTransport({
   /** The stop overran its finalize window (plan 174 S3.1, B-16): explain Force stop. */
   stopOverrun?: boolean
   startRequestPending: boolean
+  /** The start in flight is a livestream, so Go Live… answers it and Record stays off. */
+  startingLivestream?: boolean
+  /** A stop is in flight: the button says "Stopping…", stays lit and keeps its focus. */
+  stopRequestPending?: boolean
   /** Go Live's first checks are running (B-7): the button reads "Checking…" from the click. */
   goLivePending?: boolean
   recordBlockedReason: string | null
@@ -111,6 +120,21 @@ export function SessionTransport({
   onStop: () => void
 }): ReactElement {
   const startsBusy = startRequestPending || goLivePending
+  // Record answers its own click, lit from the click; a Go Live… start,
+  // checks included, is Go Live's to answer, so Record is off for it.
+  const recordStarting = startRequestPending && !goLivePending && !startingLivestream
+  let recordState: RecordButtonState = 'idle'
+  if (active) {
+    recordState = stopRequestPending ? 'stopping' : 'running'
+  } else if (recordStarting) {
+    recordState = 'starting'
+  }
+  const recordWords = (
+    <>
+      {RECORD_LABEL}
+      <ShortcutKeys accelerator={shortcutAccelerator('record-toggle')} className="ml-0.5" />
+    </>
+  )
   return (
     <section
       aria-label="Session controls"
@@ -122,57 +146,41 @@ export function SessionTransport({
         {active ? <SessionClock /> : null}
       </div>
       <div className="flex gap-2">
-        {/* D8 (plan 208): Record and the stop button are the red LED, lit
-            while the session runs; Go Live… is the chrome primary. */}
-        {active ? (
-          <Button
+        {/* D8 (plan 208): Record and the stop button are metallic red, lit
+            while the session runs; Go Live… is the chrome primary. Why a
+            start is blocked shows on hover and on keyboard focus (plan 174
+            S1.1, B-9): a disabled button never shows a title. */}
+        <DisabledReason className="flex-1" reason={active ? null : recordBlockedReason}>
+          <RecordButton
             className="flex-1"
-            data-lit
-            disabled={!canStop}
+            disabled={
+              active
+                ? !canStop && !stopRequestPending
+                : Boolean(recordBlockedReason) || (startsBusy && !recordStarting)
+            }
+            labels={{ idle: recordWords, starting: recordWords, running: stopLabel }}
             size="lg"
-            variant="record"
-            onClick={onStop}
+            state={recordState}
+            onClick={active ? onStop : onRecord}
+          />
+        </DisabledReason>
+        {active ? null : (
+          <DisabledReason
+            className="flex-1"
+            reason={goLivePending ? null : liveStreamBlockedReason}
           >
-            <StopIcon data-icon="inline-start" weight="fill" />
-            {stopLabel}
-          </Button>
-        ) : (
-          <>
-            {/* Why a start is blocked shows on hover and on keyboard focus
-                (plan 174 S1.1, B-9): a disabled button never shows a title. */}
-            <DisabledReason className="flex-1" reason={recordBlockedReason}>
-              <Button
-                className="flex-1"
-                disabled={Boolean(recordBlockedReason) || startsBusy}
-                size="lg"
-                variant="record"
-                onClick={onRecord}
-              >
-                <RecordIcon data-icon="inline-start" weight="fill" />
-                {RECORD_LABEL}
-                <ShortcutKeys
-                  accelerator={shortcutAccelerator('record-toggle')}
-                  className="ml-0.5"
-                />
-              </Button>
-            </DisabledReason>
-            <DisabledReason
+            <Button
               className="flex-1"
-              reason={goLivePending ? null : liveStreamBlockedReason}
+              data-testid="go-live-button"
+              disabled={Boolean(liveStreamBlockedReason) || startsBusy}
+              size="lg"
+              variant="default"
+              onClick={onLiveStream}
             >
-              <Button
-                className="flex-1"
-                data-testid="go-live-button"
-                disabled={Boolean(liveStreamBlockedReason) || startsBusy}
-                size="lg"
-                variant="default"
-                onClick={onLiveStream}
-              >
-                <LivestreamIcon data-icon="inline-start" weight="fill" />
-                {goLivePending ? GO_LIVE_CHECKING_LABEL : GO_LIVE_LABEL}
-              </Button>
-            </DisabledReason>
-          </>
+              <LivestreamIcon data-icon="inline-start" weight="fill" />
+              {goLivePending ? GO_LIVE_CHECKING_LABEL : GO_LIVE_LABEL}
+            </Button>
+          </DisabledReason>
         )}
       </div>
       {/* D19: Go Live and Stop are one session, said where the control is,

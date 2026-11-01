@@ -228,10 +228,12 @@ export function StudioTab(): ReactElement {
             liveStreamBlockedReason={liveStreamBlockedReason}
             recordBlockedReason={recordBlockedReason}
             startRequestPending={startRequestPending}
+            startingLivestream={sessionStartIntent?.stream === true}
             status={sessionStatus}
             stopLabel={stopControl.label}
             stopNote={stopControl.note}
             stopOverrun={sessionStopOverrun}
+            stopRequestPending={stopRequestPending}
             onLiveStream={handleLiveStream}
             onRecord={handleRecord}
             onStop={() => handleStop('button')}

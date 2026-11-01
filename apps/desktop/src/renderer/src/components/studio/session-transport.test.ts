@@ -76,6 +76,14 @@ function renderTransport(
 const text = (selector: string): string | null | undefined =>
   container.querySelector(selector)?.textContent?.trim()
 
+/**
+ * The words a button shows. Record lays out every state's words in one cell
+ * to keep its width and shows only the current state's; other buttons show
+ * all of theirs.
+ */
+const shown = (button: Element | null | undefined): Element | null | undefined =>
+  button?.querySelector(':scope > span > span:not([aria-hidden])') ?? button
+
 describe('SessionTransport (plan 095 S5)', () => {
   it('ticks the session clock from startedAt', () => {
     renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
@@ -191,9 +199,13 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
     )
     const buttons = [...container.querySelectorAll('button')]
     expect(buttons).toHaveLength(2)
-    const key = buttons[0]?.querySelector('[data-slot=kbd]')
+    const key = shown(buttons[0])?.querySelector('[data-slot=kbd]')
     expect(key?.getAttribute('data-accelerator')).toBe('Space')
-    expect(buttons[0]?.textContent?.replace(key?.textContent ?? '', '').trim()).toBe('Record')
+    expect(
+      shown(buttons[0])
+        ?.textContent?.replace(key?.textContent ?? '', '')
+        .trim()
+    ).toBe('Record')
     expect(buttons[1]?.textContent?.trim()).toBe('Go Live…')
     expect(container.textContent).not.toMatch(/\bStream\b/)
 
@@ -204,15 +216,15 @@ describe('SessionTransport start labels (plan 174 S2.2)', () => {
   })
 })
 
-// Plan 208 S4 (D8): Record and the stop button are the red LED, unlit at idle
-// and lit while the session runs; Go Live… is the chrome primary.
+// Plan 208 S4 (D8): Record and the stop button are metallic red, unlit at
+// idle and lit while the session runs; Go Live… is the chrome primary.
 describe('SessionTransport materials (plan 208 D8)', () => {
   const button = (label: string): HTMLButtonElement | undefined =>
     [...container.querySelectorAll('button')].find((candidate) =>
-      candidate.textContent?.includes(label)
+      shown(candidate)?.textContent?.includes(label)
     )
 
-  it('draws Record as the unlit LED and Go Live… as the chrome primary', () => {
+  it('draws Record unlit and Go Live… as the chrome primary', () => {
     renderTransport({ state: 'idle' }, { active: false })
     expect(button('Record')?.dataset.variant).toBe('record')
     expect(button('Record')?.hasAttribute('data-lit')).toBe(false)
@@ -226,6 +238,97 @@ describe('SessionTransport materials (plan 208 D8)', () => {
     renderTransport({ state: 'streaming', sessionId: 's', streamUrl: STREAM_URL })
     expect(button('End livestream')?.dataset.variant).toBe('record')
     expect(button('End livestream')?.hasAttribute('data-lit')).toBe(true)
+  })
+})
+
+// Plan 005 in videorc-ui: Record and the stop button are one RecordButton. It
+// answers from the click, lit and focusable but taking no click while the
+// start or the stop is in flight, and stays mounted from Record to Stop.
+describe('SessionTransport record button (videorc-ui plan 005)', () => {
+  const renderBare = (props: Partial<Parameters<typeof SessionTransport>[0]>): void => {
+    const recording: RecordingStatus = { state: 'recording', sessionId: 's', startedAt: STARTED_AT }
+    act(() =>
+      root.render(
+        createElement(
+          StudioContextProviders,
+          {
+            core: unused,
+            recordingState: { recording },
+            recording: { recording },
+            preview: unused,
+            diagnostics: unused,
+            chat: unused,
+            audio: unused
+          },
+          createElement(SessionTransport, {
+            active: false,
+            canStop: false,
+            stopLabel: 'Stop recording',
+            startRequestPending: false,
+            recordBlockedReason: null,
+            liveStreamBlockedReason: null,
+            status: null,
+            onRecord: noop,
+            onLiveStream: noop,
+            onStop: noop,
+            ...props
+          })
+        )
+      )
+    )
+  }
+  const record = (): HTMLButtonElement | null =>
+    container.querySelector<HTMLButtonElement>('button[data-variant=record]')
+
+  it('keeps one button, and its focus, from the click to the stop', () => {
+    renderBare({})
+    const button = record()
+    button?.focus()
+    expect(button?.dataset.state).toBe('idle')
+
+    // The click: lit at once, no second click, nothing dims, focus stays.
+    renderBare({ startRequestPending: true })
+    expect(record()).toBe(button)
+    expect(button?.dataset.state).toBe('starting')
+    expect(button?.hasAttribute('data-lit')).toBe(true)
+    expect(button?.getAttribute('aria-disabled')).toBe('true')
+    expect(button?.disabled).toBe(false)
+    expect(document.activeElement).toBe(button)
+
+    // The session runs: the same button stops it, in the stop's words.
+    renderBare({ active: true, canStop: true })
+    expect(record()).toBe(button)
+    expect(button?.dataset.state).toBe('running')
+    expect(shown(button)?.textContent).toBe('Stop recording')
+    expect(button?.getAttribute('aria-disabled')).toBeNull()
+    expect(container.querySelectorAll('button')).toHaveLength(1)
+
+    // The stop is in flight: still lit and focused, taking no click.
+    renderBare({ active: true, canStop: false, stopLabel: 'Stopping…', stopRequestPending: true })
+    expect(record()).toBe(button)
+    expect(button?.dataset.state).toBe('stopping')
+    expect(shown(button)?.textContent).toBe('Stopping…')
+    expect(button?.getAttribute('aria-disabled')).toBe('true')
+    expect(document.activeElement).toBe(button)
+  })
+
+  it('keeps Record off while a Go Live… start is in flight', () => {
+    renderBare({ startRequestPending: true, startingLivestream: true })
+    expect(record()?.disabled).toBe(true)
+    expect(record()?.hasAttribute('data-lit')).toBe(false)
+    expect(record()?.dataset.state).toBe('idle')
+  })
+
+  it('lays out every state words, so the button never changes width', () => {
+    renderBare({ stopLabel: 'End livestream' })
+    const layers = [...(record()?.querySelectorAll(':scope > span > span') ?? [])]
+    expect(layers.map((layer) => layer.textContent)).toEqual([
+      'RecordSpace',
+      'RecordSpace',
+      'End livestream',
+      'Stopping…'
+    ])
+    expect(layers.filter((layer) => layer.getAttribute('aria-hidden') === 'true')).toHaveLength(3)
   })
 })
 
