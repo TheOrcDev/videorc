@@ -2,6 +2,7 @@
 // React/component imports so they run under the node-only vitest runner. The
 // status strings/tones are shared by the Session rows and the Preview badge.
 
+import type { DiagnosticStats, RecordingStatus } from './backend'
 import { sessionIsLive } from '../../../shared/capture-state'
 import { formatTimecode } from '../../../shared/timecode'
 import { RECORDING_STOPS_TOO } from './session-stop'
@@ -264,4 +265,23 @@ export function sessionStatusGlyph(
     default:
       return null
   }
+}
+
+export function cameraCaptureNotice(
+  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'message' | 'replayOnly'>,
+  stats: Pick<DiagnosticStats, 'sessionId' | 'duplicateCaptureSources'>
+): string | undefined {
+  if (
+    !recording.sessionId ||
+    recording.sessionId !== stats.sessionId ||
+    !['recording', 'streaming'].includes(recording.state)
+  )
+    return undefined
+  if (!stats.duplicateCaptureSources.some((source) => source.startsWith('camera:')))
+    return undefined
+  if (recording.replayOnly)
+    return 'Preview and Clips both have the camera open. Another app may not be able to use it.'
+  if (recording.state === 'streaming')
+    return 'Preview and your livestream both have the camera open. Another app may not be able to use it.'
+  return recording.message
 }

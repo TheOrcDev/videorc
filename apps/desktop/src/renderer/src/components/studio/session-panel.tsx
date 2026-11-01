@@ -48,6 +48,7 @@ import type { SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import {
   STOP_FINALIZE_OVERRUN_ALERT,
+  cameraCaptureNotice,
   sessionAlsoRecords,
   sessionClockLabel,
   sessionStatusGlyph,
@@ -406,6 +407,9 @@ export function SessionNotices({
   onDismissRuntimeNotice
 }: Omit<SessionPanelProps, 'live'>): ReactElement {
   const { setActive } = useWorkspaceNav()
+  const { recording } = useStudioRecording()
+  const { diagnosticStats } = useStudioDiagnostics()
+  const cameraNotice = cameraCaptureNotice(recording, diagnosticStats)
   return (
     <>
       {/* A refused start is the ONE place destructive red is allowed on chrome:
@@ -437,6 +441,12 @@ export function SessionNotices({
               ) : null}
             </div>
           </AlertDescription>
+        </Alert>
+      ) : null}
+      {cameraNotice ? (
+        <Alert data-testid="session-camera-shared" variant="warning">
+          <AlertTitle>Camera opened twice</AlertTitle>
+          <AlertDescription>{cameraNotice}</AlertDescription>
         </Alert>
       ) : null}
       {runtimeNotice && onDismissRuntimeNotice ? (
