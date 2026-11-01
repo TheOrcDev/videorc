@@ -2864,7 +2864,9 @@ async fn handle_capture_health_transition_with_driver(
         } => {
             let (recovery_stage, scope) = match stage {
                 CaptureStage::CameraDelivery => {
-                    if state.preview_camera.lock().await.status.state == PreviewCameraState::Disconnected {
+                    if state.preview_camera.lock().await.status.state
+                        == PreviewCameraState::Disconnected
+                    {
                         return capture_recovery_status(&state).await;
                     }
                     let scope = camera_epoch.map(|epoch| {
